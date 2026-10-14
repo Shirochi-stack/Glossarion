@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Glossarion Mobile (U5): the Reader's WebView loads its pages from the in-app server on
+     http://127.0.0.1:<port>/<token>/ (glossarion_mobile/services/reader_server.py). Android 9+
+     blocks cleartext HTTP for Java-level clients such as WebView, so it is allowed for the
+     loopback host only; every other host keeps the platform default (HTTPS only). Python's own
+     sockets (LAN Ollama / LM Studio, OAuth loopback) are not governed by this file.
+     The app manifest points at it: [tool.flet.android.manifest_application] in pyproject.toml. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

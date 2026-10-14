@@ -1,0 +1,9741 @@
+#!/usr/bin/env python3
+"""
+EPUB Converter - Compiles translated HTML files into EPUB format
+Supports extraction of translated titles from chapter content
+"""
+
+from safe_image import open_image
+import os
+import sys
+import io
+import json
+import mimetypes
+import posixpath
+import re
+import zipfile
+import unicodedata
+import html as html_module
+from xml.etree import ElementTree as ET
+from typing import Any, Dict, List, Tuple, Optional, Callable
+
+from ebooklib import epub, ITEM_DOCUMENT
+from bs4 import BeautifulSoup
+from metadata_batch_translator import enhance_epub_compiler
+from _empty_attr_fix import fix_empty_attr_tags
+from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
+from html_tag_entities import (
+    VALID_ENTITY_TAGS as _VALID_ENTITY_TAGS,
+    fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts,
+    escape_invalid_html_tags as _escape_invalid_html_tags,
+    unescape_valid_html_tag_entities as _unescape_valid_html_tag_entities,
+)
+from epub_package import (
+    find_epub_opf_member,
+    find_opf_path as find_workspace_opf_path,
+)
+from epub_metadata_utils import (
+    extract_epub_metadata_file,
+    merge_source_epub_metadata,
+)
+from metadata_progress import resolve_metadata_field_settings
+from pdf_bookmarks import (
+    remove_pdf_source_page_break_markers,
+    replace_with_chapter_bookmarks,
+)
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import mobile_runtime
+
+# Import the lightweight compression worker for ProcessPoolExecutor.
+# Workers will import _compress_worker (~90 lines, only os+PIL) instead of
+# epub_converter.py (6096 lines + ebooklib, bs4, etc.), cutting spawn time from ~22s to ~0.1s.
+from _compress_worker import _compress_single_image as _lightweight_compress
+try:
+    from unified_api_client import UnifiedClient
+except ImportError:
+    UnifiedClient = None
+
+try:
+    from translate_headers_standalone import run_translation as run_standalone_header_translation
+except ImportError:
+    run_standalone_header_translation = None
+
+# Configure stdout for UTF-8
+def configure_utf8_output():
+    """Configure stdout for UTF-8 encoding"""
+    try:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
+    except AttributeError:
+        if sys.stdout is None:
+            devnull = open(os.devnull, "wb")
+            sys.stdout = io.TextIOWrapper(devnull, encoding='utf-8', errors='ignore')
+        elif hasattr(sys.stdout, 'buffer'):
+            try:
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='ignore')
+            except:
+                pass
+
+
+# Global configuration
+configure_utf8_output()
+_global_log_callback = None
+_stop_flag = False
+
+# Historical refinement data is never a valid EPUB source.  Keep this rule at
+# the converter boundary as well as in the translation pipeline so a recursive
+# fallback cannot accidentally discover a chapter under the backup directory.
+_EPUB_FORBIDDEN_SOURCE_DIRS = frozenset({"unrefined_backup", ".cache"})
+
+
+def _is_forbidden_epub_source_path(path: str, output_dir: str) -> bool:
+    """Return True when *path* is outside the workspace or inside a backup."""
+    try:
+        root = os.path.realpath(os.path.abspath(output_dir))
+        candidate = os.path.realpath(os.path.abspath(path))
+        root_key = os.path.normcase(root)
+        candidate_key = os.path.normcase(candidate)
+        if os.path.commonpath((root_key, candidate_key)) != root_key:
+            return True
+        relative = os.path.relpath(candidate, root)
+    except (OSError, ValueError, TypeError):
+        return True
+
+    return any(
+        part.casefold() in _EPUB_FORBIDDEN_SOURCE_DIRS
+        for part in relative.replace("\\", "/").split("/")
+        if part not in ("", ".")
+    )
+
+
+def _norm_abs_path(path: str) -> str:
+    """Return a normalized absolute path key for loose path comparisons."""
+    try:
+        return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    except Exception:
+        return os.path.normcase(os.path.normpath(str(path or "")))
+
+
+def _glossarion_library_dir() -> str:
+    """The Library folder: ``library_core.library_root_path()`` (honours ``GLOSSARION_LIBRARY_DIR``
+    like the Library itself; Glossarion Mobile keeps its Library in app storage), else
+    ``~/Documents/Glossarion/Library`` exactly as before (U9 seam gap, like ``output_naming``)."""
+    try:
+        from library_core import library_root_path
+        return library_root_path()
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), "Documents", "Glossarion", "Library")
+
+
+def _load_library_origins_for_compile() -> dict:
+    """Load Library/library_origins.txt without importing the Qt library UI."""
+    origins_path = os.path.join(_glossarion_library_dir(), "library_origins.txt")
+    try:
+        with open(origins_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"version": 3, "raw": {}, "translated": {}, "pairs": {}}
+    if not isinstance(data, dict):
+        return {"version": 3, "raw": {}, "translated": {}, "pairs": {}}
+    if "version" not in data and "raw" not in data and "translated" not in data:
+        data = {"version": 3, "raw": {}, "translated": dict(data), "pairs": {}}
+    data.setdefault("raw", {})
+    data.setdefault("translated", {})
+    data.setdefault("pairs", {})
+    if not isinstance(data["raw"], dict):
+        data["raw"] = {}
+    if not isinstance(data["translated"], dict):
+        data["translated"] = {}
+    if not isinstance(data["pairs"], dict):
+        data["pairs"] = {}
+    return data
+
+
+def _origins_raw_sources_for_stem(folder_stem: str) -> list:
+    """Raw source paths in library_origins.txt whose stem matches *folder_stem*.
+
+    Matches against both the Library/Raw basename and the recorded
+    original path. Returns every hit so callers can detect ambiguity
+    (len > 1 == duplicate origins for one workspace name).
+    """
+    if not folder_stem:
+        return []
+    origins = _load_library_origins_for_compile()
+    raw_map = origins.get("raw", {}) or {}
+    if not isinstance(raw_map, dict):
+        return []
+    raw_dir = os.path.join(_glossarion_library_dir(), "Raw")
+    stem_key = os.path.normcase(folder_stem)
+    matches = []
+    for lib_basename, original_path in raw_map.items():
+        lb = os.path.basename(str(lib_basename or ""))
+        lb_stem = os.path.splitext(lb)[0]
+        op = str(original_path or "")
+        op_stem = os.path.splitext(os.path.basename(op))[0]
+        if os.path.normcase(lb_stem) != stem_key and os.path.normcase(op_stem) != stem_key:
+            continue
+        lib_path = os.path.join(raw_dir, lb)
+        if lb and os.path.isfile(lib_path):
+            matches.append(os.path.abspath(lib_path))
+        elif op and os.path.isfile(op):
+            matches.append(os.path.abspath(op))
+    return matches
+
+
+def _raw_inputs_sources_for_stem(folder_stem: str) -> list:
+    """Paths in library_raw_inputs.txt whose filename stem matches.
+
+    Checks the registry at the Library root and the legacy copy inside
+    ``Library/Raw``. Only existing files are returned.
+    """
+    if not folder_stem:
+        return []
+    stem_key = os.path.normcase(folder_stem)
+    lib_dir = _glossarion_library_dir()
+    matches = []
+    seen = set()
+    for reg_path in (os.path.join(lib_dir, "library_raw_inputs.txt"),
+                     os.path.join(lib_dir, "Raw", "library_raw_inputs.txt")):
+        try:
+            with open(reg_path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            ln = ln.strip()
+            if not ln:
+                continue
+            stem = os.path.splitext(os.path.basename(ln))[0]
+            if os.path.normcase(stem) != stem_key:
+                continue
+            key = os.path.normcase(os.path.normpath(ln))
+            if key in seen or not os.path.isfile(ln):
+                continue
+            seen.add(key)
+            matches.append(os.path.abspath(ln))
+    return matches
+
+
+def _read_compile_source_reference(output_dir: str) -> str:
+    """Return the raw/source path used for this output folder, if known."""
+    # Resolution order:
+    #   1. The ACTUAL input file path (EPUB_PATH) when it belongs to
+    #      this workspace — verified by matching its filename stem
+    #      against the output folder name. The stem guard is mandatory
+    #      because EPUB_PATH is process-global and goes stale in
+    #      multi-EPUB runs — ordering chapters from the WRONG book's
+    #      source EPUB must never happen.
+    #   2. The library origins registry (library_origins.txt) raw map —
+    #      a UNIQUE stem match resolves the raw source directly.
+    #   3. The raw-inputs registry (library_raw_inputs.txt) — every raw
+    #      the user ever loaded; first stem match wins.
+    #   4. source_epub.txt — only consulted when no registry resolves
+    #      the workspace; the sidecar can be stale/overwritten by
+    #      multi-EPUB runs, so it is the last resort.
+    folder_stem = os.path.basename(os.path.normpath(output_dir or ""))
+    env_epub = os.environ.get("EPUB_PATH", "").strip()
+    if env_epub:
+        env_stem = os.path.splitext(os.path.basename(env_epub))[0]
+        if not folder_stem or os.path.normcase(env_stem) == os.path.normcase(folder_stem):
+            return env_epub
+    origin_matches = _origins_raw_sources_for_stem(folder_stem)
+    if len(origin_matches) == 1:
+        return origin_matches[0]
+    raw_input_matches = _raw_inputs_sources_for_stem(folder_stem)
+    if raw_input_matches:
+        return raw_input_matches[0]
+    sidecar = os.path.join(output_dir, "source_epub.txt")
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            source_ref = f.read().strip()
+            if source_ref:
+                return source_ref
+    except OSError:
+        pass
+    return ""
+
+
+def _organized_library_replacement_target(output_dir: str) -> Optional[str]:
+    """Return Library/Translated target for an already-organized compile.
+
+    The library records organized files in ``library_origins.txt``. Prefer
+    translated entries whose original compiled path lived in this output
+    folder, and fall back to translated↔raw pairs so non-EPUB raw inputs
+    organized into Library/Raw resolve through the same origin map.
+    """
+    origins = _load_library_origins_for_compile()
+    translated = origins.get("translated", {}) or {}
+    output_key = _norm_abs_path(output_dir)
+    trans_dir = os.path.join(_glossarion_library_dir(), "Translated")
+
+    matches: list[str] = []
+    for lib_basename, original_path in translated.items():
+        if not lib_basename or not original_path:
+            continue
+        try:
+            original_parent = os.path.dirname(str(original_path))
+        except Exception:
+            continue
+        if original_parent and _norm_abs_path(original_parent) == output_key:
+            matches.append(os.path.join(trans_dir, os.path.basename(str(lib_basename))))
+
+    if matches:
+        existing = [p for p in matches if os.path.isfile(p)]
+        return (existing or matches)[0]
+
+    source_ref = _read_compile_source_reference(output_dir)
+    if not source_ref:
+        return None
+
+    raw_map = origins.get("raw", {}) or {}
+    pairs = origins.get("pairs", {}) or {}
+    source_key = _norm_abs_path(source_ref)
+    raw_dir = os.path.join(_glossarion_library_dir(), "Raw")
+    raw_basenames: set[str] = set()
+    for raw_basename, original_raw_path in raw_map.items():
+        if not raw_basename:
+            continue
+        candidates = [
+            os.path.join(raw_dir, os.path.basename(str(raw_basename))),
+            str(original_raw_path or ""),
+        ]
+        if any(candidate and _norm_abs_path(candidate) == source_key for candidate in candidates):
+            raw_basenames.add(os.path.basename(str(raw_basename)))
+
+    if not raw_basenames:
+        return None
+
+    pair_matches = [
+        os.path.join(trans_dir, os.path.basename(str(trans_basename)))
+        for trans_basename, raw_basename in pairs.items()
+        if raw_basename and os.path.basename(str(raw_basename)) in raw_basenames
+    ]
+    if pair_matches:
+        existing = [p for p in pair_matches if os.path.isfile(p)]
+        return (existing or pair_matches)[0]
+    return None
+
+
+def _replace_organized_library_epub(out_path: str, output_dir: str,
+                                    log_callback: Callable[[str], None]) -> Optional[str]:
+    """Replace an organized Library/Translated EPUB and remove the duplicate."""
+    target = _organized_library_replacement_target(output_dir)
+    if not target:
+        return None
+    if _norm_abs_path(target) == _norm_abs_path(out_path):
+        return target
+
+    import shutil
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp_path = f"{target}.tmp-{os.getpid()}"
+    try:
+        shutil.copy2(out_path, tmp_path)
+        os.replace(tmp_path, target)
+        try:
+            os.remove(out_path)
+        except FileNotFoundError:
+            pass
+        log_callback(f"📚 Updated organized Library copy: {target}")
+        log_callback("🧹 Removed duplicate EPUB from the output folder.")
+        return target
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+# Builds currently inside compile_epub(). App shutdown uses this to kill the
+# PDF and image-compression subprocesses a running build owns; the GUI has no
+# other reference to the EPUBCompiler instance.
+import threading as _threading
+import weakref as _weakref
+
+_ACTIVE_COMPILERS = _weakref.WeakSet()
+_ACTIVE_COMPILERS_LOCK = _threading.Lock()
+
+
+def active_compilers() -> list:
+    """Return the EPUBCompiler instances whose build is still running."""
+    with _ACTIVE_COMPILERS_LOCK:
+        return list(_ACTIVE_COMPILERS)
+
+
+def stop_active_compiler_subprocesses() -> int:
+    """Kill PDF and image-compression subprocesses owned by running builds.
+
+    Returns how many processes were told to stop.
+    """
+    stopped = 0
+    for compiler in active_compilers():
+        pdf_mgr = getattr(compiler, '_active_pdf_mgr', None)
+        if pdf_mgr is not None:
+            try:
+                if getattr(pdf_mgr, 'is_running', False):
+                    pdf_mgr.stop()
+                    stopped += 1
+                process = getattr(pdf_mgr, 'process', None)
+                if process is not None and process.poll() is None:
+                    process.kill()
+            except Exception:
+                pass
+        for process in list(getattr(compiler, '_active_compress_workers', None) or []):
+            try:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    stopped += 1
+            except Exception:
+                pass
+    return stopped
+
+
+def set_stop_flag(value: bool):
+    """Set the stop flag for EPUB converter"""
+    global _stop_flag
+    _stop_flag = value
+
+
+def is_stop_requested() -> bool:
+    """Check if stop has been requested"""
+    global _stop_flag
+    return _stop_flag
+
+
+def reset_stop_state_for_new_compilation(api_client: Any = None) -> None:
+    """Clear cancellation state inherited from an earlier EPUB run.
+
+    EPUB header, TOC, and metadata requests use the translation module and the
+    unified API client in addition to this module's local stop flag.  A hard or
+    graceful stop therefore has to be reset at all three boundaries before a
+    new client is constructed or a supplied client is reused.
+    """
+    set_stop_flag(False)
+    os.environ.pop('TRANSLATION_CANCELLED', None)
+    os.environ['GRACEFUL_STOP'] = '0'
+    os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+    os.environ['WAIT_FOR_CHUNKS'] = '0'
+    os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
+    os.environ['GRACEFUL_STOP_HTTP_SUPPRESS'] = '0'
+
+    try:
+        from TransateKRtoEN import set_stop_flag as set_translation_stop_flag
+        set_translation_stop_flag(False)
+    except Exception:
+        pass
+
+    try:
+        import unified_api_client
+        if hasattr(unified_api_client, 'set_stop_flag'):
+            unified_api_client.set_stop_flag(False)
+        elif hasattr(unified_api_client, 'UnifiedClient'):
+            unified_api_client.UnifiedClient.set_global_cancellation(False)
+    except Exception:
+        pass
+
+    if api_client is not None:
+        # ``hard_cancel_all()`` marks existing instances as cancelled.  The
+        # compiler can be given one of those instances by the translation or
+        # Library rebuild path, so clear its instance latch as well.
+        try:
+            if hasattr(api_client, '_cancelled'):
+                api_client._cancelled = False
+        except Exception:
+            pass
+        try:
+            reset_cleanup = getattr(api_client, 'reset_cleanup_state', None)
+            if callable(reset_cleanup):
+                reset_cleanup()
+        except Exception:
+            pass
+
+
+def set_global_log_callback(callback: Optional[Callable]):
+    """Set the global log callback for module-level functions"""
+    global _global_log_callback
+    _global_log_callback = callback
+
+
+def log(message: str):
+    """Module-level logging that works with or without callback"""
+    if _global_log_callback:
+        _global_log_callback(message)
+    else:
+        print(message)
+
+def _compress_single_image(images_dir, original_name, safe_name, quality, is_gif):
+    """Module-level worker for compressing a single image (ProcessPoolExecutor-compatible).
+    
+    Returns dict with: original_name, safe_name, new_safe_name, status, 
+                       original_size, compressed_size, error
+    """
+    try:
+        from PIL import Image
+        img_path = os.path.join(images_dir, original_name)
+        
+        if not os.path.isfile(img_path):
+            return {
+                'original_name': original_name, 'safe_name': safe_name,
+                'new_safe_name': safe_name, 'status': 'missing',
+                'original_size': 0, 'compressed_size': 0, 'error': None
+            }
+        
+        original_size = os.path.getsize(img_path)
+        
+        if is_gif:
+            # Compress GIF in place
+            im = open_image(img_path)
+            if hasattr(im, 'n_frames') and im.n_frames > 1:
+                frames = []
+                try:
+                    while True:
+                        frames.append(im.copy())
+                        im.seek(im.tell() + 1)
+                except EOFError:
+                    pass
+                if frames:
+                    frames[0].save(
+                        img_path, save_all=True, append_images=frames[1:],
+                        optimize=True, loop=im.info.get('loop', 0)
+                    )
+            else:
+                im.save(img_path, optimize=True)
+            im.close()
+            compressed_size = os.path.getsize(img_path)
+            return {
+                'original_name': original_name, 'safe_name': safe_name,
+                'new_safe_name': safe_name, 'status': 'compressed',
+                'original_size': original_size, 'compressed_size': compressed_size, 'error': None
+            }
+        else:
+            # Convert to .webp
+            webp_name = os.path.splitext(safe_name)[0] + '.webp'
+            webp_path = os.path.join(images_dir, os.path.splitext(original_name)[0] + '.webp')
+            
+            im = open_image(img_path)
+            if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
+                im = im.convert('RGBA')
+            elif im.mode != 'RGB':
+                im = im.convert('RGB')
+            
+            im.save(webp_path, 'WEBP', quality=quality, method=4)
+            im.close()
+            
+            # Remove original if webp was created successfully and is different file
+            if os.path.exists(webp_path) and webp_path != img_path:
+                try:
+                    os.remove(img_path)
+                except Exception:
+                    pass
+            
+            compressed_size = os.path.getsize(webp_path) if os.path.exists(webp_path) else 0
+            return {
+                'original_name': original_name, 'safe_name': safe_name,
+                'new_safe_name': webp_name, 'status': 'compressed',
+                'original_size': original_size, 'compressed_size': compressed_size, 'error': None
+            }
+    except Exception as e:
+        return {
+            'original_name': original_name, 'safe_name': safe_name,
+            'new_safe_name': safe_name, 'status': 'failed',
+            'original_size': 0, 'compressed_size': 0, 'error': str(e)
+        }
+
+
+class HTMLEntityDecoder:
+    """Handles comprehensive HTML entity decoding with full Unicode support"""
+    
+    # Comprehensive entity replacement dictionary
+    ENTITY_MAP = {
+        # Quotation marks and apostrophes
+        '&quot;': '"', '&QUOT;': '"',
+        '&apos;': "'", '&APOS;': "'",
+        '&lsquo;': '\u2018', '&rsquo;': '\u2019',
+        '&ldquo;': '\u201c', '&rdquo;': '\u201d',
+        '&sbquo;': '‚', '&bdquo;': '„',
+        '&lsaquo;': '‹', '&rsaquo;': '›',
+        '&laquo;': '«', '&raquo;': '»',
+        
+        # Spaces and dashes
+        '&nbsp;': ' ', '&NBSP;': ' ',
+        '&ensp;': ' ', '&emsp;': ' ',
+        '&thinsp;': ' ', '&zwnj;': '\u200c',
+        '&zwj;': '\u200d', '&lrm;': '\u200e',
+        '&rlm;': '\u200f',
+        '&ndash;': '–', '&mdash;': '—',
+        '&minus;': '−', '&hyphen;': '‐',
+        
+        # Common symbols
+        '&hellip;': '…', '&mldr;': '…',
+        '&bull;': '•', '&bullet;': '•',
+        '&middot;': '·', '&centerdot;': '·',
+        '&sect;': '§', '&para;': '¶',
+        '&dagger;': '†', '&Dagger;': '‡',
+        '&loz;': '◊', '&diams;': '♦',
+        '&clubs;': '♣', '&hearts;': '♥',
+        '&spades;': '♠',
+        
+        # Currency symbols
+        '&cent;': '¢', '&pound;': '£',
+        '&yen;': '¥', '&euro;': '€',
+        '&curren;': '¤',
+        
+        # Mathematical symbols
+        '&plusmn;': '±', '&times;': '×',
+        '&divide;': '÷', '&frasl;': '⁄',
+        '&permil;': '‰', '&pertenk;': '‱',
+        '&prime;': '\u2032', '&Prime;': '\u2033',
+        '&infin;': '∞', '&empty;': '∅',
+        '&nabla;': '∇', '&partial;': '∂',
+        '&sum;': '∑', '&prod;': '∏',
+        '&int;': '∫', '&radic;': '√',
+        '&asymp;': '≈', '&ne;': '≠',
+        '&equiv;': '≡', '&le;': '≤',
+        '&ge;': '≥', '&sub;': '⊂',
+        '&sup;': '⊃', '&nsub;': '⊄',
+        '&sube;': '⊆', '&supe;': '⊇',
+        
+        # Intellectual property
+        '&copy;': '©', '&COPY;': '©',
+        '&reg;': '®', '&REG;': '®',
+        '&trade;': '™', '&TRADE;': '™',
+    }
+    
+    # Common encoding fixes
+    ENCODING_FIXES = {
+        # UTF-8 decoded as Latin-1
+        'Ã¢â‚¬â„¢': "'", 'Ã¢â‚¬Å"': '"', 'Ã¢â‚¬ï¿½': '"',
+        'Ã¢â‚¬â€œ': '–', 'Ã¢â‚¬â€': '—',
+        'Ã‚Â ': ' ', 'Ã‚Â': '', 
+        'ÃƒÂ¢': 'â', 'ÃƒÂ©': 'é', 'ÃƒÂ¨': 'è',
+        'ÃƒÂ¤': 'ä', 'ÃƒÂ¶': 'ö', 'ÃƒÂ¼': 'ü',
+        'ÃƒÂ±': 'ñ', 'ÃƒÂ§': 'ç',
+        # Common mojibake patterns
+        'â€™': "'", 'â€œ': '"', 'â€': '"',
+        'â€"': '—', 'â€"': '–',
+        'â€¦': '…', 'â€¢': '•',
+        'â„¢': '™', 'Â©': '©', 'Â®': '®',
+        # Windows-1252 interpreted as UTF-8
+        'â€˜': '\u2018', 'â€™': '\u2019', 
+        'â€œ': '\u201c', 'â€': '\u201d',
+        'â€¢': '•', 'â€"': '–', 'â€"': '—',
+    }
+    
+    @classmethod
+    def decode(cls, text: str) -> str:
+        """Comprehensive HTML entity decoding - PRESERVES UNICODE"""
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
+        if not text:
+            return text
+        
+        # Fix common encoding issues first
+        for bad, good in cls.ENCODING_FIXES.items():
+            text = text.replace(bad, good)
+        
+        # Multiple passes to handle nested/double-encoded entities
+        max_passes = 3
+        for _ in range(max_passes):
+            prev_text = text
+            
+            # Use html module for standard decoding (this handles &lt;, &gt;, etc.)
+            text = html_module.unescape(text)
+            
+            if text == prev_text:
+                break
+        
+        # Apply any remaining entity replacements
+        for entity, char in cls.ENTITY_MAP.items():
+            text = text.replace(entity, char)
+        
+        return text
+    
+    @staticmethod
+    def _decode_decimal(match):
+        """Decode decimal HTML entity"""
+        try:
+            code = int(match.group(1))
+            if XMLValidator.is_valid_char_code(code):
+                return chr(code)
+        except:
+            pass
+        return match.group(0)
+    
+    @staticmethod
+    def _decode_hex(match):
+        """Decode hexadecimal HTML entity"""
+        try:
+            code = int(match.group(1), 16)
+            if XMLValidator.is_valid_char_code(code):
+                return chr(code)
+        except:
+            pass
+        return match.group(0)
+
+
+class XMLValidator:
+    """Handles XML validation and character checking"""
+    
+    @staticmethod
+    def is_valid_char_code(codepoint: int) -> bool:
+        """Check if a codepoint is valid for XML"""
+        return (
+            codepoint == 0x9 or 
+            codepoint == 0xA or 
+            codepoint == 0xD or 
+            (0x20 <= codepoint <= 0xD7FF) or 
+            (0xE000 <= codepoint <= 0xFFFD) or 
+            (0x10000 <= codepoint <= 0x10FFFF)
+        )
+    
+    @staticmethod
+    def is_valid_char(c: str) -> bool:
+        """Check if a character is valid for XML"""
+        return XMLValidator.is_valid_char_code(ord(c))
+    
+    @staticmethod
+    def clean_for_xml(text: str) -> str:
+        """Remove invalid XML characters"""
+        return ''.join(c for c in text if XMLValidator.is_valid_char(c))
+
+
+class ContentProcessor:
+    """Handles content cleaning and processing - UPDATED WITH UNICODE PRESERVATION"""
+    
+    @staticmethod
+    def safe_escape(text: str) -> str:
+        """Escape XML special characters for use in XHTML titles/attributes"""
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            try:
+                text = str(text)
+            except Exception:
+                return ""
+        # Use html.escape to handle &, <, > and quotes; then escape single quotes
+        escaped = html_module.escape(text, quote=True)
+        escaped = escaped.replace("'", "&apos;")
+        return escaped
+
+
+class TitleExtractor:
+    """Handles extraction of titles from HTML content - UPDATED WITH UNICODE PRESERVATION"""
+    
+    @staticmethod
+    def extract_from_html(html_content: str, chapter_num: Optional[int] = None, 
+                         filename: Optional[str] = None, allow_paragraph_fallback: bool = True,
+                         allow_generic_chapter_fallback: bool = True) -> Tuple[str, float]:
+        """Extract title from HTML content with confidence score - KEEP ALL HEADERS INCLUDING NUMBERS"""
+        try:
+            # Decode entities first - PRESERVES UNICODE
+            html_content = HTMLEntityDecoder.decode(html_content)
+            
+            soup = BeautifulSoup(html_content, 'lxml', from_encoding='utf-8')
+            candidates = []
+            
+            # Strategy 1: <title> tag (highest confidence)
+            title_tag = soup.find('title')
+            if title_tag and title_tag.string:
+                title_text = HTMLEntityDecoder.decode(title_tag.string.strip())
+                if title_text and len(title_text) > 0 and title_text.lower() not in ['untitled', 'chapter', 'document']:
+                    candidates.append((title_text, 0.95, "title_tag"))
+            
+            # Strategy 2: h1 tags (very high confidence)
+            h1_tags = soup.find_all('h1')
+            for i, h1 in enumerate(h1_tags[:3]):  # Check first 3 h1 tags
+                text = HTMLEntityDecoder.decode(h1.get_text(strip=True))
+                if text and len(text) < 300:
+                    # First h1 gets highest confidence
+                    confidence = 0.9 if i == 0 else 0.85
+                    candidates.append((text, confidence, f"h1_tag_{i+1}"))
+            
+            # Strategy 3: h2 tags (high confidence)
+            h2_tags = soup.find_all('h2')
+            for i, h2 in enumerate(h2_tags[:3]):  # Check first 3 h2 tags
+                text = HTMLEntityDecoder.decode(h2.get_text(strip=True))
+                if text and len(text) < 250:
+                    # First h2 gets highest confidence among h2s
+                    confidence = 0.8 if i == 0 else 0.75
+                    candidates.append((text, confidence, f"h2_tag_{i+1}"))
+            
+            # Strategy 4: h3 tags (moderate confidence)
+            h3_tags = soup.find_all('h3')
+            for i, h3 in enumerate(h3_tags[:3]):  # Check first 3 h3 tags
+                text = HTMLEntityDecoder.decode(h3.get_text(strip=True))
+                if text and len(text) < 200:
+                    confidence = 0.7 if i == 0 else 0.65
+                    candidates.append((text, confidence, f"h3_tag_{i+1}"))
+            
+            # Strategy 5: Bold text in first elements (lower confidence)
+            # If paragraph fallback is disabled, avoid using <p> tags as title sources
+            body_title_tags = ['div'] if not allow_paragraph_fallback else ['p', 'div']
+            first_elements = soup.find_all(body_title_tags)[:5]
+            for elem in first_elements:
+                for bold in elem.find_all(['b', 'strong'])[:2]:  # Limit to first 2 bold items
+                    bold_text = HTMLEntityDecoder.decode(bold.get_text(strip=True))
+                    if bold_text and 2 <= len(bold_text) <= 150:
+                        candidates.append((bold_text, 0.6, "bold_text"))
+            
+            # Strategy 6: Center-aligned text (common for chapter titles)
+            center_tags = ['center', 'div'] if not allow_paragraph_fallback else ['center', 'div', 'p']
+            center_elements = soup.find_all(center_tags, 
+                                           attrs={'align': 'center'}) or \
+                             soup.find_all(center_tags if not allow_paragraph_fallback else ['div', 'p'], 
+                                         style=lambda x: x and 'text-align' in x and 'center' in x)
+            
+            for center in center_elements[:3]:  # Check first 3 centered elements
+                text = HTMLEntityDecoder.decode(center.get_text(strip=True))
+                if text and 2 <= len(text) <= 200:
+                    candidates.append((text, 0.65, "centered_text"))
+            
+            # Strategy 7: All-caps text (common for titles in older books)
+            all_caps_tags = ['h1', 'h2', 'h3', 'div'] if not allow_paragraph_fallback else ['h1', 'h2', 'h3', 'p', 'div']
+            for elem in soup.find_all(all_caps_tags)[:10]:
+                text = elem.get_text(strip=True)
+                # Check if text is mostly uppercase
+                if text and len(text) > 2 and text.isupper():
+                    decoded_text = HTMLEntityDecoder.decode(text)
+                    # Keep it as-is (don't convert to title case automatically)
+                    candidates.append((decoded_text, 0.55, "all_caps_text"))
+            
+            # Strategy 8: Patterns in first paragraph (optional)
+            if allow_paragraph_fallback:
+                first_p = soup.find('p')
+                if first_p:
+                    p_text = HTMLEntityDecoder.decode(first_p.get_text(strip=True))
+                    
+                    # Look for "Chapter X: Title" patterns
+                    chapter_pattern = re.match(
+                        r'^(Chapter\s+[\dIVXLCDM]+\s*[:\-\u2013\u2014]\s*)(.{2,100})(?:\.|$)',
+                        p_text, re.IGNORECASE
+                    )
+                    if chapter_pattern:
+                        # Extract just the title part after "Chapter X:"
+                        title_part = chapter_pattern.group(2).strip()
+                        if title_part:
+                            candidates.append((title_part, 0.8, "paragraph_pattern_title"))
+                        # Also add the full "Chapter X: Title" as a lower confidence option
+                        full_title = chapter_pattern.group(0).strip().rstrip('.')
+                        candidates.append((full_title, 0.75, "paragraph_pattern_full"))
+                    elif len(p_text) <= 100 and len(p_text) > 2:
+                        # Short first paragraph might be the title
+                        candidates.append((p_text, 0.4, "paragraph_standalone"))
+            
+            # Strategy 9: Filename
+            if filename:
+                filename_match = re.search(r'response_\d+_(.+?)\.html', filename)
+                if filename_match:
+                    filename_title = filename_match.group(1).replace('_', ' ').title()
+                    if len(filename_title) > 2:
+                        candidates.append((filename_title, 0.3, "filename"))
+            
+            # Filter and rank candidates
+            if candidates:
+                unique_candidates = {}
+                for title, confidence, source in candidates:
+                    # Clean the title but keep roman numerals and short titles
+                    title = TitleExtractor.clean_title(title)
+                    
+                    # Don't reject short titles (like "III", "IX") - they're valid!
+                    if title and len(title) > 0:
+                        # Don't apply is_valid_title check too strictly
+                        # Roman numerals and chapter numbers are valid titles
+                        if title not in unique_candidates or unique_candidates[title][1] < confidence:
+                            unique_candidates[title] = (title, confidence, source)
+                
+                if unique_candidates:
+                    sorted_candidates = sorted(unique_candidates.values(), key=lambda x: x[1], reverse=True)
+                    best_title, best_confidence, best_source = sorted_candidates[0]
+                    
+                    # Log what we found for debugging (only if debug mode is enabled)
+                    import os
+                    debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
+                    if debug_mode_enabled:
+                        log(f"[DEBUG] Best title candidate: '{best_title}' (confidence: {best_confidence:.2f}, source: {best_source})")
+                    
+                    return best_title, best_confidence
+            
+            # Fallback - only use generic chapter number if allowed and nothing found
+            if allow_generic_chapter_fallback and chapter_num:
+                return f"Chapter {chapter_num}", 0.1
+            return "Untitled Chapter", 0.0
+            
+        except Exception as e:
+            log(f"[WARNING] Error extracting title: {e}")
+            if allow_generic_chapter_fallback and chapter_num:
+                return f"Chapter {chapter_num}", 0.1
+            return "Untitled Chapter", 0.0
+    
+    @staticmethod
+    def clean_title(title: str) -> str:
+        """Clean and normalize extracted title - trust HTML headers, minimal cleanup only"""
+        if not title:
+            return ""
+        
+        # Decode HTML entities - PRESERVES UNICODE
+        title = HTMLEntityDecoder.decode(title)
+        
+        # Remove HTML tags only
+        title = re.sub(r'<[^>]+>', '', title)
+        
+        # Normalize whitespace (convert non-breaking spaces, multiple spaces, etc.)
+        title = re.sub(r'[\xa0\u2000-\u200a\u202f\u205f\u3000]+', ' ', title)
+        title = re.sub(r'\s+', ' ', title).strip()
+        
+        # Normalize Unicode to NFC form
+        title = unicodedata.normalize('NFC', title)
+        
+        # Remove invisible zero-width characters only
+        title = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]', '', title)
+        
+        # Final whitespace cleanup
+        title = ' '.join(title.split())
+        
+        # Truncate if excessively long (safety check only)
+        if len(title) > 200:
+            truncated = title[:197]
+            last_space = truncated.rfind(' ')
+            if last_space > 150:
+                truncated = truncated[:last_space]
+            title = truncated + "..."
+        
+        return title
+    
+    @staticmethod
+    def is_valid_title(title: str) -> bool:
+        """Check if extracted title is valid - ACCEPT SHORT TITLES LIKE ROMAN NUMERALS"""
+        if not title:
+            return False
+        
+        # Accept any non-empty title after cleaning
+        # Don't reject roman numerals or short titles
+        
+        # Only reject truly invalid patterns
+        invalid_patterns = [
+            r'^untitled$',  # Just "untitled"
+            r'^chapter$',   # Just "chapter" without a number
+            r'^document$',  # Just "document"
+        ]
+        
+        for pattern in invalid_patterns:
+            if re.match(pattern, title.lower().strip()):
+                return False
+        
+        # Skip obvious filler phrases
+        filler_phrases = [
+            'click here', 'read more', 'continue reading', 'next chapter',
+            'previous chapter', 'table of contents', 'back to top'
+        ]
+        
+        title_lower = title.lower().strip()
+        if any(phrase in title_lower for phrase in filler_phrases):
+            return False
+        
+        # Accept everything else, including roman numerals and short titles
+        return True
+
+
+class XHTMLConverter:
+    """Handles XHTML conversion and compliance"""
+
+    VALID_ENTITY_TAGS = _VALID_ENTITY_TAGS
+    
+    # Default language for generated XHTML (used for html[@lang] and html[@xml:lang])
+    # This will be synchronized with the EPUB book language by EPUBCompiler.
+    DEFAULT_LANG = "en"
+
+    @classmethod
+    def set_default_language(cls, lang_code: str):
+        """Set default language code used for html lang/xml:lang attributes"""
+        if not lang_code:
+            return
+        try:
+            cls.DEFAULT_LANG = str(lang_code).strip() or "en"
+        except Exception:
+            cls.DEFAULT_LANG = "en"
+
+    @staticmethod
+    def unescape_valid_html_tag_entities(text: str) -> str:
+        """Turn encoded known HTML tags back into real tags while preserving narrative angle text."""
+        return _unescape_valid_html_tag_entities(text)
+    
+    @staticmethod
+    def ensure_compliance(html_content: str, title: str = "Chapter", 
+                         css_links: Optional[List[str]] = None) -> str:
+        """Ensure HTML content is XHTML-compliant while PRESERVING story tags"""
+        try:
+            import html
+            import re
+            
+            # Unescape HTML entities but PRESERVE &lt; and &gt; so fake angle brackets in narrative
+            # text don't become real tags (which breaks parsing across paragraphs like the sample).
+            if any(ent in html_content for ent in ['&amp;', '&quot;', '&#', '&lt;', '&gt;']):
+                # Temporarily protect &lt; and &gt; (both cases) from unescaping
+                placeholder_lt = '\ue000'
+                placeholder_gt = '\ue001'
+                html_content = html_content.replace('&lt;', placeholder_lt).replace('&LT;', placeholder_lt)
+                html_content = html_content.replace('&gt;', placeholder_gt).replace('&GT;', placeholder_gt)
+                # Unescape remaining entities
+                html_content = html.unescape(html_content)
+                # Restore protected angle bracket entities
+                html_content = html_content.replace(placeholder_lt, '&lt;').replace(placeholder_gt, '&gt;')
+
+            html_content = XHTMLConverter.unescape_valid_html_tag_entities(html_content)
+
+            if os.getenv('FIX_STRAY_P_GT_EPUB', '0') == '1':
+                html_content = _fix_stray_p_gt_artifacts(html_content)
+            
+            # Strip out ANY existing DOCTYPE, XML declaration, or html wrapper
+            # We only want the body content
+            
+            # Try to extract just body content
+            body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL | re.IGNORECASE)
+            if body_match:
+                html_content = body_match.group(1)
+            else:
+                # No body tags, strip any DOCTYPE/html tags if present
+                html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content)
+                html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content)
+                html_content = re.sub(r'</?html[^>]*>', '', html_content)
+                html_content = re.sub(r'<head[^>]*>.*?</head>', '', html_content, flags=re.DOTALL)
+
+            if os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1':
+                soup = BeautifulSoup(html_content, 'html.parser')
+                remove_duplicate_heading_paragraph_pairs(soup)
+                html_content = str(soup)
+            
+            # Fix <p"Text... -> <p>"Text... and orphaned < inside <p>
+            def _fix_malformed_p_tags(text: str) -> str:
+                # Part 1: Fix <p"Text... -> <p>"Text...
+                # This handles the specific case where the opening p tag is malformed as <p"
+                text = re.sub(r'<p"([^>]*?</p>)', r'<p>"\1', text, flags=re.IGNORECASE | re.DOTALL)
+                
+                # Part 1.5: Fix p>Text... -> <p>Text...
+                # Handles cases where the opening bracket is missing for the p tag
+                # Only matches if it starts a line or follows a closing tag, to be safe
+                text = re.sub(r'(^|>)\s*p>([^<]*?</p>)', r'\1<p>\2', text, flags=re.IGNORECASE | re.DOTALL)
+
+                # Part 2: Fix orphaned < inside <p> tags (e.g. <p><Yeah...)
+                def _process_p_content(m):
+                    open_tag = m.group(1)
+                    content = m.group(2)
+                    close_tag = m.group(3)
+                    
+                    new_content = []
+                    last_pos = 0
+                    
+                    # Iterate through all < characters in the content
+                    # We use a manual loop to handle logic correctly
+                    i = 0
+                    while i < len(content):
+                        if content[i] == '<':
+                            # Found a <. Check if it's a valid tag or orphaned/text
+                            # Append everything before this <
+                            new_content.append(content[last_pos:i])
+                            
+                            # Check for valid tag structure
+                            # 1. Must have a closing >
+                            next_gt = content.find('>', i)
+                            
+                            should_escape = False
+                            if next_gt == -1:
+                                # No closing >, definitely orphaned
+                                should_escape = True
+                            else:
+                                # Has closing >. Check interior.
+                                inner_text = content[i+1:next_gt]
+                                
+                                # If inner text contains <, then the first < is likely text 
+                                # (e.g. "x < y and y < z") unless it's nested tags which is rare inside simple P
+                                # But simpler check: valid tag names start with alpha or /alpha
+                                # and generally don't contain spaces immediately unless attributes
+                                
+                                # Check if it looks like a tag: <tagname...> or </tagname...>
+                                # Strip whitespace to handle <br >
+                                inner_stripped = inner_text.strip()
+                                tag_match = re.match(r'^/?([a-zA-Z0-9]+)', inner_stripped)
+                                
+                                if not tag_match:
+                                    # < 3 or < . or < ? (though <? is processing instruction)
+                                    should_escape = True
+                                else:
+                                    # It has a tag-like name.
+                                    # Check against known HTML tags if we want to be strict, 
+                                    # but user said "if it's anything else, then it's a whole sentence"
+                                    # The case <Yeah... matches [a-zA-Z]+ but had NO >. We handled that above.
+                                    
+                                    # What if we have <Yeah >? 
+                                    # User's example was <Yeah... (no >). 
+                                    # If we have <Yeah >, it is technically a tag "Yeah".
+                                    # But let's assume if it's not a standard HTML tag, it might be text?
+                                    # The user didn't explicitly ask to fix <Text>, only orphaned ones.
+                                    # So we stick to the "orphaned" logic (missing >) OR "obviously not a tag" logic.
+                                    
+                                    # For the purpose of this fix, the "missing >" check handles the user's <Yeah example.
+                                    # The <I haven't example also has "missing >".
+                                    
+                                    # One edge case: <p>Text <br> Text</p>
+                                    # <br> has > and matches [a-zA-Z]. Kept.
+                                    pass
+
+                            if should_escape:
+                                new_content.append('&lt;')
+                                last_pos = i + 1
+                            else:
+                                # It's a tag (or looks enough like one), keep the <
+                                new_content.append('<')
+                                last_pos = i + 1
+                        
+                        i += 1
+                        
+                    new_content.append(content[last_pos:])
+                    return f"{open_tag}{''.join(new_content)}{close_tag}"
+
+                return re.sub(r'(<p[^>]*>)(.*?)(</p>)', _process_p_content, text, flags=re.IGNORECASE | re.DOTALL)
+
+            html_content = _fix_malformed_p_tags(html_content)
+
+            fix_empty_attr_tags_epub_enabled = os.getenv('FIX_EMPTY_ATTR_TAGS_EPUB', '0') == '1'
+
+            # Sanitize attributes that contain a colon (:) but are NOT valid namespaces.
+            # Example: <status effects:="" high="" temperature="" unconscious=""></status>
+            # becomes: <status data-effects="" high="" temperature="" unconscious=""></status>
+            def _sanitize_colon_attributes_in_tags(text: str) -> str:
+                # Process only inside start tags; skip closing tags, comments, doctypes, processing instructions
+                def _process_tag(tag_match):
+                    tag = tag_match.group(0)
+                    if tag.startswith('</') or tag.startswith('<!') or tag.startswith('<?'):
+                        return tag
+                    
+                    def _attr_repl(m):
+                        before, name, eqval = m.group(1), m.group(2), m.group(3)
+                        lname = name.lower()
+                        # Preserve known namespace attributes
+                        if (
+                            lname.startswith('xml:') or lname.startswith('xlink:') or lname.startswith('epub:') or
+                            lname == 'xmlns' or lname.startswith('xmlns:')
+                        ):
+                            return m.group(0)
+                        if ':' not in name:
+                            return m.group(0)
+                        # Replace colon(s) with dashes and prefix with data-
+                        safe = re.sub(r'[:]+', '-', name).strip('-')
+                        safe = re.sub(r'[^A-Za-z0-9_.-]', '-', safe) or 'attr'
+                        if not safe.startswith('data-'):
+                            safe = 'data-' + safe
+                        return f'{before}{safe}{eqval}'
+                    
+                    # Replace attributes with colon in the name (handles both single and double quoted values)
+                    tag = re.sub(r'(\s)([A-Za-z_:][A-Za-z0-9_.:-]*:[A-Za-z0-9_.:-]*)(\s*=\s*(?:"[^"]*"|\'[^\']*\'))', _attr_repl, tag)
+                    return tag
+                
+                return re.sub(r'<[^>]+>', _process_tag, text)
+            
+            html_content = _sanitize_colon_attributes_in_tags(html_content)
+            
+            # Convert only "story tags" whose TAG NAME contains a colon (e.g., <System:Message>),
+            # but DO NOT touch valid HTML/SVG tags where colons appear in attributes (e.g., style="color:red" or xlink:href)
+            # and DO NOT touch namespaced tags like <svg:rect>.
+            allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns", "epub"}
+
+            # Fix for "Empty Attribute Tags" / "LLM Token Fix" (e.g.
+            # <unique ability=""></unique>, <a a="" and="" ... thorough=""></a>).
+            # Delegates to the shared ``_empty_attr_fix`` helper so the
+            # BeautifulSoup post-process, html2text pre-process, and this
+            # EPUB-converter pass all use the same regex.
+            if fix_empty_attr_tags_epub_enabled:
+                html_content = fix_empty_attr_tags(html_content)
+
+            if os.getenv('FIX_STRAY_P_GT_EPUB', '0') == '1':
+                html_content = _fix_stray_p_gt_artifacts(html_content)
+
+            # Number Spacing Tokenization Fix (also applied during translation).
+            # Rerunning it here is idempotent (the (?<![a-zA-Z0-9]) lookbehind
+            # prevents double-spacing), but it lets users:
+            #   - Re-compile an already-translated project with the toggle ON
+            #   - Fix output produced when the toggle was previously OFF
+            # The (?![^<]*>) lookahead keeps the rewrite out of tag attributes.
+            #   Mode '1' (Standard):        mixed-case words only (e.g. "Chapter7" -> "Chapter 7")
+            #   Mode '2' (Standard + Caps): also ALL-CAPS acronyms (e.g. "MP3" -> "MP 3")
+            _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
+            if _ns_mode in ('1', '2') and isinstance(html_content, str):
+                _ns_pat = (
+                    r'(?<![a-zA-Z0-9])((?:[a-zA-Z]*[a-z][a-zA-Z]*|[A-Z]+)[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                    if _ns_mode == '2' else
+                    r'(?<![a-zA-Z0-9])([a-zA-Z]*[a-z][a-zA-Z]*[^\w\s"\'「」『』“”‘’«»<>\[\]{}(),\-—]*)(\d+)(?=$|[^a-zA-Z]|(?:st|nd|rd|th)(?![a-zA-Z]))(?![^<]*>)'
+                )
+                html_content, _ns_count = re.subn(_ns_pat, r'\1 \2', html_content)
+                if _ns_count > 0:
+                    # Avoid log flooding when compiling large books: print once per call.
+                    try:
+                        print(f"🔧 EPUB Number Spacing Fix: separated {_ns_count} letter-number run-on(s)")
+                    except Exception:
+                        pass
+
+            def _escape_story_tag(match):
+                full_tag = match.group(0)   # Entire <...> or </...>
+                tag_name = match.group(1)   # The tag name possibly containing ':'
+                prefix = tag_name.split(':', 1)[0].lower()
+                # If this is a known namespace prefix (e.g., svg:rect), leave it alone
+                if prefix in allowed_ns_prefixes:
+                    return full_tag
+                # Otherwise, treat as a story/fake tag and replace angle brackets with Chinese brackets
+                return full_tag.replace('<', '《').replace('>', '》')
+
+            # Escape invalid story tags (tag names containing ':') so they render literally with angle brackets.
+            allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns", "epub"}
+            def _escape_story_tag_entities(m):
+                tagname = m.group(1)
+                prefix = tagname.split(':', 1)[0].lower()
+                if prefix in allowed_ns_prefixes:
+                    return m.group(0)
+                tag_text = m.group(0)
+                return tag_text.replace('<', '&lt;').replace('>', '&gt;')
+            # Apply in order: self-closing, opening, closing
+            html_content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)/>', _escape_story_tag_entities, html_content)
+            html_content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)>', _escape_story_tag_entities, html_content)
+            html_content = re.sub(r'</([A-Za-z][\w.-]*:[\w.-]*)\s*>', _escape_story_tag_entities, html_content)
+
+            # PREVENT malformed "fake tags" like <You are a farmer.> from being parsed as tags
+            # We only keep real HTML-like tag syntax; prose in angle brackets must
+            # remain visible text instead of being parsed as empty attributes.
+            html_content = _escape_invalid_html_tags(html_content)
+            
+            # Parse with lxml
+            from lxml import html as lxml_html, etree
+            
+            parser = lxml_html.HTMLParser(recover=True)
+            doc = lxml_html.document_fromstring(f"<div>{html_content}</div>", parser=parser)
+
+            # Fix common malformed link attributes produced by some EPUB sources/LLM output:
+            #   href="<part0008.html#id>"  -> href="part0008.html#id"
+            #   href="&lt;part0008.html#id&gt;" -> href="part0008.html#id"
+            # If left as-is, XML serialization will escape the angle brackets, breaking navigation.
+            def _strip_angle_wrapped_url(v: str) -> str:
+                try:
+                    if v is None:
+                        return v
+                    s = str(v).strip()
+                    if not s:
+                        return s
+                    sl = s.lower()
+
+                    # Full wrapper (entities)
+                    if sl.startswith('&lt;') and sl.endswith('&gt;') and len(s) >= 8:
+                        return s[4:-4].strip()
+
+                    # Full wrapper (literal)
+                    if s.startswith('<') and s.endswith('>') and len(s) >= 2:
+                        return s[1:-1].strip()
+
+                    # One-sided wrappers (best-effort)
+                    if sl.startswith('&lt;'):
+                        s = s[4:]
+                    if sl.endswith('&gt;') and len(s) >= 4:
+                        s = s[:-4]
+                    if s.startswith('<'):
+                        s = s[1:]
+                    if s.endswith('>'):
+                        s = s[:-1]
+                    return s.strip()
+                except Exception:
+                    return v
+
+            try:
+                for el in doc.iter():
+                    # Common link attributes
+                    for attr in ('href', 'src'):
+                        try:
+                            if attr in el.attrib:
+                                old = el.attrib.get(attr)
+                                new = _strip_angle_wrapped_url(old)
+                                if new != old:
+                                    el.attrib[attr] = new
+                        except Exception:
+                            pass
+                    # Namespaced link attributes (e.g., SVG)
+                    try:
+                        for attr in ("{http://www.w3.org/1999/xlink}href", 'xlink:href'):
+                            if attr in el.attrib:
+                                old = el.attrib.get(attr)
+                                new = _strip_angle_wrapped_url(old)
+                                if new != old:
+                                    el.attrib[attr] = new
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
+            # Get the content back
+            # Use HTML method if enabled (better whitespace preservation for buggy readers like Freda)
+            # but may reduce XHTML compliance. Default: xml (strict XHTML)
+            serialize_method = 'html' if os.getenv('EPUB_USE_HTML_METHOD', '0') == '1' else 'xml'
+            body_xhtml = etree.tostring(doc, method=serialize_method, encoding='unicode')
+            # Remove the wrapper div we added
+            body_xhtml = re.sub(r'^<div[^>]*>|</div>$', '', body_xhtml)
+            
+            # Optionally replace angle-bracket entities with Chinese brackets
+            # Default behavior: keep them as entities (&lt; &gt;) so the output preserves the original text
+            bracket_style = os.getenv('ANGLE_BRACKET_OUTPUT', 'entity').lower()
+            if '&lt;' in body_xhtml or '&gt;' in body_xhtml:
+                if bracket_style in ('cjk', 'chinese', 'cjk_brackets'):
+                    body_xhtml = body_xhtml.replace('&lt;', '《').replace('&gt;', '》')
+                # else: keep as entities
+            
+            # Build our own clean XHTML document
+            return XHTMLConverter._build_xhtml(title, body_xhtml, css_links)
+            
+        except Exception as e:
+            log(f"[WARNING] Failed to ensure XHTML compliance: {e}")
+            import traceback
+            log(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
+            log(f"[DEBUG] Failed chapter title: {title}")
+            log(f"[DEBUG] First 500 chars of input: {html_content[:500] if html_content else 'EMPTY'}")
+            
+            return XHTMLConverter._build_fallback_xhtml(title)
+        
+    @staticmethod
+    def _build_xhtml(title: str, body_content: str, css_links: Optional[List[str]] = None) -> str:
+        """Build XHTML document"""
+        if not body_content.strip():
+            body_content = '<p>Empty chapter</p>'
+        
+        title = ContentProcessor.safe_escape(title)
+        body_content = XHTMLConverter._ensure_xml_safe_readable(body_content)
+        
+        xml_declaration = '<?xml version="1.0" encoding="utf-8"?>'
+        doctype = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'
+        
+        # Use class-level default language for html element language attributes
+        lang = getattr(XHTMLConverter, "DEFAULT_LANG", "en")
+        
+        xhtml_parts = [
+            xml_declaration,
+            doctype,
+            f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">',
+            '<head>',
+            '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />',
+            f'<title>{title}</title>'
+        ]
+        
+        if css_links:
+            for css_link in css_links:
+                if css_link.startswith('<link'):
+                    href_match = re.search(r'href="([^"]+)"', css_link)
+                    if href_match:
+                        css_link = href_match.group(1)
+                    else:
+                        continue
+                xhtml_parts.append(f'<link rel="stylesheet" type="text/css" href="{ContentProcessor.safe_escape(css_link)}" />')
+        
+        xhtml_parts.extend([
+            '</head>',
+            '<body>',
+            body_content,
+            '</body>',
+            '</html>'
+        ])
+        
+        return '\n'.join(xhtml_parts)
+    
+    @staticmethod
+    def _ensure_xml_safe_readable(content: str) -> str:
+        """Ensure content is XML-safe"""
+        content = re.sub(
+            r'&(?!(?:'
+            r'[a-zA-Z][a-zA-Z0-9]{0,30};|'
+            r'#[0-9]{1,7};|'
+            r'#x[0-9a-fA-F]{1,6};'
+            r'))',
+            '&amp;',
+            content
+        )
+        return content
+    
+    @staticmethod
+    def _build_fallback_xhtml(title: str) -> str:
+        """Build minimal fallback XHTML"""
+        safe_title = re.sub(r'[<>&"\']+', '', str(title))
+        if not safe_title:
+            safe_title = "Chapter"
+        
+        lang = getattr(XHTMLConverter, "DEFAULT_LANG", "en")
+        
+        return f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>{ContentProcessor.safe_escape(safe_title)}</title>
+</head>
+<body>
+<p>Error processing content. Please check the source file.</p>
+</body>
+</html>'''
+    
+    
+    @staticmethod
+    def validate(content: str) -> str:
+        """Validate and fix XHTML content - WITH DEBUGGING"""
+        import re
+        # Ensure XML declaration
+        if not content.strip().startswith('<?xml'):
+            content = '<?xml version="1.0" encoding="utf-8"?>\n' + content
+        
+        # Remove control characters
+        content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', content)
+        
+        # Fix unescaped ampersands
+        content = re.sub(
+            r'&(?!(?:'
+            r'amp|lt|gt|quot|apos|'
+            r'[a-zA-Z][a-zA-Z0-9]{1,31}|'
+            r'#[0-9]{1,7}|'
+            r'#x[0-9a-fA-F]{1,6}'
+            r');)',
+            '&amp;',
+            content
+        )
+        
+
+        # Fix unquoted attributes
+        try:
+            content = re.sub(r'<([^>]+)\s+(\w+)=([^\s"\'>]+)([>\s])', r'<\1 \2="\3"\4', content)
+        except re.error:
+            pass  # Skip if regex fails      
+
+        # Sanitize invalid colon-containing attribute names (preserve XML/xlink/epub/xmlns)
+        def _sanitize_colon_attrs_in_content(text: str) -> str:
+            def _process_tag(m):
+                tag = m.group(0)
+                if tag.startswith('</') or tag.startswith('<!') or tag.startswith('<?'):
+                    return tag
+                def _attr_repl(am):
+                    before, name, eqval = am.group(1), am.group(2), am.group(3)
+                    lname = name.lower()
+                    if (
+                        lname.startswith('xml:') or lname.startswith('xlink:') or lname.startswith('epub:') or
+                        lname == 'xmlns' or lname.startswith('xmlns:')
+                    ):
+                        return am.group(0)
+                    if ':' not in name:
+                        return am.group(0)
+                    safe = re.sub(r'[:]+', '-', name).strip('-')
+                    safe = re.sub(r'[^A-Za-z0-9_.-]', '-', safe) or 'attr'
+                    if not safe.startswith('data-'):
+                        safe = 'data-' + safe
+                    return f'{before}{safe}{eqval}'
+                return re.sub(r'(\s)([A-Za-z_:][A-Za-z0-9_.:-]*:[A-Za-z0-9_.:-]*)(\s*=\s*(?:"[^"]*"|\'[^\']*\'))', _attr_repl, tag)
+            return re.sub(r'<[^>]+>', _process_tag, text)
+
+        content = _sanitize_colon_attrs_in_content(content)
+            
+        # Escape invalid story tags so they render literally with angle brackets in output
+        allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns", "epub"}
+        def _escape_story_tag_entities(m):
+            tagname = m.group(1)
+            prefix = tagname.split(':', 1)[0].lower()
+            if prefix in allowed_ns_prefixes:
+                return m.group(0)
+            tag_text = m.group(0)
+            return tag_text.replace('<', '&lt;').replace('>', '&gt;')
+        # Apply in order: self-closing, opening, closing
+        content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)/>', _escape_story_tag_entities, content)
+        content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)>', _escape_story_tag_entities, content)
+        content = re.sub(r'</([A-Za-z][\w.-]*:[\w.-]*)\s*>', _escape_story_tag_entities, content)
+            
+        # Clean for XML
+        content = XMLValidator.clean_for_xml(content)
+        
+        # Try to parse for validation
+        try:
+            ET.fromstring(content.encode('utf-8'))
+        except ET.ParseError as e:
+            log(f"[WARNING] XHTML validation failed: {e}")
+            
+            # DEBUG: Show what's at the error location
+            import re
+            match = re.search(r'line (\d+), column (\d+)', str(e))
+            if match:
+                line_num = int(match.group(1))
+                col_num = int(match.group(2))
+                
+                lines = content.split('\n')
+                log(f"[DEBUG] Error at line {line_num}, column {col_num}")
+                log(f"[DEBUG] Total lines in content: {len(lines)}")
+                
+                if line_num <= len(lines):
+                    problem_line = lines[line_num - 1]
+                    log(f"[DEBUG] Full problem line: {problem_line!r}")
+                    
+                    # Show the problem area
+                    if col_num <= len(problem_line):
+                        # Show 40 characters before and after
+                        start = max(0, col_num - 40)
+                        end = min(len(problem_line), col_num + 40)
+                        
+                        log(f"[DEBUG] Context around error: {problem_line[start:end]!r}")
+                        log(f"[DEBUG] Character at column {col_num}: {problem_line[col_num-1]!r} (U+{ord(problem_line[col_num-1]):04X})")
+                        
+                        # Show 5 characters before and after with hex
+                        for i in range(max(0, col_num-5), min(len(problem_line), col_num+5)):
+                            char = problem_line[i]
+                            marker = " <-- ERROR" if i == col_num-1 else ""
+                            log(f"[DEBUG] Col {i+1}: {char!r} (U+{ord(char):04X}){marker}")
+                    else:
+                        log(f"[DEBUG] Column {col_num} is beyond line length {len(problem_line)}")
+                else:
+                    log(f"[DEBUG] Line {line_num} doesn't exist (only {len(lines)} lines)")
+                    # Show last few lines
+                    for i in range(max(0, len(lines)-3), len(lines)):
+                        log(f"[DEBUG] Line {i+1}: {lines[i][:100]!r}...")
+            
+            # Try to recover
+            content = XHTMLConverter._attempt_recovery(content, e)
+        
+        return content
+    
+    @staticmethod
+    def _attempt_recovery(content: str, error: ET.ParseError) -> str:
+        """Attempt to recover from XML parse errors - ENHANCED"""
+        try:
+            # Use BeautifulSoup to fix structure
+            soup = BeautifulSoup(content, 'lxml')
+            
+            # Ensure we have proper XHTML structure
+            if not soup.find('html'):
+                # Use default XHTML namespace and language attributes
+                lang = getattr(XHTMLConverter, "DEFAULT_LANG", "en")
+                new_soup = BeautifulSoup(f'<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}"></html>', 'lxml')
+                html_tag = new_soup.html
+                for child in list(soup.children):
+                    html_tag.append(child)
+                soup = new_soup
+            
+            # Ensure we have head and body
+            if not soup.find('head'):
+                head = soup.new_tag('head')
+                meta = soup.new_tag('meta')
+                meta['http-equiv'] = 'Content-Type'
+                meta['content'] = 'text/html; charset=utf-8'
+                head.append(meta)
+                
+                title_tag = soup.new_tag('title')
+                title_tag.string = 'Chapter'
+                head.append(title_tag)
+                
+                if soup.html:
+                    soup.html.insert(0, head)
+            
+            if not soup.find('body'):
+                body = soup.new_tag('body')
+                if soup.html:
+                    for child in list(soup.html.children):
+                        if child.name not in ['head', 'body']:
+                            body.append(child.extract())
+                    soup.html.append(body)
+            
+            # Convert back to string
+            recovered = str(soup)
+            
+            # Ensure proper XML declaration
+            if not recovered.strip().startswith('<?xml'):
+                recovered = '<?xml version="1.0" encoding="utf-8"?>\n' + recovered
+            
+            # Add DOCTYPE if missing
+            if '<!DOCTYPE' not in recovered:
+                lines = recovered.split('\n')
+                lines.insert(1, '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">')
+                recovered = '\n'.join(lines)
+            
+            # Final validation
+            ET.fromstring(recovered.encode('utf-8'))
+            log(f"[INFO] Successfully recovered XHTML")
+            return recovered
+            
+        except Exception as recovery_error:
+            log(f"[WARNING] Recovery attempt failed: {recovery_error}")
+            # Last resort: use fallback
+            return XHTMLConverter._build_fallback_xhtml("Chapter")
+
+
+class FileUtils:
+    """File handling utilities"""
+
+    WINDOWS_MAX_PATH = 259
+    WINDOWS_MAX_FILENAME_LENGTH = 255
+    WINDOWS_RESERVED_FILENAMES = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CONIN$", "CONOUT$",
+    }
+
+    @staticmethod
+    def _avoid_windows_reserved_name(name: str, max_length: Optional[int] = None) -> str:
+        """Avoid Windows device names such as CON, AUX, COM1, and LPT1."""
+        if name.upper() not in FileUtils.WINDOWS_RESERVED_FILENAMES:
+            return name
+
+        if max_length is not None and max_length <= len(name):
+            return f"{name[:max(1, max_length - 1)]}_"
+        return f"{name}_"
+    
+    @staticmethod
+    def sanitize_filename(filename: str, allow_unicode: bool = False, max_length: int = 100) -> str:
+        """Sanitize filename for Windows-safe saves."""
+        filename = str(filename or "")
+
+        if allow_unicode:
+            filename = unicodedata.normalize('NFC', filename)
+            replacements = {
+                '/': '_', '\\': '_', ':': '_', '*': '_',
+                '?': '_', '"': '_', '<': '_', '>': '_',
+                '|': '_',
+            }
+            for old, new in replacements.items():
+                filename = filename.replace(old, new)
+            filename = ''.join(char if ord(char) >= 32 else '_' for char in filename)
+        else:
+            filename = unicodedata.normalize('NFKD', filename)
+            try:
+                filename = filename.encode('ascii', 'ignore').decode('ascii')
+            except:
+                filename = ''.join(c if ord(c) < 128 else '_' for c in filename)
+            
+            replacements = {
+                '/': '_', '\\': '_', ':': '_', '*': '_',
+                '?': '_', '"': '_', '<': '_', '>': '_',
+                '|': '_', '\n': '_', '\r': '_', '\t': '_',
+                '&': '_and_', '#': '_num_', ' ': '_',
+            }
+            for old, new in replacements.items():
+                filename = filename.replace(old, new)
+            
+            filename = ''.join(char for char in filename if ord(char) >= 32)
+            filename = re.sub(r'_+', '_', filename)
+            filename = filename.strip('_')
+        
+        filename = filename.strip()
+        name, ext = os.path.splitext(filename)
+
+        name = name.rstrip(' .')
+        ext = ext.rstrip(' .')
+        
+        max_length = max(1, min(int(max_length or 100), FileUtils.WINDOWS_MAX_FILENAME_LENGTH))
+        if len(ext) >= max_length:
+            ext = ext[:max(0, max_length - 1)].rstrip(' .')
+
+        max_name_length = max(1, max_length - len(ext))
+        if len(name) > max_name_length:
+            name = name[:max_name_length].rstrip(' ._')
+
+        if not name or name == '_':
+            name = 'file'
+
+        name = FileUtils._avoid_windows_reserved_name(name, max_name_length)
+        
+        return name + ext
+
+    @staticmethod
+    def sanitize_filename_for_windows_path(
+        filename: str,
+        directory: str,
+        extension: str = "",
+        allow_unicode: bool = False,
+        max_path: Optional[int] = None,
+    ) -> str:
+        """Return a Windows-safe filename stem that fits inside *directory*."""
+        extension = str(extension or "")
+        if extension and not extension.startswith('.'):
+            extension = f".{extension}"
+
+        max_component_length = max(1, FileUtils.WINDOWS_MAX_FILENAME_LENGTH - len(extension))
+        safe_name = FileUtils.sanitize_filename(
+            filename,
+            allow_unicode=allow_unicode,
+            max_length=max_component_length,
+        )
+        safe_name = safe_name.rstrip(' .') or 'file'
+        safe_name = FileUtils._avoid_windows_reserved_name(safe_name, max_component_length)
+
+        max_path = FileUtils.WINDOWS_MAX_PATH if max_path is None else int(max_path)
+        abs_dir = os.path.abspath(directory or ".")
+        separator_length = 1 if abs_dir else 0
+        path_budget = max_path - len(abs_dir) - separator_length - len(extension)
+        path_budget = min(path_budget, max_component_length)
+
+        if path_budget < 1:
+            return 'file'
+
+        if len(safe_name) > path_budget:
+            safe_name = safe_name[:path_budget].rstrip(' ._') or 'file'
+
+        safe_name = FileUtils._avoid_windows_reserved_name(safe_name, path_budget)
+        if len(safe_name) > path_budget:
+            safe_name = safe_name[:path_budget].rstrip(' ._') or 'file'
+            safe_name = FileUtils._avoid_windows_reserved_name(safe_name, path_budget)
+
+        return safe_name
+    
+    @staticmethod
+    def ensure_bytes(content) -> bytes:
+        """Ensure content is bytes"""
+        if content is None:
+            return b''
+        if isinstance(content, bytes):
+            return content
+        if not isinstance(content, str):
+            content = str(content)
+        return content.encode('utf-8')
+
+
+class EPUBCompiler:
+    """Main EPUB compilation class"""
+    
+    def __init__(
+        self,
+        base_dir: str,
+        log_callback: Optional[Callable] = None,
+        stop_callback: Optional[Callable] = None,
+        api_client: Any = None,
+    ):
+        self.base_dir = os.path.abspath(base_dir)
+        self.log_callback = log_callback
+        self.stop_callback = stop_callback
+        self.output_dir = self.base_dir
+        self.last_epub_output_path: Optional[str] = None
+        self.images_dir = os.path.join(self.output_dir, "images")
+        self.css_dir = os.path.join(self.output_dir, "css")
+        self.fonts_dir = os.path.join(self.output_dir, "fonts")
+        self.metadata_path = os.path.join(self.output_dir, "metadata.json")
+        self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'  # Default to '0' (disabled)
+        # EPUB layout mode: 'auto' (detect from source), 'epub2' (force OEBPS/Text), 'epub3' (flat OEBPS)
+        _layout_mode = os.getenv('EPUB_LAYOUT_MODE', '').lower().strip()
+        if _layout_mode == 'epub2':
+            self.legacy_epub_structure = True
+        elif _layout_mode == 'epub3':
+            self.legacy_epub_structure = False
+        elif _layout_mode == 'auto':
+            # Auto-detect from source EPUB's content.opf manifest
+            self.legacy_epub_structure = self._detect_epub2_layout()
+        else:
+            # Fallback to old boolean env var for backward compatibility
+            self.legacy_epub_structure = os.getenv('LEGACY_EPUB_STRUCTURE', '0') == '1'
+
+        # Source toc.ncx options
+        self.use_toc_ncx = os.getenv('USE_TOC_NCX', '0') == '1'
+        self.translate_toc_ncx = os.getenv('TRANSLATE_TOC_NCX', '0') == '1'
+        if self.translate_toc_ncx and not self.use_toc_ncx:
+            # Translation implies we must read the source toc.ncx
+            self.use_toc_ncx = True
+
+        self.max_workers = int(os.environ.get("EXTRACTION_WORKERS", "4"))
+        self.log(f"[INFO] Using {self.max_workers} workers for parallel processing")
+        _layout_label = _layout_mode if _layout_mode else ('legacy' if self.legacy_epub_structure else 'epub3')
+        self.log(f"[INFO] EPUB layout mode: {_layout_label} → {'EPUB2 (OEBPS/Text)' if self.legacy_epub_structure else 'EPUB3 (flat OEBPS)'}")
+        if self.use_toc_ncx:
+            self.log(
+                "[INFO] Use source TOC enabled: navigation will come from toc.ncx "
+                "or EPUB 3 nav.xhtml fallback"
+            )
+        if self.translate_toc_ncx:
+            self.log(
+                "[INFO] Translate source TOC enabled: navigation entries will be "
+                "translated and cached to TOC.txt"
+            )
+        
+        # Track auxiliary (non-chapter) HTML files to include in spine but omit from TOC
+        self.auxiliary_html_files: set[str] = set()
+        
+        # SVG rasterization settings
+        self.rasterize_svg = os.getenv('RASTERIZE_SVG_FALLBACK', '1') == '1'
+        try:
+            import cairosvg  # noqa: F401
+            self._cairosvg_available = True
+        except Exception:
+            self._cairosvg_available = False
+        
+        # Set global log callback
+        set_global_log_callback(log_callback)
+        
+        # translation features
+        self.html_dir = self.output_dir  # For compatibility
+        self.translate_titles = os.getenv('TRANSLATE_BOOK_TITLE', '1') == '1'
+        
+        # Initialize API client if needed
+        self.api_client = api_client
+        if (
+            self.api_client is None
+            and (
+                self.translate_titles
+                or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+                or getattr(self, 'translate_toc_ncx', False)
+            )
+        ):
+            model = os.getenv('MODEL')
+            api_key = os.getenv('API_KEY')
+            # Check if model needs API key (delegates to UnifiedClient's authoritative list)
+            model_needs_api_key = UnifiedClient._model_needs_api_key(model) if (UnifiedClient and model) else True
+            # Use a dummy API key for keyless models so UnifiedClient can initialize
+            if model and not api_key and not model_needs_api_key:
+                api_key = 'dummy-key-not-required'
+            if model and api_key and UnifiedClient:
+                self.api_client = UnifiedClient(api_key=api_key, model=model, output_dir=self.output_dir)
+            elif model and api_key and not UnifiedClient:
+                self.log("Warning: UnifiedClient module not available, translation features disabled")
+        
+        # Enhance with translation features
+        enhance_epub_compiler(self)
+
+    def _find_opf_path(self) -> Optional[str]:
+        """Return the workspace's authoritative OPF package document.
+
+        Resource extraction preserves the source package basename (for example
+        ``standard.opf``), so ``content.opf`` is only one possible name. Prefer
+        the package selected by container.xml, then fall back to a sole/root OPF.
+        """
+        return find_workspace_opf_path(self.output_dir)
+
+    def _load_image_rename_map(self) -> Dict[str, str]:
+        """Load the extraction-time original-image -> workspace-image map."""
+        rename_map_path = os.path.join(self.output_dir, "image_rename_map.json")
+        try:
+            with open(rename_map_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, ValueError, TypeError):
+            return {}
+        if not isinstance(loaded, dict):
+            return {}
+        return {
+            os.path.basename(str(original)): os.path.basename(str(renamed))
+            for original, renamed in loaded.items()
+            if original and renamed
+        }
+
+    def _get_opf_cover_designation(self) -> Dict[str, str]:
+        """Resolve EPUB 3/EPUB 2 OPF cover image and cover-page declarations."""
+        opf_path = self._find_opf_path()
+        result = {
+            "opf_path": opf_path or "",
+            "image_id": "",
+            "image_href": "",
+            "page_href": "",
+            "method": "",
+            "read_error": "",
+        }
+        if not opf_path:
+            return result
+
+        try:
+            root = ET.parse(opf_path).getroot()
+        except (OSError, ET.ParseError, ValueError) as exc:
+            result["read_error"] = str(exc)
+            return result
+
+        def local_name(element) -> str:
+            return str(element.tag).rsplit("}", 1)[-1].lower()
+
+        manifest_items: Dict[str, Dict[str, str]] = {}
+        for element in root.iter():
+            if local_name(element) != "item":
+                continue
+            item_id = (element.get("id") or "").strip()
+            href = (element.get("href") or "").strip()
+            if item_id and href:
+                manifest_items[item_id] = {
+                    "href": href,
+                    "media_type": (element.get("media-type") or "").strip(),
+                    "properties": (element.get("properties") or "").strip(),
+                }
+
+        # EPUB 3: the manifest cover-image property is authoritative.
+        for item_id, item in manifest_items.items():
+            properties = {token.casefold() for token in item["properties"].split()}
+            if "cover-image" in properties:
+                result.update(
+                    image_id=item_id,
+                    image_href=item["href"],
+                    method="EPUB 3 cover-image property",
+                )
+                break
+
+        # EPUB 2: <meta name="cover" content="manifest-id"/>.
+        if not result["image_href"]:
+            for element in root.iter():
+                if local_name(element) != "meta":
+                    continue
+                if (element.get("name") or "").strip().casefold() != "cover":
+                    continue
+                cover_id = (element.get("content") or "").strip()
+                item = manifest_items.get(cover_id)
+                if item:
+                    result.update(
+                        image_id=cover_id,
+                        image_href=item["href"],
+                        method="EPUB 2 cover metadata",
+                    )
+                break
+
+        # EPUB 2 guide entries can designate either a cover page or an image.
+        for element in root.iter():
+            if local_name(element) != "reference":
+                continue
+            reference_types = {
+                token.casefold()
+                for token in (element.get("type") or "").replace(",", " ").split()
+            }
+            if "cover" not in reference_types:
+                continue
+            href = (element.get("href") or "").strip()
+            if not href:
+                continue
+            clean_href = href.split("#", 1)[0]
+            if clean_href.lower().endswith((".html", ".htm", ".xhtml")):
+                result["page_href"] = href
+            elif not result["image_href"]:
+                result.update(image_href=href, method="OPF guide cover reference")
+            break
+
+        return result
+
+    def _html_image_references(self, filename: str) -> List[str]:
+        """Return file references from HTML ``img`` and SVG ``image`` elements."""
+        path = os.path.join(self.output_dir, filename)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                markup = _unescape_valid_html_tag_entities(f.read())
+        except (OSError, UnicodeError):
+            return []
+
+        soup = BeautifulSoup(markup, "html.parser")
+        references: List[str] = []
+        for tag in soup.find_all(("img", "image")):
+            reference = (
+                tag.get("src")
+                or tag.get("xlink:href")
+                or tag.get("href")
+                or tag.get("{http://www.w3.org/1999/xlink}href")
+            )
+            if reference:
+                references.append(str(reference).strip())
+        return references
+
+    def _html_declares_cover_semantics(self, filename: str) -> bool:
+        """Return whether markup explicitly identifies itself as a cover page."""
+        path = os.path.join(self.output_dir, filename)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                markup = _unescape_valid_html_tag_entities(f.read())
+        except (OSError, UnicodeError):
+            return False
+        soup = BeautifulSoup(markup, "html.parser")
+        for tag in soup.find_all(True):
+            value = tag.get("epub:type") or tag.get("type")
+            if value and "cover" in {token.casefold() for token in str(value).split()}:
+                return True
+        return False
+
+    def _find_existing_cover_html(
+        self,
+        html_files: List[str],
+        opf_cover: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
+        """Find an image-bearing source cover page in deterministic priority order."""
+        candidates = [
+            name for name in (html_files or [])
+            if str(name).lower().endswith((".html", ".htm", ".xhtml"))
+        ]
+        if not candidates:
+            return None
+
+        references_by_file = {
+            name: self._html_image_references(name)
+            for name in candidates
+        }
+        image_bearing = [name for name in candidates if references_by_file[name]]
+        if not image_bearing:
+            return None
+
+        opf_cover = opf_cover or {}
+        page_href = opf_cover.get("page_href", "")
+        if page_href:
+            page_core = self._normalize_core_name(page_href)
+            for name in image_bearing:
+                if self._normalize_core_name(name) == page_core:
+                    return name
+
+        # If a page embeds the OPF-declared image, it is the strongest available
+        # cover-page designation even when its own filename is unconventional.
+        image_href = opf_cover.get("image_href", "")
+        if image_href:
+            from urllib.parse import unquote
+
+            rename_map = self._load_image_rename_map()
+            rename_casefold = {key.casefold(): value for key, value in rename_map.items()}
+            source_basename = os.path.basename(unquote(image_href.split("#", 1)[0])).casefold()
+            accepted_names = {source_basename}
+            renamed = rename_casefold.get(source_basename)
+            if renamed:
+                accepted_names.add(os.path.basename(renamed).casefold())
+            for name in image_bearing:
+                referenced_names = {
+                    os.path.basename(unquote(ref.split("?", 1)[0].split("#", 1)[0])).casefold()
+                    for ref in references_by_file[name]
+                }
+                if referenced_names & accepted_names:
+                    return name
+
+        for name in image_bearing:
+            if self._html_declares_cover_semantics(name):
+                return name
+
+        exact_cover = [
+            name for name in image_bearing
+            if self._normalize_core_name(name) == "cover"
+        ]
+        if exact_cover:
+            return exact_cover[0]
+
+        # Improved fallback: p-cover.xhtml, book-cover.html, etc.
+        cover_named = [
+            name for name in image_bearing
+            if "cover" in self._normalize_core_name(name)
+        ]
+        return cover_named[0] if cover_named else None
+    
+    def _detect_epub2_layout(self) -> bool:
+        """Auto-detect whether the source EPUB used an EPUB2-style folder layout.
+
+        Checks the package manifest for item hrefs that reference a ``Text/``
+        subdirectory, which is the hallmark of the classic ``OEBPS/Text/`` layout.
+
+        Returns ``True`` if an EPUB2 layout is detected, ``False`` otherwise
+        (including when no OPF exists – defaults to modern EPUB3).
+        """
+        import xml.etree.ElementTree as _ET
+
+        opf_path = self._find_opf_path()
+        if not opf_path:
+            return False  # no OPF → default to EPUB3
+
+        try:
+            tree = _ET.parse(opf_path)
+            root = tree.getroot()
+            ns = {'opf': 'http://www.idpf.org/2007/opf'}
+            for item in root.findall('.//opf:manifest/opf:item', ns):
+                href = item.get('href', '')
+                if href.startswith('Text/') or href.startswith('text/'):
+                    self.log("[INFO] Auto-detected EPUB2 layout (Text/ references in source OPF)")
+                    return True
+        except Exception:
+            pass
+
+        return False
+
+    def _relative_item_href(self, document_name: str, item_name: str) -> str:
+        """Return an EPUB-safe relative href from a document to a manifest item."""
+        try:
+            document_dir = os.path.dirname((document_name or "").replace("\\", "/"))
+            normalized_item = (item_name or "").replace("\\", "/")
+            if not document_dir:
+                return normalized_item
+            rel_href = os.path.relpath(normalized_item, start=document_dir)
+            return rel_href.replace("\\", "/")
+        except Exception:
+            normalized_item = (item_name or "").replace("\\", "/")
+            prefix = "../" if getattr(self, 'legacy_epub_structure', False) else ""
+            return f"{prefix}{normalized_item}"
+
+    def _attach_css_items_to_document(self, document: epub.EpubHtml, css_items: List[epub.EpubItem]) -> None:
+        """Attach CSS with hrefs relative to the XHTML document path.
+
+        EbookLib's EpubHtml.add_item() injects the manifest href verbatim. That
+        breaks EPUB2-style layouts where documents live in Text/ and styles live
+        in css/, because Text/chapter.xhtml needs ../css/stylesheet.css.
+        """
+        document_name = getattr(document, "file_name", "") or ""
+        for css_item in css_items:
+            document.add_link(
+                href=self._relative_item_href(document_name, css_item.file_name),
+                rel="stylesheet",
+                type="text/css"
+            )
+
+    def log(self, message: str):
+        """Log a message"""
+        if self.log_callback:
+            self.log_callback(message)
+        else:
+            print(message)
+    
+    def is_stopped(self) -> bool:
+        """Check every stop signal that can cancel an EPUB build.
+
+        The converter's own flag is set only by the EPUB Converter button.
+        When the build runs as the last phase of a translation, the user stops
+        it with the translation Stop button, which raises GRACEFUL_STOP (or
+        TRANSLATION_CANCELLED and the translator's flag on a force stop).
+        compile_epub() clears all of these before each build, so a stale flag
+        from an earlier run cannot abort a new one.
+        """
+        if is_stop_requested():
+            return True
+        if self.stop_callback and self.stop_callback():
+            return True
+        if any(
+            os.environ.get(name) == '1'
+            for name in (
+                'TRANSLATION_CANCELLED',
+                'GRACEFUL_STOP',
+                'GRACEFUL_STOP_COMPLETED',
+            )
+        ):
+            return True
+        try:
+            from TransateKRtoEN import is_stop_requested as translation_stopped
+            if translation_stopped():
+                return True
+        except Exception:
+            pass
+        try:
+            from unified_api_client import is_stop_requested as api_stopped
+            if api_stopped():
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _translation_stop_requested(self) -> bool:
+        """Check every stop signal that can cancel metadata translation."""
+        return self.is_stopped()
+            
+    def compile(self):
+        """Main compilation method"""
+        try:    
+            # Debug: Check what metadata enhancement was done
+            self.log("[DEBUG] Checking metadata translation setup...")
+            self.log(f"[DEBUG] Has api_client: {hasattr(self, 'api_client') and self.api_client is not None}")
+            self.log(f"[DEBUG] Has metadata_translator: {hasattr(self, 'metadata_translator')}")
+            self.log(f"[DEBUG] Has translate_metadata_fields: {hasattr(self, 'translate_metadata_fields')}")
+            
+            if hasattr(self, 'translate_metadata_fields'):
+                self.log(f"[DEBUG] translate_metadata_fields content: {self.translate_metadata_fields}")
+                enabled_fields = [k for k, v in self.translate_metadata_fields.items() if v]
+                self.log(f"[DEBUG] Enabled metadata fields: {enabled_fields}")
+                
+            # Pre-flight check
+            if not self._preflight_check():
+                return
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Analyze chapters FIRST to get the structure
+            chapter_titles_info = self._analyze_chapters()
+            
+            # Check stop flag after chapter analysis
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Debug: Check if batch translation is enabled
+            self.log(f"[DEBUG] Batch translation enabled: {getattr(self, 'batch_translate_headers', False)}")
+            self.log(f"[DEBUG] Has header translator: {hasattr(self, 'header_translator')}")
+            self.log(f"[DEBUG] EPUB_PATH env: {os.getenv('EPUB_PATH', 'NOT SET')}")
+            self.log(f"[DEBUG] HTML dir: {self.html_dir}")
+            
+            # PRIORITY: Try standalone header translation first
+            standalone_success = False
+            if (hasattr(self, 'batch_translate_headers') and self.batch_translate_headers and 
+                run_standalone_header_translation is not None):
+                
+                self.log("\n🔄 Attempting standalone header translation (OPF based)...")
+                try:
+                    # Check if translated_headers.txt already exists
+                    translations_file = os.path.join(self.output_dir, "translated_headers.txt")
+                    
+                    if os.path.exists(translations_file):
+                        self.log("📁 Found existing translated_headers.txt - applying existing translations...")
+                        self.log(f"  Translation file: {translations_file}")
+                        self.log(f"  HTML directory: {self.html_dir}")
+                        
+                        try:
+                            # Import the functions from standalone module
+                            from translate_headers_standalone import (
+                                apply_existing_translations,
+                                extract_source_chapters_with_opf_mapping,
+                                retry_failed_header_translations,
+                            )
+                            self.log("✅ Successfully imported standalone module functions")
+                            
+                            # Retry status-marked failures before applying the
+                            # usable cache. Merely excluding those fallbacks is
+                            # not enough: existing source records are not "new"
+                            # chapters, so the old reconciliation skipped them.
+                            retry_translator = getattr(self, 'header_translator', None)
+                            if not getattr(retry_translator, 'client', None):
+                                retry_translator = None
+                            if retry_translator is None and getattr(self, 'api_client', None):
+                                from metadata_batch_translator import BatchHeaderTranslator
+                                retry_config = {
+                                    'batch_header_system_prompt': os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'),
+                                    'batch_header_prompt': os.environ.get('BATCH_HEADER_PROMPT'),
+                                    'output_language': os.environ.get('OUTPUT_LANGUAGE'),
+                                    'output_dir': self.output_dir,
+                                    'source_path': getattr(self, 'epub_path', ''),
+                                }
+                                retry_translator = BatchHeaderTranslator(
+                                    self.api_client, retry_config
+                                )
+
+                            self.log("🔍 Loading translations and retrying failed cache entries...")
+                            chapters_info, translated_headers, _ = retry_failed_header_translations(
+                                translations_file,
+                                translator=retry_translator,
+                                batch_size=getattr(self, 'headers_per_batch', -1),
+                                other_file_path=os.path.join(self.output_dir, 'TOC.txt'),
+                                log_callback=self.log,
+                            )
+                            
+                            if translated_headers:
+                                self.log(f"📋 Loaded {len(translated_headers)} existing translations:")
+                                # Show first 3 translations for debugging
+                                for num in list(translated_headers.keys())[:3]:
+                                    self.log(f"    Chapter {num}: {translated_headers[num]}")
+                                
+                                # --- Reconcile: detect new chapters added to the source EPUB ---
+                                source_epub_path = os.getenv('EPUB_PATH')
+                                if source_epub_path and os.path.exists(source_epub_path):
+                                    try:
+                                        source_mapping, spine_order = extract_source_chapters_with_opf_mapping(
+                                            source_epub_path, self.log
+                                        )
+                                        
+                                        # Build numbered headers from spine for comparison
+                                        from translate_headers_standalone import get_basename_without_ext
+                                        all_source_headers = {}
+                                        for idx, src_file in enumerate(spine_order, 1):
+                                            src_basename = get_basename_without_ext(os.path.basename(src_file))
+                                            if src_basename in source_mapping:
+                                                all_source_headers[idx] = source_mapping[src_basename]
+                                        
+                                        existing_nums = set(chapters_info.keys()) if chapters_info else set()
+                                        current_nums = set(all_source_headers.keys())
+                                        new_nums = current_nums - existing_nums
+                                        
+                                        if new_nums:
+                                            self.log(f"📦 Source EPUB has {len(new_nums)} NEW chapter(s) not in translated_headers.txt: {sorted(new_nums)}")
+                                            
+                                            new_headers_to_translate = {n: all_source_headers[n] for n in sorted(new_nums)}
+
+                                            # ── Cross-reference new entries from TOC.txt (two-way reuse) ──
+                                            _toc_file = os.path.join(self.output_dir, 'TOC.txt')
+                                            _reused_from_toc, _hdr_api_remaining = self._cross_reference_from_other_file(
+                                                new_headers_to_translate, _toc_file, 'header'
+                                            )
+
+                                            # Try to translate the remaining new entries
+                                            if hasattr(self, 'header_translator') and self.header_translator and \
+                                               hasattr(self.header_translator, 'client') and self.header_translator.client:
+                                                try:
+                                                    new_translations = dict(_reused_from_toc)
+                                                    if _hdr_api_remaining:
+                                                        _hpb = getattr(self, 'headers_per_batch', -1)
+                                                        _api_trans = self.header_translator.translate_headers_batch(
+                                                            _hdr_api_remaining,
+                                                            batch_size=_hpb if _hpb > 0 else None,
+                                                            translation_type='header'
+                                                        ) or {}
+                                                        new_translations.update(_api_trans)
+                                                    else:
+                                                        self.log("♻️ All new header entries were reused from cached file; skipping API call.")
+                                                    
+                                                    if new_translations:
+                                                        _api_count = len(new_translations) - len(_reused_from_toc)
+                                                        if _reused_from_toc and _api_count > 0:
+                                                            self.log(
+                                                                f"✅ Resolved {len(new_translations)} new chapter header(s) "
+                                                                f"({len(_reused_from_toc)} reused + {_api_count} translated)"
+                                                            )
+                                                        elif _reused_from_toc:
+                                                            self.log(f"✅ Reused {len(new_translations)} new chapter header(s) from cached file")
+                                                        else:
+                                                            self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                                        translated_headers.update(new_translations)
+                                                        
+                                                        # Append new entries to the existing file
+                                                        try:
+                                                            with open(translations_file, 'r', encoding='utf-8') as f:
+                                                                existing_content = f.read()
+                                                            
+                                                            import re as _re
+                                                            summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                                            if summary_match:
+                                                                existing_content = existing_content[:summary_match.start()]
+                                                            
+                                                            with open(translations_file, 'w', encoding='utf-8') as f:
+                                                                f.write(existing_content.rstrip('\n') + '\n')
+                                                                
+                                                                for num in sorted(new_nums):
+                                                                    orig = all_source_headers.get(num, "")
+                                                                    trans = new_translations.get(num, orig)
+                                                                    f.write(f"Chapter {num}:\n")
+                                                                    f.write(f"  Original:   {orig}\n")
+                                                                    f.write(f"  Translated: {trans}\n")
+                                                                    if num not in new_translations:
+                                                                        f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                                                    f.write("-" * 40 + "\n")
+                                                                
+                                                                all_nums = sorted(existing_nums | new_nums)
+                                                                f.write(f"\nSummary:\n")
+                                                                f.write(f"Total chapters: {len(all_nums)}\n")
+                                                                if all_nums:
+                                                                    f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
+                                                                f.write(f"Successfully translated: {len(translated_headers)}\n")
+                                                            
+                                                            self.log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                                            
+                                                            # ── IMMEDIATE REPAIR TO ENSURE SORTING AND METADATA ──
+                                                            try:
+                                                                from translate_headers_standalone import repair_translation_file
+                                                                repair_translation_file(translations_file, source_epub_path, self.output_dir, log_callback=self.log)
+                                                            except Exception as repair_err:
+                                                                self.log(f"⚠️ Post-append repair check failed: {repair_err}")
+                                                                
+                                                        except Exception as append_err:
+                                                            self.log(f"⚠️ Failed to update translated_headers.txt: {append_err}")
+                                                    else:
+                                                        self.log("⚠️ Translation of new headers returned no results — using originals")
+                                                        for num in new_nums:
+                                                            translated_headers[num] = all_source_headers[num]
+                                                except Exception as new_trans_err:
+                                                    self.log(f"⚠️ Failed to translate new headers: {new_trans_err}")
+                                                    for num in new_nums:
+                                                        translated_headers[num] = all_source_headers[num]
+                                            elif getattr(self, 'api_client', None):
+                                                # Try using api_client directly
+                                                try:
+                                                    new_translations = dict(_reused_from_toc)
+                                                    if _hdr_api_remaining:
+                                                        from metadata_batch_translator import BatchHeaderTranslator
+                                                        _bt_config = {
+                                                            'output_dir': self.output_dir,
+                                                            'source_path': getattr(self, 'epub_path', ''),
+                                                        }
+                                                        if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
+                                                            _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
+                                                        if os.environ.get('BATCH_HEADER_PROMPT'):
+                                                            _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
+                                                        if os.environ.get('OUTPUT_LANGUAGE'):
+                                                            _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
+                                                        tr = BatchHeaderTranslator(self.api_client, _bt_config)
+                                                        _hpb = getattr(self, 'headers_per_batch', -1)
+                                                        _api_trans = tr.translate_headers_batch(
+                                                            _hdr_api_remaining,
+                                                            batch_size=_hpb if _hpb > 0 else None,
+                                                            translation_type='header'
+                                                        ) or {}
+                                                        new_translations.update(_api_trans)
+                                                    else:
+                                                        self.log("♻️ All new header entries were reused from cached file; skipping API call.")
+                                                    
+                                                    if new_translations:
+                                                        _api_count = len(new_translations) - len(_reused_from_toc)
+                                                        if _reused_from_toc and _api_count > 0:
+                                                            self.log(
+                                                                f"✅ Resolved {len(new_translations)} new chapter header(s) "
+                                                                f"({len(_reused_from_toc)} reused + {_api_count} translated)"
+                                                            )
+                                                        elif _reused_from_toc:
+                                                            self.log(f"✅ Reused {len(new_translations)} new chapter header(s) from cached file")
+                                                        else:
+                                                            self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                                        translated_headers.update(new_translations)
+                                                        
+                                                        try:
+                                                            with open(translations_file, 'r', encoding='utf-8') as f:
+                                                                existing_content = f.read()
+                                                            import re as _re
+                                                            summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                                            if summary_match:
+                                                                existing_content = existing_content[:summary_match.start()]
+                                                            with open(translations_file, 'w', encoding='utf-8') as f:
+                                                                f.write(existing_content.rstrip('\n') + '\n')
+                                                                for num in sorted(new_nums):
+                                                                    orig = all_source_headers.get(num, "")
+                                                                    trans = new_translations.get(num, orig)
+                                                                    f.write(f"Chapter {num}:\n")
+                                                                    f.write(f"  Original:   {orig}\n")
+                                                                    f.write(f"  Translated: {trans}\n")
+                                                                    if num not in new_translations:
+                                                                        f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                                                    f.write("-" * 40 + "\n")
+                                                                all_nums = sorted(existing_nums | new_nums)
+                                                                f.write(f"\nSummary:\n")
+                                                                f.write(f"Total chapters: {len(all_nums)}\n")
+                                                                if all_nums:
+                                                                    f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
+                                                                f.write(f"Successfully translated: {len(translated_headers)}\n")
+                                                            self.log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                                            
+                                                            # ── IMMEDIATE REPAIR TO ENSURE SORTING AND METADATA ──
+                                                            try:
+                                                                from translate_headers_standalone import repair_translation_file
+                                                                repair_translation_file(translations_file, source_epub_path, self.output_dir, log_callback=self.log)
+                                                            except Exception as repair_err:
+                                                                self.log(f"⚠️ Post-append repair check failed: {repair_err}")
+                                                                
+                                                        except Exception as append_err:
+                                                            self.log(f"⚠️ Failed to update translated_headers.txt: {append_err}")
+                                                    else:
+                                                        for num in new_nums:
+                                                            translated_headers[num] = all_source_headers[num]
+                                                except Exception as new_trans_err:
+                                                    self.log(f"⚠️ Failed to translate new headers via api_client: {new_trans_err}")
+                                                    for num in new_nums:
+                                                        translated_headers[num] = all_source_headers[num]
+                                            else:
+                                                # No translator/API client - still apply any reuse from TOC.txt
+                                                if _reused_from_toc:
+                                                    self.log(
+                                                        f"♻️ Reused {len(_reused_from_toc)} header(s) from cached file (no API client)"
+                                                    )
+                                                    translated_headers.update(_reused_from_toc)
+                                                if _hdr_api_remaining:
+                                                    self.log(
+                                                        f"⚠️ {len(_hdr_api_remaining)} new chapter(s) remaining and no API client — using original titles"
+                                                    )
+                                                    for num in _hdr_api_remaining:
+                                                        translated_headers[num] = all_source_headers[num]
+                                    except Exception as recon_err:
+                                        self.log(f"⚠️ Reconciliation check failed: {recon_err} — proceeding with existing translations")
+                                
+                                # Get the source EPUB path (may already be set from reconciliation)
+                                if not source_epub_path:
+                                    source_epub_path = os.getenv('EPUB_PATH')
+                                self.log(f"  Source EPUB path: {source_epub_path}")
+                                
+                                if source_epub_path and os.path.exists(source_epub_path):
+                                    self.log(f"🔄 Applying translations to HTML files in: {self.html_dir}")
+                                    
+                                    # ── Repair: sort entries and discover missing Output File fields ──
+                                    try:
+                                        from translate_headers_standalone import repair_translation_file
+                                        repair_translation_file(
+                                            translations_file, source_epub_path, self.html_dir,
+                                            log_callback=self.log
+                                        )
+                                        _toc_txt = os.path.join(self.output_dir, 'TOC.txt')
+                                        if os.path.exists(_toc_txt):
+                                            repair_translation_file(
+                                                _toc_txt, source_epub_path, self.html_dir,
+                                                log_callback=self.log
+                                            )
+                                    except Exception as repair_err:
+                                        self.log(f"⚠️ Repair check failed: {repair_err}")
+                                    
+                                    # Apply translations using the standalone module's function
+                                    result = apply_existing_translations(
+                                        epub_path=source_epub_path,
+                                        output_dir=self.html_dir,
+                                        translations_file=translations_file,
+                                        update_html=getattr(self, 'update_html_headers', True),
+                                        log_callback=self.log
+                                    )
+                                    
+                                    if result:
+                                        self.log(f"✅ Successfully applied translations to {len(result)} files:")
+                                        # Show first 3 updated files
+                                        for filename in list(result.keys())[:3]:
+                                            self.log(f"    {filename}: {result[filename]}")
+                                        
+                                        # CRITICAL: Update chapter_titles_info so TOC uses translated titles now
+                                        updated_for_toc = 0
+                                        for chap_num, (orig_title, conf, fname) in list(chapter_titles_info.items()):
+                                            base = os.path.basename(fname)
+                                            if base in result:
+                                                chapter_titles_info[chap_num] = (result[base], max(conf, 0.95), 'existing_translation')
+                                                updated_for_toc += 1
+                                        self.log(f"📝 Updated TOC titles from existing translations: {updated_for_toc} entries")
+                                    else:
+                                        self.log("⚠️ No files were updated with translations (result was empty)")
+                                else:
+                                    self.log(f"⚠️ Source EPUB not found or doesn't exist: {source_epub_path}")
+                                    self.log("  Cannot apply translations without source EPUB for mapping")
+                            else:
+                                self.log("⚠️ No translations were loaded from file (empty result)")
+                            
+                            standalone_success = True
+                        except ImportError as e:
+                            self.log(f"⚠️ Failed to import standalone module: {e}")
+                            self.log("  Make sure translate_headers_standalone.py is in the same directory")
+                            import traceback
+                            self.log(traceback.format_exc())
+                            standalone_success = False
+                        except Exception as e:
+                            self.log(f"⚠️ Failed to apply existing translations: {e}")
+                            self.log(f"  Exception type: {type(e).__name__}")
+                            import traceback
+                            self.log(traceback.format_exc())
+                            standalone_success = False
+                    else:
+                        # Get the source EPUB path from environment
+                        source_epub_path = os.getenv('EPUB_PATH')
+                        
+                        if source_epub_path and os.path.exists(source_epub_path):
+                            self.log(f"📚 Source EPUB: {os.path.basename(source_epub_path)}")
+                            self.log(f"📂 Output HTML dir: {self.html_dir}")
+                            
+                            # Run standalone header translation
+                            result = run_standalone_header_translation(
+                                source_epub_path=source_epub_path,
+                                output_html_dir=self.html_dir,
+                                log_callback=self.log
+                            )
+                            
+                            if result:
+                                successful_noop = bool(
+                                    getattr(result, "successful_noop", False)
+                                )
+                                if successful_noop:
+                                    self.log(
+                                        "✅ Standalone header translation complete: "
+                                        "no source header tags found"
+                                    )
+                                else:
+                                    self.log("✅ Standalone header translation completed successfully")
+                                standalone_success = True
+                                
+                                # CRITICAL: Update chapter_titles_info so TOC uses translated titles
+                                # result is a dict mapping filename -> translated_title
+                                updated_for_toc = 0
+                                for chap_num, (orig_title, conf, fname) in list(chapter_titles_info.items()):
+                                    base = os.path.basename(fname)
+                                    if base in result:
+                                        chapter_titles_info[chap_num] = (result[base], max(conf, 0.95), 'standalone_translation')
+                                        updated_for_toc += 1
+                                if not successful_noop:
+                                    self.log(f"📝 Updated TOC titles from standalone translation: {updated_for_toc} entries")
+                            else:
+                                self.log("⚠️ Standalone header translation returned no result")
+                        else:
+                            self.log(f"⚠️ Source EPUB not found: {source_epub_path}")
+                            
+                except Exception as e:
+                    self.log(f"⚠️ Standalone header translation failed: {e}")
+                    import traceback
+                    self.log(traceback.format_exc())
+            
+            # FALLBACK: Extract source headers AND current titles if batch translation is enabled
+            # Only run if standalone translation was not successful AND fallback is enabled
+            source_headers = {}
+            current_titles = {}
+            use_fallback = os.getenv('USE_SORTED_FALLBACK', '0') == '1'
+            
+            if (not standalone_success and use_fallback and
+                hasattr(self, 'batch_translate_headers') and self.batch_translate_headers and 
+                hasattr(self, 'header_translator') and self.header_translator):
+                
+                self.log("\n🔄 Using fallback header translation method...")
+                
+                # Check if the extraction method exists
+                if hasattr(self, '_extract_source_headers_and_current_titles'):
+                    # Use the new extraction method
+                    source_headers, current_titles = self._extract_source_headers_and_current_titles()
+                    for _header_num, _source_title in source_headers.items():
+                        if _header_num in current_titles:
+                            current_titles[_header_num]['source_title'] = _source_title
+                    self.log(f"[DEBUG] Extraction complete: {len(source_headers)} source, {len(current_titles)} current")
+                else:
+                    self.log("⚠️ Missing _extract_source_headers_and_current_titles method!")
+            
+            # Batch translate headers if we have source headers (fallback only)
+            translated_headers = {}
+            if (not standalone_success and source_headers and 
+                hasattr(self, 'header_translator') and self.header_translator):
+                # Check if translated_headers.txt already exists
+                translations_file = os.path.join(self.output_dir, "translated_headers.txt")
+                
+                if os.path.exists(translations_file):
+                    # File exists - load and apply existing translations
+                    self.log("📁 Found existing translated_headers.txt - applying existing translations...")
+                    
+                    # Repair: sort entries and discover missing Output File fields
+                    try:
+                        from translate_headers_standalone import repair_translation_file
+                        repair_translation_file(
+                            translations_file, self.epub_path, self.output_dir,
+                            log_callback=self.log
+                        )
+                        # Also repair TOC.txt if it exists
+                        _toc_txt = os.path.join(self.output_dir, 'TOC.txt')
+                        if os.path.exists(_toc_txt):
+                            repair_translation_file(
+                                _toc_txt, self.epub_path, self.output_dir,
+                                log_callback=self.log
+                            )
+                    except Exception:
+                        pass
+                    
+                    try:
+                        # Import the functions from standalone module
+                        from translate_headers_standalone import retry_failed_header_translations
+                        
+                        # Load existing translations and retry status-marked
+                        # failures before calculating genuinely new chapters.
+                        _, translated_headers, _ = retry_failed_header_translations(
+                            translations_file,
+                            translator=self.header_translator,
+                            batch_size=getattr(self, 'headers_per_batch', -1),
+                            other_file_path=os.path.join(self.output_dir, 'TOC.txt'),
+                            log_callback=self.log,
+                        )
+                        
+                        if translated_headers:
+                            self.log(f"📋 Loaded {len(translated_headers)} existing translations")
+                            
+                            # --- Reconcile: detect new chapters added to the source EPUB ---
+                            existing_nums = set(translated_headers.keys())
+                            source_nums = set(source_headers.keys())
+                            new_nums = source_nums - existing_nums
+                            
+                            if new_nums:
+                                self.log(f"📦 Source EPUB has {len(new_nums)} NEW chapter(s) not in translated_headers.txt: {sorted(new_nums)}")
+                                
+                                # Translate only the new entries
+                                new_headers_to_translate = {n: source_headers[n] for n in sorted(new_nums)}
+                                
+                                # ── Cross-reference new entries from TOC.txt ──
+                                _toc_file = os.path.join(self.output_dir, 'TOC.txt')
+                                _reused, _api_remaining = self._cross_reference_from_other_file(
+                                    new_headers_to_translate, _toc_file, 'header'
+                                )
+                                
+                                new_translations = _reused.copy()
+                                if hasattr(self.header_translator, 'client') and self.header_translator.client:
+                                    try:
+                                        if _api_remaining:
+                                            _hpb = getattr(self, 'headers_per_batch', -1)
+                                            _api_trans = self.header_translator.translate_headers_batch(
+                                                _api_remaining,
+                                                batch_size=_hpb if _hpb > 0 else None,
+                                                translation_type='header'
+                                            ) or {}
+                                            new_translations.update(_api_trans)
+                                        else:
+                                            self.log("♻️ All new entries were reused from cached file; skipping API call.")
+                                        
+                                        if new_translations:
+                                            self.log(f"✅ Translated {len(new_translations)} new chapter header(s)")
+                                            translated_headers.update(new_translations)
+                                            
+                                            # Append new entries to the existing file
+                                            try:
+                                                with open(translations_file, 'r', encoding='utf-8') as f:
+                                                    existing_content = f.read()
+                                                
+                                                # Remove the Summary block at the end so we can rewrite it
+                                                import re as _re
+                                                summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                                if summary_match:
+                                                    existing_content = existing_content[:summary_match.start()]
+                                                
+                                                with open(translations_file, 'w', encoding='utf-8') as f:
+                                                    f.write(existing_content.rstrip('\n') + '\n')
+                                                    
+                                                    for num in sorted(new_nums):
+                                                        orig = source_headers.get(num, "")
+                                                        trans = new_translations.get(num, orig)
+                                                        f.write(f"Chapter {num}:\n")
+                                                        f.write(f"  Original:   {orig}\n")
+                                                        f.write(f"  Translated: {trans}\n")
+                                                        # Add output file if available
+                                                        if current_titles and num in current_titles:
+                                                            filename = current_titles[num].get('filename', '')
+                                                            if filename:
+                                                                clean_fn = filename
+                                                                if clean_fn.startswith('response_'):
+                                                                    clean_fn = clean_fn[9:]
+                                                                while True:
+                                                                    _n, _e = os.path.splitext(clean_fn)
+                                                                    if _e and _e.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                                                        clean_fn = _n
+                                                                    else:
+                                                                        break
+                                                                f.write(f"  Output File: {clean_fn}\n")
+                                                        if num not in new_translations:
+                                                            f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                                        f.write("-" * 40 + "\n")
+                                                    
+                                                    # Rewrite summary
+                                                    all_nums = sorted(existing_nums | new_nums)
+                                                    f.write(f"\nSummary:\n")
+                                                    f.write(f"Total chapters: {len(all_nums)}\n")
+                                                    if all_nums:
+                                                        f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
+                                                    f.write(f"Successfully translated: {len(translated_headers)}\n")
+                                                
+                                                self.log(f"📝 Updated translated_headers.txt with {len(new_translations)} new entries")
+                                            except Exception as append_err:
+                                                self.log(f"⚠️ Failed to update translated_headers.txt: {append_err}")
+                                        else:
+                                            self.log("⚠️ Translation of new headers returned no results — using originals")
+                                            for num in new_nums:
+                                                translated_headers[num] = source_headers[num]
+                                    except Exception as new_trans_err:
+                                        self.log(f"⚠️ Failed to translate new headers: {new_trans_err}")
+                                        for num in new_nums:
+                                            translated_headers[num] = source_headers[num]
+                                else:
+                                    self.log("⚠️ No API client available — using original titles for new chapters")
+                                    for num in new_nums:
+                                        translated_headers[num] = source_headers[num]
+                            
+                            # Apply translations to HTML files using the same method
+                            if hasattr(self, 'update_html_headers') and self.update_html_headers:
+                                self.header_translator._update_html_headers_exact(
+                                    self.html_dir, 
+                                    translated_headers, 
+                                    current_titles
+                                )
+                                self.log("✅ Applied existing translations to HTML files")
+                                
+                                # CRITICAL: Update chapter_titles_info so TOC gets translated titles on this run
+                                updated_for_toc = 0
+                                # Build filename -> translated mapping from current_titles' indices
+                                file_to_trans = {}
+                                for num, info in current_titles.items():
+                                    if num in translated_headers:
+                                        base = os.path.basename(info.get('filename', ''))
+                                        if base:
+                                            file_to_trans[base] = translated_headers[num]
+                                for chap_num, (orig_title, conf, fname) in list(chapter_titles_info.items()):
+                                    base = os.path.basename(fname)
+                                    if base in file_to_trans:
+                                        chapter_titles_info[chap_num] = (file_to_trans[base], max(conf, 0.95), 'existing_translation')
+                                        updated_for_toc += 1
+                                self.log(f"📝 Updated TOC titles from existing translations (fallback path): {updated_for_toc} entries")
+                            
+                            # Update toc.ncx if it exists
+                            toc_path = os.path.join(self.output_dir, 'toc.ncx')
+                            if os.path.exists(toc_path):
+                                from translate_headers_standalone import update_toc_ncx
+                                update_toc_ncx(toc_path, translated_headers, current_titles, self.log)
+                        else:
+                            self.log("⚠️ No translations found in existing file")
+                    
+                    except Exception as e:
+                        self.log(f"⚠️ Failed to apply existing translations: {e}")
+                        import traceback
+                        self.log(traceback.format_exc())
+                else:
+                    # No existing file - proceed with translation
+                    self.log("🌐 Batch translating chapter headers...")
+                    
+                    try:
+                        # Check if the translator has been initialized properly
+                        if not hasattr(self.header_translator, 'client') or not self.header_translator.client:
+                            self.log("⚠️ Header translator not properly initialized, skipping batch translation")
+                        else:
+                            self.log(f"📚 Found {len(source_headers)} headers to translate")
+                            self.log(f"📚 Found {len(current_titles)} current titles in HTML files")
+                            
+                            # Debug: Show a few examples
+                            for num in list(source_headers.keys())[:3]:
+                                self.log(f"  Example - Chapter {num}: {source_headers[num]}")
+                            
+                            # ── Cross-reference: reuse translations from TOC.txt ──
+                            _toc_file = os.path.join(self.output_dir, 'TOC.txt')
+                            _reused_from_toc, _hdr_remaining = self._cross_reference_from_other_file(
+                                source_headers, _toc_file, 'header'
+                            )
+                            
+                            _hpb = getattr(self, 'headers_per_batch', -1)
+                            # Always call translate_and_save_headers to ensure reused headers are injected into HTML
+                            translated_headers = self.header_translator.translate_and_save_headers(
+                                html_dir=self.html_dir,
+                                headers_dict=_hdr_remaining,  # translate_headers_batch natively skips if empty
+                                batch_size=_hpb if _hpb > 0 else None,
+                                output_dir=self.output_dir,
+                                update_html=getattr(self, 'update_html_headers', True),
+                                save_to_file=getattr(self, 'save_header_translations', True),
+                                current_titles=current_titles,
+                                reused_headers=_reused_from_toc,
+                                source_headers_full=source_headers
+                            ) or {}
+
+                            if getattr(self, 'save_header_translations', True):
+                                # Persist even an all-failed first response so
+                                # the bounded retry helper has explicit records
+                                # to retry on this same run.
+                                translations_file = os.path.join(
+                                    self.output_dir, 'translated_headers.txt'
+                                )
+                                self.header_translator._save_translations_to_file(
+                                    source_headers,
+                                    translated_headers,
+                                    translations_file,
+                                    current_titles,
+                                )
+                                translated_before_retry = set(translated_headers)
+                                from translate_headers_standalone import retry_failed_header_translations
+                                _, retried_headers, _ = retry_failed_header_translations(
+                                    translations_file,
+                                    translator=self.header_translator,
+                                    batch_size=_hpb if _hpb > 0 else None,
+                                    other_file_path=_toc_file,
+                                    log_callback=self.log,
+                                )
+                                recovered_now = {
+                                    num: title
+                                    for num, title in retried_headers.items()
+                                    if num not in translated_before_retry
+                                }
+                                translated_headers = retried_headers
+                                if (
+                                    recovered_now
+                                    and getattr(self, 'update_html_headers', True)
+                                ):
+                                    self.header_translator._update_html_headers_exact(
+                                        self.html_dir,
+                                        recovered_now,
+                                        current_titles,
+                                    )
+
+                            # Update chapter_titles_info with translations
+                            if translated_headers:
+                                self.log("\n📝 Updating chapter titles in EPUB structure...")
+                                for chapter_num, translated_title in translated_headers.items():
+                                    if chapter_num in chapter_titles_info:
+                                        # Keep the original confidence and method, just update the title
+                                        orig_title, confidence, method = chapter_titles_info[chapter_num]
+                                        chapter_titles_info[chapter_num] = (translated_title, confidence, method)
+                                        self.log(f"✓ Chapter {chapter_num}: {source_headers.get(chapter_num, 'Unknown')} → {translated_title}")
+                                    else:
+                                        # Add new entry if not in chapter_titles_info
+                                        chapter_titles_info[chapter_num] = (translated_title, 1.0, 'batch_translation')
+                                        self.log(f"✓ Added Chapter {chapter_num}: {translated_title}")
+                            
+                    except Exception as e:
+                        self.log(f"⚠️ Batch translation failed: {e}")
+                        import traceback
+                        self.log(traceback.format_exc())
+                        # Continue with compilation even if translation fails
+            elif not standalone_success and not use_fallback and hasattr(self, 'batch_translate_headers') and self.batch_translate_headers:
+                # Standalone failed but fallback is disabled (only warn if batch translation is enabled)
+                self.log("⚠️ Standalone header translation failed and sorted fallback is disabled")
+                self.log("   Enable 'Use Sorted Fallback' in Other Settings if needed")
+            else:
+                if not standalone_success and not source_headers:
+                    self.log("⚠️ No source headers found, skipping batch translation")
+                elif not hasattr(self, 'header_translator'):
+                    self.log("⚠️ No header translator available")
+
+            # ── Post-reconciliation: ensure TOC.txt and translated_headers.txt are consistent ──
+            # Run whenever toc.ncx translation is enabled; the chapter headers may
+            # have been produced by the standalone/main path (not the batch path),
+            # so don't gate on batch_translate_headers. _reconcile_toc_and_headers
+            # itself no-ops unless both files exist.
+            if getattr(self, 'translate_toc_ncx', False):
+                try:
+                    self._reconcile_toc_and_headers()
+                except Exception as _recon_err:
+                    self.log(f"⚠️ Post-reconciliation error: {_recon_err}")
+
+            # Find HTML files
+            html_files = self._find_html_files()
+            if not html_files:
+                raise Exception("No translated chapters found to compile into EPUB")
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Load metadata
+            metadata = self._load_metadata()
+            metadata_source_path = _read_compile_source_reference(
+                self.output_dir
+            )
+            raw_metadata_fields = getattr(
+                self, 'translate_metadata_fields', {}
+            )
+            configured_metadata_fields = (
+                resolve_metadata_field_settings(
+                    raw_metadata_fields,
+                    metadata_source_path,
+                )
+                if self.translate_titles and raw_metadata_fields
+                else {}
+            )
+            metadata_progress_manager = None
+            metadata_progress_plan = []
+
+            # Translate metadata if configured (skip in image output passthrough mode —
+            # content is not translated, only images are edited)
+            _image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+            if hasattr(self, 'metadata_translator') and self.metadata_translator and not _image_passthrough:
+                if any(configured_metadata_fields.values()):
+                    self.log("🌐 Translating metadata fields...")
+
+                    try:
+                        from TransateKRtoEN import ProgressManager
+
+                        metadata_progress_manager = ProgressManager(
+                            self.output_dir
+                        )
+                        metadata_progress_plan = (
+                            metadata_progress_manager.configure_metadata_progress(
+                                getattr(
+                                    self,
+                                    'metadata_translation_mode',
+                                    'together',
+                                ),
+                                metadata,
+                                configured_metadata_fields,
+                                self.metadata_path,
+                                source_path=metadata_source_path,
+                            )
+                        )
+                        metadata_progress_manager.save()
+                    except Exception as progress_error:
+                        metadata_progress_manager = None
+                        metadata_progress_plan = []
+                        self.log(
+                            "⚠️ Could not initialize metadata progress: "
+                            f"{progress_error}"
+                        )
+
+                    fields_to_translate = {}
+                    for field, should_translate in (
+                        configured_metadata_fields.items()
+                    ):
+                        if not should_translate or field not in metadata:
+                            continue
+                        translated_key = (
+                            'title_translated'
+                            if field == 'title'
+                            else f'{field}_translated'
+                        )
+                        if metadata.get(translated_key, False):
+                            continue
+                        fields_to_translate[field] = True
+
+                    try:
+                        if metadata_progress_manager is not None:
+                            for phase in metadata_progress_plan:
+                                if set(phase['fields']).intersection(
+                                    fields_to_translate
+                                ):
+                                    metadata_progress_manager.update_metadata_status(
+                                        'in_progress',
+                                        self.metadata_path,
+                                        key=phase['key'],
+                                    )
+                            metadata_progress_manager.save()
+
+                        if not fields_to_translate:
+                            self.log(
+                                "✓ Selected metadata fields are already translated"
+                            )
+                            translated_metadata = metadata
+                        else:
+                            translated_metadata = self.metadata_translator.translate_metadata(
+                                metadata,
+                                fields_to_translate,
+                                mode=getattr(
+                                    self,
+                                    'metadata_translation_mode',
+                                    'together',
+                                ),
+                            )
+
+                        completed_fields = set(
+                            getattr(
+                                self.metadata_translator,
+                                'last_completed_fields',
+                                set(),
+                            )
+                        )
+
+                        # Preserve original values and mark successful fields even
+                        # when the service validly returns the same text. This keeps
+                        # direct EPUB rebuilds from repeatedly sending metadata.
+                        for field in completed_fields:
+                            if field not in fields_to_translate:
+                                continue
+                            if field not in translated_metadata:
+                                continue
+                            original_value = metadata.get(field)
+                            translated_value = translated_metadata.get(field)
+                            if translated_value != original_value:
+                                original_key = f'original_{field}'
+                                translated_metadata.setdefault(
+                                    original_key,
+                                    original_value,
+                                )
+                            translated_key = (
+                                'title_translated'
+                                if field == 'title'
+                                else f'{field}_translated'
+                            )
+                            translated_metadata[translated_key] = True
+
+                        unresolved_fields = (
+                            set(fields_to_translate) - completed_fields
+                        )
+                        metadata = translated_metadata
+
+                        # Persist API work before the rest of EPUB compilation.
+                        # A later cover/resource failure must not discard a
+                        # successful metadata request or leave its progress row
+                        # pointing at an unsaved result.
+                        self._save_metadata(metadata)
+
+                        if metadata_progress_manager is not None:
+                            for phase in metadata_progress_plan:
+                                pending_phase_fields = set(
+                                    phase['fields']
+                                ).intersection(fields_to_translate)
+                                if not pending_phase_fields:
+                                    continue
+                                incomplete = sorted(
+                                    pending_phase_fields.intersection(
+                                        unresolved_fields
+                                    )
+                                )
+                                if incomplete:
+                                    metadata_progress_manager.update_metadata_status(
+                                        'failed',
+                                        self.metadata_path,
+                                        error=(
+                                            "Metadata fields did not complete: "
+                                            + ", ".join(incomplete)
+                                        ),
+                                        key=phase['key'],
+                                    )
+                                else:
+                                    metadata_progress_manager.update_metadata_status(
+                                        'completed',
+                                        self.metadata_path,
+                                        key=phase['key'],
+                                    )
+                            metadata_progress_manager.save()
+
+                        if unresolved_fields:
+                            self.log(
+                                "⚠️ Metadata fields did not complete: "
+                                + ", ".join(sorted(unresolved_fields))
+                            )
+                    except Exception as e:
+                        self.log(f"⚠️ Metadata translation failed: {e}")
+                        if metadata_progress_manager is not None:
+                            for phase in metadata_progress_plan:
+                                if set(phase['fields']).intersection(
+                                    fields_to_translate
+                                ):
+                                    metadata_progress_manager.update_metadata_status(
+                                        'failed',
+                                        self.metadata_path,
+                                        error=e,
+                                        key=phase['key'],
+                                    )
+                            metadata_progress_manager.save()
+                        # Continue with original metadata
+
+            # Decide language for EPUB based primarily on GUI's OUTPUT_LANGUAGE
+            try:
+                detected_lang = self._detect_primary_language_from_html(html_files)
+                if detected_lang:
+                    current_lang = metadata.get("language")
+                    if not current_lang or current_lang.lower() != detected_lang.lower():
+                        self.log(f"[INFO] Setting metadata language from OUTPUT_LANGUAGE: {current_lang!r} -> '{detected_lang}'")
+                        metadata["language"] = detected_lang
+            except Exception as e:
+                self.log(f"[WARNING] Failed to determine EPUB language from OUTPUT_LANGUAGE: {e}")
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Create EPUB book
+            book = self._create_book(metadata)
+            
+            # Process all components
+            spine = []
+            toc = []
+            
+            # Add CSS
+            css_items = self._add_css_files(book)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Add fonts
+            self._add_fonts(book)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Cover identity and cover-page reuse are separate decisions. The
+            # OPF-declared cover image is authoritative regardless of the
+            # automatic-cover preference. Existing image-bearing cover HTML is
+            # reused instead of manufacturing a duplicate page.
+            automatic_cover_enabled = (
+                os.environ.get('DISABLE_AUTOMATIC_COVER_CREATION', '0') != '1'
+            )
+            opf_cover = self._get_opf_cover_designation()
+            opf_path = opf_cover.get("opf_path", "")
+            self.log(
+                "📔 Cover discovery: automatic cover creation is "
+                f"{'ENABLED' if automatic_cover_enabled else 'DISABLED'}"
+            )
+            if opf_path:
+                self.log(
+                    "📔 Cover discovery: inspecting OPF package: "
+                    f"{os.path.basename(opf_path)}"
+                )
+                if opf_cover.get("read_error"):
+                    self.log(
+                        "⚠️ Cover discovery: OPF package could not be parsed: "
+                        f"{opf_cover['read_error']}"
+                    )
+                elif opf_cover.get("image_href"):
+                    self.log(
+                        "✅ Cover discovery: OPF explicitly designates cover image "
+                        f"'{opf_cover['image_href']}' via "
+                        f"{opf_cover.get('method') or 'package metadata'}"
+                    )
+                elif opf_cover.get("page_href"):
+                    self.log(
+                        "📔 Cover discovery: OPF designates cover page "
+                        f"'{opf_cover['page_href']}', but no separate cover image"
+                    )
+                else:
+                    self.log(
+                        "ℹ️ Cover discovery: OPF package has no recognized cover "
+                        "image or cover-page designation"
+                    )
+            else:
+                self.log(
+                    "ℹ️ Cover discovery: no OPF package was available for an "
+                    "authoritative cover designation"
+                )
+
+            existing_cover_html = self._find_existing_cover_html(html_files, opf_cover)
+            if existing_cover_html:
+                self.log(
+                    "✅ Cover discovery: reusable image-bearing cover HTML found: "
+                    f"{existing_cover_html}"
+                )
+
+            first_image_html = None
+            if (
+                not automatic_cover_enabled
+                and not existing_cover_html
+                and not opf_cover.get("image_href")
+            ):
+                # The broad "first spine HTML has an image" rule is deliberately
+                # only a fallback when automatic cover generation is disabled.
+                self.log(
+                    "📔 Cover fallback: automatic creation is disabled and no "
+                    "OPF cover image/reusable cover page was found; attempting "
+                    "the first image-bearing HTML fallback"
+                )
+                first_image_html = self._first_opf_spine_html_with_image(html_files)
+                if not first_image_html:
+                    self.log(
+                        "ℹ️ Cover fallback: no image-bearing HTML file was found"
+                    )
+
+            reused_cover_html = existing_cover_html or first_image_html
+            self._reused_cover_html = reused_cover_html
+            preferred_cover_names: List[str] = []
+            if opf_cover.get("image_href"):
+                preferred_cover_names.append(opf_cover["image_href"])
+            if reused_cover_html:
+                preferred_cover_names.extend(
+                    self._html_image_references(reused_cover_html)
+                )
+
+            processed_images, cover_file = self._process_images(
+                skip_automatic_cover=not automatic_cover_enabled,
+                preferred_cover_names=preferred_cover_names,
+            )
+            
+            # Compress images if enabled (before adding to EPUB)
+            if os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1':
+                processed_images, cover_file = self._compress_images(processed_images, cover_file)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            should_generate_cover_page = bool(
+                automatic_cover_enabled and cover_file and not reused_cover_html
+            )
+            cover_file_for_generated_page = (
+                cover_file if should_generate_cover_page else None
+            )
+
+            # Add images to book
+            self._add_images_to_book(
+                book,
+                processed_images,
+                cover_file_for_generated_page,
+                protected_cover_file=cover_file,
+            )
+
+            # A reused page or disabled synthetic-page setting must not discard
+            # the OPF cover-image metadata used by reader/library thumbnails.
+            if cover_file and not should_generate_cover_page:
+                if not self._set_cover_image_metadata(book, cover_file):
+                    self._add_cover_image_item(book, cover_file, processed_images)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Add cover page if exists
+            if reused_cover_html:
+                self.log(
+                    f"📔 Using existing image-bearing cover page instead of "
+                    f"generating one: {reused_cover_html}"
+                )
+            elif should_generate_cover_page:
+                self.log(
+                    "📔 Cover fallback: automatic creation selected image "
+                    f"'{cover_file_for_generated_page}'; generating cover.xhtml"
+                )
+                cover_page = self._create_cover_page(book, cover_file_for_generated_page, processed_images, css_items, metadata)
+                if cover_page:
+                    spine.insert(0, cover_page)
+            elif cover_file and not automatic_cover_enabled:
+                self.log(
+                    "📔 Automatic cover page creation is disabled; retained "
+                    "the selected image as OPF cover metadata only"
+                )
+            elif automatic_cover_enabled:
+                self.log(
+                    "ℹ️ Cover fallback: automatic creation found no usable image; "
+                    "no synthetic cover page was generated"
+                )
+            else:
+                self.log(
+                    "ℹ️ Cover fallback: automatic creation is disabled and the "
+                    "first-image HTML fallback found no usable cover"
+                )
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Build OPF filename map for restoring original names inside the EPUB
+            self._opf_filename_map = self._build_opf_filename_map()
+            if self._opf_filename_map:
+                source_opf = self._find_opf_path()
+                self.log(
+                    f"✅ Loaded {len(self._opf_filename_map)} original filenames "
+                    f"from {os.path.basename(source_opf) if source_opf else 'OPF'}"
+                )
+
+            # Process chapters with updated titles
+            chapters_added = self._process_chapters(
+                book, html_files, chapter_titles_info, 
+                css_items, processed_images, spine, toc, metadata
+            )
+            
+            if chapters_added == 0:
+                raise Exception("No chapters could be added to the EPUB")
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Add optional gallery (unless disabled or image output passthrough mode)
+            disable_gallery = os.environ.get('DISABLE_EPUB_GALLERY', '0') == '1'
+            if not disable_gallery and _image_passthrough:
+                disable_gallery = True
+                self.log("📷 Image gallery skipped — image output passthrough mode")
+            if disable_gallery:
+                self.log("📷 Image gallery disabled by user preference")
+            else:
+                gallery_images = self._filter_gallery_images_for_ocr(
+                    processed_images,
+                    cover_file,
+                )
+                if gallery_images:
+                    self.log(f"📷 Creating image gallery with {len(gallery_images)} images...")
+                    gallery_page = self._create_gallery_page(book, gallery_images, css_items, metadata)
+                    spine.append(gallery_page)
+                    toc.append(gallery_page)
+                else:
+                    self.log("📷 No images found for gallery")
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+
+            # Optional: Build TOC from source NCX or EPUB 3 nav.xhtml.
+            if getattr(self, 'use_toc_ncx', False):
+                try:
+                    toc = self._build_toc_from_source_toc_ncx(
+                        spine=spine,
+                        existing_toc=toc,
+                        metadata=metadata
+                    )
+                except Exception as e:
+                    self.log(f"⚠️ Failed to build TOC from source navigation: {e}")
+
+            # Finalize book
+            self._finalize_book(book, spine, toc, cover_file)
+            
+            # Check stop flag
+            if self.is_stopped():
+                self.log("🛑 EPUB converter stopped by user")
+                return
+            
+            # Write EPUB
+            self._write_epub(book, metadata)
+            
+            # Build PDF TOC exclusively from TOC.txt if it exists;
+            # entries not in TOC.txt are excluded entirely.
+            toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
+            if os.path.exists(toc_txt_path):
+                try:
+                    _toc_source, _toc_trans, _toc_files = self._load_toc_translations_file(toc_txt_path)
+                    if _toc_source:
+                        # Build output-filename -> translated title lookup
+                        # TOC.txt stores extensionless names, so strip extensions when matching
+                        _file_to_title = {}
+                        for _idx, _raw_title in _toc_source.items():
+                            # Failed cache entries are intentionally absent from
+                            # _toc_trans. Keep them in the PDF TOC using their raw
+                            # label; filtering failed entries must not remove the
+                            # TOC entry itself.
+                            _ttitle = _toc_trans.get(_idx) or _raw_title
+                            _out = _toc_files.get(_idx, '')
+                            if _out:
+                                _file_to_title[os.path.basename(_out)] = _ttitle
+                        # Rebuild chapter_titles_info keeping only TOC.txt entries
+                        _pdf_titles = {}
+                        for _cn, (_ot, _cf, _fn) in chapter_titles_info.items():
+                            _base = os.path.basename(_fn) if _fn else ''
+                            # Try exact match first, then extensionless match
+                            if _base in _file_to_title:
+                                _pdf_titles[_cn] = (_file_to_title[_base], 1.0, _fn)
+                            else:
+                                # Strip extensions for matching (TOC.txt stores extensionless names)
+                                _base_no_ext = _base
+                                while True:
+                                    _name, _ext = os.path.splitext(_base_no_ext)
+                                    if _ext and _ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                        _base_no_ext = _name
+                                    else:
+                                        break
+                                if _base_no_ext in _file_to_title:
+                                    _pdf_titles[_cn] = (_file_to_title[_base_no_ext], 1.0, _fn)
+                        if _pdf_titles:
+                            chapter_titles_info = _pdf_titles
+                            self.log(f"📝 PDF TOC will use {len(_pdf_titles)} entries from TOC.txt")
+                except Exception as _e:
+                    self.log(f"⚠️ Could not load TOC.txt for PDF: {_e}")
+
+            # Generate PDF if enabled
+            if os.environ.get('ENABLE_PDF_OUTPUT', '0') == '1':
+                if self.is_stopped():
+                    self.log("🛑 PDF generation skipped - stop requested")
+                else:
+                    try:
+                        import threading
+                        # Build JSON config for the PDF worker subprocess
+                        _pdf_config = {
+                            'output_dir': self.output_dir,
+                            'images_dir': self.images_dir,
+                            'css_dir': self.css_dir,
+                            'html_files': html_files,
+                            'chapter_titles_info': {str(k): list(v) for k, v in chapter_titles_info.items()},
+                            'processed_images': processed_images,
+                            'cover_file': cover_file_for_generated_page,
+                            'metadata': metadata,
+                            'env_vars': {
+                                k: os.environ.get(k, '') for k in [
+                                    'ENABLE_IMAGE_COMPRESSION',
+                                    'IMAGE_COMPRESSION_QUALITY', 'EXTRACTION_WORKERS',
+                                    'PDF_EXTRACTION_WORKERS',
+                                    'PDF_PAGE_NUMBERS', 'PDF_PAGE_NUMBER_ALIGNMENT',
+                                    'PDF_GENERATE_TOC', 'PDF_TOC_PAGE_NUMBERS',
+                                    'PDF_RENDER_BATCH_SIZE', 'PDF_FAST_RENDERING',
+                                    'PDF_USE_RAPID_WORKSPACE_COMPILER',
+                                    'DEDUPLICATE_TOC', 'DEDUPLICATE_TOC_USE_TRANSLATED',
+                                    'EPUB_PATH',
+                                ] if os.environ.get(k) is not None
+                            },
+                        }
+                        _pdf_config_path = os.path.join(self.output_dir, '_pdf_config.json')
+                        with open(_pdf_config_path, 'w', encoding='utf-8') as _pcf:
+                            json.dump(_pdf_config, _pcf, ensure_ascii=False)
+
+                        from pdf_generation_manager import PdfGenerationManager
+                        _pdf_done = threading.Event()
+                        _pdf_result = [None]
+
+                        def _pdf_completion(success, result):
+                            _pdf_result[0] = result
+                            _pdf_done.set()
+
+                        _pdf_mgr = PdfGenerationManager(log_callback=self.log)
+                        self._active_pdf_mgr = _pdf_mgr  # Store for cleanup on shutdown
+                        _pdf_mgr.generate_pdf_async(_pdf_config_path, completion_callback=_pdf_completion)
+
+                        # Wait for subprocess to finish, checking for stop every second
+                        while not _pdf_done.is_set():
+                            if self.is_stopped():
+                                _pdf_mgr.stop()
+                                self.log("🛑 PDF generation stopped by user")
+                                if not mobile_runtime.subprocesses_available():
+                                    # In-process renderer (Glossarion Mobile): stop() is
+                                    # cooperative, so wait for its next checkpoint; no
+                                    # PyMuPDF render thread may outlive this compile.
+                                    while not _pdf_mgr.wait(timeout=10.0):
+                                        self.log("⏳ Waiting for the PDF renderer to reach a stop point...")
+                                break
+                            _pdf_done.wait(timeout=1.0)
+
+                        # Clean up config file
+                        try:
+                            os.remove(_pdf_config_path)
+                        except Exception:
+                            pass
+
+                        if _pdf_result[0] and not _pdf_result[0].get('success', False):
+                            err = _pdf_result[0].get('error', 'Unknown error')
+                            if not self.is_stopped():
+                                self.log(f"⚠️ PDF generation failed: {err}")
+                    except BaseException as e:
+                        import traceback
+                        self.log(f"⚠️ PDF generation failed: {type(e).__name__}: {e}")
+                        self.log(f"[DEBUG] {traceback.format_exc()}")
+            
+            # Persist updated metadata (including translated fields/language)
+            try:
+                self._save_metadata(metadata)
+                if (
+                    metadata_progress_manager is not None
+                    and metadata_progress_manager.refresh_metadata_content_hash(
+                        self.metadata_path
+                    )
+                ):
+                    metadata_progress_manager.save()
+            except Exception as e:
+                self.log(f"[WARNING] Failed to save updated metadata.json: {e}")
+            
+            # Show summary
+            self._show_summary(chapter_titles_info, css_items)
+            return self.last_epub_output_path
+            
+        except Exception as e:
+            self.log(f"❌ EPUB compilation failed: {e}")
+            raise
+
+
+
+    def _fix_encoding_issues(self, content: str) -> str:
+        """Convert smart quotes and other Unicode punctuation to ASCII."""
+        # Repair attributes such as src="”../Images/foo.webp”" before the
+        # general smart-quote replacement below. Replacing punctuation first
+        # would turn that into src=""../Images/foo.webp"", which HTML parsers
+        # misread as an empty src plus bogus attributes such as ``..=""``.
+        def _repair_img_tag(match):
+            tag = match.group(0)
+            if not re.match(r'<\s*img\b', tag, flags=re.IGNORECASE):
+                return tag
+
+            def _repair_attr(attr_match):
+                prefix = attr_match.group(1)
+                ascii_quote = attr_match.group(2)
+                value = attr_match.group(4)
+                return f'{prefix}{ascii_quote}{value}{ascii_quote}'
+
+            return re.sub(
+                r'(\s[A-Za-z_:][A-Za-z0-9_.:-]*\s*=\s*)(["\'])([“”‘’])([^"\'“”‘’]*?)([“”‘’])?/?\2',
+                _repair_attr,
+                tag,
+            )
+
+        content = re.sub(r'<\s*img\b[^>]*>', _repair_img_tag, content, flags=re.IGNORECASE)
+
+        # Convert smart quotes to regular quotes and other punctuation
+        fixes = {
+            '’': "'",   # Right single quotation mark
+            '‘': "'",   # Left single quotation mark
+            '“': '"',   # Left double quotation mark
+            '”': '"',   # Right double quotation mark
+            '–': '-',   # En dash to hyphen
+            '…': '...', # Ellipsis to three dots
+        }
+
+        for bad, good in fixes.items():
+            if bad in content:
+                content = content.replace(bad, good)
+                #self.log(f"[DEBUG] Replaced {bad!r} with {good!r}")
+
+        return content
+
+
+    def _preflight_check(self) -> bool:
+        """Pre-flight check before compilation with progressive fallback"""
+        # Check if we have standard files
+        if self._has_standard_files():
+            # Use original strict check
+            return self._preflight_check_strict()
+        else:
+            # Use progressive check for non-standard files
+            result = self._preflight_check_progressive()
+            return result is not None
+
+    def _has_standard_files(self) -> bool:
+        """Check if directory contains standard response_ files"""
+        if not os.path.exists(self.base_dir):
+            return False
+        
+        html_exts = ('.html', '.xhtml', '.htm')
+        html_files = [f for f in os.listdir(self.base_dir) if f.lower().endswith(html_exts)]
+        response_files = [f for f in html_files if f.startswith('response_')]
+        
+        return len(response_files) > 0
+
+    def _preflight_check_strict(self) -> bool:
+        """Original strict pre-flight check - for standard files"""
+        self.log("\n📋 Pre-flight Check")
+        self.log("=" * 50)
+        
+        issues = []
+        
+        if not os.path.exists(self.base_dir):
+            issues.append(f"Directory does not exist: {self.base_dir}")
+            return False
+        
+        html_files = [f for f in os.listdir(self.base_dir) if f.endswith('.html')]
+        response_files = [f for f in html_files if f.startswith('response_')]
+        
+        if not html_files:
+            issues.append("No HTML files found in directory")
+        elif not response_files:
+            issues.append(f"Found {len(html_files)} HTML files but none start with 'response_'")
+        else:
+            self.log(f"✅ Found {len(response_files)} chapter files")
+        
+        if not os.path.exists(self.metadata_path):
+            self.log("⚠️  No metadata.json found (will use defaults)")
+        else:
+            self.log("✅ Found metadata.json")
+        
+        for subdir in ['css', 'images', 'fonts']:
+            path = os.path.join(self.base_dir, subdir)
+            if os.path.exists(path):
+                count = len(os.listdir(path))
+                self.log(f"✅ Found {subdir}/ with {count} files")
+        
+        if issues:
+            self.log("\n❌ Pre-flight check FAILED:")
+            for issue in issues:
+                self.log(f"  • {issue}")
+            return False
+        
+        self.log("\n✅ Pre-flight check PASSED")
+        return True
+
+    def _preflight_check_progressive(self) -> dict:
+        """Progressive pre-flight check for non-standard files"""
+        self.log("\n📋 Starting Progressive Pre-flight Check")
+        self.log("=" * 50)
+        
+        # Critical check - always required
+        if not os.path.exists(self.base_dir):
+            self.log(f"❌ CRITICAL: Directory does not exist: {self.base_dir}")
+            return None
+        
+        # Phase 1: Try strict mode (response_ files) - already checked in caller
+        
+        # Phase 2: Try relaxed mode (any HTML files)
+        self.log("\n[Phase 2] Checking for any HTML files...")
+        
+        html_exts = ('.html', '.xhtml', '.htm')
+        html_files = [f for f in os.listdir(self.base_dir) if f.lower().endswith(html_exts)]
+        
+        if html_files:
+            self.log(f"✅ Found {len(html_files)} HTML files:")
+            # Show first 5 files as examples
+            for i, f in enumerate(html_files[:5]):
+                self.log(f"    • {f}")
+            if len(html_files) > 5:
+                self.log(f"    ... and {len(html_files) - 5} more")
+            
+            self._check_optional_resources()
+            self.log("\n⚠️  Pre-flight check PASSED with warnings (relaxed mode)")
+            return {'success': True, 'mode': 'relaxed'}
+        
+        # Phase 3: No HTML files at all
+        self.log("❌ No HTML files found in directory")
+        self.log("\n[Phase 3] Checking directory contents...")
+        
+        all_files = os.listdir(self.base_dir)
+        self.log(f"📁 Directory contains {len(all_files)} total files")
+        
+        # Look for any potential content
+        potential_content = [f for f in all_files if not f.startswith('.')]
+        if potential_content:
+            self.log("⚠️  Found non-HTML files:")
+            for i, f in enumerate(potential_content[:5]):
+                self.log(f"    • {f}")
+            if len(potential_content) > 5:
+                self.log(f"    ... and {len(potential_content) - 5} more")
+            
+            self.log("\n⚠️  BYPASSING standard checks - compilation may fail!")
+            return {'success': True, 'mode': 'bypass'}
+        
+        self.log("\n❌ Directory appears to be empty")
+        return None
+
+    def _check_optional_resources(self):
+        """Check for optional resources (metadata, CSS, images, fonts)"""
+        self.log("\n📁 Checking optional resources:")
+        
+        if os.path.exists(self.metadata_path):
+            self.log("✅ Found metadata.json")
+        else:
+            self.log("⚠️  No metadata.json found (will use defaults)")
+        
+        resources_found = False
+        for subdir in ['css', 'images', 'fonts']:
+            path = os.path.join(self.base_dir, subdir)
+            if os.path.exists(path):
+                items = os.listdir(path)
+                if items:
+                    self.log(f"✅ Found {subdir}/ with {len(items)} files")
+                    resources_found = True
+                else:
+                    self.log(f"📁 Found {subdir}/ (empty)")
+        
+        if not resources_found:
+            self.log("⚠️  No resource directories found (CSS/images/fonts)")
+
+    def _detect_primary_language_from_html(self, html_files: List[str]) -> Optional[str]:
+        """Determine language for EPUB/output based on GUI target language.
+
+        Priority:
+          1) OUTPUT_LANGUAGE env var set by TranslatorGUI ("English", "Spanish", ...)
+          2) metadata["language"] if already present (2-letter/ISO-ish code)
+          3) Fallback: "en".
+
+        Returns a BCP‑47 style language code like "en", "es", "ru", "tr", "ko", ...
+        """
+        # 1) First, try OUTPUT_LANGUAGE name from GUI (English, Spanish, ...)
+        output_lang_name = os.getenv('OUTPUT_LANGUAGE', '').strip().lower()
+
+        gui_name_to_code = {
+            # Matches translator_gui.py target_lang_combo entries
+            'english': 'en',
+            'spanish': 'es',
+            'french': 'fr',
+            'german': 'de',
+            'italian': 'it',
+            'portuguese': 'pt',
+            'russian': 'ru',
+            'arabic': 'ar',
+            'hindi': 'hi',
+            'chinese (simplified)': 'zh-CN',
+            'chinese (traditional)': 'zh-TW',
+            'chinese': 'zh-CN',
+            'japanese': 'ja',
+            'korean': 'ko',
+            'turkish': 'tr',
+            'vietnamese': 'vi',
+            'bahasa indonesia': 'id',
+            'indonesian': 'id',
+            'bengali': 'bn',
+            'urdu': 'ur',
+            'marathi': 'mr',
+            'punjabi': 'pa',
+            'gujarati': 'gu',
+            'tamil': 'ta',
+            'telugu': 'te',
+            'kannada': 'kn',
+            'malayalam': 'ml',
+            'nepali': 'ne',
+            'sinhala': 'si',
+            'malay': 'ms',
+            'filipino': 'fil',
+            'thai': 'th',
+            'burmese': 'my',
+            'khmer': 'km',
+            'lao': 'lo',
+            'dutch': 'nl',
+            'polish': 'pl',
+            'ukrainian': 'uk',
+            'persian': 'fa',
+            'hebrew': 'he',
+            'greek': 'el',
+            'romanian': 'ro',
+            'swedish': 'sv',
+            'czech': 'cs',
+            'catalan': 'ca',
+            'bulgarian': 'bg',
+            'croatian': 'hr',
+            'serbian': 'sr',
+            'slovak': 'sk',
+            'slovenian': 'sl',
+            'hungarian': 'hu',
+            'danish': 'da',
+            'finnish': 'fi',
+            'norwegian': 'no',
+            'swahili': 'sw',
+            'afrikaans': 'af',
+            'amharic': 'am',
+            'hausa': 'ha',
+            'yoruba': 'yo',
+            'zulu': 'zu',
+            'azerbaijani': 'az',
+            'kazakh': 'kk',
+            'uzbek': 'uz',
+        }
+
+        if output_lang_name:
+            code = gui_name_to_code.get(output_lang_name)
+            if code:
+                self.log(f"[DEBUG] Using OUTPUT_LANGUAGE from GUI for EPUB language: '{output_lang_name}' -> '{code}'")
+                return code
+            else:
+                # If user typed a raw code like "es" or "pt-BR", just pass it through
+                self.log(f"[DEBUG] OUTPUT_LANGUAGE not in predefined map, using raw value: '{output_lang_name}'")
+                return output_lang_name
+
+        # 2) Nothing from GUI – leave decision to caller by returning None
+        return None
+
+    def _analyze_chapters(self) -> Dict[int, Tuple[str, float, str]]:
+        """Analyze chapter files and extract titles using parallel processing"""
+        self.log("\n📖 Extracting translated titles from chapter files...")
+        
+        chapter_info = {}
+        sorted_files = self._find_html_files()
+        
+        if not sorted_files:
+            self.log("⚠️ No translated chapter files found!")
+            return chapter_info
+        
+        self.log(f"📖 Analyzing {len(sorted_files)} translated chapter files for titles...")
+        self.log(f"🔧 Using {self.max_workers} parallel workers")
+        
+        def analyze_single_file(idx_filename):
+            """Worker function to analyze a single file"""
+            idx, filename = idx_filename
+            file_path = os.path.join(self.output_dir, filename)
+            
+            try:
+                # Read and process file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    raw_html_content = f.read()
+                
+                # Decode HTML entities
+                import html
+                html_content = html.unescape(raw_html_content)
+                html_content = self._fix_encoding_issues(html_content)
+                html_content = HTMLEntityDecoder.decode(html_content)
+                
+                # Extract title
+                allow_p_fallback = os.getenv('USE_P_TAG_TOC_FALLBACK', '0') == '1'
+                title, confidence = TitleExtractor.extract_from_html(
+                    html_content, idx, filename,
+                    allow_paragraph_fallback=allow_p_fallback,
+                    allow_generic_chapter_fallback=allow_p_fallback
+                )
+                
+                return idx, (title, confidence, filename)
+                
+            except Exception as e:
+                return idx, (f"Chapter {idx}", 0.0, filename), str(e)
+        
+        # Process files in parallel using environment variable worker count
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(analyze_single_file, (idx, filename)): idx 
+                for idx, filename in enumerate(sorted_files)
+            }
+            
+            # Collect results as they complete
+            completed = 0
+            for future in as_completed(futures):
+                # Check stop flag
+                if self.is_stopped():
+                    self.log("🛑 Chapter analysis stopped by user")
+                    break
+                
+                try:
+                    result = future.result()
+                    completed += 1
+                    
+                    if len(result) == 2:  # Success
+                        idx, info = result
+                        chapter_info[idx] = info
+                        
+                        # Log progress - only show issues (low confidence) unless debug mode is on
+                        title, confidence, filename = info
+                        debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
+                        
+                        # Always log low confidence (issues) or errors
+                        if confidence <= 0.4:
+                            indicator = "🔴"
+                            self.log(f"  [{completed}/{len(sorted_files)}] {indicator} Chapter {idx}: '{title}' (confidence: {confidence:.2f})")
+                        elif debug_mode_enabled:
+                            # In debug mode, log all chapters
+                            indicator = "✅" if confidence > 0.7 else "🟡"
+                            self.log(f"  [{completed}/{len(sorted_files)}] {indicator} Chapter {idx}: '{title}' (confidence: {confidence:.2f})")
+                    else:  # Error
+                        idx, info, error = result
+                        chapter_info[idx] = info
+                        # Always log errors
+                        self.log(f"❌ [{completed}/{len(sorted_files)}] Error processing chapter {idx}: {error}")
+                        
+                except Exception as e:
+                    idx = futures[future]
+                    self.log(f"❌ Failed to process chapter {idx}: {e}")
+                    chapter_info[idx] = (f"Chapter {idx}", 0.0, sorted_files[idx])
+        
+        return chapter_info
+    
+    def _process_chapters(self, book: epub.EpubBook, html_files: List[str],
+                         chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                         css_items: List[epub.EpubItem], processed_images: Dict[str, str],
+                         spine: List, toc: List, metadata: dict) -> int:
+        """Process chapters using parallel processing with AGGRESSIVE DEBUGGING"""
+        chapters_added = 0
+        self.log(f"\n{'='*80}")
+        self.log(f"📚 STARTING CHAPTER PROCESSING")
+        self.log(f"📚 Total files to process: {len(html_files)}")
+        self.log(f"🔧 Using {self.max_workers} parallel workers")
+        self.log(f"📂 Output directory: {self.output_dir}")
+        self.log(f"{'='*80}")
+        
+        # Debug chapter titles info
+        self.log(f"\n[DEBUG] Chapter titles info has {len(chapter_titles_info)} entries")
+        for num in list(chapter_titles_info.keys())[:5]:
+            title, conf, method = chapter_titles_info[num]
+            self.log(f"  Chapter {num}: {title[:50]}... (conf: {conf}, method: {method})")
+        
+        # Prepare chapter data
+        chapter_data = []
+        for idx, filename in enumerate(html_files):
+            chapter_num = idx
+            if chapter_num not in chapter_titles_info and (chapter_num + 1) in chapter_titles_info:
+                chapter_num = idx + 1
+            chapter_data.append((chapter_num, filename))
+            
+            # Debug specific problem chapters
+            if 49 <= chapter_num <= 56:
+                self.log(f"[DEBUG] Problem chapter found: {chapter_num} -> {filename}")
+        
+        def process_chapter_content(data):
+            """Worker function to process chapter content with FULL DEBUGGING"""
+            chapter_num, filename = data
+            path = os.path.join(self.output_dir, filename)
+            
+            # Debug tracking for problem chapters
+            is_problem_chapter = 49 <= chapter_num <= 56
+            
+            try:
+                if is_problem_chapter:
+                    self.log(f"\n[DEBUG] {'*'*60}")
+                    self.log(f"[DEBUG] PROCESSING PROBLEM CHAPTER {chapter_num}: {filename}")
+                    self.log(f"[DEBUG] Full path: {path}")
+                
+                # Check file exists
+                if not os.path.exists(path):
+                    error_msg = f"File does not exist: {path}"
+                    self.log(f"[ERROR] {error_msg}")
+                    raise FileNotFoundError(error_msg)
+                
+                # Get file size
+                file_size = os.path.getsize(path)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] File size: {file_size} bytes")
+
+                # Skip truly empty (0-byte) junk files entirely (do not generate error placeholders)
+                if file_size == 0:
+                    title = chapter_titles_info.get(chapter_num, (f"Chapter {chapter_num}", 0, ""))[0]
+                    return {
+                        'num': chapter_num,
+                        'filename': filename,
+                        'title': title,
+                        'error': f"Skipped 0-byte file: {filename}",
+                        'success': False,
+                        'skipped': True,
+                        'skip_reason': 'zero_byte_file'
+                    }
+                
+                # Read and decode
+                raw_content = self._read_and_decode_html_file(path)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Raw content length after reading: {len(raw_content) if raw_content else 'NULL'}")
+                    if raw_content:
+                        self.log(f"[DEBUG] First 200 chars: {raw_content[:200]}")
+                
+                # Fix encoding
+                raw_content = self._fix_encoding_issues(raw_content)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Content length after encoding fix: {len(raw_content) if raw_content else 'NULL'}")
+                
+                if not raw_content or not raw_content.strip():
+                    error_msg = f"Empty content after reading/decoding: {filename}"
+                    if is_problem_chapter:
+                        self.log(f"[ERROR] {error_msg}")
+                    raise ValueError(error_msg)
+                
+                # Extract main content
+                if not filename.startswith('response_'):
+                    before_len = len(raw_content)
+                    raw_content = self._extract_main_content(raw_content, filename)
+                    if is_problem_chapter:
+                        self.log(f"[DEBUG] Content extraction: {before_len} -> {len(raw_content)} chars")
+                
+                # Get title
+                title = self._get_chapter_title(chapter_num, filename, raw_content, chapter_titles_info)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Chapter title: {title}")
+                
+                # Prepare CSS links
+                css_prefix = "../css/" if getattr(self, 'legacy_epub_structure', False) else "css/"
+                css_links = [f"{css_prefix}{item.file_name.split('/')[-1]}" for item in css_items]
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] CSS links: {css_links}")
+                
+                # XHTML conversion - THE CRITICAL PART
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Starting XHTML conversion...")
+                
+                xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
+                
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] XHTML content length: {len(xhtml_content) if xhtml_content else 'NULL'}")
+                    if xhtml_content:
+                        self.log(f"[DEBUG] XHTML first 300 chars: {xhtml_content[:300]}")
+                
+                # Process images in memory only.  EPUB compilation must never
+                # rewrite translated/manual source HTML.  Missing image tags
+                # are removed from the packaged XHTML, not from the workspace.
+                xhtml_content, _missing_imgs = self._process_chapter_images(xhtml_content, processed_images)
+                
+                # Validate
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Starting validation...")
+                
+                final_content = XHTMLConverter.validate(xhtml_content)
+                
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Final content length: {len(final_content)}")
+                
+                # Final XML validation
+                try:
+                    ET.fromstring(final_content.encode('utf-8'))
+                    if is_problem_chapter:
+                        self.log(f"[DEBUG] XML validation PASSED")
+                except ET.ParseError as e:
+                    if is_problem_chapter:
+                        self.log(f"[ERROR] XML validation FAILED: {e}")
+                        # Show the exact error location
+                        lines = final_content.split('\n')
+                        import re
+                        match = re.search(r'line (\d+), column (\d+)', str(e))
+                        if match:
+                            line_num = int(match.group(1))
+                            if line_num <= len(lines):
+                                self.log(f"[ERROR] Problem line {line_num}: {lines[line_num-1][:100]}")
+                    
+                    # Create fallback
+                    final_content = XHTMLConverter._build_fallback_xhtml(title)
+                    if is_problem_chapter:
+                        self.log(f"[DEBUG] Using fallback XHTML")
+                
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Chapter processing SUCCESSFUL")
+                    self.log(f"[DEBUG] {'*'*60}\n")
+                
+                return {
+                    'num': chapter_num,
+                    'filename': filename,
+                    'title': title,
+                    'content': final_content,
+                    'success': True
+                }
+                
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                
+                if is_problem_chapter:
+                    self.log(f"[ERROR] {'!'*60}")
+                    self.log(f"[ERROR] CHAPTER {chapter_num} PROCESSING FAILED")
+                    self.log(f"[ERROR] Exception type: {type(e).__name__}")
+                    self.log(f"[ERROR] Exception: {e}")
+                    self.log(f"[ERROR] Full traceback:\n{tb}")
+                    self.log(f"[ERROR] {'!'*60}\n")
+                
+                return {
+                    'num': chapter_num,
+                    'filename': filename,
+                    'title': chapter_titles_info.get(chapter_num, (f"Chapter {chapter_num}", 0, ""))[0],
+                    'error': str(e),
+                    'traceback': tb,
+                    'success': False
+                }
+        
+        # Process in parallel
+        processed_chapters = []
+        completed = 0
+        total_chapters = len(chapter_data)
+        
+        # Use reduced logging for large EPUBs
+        use_reduced_logging = total_chapters > 50
+        log_interval = max(1, total_chapters // 20) if use_reduced_logging else 1
+        
+        self.log(f"\n[DEBUG] Starting parallel processing...")
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(process_chapter_content, data): data[0] 
+                for data in chapter_data
+            }
+            
+            for future in as_completed(futures):
+                # Check stop flag
+                if self.is_stopped():
+                    self.log("🛑 Chapter processing stopped by user")
+                    break
+                
+                try:
+                    result = future.result()
+                    if result:
+                        processed_chapters.append(result)
+                        completed += 1
+                        
+                        # Always log failures
+                        if not result['success']:
+                            self.log(f"  [{completed}/{total_chapters}] ❌ Failed: {result['filename']} - {result['error']}")
+                        # For successes: log at intervals for large EPUBs, or always for small ones
+                        elif not use_reduced_logging or completed == 1 or completed % log_interval == 0 or completed == total_chapters:
+                            current_percent = (completed * 100) // total_chapters
+                            self.log(f"  [{completed}/{total_chapters}] ({current_percent}%) ✅")
+                            
+                except Exception as e:
+                    completed += 1
+                    chapter_num = futures[future]
+                    self.log(f"  [{completed}/{total_chapters}] ❌ Exception processing chapter {chapter_num}: {e}")
+                    import traceback
+                    self.log(f"[ERROR] Traceback:\n{traceback.format_exc()}")
+        
+        # Sort by chapter number to maintain order
+        processed_chapters.sort(key=lambda x: x['num'])
+        
+        # Debug what we have
+        self.log(f"\n[DEBUG] Processed {len(processed_chapters)} chapters")
+
+        skipped_chapters = [c for c in processed_chapters if (not c.get('success')) and c.get('skipped')]
+        failed_chapters = [c for c in processed_chapters if (not c.get('success')) and (not c.get('skipped'))]
+
+        if skipped_chapters:
+            self.log(f"[INFO] {len(skipped_chapters)} chapters skipped (0-byte junk files):")
+            for sc in skipped_chapters:
+                self.log(f"  - Chapter {sc['num']}: {sc['filename']} - {sc.get('skip_reason', 'skipped')}")
+
+        if failed_chapters:
+            self.log(f"[WARNING] {len(failed_chapters)} chapters failed:")
+            for fc in failed_chapters:
+                self.log(f"  - Chapter {fc['num']}: {fc['filename']} - {fc.get('error', 'Unknown error')}")
+
+        # Add chapters to book in order (this must be sequential)
+        self.log("\n📦 Adding chapters to EPUB structure...")
+
+        # Skip 0-byte junk chapters entirely; only add real chapters + placeholders for true failures
+        chapters_to_add = [c for c in processed_chapters if not c.get('skipped')]
+
+        # Use reduced logging for large EPUBs
+        total_to_add = len(chapters_to_add)
+        use_reduced_logging = total_to_add > 50
+        log_interval = max(1, total_to_add // 20) if use_reduced_logging else 1
+
+        for idx, chapter_data in enumerate(chapters_to_add, 1):
+            if chapter_data['success']:
+                try:
+                    # Create EPUB chapter
+                    import html
+                    text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+                    # Restore original OPF filename (strips response_ prefix, restores source extension)
+                    opf_map = getattr(self, '_opf_filename_map', {})
+                    chapter_file_name = self._restore_opf_filename(chapter_data['filename'], opf_map)
+                    if text_dirname:
+                        chapter_file_name = f"{text_dirname}/{chapter_file_name}"
+                    chapter = epub.EpubHtml(
+                        title=XMLValidator.clean_for_xml(html.unescape(chapter_data['title'])),
+                        file_name=chapter_file_name,
+                        lang=metadata.get("language", "en")
+                    )
+                    chapter.content = FileUtils.ensure_bytes(chapter_data['content'])
+                    
+                    if self.attach_css_to_chapters:
+                        self._attach_css_items_to_document(chapter, css_items)
+                    
+                    # Add to book
+                    book.add_item(chapter)
+                    spine.append(chapter)
+
+                    # Include auxiliary files in spine but omit from TOC
+                    base_name = os.path.basename(chapter_data['filename'])
+                    base_core = os.path.splitext(base_name)[0].removeprefix('response_').lower()
+                    title_lower = str(chapter_data.get('title', '')).strip().lower()
+                    reused_cover_html = getattr(self, '_reused_cover_html', None)
+                    is_reused_cover = bool(
+                        reused_cover_html
+                        and self._normalize_core_name(base_name)
+                        == self._normalize_core_name(reused_cover_html)
+                    )
+                    if base_core == 'cover' or is_reused_cover:
+                        self.log(f"  🛈 Added existing cover page to spine (not in TOC): {base_name}")
+                    elif hasattr(self, 'auxiliary_html_files') and base_name in self.auxiliary_html_files:
+                        self.log(f"  🛈 Added auxiliary page to spine (not in TOC): {base_name}")
+                    else:
+                        if title_lower in ('untitled chapter', 'untitled'):
+                            self.log(f"  🛈 Skipped TOC entry for untitled chapter: {base_name}")
+                        else:
+                            toc.append(chapter)
+                    chapters_added += 1
+                    
+                    # Log auxiliary files always, or at intervals for regular chapters
+                    if base_name in getattr(self, 'auxiliary_html_files', set()):
+                        self.log(f"  ✅ Added auxiliary page (spine only): '{base_name}'")
+                    elif not use_reduced_logging or idx == 1 or idx % log_interval == 0 or idx == total_to_add:
+                        current_percent = (idx * 100) // total_to_add
+                        self.log(f"  [{idx}/{total_to_add}] ({current_percent}%) ✅")
+                    
+                except Exception as e:
+                    self.log(f"  ❌ Failed to add chapter {chapter_data['num']} to book: {e}")
+                    import traceback
+                    self.log(f"[ERROR] Traceback:\n{traceback.format_exc()}")
+                    # Add error placeholder
+                    self._add_error_chapter_from_data(book, chapter_data, spine, toc, metadata)
+                    chapters_added += 1
+            else:
+                # Only add placeholders for real processing failures.
+                # 0-byte junk files are skipped earlier and not present in chapters_to_add.
+                self.log(f"  ⚠️ Adding error placeholder for chapter {chapter_data['num']}")
+                self._add_error_chapter_from_data(book, chapter_data, spine, toc, metadata)
+                chapters_added += 1
+        
+        self.log(f"\n{'='*80}")
+        self.log(f"✅ CHAPTER PROCESSING COMPLETE")
+        self.log(f"✅ Added {chapters_added} chapters to EPUB")
+        self.log(f"{'='*80}\n")
+        
+        return chapters_added
+    
+    def _add_error_chapter_from_data(self, book, chapter_data, spine, toc, metadata):
+        """Helper to add an error placeholder chapter"""
+        try:
+            title = XMLValidator.clean_for_xml(str(chapter_data.get('title', f"Chapter {chapter_data['num']}")))
+            text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+            err_file = f"chapter_{chapter_data['num']:03d}.xhtml"
+            if text_dirname:
+                err_file = f"{text_dirname}/{err_file}"
+            chapter = epub.EpubHtml(
+                title=title,
+                file_name=err_file,
+                lang=metadata.get("language", "en")
+            )
+            
+            lang = metadata.get("language", "en")
+            error_content = f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}">
+<head><title>{ContentProcessor.safe_escape(title)}</title></head>
+<body>
+<h1>{ContentProcessor.safe_escape(title)}</h1>
+<p>Error loading chapter content.</p>
+<p>File: {chapter_data.get('filename', 'unknown')}</p>
+<p>Error: {chapter_data.get('error', 'unknown error')}</p>
+</body>
+</html>"""
+            
+            chapter.content = error_content.encode('utf-8')
+            book.add_item(chapter)
+            spine.append(chapter)
+            title_lower = str(title).strip().lower()
+            if title_lower in ('untitled chapter', 'untitled'):
+                self.log(f"  🛈 Skipped TOC entry for untitled error chapter: {err_file}")
+            else:
+                toc.append(chapter)
+            
+        except Exception as e:
+            self.log(f"  ❌ Failed to add error placeholder: {e}")
+
+
+    def _get_chapter_order_from_opf(self) -> Dict[str, int]:
+        """Get chapter order from content.opf or source EPUB
+        Returns dict mapping original_filename -> chapter_number
+        """
+        # First, use the package document extracted into the workspace. Its
+        # source basename is not necessarily content.opf (for example standard.opf).
+        opf_path = self._find_opf_path()
+
+        if opf_path:
+            self.log(f"✅ Found {os.path.basename(opf_path)} - using for chapter ordering")
+            return self._parse_opf_file(opf_path)
+        
+        # If not found, try to extract from source EPUB
+        source_epub = os.getenv('EPUB_PATH')
+        if source_epub and os.path.exists(source_epub):
+            self.log(f"📚 Extracting chapter order from source EPUB: {source_epub}")
+            return self._extract_order_from_epub(source_epub)
+        
+        # Fallback to translation_progress.json if available
+        progress_file = os.path.join(self.output_dir, "translation_progress.json")
+        if os.path.exists(progress_file):
+            self.log("📄 Using translation_progress.json for chapter order")
+            return self._get_order_from_progress_file(progress_file)
+        
+        return None
+
+    def _parse_opf_file(self, opf_path: str) -> Dict[str, int]:
+        """Parse content.opf to get chapter order from spine
+        Returns dict mapping original_filename -> chapter_number
+        """
+        try:
+            tree = ET.parse(opf_path)
+            root = tree.getroot()
+            
+            # Handle namespaces
+            ns = {'opf': 'http://www.idpf.org/2007/opf'}
+            if root.tag.startswith('{'):
+                # Extract default namespace
+                default_ns = root.tag[1:root.tag.index('}')]
+                ns = {'opf': default_ns}
+            
+            # Get manifest to map IDs to files
+            manifest = {}
+            for item in root.findall('.//opf:manifest/opf:item', ns):
+                item_id = item.get('id')
+                href = item.get('href')
+                media_type = item.get('media-type', '')
+                
+                # Only include HTML/XHTML files
+                if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                    # Get just the filename without path
+                    filename = os.path.basename(href)
+                    manifest[item_id] = filename
+            
+            # Get spine order
+            filename_to_order = {}
+            chapter_num = 0  # Start from 0 for array indexing
+            
+            spine = root.find('.//opf:spine', ns)
+            spine_ids = set()
+            if spine is not None:
+                # Count total items first to decide on logging
+                itemrefs = spine.findall('opf:itemref', ns)
+                total_items = len(itemrefs)
+                use_reduced_logging = total_items > 50
+                log_interval = max(1, total_items // 20) if use_reduced_logging else 1
+                
+                for idx, itemref in enumerate(itemrefs):
+                    idref = itemref.get('idref')
+                    if idref and idref in manifest:
+                        spine_ids.add(idref)
+                        filename = manifest[idref]
+                        filename_to_order[filename] = chapter_num
+                        # Only log periodically for large EPUBs
+                        if not use_reduced_logging or idx % log_interval == 0 or idx == 0 or idx == total_items - 1:
+                            if use_reduced_logging:
+                                percent = (idx * 100) // total_items
+                                self.log(f"  [{idx}/{total_items}] ({percent}%) ✅")
+                            else:
+                                self.log(f"  Chapter {chapter_num}: {filename}")
+                        chapter_num += 1
+            
+            
+            return filename_to_order
+            
+        except Exception as e:
+            self.log(f"⚠️ Error parsing content.opf: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            return None
+
+    def _extract_order_from_epub(self, epub_path: str) -> List[Tuple[int, str]]:
+        """Extract chapter order from source EPUB file"""
+        try:
+            import zipfile
+            
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                opf_file = find_epub_opf_member(zf)
+                
+                if opf_file:
+                    opf_content = zf.read(opf_file)
+                    # Save temporarily and parse
+                    temp_opf = os.path.join(self.output_dir, "temp_content.opf")
+                    with open(temp_opf, 'wb') as f:
+                        f.write(opf_content)
+                    
+                    result = self._parse_opf_file(temp_opf)
+                    
+                    # Clean up temp file
+                    if os.path.exists(temp_opf):
+                        os.remove(temp_opf)
+                        
+                    return result
+                    
+        except Exception as e:
+            self.log(f"⚠️ Error extracting from EPUB: {e}")
+            return None
+
+    def _first_opf_spine_html_with_image(
+        self,
+        html_files: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        """Return the first image-bearing HTML, preferring OPF reading order.
+
+        The translated files are normally flattened and prefixed with
+        ``response_``, so match OPF entries by normalized basename rather than
+        assuming their original hrefs still exist on disk. If the OPF is absent
+        or incomplete, scan the remaining workspace HTML in its supplied order.
+        """
+        candidates = list(html_files or [])
+        if not candidates:
+            try:
+                candidates = [
+                    name
+                    for name in os.listdir(self.output_dir)
+                    if name.lower().endswith((".html", ".htm", ".xhtml"))
+                ]
+            except OSError:
+                return None
+
+        ordered_candidates: List[str] = []
+        seen = set()
+        opf_path = self._find_opf_path()
+        opf_order = self._parse_opf_file(opf_path) if opf_path else None
+        if opf_order:
+            by_core: Dict[str, List[str]] = {}
+            for name in candidates:
+                by_core.setdefault(self._normalize_core_name(name), []).append(name)
+            for opf_name, _position in sorted(
+                opf_order.items(),
+                key=lambda item: item[1],
+            ):
+                core = self._normalize_core_name(opf_name)
+                for name in by_core.get(core, []):
+                    if name not in seen:
+                        ordered_candidates.append(name)
+                        seen.add(name)
+
+        # Include unmapped files and support workspaces with no readable OPF.
+        for name in candidates:
+            if name not in seen:
+                ordered_candidates.append(name)
+                seen.add(name)
+
+        disk_filename = next(
+            (
+                name for name in ordered_candidates
+                if self._html_image_references(name)
+            ),
+            None,
+        )
+        if not disk_filename:
+            return None
+
+        self.log(
+            "✅ Cover fallback: first image-bearing HTML accepted"
+            f"{' in OPF reading order' if opf_order else ''}: {disk_filename}"
+        )
+        return disk_filename
+
+    def _first_opf_spine_html_contains_image(
+        self,
+        html_files: Optional[List[str]] = None,
+    ) -> bool:
+        """Compatibility boolean wrapper for the image-bearing HTML fallback."""
+        return bool(self._first_opf_spine_html_with_image(html_files))
+
+    @staticmethod
+    def _special_html_stem(filename: str) -> str:
+        """Return a normalized HTML stem for configured special-file matching."""
+        stem = os.path.basename(str(filename or "")).casefold()
+        if stem.startswith("response_"):
+            stem = stem[len("response_"):]
+        while True:
+            base, extension = os.path.splitext(stem)
+            if extension.casefold() not in (".html", ".htm", ".xhtml", ".xml"):
+                break
+            stem = base
+        return stem
+
+    def _is_configured_special_html_file(self, filename: str) -> bool:
+        """Return whether an HTML filename matches the configured special lists."""
+        stem = self._special_html_stem(filename)
+        if not stem:
+            return False
+        keyword_text = os.environ.get(
+            "SPECIAL_FILE_KEYWORDS",
+            "title, toc, copyright, preface, nav, message, notice, colophon, "
+            "dedication, epigraph, foreword, acknowledgment, author, appendix, "
+            "bibliography",
+        )
+        exact_text = os.environ.get(
+            "SPECIAL_FILE_EXACT",
+            "index, glossary, glossary_extension, glossary_unified",
+        )
+        keywords = [
+            token.strip().casefold()
+            for token in keyword_text.split(",")
+            if token.strip()
+        ]
+        exact_names = {
+            token.strip().casefold()
+            for token in exact_text.split(",")
+            if token.strip()
+        }
+        return stem in exact_names or any(keyword in stem for keyword in keywords)
+
+    def _unmapped_html_sort_key(self, filename: str):
+        """Group unmapped special HTML first, then sort numerically per group."""
+        number = self._extract_chapter_number(filename, -2)
+        has_number = number >= 0
+        return (
+            0 if self._is_configured_special_html_file(filename) else 1,
+            0 if has_number else 1,
+            number if has_number else 0,
+            str(filename).casefold(),
+        )
+
+    def _find_html_files(self) -> List[str]:
+        """Find HTML files using OPF-based ordering when available"""
+        self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
+
+        backup_dir = os.path.join(self.output_dir, "unrefined_backup")
+        if os.path.isdir(backup_dir):
+            self.log("[INFO] Ignoring unrefined_backup/ (historical data is never an EPUB source)")
+        
+        # Get all HTML files in directory
+        all_files = os.listdir(self.output_dir)
+        html_extensions = ('.html', '.htm', '.xhtml')
+        html_files = [f for f in all_files if f.lower().endswith(html_extensions)]
+        
+        if not html_files:
+            self.log("[ERROR] No HTML files found!")
+            return []
+        
+        # Try to get authoritative order from OPF/EPUB
+        opf_order = self._get_chapter_order_from_opf()
+        
+        if opf_order:
+            self.log("✅ Using authoritative chapter order from OPF/EPUB")
+            
+            # Check if debug mode is enabled
+            debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
+            if debug_mode_enabled:
+                self.log(f"[DEBUG] OPF entries (first 5): {list(opf_order.items())[:5]}")
+            
+            # Create mapping based on core filename (strip response_ and strip ALL extensions)
+            ordered_files = []
+            unmapped_files = []
+            
+            def strip_all_ext(name: str) -> str:
+                # Remove all trailing known extensions
+                core = name
+                while True:
+                    parts = core.rsplit('.', 1)
+                    if len(parts) == 2 and parts[1].lower() in ['html', 'htm', 'xhtml', 'xml']:
+                        core = parts[0]
+                    else:
+                        break
+                return core
+            
+            for output_file in html_files:
+                core_name = output_file[9:] if output_file.startswith('response_') else output_file
+                core_name = strip_all_ext(core_name)
+                
+                matched = False
+                for opf_name, chapter_order in opf_order.items():
+                    opf_file = opf_name.split('/')[-1]
+                    opf_core = strip_all_ext(opf_file)
+                    if core_name == opf_core:
+                        ordered_files.append((chapter_order, output_file))
+                        if debug_mode_enabled:
+                            self.log(f"  Mapped: {output_file} -> {opf_name} (order: {chapter_order})")
+                        matched = True
+                        break
+                if not matched:
+                    # By default, retain every compiled HTML file even when it
+                    # is absent from the source spine. Some rolling EPUBs keep
+                    # translated notices / front matter outside that spine,
+                    # and silently dropping those pages loses user output.
+                    # Users who prefer the legacy behavior can opt back in.
+                    _special_kw_str = os.environ.get('SPECIAL_FILE_KEYWORDS', 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography')
+                    _special_keywords = [k.strip().lower() for k in _special_kw_str.split(',') if k.strip()]
+                    _core_lower = core_name.lower()
+                    _skip_non_spine_special = (
+                        os.environ.get('SKIP_NON_SPINE_SPECIAL_FILES', '0') == '1'
+                    )
+                    if (
+                        _skip_non_spine_special
+                        and any(kw in _core_lower for kw in _special_keywords)
+                    ):
+                        self.log(f"  ℹ️ Skipping non-spine special file: {output_file}")
+                        continue
+                    unmapped_files.append(output_file)
+                    self.log(f"  ⚠️ Could not map: {output_file} (core: {core_name})")
+            
+            if ordered_files:
+                # Sort by chapter order and extract just the filenames
+                ordered_files.sort(key=lambda x: x[0])
+                final_order = [f for _, f in ordered_files]
+                
+                # Numerically merge unmapped chapter files with the partial
+                # OPF order, then leave files without a usable number at the end.
+                if unmapped_files:
+                    numeric_order_cache = {}
+
+                    def numeric_order(filename):
+                        if filename in numeric_order_cache:
+                            return numeric_order_cache[filename]
+                        number = self._extract_chapter_number(filename, -2)
+                        numeric_order_cache[filename] = (
+                            number if number >= 0 else None
+                        )
+                        return numeric_order_cache[filename]
+
+                    special_unmapped = sorted(
+                        (
+                            filename for filename in unmapped_files
+                            if self._is_configured_special_html_file(filename)
+                        ),
+                        key=self._unmapped_html_sort_key,
+                    )
+                    regular_unmapped = [
+                        filename for filename in unmapped_files
+                        if not self._is_configured_special_html_file(filename)
+                    ]
+
+                    # Keep mapped OPF entries in their authoritative relative
+                    # order. Insert the special-file block immediately before
+                    # the first numbered mapped chapter, leaving numberless
+                    # mapped front matter (cover/info) at the front.
+                    special_insert_at = next(
+                        (
+                            idx for idx, existing in enumerate(final_order)
+                            if numeric_order(existing) is not None
+                        ),
+                        len(final_order),
+                    )
+                    for offset, filename in enumerate(special_unmapped):
+                        final_order.insert(special_insert_at + offset, filename)
+
+                    regular_floor = special_insert_at + len(special_unmapped)
+                    numbered_unmapped = sorted(
+                        (
+                            (numeric_order(filename), filename)
+                            for filename in regular_unmapped
+                            if numeric_order(filename) is not None
+                        ),
+                        key=lambda item: (item[0], item[1].casefold()),
+                    )
+                    for number, filename in numbered_unmapped:
+                        insert_at = next(
+                            (
+                                idx for idx, existing in enumerate(final_order)
+                                if idx >= regular_floor
+                                if numeric_order(existing) is not None
+                                and numeric_order(existing) > number
+                            ),
+                            None,
+                        )
+                        if insert_at is None:
+                            numbered_indexes = [
+                                idx for idx, existing in enumerate(final_order)
+                                if idx >= regular_floor
+                                if numeric_order(existing) is not None
+                            ]
+                            insert_at = (
+                                numbered_indexes[-1] + 1
+                                if numbered_indexes else len(final_order)
+                            )
+                        final_order.insert(insert_at, filename)
+
+                    unnumbered_unmapped = [
+                        filename for filename in regular_unmapped
+                        if numeric_order(filename) is None
+                    ]
+                    final_order.extend(sorted(unnumbered_unmapped))
+                    self.log(
+                        "🔢 Grouped unmapped HTML: "
+                        f"{len(special_unmapped)} special file(s) first; "
+                        f"{len(numbered_unmapped)} numbered regular file(s) after"
+                    )
+                    # Mark non-response unmapped files as auxiliary (omit from TOC)
+                    aux = {f for f in unmapped_files if not f.startswith('response_')}
+                    # If special files override is enabled, or passthrough mode,
+                    # do NOT treat special files as auxiliary
+                    translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                    image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+                    if translate_special or image_passthrough:
+                        # Don't exclude any special files when override is enabled
+                        aux = set()
+                    self.auxiliary_html_files = aux
+                else:
+                    self.auxiliary_html_files = set()
+                
+                self.log(f"✅ Successfully ordered {len(final_order)} chapters using OPF")
+                return final_order
+            else:
+                self.log("⚠️ Could not map any files using OPF order, falling back to pattern matching")
+        
+        # Fallback to original pattern matching logic
+        self.log("⚠️ No OPF/EPUB found or mapping failed, using filename pattern matching")
+        
+        # First, try to find response_ files
+        response_files = [f for f in html_files if f.startswith('response_')]
+        
+        if response_files:
+            # Sort response_ files as primary chapters
+            main_files = list(response_files)
+            self.log(f"[DEBUG] Found {len(response_files)} response_ files")
+            main_files.sort(key=self._unmapped_html_sort_key)
+            
+            # Append non-response files as auxiliary pages (not in TOC)
+            aux_files = sorted([f for f in html_files if not f.startswith('response_')])
+            if aux_files:
+                aux_set = set(aux_files)
+                # If special files override is enabled or passthrough mode,
+                # don't mark special files as auxiliary
+                translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+                if translate_special or image_passthrough:
+                    # Don't exclude any files when override is enabled
+                    aux_set = set()
+                self.auxiliary_html_files = aux_set
+                self.log(f"[DEBUG] Appending {len(aux_set)} auxiliary HTML file(s) (not in TOC): {list(aux_set)[:5]}")
+            else:
+                self.auxiliary_html_files = set()
+            
+            return main_files + aux_files
+        else:
+            # Progressive sorting for non-standard files
+            html_files.sort(key=self._unmapped_html_sort_key)
+            # No response_ files -> treat none as auxiliary
+            self.auxiliary_html_files = set()
+        
+        return html_files
+
+    def _read_and_decode_html_file(self, file_path: str) -> str:
+        """Read HTML file and decode entities, preserving &lt; and &gt; as text.
+        This prevents narrative angle-bracket text from becoming bogus tags."""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        if not content:
+            return content
+        
+        import re
+        import html
+        
+        # Placeholders for angle bracket entities
+        LT_PLACEHOLDER = "\ue000"
+        GT_PLACEHOLDER = "\ue001"
+        
+        # Patterns for common representations of < and >
+        _lt_entity_patterns = [r'&lt;', r'&LT;', r'&#0*60;', r'&#x0*3[cC];']
+        _gt_entity_patterns = [r'&gt;', r'&GT;', r'&#0*62;', r'&#x0*3[eE];']
+        
+        def protect_angle_entities(s: str) -> str:
+            # Replace all forms of &lt; and &gt; with placeholders so unescape won't turn them into real < >
+            for pat in _lt_entity_patterns:
+                s = re.sub(pat, LT_PLACEHOLDER, s)
+            for pat in _gt_entity_patterns:
+                s = re.sub(pat, GT_PLACEHOLDER, s)
+            return s
+        
+        max_iterations = 5
+        for _ in range(max_iterations):
+            prev_content = content
+            # Protect before each pass in case of double-encoded entities
+            content = protect_angle_entities(content)
+            # html.unescape handles all standard HTML entities (except our placeholders)
+            content = html.unescape(content)
+            if content == prev_content:
+                break
+        
+        # Restore placeholders back to entities so they remain literal text in XHTML
+        content = content.replace(LT_PLACEHOLDER, '&lt;').replace(GT_PLACEHOLDER, '&gt;')
+        
+        return content
+
+    def _process_single_chapter(self, book: epub.EpubBook, num: int, filename: str,
+                               chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                               css_items: List[epub.EpubItem], processed_images: Dict[str, str],
+                               spine: List, toc: List, metadata: dict) -> bool:
+        """Process a single chapter with COMPREHENSIVE debugging"""
+        path = os.path.join(self.output_dir, filename)
+        
+        # Flag for extra debugging on problem chapters
+        is_problem_chapter = 49 <= num <= 56
+        is_response_file = filename.startswith('response_')
+        
+        try:
+            if is_problem_chapter:
+                self.log(f"\n{'='*70}")
+                self.log(f"[DEBUG] PROCESSING PROBLEM CHAPTER {num}")
+                self.log(f"[DEBUG] Filename: {filename}")
+                self.log(f"[DEBUG] Is response file: {is_response_file}")
+                self.log(f"[DEBUG] Full path: {path}")
+            
+            # Check file exists and size
+            if not os.path.exists(path):
+                self.log(f"[ERROR] File does not exist: {path}")
+                return False
+            
+            file_size = os.path.getsize(path)
+            if is_problem_chapter:
+                self.log(f"[DEBUG] File size: {file_size} bytes")
+            
+            if file_size == 0:
+                self.log(f"[ERROR] File is empty (0 bytes): {filename}")
+                return False
+            
+            # Read and decode
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Reading and decoding file...")
+            
+            raw_content = self._read_and_decode_html_file(path)
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Raw content length: {len(raw_content) if raw_content else 'NULL'}")
+                if raw_content:
+                    # Show first and last parts
+                    self.log(f"[DEBUG] First 300 chars of raw content:")
+                    self.log(f"  {raw_content[:300]!r}")
+                    self.log(f"[DEBUG] Last 300 chars of raw content:")
+                    self.log(f"  {raw_content[-300:]!r}")
+                    
+                    # Check for common issues
+                    if '&lt;' in raw_content[:500]:
+                        self.log(f"[DEBUG] Found &lt; entities in content")
+                    if '&gt;' in raw_content[:500]:
+                        self.log(f"[DEBUG] Found &gt; entities in content")
+                    if '<Official' in raw_content[:500] or '<System' in raw_content[:500]:
+                        self.log(f"[DEBUG] Found story tags in content")
+            
+            # Fix encoding issues
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Fixing encoding issues...")
+            
+            before_fix = len(raw_content) if raw_content else 0
+            raw_content = self._fix_encoding_issues(raw_content)
+            after_fix = len(raw_content) if raw_content else 0
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Encoding fix: {before_fix} -> {after_fix} chars")
+                if before_fix != after_fix:
+                    self.log(f"[DEBUG] Content changed during encoding fix")
+            
+            if not raw_content or not raw_content.strip():
+                self.log(f"[WARNING] Chapter {num} is empty after decoding/encoding fix")
+                if is_problem_chapter:
+                    self.log(f"[ERROR] Problem chapter {num} has no content!")
+                return False
+            
+            # Extract main content if needed
+            if not filename.startswith('response_'):
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Extracting main content (not a response file)...")
+                
+                before_extract = len(raw_content)
+                raw_content = self._extract_main_content(raw_content, filename)
+                after_extract = len(raw_content)
+                
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Content extraction: {before_extract} -> {after_extract} chars")
+                    if after_extract < before_extract / 2:
+                        self.log(f"[WARNING] Lost more than 50% of content during extraction!")
+                        self.log(f"[DEBUG] Content after extraction (first 300 chars):")
+                        self.log(f"  {raw_content[:300]!r}")
+            else:
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Skipping content extraction for response file")
+                    self.log(f"[DEBUG] Response file content structure:")
+                    # Check what's in a response file
+                    if '<body>' in raw_content:
+                        self.log(f"  Has <body> tag")
+                    if '<html>' in raw_content:
+                        self.log(f"  Has <html> tag")
+                    if '<!DOCTYPE' in raw_content:
+                        self.log(f"  Has DOCTYPE declaration")
+                    # Check for any obvious issues
+                    if raw_content.strip().startswith('Error'):
+                        self.log(f"[ERROR] Response file starts with 'Error'")
+                    if 'failed' in raw_content.lower()[:500]:
+                        self.log(f"[WARNING] Response file contains 'failed' in first 500 chars")
+            
+            # Get chapter title
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Getting chapter title...")
+            
+            title = self._get_chapter_title(num, filename, raw_content, chapter_titles_info)
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Chapter title: {title!r}")
+                if title == f"Chapter {num}" or title.startswith("Chapter"):
+                    self.log(f"[WARNING] Using generic title, couldn't extract proper title")
+            
+            # Prepare CSS links
+            css_prefix = "../css/" if getattr(self, 'legacy_epub_structure', False) else "css/"
+            css_links = [f"{css_prefix}{item.file_name.split('/')[-1]}" for item in css_items]
+            if is_problem_chapter:
+                self.log(f"[DEBUG] CSS links: {css_links}")
+            
+            # XHTML conversion - CRITICAL PART
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Starting XHTML conversion...")
+                self.log(f"[DEBUG] Content length before XHTML: {len(raw_content)}")
+            
+            xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] XHTML conversion complete")
+                self.log(f"[DEBUG] XHTML content length: {len(xhtml_content) if xhtml_content else 'NULL'}")
+                if xhtml_content:
+                    # Check if it's the fallback
+                    if 'Error processing content' in xhtml_content:
+                        self.log(f"[ERROR] Got fallback XHTML - conversion failed!")
+                    else:
+                        self.log(f"[DEBUG] XHTML first 400 chars:")
+                        self.log(f"  {xhtml_content[:400]!r}")
+            
+            # Process chapter images
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Processing chapter images...")
+            
+            # Keep source HTML immutable during packaging.  The returned XHTML
+            # is the only copy from which missing image tags are removed.
+            xhtml_content, _missing_imgs = self._process_chapter_images(xhtml_content, processed_images)
+            
+            # Validate final content
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Validating final XHTML...")
+            
+            final_content = XHTMLConverter.validate(xhtml_content)
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Validation complete")
+                self.log(f"[DEBUG] Final content length: {len(final_content)}")
+                # Check for fallback again
+                if 'Error processing content' in final_content:
+                    self.log(f"[ERROR] Final content is fallback error page!")
+            
+            # Create chapter object
+            import html
+            text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+            # Restore original OPF filename (strips response_ prefix, restores source extension)
+            opf_map = getattr(self, '_opf_filename_map', {})
+            chapter_file_name = self._restore_opf_filename(filename, opf_map)
+            if text_dirname:
+                chapter_file_name = f"{text_dirname}/{chapter_file_name}"
+            chapter = epub.EpubHtml(
+                title=XMLValidator.clean_for_xml(html.unescape(title)),
+                file_name=chapter_file_name,
+                lang=metadata.get("language", "en")
+            )
+
+            chapter.content = FileUtils.ensure_bytes(final_content)
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Chapter object created")
+                self.log(f"[DEBUG] Chapter content size: {len(chapter.content)} bytes")
+            
+            # Attach CSS if configured
+            if self.attach_css_to_chapters:
+                self._attach_css_items_to_document(chapter, css_items)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Attached {len(css_items)} CSS files")
+            
+            # Add to book
+            book.add_item(chapter)
+            spine.append(chapter)
+            title_lower = str(title).strip().lower()
+            if title_lower in ('untitled chapter', 'untitled'):
+                self.log(f"  🛈 Skipped TOC entry for untitled chapter: {chapter_file_name}")
+            else:
+                toc.append(chapter)
+            
+            if is_problem_chapter:
+                self.log(f"[SUCCESS] Problem chapter {num} successfully added to EPUB!")
+                self.log(f"{'='*70}\n")
+            else:
+                self.log(f"  ✓ Chapter {num}: {title}")
+            
+            return True
+            
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            
+            self.log(f"\n{'!'*70}")
+            self.log(f"[ERROR] Failed to process chapter {num}: {filename}")
+            self.log(f"[ERROR] Exception type: {type(e).__name__}")
+            self.log(f"[ERROR] Exception message: {e}")
+            
+            if is_problem_chapter:
+                self.log(f"[ERROR] PROBLEM CHAPTER {num} FAILED!")
+                self.log(f"[ERROR] Full traceback:")
+                self.log(tb)
+                
+                # Try to identify the exact failure point
+                if 'ensure_compliance' in tb:
+                    self.log(f"[ERROR] Failed during XHTML compliance")
+                elif 'validate' in tb:
+                    self.log(f"[ERROR] Failed during validation")
+                elif '_extract_main_content' in tb:
+                    self.log(f"[ERROR] Failed during content extraction")
+                elif '_read_and_decode' in tb:
+                    self.log(f"[ERROR] Failed during file reading/decoding")
+            
+            self.log(f"{'!'*70}\n")
+            
+            # Add error chapter as fallback
+            self._add_error_chapter(book, num, title if 'title' in locals() else f"Chapter {num}", 
+                                    spine, toc, metadata, str(e))
+            return False
+
+    def _get_chapter_title(self, num: int, filename: str, content: str,
+                          chapter_titles_info: Dict[int, Tuple[str, float, str]]) -> str:
+        """Get chapter title with fallbacks - uses position-based numbering"""
+        title = None
+        confidence = 0.0
+        
+        # Primary source: pre-analyzed title using position-based number
+        if num in chapter_titles_info:
+            title, confidence, stored_filename = chapter_titles_info[num]
+        
+        # Re-extract if low confidence or missing
+        if not title or confidence < 0.5:
+            allow_p_fallback = os.getenv('USE_P_TAG_TOC_FALLBACK', '0') == '1'
+            backup_title, backup_confidence = TitleExtractor.extract_from_html(
+                content, num, filename,
+                allow_paragraph_fallback=allow_p_fallback,
+                allow_generic_chapter_fallback=allow_p_fallback
+            )
+            if backup_confidence > confidence:
+                title = backup_title
+                confidence = backup_confidence
+        
+        # Clean and validate
+        if title:
+            title = TitleExtractor.clean_title(title)
+            if not TitleExtractor.is_valid_title(title):
+                title = None
+        
+        # Fallback for non-standard files
+        if not title and not filename.startswith('response_'):
+            # Try enhanced extraction methods for web-scraped content
+            title = self._fallback_title_extraction(content, filename, num)
+        
+        # Final fallback - use position-based chapter number only if toggle allows it
+        if not title:
+            if os.getenv('USE_P_TAG_TOC_FALLBACK', '0') == '1':
+                title = f"Chapter {num}"
+            else:
+                # Avoid generic Chapter N titles; use filename stem if available
+                base = os.path.splitext(os.path.basename(filename))[0] if filename else ""
+                title = base or "Untitled Chapter"
+        
+        return title
+
+    def get_robust_sort_key(self, filename):
+        """Extract chapter/sequence number using multiple patterns"""
+        
+        # Pattern 1: -h-NUMBER (your current pattern)
+        match = re.search(r'-h-(\d+)', filename)
+        if match:
+            return (1, int(match.group(1)))
+        
+        # Pattern 2: chapter-NUMBER or chapter_NUMBER or chapterNUMBER
+        match = re.search(r'chapter[-_\s]?(\d+)', filename, re.IGNORECASE)
+        if match:
+            return (2, int(match.group(1)))
+        
+        # Pattern 3: ch-NUMBER or ch_NUMBER or chNUMBER  
+        match = re.search(r'\bch[-_\s]?(\d+)\b', filename, re.IGNORECASE)
+        if match:
+            return (3, int(match.group(1)))
+        
+        # Pattern 4: response_NUMBER_ (if response_ prefix exists)
+        if filename.startswith('response_'):
+            match = re.match(r'response_(\d+)[-_]', filename)
+            if match:
+                return (4, int(match.group(1)))
+        
+        # Pattern 5: book_NUMBER, story_NUMBER, part_NUMBER, section_NUMBER
+        match = re.search(r'(?:book|story|part|section)[-_\s]?(\d+)', filename, re.IGNORECASE)
+        if match:
+            return (5, int(match.group(1)))
+        
+        # Pattern 6: split_NUMBER (Calibre pattern)
+        match = re.search(r'split_(\d+)', filename)
+        if match:
+            return (6, int(match.group(1)))
+        
+        # Pattern 7: Just NUMBER.html (like 1.html, 2.html)
+        match = re.match(r'^(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return (7, int(match.group(1)))
+        
+        # Pattern 8: -NUMBER at end before extension
+        match = re.search(r'-(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return (8, int(match.group(1)))
+        
+        # Pattern 9: _NUMBER at end before extension
+        match = re.search(r'_(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return (9, int(match.group(1)))
+        
+        # Pattern 10: (NUMBER) in parentheses anywhere
+        match = re.search(r'\((\d+)\)', filename)
+        if match:
+            return (10, int(match.group(1)))
+        
+        # Pattern 11: [NUMBER] in brackets anywhere
+        match = re.search(r'\[(\d+)\]', filename)
+        if match:
+            return (11, int(match.group(1)))
+        
+        # Pattern 12: page-NUMBER or p-NUMBER or pg-NUMBER
+        match = re.search(r'(?:page|pg?)[-_\s]?(\d+)', filename, re.IGNORECASE)
+        if match:
+            return (12, int(match.group(1)))
+        
+        # Pattern 13: Any file ending with NUMBER before extension
+        match = re.search(r'(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return (13, int(match.group(1)))
+        
+        # Pattern 14: Roman numerals (I, II, III, IV, etc.)
+        roman_pattern = r'\b(M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3}))\b'
+        match = re.search(roman_pattern, filename)
+        if match:
+            roman = match.group(1)
+            # Convert roman to number
+            roman_dict = {'I':1,'V':5,'X':10,'L':50,'C':100,'D':500,'M':1000}
+            val = 0
+            for i in range(len(roman)):
+                if i > 0 and roman_dict[roman[i]] > roman_dict[roman[i-1]]:
+                    val += roman_dict[roman[i]] - 2 * roman_dict[roman[i-1]]
+                else:
+                    val += roman_dict[roman[i]]
+            return (14, val)
+        
+        # Pattern 15: First significant number found
+        numbers = re.findall(r'\d+', filename)
+        if numbers:
+            # Skip common year numbers (1900-2099) unless it's the only number
+            significant_numbers = [int(n) for n in numbers if not (1900 <= int(n) <= 2099)]
+            if significant_numbers:
+                return (15, significant_numbers[0])
+            elif numbers:
+                return (15, int(numbers[0]))
+        
+        # Final fallback: alphabetical
+        return (99, filename)
+
+    def _extract_chapter_number(self, filename: str, default_idx: int) -> int:
+            """Extract chapter number using multiple patterns"""
+            
+            # FIXED: Pattern 1 - Check -h-NUMBER FIRST (YOUR FILES USE THIS!)
+            match = re.search(r'-h-(\d+)', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 2: response_NUMBER_ (standard pattern)
+            match = re.match(r"response_(\d+)_", filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 3: chapter-NUMBER, chapter_NUMBER, chapterNUMBER
+            match = re.search(r'chapter[-_\s]?(\d+)', filename, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 4: ch-NUMBER, ch_NUMBER, chNUMBER
+            match = re.search(r'\bch[-_\s]?(\d+)\b', filename, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 5: Just NUMBER.html (like 127.html)
+            match = re.match(r'^(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 6: _NUMBER at end before extension
+            match = re.search(r'_(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 7: -NUMBER at end before extension
+            match = re.search(r'-(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 8: (NUMBER) in parentheses
+            match = re.search(r'\((\d+)\)', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 9: [NUMBER] in brackets
+            match = re.search(r'\[(\d+)\]', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 10: Use the sort key logic
+            sort_key = self.get_robust_sort_key(filename)
+            if isinstance(sort_key[1], int) and sort_key[1] > 0:
+                return sort_key[1]
+            
+            # Final fallback: use position + 1
+            return default_idx + 1
+
+    def _extract_main_content(self, html_content: str, filename: str) -> str:
+        """Extract main content from web-scraped HTML pages
+        
+        This method tries to find the actual chapter content within a full webpage
+        """
+        try:
+            # For web-scraped content, try to extract just the chapter part
+            # Common patterns for chapter content containers
+            content_patterns = [
+                # Look for specific class names commonly used for content
+                (r'<div[^>]*class="[^"]*(?:chapter-content|entry-content|epcontent|post-content|content-area|main-content)[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE),
+                # Look for article tags with content
+                (r'<article[^>]*>(.*?)</article>', re.DOTALL | re.IGNORECASE),
+                # Look for main tags
+                (r'<main[^>]*>(.*?)</main>', re.DOTALL | re.IGNORECASE),
+                # Look for specific id patterns
+                (r'<div[^>]*id="[^"]*(?:content|chapter|post)[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE),
+            ]
+            
+            for pattern, flags in content_patterns:
+                match = re.search(pattern, html_content, flags)
+                if match:
+                    extracted = match.group(1)
+                    # Make sure we got something substantial
+                    if len(extracted.strip()) > 100:
+                        self.log(f"📄 Extracted main content using pattern for {filename}")
+                        return extracted
+            
+            # If no patterns matched, check if this looks like a full webpage
+            if '<html' in html_content.lower() and '<body' in html_content.lower():
+                # Try to extract body content
+                body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL | re.IGNORECASE)
+                if body_match:
+                    self.log(f"📄 Extracted body content for {filename}")
+                    return body_match.group(1)
+            
+            # If all else fails, return original content
+            self.log(f"📄 Using original content for {filename}")
+            return html_content
+            
+        except Exception as e:
+            self.log(f"⚠️  Content extraction failed for {filename}: {e}")
+            return html_content
+
+    def _fallback_title_extraction(self, content: str, filename: str, num: int) -> Optional[str]:
+        """Fallback title extraction for when TitleExtractor fails
+        
+        This handles web-scraped pages and other non-standard formats
+        """
+        # Try filename-based extraction first (often more reliable for web scrapes)
+        filename_title = self._extract_title_from_filename_fallback(filename, num)
+        if filename_title:
+            return filename_title
+        
+        # Try HTML content extraction with patterns TitleExtractor might miss
+        html_title = self._extract_title_from_html_fallback(content, num)
+        if html_title:
+            return html_title
+        
+        return None
+
+    def _extract_title_from_html_fallback(self, content: str, num: int) -> Optional[str]:
+        """Fallback HTML title extraction for web-scraped content"""
+        
+        # Look for title patterns that TitleExtractor might miss
+        # Specifically for web-scraped novel sites
+        patterns = [
+            # Title tags with site separators
+            r'<title[^>]*>([^|–\-]+?)(?:\s*[|–\-]\s*[^<]+)?</title>',
+            # Specific class patterns from novel sites
+            r'<div[^>]*class="[^"]*cat-series[^"]*"[^>]*>([^<]+)</div>',
+            r'<h1[^>]*class="[^"]*entry-title[^"]*"[^>]*>([^<]+)</h1>',
+            r'<span[^>]*class="[^"]*chapter-title[^"]*"[^>]*>([^<]+)</span>',
+            # Meta property patterns
+            r'<meta[^>]*property="og:title"[^>]*content="([^"]+)"',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                title = match.group(1).strip()
+                # Decode HTML entities
+                title = HTMLEntityDecoder.decode(title)
+                
+                # Additional cleanup for web-scraped content
+                title = re.sub(r'\s+', ' ', title)  # Normalize whitespace
+                title = title.strip()
+                
+                # Validate it's reasonable
+                if 3 < len(title) < 200 and title.lower() != 'untitled':
+                    self.log(f"📝 Fallback extracted title from HTML: '{title}'")
+                    return title
+        
+        return None
+
+    def _extract_title_from_filename_fallback(self, filename: str, num: int) -> Optional[str]:
+        """Fallback filename title extraction"""
+        
+        # Remove extension
+        base_name = re.sub(r'\.(html?|xhtml)$', '', filename, flags=re.IGNORECASE)
+        
+        # Web-scraped filename patterns
+        patterns = [
+            # "theend-chapter-127-apocalypse-7" -> "Chapter 127 - Apocalypse 7"
+            r'(?:theend|story|novel)[-_]chapter[-_](\d+)[-_](.+)',
+            # "chapter-127-apocalypse-7" -> "Chapter 127 - Apocalypse 7"  
+            r'chapter[-_](\d+)[-_](.+)',
+            # "ch127-title" -> "Chapter 127 - Title"
+            r'ch[-_]?(\d+)[-_](.+)',
+            # Just the title part after number
+            r'^\d+[-_](.+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, base_name, re.IGNORECASE)
+            if match:
+                if match.lastindex == 2:  # Pattern with chapter number and title
+                    chapter_num = match.group(1)
+                    title_part = match.group(2)
+                else:  # Pattern with just title
+                    chapter_num = str(num)
+                    title_part = match.group(1)
+                
+                # Clean up the title part
+                title_part = title_part.replace('-', ' ').replace('_', ' ')
+                # Capitalize properly
+                words = title_part.split()
+                title_part = ' '.join(word.capitalize() if len(word) > 2 else word for word in words)
+                
+                title = f"Chapter {chapter_num} - {title_part}"
+                self.log(f"📝 Fallback extracted title from filename: '{title}'")
+                return title
+        
+        return None
+    
+    def _load_metadata(self) -> dict:
+        """Load workspace metadata and restore missing fields from the OPF."""
+        metadata = {}
+        if os.path.exists(self.metadata_path):
+            try:
+                with open(self.metadata_path, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                self.log("[DEBUG] Metadata loaded successfully")
+            except Exception as e:
+                self.log(f"[WARNING] Failed to load metadata.json: {e}")
+        else:
+            self.log("[WARNING] metadata.json not found, using defaults")
+
+        source_path = _read_compile_source_reference(self.output_dir)
+        if source_path and os.path.isfile(source_path):
+            try:
+                source_metadata = extract_epub_metadata_file(source_path)
+                metadata, restored_fields = merge_source_epub_metadata(
+                    metadata,
+                    source_metadata,
+                )
+                if restored_fields:
+                    self.log(
+                        "📋 Restored source OPF metadata for translation: "
+                        + ", ".join(sorted(restored_fields))
+                    )
+            except Exception as e:
+                self.log(
+                    f"[WARNING] Failed to restore metadata from source EPUB: {e}"
+                )
+
+        return metadata
+    
+    def _save_metadata(self, metadata: dict) -> None:
+        """Persist metadata.json alongside the translated HTML output.
+
+        This ensures that once metadata fields (title, creator, subject, description, etc.)
+        have been translated, future EPUB rebuilds can reuse them instead of sending the
+        same fields to the API again.
+        """
+        if not isinstance(metadata, dict):
+            return
+        try:
+            os.makedirs(os.path.dirname(self.metadata_path), exist_ok=True)
+            with open(self.metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            self.log("[DEBUG] Saved updated metadata.json")
+        except Exception as e:
+            # Let caller decide how to log/handle, but don't crash compilation here
+            raise e
+    
+    def _create_book(self, metadata: dict) -> epub.EpubBook:
+        """Create and configure EPUB book with complete metadata"""
+        book = epub.EpubBook()
+
+        # Sanitize all metadata strings for XML safety BEFORE writing them into
+        # the OPF/NCX. AI-translated titles/metadata can contain NULL bytes or
+        # other control characters that lxml rejects at write_epub() time with
+        # "All strings must be XML compatible". Chapter *body* content is already
+        # cleaned in XHTMLConverter.validate(), but metadata bypasses that path.
+        def _clean_meta(value):
+            if isinstance(value, str):
+                return XMLValidator.clean_for_xml(value)
+            if isinstance(value, list):
+                return [XMLValidator.clean_for_xml(v) if isinstance(v, str) else v
+                        for v in value]
+            return value
+        metadata = {k: _clean_meta(v) for k, v in metadata.items()}
+
+        # Set identifier
+        book.set_identifier(metadata.get("identifier", f"translated-{os.path.basename(self.base_dir)}"))
+        
+        # Fix encoding issues in titles before using them
+        if metadata.get('title'):
+            metadata['title'] = self._fix_encoding_issues(metadata['title'])
+        if metadata.get('original_title'):
+            metadata['original_title'] = self._fix_encoding_issues(metadata['original_title'])
+        
+        # Determine title
+        book_title = self._determine_book_title(metadata)
+        book.set_title(book_title)
+        
+        # Set language (dc:language)
+        language_code = metadata.get("language", "en")
+        book.set_language(language_code)
+
+        # Keep XHTMLConverter in sync so generated html/xml:lang attributes match book language
+        try:
+            XHTMLConverter.set_default_language(language_code)
+        except Exception:
+            pass
+        
+        # Store original title as alternative metadata (not as another dc:title)
+        # This prevents EPUB readers from getting confused about which title to display
+        if metadata.get('original_title') and metadata.get('original_title') != book_title:
+            # Use 'alternative' field instead of 'title' to avoid display issues
+            book.add_metadata('DC', 'alternative', metadata['original_title'])
+            # Also store in a custom field for reference
+            book.add_metadata('calibre', 'original_title', metadata['original_title'])
+            self.log(f"[INFO] Stored original title as alternative: {metadata['original_title']}")
+        
+        # Set author/creator
+        if metadata.get("creator"):
+            book.add_author(metadata["creator"])
+            self.log(f"[INFO] Set author: {metadata['creator']}")
+        
+        # ADD DESCRIPTION - This is what Calibre looks for
+        if metadata.get("description"):
+            # Clean the description of any HTML entities
+            description = HTMLEntityDecoder.decode(str(metadata["description"]))
+            book.add_metadata('DC', 'description', description)
+            self.log(f"[INFO] Set description: {description[:100]}..." if len(description) > 100 else f"[INFO] Set description: {description}")
+        
+        # Add publisher
+        if metadata.get("publisher"):
+            book.add_metadata('DC', 'publisher', metadata["publisher"])
+            self.log(f"[INFO] Set publisher: {metadata['publisher']}")
+        
+        # Add publication date
+        if metadata.get("date"):
+            book.add_metadata('DC', 'date', metadata["date"])
+            self.log(f"[INFO] Set date: {metadata['date']}")
+        
+        # Add rights/copyright
+        if metadata.get("rights"):
+            book.add_metadata('DC', 'rights', metadata["rights"])
+            self.log(f"[INFO] Set rights: {metadata['rights']}")
+        
+        # Add subject/genre/tags
+        if metadata.get("subject"):
+            if isinstance(metadata["subject"], list):
+                for subject in metadata["subject"]:
+                    book.add_metadata('DC', 'subject', subject)
+                    self.log(f"[INFO] Added subject: {subject}")
+            else:
+                book.add_metadata('DC', 'subject', metadata["subject"])
+                self.log(f"[INFO] Set subject: {metadata['subject']}")
+        
+        # Add series information if available
+        if metadata.get("series"):
+            # Calibre uses a custom metadata field for series
+            book.add_metadata('calibre', 'series', metadata["series"])
+            self.log(f"[INFO] Set series: {metadata['series']}")
+            
+            # Add series index if available
+            if metadata.get("series_index"):
+                book.add_metadata('calibre', 'series_index', str(metadata["series_index"]))
+                self.log(f"[INFO] Set series index: {metadata['series_index']}")
+        
+        # Add custom metadata for translator info
+        if metadata.get("translator"):
+            book.add_metadata('DC', 'contributor', metadata["translator"], {'role': 'translator'})
+            self.log(f"[INFO] Set translator: {metadata['translator']}")
+        
+        # Add source information
+        if metadata.get("source"):
+            book.add_metadata('DC', 'source', metadata["source"])
+            self.log(f"[INFO] Set source: {metadata['source']}")
+        
+        # Add any ISBN if available
+        if metadata.get("isbn"):
+            book.add_metadata('DC', 'identifier', f"ISBN:{metadata['isbn']}", {'scheme': 'ISBN'})
+            self.log(f"[INFO] Set ISBN: {metadata['isbn']}")
+        
+        # Add coverage (geographic/temporal scope) if available
+        if metadata.get("coverage"):
+            book.add_metadata('DC', 'coverage', metadata["coverage"])
+            self.log(f"[INFO] Set coverage: {metadata['coverage']}")
+        
+        # Add any custom metadata that might be in the JSON
+        # This handles any additional fields that might be present
+        custom_metadata_fields = [
+            'contributor', 'format', 'relation', 'type'
+        ]
+        
+        for field in custom_metadata_fields:
+            if metadata.get(field):
+                book.add_metadata('DC', field, metadata[field])
+                self.log(f"[INFO] Set {field}: {metadata[field]}")
+        
+        return book
+    
+    def _determine_book_title(self, metadata: dict) -> str:
+        """Determine the book title from metadata"""
+        # Try translated title
+        if metadata.get('title') and str(metadata['title']).strip():
+            title = str(metadata['title']).strip()
+            self.log(f"✅ Using translated title: '{title}'")
+            return title
+        
+        # Try original title
+        if metadata.get('original_title') and str(metadata['original_title']).strip():
+            title = str(metadata['original_title']).strip()
+            self.log(f"⚠️ Using original title: '{title}'")
+            return title
+        
+        # Fallback to directory name
+        title = os.path.basename(self.base_dir)
+        self.log(f"📁 Using directory name: '{title}'")
+        return title
+    
+    def _create_default_css(self) -> str:
+        """Create default CSS for proper chapter formatting"""
+        return """
+/* Default EPUB CSS */
+body {
+    margin: 1em;
+    padding: 0;
+    font-family: serif;
+    line-height: 1.6;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-weight: bold;
+    margin-top: 1em;
+    margin-bottom: 0.5em;
+    page-break-after: avoid;
+}
+
+h1 {
+    font-size: 1.5em;
+    text-align: center;
+    margin-top: 2em;
+    margin-bottom: 2em;
+}
+
+p {
+    margin: 1em 0;
+    text-indent: 0;
+    white-space: normal;
+}
+
+/* Ensure proper word spacing for readers like Freda */
+body, p, div, span {
+    word-spacing: normal;
+}
+
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+}
+
+/* Prevent any overlay issues */
+* {
+    position: static !important;
+    z-index: auto !important;
+}
+
+/* Remove any floating elements */
+.title, [class*="title"] {
+    position: static !important;
+    float: none !important;
+    background: transparent !important;
+}
+"""
+
+    def _add_css_files(self, book: epub.EpubBook) -> List[epub.EpubItem]:
+        """Add CSS files to book.
+
+        Behavior:
+          * If EPUB_CSS_OVERRIDE_PATH is set, add ONLY that CSS — the
+            default.css is skipped because the user explicitly chose a
+            replacement stylesheet via the Load CSS button.  This is
+            independent of ``attach_css_to_chapters`` (which controls
+            whether ``<link>`` tags are injected into chapter HTML).
+          * Also overwrites PDF-generated styles.css in the output directory if override is set.
+          * Otherwise, add the built-in default.css followed by all .css files
+            from the extracted EPUB/css directory.
+        """
+        css_items = []
+        
+        # Check for explicit CSS override from GUI
+        # Skip CSS override in image mode passthrough — use original source CSS
+        override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
+        image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+        if image_passthrough:
+            override_path = ''  # Force skip CSS override in passthrough mode
+        if override_path:
+            try:
+                if os.path.isfile(override_path):
+                    self.log(f"[INFO] Using override CSS for EPUB: {override_path}")
+                    with open(override_path, 'r', encoding='utf-8') as f:
+                        css_content = f.read()
+                    
+                    # IMPORTANT: Overwrite PDF-generated styles.css if it exists
+                    styles_css_path = os.path.join(self.output_dir, 'styles.css')
+                    if os.path.exists(styles_css_path):
+                        try:
+                            with open(styles_css_path, 'w', encoding='utf-8') as f:
+                                f.write(css_content)
+                            self.log(f"✅ Overwrote PDF-generated styles.css with loaded CSS")
+                        except Exception as e:
+                            self.log(f"[WARNING] Failed to overwrite styles.css: {e}")
+                    
+                    # Retain the original filename so the EPUB output is
+                    # traceable back to what the user selected.
+                    original_name = os.path.basename(override_path)
+                    override_item = epub.EpubItem(
+                        uid="css_override",
+                        file_name=f"css/{original_name}",
+                        media_type="text/css",
+                        content=FileUtils.ensure_bytes(css_content)
+                    )
+                    book.add_item(override_item)
+                    css_items.append(override_item)
+                    self.log(f"✅ Added override CSS: {original_name} (default.css skipped)")
+                    # Also sync the override CSS to the extracted css/
+                    # folder on disk so the working directory matches the
+                    # compiled EPUB.
+                    try:
+                        import shutil
+                        os.makedirs(self.css_dir, exist_ok=True)
+                        # Remove old CSS files so only the override remains
+                        for old in os.listdir(self.css_dir):
+                            if old.lower().endswith('.css'):
+                                try:
+                                    os.remove(os.path.join(self.css_dir, old))
+                                except OSError:
+                                    pass
+                        # Copy override with its original filename
+                        shutil.copy2(override_path,
+                                     os.path.join(self.css_dir, original_name))
+                        self.log(f"✅ Synced override CSS to {self.css_dir}/{original_name}")
+                    except Exception as e:
+                        self.log(f"[WARNING] Failed to sync CSS to disk: {e}")
+                    return css_items
+                else:
+                    self.log(f"[WARNING] EPUB_CSS_OVERRIDE_PATH does not exist: {override_path}")
+            except Exception as e:
+                self.log(f"[WARNING] Failed to load override CSS '{override_path}': {e}")
+                # Fall back to normal behavior below
+        
+        # No override — add the built-in default.css as baseline formatting
+        default_css = epub.EpubItem(
+            uid="css_default",
+            file_name="css/default.css",
+            media_type="text/css",
+            content=FileUtils.ensure_bytes(self._create_default_css())
+        )
+        book.add_item(default_css)
+        css_items.append(default_css)
+        self.log("✅ Added default CSS")
+        
+        # Then add user CSS files from css/ directory (original behavior)
+        if not os.path.isdir(self.css_dir):
+            return css_items
+        
+        css_files = [f for f in sorted(os.listdir(self.css_dir)) if f.endswith('.css')]
+        self.log(f"[DEBUG] Found {len(css_files)} CSS files")
+        
+        for css_file in css_files:
+            css_path = os.path.join(self.css_dir, css_file)
+            try:
+                with open(css_path, 'r', encoding='utf-8') as f:
+                    css_content = f.read()
+                css_item = epub.EpubItem(
+                    uid=f"css_{css_file}",
+                    file_name=f"css/{css_file}",
+                    media_type="text/css",
+                    content=FileUtils.ensure_bytes(css_content)
+                )
+                book.add_item(css_item)
+                css_items.append(css_item)
+                self.log(f"✅ Added CSS: {css_file}")
+                
+            except Exception as e:
+                self.log(f"[WARNING] Failed to add CSS {css_file}: {e}")
+        
+        return css_items
+    
+    def _font_basename_from_css_url(self, url_val: str) -> str:
+        """Return a normalized font filename from a CSS url(...) value."""
+        try:
+            from urllib.parse import unquote
+            cleaned = unquote(str(url_val).strip().strip('"\''))
+            cleaned = cleaned.split('#', 1)[0].split('?', 1)[0]
+            cleaned = cleaned.replace('\\', '/')
+            return os.path.basename(cleaned).lower()
+        except Exception:
+            return ""
+
+    def _get_global_custom_fonts_dir(self) -> str:
+        """Return the app-level custom_fonts directory used by the GUI."""
+        try:
+            if getattr(sys, 'frozen', False):
+                app_dir = os.path.dirname(sys.executable)
+            else:
+                app_dir = os.path.dirname(os.path.abspath(__file__))
+            return os.path.join(mobile_runtime.data_dir(app_dir), 'custom_fonts')
+        except Exception:
+            return os.path.join(os.getcwd(), 'custom_fonts')
+
+    def _mirror_global_custom_fonts_to_workspace(self, font_exts) -> set:
+        """Copy loaded GUI fonts into this book's workspace fonts/ folder."""
+        mirrored_fonts = set()
+        global_fonts = self._get_global_custom_fonts_dir()
+        if not os.path.isdir(global_fonts):
+            return mirrored_fonts
+
+        try:
+            import shutil
+            os.makedirs(self.fonts_dir, exist_ok=True)
+            copied = 0
+            for fname in os.listdir(global_fonts):
+                if os.path.splitext(fname)[1].lower() not in font_exts:
+                    continue
+                src = os.path.join(global_fonts, fname)
+                dst = os.path.join(self.fonts_dir, fname)
+                if not os.path.isfile(src):
+                    continue
+                mirrored_fonts.add(fname.lower())
+                try:
+                    needs_copy = not os.path.isfile(dst)
+                    if not needs_copy:
+                        src_stat = os.stat(src)
+                        dst_stat = os.stat(dst)
+                        needs_copy = (
+                            src_stat.st_size != dst_stat.st_size
+                            or src_stat.st_mtime > dst_stat.st_mtime
+                        )
+                    if needs_copy:
+                        shutil.copy2(src, dst)
+                        copied += 1
+                except Exception as e:
+                    self.log(f"[WARNING] Failed to mirror custom font {fname}: {e}")
+            if copied:
+                self.log(f"[INFO] Mirrored {copied} loaded custom font(s) to workspace fonts/")
+        except Exception as e:
+            self.log(f"[WARNING] Failed to mirror custom fonts to workspace: {e}")
+
+        return mirrored_fonts
+
+    def _add_fonts(self, book: epub.EpubBook):
+        """Add font files to book.
+
+        Only bundles fonts that are actually referenced by the active
+        CSS (override or workspace CSS files) via ``@font-face``
+        ``src: url(...)`` declarations.  Fonts are sourced from both
+        the global ``custom_fonts/`` store and the workspace ``fonts/``
+        directory.
+        """
+        import re
+        _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
+
+        # ── 1. Discover which font filenames the CSS actually needs ──
+        referenced_fonts = set()   # lowercase basenames the CSS references
+        css_sources = []
+
+        # Check override CSS
+        override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
+        if override_path and os.path.isfile(override_path):
+            css_sources.append(override_path)
+
+        # Check workspace css/ directory
+        if os.path.isdir(self.css_dir):
+            for cf in os.listdir(self.css_dir):
+                if cf.endswith('.css'):
+                    css_sources.append(os.path.join(self.css_dir, cf))
+
+        for css_path in css_sources:
+            try:
+                with open(css_path, 'r', encoding='utf-8') as f:
+                    css_text = f.read()
+                # Match url(...) values used by @font-face declarations.
+                # Handles quoted paths, spaces, URL encoding, and fragments.
+                for m in re.finditer(r'url\s*\(\s*([\'"]?)(.*?)\1\s*\)', css_text, flags=re.IGNORECASE):
+                    url_val = m.group(2)
+                    basename = self._font_basename_from_css_url(url_val)
+                    if os.path.splitext(basename)[1] in _FONT_EXTS:
+                        referenced_fonts.add(basename)
+            except Exception:
+                pass
+
+        mirrored_fonts = self._mirror_global_custom_fonts_to_workspace(_FONT_EXTS)
+
+        if not referenced_fonts:
+            if mirrored_fonts:
+                self.log("[INFO] No CSS font references found; custom fonts were mirrored to workspace only")
+            # No fonts referenced in any CSS - skip EPUB embedding.
+            return
+
+        self.log(f"[INFO] CSS references {len(referenced_fonts)} font file(s): "
+                 f"{', '.join(sorted(referenced_fonts))}")
+
+        # ── 2. Bundle only referenced fonts from workspace fonts/ ──
+        if not os.path.isdir(self.fonts_dir):
+            return
+        
+        for font_file in os.listdir(self.fonts_dir):
+            font_path = os.path.join(self.fonts_dir, font_file)
+            if not os.path.isfile(font_path):
+                continue
+            if font_file.lower() not in referenced_fonts:
+                continue
+            
+            try:
+                mime_type = 'application/font-woff'
+                if font_file.endswith('.ttf'):
+                    mime_type = 'font/ttf'
+                elif font_file.endswith('.otf'):
+                    mime_type = 'font/otf'
+                elif font_file.endswith('.woff2'):
+                    mime_type = 'font/woff2'
+                
+                with open(font_path, 'rb') as f:
+                    book.add_item(epub.EpubItem(
+                        uid=f"font_{font_file}",
+                        file_name=f"Fonts/{font_file}",
+                        media_type=mime_type,
+                        content=f.read()
+                    ))
+                self.log(f"✅ Added font: {font_file}")
+                
+            except Exception as e:
+                self.log(f"[WARNING] Failed to add font {font_file}: {e}")
+    
+    def _process_images(
+        self,
+        *,
+        skip_automatic_cover: bool = False,
+        preferred_cover_names: Optional[List[str]] = None,
+    ) -> Tuple[Dict[str, str], Optional[str]]:
+        """Process images and choose an OPF/page-designated or fallback cover."""
+        processed_images = {}
+        cover_file = None
+        
+        try:
+            # Find the images directory
+            actual_images_dir = None
+            possible_dirs = [
+                self.images_dir,
+                os.path.join(self.base_dir, "images"),
+                os.path.join(self.output_dir, "images"),
+            ]
+            
+            for test_dir in possible_dirs:
+                self.log(f"[DEBUG] Checking for images in: {test_dir}")
+                if os.path.isdir(test_dir):
+                    files = [
+                        name
+                        for name in os.listdir(test_dir)
+                        if os.path.isfile(os.path.join(test_dir, name))
+                    ]
+                    if files:
+                        self.log(f"[DEBUG] Found {len(files)} files in {test_dir}")
+                        actual_images_dir = test_dir
+                        break
+            
+            if not actual_images_dir:
+                self.log("[WARNING] No images directory found or directory is empty")
+                return processed_images, cover_file
+            
+            self.images_dir = actual_images_dir
+            self.log(f"[INFO] Using images directory: {self.images_dir}")
+            
+            # Get list of files to process
+            image_files = sorted(
+                name
+                for name in os.listdir(self.images_dir)
+                if os.path.isfile(os.path.join(self.images_dir, name))
+            )
+            self.log(f"🖼️ Processing {len(image_files)} potential images with {self.max_workers} workers")
+            
+            def process_single_image(img):
+                """Worker function to process a single image"""
+                path = os.path.join(self.images_dir, img)
+                if not os.path.isfile(path):
+                    return None
+                
+                # Check MIME type
+                ctype, _ = mimetypes.guess_type(path)
+                
+                # If MIME type detection fails, check extension
+                if not ctype:
+                    ext = os.path.splitext(img)[1].lower()
+                    mime_map = {
+                        '.jpg': 'image/jpeg',
+                        '.jpeg': 'image/jpeg',
+                        '.png': 'image/png',
+                        '.gif': 'image/gif',
+                        '.bmp': 'image/bmp',
+                        '.webp': 'image/webp',
+                        '.svg': 'image/svg+xml'
+                    }
+                    ctype = mime_map.get(ext)
+                
+                if ctype and ctype.startswith("image"):
+                    safe_name = FileUtils.sanitize_filename(img, allow_unicode=False)
+                    
+                    # Ensure extension
+                    if not os.path.splitext(safe_name)[1]:
+                        ext = os.path.splitext(img)[1]
+                        if ext:
+                            safe_name += ext
+                        elif ctype == 'image/jpeg':
+                            safe_name += '.jpg'
+                        elif ctype == 'image/png':
+                            safe_name += '.png'
+                    
+                    # Special handling for SVG: rasterize to PNG fallback for reader compatibility
+                    if ctype == 'image/svg+xml' and self.rasterize_svg and self._cairosvg_available:
+                        try:
+                            from cairosvg import svg2png
+                            png_name = os.path.splitext(safe_name)[0] + '.png'
+                            png_path = os.path.join(self.images_dir, png_name)
+                            # Generate PNG only if not already present
+                            if not os.path.exists(png_path):
+                                svg2png(url=path, write_to=png_path)
+                                self.log(f"  🖼️ Rasterized SVG → PNG: {img} -> {png_name}")
+                            # Return the PNG as the image to include
+                            return (png_name, png_name, 'image/png')
+                        except Exception as e:
+                            self.log(f"[WARNING] SVG rasterization failed for {img}: {e}")
+                            # Fall back to adding the raw SVG
+                            return (img, safe_name, ctype)
+                    
+                    return (img, safe_name, ctype)
+                else:
+                    return None
+            
+            # Process images in parallel
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = [executor.submit(process_single_image, img) for img in image_files]
+                
+                completed = 0
+                # Only log periodically for large image sets to avoid GUI lag
+                use_reduced_logging = len(image_files) > 50
+                # Log at 5% intervals for large sets (20 updates total)
+                log_interval = max(1, len(image_files) // 20) if use_reduced_logging else 1
+                last_logged_percent = -1
+                
+                for future in as_completed(futures):
+                    # Check stop flag
+                    if self.is_stopped():
+                        self.log("🛑 Image processing stopped by user")
+                        break
+                    
+                    try:
+                        result = future.result()
+                        completed += 1
+                        
+                        if result:
+                            original, safe, ctype = result
+                            processed_images[original] = safe
+                            # Log based on image count
+                            if use_reduced_logging:
+                                # For large sets: log at percentage milestones or interval
+                                current_percent = (completed * 100) // len(image_files)
+                                should_log = (completed % log_interval == 0 or completed == 1 or completed == len(image_files))
+                                # Also log when percentage changes for better feedback
+                                if should_log or (current_percent != last_logged_percent and current_percent % 5 == 0):
+                                    self.log(f"  [{completed}/{len(image_files)}] ({current_percent}%) ✅")
+                                    last_logged_percent = current_percent
+                            else:
+                                # For small sets: log every image
+                                self.log(f"  [{completed}/{len(image_files)}] ✅ Processed: {original} -> {safe}")
+                        else:
+                            # Log skipped files based on image count
+                            if not use_reduced_logging or completed % log_interval == 0:
+                                self.log(f"  [{completed}/{len(image_files)}] ⏭️ Skipped non-image file")
+                            
+                    except Exception as e:
+                        completed += 1
+                        # Always log errors
+                        self.log(f"  [{completed}/{len(image_files)}] ❌ Failed to process image: {e}")
+            
+            # Resolve preferred cover names before any heuristic. These names
+            # can come from the OPF and therefore refer to pre-rename files.
+            rename_map = self._load_image_rename_map()
+            processed_by_key = {
+                os.path.basename(str(original)).casefold(): safe
+                for original, safe in processed_images.items()
+            }
+            safe_by_key = {
+                os.path.basename(str(safe)).casefold(): safe
+                for safe in processed_images.values()
+            }
+            rename_by_key = {
+                os.path.basename(str(original)).casefold(): os.path.basename(str(renamed))
+                for original, renamed in rename_map.items()
+            }
+
+            def resolve_cover_name(candidate: str) -> Optional[str]:
+                if not candidate:
+                    return None
+                from urllib.parse import unquote
+
+                candidate_text = str(candidate).strip()
+                if candidate_text.casefold().startswith("data:"):
+                    return None
+                basename = os.path.basename(
+                    unquote(candidate_text.split("?", 1)[0].split("#", 1)[0])
+                )
+                key = basename.casefold()
+                resolved = processed_by_key.get(key) or safe_by_key.get(key)
+                if resolved:
+                    return resolved
+                renamed = rename_by_key.get(key)
+                if renamed:
+                    renamed_key = renamed.casefold()
+                    resolved = processed_by_key.get(renamed_key) or safe_by_key.get(renamed_key)
+                    if resolved:
+                        return resolved
+                    key = renamed_key
+
+                # SVG rasterization and similar compatibility conversions can
+                # change only the extension. Preserve the OPF choice by matching
+                # the mapped stem as a final designated-cover resolution step.
+                target_stem = os.path.splitext(key)[0]
+                for current_key, safe_name in sorted(processed_by_key.items()):
+                    if os.path.splitext(current_key)[0] == target_stem:
+                        return safe_name
+                for current_key, safe_name in sorted(safe_by_key.items()):
+                    if os.path.splitext(current_key)[0] == target_stem:
+                        return safe_name
+                return None
+
+            preferred_cover_names = [
+                name for name in (preferred_cover_names or []) if name
+            ]
+            for preferred_name in preferred_cover_names:
+                cover_file = resolve_cover_name(preferred_name)
+                if cover_file:
+                    self.log(
+                        f"📔 Using designated cover image: {preferred_name} -> {cover_file}"
+                    )
+                    break
+            if preferred_cover_names and not cover_file:
+                self.log(
+                    "⚠️ Cover discovery: designated cover image reference(s) "
+                    "could not be resolved after image renaming: "
+                    + ", ".join(str(name) for name in preferred_cover_names)
+                )
+
+            # Find a heuristic cover only when automatic creation is enabled.
+            # Respect user preference to disable automatic cover creation
+            disable_auto_cover = os.environ.get('DISABLE_AUTOMATIC_COVER_CREATION', '0') == '1'
+            if processed_images and not cover_file and not disable_auto_cover and not skip_automatic_cover:
+                self.log(
+                    "📔 Cover fallback: attempting automatic image selection "
+                    "(rename-map cover name → cover/front filename → first image)"
+                )
+                # Prefer original source names from image_rename_map.json. This
+                # preserves cover identity after extraction renames cover.jpg to
+                # a chapter-based filename such as p-cover_img_1.jpg.
+                for original_name, renamed_name in rename_map.items():
+                    if "cover" not in original_name.casefold():
+                        continue
+                    cover_file = resolve_cover_name(renamed_name)
+                    if cover_file:
+                        self.log(
+                            f"📔 Found cover image from rename map: "
+                            f"{original_name} -> {cover_file}"
+                        )
+                        break
+
+                if not cover_file:
+                    for original_name in sorted(processed_images, key=str.casefold):
+                        name_lower = original_name.casefold()
+                        if "cover" in name_lower or name_lower.startswith("front"):
+                            cover_file = processed_images[original_name]
+                            self.log(f"📔 Found cover image: {original_name} -> {cover_file}")
+                            break
+                
+                if not cover_file:
+                    # Sort numerically so e.g. "2.jpg" comes before "10.jpg"
+                    import re as _re
+                    def _numeric_key(name):
+                        parts = _re.split(r'(\d+)', name.lower())
+                        return [int(p) if p.isdigit() else p for p in parts]
+                    first_original = sorted(processed_images.keys(), key=_numeric_key)[0]
+                    cover_file = processed_images[first_original]
+                    self.log(f"📔 Using first image (numerically sorted) as cover: {cover_file}")
+            elif not cover_file and not processed_images:
+                self.log(
+                    "ℹ️ Cover fallback: no processed images are available for "
+                    "cover selection"
+                )
+            elif not cover_file and (disable_auto_cover or skip_automatic_cover):
+                self.log(
+                    "ℹ️ Cover fallback: automatic image selection was not run "
+                    "because automatic cover creation is disabled or an HTML "
+                    "cover fallback is being used"
+                )
+            
+            self.log(f"✅ Processed {len(processed_images)} images successfully")
+            
+        except Exception as e:
+            self.log(f"[ERROR] Error processing images: {e}")
+            import traceback
+            self.log(f"[DEBUG] Traceback: {traceback.format_exc()}")
+        
+        return processed_images, cover_file
+
+    def _add_images_to_book(
+        self,
+        book: epub.EpubBook,
+        processed_images: Dict[str, str],
+        cover_file: Optional[str],
+        protected_cover_file: Optional[str] = None,
+    ):
+        """Add images to book using parallel processing for reading files"""
+        
+        images_to_add = self._filter_embedded_images_for_ocr(
+            processed_images,
+            cover_file,
+            protected_images=(protected_cover_file,),
+        )
+        
+        if not images_to_add:
+            self.log("No images to add (besides cover)")
+            return
+        
+        self.log(f"📚 Adding {len(images_to_add)} images to EPUB with {self.max_workers} workers")
+        
+        def read_image_file(image_data):
+            """Worker function to read image file"""
+            original_name, safe_name = image_data
+            img_path = os.path.join(self.images_dir, original_name)
+            
+            # If original was compressed to a different format (e.g. png→webp),
+            # the original file may have been deleted. Fall back to the
+            # compressed file whose extension matches safe_name.
+            if not os.path.isfile(img_path):
+                safe_ext = os.path.splitext(safe_name)[1]
+                if safe_ext:
+                    alt_path = os.path.join(
+                        self.images_dir,
+                        os.path.splitext(original_name)[0] + safe_ext
+                    )
+                    if os.path.isfile(alt_path):
+                        img_path = alt_path
+            
+            try:
+                ctype, _ = mimetypes.guess_type(img_path)
+                if not ctype:
+                    ctype = "image/jpeg"  # Default fallback
+                
+                with open(img_path, 'rb') as f:
+                    content = f.read()
+                
+                return {
+                    'original': original_name,
+                    'safe': safe_name,
+                    'ctype': ctype,
+                    'content': content,
+                    'success': True
+                }
+            except Exception as e:
+                return {
+                    'original': original_name,
+                    'safe': safe_name,
+                    'error': str(e),
+                    'success': False
+                }
+        
+        # Read all images in parallel
+        image_data_list = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [executor.submit(read_image_file, img_data) for img_data in images_to_add]
+            
+            completed = 0
+            # Only log periodically for large image sets to avoid GUI lag
+            use_reduced_logging = len(images_to_add) > 50
+            # Log at 5% intervals for large sets (20 updates total)
+            log_interval = max(1, len(images_to_add) // 20) if use_reduced_logging else 1
+            last_logged_percent = -1
+            
+            for future in as_completed(futures):
+                # Check stop flag
+                if self.is_stopped():
+                    self.log("🛑 Image reading stopped by user")
+                    break
+                
+                try:
+                    result = future.result()
+                    completed += 1
+                    
+                    if result['success']:
+                        image_data_list.append(result)
+                        # Log based on image count
+                        if use_reduced_logging:
+                            # For large sets: log at percentage milestones or interval
+                            current_percent = (completed * 100) // len(images_to_add)
+                            should_log = (completed % log_interval == 0 or completed == 1 or completed == len(images_to_add))
+                            # Also log when percentage changes for better feedback
+                            if should_log or (current_percent != last_logged_percent and current_percent % 5 == 0):
+                                self.log(f"  [{completed}/{len(images_to_add)}] ({current_percent}%) ✅")
+                                last_logged_percent = current_percent
+                        else:
+                            # For small sets: log every image
+                            self.log(f"  [{completed}/{len(images_to_add)}] ✅ Read: {result['original']}")
+                    else:
+                        # Always log failures
+                        self.log(f"  [{completed}/{len(images_to_add)}] ❌ Failed: {result['original']} - {result['error']}")
+                        
+                except Exception as e:
+                    completed += 1
+                    # Always log exceptions
+                    self.log(f"  [{completed}/{len(images_to_add)}] ❌ Exception reading image: {e}")
+        
+        # Add images to book sequentially (required by ebooklib)
+        self.log("\n📦 Adding images to EPUB structure...")
+        added = 0
+        use_reduced_logging = len(image_data_list) > 50
+        log_interval = max(1, len(image_data_list) // 20) if use_reduced_logging else 1
+        
+        for idx, img_data in enumerate(image_data_list, 1):
+            # Check stop flag
+            if self.is_stopped():
+                self.log(f"🛑 Image addition stopped by user ({added}/{len(image_data_list)} images added)")
+                break
+            
+            try:
+                book.add_item(epub.EpubItem(
+                    uid=img_data['safe'],
+                    file_name=f"images/{img_data['safe']}",
+                    media_type=img_data['ctype'],
+                    content=img_data['content']
+                ))
+                added += 1
+                # Only log periodically for large sets
+                if use_reduced_logging:
+                    if idx % log_interval == 0 or idx == 1 or idx == len(image_data_list):
+                        percent = (idx * 100) // len(image_data_list)
+                        self.log(f"  [{idx}/{len(image_data_list)}] ({percent}%) ✅")
+                else:
+                    self.log(f"  ✅ Added: {img_data['original']}")
+            except Exception as e:
+                self.log(f"  ❌ Failed to add {img_data['original']} to EPUB: {e}")
+        
+        if self.is_stopped():
+            self.log(f"⚠️ Image addition incomplete: {added}/{len(images_to_add)} images were added before stopping")
+        else:
+            self.log(f"✅ Successfully added {added}/{len(images_to_add)} images to EPUB")
+    
+    def _set_cover_image_metadata(self, book: epub.EpubBook, cover_file: Optional[str]) -> bool:
+        """Mark an existing image item as the EPUB cover image.
+
+        Reader library thumbnails are discovered from OPF metadata, not from a
+        visible cover XHTML page. Keep both EPUB3 and EPUB2-style markers.
+        """
+        if not cover_file:
+            return False
+
+        expected_name = f"images/{cover_file}"
+        cover_item = None
+        for item in book.get_items():
+            get_name = getattr(item, 'get_name', None)
+            item_name = getattr(item, 'file_name', '') or (get_name() if callable(get_name) else '')
+            if item_name == expected_name or os.path.basename(item_name) == cover_file:
+                cover_item = item
+                break
+
+        if cover_item is None:
+            self.log(f"[WARNING] Cover image metadata skipped; image item not found: {cover_file}")
+            return False
+
+        cover_id_item = book.get_item_with_id("cover-image")
+        if cover_id_item is None or cover_id_item is cover_item:
+            cover_item.id = "cover-image"
+
+        properties = list(getattr(cover_item, 'properties', []) or [])
+        if "cover-image" not in properties:
+            properties.append("cover-image")
+        cover_item.properties = properties
+
+        cover_id = cover_item.id
+        existing_meta = book.metadata.get(None, {}).get('meta', [])
+        has_cover_meta = any(
+            isinstance(attrs, dict)
+            and attrs.get('name') == 'cover'
+            and attrs.get('content') == cover_id
+            for _value, attrs in existing_meta
+        )
+        if not has_cover_meta:
+            book.add_metadata(None, 'meta', '', {'name': 'cover', 'content': cover_id})
+
+        self.log(f"[INFO] Set cover image metadata: {cover_file} ({cover_id})")
+        return True
+
+    def _add_cover_image_item(
+        self,
+        book: epub.EpubBook,
+        cover_file: str,
+        processed_images: Dict[str, str],
+    ) -> bool:
+        """Add the cover image item when filters did not already include it."""
+        original_cover = None
+        for orig, safe in processed_images.items():
+            if safe == cover_file:
+                original_cover = orig
+                break
+
+        if not original_cover:
+            self.log(f"[WARNING] Cover image item skipped; source image not found: {cover_file}")
+            return False
+
+        cover_path = os.path.join(self.images_dir, original_cover)
+        if not os.path.isfile(cover_path):
+            cover_ext = os.path.splitext(cover_file)[1]
+            if cover_ext:
+                alt_path = os.path.join(
+                    self.images_dir,
+                    os.path.splitext(original_cover)[0] + cover_ext
+                )
+                if os.path.isfile(alt_path):
+                    cover_path = alt_path
+
+        try:
+            with open(cover_path, 'rb') as f:
+                cover_data = f.read()
+
+            cover_img = epub.EpubItem(
+                uid="cover-image",
+                file_name=f"images/{cover_file}",
+                media_type=mimetypes.guess_type(cover_path)[0] or "image/jpeg",
+                content=cover_data
+            )
+            book.add_item(cover_img)
+            return self._set_cover_image_metadata(book, cover_file)
+        except Exception as e:
+            self.log(f"[WARNING] Failed to add cover image item: {e}")
+            return False
+
+    def _create_cover_page(self, book: epub.EpubBook, cover_file: str, 
+                          processed_images: Dict[str, str], css_items: List[epub.EpubItem],
+                          metadata: dict) -> Optional[epub.EpubHtml]:
+        """Create cover page"""
+        # Find original filename
+        original_cover = None
+        for orig, safe in processed_images.items():
+            if safe == cover_file:
+                original_cover = orig
+                break
+        
+        if not original_cover:
+            return None
+        
+        cover_path = os.path.join(self.images_dir, original_cover)
+        
+        # If original was compressed to a different format (e.g. jpg→webp),
+        # the original file may have been deleted. Fall back to the
+        # compressed file whose extension matches cover_file.
+        if not os.path.isfile(cover_path):
+            cover_ext = os.path.splitext(cover_file)[1]
+            if cover_ext:
+                alt_path = os.path.join(
+                    self.images_dir,
+                    os.path.splitext(original_cover)[0] + cover_ext
+                )
+                if os.path.isfile(alt_path):
+                    cover_path = alt_path
+        
+        try:
+            with open(cover_path, 'rb') as f:
+                cover_data = f.read()
+            
+            # Add cover image
+            cover_img = epub.EpubItem(
+                uid="cover-image",
+                file_name=f"images/{cover_file}",
+                media_type=mimetypes.guess_type(cover_path)[0] or "image/jpeg",
+                content=cover_data
+            )
+            book.add_item(cover_img)
+            
+            # Set cover metadata
+            self._set_cover_image_metadata(book, cover_file)
+            
+            # Create cover page
+            text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+            cover_page_name = f"{text_dirname}/cover.xhtml" if text_dirname else "cover.xhtml"
+            cover_page = epub.EpubHtml(
+                title="Cover",
+                file_name=cover_page_name,
+                lang=metadata.get("language", "en")
+            )
+            
+            # Build cover HTML directly without going through ensure_compliance
+            # Since it's simple and controlled, we can build it directly
+            lang = metadata.get("language", "en")
+            img_href = f"../images/{cover_file}" if getattr(self, 'legacy_epub_structure', False) else f"images/{cover_file}"
+            cover_content = f'''<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}">
+    <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Cover</title>
+    </head>
+    <body>
+    <div style="text-align: center;">
+    <img src="{img_href}" alt="Cover" style="max-width: 100%; height: auto;" />
+    </div>
+    </body>
+    </html>'''
+            
+            cover_page.content = cover_content.encode('utf-8')
+            
+            # Associate CSS with cover page if needed
+            if self.attach_css_to_chapters:
+                self._attach_css_items_to_document(cover_page, css_items)
+
+            book.add_item(cover_page)
+            self.log(f"✅ Set cover image: {cover_file}")
+            return cover_page
+            
+        except Exception as e:
+            self.log(f"[WARNING] Failed to add cover: {e}")
+            return None
+    
+    def _process_chapter_images(self, xhtml_content: str, processed_images: Dict[str, str]) -> str:
+        """Process image paths and inline SVG in chapter content.
+        - Rewrites <img src> to use images/ paths and prefers PNG fallback for SVGs.
+        - Converts inline <svg> elements to <img src="data:image/png;base64,..."> when CairoSVG is available.
+        - Uses image_rename_map.json to resolve old image names to new chapter-based names.
+        """
+        try:
+            soup = BeautifulSoup(xhtml_content, 'lxml')
+            changed = False
+            
+            # Load image rename map for resolving old names to new chapter-based names
+            image_rename_map = {}
+            rename_map_path = os.path.join(self.output_dir, 'image_rename_map.json')
+            if os.path.exists(rename_map_path):
+                try:
+                    with open(rename_map_path, 'r', encoding='utf-8') as f:
+                        image_rename_map = json.load(f)
+                except Exception:
+                    pass
+            
+            # Track statistics for summary
+            total_images = 0
+            found_images = 0
+            missing_images = []
+            
+            # 1) Handle <img> tags that reference files
+            for img in soup.find_all('img'):
+                src = img.get('src', '')
+                if not src:
+                    self.log(f"[WARNING] Image tag with no src attribute found")
+                    continue
+                
+                total_images += 1
+                
+                # Get the base filename - handle various path formats
+                # Remove query parameters first
+                clean_src = src.split('?')[0]
+                basename = os.path.basename(clean_src)
+                
+                # Look up the safe name
+                if basename in processed_images:
+                    safe_name = processed_images[basename]
+                    img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                    new_src = f"{img_prefix}{safe_name}"
+                    
+                    if src != new_src:
+                        img['src'] = new_src
+                        changed = True
+                    found_images += 1
+                else:
+                    # Try rename map: old name -> new chapter-based name
+                    renamed_basename = image_rename_map.get(basename)
+                    if renamed_basename and renamed_basename in processed_images:
+                        safe_name = processed_images[renamed_basename]
+                        img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                        new_src = f"{img_prefix}{safe_name}"
+                        img['src'] = new_src
+                        changed = True
+                        found_images += 1
+                    elif renamed_basename:
+                        # Renamed file exists but not in processed_images — use directly
+                        img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                        new_src = f"{img_prefix}{renamed_basename}"
+                        img['src'] = new_src
+                        changed = True
+                        found_images += 1
+                    else:
+                        # Try without extension variations
+                        name_without_ext = os.path.splitext(basename)[0]
+                        found = False
+                        for original_name, safe_name in processed_images.items():
+                            if os.path.splitext(original_name)[0] == name_without_ext:
+                                img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                                new_src = f"{img_prefix}{safe_name}"
+                                img['src'] = new_src
+                                changed = True
+                                found = True
+                                found_images += 1
+                                break
+                    
+                        if not found:
+                            missing_images.append(basename)
+                            # Remove the broken img tag to avoid broken image icons
+                            parent = img.parent
+                            img.decompose()
+                            changed = True
+                            # Also remove parent <p> if it's now empty
+                            if parent and parent.name == 'p' and not parent.get_text(strip=True) and not parent.find_all(True):
+                                parent.decompose()
+                            continue
+                
+                # Ensure alt attribute exists (required for XHTML)
+                if not img.get('alt'):
+                    img['alt'] = ''
+                    changed = True
+            
+            # 2) Convert inline SVG wrappers that point to raster images into plain <img>
+            #    Example: <svg ...><image xlink:href="../images/00002.jpeg"/></svg>
+            for svg_tag in soup.find_all('svg'):
+                try:
+                    image_child = svg_tag.find('image')
+                    if image_child:
+                        href = (
+                            image_child.get('xlink:href') or
+                            image_child.get('href') or
+                            image_child.get('{http://www.w3.org/1999/xlink}href')
+                        )
+                        if href:
+                            clean_href = href.split('?')[0]
+                            basename = os.path.basename(clean_href)
+                            # Map to processed image name
+                            if basename in processed_images:
+                                safe_name = processed_images[basename]
+                            else:
+                                renamed_basename = image_rename_map.get(basename)
+                                if renamed_basename and renamed_basename in processed_images:
+                                    safe_name = processed_images[renamed_basename]
+                                else:
+                                    safe_name = None
+                                name_wo = os.path.splitext(basename)[0]
+                                if safe_name is None:
+                                    for orig, safe in processed_images.items():
+                                        if os.path.splitext(orig)[0] == name_wo:
+                                            safe_name = safe
+                                            break
+                            img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+                            new_src = f"{img_prefix}{safe_name}" if safe_name else f"{img_prefix}{basename}"
+                            new_img = soup.new_tag('img')
+                            new_img['src'] = new_src
+                            new_img['alt'] = svg_tag.get('aria-label') or svg_tag.get('title') or ''
+                            new_img['style'] = 'width:100%; height:auto; display:block;'
+                            svg_tag.replace_with(new_img)
+                            changed = True
+                            self.log(f"[DEBUG] Rewrote inline SVG<image> to <img src='{new_src}'>")
+                except Exception as e:
+                    self.log(f"[WARNING] Failed to rewrite inline SVG wrapper: {e}")
+            
+            # 3) Convert remaining inline <svg> (complex vector art) to PNG data URIs if possible
+            if self.rasterize_svg and self._cairosvg_available:
+                try:
+                    from cairosvg import svg2png
+                    import base64
+                    for svg_tag in soup.find_all('svg'):
+                        try:
+                            svg_markup = str(svg_tag)
+                            png_bytes = svg2png(bytestring=svg_markup.encode('utf-8'))
+                            b64 = base64.b64encode(png_bytes).decode('ascii')
+                            alt_text = svg_tag.get('aria-label') or svg_tag.get('title') or ''
+                            new_img = soup.new_tag('img')
+                            new_img['src'] = f'data:image/png;base64,{b64}'
+                            new_img['alt'] = alt_text
+                            new_img['style'] = 'width:100%; height:auto; display:block;'
+                            svg_tag.replace_with(new_img)
+                            changed = True
+                            self.log("[DEBUG] Converted inline <svg> to PNG data URI")
+                        except Exception as e:
+                            self.log(f"[WARNING] Failed to rasterize inline SVG: {e}")
+                except Exception:
+                    pass
+            
+            # Log summary only if there are issues
+            if total_images > 0 and missing_images:
+                self.log(f"[WARNING] Chapter images: {found_images}/{total_images} found. Missing: {missing_images[:5]}{'...' if len(missing_images) > 5 else ''}")
+            
+            if changed:
+                return str(soup), missing_images
+            
+            return xhtml_content, missing_images
+            
+        except Exception as e:
+            self.log(f"[WARNING] Failed to process images in chapter: {e}")
+            return xhtml_content, []
+
+    @staticmethod
+    def _gallery_ocr_key(name: str) -> str:
+        """Normalize an image/OCR filename stem for gallery OCR matching."""
+        stem = os.path.splitext(os.path.basename(str(name or "")))[0].lower()
+        return re.sub(r'[^a-z0-9]+', '_', stem).strip('_')
+
+    @staticmethod
+    def _gallery_ocr_is_no_response(text) -> bool:
+        """Return True when Vision OCR marked an image as a real illustration."""
+        if text is None:
+            return False
+        normalized = str(text).strip()
+        normalized = re.sub(r'^[\s"`\'*_~]+|[\s"`\'*_~.。!！]+$', '', normalized).strip()
+        return normalized.lower() == "no"
+
+    def _gallery_ocr_candidates_for_image(self, original_name: str, safe_name: str, rename_map: Dict[str, str]) -> List[str]:
+        candidates = set()
+        for name in (original_name, safe_name):
+            key = self._gallery_ocr_key(name)
+            if key:
+                candidates.add(key)
+
+            base = os.path.basename(str(name or ""))
+            for src, dst in rename_map.items():
+                src_base = os.path.basename(str(src or ""))
+                dst_base = os.path.basename(str(dst or ""))
+                if base and base in (src_base, dst_base):
+                    for mapped in (src_base, dst_base):
+                        mapped_key = self._gallery_ocr_key(mapped)
+                        if mapped_key:
+                            candidates.add(mapped_key)
+
+        return sorted(candidates, key=len, reverse=True)
+
+    def _load_gallery_ocr_classifications(self) -> Dict[str, List[bool]]:
+        """Load cached per-image OCR results from OCR/single and OCR/chunks."""
+        classifications: Dict[str, List[bool]] = {}
+        ocr_dir = os.path.join(self.output_dir, "OCR")
+        if not os.path.isdir(ocr_dir):
+            return classifications
+
+        for kind in ("single", "chunks"):
+            target_dir = os.path.join(ocr_dir, kind)
+            if not os.path.isdir(target_dir):
+                continue
+            try:
+                filenames = os.listdir(target_dir)
+            except Exception:
+                continue
+            for filename in filenames:
+                if not filename.lower().endswith(".txt"):
+                    continue
+                path = os.path.join(target_dir, filename)
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        text = f.read()
+                except Exception:
+                    continue
+                if not text.strip():
+                    continue
+
+                key = self._gallery_ocr_key(filename)
+                key = re.sub(r'_chunk_\d+$', '', key)
+                if key:
+                    classifications.setdefault(key, []).append(self._gallery_ocr_is_no_response(text))
+
+        return classifications
+
+    def _load_gallery_image_rename_map(self) -> Dict[str, str]:
+        rename_map_path = os.path.join(self.output_dir, "image_rename_map.json")
+        if not os.path.exists(rename_map_path):
+            return {}
+        try:
+            with open(rename_map_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _gallery_ocr_match_values(self, image_keys: List[str], classifications: Dict[str, List[bool]]) -> List[bool]:
+        values: List[bool] = []
+        for ocr_key, ocr_values in classifications.items():
+            for image_key in image_keys:
+                if not image_key or len(image_key) < 4:
+                    continue
+                if ocr_key == image_key or ocr_key.endswith(f"_{image_key}"):
+                    values.extend(ocr_values)
+                    break
+        return values
+
+    def _compiled_html_image_reference_keys(self, rename_map: Dict[str, str]) -> set:
+        """Return normalized image keys referenced by compiled HTML or CSS."""
+        from urllib.parse import unquote
+
+        reference_keys = set()
+        html_exts = (".html", ".htm", ".xhtml")
+        try:
+            filenames = [
+                f for f in os.listdir(self.output_dir)
+                if f.lower().endswith(html_exts) and os.path.isfile(os.path.join(self.output_dir, f))
+            ]
+        except Exception:
+            return reference_keys
+
+        for filename in filenames:
+            path = os.path.join(self.output_dir, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+            try:
+                soup = BeautifulSoup(content, "html.parser")
+                srcs = []
+                for tag in soup.find_all(("img", "image", "source", "object")):
+                    for attr in (
+                        "src",
+                        "data-src",
+                        "data-original",
+                        "href",
+                        "xlink:href",
+                        "data",
+                    ):
+                        value = tag.get(attr, "")
+                        if value:
+                            srcs.append(value)
+                    srcset = tag.get("srcset", "")
+                    if srcset:
+                        srcs.extend(
+                            candidate.strip().split()[0]
+                            for candidate in str(srcset).split(",")
+                            if candidate.strip()
+                        )
+                srcs.extend(
+                    match.strip().strip('"\'')
+                    for match in re.findall(
+                        r'url\(\s*([^\)]+?)\s*\)',
+                        content,
+                        flags=re.IGNORECASE,
+                    )
+                )
+            except Exception:
+                srcs = re.findall(
+                    r'(?:src|href|xlink:href|data)=["\']([^"\']+)["\']',
+                    content,
+                    flags=re.IGNORECASE,
+                )
+
+            for src in srcs:
+                basename = os.path.basename(unquote(
+                    str(src or "").split("?", 1)[0].split("#", 1)[0]
+                ))
+                key = self._gallery_ocr_key(basename)
+                if key:
+                    reference_keys.add(key)
+                renamed = rename_map.get(basename)
+                renamed_key = self._gallery_ocr_key(renamed) if renamed else ""
+                if renamed_key:
+                    reference_keys.add(renamed_key)
+
+        # A background/list-style image can be referenced only by an external
+        # stylesheet. Treat those URLs as live references too, otherwise the
+        # optional filter would create a valid XHTML document with a missing
+        # CSS image resource.
+        css_dirs = {
+            os.path.join(self.output_dir, "css"),
+            getattr(self, "css_dir", ""),
+        }
+        for css_dir in css_dirs:
+            if not css_dir or not os.path.isdir(css_dir):
+                continue
+            try:
+                css_files = [
+                    os.path.join(css_dir, name)
+                    for name in os.listdir(css_dir)
+                    if name.lower().endswith(".css")
+                    and os.path.isfile(os.path.join(css_dir, name))
+                ]
+            except OSError:
+                continue
+            for css_path in css_files:
+                try:
+                    with open(css_path, "r", encoding="utf-8") as f:
+                        css_text = f.read()
+                except OSError:
+                    continue
+                for src in re.findall(
+                    r'url\(\s*([^\)]+?)\s*\)',
+                    css_text,
+                    flags=re.IGNORECASE,
+                ):
+                    basename = os.path.basename(unquote(
+                        src.strip().strip('"\'').split("?", 1)[0].split("#", 1)[0]
+                    ))
+                    key = self._gallery_ocr_key(basename)
+                    if key:
+                        reference_keys.add(key)
+                    renamed = rename_map.get(basename)
+                    renamed_key = (
+                        self._gallery_ocr_key(renamed) if renamed else ""
+                    )
+                    if renamed_key:
+                        reference_keys.add(renamed_key)
+
+        return reference_keys
+
+    def _filter_embedded_images_for_ocr(
+        self,
+        processed_images: Dict[str, str],
+        cover_file: Optional[str],
+        protected_images=(),
+    ) -> List[Tuple[str, str]]:
+        """Apply optional reference and OCR filters to EPUB payload images."""
+        image_items = [(original, safe) for original, safe in processed_images.items() if safe != cover_file]
+        skip_unreferenced = (
+            os.environ.get('SKIP_UNREFERENCED_EPUB_IMAGES', '0') == '1'
+        )
+        classifications = self._load_gallery_ocr_classifications()
+        if not skip_unreferenced and not classifications:
+            return image_items
+
+        rename_map = self._load_gallery_image_rename_map()
+        referenced_keys = self._compiled_html_image_reference_keys(rename_map)
+
+        if skip_unreferenced:
+            protected_keys = {
+                self._gallery_ocr_key(name)
+                for name in (protected_images or ())
+                if name
+            }
+            referenced_items: List[Tuple[str, str]] = []
+            skipped_unreferenced = 0
+            for original, safe in image_items:
+                image_keys = self._gallery_ocr_candidates_for_image(
+                    original,
+                    safe,
+                    rename_map,
+                )
+                if (
+                    any(key in referenced_keys for key in image_keys)
+                    or any(key in protected_keys for key in image_keys)
+                ):
+                    referenced_items.append((original, safe))
+                else:
+                    skipped_unreferenced += 1
+            image_items = referenced_items
+            self.log(
+                "Image reference filter: skipped "
+                f"{skipped_unreferenced} unreferenced image(s) from EPUB payload; "
+                f"kept {len(image_items)} referenced/protected image(s)"
+            )
+
+        if not classifications:
+            return image_items
+
+        images_to_add: List[Tuple[str, str]] = []
+        excluded_text = 0
+        kept_referenced_text = 0
+        kept_no = 0
+
+        for original, safe in image_items:
+            image_keys = self._gallery_ocr_candidates_for_image(original, safe, rename_map)
+            ocr_values = self._gallery_ocr_match_values(image_keys, classifications)
+            if not ocr_values:
+                images_to_add.append((original, safe))
+                continue
+
+            is_ocr_text_image = any(value is False for value in ocr_values)
+            if is_ocr_text_image:
+                if any(key in referenced_keys for key in image_keys):
+                    kept_referenced_text += 1
+                    images_to_add.append((original, safe))
+                else:
+                    excluded_text += 1
+                continue
+
+            kept_no += 1
+            images_to_add.append((original, safe))
+
+        if excluded_text or kept_referenced_text or kept_no:
+            summary = [f"excluded {excluded_text} OCR text image(s) from EPUB"]
+            if kept_referenced_text:
+                summary.append(f"kept {kept_referenced_text} still-referenced OCR text image(s)")
+            if kept_no:
+                summary.append(f"kept {kept_no} OCR illustration image(s)")
+            self.log("Image EPUB OCR filter: " + ", ".join(summary))
+
+        return images_to_add
+
+    def _filter_gallery_images_for_ocr(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> List[str]:
+        """Exclude OCR text-page images from the optional EPUB image gallery."""
+        gallery_items = [(original, safe) for original, safe in processed_images.items() if safe != cover_file]
+        skip_unreferenced = (
+            os.environ.get('SKIP_UNREFERENCED_EPUB_IMAGES', '0') == '1'
+        )
+        classifications = self._load_gallery_ocr_classifications()
+        if not skip_unreferenced and not classifications:
+            return [safe for _original, safe in gallery_items]
+
+        rename_map = self._load_gallery_image_rename_map()
+        if skip_unreferenced:
+            referenced_keys = self._compiled_html_image_reference_keys(rename_map)
+            gallery_items = [
+                (original, safe)
+                for original, safe in gallery_items
+                if any(
+                    key in referenced_keys
+                    for key in self._gallery_ocr_candidates_for_image(
+                        original,
+                        safe,
+                        rename_map,
+                    )
+                )
+            ]
+        if not classifications:
+            return [safe for _original, safe in gallery_items]
+
+        gallery_images: List[str] = []
+        excluded_text = 0
+        kept_no = 0
+
+        for original, safe in gallery_items:
+            image_keys = self._gallery_ocr_candidates_for_image(original, safe, rename_map)
+            ocr_values = self._gallery_ocr_match_values(image_keys, classifications)
+            if not ocr_values:
+                gallery_images.append(safe)
+                continue
+
+            if any(value is False for value in ocr_values):
+                excluded_text += 1
+                continue
+
+            kept_no += 1
+            gallery_images.append(safe)
+
+        if excluded_text or kept_no:
+            self.log(
+                f"Gallery OCR filter: excluded {excluded_text} OCR text image(s), "
+                f"kept {kept_no} OCR illustration image(s)"
+            )
+
+        return gallery_images
+    
+    def _create_gallery_page(self, book: epub.EpubBook, images: List[str],
+                            css_items: List[epub.EpubItem], metadata: dict) -> epub.EpubHtml:
+        """Create image gallery page - FIXED to avoid escaping HTML tags"""
+        text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
+        gallery_page_name = f"{text_dirname}/gallery.xhtml" if text_dirname else "gallery.xhtml"
+        gallery_page = epub.EpubHtml(
+            title="Gallery",
+            file_name=gallery_page_name,
+            lang=metadata.get("language", "en")
+        )
+        
+        # Build the gallery body content
+        gallery_body_parts = ['<h1>Image Gallery</h1>']
+        img_prefix = "../images/" if getattr(self, 'legacy_epub_structure', False) else "images/"
+        for img in images:
+            gallery_body_parts.append(
+                f'<div style="text-align: center; margin: 20px;">'
+                f'<img src="{img_prefix}{img}" alt="{img}" />'
+                f'</div>'
+            )
+        
+        gallery_body_content = '\n'.join(gallery_body_parts)
+        
+        # Build XHTML directly without going through ensure_compliance
+        # which might escape our HTML tags
+        css_prefix = "../css/" if getattr(self, 'legacy_epub_structure', False) else "css/"
+        css_links = [f"{css_prefix}{item.file_name.split('/')[-1]}" for item in css_items]
+        
+        # Build the complete XHTML document manually
+        lang = metadata.get("language", "en")
+        xhtml_content = f'''<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">
+    <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Gallery</title>'''
+        
+        # Add CSS links
+        for css_link in css_links:
+            xhtml_content += f'\n<link rel="stylesheet" type="text/css" href="{css_link}" />'
+        
+        xhtml_content += f'''
+    </head>
+    <body>
+    {gallery_body_content}
+    </body>
+    </html>'''
+        
+        # Validate the XHTML
+        validated_content = XHTMLConverter.validate(xhtml_content)
+        
+        # Set the content
+        gallery_page.content = FileUtils.ensure_bytes(validated_content)
+        
+        # Associate CSS with gallery page
+        if self.attach_css_to_chapters:
+            self._attach_css_items_to_document(gallery_page, css_items)
+        
+        book.add_item(gallery_page)
+        return gallery_page
+
+    # --- Source TOC support (toc.ncx with EPUB 3 nav.xhtml fallback) ---
+    def _strip_all_ext(self, name: str) -> str:
+        core = name
+        while True:
+            base, ext = os.path.splitext(core)
+            if ext and ext.lower() in ['.html', '.htm', '.xhtml', '.xml']:
+                core = base
+            else:
+                break
+        return core
+
+    def _build_opf_filename_map(self) -> dict:
+        """Build a mapping from core_name → original OPF basename from content.opf.
+
+        Returns an empty dict if content.opf does not exist or is unparseable.
+        The keys are lower-cased core names (extensions and 'response_' stripped).
+        The values are the original basenames exactly as they appear in the OPF manifest.
+        """
+        opf_path = self._find_opf_path()
+        if not opf_path:
+            return {}
+        try:
+            tree = ET.parse(opf_path)
+            root = tree.getroot()
+            ns_uri = ''
+            if root.tag.startswith('{'):
+                ns_uri = root.tag[1:root.tag.index('}')]
+            ns = {'opf': ns_uri} if ns_uri else {}
+            mapping = {}
+            xpath = './/opf:manifest/opf:item' if ns else \
+                    './/{http://www.idpf.org/2007/opf}manifest/{http://www.idpf.org/2007/opf}item'
+            for item in root.findall(xpath, ns if ns else None):
+                href = item.get('href', '')
+                media = item.get('media-type', '')
+                if not href:
+                    continue
+                if 'html' not in media.lower() and \
+                   not href.lower().endswith(('.html', '.xhtml', '.htm')):
+                    continue
+                basename = os.path.basename(href)
+                core = self._strip_all_ext(basename).lower().strip()
+                if core:
+                    mapping[core] = basename
+            return mapping
+        except Exception:
+            return {}
+
+    def _restore_opf_filename(self, disk_filename: str, opf_map: dict) -> str:
+        """Return the original OPF basename for *disk_filename*, or the
+        basename unchanged if it cannot be resolved.
+
+        Handles ``response_`` prefix and stacked extensions automatically.
+        """
+        base = os.path.basename(disk_filename)
+        core = base
+        if core.startswith('response_'):
+            core = core[9:]
+        core = self._strip_all_ext(core).lower().strip()
+        return opf_map.get(core, base)
+
+    def _normalize_core_name(self, filename_or_href: str) -> str:
+        """Normalize a filename/href for matching (strip fragment, response_ prefix, and all extensions)."""
+        if not filename_or_href:
+            return ''
+        href = str(filename_or_href)
+        if '#' in href:
+            href = href.split('#', 1)[0]
+        base = os.path.basename(href)
+        if base.startswith('response_'):
+            base = base[9:]
+        base = self._strip_all_ext(base)
+        return base.lower().strip()
+
+    def _extract_source_toc_ncx_entries(self, source_epub_path: str) -> List[Dict[str, str]]:
+        """Extract source TOC entries, preferring NCX then EPUB 3 nav XHTML.
+
+        ``USE_TOC_NCX`` keeps its historical name, but EPUB 3 books are only
+        required to expose their table of contents through a manifest item with
+        ``properties="nav"``. If no NCX exists, parse that item's
+        ``<nav epub:type="toc">`` links in document order.
+
+        Returns list of dicts: ``{'label': str, 'src': str}``.
+        """
+        entries: List[Dict[str, str]] = []
+        if not source_epub_path or not os.path.exists(source_epub_path):
+            return entries
+
+        try:
+            with zipfile.ZipFile(source_epub_path, 'r') as zf:
+                names = zf.namelist()
+                names_by_key = {name.casefold(): name for name in names}
+                ncx_path = None
+                nav_path = None
+
+                def resolve_member(base_path: str, href: str) -> Optional[str]:
+                    from urllib.parse import unquote
+
+                    href_path = unquote((href or '').split('#', 1)[0]).replace('\\', '/')
+                    candidate = posixpath.normpath(
+                        posixpath.join(posixpath.dirname(base_path), href_path)
+                    ).lstrip('/')
+                    if candidate == '..' or candidate.startswith('../'):
+                        return None
+                    return names_by_key.get(candidate.casefold())
+
+                # 1) container.xml -> OPF -> manifest NCX and EPUB 3 nav items.
+                opf_path = find_epub_opf_member(zf)
+
+                if opf_path:
+                    try:
+                        root = ET.fromstring(zf.read(opf_path))
+                        ns_uri = ''
+                        if root.tag.startswith('{'):
+                            ns_uri = root.tag[1:root.tag.index('}')]
+                        item_path = (
+                            f'.//{{{ns_uri}}}manifest/{{{ns_uri}}}item'
+                            if ns_uri else './/manifest/item'
+                        )
+                        manifest_items = root.findall(item_path)
+
+                        # Follow the spine's NCX id when present, then fall
+                        # back to the NCX media type / conventional id.
+                        spine_path = (
+                            f'.//{{{ns_uri}}}spine' if ns_uri else './/spine'
+                        )
+                        spine_el = root.find(spine_path)
+                        spine_toc_id = (
+                            (spine_el.get('toc') or '').strip()
+                            if spine_el is not None else ''
+                        )
+
+                        for item in manifest_items:
+                            item_id = (item.get('id') or '').strip()
+                            href = item.get('href') or ''
+                            media_type = (item.get('media-type') or '').strip().lower()
+                            properties = {
+                                token.casefold()
+                                for token in (item.get('properties') or '').split()
+                            }
+                            candidate = resolve_member(opf_path, href) if href else None
+                            if not candidate:
+                                continue
+                            if (
+                                item_id == spine_toc_id
+                                or media_type == 'application/x-dtbncx+xml'
+                                or item_id.casefold() == 'ncx'
+                            ):
+                                ncx_path = candidate
+                            if 'nav' in properties:
+                                nav_path = candidate
+                    except Exception as opf_error:
+                        self.log(f"⚠️ Could not inspect source OPF navigation manifest: {opf_error}")
+
+                # 2) Legacy filename fallback for EPUBs with incomplete OPFs.
+                if not ncx_path:
+                    ncx_path = next(
+                        (name for name in names if name.lower().endswith('toc.ncx')),
+                        None,
+                    )
+
+                # NCX remains authoritative when both navigation formats exist.
+                if ncx_path:
+                    ncx_bytes = zf.read(ncx_path)
+                    nav_bytes = None
+                else:
+                    if not nav_path:
+                        nav_path = next(
+                            (
+                                name for name in names
+                                if posixpath.basename(name).casefold() == 'nav.xhtml'
+                            ),
+                            None,
+                        )
+                    if not nav_path:
+                        return entries
+                    nav_bytes = zf.read(nav_path)
+                    ncx_bytes = None
+
+            if nav_bytes is not None:
+                self.log(
+                    f"📖 No toc.ncx found; using EPUB 3 navigation document: {nav_path}"
+                )
+
+                def is_toc_nav_et(element) -> bool:
+                    epub_type = (
+                        element.get('{http://www.idpf.org/2007/ops}type')
+                        or element.get('epub:type')
+                        or element.get('type')
+                        or ''
+                    )
+                    return (
+                        'toc' in epub_type.casefold().split()
+                        or (element.get('role') or '').casefold() == 'doc-toc'
+                        or (element.get('id') or '').casefold() == 'toc'
+                    )
+
+                def extract_nav_et(xhtml_data) -> List[Dict[str, str]]:
+                    root_el = ET.fromstring(xhtml_data)
+                    toc_nav = next(
+                        (
+                            element for element in root_el.iter()
+                            if element.tag.rsplit('}', 1)[-1].casefold() == 'nav'
+                            and is_toc_nav_et(element)
+                        ),
+                        None,
+                    )
+                    if toc_nav is None:
+                        return []
+                    out = []
+                    for element in toc_nav.iter():
+                        if element.tag.rsplit('}', 1)[-1].casefold() != 'a':
+                            continue
+                        href = (element.get('href') or '').strip()
+                        label = re.sub(
+                            r'\s+', ' ', ''.join(element.itertext())
+                        ).strip()
+                        if label or href:
+                            out.append({'label': label, 'src': href})
+                    return out
+
+                try:
+                    nav_entries = extract_nav_et(nav_bytes)
+                    if nav_entries:
+                        self.log(
+                            f"✅ Loaded {len(nav_entries)} entries from EPUB 3 nav.xhtml"
+                        )
+                        return nav_entries
+                except ET.ParseError as parse_error:
+                    self.log(
+                        f"⚠️ EPUB 3 navigation document is not well-formed "
+                        f"({parse_error}); attempting recovery"
+                    )
+
+                # Tolerate malformed XHTML and named HTML entities while still
+                # selecting only the TOC nav, never landmarks or page-list.
+                for parser_name in ('xml', 'html.parser'):
+                    try:
+                        soup = BeautifulSoup(nav_bytes, parser_name)
+                        toc_nav = None
+                        for nav in soup.find_all('nav'):
+                            nav_type = (
+                                nav.get('epub:type')
+                                or nav.get('type')
+                                or ''
+                            )
+                            if (
+                                'toc' in str(nav_type).casefold().split()
+                                or str(nav.get('role') or '').casefold() == 'doc-toc'
+                                or str(nav.get('id') or '').casefold() == 'toc'
+                            ):
+                                toc_nav = nav
+                                break
+                        if toc_nav is None:
+                            continue
+                        recovered = []
+                        for anchor in toc_nav.find_all('a'):
+                            href = (anchor.get('href') or '').strip()
+                            label = re.sub(r'\s+', ' ', anchor.get_text(' ', strip=True)).strip()
+                            if label or href:
+                                recovered.append({'label': label, 'src': href})
+                        if recovered:
+                            self.log(
+                                f"✅ Recovered {len(recovered)} EPUB 3 nav.xhtml "
+                                f"entries via tolerant '{parser_name}' parser"
+                            )
+                            return recovered
+                    except Exception:
+                        continue
+
+                self.log(
+                    "⚠️ EPUB 3 navigation document contained no usable TOC links; "
+                    "using generated TOC"
+                )
+                return entries
+
+            # Parse outside the zip context. Source NCX files are frequently
+            # malformed (unescaped '&', stray control characters, bad entities),
+            # which makes a strict parse raise "not well-formed (invalid token)".
+            # Try strict parsing first, then progressively more tolerant parsers
+            # so a slightly-broken source TOC still yields its real navPoints
+            # instead of silently falling back to a generated TOC.
+            def _extract_navpoints_et(xml_data):
+                root_el = ET.fromstring(xml_data)
+                ns_uri = ''
+                if root_el.tag.startswith('{'):
+                    ns_uri = root_el.tag[1:root_el.tag.index('}')]
+                nsm = {'ncx': ns_uri} if ns_uri else {}
+                nps = root_el.findall('.//ncx:navPoint', nsm) if nsm else root_el.findall('.//navPoint')
+                out = []
+                for np in nps:
+                    label = ''
+                    src = ''
+                    nav_text = np.find('ncx:navLabel/ncx:text', nsm) if nsm else np.find('navLabel/text')
+                    if nav_text is not None and nav_text.text:
+                        label = nav_text.text.strip()
+                    content = np.find('ncx:content', nsm) if nsm else np.find('content')
+                    if content is not None:
+                        src = (content.get('src') or '').strip()
+                    if label or src:
+                        out.append({'label': label, 'src': src})
+                return out
+
+            # Attempt 1: strict parse (the common, well-formed case)
+            try:
+                return _extract_navpoints_et(ncx_bytes)
+            except ET.ParseError as parse_err:
+                self.log(f"⚠️ Source toc.ncx not well-formed ({parse_err}); attempting recovery")
+
+            # Attempt 2: repair the two most common faults (illegal control
+            # characters and bare ampersands), then re-parse strictly. Re-encode
+            # to bytes so ElementTree doesn't reject the XML encoding declaration.
+            try:
+                text = ncx_bytes.decode('utf-8', errors='replace')
+                text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F]', '', text)
+                text = re.sub(
+                    r'&(?!(?:amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);)',
+                    '&amp;', text
+                )
+                repaired = _extract_navpoints_et(text.encode('utf-8'))
+                if repaired:
+                    self.log(f"✅ Recovered {len(repaired)} toc.ncx entries after repairing malformed XML")
+                    return repaired
+            except Exception:
+                pass
+
+            # Attempt 3: BeautifulSoup, which is far more tolerant of broken
+            # markup. Try the XML parser first, then the very lenient HTML
+            # parser (which lowercases tags to <navpoint>).
+            for parser_name, np_tag in (('xml', 'navPoint'), ('html.parser', 'navpoint')):
+                try:
+                    soup = BeautifulSoup(ncx_bytes, parser_name)
+                    nps = soup.find_all(np_tag)
+                    if not nps:
+                        continue
+                    out = []
+                    for np in nps:
+                        text_el = np.find('text')
+                        content_el = np.find('content')
+                        label = text_el.get_text(strip=True) if text_el else ''
+                        src = (content_el.get('src') if content_el else '') or ''
+                        if label or src.strip():
+                            out.append({'label': label, 'src': src.strip()})
+                    if out:
+                        self.log(f"✅ Recovered {len(out)} toc.ncx entries via tolerant '{parser_name}' parser")
+                        return out
+                except Exception:
+                    continue
+
+            self.log("⚠️ Source toc.ncx could not be recovered even with tolerant parsing; using generated TOC")
+            return entries
+
+        except Exception as e:
+            self.log(f"⚠️ Failed to read source toc.ncx: {e}")
+            return []
+
+        return entries
+
+    def _save_toc_translations_file(self, output_path: str, original: Dict[int, str], translated: Dict[int, str], refs: Dict[int, str]):
+        """Save TOC translations in the same block format as translated_headers.txt (robust parsing)."""
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write("TOC Translations\n")
+                f.write("=" * 50 + "\n\n")
+
+                nums = list(original.keys())
+                for num in nums:
+                    orig = original.get(num, "")
+                    trans = translated.get(num, orig)
+                    f.write(f"Chapter {num}:\n")
+                    f.write(f"  Original:   {orig}\n")
+                    f.write(f"  Translated: {trans}\n")
+                    if refs and num in refs and refs[num]:
+                        f.write(f"  Target URI: {refs[num]}\n")
+                    if num not in translated:
+                        f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                    f.write("-" * 40 + "\n")
+
+                f.write("\nSummary:\n")
+                f.write(f"Total entries: {len(nums)}\n")
+                if nums:
+                    f.write(f"Entry range: {min(nums)} to {max(nums)}\n")
+                f.write(f"Successfully translated: {len(translated)}\n")
+
+        except Exception as e:
+            self.log(f"⚠️ Failed to save TOC.txt: {e}")
+
+    def _load_toc_translations_file(self, toc_txt_path: str) -> Tuple[Dict[int, str], Dict[int, str], Dict[int, str]]:
+        """Load TOC translations from TOC.txt (same parser as translated_headers.txt)."""
+        try:
+            from translate_headers_standalone import load_translations_from_file
+            source_headers, translated, output_files = load_translations_from_file(toc_txt_path, self.log)
+            return source_headers or {}, translated or {}, output_files or {}
+        except Exception:
+            return {}, {}, {}
+
+    def _retry_failed_toc_translations(
+        self,
+        toc_txt_path: str,
+        translator=None,
+        max_retry_attempts: int = None,
+    ) -> Tuple[Dict[int, str], Dict[int, str], Dict[int, str]]:
+        """Retry status-marked TOC.txt failures up to the configured limit."""
+        source, translated, output_files = self._load_toc_translations_file(
+            toc_txt_path
+        )
+        failed_numbers = [num for num in source if num not in translated]
+        if not failed_numbers:
+            # A cache that is already complete can still carry the Failed /
+            # Pending row an interrupted run left behind.
+            self._mark_complete_toc_progress_if_stale(source, translated)
+            return source, translated, output_files
+
+        from translate_headers_standalone import (
+            get_failed_translation_retry_attempts,
+        )
+
+        failed_entries = {num: source[num] for num in failed_numbers}
+        retry_attempts = get_failed_translation_retry_attempts(
+            max_retry_attempts
+        )
+        self.log(
+            f"🔁 Retrying {len(failed_entries)} failed source TOC "
+            f"translation(s), up to {retry_attempts} API attempt(s)..."
+        )
+
+        headers_file = os.path.join(self.output_dir, 'translated_headers.txt')
+        reused, remaining = self._cross_reference_from_other_file(
+            failed_entries,
+            headers_file,
+            'toc',
+        )
+        recycled_keys = getattr(
+            self, '_toc_recycled_header_keys_current', None
+        )
+        if reused and isinstance(recycled_keys, set):
+            recycled_keys.update(reused)
+        recovered: Dict[int, str] = dict(reused)
+
+        if recovered:
+            translated.update(recovered)
+            self._save_toc_translations_file(
+                toc_txt_path,
+                source,
+                translated,
+                output_files,
+            )
+            if not remaining:
+                # Every failed entry was recovered from translated_headers.txt,
+                # so no model was dispatched for this TOC repair.
+                try:
+                    from translation_artifacts import update_translation_artifact_progress
+                    update_translation_artifact_progress(
+                        self.output_dir,
+                        'toc',
+                        'completed',
+                        model_name='RECYCLED',
+                    )
+                except Exception:
+                    pass
+
+        if (
+            remaining
+            and retry_attempts > 0
+            and translator is None
+            and getattr(self, 'api_client', None)
+        ):
+            from metadata_batch_translator import BatchHeaderTranslator
+
+            retry_config = {
+                'batch_header_system_prompt': os.environ.get(
+                    'BATCH_HEADER_SYSTEM_PROMPT'
+                ),
+                'batch_header_prompt': os.environ.get('BATCH_HEADER_PROMPT'),
+                'output_language': os.environ.get('OUTPUT_LANGUAGE'),
+                'output_dir': self.output_dir,
+                'source_path': getattr(self, 'epub_path', ''),
+            }
+            translator = BatchHeaderTranslator(self.api_client, retry_config)
+
+        if remaining and translator is not None and retry_attempts > 0:
+            for attempt in range(1, retry_attempts + 1):
+                pending = {
+                    num: title
+                    for num, title in remaining.items()
+                    if num not in recovered
+                }
+                if not pending:
+                    break
+                if getattr(translator, 'stop_flag', False):
+                    self.log(
+                        "⏹️ Source TOC retranslation stopped before the next "
+                        "retry attempt"
+                    )
+                    break
+
+                self.log(
+                    f"🌐 TOC retry attempt {attempt}/{retry_attempts}: sending "
+                    f"{len(pending)} failed source TOC entry(ies)..."
+                )
+                try:
+                    batch_size = int(
+                        os.environ.get('TOC_NCX_PER_BATCH', '-1')
+                    )
+                    batch_size = batch_size if batch_size > 0 else None
+                    api_translations: Dict[int, str] = {}
+
+                    if (
+                        os.environ.get(
+                            'SKIP_DUPLICATE_TOC_TRANSLATION', '0'
+                        ) == '1'
+                    ):
+                        unique_entries: Dict[int, str] = {}
+                        first_index_by_label: Dict[str, int] = {}
+                        for num, label in pending.items():
+                            key = (label or '').strip()
+                            if key not in first_index_by_label:
+                                first_index_by_label[key] = num
+                                unique_entries[num] = label
+                        unique_translations = (
+                            translator.translate_headers_batch(
+                                unique_entries,
+                                batch_size=batch_size,
+                                translation_type='toc',
+                            ) or {}
+                        )
+                        for num, label in pending.items():
+                            first_num = first_index_by_label.get(
+                                (label or '').strip(), num
+                            )
+                            if unique_translations.get(first_num):
+                                api_translations[num] = (
+                                    unique_translations[first_num]
+                                )
+                    else:
+                        api_translations = translator.translate_headers_batch(
+                            pending,
+                            batch_size=batch_size,
+                            translation_type='toc',
+                        ) or {}
+
+                    recovered_this_attempt = {
+                        num: title
+                        for num, title in api_translations.items()
+                        if num in pending and title
+                    }
+                    if recovered_this_attempt:
+                        recovered.update(recovered_this_attempt)
+                        translated.update(recovered_this_attempt)
+                        self._save_toc_translations_file(
+                            toc_txt_path,
+                            source,
+                            translated,
+                            output_files,
+                        )
+                except Exception as exc:
+                    self.log(
+                        f"⚠️ Source TOC retranslation attempt "
+                        f"{attempt}/{retry_attempts} failed: {exc}"
+                    )
+        elif remaining and retry_attempts == 0:
+            self.log(
+                f"ℹ️ {len(remaining)} failed source TOC entry(ies) remain; "
+                "failed-entry API retries are disabled"
+            )
+        elif remaining and translator is None:
+            self.log(
+                f"⚠️ {len(remaining)} failed source TOC entry(ies) could not "
+                "be retried because no API translator is available"
+            )
+
+        unresolved_count = sum(
+            1 for num in failed_numbers if num not in translated
+        )
+        self.log(
+            f"✅ Recovered {len(recovered)}/{len(failed_numbers)} failed source "
+            f"TOC translation(s); {unresolved_count} remain failed"
+        )
+        if not unresolved_count:
+            # Recycled + API-retried entries together can complete the file
+            # even though neither step alone saw the whole TOC finished.
+            self._mark_complete_toc_progress_if_stale(source, translated)
+        return source, translated, output_files
+
+    def _mark_complete_toc_progress_if_stale(self, source, translated):
+        """Promote a leftover Failed/Pending TOC row once TOC.txt is complete.
+
+        The row's model label is kept (RECYCLED stays RECYCLED); only the
+        status is corrected. A row that is Completed or In Progress is left
+        alone.
+        """
+        if not source or any(
+            not str(translated.get(num) or '').strip() for num in source
+        ):
+            return False
+        try:
+            from translation_artifacts import (
+                load_translation_artifact_progress,
+                translation_artifact_progress_entry,
+                update_translation_artifact_progress,
+            )
+            progress = load_translation_artifact_progress(self.output_dir)
+            _key, entry = translation_artifact_progress_entry(progress, 'toc')
+            if not isinstance(entry, dict):
+                return False
+            status = str(entry.get('status') or '').strip().lower()
+            if status not in {'failed', 'error', 'pending'}:
+                return False
+            model_name = None
+            if not str(entry.get('model_name') or entry.get('model') or '').strip():
+                recycled = getattr(self, '_toc_recycled_header_keys_current', None)
+                if recycled:
+                    model_name = 'RECYCLED'
+            if update_translation_artifact_progress(
+                self.output_dir, 'toc', 'completed', model_name=model_name,
+            ):
+                self.log(
+                    f"✅ TOC.txt is complete ({len(source)} entries); "
+                    f"marked Table of Contents completed (was {status})"
+                )
+                return True
+        except Exception as exc:
+            self.log(f"⚠️ Could not update Table of Contents progress: {exc}")
+        return False
+
+    def _cross_reference_from_other_file(self, entries_to_translate: Dict[int, str],
+                                          other_file_path: str,
+                                          translation_type: str = 'toc') -> Tuple[Dict[int, str], Dict[int, str]]:
+        """Cross-reference entries against an existing translation file to reuse translations.
+
+        Before sending entries to the API for translation, check if the *other*
+        translation file (TOC.txt when translating headers, or translated_headers.txt
+        when translating TOC) already contains an identical raw entry.  If so,
+        reuse the existing translation to avoid redundant API calls and ensure
+        consistency between the two files.
+
+        Args:
+            entries_to_translate: Dict[int, str] mapping index -> raw text to translate
+            other_file_path: Path to the other translation file
+            translation_type: 'toc' or 'header' (for logging only)
+
+        Returns:
+            Tuple of (reused_translations, remaining_to_translate):
+            - reused_translations: entries whose translation was found in the other file
+            - remaining_to_translate: entries that still need an API call
+        """
+        reused: Dict[int, str] = {}
+        remaining: Dict[int, str] = dict(entries_to_translate)
+
+        if not other_file_path or not os.path.exists(other_file_path):
+            return reused, remaining
+
+        try:
+            from translate_headers_standalone import load_translations_from_file
+            other_originals, other_translated, _ = load_translations_from_file(
+                other_file_path, self.log
+            )
+
+            if not other_originals or not other_translated:
+                return reused, remaining
+
+            # Build a map: stripped raw text -> translated text from the other file
+            raw_to_translated: Dict[str, str] = {}
+            for idx, raw in other_originals.items():
+                key = (raw or '').strip()
+                if key and idx in other_translated:
+                    trans = (other_translated[idx] or '').strip()
+                    if trans and trans != key:
+                        raw_to_translated[key] = trans
+
+            if not raw_to_translated:
+                return reused, remaining
+
+            other_label = 'translated_headers.txt' if translation_type == 'toc' else 'TOC.txt'
+
+            # Match entries to translate against the other file's originals
+            for idx, raw in list(remaining.items()):
+                key = (raw or '').strip()
+                if key in raw_to_translated:
+                    reused[idx] = raw_to_translated[key]
+                    del remaining[idx]
+
+            if reused:
+                self.log(f"♻️ Reused {len(reused)}/{len(entries_to_translate)} "
+                         f"{translation_type} translation(s) from {other_label}")
+                # Show a few examples
+                for idx in list(reused.keys())[:3]:
+                    self.log(f"  ♻️ [{idx}] {entries_to_translate[idx]} → {reused[idx]}")
+                if len(reused) > 3:
+                    self.log(f"  ... and {len(reused) - 3} more")
+
+        except Exception as e:
+            self.log(f"⚠️ Cross-reference check failed ({e}) — will translate all entries")
+            remaining = dict(entries_to_translate)
+            reused = {}
+
+        return reused, remaining
+
+    def _reconcile_toc_and_headers(self):
+        """After both TOC and header translations complete, ensure consistency.
+
+        Loads both TOC.txt and translated_headers.txt and matches entries by the
+        OUTPUT FILE they point to (normalized), not by chapter number — the two
+        files legitimately number chapters differently. The chapter-header
+        translation is treated as authoritative (it comes from the actual
+        translated chapter content), so any TOC navLabel translation that
+        disagrees for the same output file is rewritten to match it. Falls back
+        to identical raw-source-text matching when no output-file match exists.
+        Only TOC.txt is updated; translated_headers.txt is left untouched.
+        """
+        toc_path = os.path.join(self.output_dir, 'TOC.txt')
+        headers_path = os.path.join(self.output_dir, 'translated_headers.txt')
+
+        if not os.path.exists(toc_path) or not os.path.exists(headers_path):
+            return
+
+        try:
+            source_epub_path = os.getenv('EPUB_PATH') or self.epub_path
+            from translate_headers_standalone import load_translations_from_file, repair_translation_file
+            
+            # ── Repair both files first to ensure structural consistency ──
+            try:
+                repair_translation_file(toc_path, source_epub_path, self.output_dir, log_callback=self.log)
+                repair_translation_file(headers_path, source_epub_path, self.output_dir, log_callback=self.log)
+            except Exception as e:
+                self.log(f"⚠️ Pre-reconciliation repair failed: {e}")
+
+            toc_orig, toc_trans, toc_out = load_translations_from_file(toc_path, self.log)
+            hdr_orig, hdr_trans, hdr_out = load_translations_from_file(headers_path, self.log)
+
+            if not toc_orig or not hdr_orig:
+                return
+
+            # ── Match by OUTPUT FILE (normalized), not chapter number ──
+            # TOC.txt (from toc.ncx navLabels) and translated_headers.txt (from the
+            # actual translated chapter headers) legitimately use *different* chapter
+            # numbering — e.g. translated_headers.txt counts the title/info page that
+            # toc.ncx omits — so the reliable cross-file key is the OUTPUT FILE each
+            # entry points to, never the chapter number. The chapter-header
+            # translation is derived from the real translated chapter content, so it
+            # is authoritative; a toc.ncx navLabel translation that disagrees (e.g.
+            # because the source label was corrupted) is rewritten to match it.
+            def _real_trans(trans: str, raw: str) -> bool:
+                t = (trans or '').strip()
+                return bool(t) and t != (raw or '').strip()
+
+            # Primary key: output-file core name -> clean header translation
+            hdr_by_core: Dict[str, str] = {}
+            for hidx, out_ref in hdr_out.items():
+                core = self._normalize_core_name(out_ref)
+                trans = (hdr_trans.get(hidx) or '').strip()
+                if core and _real_trans(trans, hdr_orig.get(hidx, '')):
+                    hdr_by_core.setdefault(core, trans)
+
+            # Secondary key: identical raw source text (used when no output-file match)
+            hdr_by_raw: Dict[str, str] = {}
+            for hidx, raw in hdr_orig.items():
+                key = (raw or '').strip()
+                trans = (hdr_trans.get(hidx) or '').strip()
+                if key and _real_trans(trans, key):
+                    hdr_by_raw.setdefault(key, trans)
+
+            if not hdr_by_core and not hdr_by_raw:
+                self.log("✅ TOC and header translations are already consistent")
+                return
+
+            # ── Rewrite TOC entries whose translation disagrees with the header ──
+            updates = 0
+            # Iterate every TOC record, including records whose failed fallback
+            # was excluded from toc_trans. A successful chapter-header cache can
+            # therefore repair a failed TOC cache entry, while a failed header
+            # can never become canonical because it is absent from hdr_trans.
+            for tidx in toc_orig:
+                toc_core = self._normalize_core_name(toc_out.get(tidx, ''))
+                toc_version = (toc_trans.get(tidx) or '').strip()
+                canonical = hdr_by_core.get(toc_core)
+                if not canonical:
+                    canonical = hdr_by_raw.get((toc_orig.get(tidx) or '').strip())
+                if canonical and canonical != toc_version:
+                    self.log(f"  [{tidx}] TOC \"{toc_version}\" → \"{canonical}\" (file: {toc_core or '?'})")
+                    toc_trans[tidx] = canonical
+                    updates += 1
+
+            if updates:
+                self._save_toc_translations_file(toc_path, toc_orig, toc_trans, toc_out)
+                self.log(f"✅ Reconciled {updates} TOC translation(s) with chapter headers (matched by output file)")
+            else:
+                self.log("✅ TOC and header translations are already consistent")
+
+        except Exception as e:
+            self.log(f"⚠️ Post-reconciliation failed: {e}")
+
+    def _build_toc_from_source_toc_ncx(self, spine: List, existing_toc: List, metadata: dict) -> List:
+        """Build TOC from source NCX/nav.xhtml and optionally cache translations."""
+        source_epub_path = os.getenv('EPUB_PATH')
+        if not source_epub_path or not os.path.exists(source_epub_path):
+            self.log("⚠️ USE_TOC_NCX enabled but EPUB_PATH is missing or invalid; using generated TOC")
+            return existing_toc
+
+        entries = self._extract_source_toc_ncx_entries(source_epub_path)
+        if not entries:
+            self.log(
+                "⚠️ USE_TOC_NCX enabled but no toc.ncx or EPUB 3 nav.xhtml "
+                "TOC entries were found; using generated TOC"
+            )
+            return existing_toc
+
+        # Build mapping from normalized core name -> actual spine href
+        spine_href_by_core: Dict[str, str] = {}
+        spine_items_for_order = []
+        for it in spine:
+            if not hasattr(it, 'file_name'):
+                continue
+            # Skip cover for mapping
+            if hasattr(it, 'title') and str(getattr(it, 'title', '')).strip().lower() == 'cover':
+                continue
+            # Skip gallery for mapping
+            if os.path.basename(it.file_name).lower() == 'gallery.xhtml':
+                continue
+            spine_items_for_order.append(it)
+            core = self._normalize_core_name(it.file_name)
+            if core and core not in spine_href_by_core:
+                spine_href_by_core[core] = it.file_name
+
+        # Fallback: map by OPF order (source filename order → spine chapter order)
+        # IMPORTANT: Only use positional mapping when source and output counts match exactly,
+        # because skipped/failed chapters cause the output spine to have fewer items,
+        # leading to off-by-one (or more) misalignment in positional mappings.
+        try:
+            opf_order = self._get_chapter_order_from_opf() or {}
+            if opf_order and spine_items_for_order:
+                ordered_source = [fn for fn, _ in sorted(opf_order.items(), key=lambda x: x[1])]
+                # Only use positional fallback if counts match (no skipped chapters)
+                if len(ordered_source) == len(spine_items_for_order):
+                    for i in range(len(ordered_source)):
+                        src_core = self._normalize_core_name(ordered_source[i])
+                        if src_core and src_core not in spine_href_by_core:
+                            spine_href_by_core[src_core] = spine_items_for_order[i].file_name
+                else:
+                    # Counts differ → chapters were skipped. Use name-matching instead
+                    # of positional mapping to avoid misalignment.
+                    output_core_map = {}
+                    for it in spine_items_for_order:
+                        oc = self._normalize_core_name(it.file_name)
+                        if oc and oc not in output_core_map:
+                            output_core_map[oc] = it.file_name
+                    for fn in ordered_source:
+                        src_core = self._normalize_core_name(fn)
+                        if src_core and src_core not in spine_href_by_core:
+                            if src_core in output_core_map:
+                                spine_href_by_core[src_core] = output_core_map[src_core]
+        except Exception:
+            pass
+
+        # Optional translation (single API call) with caching to TOC.txt
+        translations: Dict[int, str] = {}
+        toc_fully_recycled = False
+        toc_recycled_header_keys: Set[int] = set()
+        self._toc_recycled_header_keys_current = toc_recycled_header_keys
+        toc_filter_nums: Optional[Set[int]] = None
+        original: Dict[int, str] = {}
+        refs: Dict[int, str] = {}
+        for idx, ent in enumerate(entries, 1):
+            if toc_filter_nums is not None and idx not in toc_filter_nums:
+                # Entry was removed from TOC.txt by user; skip it entirely
+                continue
+            original[idx] = ent.get('label', '') or ''
+            refs[idx] = ent.get('src', '') or ''
+
+        if getattr(self, 'translate_toc_ncx', False):
+            toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
+            if os.path.exists(toc_txt_path):
+                self.log("📁 Found existing TOC.txt - using cached source TOC translations")
+                toc_source_headers, translations, toc_output_files = (
+                    self._retry_failed_toc_translations(toc_txt_path)
+                )
+                # If TOC.txt exists, treat it as authoritative: only include entries present in the file.
+                if toc_source_headers:
+                    toc_filter_nums = set(toc_source_headers.keys())
+                    
+                    # --- Retroactive Fix: Correct Target URIs ---
+                    # Compute the correct target URIs from toc.ncx (preserving fragments/extensions)
+                    correct_output_refs: Dict[int, str] = {}
+                    for _idx, _ent in enumerate(entries, 1):
+                        _src = (_ent.get('src') or '').strip()
+                        if not _src:
+                            _fallback = refs.get(_idx, '')
+                            correct_output_refs[_idx] = os.path.basename(_fallback) if _fallback else ''
+                            continue
+                        _src_base, _frag = (_src.split('#', 1) + [''])[:2] if '#' in _src else (_src, '')
+                        _core = self._normalize_core_name(_src_base)
+                        _target = spine_href_by_core.get(_core)
+                        _resolved = _target if _target else _src_base
+                        _final_src = f"{os.path.basename(_resolved)}#{_frag}" if _frag else os.path.basename(_resolved)
+                        correct_output_refs[_idx] = _final_src
+                    
+                    # Check if any loaded refs differ from the correct ones (only for existing toc items)
+                    needs_uri_fix = False
+                    for _k in toc_source_headers.keys():
+                        if correct_output_refs.get(_k) != toc_output_files.get(_k):
+                            needs_uri_fix = True
+                            break
+                            
+                    if needs_uri_fix:
+                        self.log("🔧 Retroactively fixing malformed Target URIs in existing TOC.txt")
+                        self._save_toc_translations_file(toc_txt_path, toc_source_headers, translations, correct_output_refs)
+                        toc_output_files = correct_output_refs
+                
+                # --- Reconcile: detect new entries added to the source EPUB ---
+                existing_toc_nums = set(toc_source_headers.keys()) if toc_source_headers else set()
+                current_toc_nums = set(original.keys())
+                new_toc_nums = current_toc_nums - existing_toc_nums
+                
+                if new_toc_nums:
+                    self.log(f"📦 Source EPUB has {len(new_toc_nums)} NEW toc.ncx entry(ies) not in TOC.txt: {sorted(new_toc_nums)}")
+                    
+                    # Translate only the new entries
+                    new_toc_to_translate = {n: original[n] for n in sorted(new_toc_nums)}
+                    
+                    # ── Cross-reference new entries from translated_headers.txt ──
+                    _headers_file = os.path.join(self.output_dir, 'translated_headers.txt')
+                    _reused_toc, _api_toc_remaining = self._cross_reference_from_other_file(
+                        new_toc_to_translate, _headers_file, 'toc'
+                    )
+                    toc_recycled_header_keys.update(_reused_toc)
+                    
+                    new_toc_translations = _reused_toc.copy()
+                    new_toc_translator = None
+                    if getattr(self, 'api_client', None):
+                        try:
+                            if _api_toc_remaining:
+                                from metadata_batch_translator import BatchHeaderTranslator
+                                _bt_config = {
+                                    'output_dir': self.output_dir,
+                                    'source_path': getattr(self, 'epub_path', ''),
+                                }
+                                if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
+                                    _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
+                                if os.environ.get('BATCH_HEADER_PROMPT'):
+                                    _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
+                                if os.environ.get('OUTPUT_LANGUAGE'):
+                                    _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
+                                tr = BatchHeaderTranslator(self.api_client, _bt_config)
+                                new_toc_translator = tr
+                                toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
+                                _api_trans = tr.translate_headers_batch(
+                                    _api_toc_remaining,
+                                    batch_size=toc_ncx_per_batch if toc_ncx_per_batch > 0 else None,
+                                    translation_type='toc'
+                                ) or {}
+                                new_toc_translations.update(_api_trans)
+                            else:
+                                self.log("♻️ All new TOC entries were reused from cached file; skipping API call.")
+                            
+                            if new_toc_nums:
+                                if new_toc_translations:
+                                    self.log(f"✅ Translated/Reused {len(new_toc_translations)} new TOC entry(ies)")
+                                else:
+                                    self.log(
+                                        f"⚠️ Initial translation failed for all {len(new_toc_nums)} "
+                                        "new TOC entries; recording them for immediate retry"
+                                    )
+                                translations.update(new_toc_translations)
+                                
+                                # Compute target URIs for new entries (preserve fragments and extensions)
+                                new_output_refs = {}
+                                for _idx in new_toc_nums:
+                                    if _idx <= len(entries):
+                                        _ent = entries[_idx - 1]
+                                        _src = (_ent.get('src') or '').strip()
+                                        if _src:
+                                            _src_base, _frag = (_src.split('#', 1) + [''])[:2] if '#' in _src else (_src, '')
+                                            _core = self._normalize_core_name(_src_base)
+                                            _target = spine_href_by_core.get(_core)
+                                            _resolved = _target if _target else _src_base
+                                            _final_src = f"{os.path.basename(_resolved)}#{_frag}" if _frag else os.path.basename(_resolved)
+                                            new_output_refs[_idx] = _final_src
+                                        else:
+                                            _fallback = refs.get(_idx, '')
+                                            new_output_refs[_idx] = os.path.basename(_fallback) if _fallback else ''
+                                
+                                # Append new entries to the existing file
+                                try:
+                                    with open(toc_txt_path, 'r', encoding='utf-8') as f:
+                                        existing_content = f.read()
+                                    
+                                    import re as _re
+                                    summary_match = _re.search(r'\nSummary:\n', existing_content)
+                                    if summary_match:
+                                        existing_content = existing_content[:summary_match.start()]
+                                    
+                                    with open(toc_txt_path, 'w', encoding='utf-8') as f:
+                                        f.write(existing_content.rstrip('\n') + '\n')
+                                        
+                                        for num in sorted(new_toc_nums):
+                                            orig = original.get(num, "")
+                                            trans = new_toc_translations.get(num, orig)
+                                            f.write(f"Chapter {num}:\n")
+                                            f.write(f"  Original:   {orig}\n")
+                                            f.write(f"  Translated: {trans}\n")
+                                            if new_output_refs.get(num):
+                                                f.write(f"  Output File: {new_output_refs[num]}\n")
+                                            if num not in new_toc_translations:
+                                                f.write("  Status:     ⚠️ Using original (translation failed)\n")
+                                            f.write("-" * 40 + "\n")
+                                        
+                                        all_toc_nums = sorted(existing_toc_nums | new_toc_nums)
+                                        f.write(f"\nSummary:\n")
+                                        f.write(f"Total entries: {len(all_toc_nums)}\n")
+                                        if all_toc_nums:
+                                            f.write(f"Entry range: {min(all_toc_nums)} to {max(all_toc_nums)}\n")
+                                        f.write(f"Successfully translated: {len(translations)}\n")
+                                    
+                                    self.log(f"📝 Updated TOC.txt with {len(new_toc_translations)} new entries")
+                                    
+                                    # ── IMMEDIATE REPAIR TO ENSURE SORTING AND METADATA ──
+                                    try:
+                                        from translate_headers_standalone import repair_translation_file
+                                        source_epub_path = os.getenv('EPUB_PATH') or self.epub_path
+                                        repair_translation_file(toc_txt_path, source_epub_path, self.output_dir, log_callback=self.log)
+                                    except Exception as repair_err:
+                                        self.log(f"⚠️ Post-append repair check failed: {repair_err}")
+
+                                    # A partial API response writes failed
+                                    # records for the missing new entries. Retry
+                                    # those records immediately on this run.
+                                    (
+                                        toc_source_headers,
+                                        translations,
+                                        toc_output_files,
+                                    ) = self._retry_failed_toc_translations(
+                                        toc_txt_path,
+                                        translator=new_toc_translator,
+                                    )
+                                        
+                                except Exception as append_err:
+                                    self.log(f"⚠️ Failed to update TOC.txt: {append_err}")
+                            else:
+                                self.log("⚠️ Translation of new TOC entries returned no results — using originals")
+                                for num in new_toc_nums:
+                                    translations[num] = original[num]
+                        except Exception as new_trans_err:
+                            self.log(f"⚠️ Failed to translate new TOC entries: {new_trans_err}")
+                            for num in new_toc_nums:
+                                translations[num] = original[num]
+                    else:
+                        self.log("⚠️ No API client available — using original labels for new TOC entries")
+                        for num in new_toc_nums:
+                            translations[num] = original[num]
+                    
+                    # Update filter to include the new entries
+                    if toc_filter_nums is not None:
+                        toc_filter_nums.update(new_toc_nums)
+            else:
+                if not getattr(self, 'api_client', None):
+                    self.log("⚠️ TRANSLATE_TOC_NCX enabled but API client is not initialized; using original toc.ncx labels")
+                    translations = {}
+                else:
+                    toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
+                    if toc_ncx_per_batch <= 0:
+                        # Auto-calculate based on output token limit / compression factor
+                        max_output_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
+                        compression_factor = float(os.environ.get('COMPRESSION_FACTOR', '3.0'))
+                        if compression_factor <= 0:
+                            compression_factor = 3.0
+                        available_tokens = int(max_output_tokens / compression_factor)
+                        # ~50 tokens per TOC entry (title text + JSON key/formatting overhead)
+                        toc_ncx_per_batch = max(10, available_tokens // 50)
+                        self.log(f"📐 Auto toc.ncx batch size: {toc_ncx_per_batch} entries "
+                                 f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
+                                 f"{available_tokens:,} available tokens, ~50 tok/entry)")
+                    self.log(f"🌐 Translating {len(original)} source TOC entries in chunks of {toc_ncx_per_batch}...")
+                    try:
+                        from metadata_batch_translator import BatchHeaderTranslator
+                        # Build config from env vars set by GUI so user's custom prompts are used
+                        _bt_config = {
+                            'output_dir': self.output_dir,
+                            'source_path': getattr(self, 'epub_path', ''),
+                        }
+                        if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
+                            _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
+                        if os.environ.get('BATCH_HEADER_PROMPT'):
+                            _bt_config['batch_header_prompt'] = os.environ['BATCH_HEADER_PROMPT']
+                        if os.environ.get('OUTPUT_LANGUAGE'):
+                            _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
+                        tr = BatchHeaderTranslator(self.api_client, _bt_config)
+
+                        # ── Cross-reference: reuse translations from translated_headers.txt ──
+                        headers_file = os.path.join(self.output_dir, 'translated_headers.txt')
+                        reused_from_headers, toc_remaining = self._cross_reference_from_other_file(
+                            original, headers_file, 'toc'
+                        )
+                        if reused_from_headers:
+                            translations.update(reused_from_headers)
+                            toc_recycled_header_keys.update(reused_from_headers)
+
+                        # Only send entries that weren't reused to the API
+                        entries_for_api = toc_remaining if toc_remaining else {}
+                        toc_fully_recycled = (
+                            bool(reused_from_headers) and not entries_for_api
+                        )
+
+                        if entries_for_api:
+                            skip_dup_translate = os.environ.get('SKIP_DUPLICATE_TOC_TRANSLATION', '0') == '1'
+                            if skip_dup_translate:
+                                unique_original: Dict[int, str] = {}
+                                first_idx_by_label: Dict[str, int] = {}
+                                for idx, label in entries_for_api.items():
+                                    key = (label or '').strip()
+                                    if key in first_idx_by_label:
+                                        continue
+                                    first_idx_by_label[key] = idx
+                                    unique_original[idx] = label
+                                self.log(f"🔁 Skip duplicate translation enabled: {len(unique_original)}/{len(entries_for_api)} unique labels")
+                                unique_translations = tr.translate_headers_batch(unique_original, batch_size=toc_ncx_per_batch, translation_type='toc') or {}
+                                for idx, label in entries_for_api.items():
+                                    key = (label or '').strip()
+                                    first_idx = first_idx_by_label.get(key, idx)
+                                    if first_idx in unique_translations:
+                                        translations[idx] = unique_translations[first_idx]
+                            else:
+                                api_translations = tr.translate_headers_batch(entries_for_api, batch_size=toc_ncx_per_batch, translation_type='toc') or {}
+                                translations.update(api_translations)
+                        elif reused_from_headers:
+                            self.log("♻️ All TOC entries were reused from translated_headers.txt — no API call needed")
+                        if original:
+                            # Pre-compute actual output paths so "Output File" shows
+                            # the path in the built EPUB, not the raw NCX src.
+                            # Strip file extensions to prevent double-extension issues.
+                            output_refs: Dict[int, str] = {}
+                            for _idx, _ent in enumerate(entries, 1):
+                                _src = (_ent.get('src') or '').strip()
+                                if not _src:
+                                    _fallback = refs.get(_idx, '')
+                                    output_refs[_idx] = os.path.basename(_fallback) if _fallback else ''
+                                    continue
+                                _src_base, _frag = (_src.split('#', 1) + [''])[:2] if '#' in _src else (_src, '')
+                                _core = self._normalize_core_name(_src_base)
+                                _target = spine_href_by_core.get(_core)
+                                _resolved = _target if _target else _src_base
+                                _final_src = f"{os.path.basename(_resolved)}#{_frag}" if _frag else os.path.basename(_resolved)
+                                output_refs[_idx] = _final_src
+                            self._save_toc_translations_file(toc_txt_path, original, translations, output_refs)
+                            self.log(f"✅ Saved TOC translations cache: {toc_txt_path}")
+                            _, translations, _ = self._retry_failed_toc_translations(
+                                toc_txt_path,
+                                translator=tr,
+                            )
+                            if toc_fully_recycled:
+                                try:
+                                    from translation_artifacts import update_translation_artifact_progress
+                                    update_translation_artifact_progress(
+                                        self.output_dir,
+                                        'toc',
+                                        'completed',
+                                        model_name='RECYCLED',
+                                    )
+                                except Exception:
+                                    pass
+                        else:
+                            self.log(f"⚠️ toc.ncx translation returned no results - skipping cache (will retry next run)")
+                    except Exception as e:
+                        self.log(f"⚠️ toc.ncx translation failed: {e}")
+                        translations = {}
+
+            # A hard stop can arrive after translated_headers.txt entries were
+            # copied into TOC.txt but before the remaining TOC entries receive
+            # an API response. Preserve the resulting Pending/Failed status,
+            # but replace its model provenance with RECYCLED so the progress
+            # view records the dependency on the partial header cache.
+            if toc_recycled_header_keys and self._translation_stop_requested():
+                try:
+                    cached_source, cached_translations, _cached_outputs = (
+                        self._load_toc_translations_file(toc_txt_path)
+                    )
+                    cached_valid_keys = {
+                        key for key, value in cached_translations.items()
+                        if str(value or '').strip()
+                    }
+                    recycled_keys_written = (
+                        toc_recycled_header_keys & cached_valid_keys
+                    )
+                    unresolved_keys = set(cached_source) - cached_valid_keys
+                    if recycled_keys_written and unresolved_keys:
+                        from translation_artifacts import (
+                            load_translation_artifact_progress,
+                            translation_artifact_progress_entry,
+                            update_translation_artifact_progress,
+                        )
+                        progress = load_translation_artifact_progress(
+                            self.output_dir
+                        )
+                        _progress_key, progress_entry = (
+                            translation_artifact_progress_entry(progress, 'toc')
+                        )
+                        current_status = str(
+                            (progress_entry or {}).get('status') or 'pending'
+                        ).strip().lower()
+                        if current_status in {'in_progress', 'completed'}:
+                            # The cache is demonstrably incomplete at this
+                            # point, so neither status can remain authoritative.
+                            current_status = 'pending'
+                        if current_status not in {
+                            'pending', 'failed', 'error',
+                        }:
+                            current_status = 'pending'
+                        update_translation_artifact_progress(
+                            self.output_dir,
+                            'toc',
+                            current_status,
+                            model_name='RECYCLED',
+                        )
+                        self.log(
+                            f"♻️ Preserved RECYCLED model info for stopped "
+                            f"partial TOC ({len(recycled_keys_written)} reused, "
+                            f"{len(unresolved_keys)} pending)"
+                        )
+                except Exception as progress_error:
+                    self.log(
+                        "⚠️ Could not preserve stopped partial TOC "
+                        f"RECYCLED progress info: {progress_error}"
+                    )
+
+        # Build toc links in source toc.ncx order
+        toc_links = []
+        missing = 0
+        seen_labels = set()
+        dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+        dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
+        # Optional "Prepend number pattern" (Other Settings → Chapter
+        # Headers): applied to the labels written into the compiled book's
+        # TOC/NCX — the TOC.txt / translated_headers.txt caches stay clean.
+        # Offsets use the SOURCE NCX ENTRY POSITION (idx - 1), the same
+        # base the chapter <h1> numbering uses, so TOC and headers always
+        # agree. The helper is idempotent, so already-numbered labels
+        # pass through.
+        try:
+            from metadata_batch_translator import (
+                get_header_prepend_number_pattern, prepend_number_pattern_to_label)
+            _toc_prepend_pattern = get_header_prepend_number_pattern()
+        except Exception:
+            _toc_prepend_pattern = ''
+        for idx, ent in enumerate(entries, 1):
+            if toc_filter_nums is not None and idx not in toc_filter_nums:
+                # Entry was removed from TOC.txt by user; skip it entirely
+                continue
+            src = (ent.get('src') or '').strip()
+            raw_label = original.get(idx) or (ent.get('label') or '').strip()
+            label = translations.get(idx) or raw_label
+            if not src:
+                continue
+            if dedup_enabled:
+                key = label if dedup_use_translated else raw_label
+                if key in seen_labels:
+                    continue
+                seen_labels.add(key)
+
+            frag = ''
+            src_base = src
+            if '#' in src:
+                src_base, frag = src.split('#', 1)
+
+            core = self._normalize_core_name(src_base)
+            target_base = spine_href_by_core.get(core)
+            if not target_base:
+                missing += 1
+                continue
+
+            # Ensure the target HTML actually exists before linking (dynamic fallback roots)
+            def _path_exists_with_fallback(rel_path: str) -> bool:
+                if not rel_path:
+                    return False
+                # Build all candidate relative paths:
+                # - original, with/without Text/ prefix
+                # - with response_ prefix and alternate extensions
+                base_candidates = [rel_path]
+                norm_rel = rel_path.replace('\\', '/')
+                if norm_rel.lower().startswith('text/'):
+                    base_candidates.append(norm_rel[5:])
+                else:
+                    base_candidates.append(f"Text/{norm_rel}")
+
+                # Also try response_ prefix + alternate extensions
+                _alt_exts = ['.html', '.xhtml', '.htm']
+                expanded = []
+                for cand in base_candidates:
+                    expanded.append(cand)
+                    cand_dir = os.path.dirname(cand)
+                    cand_base = os.path.basename(cand)
+                    cand_core, cand_ext = os.path.splitext(cand_base)
+                    # Strip stacked extensions
+                    while cand_ext and cand_ext.lower() in ('.html', '.xhtml', '.htm', '.xml'):
+                        cand_core_next, cand_ext_next = os.path.splitext(cand_core)
+                        if cand_ext_next and cand_ext_next.lower() in ('.html', '.xhtml', '.htm', '.xml'):
+                            cand_core = cand_core_next
+                            cand_ext = cand_ext_next
+                        else:
+                            break
+                    # Try with response_ prefix
+                    if not cand_base.startswith('response_'):
+                        for ext in _alt_exts:
+                            resp_name = f"response_{cand_core}{ext}"
+                            expanded.append(os.path.join(cand_dir, resp_name) if cand_dir else resp_name)
+                    # Try without response_ prefix + alternate extensions
+                    bare_core = cand_core
+                    if bare_core.startswith('response_'):
+                        bare_core = bare_core[9:]
+                    for ext in _alt_exts:
+                        if ext != cand_ext:
+                            expanded.append(os.path.join(cand_dir, f"{bare_core}{ext}") if cand_dir else f"{bare_core}{ext}")
+
+                # Direct path check
+                for cand in expanded:
+                    direct = os.path.normpath(os.path.join(self.output_dir, cand))
+                    if (
+                        not _is_forbidden_epub_source_path(direct, self.output_dir)
+                        and os.path.exists(direct)
+                    ):
+                        return True
+                # Dynamically discover likely roots by locating any HTML/XHTML files
+                roots = set()
+                try:
+                    for root_dir, dirnames, files in os.walk(self.output_dir):
+                        dirnames[:] = [
+                            dirname for dirname in dirnames
+                            if dirname.casefold() not in _EPUB_FORBIDDEN_SOURCE_DIRS
+                        ]
+                        if _is_forbidden_epub_source_path(root_dir, self.output_dir):
+                            continue
+                        if any(f.lower().endswith(('.html', '.htm', '.xhtml')) for f in files):
+                            roots.add(root_dir)
+                    # Prefer shorter paths first
+                    candidate_roots = sorted(roots, key=lambda p: len(p))
+                except Exception:
+                    candidate_roots = []
+                for root_dir in candidate_roots:
+                    for cand in expanded:
+                        candidate = os.path.normpath(os.path.join(root_dir, cand))
+                        if (
+                            not _is_forbidden_epub_source_path(candidate, self.output_dir)
+                            and os.path.exists(candidate)
+                        ):
+                            return True
+
+                # Final fallback: scan output dir for any HTML file matching core name
+                # This catches double extensions like .htm.xhtml, .html.html, etc.
+                _html_exts_set = {'.html', '.xhtml', '.htm', '.xml'}
+                def _core_of(fn):
+                    n = fn
+                    if n.startswith('response_'):
+                        n = n[9:]
+                    while True:
+                        b, e = os.path.splitext(n)
+                        if e and e.lower() in _html_exts_set:
+                            n = b
+                        else:
+                            break
+                    return n.lower().strip()
+
+                target_core = _core_of(os.path.basename(rel_path))
+                if target_core:
+                    try:
+                        for f in os.listdir(self.output_dir):
+                            if f.lower().endswith(('.html', '.htm', '.xhtml')) and os.path.isfile(os.path.join(self.output_dir, f)):
+                                if _core_of(f) == target_core:
+                                    return True
+                    except Exception:
+                        pass
+
+                return False
+
+            if not _path_exists_with_fallback(target_base):
+                missing += 1
+                continue
+
+            target_href = target_base
+            if frag:
+                target_href = f"{target_href}#{frag}"
+
+            if _toc_prepend_pattern:
+                label = prepend_number_pattern_to_label(
+                    _toc_prepend_pattern, label, idx - 1)
+
+            try:
+                toc_links.append(epub.Link(target_href, label or os.path.basename(target_base), f"toc_{idx}"))
+            except Exception:
+                # If Link construction fails for any reason, skip
+                missing += 1
+
+        # Preserve any non-chapter TOC entries we added (e.g., gallery)
+        extras = []
+        for it in existing_toc:
+            try:
+                if hasattr(it, 'file_name') and os.path.basename(it.file_name).lower() == 'gallery.xhtml':
+                    extras.append(it)
+            except Exception:
+                continue
+
+        if missing:
+            self.log(f"⚠️ toc.ncx mapping: skipped {missing} entry(ies) that couldn't be matched to output chapters")
+        self.log(f"✅ Built TOC from source toc.ncx: {len(toc_links)} entries")
+
+        # TOC.txt has now been (re)written this run. Reconcile it against the
+        # chapter headers so any corrupted/garbled navLabel translation is
+        # replaced by the clean chapter-header translation (matched by output
+        # file). This also corrects stale entries loaded from a cached TOC.txt.
+        if getattr(self, 'translate_toc_ncx', False):
+            try:
+                self._reconcile_toc_and_headers()
+            except Exception as _recon_err:
+                self.log(f"⚠️ TOC/header reconciliation after build failed: {_recon_err}")
+
+        return toc_links + extras
+
+    def _create_nav_content(self, toc_items, book_title="Book"):
+        """Create navigation content manually"""
+        # Use the same primary language as the rest of the book for nav.xhtml
+        # We read from XHTMLConverter.DEFAULT_LANG, which is kept in sync with book language.
+        lang = getattr(XHTMLConverter, "DEFAULT_LANG", "en")
+        nav_content = f'''<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">
+    <head>
+    <title>Table of Contents</title>
+    </head>
+    <body>
+    <nav epub:type="toc" id="toc">
+    <h1>Table of Contents</h1>
+    <ol>'''
+        
+        # The toc_items are already sorted properly by _finalize_book
+        # Don't re-sort them here - just use them as-is
+        for item in toc_items:
+            href = None
+            title = None
+
+            # EpubHtml
+            if hasattr(item, 'title') and hasattr(item, 'file_name'):
+                href = item.file_name
+                title = item.title
+            # epub.Link
+            elif hasattr(item, 'title') and hasattr(item, 'href'):
+                href = item.href
+                title = item.title
+
+            if href and title is not None:
+                nav_content += f'\n<li><a href="{href}">{ContentProcessor.safe_escape(str(title))}</a></li>'
+        
+        nav_content += '''
+    </ol>
+    </nav>
+    </body>
+    </html>'''
+        
+        return nav_content
+
+
+    def _get_order_from_progress_file(self, progress_file: str) -> Dict[str, int]:
+        """Get chapter order from translation_progress.json
+        Returns dict mapping original_filename -> chapter_number
+        """
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                progress_data = json.load(f)
+            
+            filename_to_order = {}
+            
+            # Extract chapter order from progress data
+            chapters = progress_data.get('chapters', {})
+            
+            for chapter_key, chapter_info in chapters.items():
+                # Get the original basename from progress data
+                original_basename = chapter_info.get('original_basename', '')
+                if original_basename:
+                    # Map to chapter position (key is usually the chapter number)
+                    try:
+                        chapter_num = int(chapter_key)
+                        filename_to_order[original_basename] = chapter_num - 1  # Convert to 0-based
+                        self.log(f"  Progress mapping: {original_basename} -> Chapter {chapter_num}")
+                    except (ValueError, TypeError):
+                        pass
+            
+            return filename_to_order if filename_to_order else None
+            
+        except Exception as e:
+            self.log(f"⚠️ Error reading translation_progress.json: {e}")
+            return None
+
+    def _finalize_book(self, book: epub.EpubBook, spine: List, toc: List, 
+                      cover_file: Optional[str]):
+        """Finalize book structure"""
+        legacy = getattr(self, 'legacy_epub_structure', False)
+        # Check if we should use NCX-only
+        use_ncx_only = legacy or (os.environ.get('FORCE_NCX_ONLY', '0') == '1')
+        
+        # Check if first item in spine is a cover
+        has_cover = False
+        cover_item = None
+        if spine and len(spine) > 0:
+            first_item = spine[0]
+            if hasattr(first_item, 'title') and first_item.title == "Cover":
+                has_cover = True
+                cover_item = first_item
+                spine = spine[1:]  # Remove cover from spine temporarily
+        
+        def _href_without_fragment(h: str) -> str:
+            if not h:
+                return ''
+            return h.split('#', 1)[0]
+
+        def _get_toc_href(it):
+            # EpubHtml
+            if hasattr(it, 'file_name'):
+                return getattr(it, 'file_name', '')
+            # epub.Link
+            if hasattr(it, 'href'):
+                return getattr(it, 'href', '')
+            return ''
+
+        if has_cover and cover_item is not None:
+            cover_href = _href_without_fragment(_get_toc_href(cover_item))
+            if cover_href:
+                before_toc_count = len(toc)
+                toc = [
+                    item for item in toc
+                    if _href_without_fragment(_get_toc_href(item)) != cover_href
+                ]
+                removed_cover_toc = before_toc_count - len(toc)
+                if removed_cover_toc:
+                    self.log(f"📔 Removed cover page from EPUB TOC ({removed_cover_toc} entry)")
+
+        # DEBUG: Log what we have before sorting (only if debug mode is enabled)
+        debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
+        if debug_mode_enabled:
+            self.log("\n[DEBUG] Before sorting TOC:")
+            self.log("Spine order:")
+            for idx, item in enumerate(spine):
+                if hasattr(item, 'file_name') and hasattr(item, 'title'):
+                    self.log(f"  Spine[{idx}]: {item.file_name} -> {item.title}")
+
+            self.log("TOC order:")
+            for idx, item in enumerate(toc):
+                href = _get_toc_href(item)
+                title = getattr(item, 'title', '') if hasattr(item, 'title') else ''
+                if href:
+                    self.log(f"  TOC[{idx}]: {href} -> {title}")
+
+        # CRITICAL FIX: Sort TOC to match spine order
+        # Create a mapping of target href to spine position
+        spine_order_full = {}
+        spine_order_base = {}
+        for idx, item in enumerate(spine):
+            if hasattr(item, 'file_name'):
+                full = getattr(item, 'file_name', '')
+                if not full:
+                    continue
+                full_base = _href_without_fragment(full)
+                spine_order_full[full_base] = idx
+                spine_order_base[os.path.basename(full_base)] = idx
+
+        # Sort the TOC based on spine order
+        sorted_toc = []
+        unsorted_items = []
+
+        for toc_item in toc:
+            href = _href_without_fragment(_get_toc_href(toc_item))
+            if href and href in spine_order_full:
+                sorted_toc.append((spine_order_full[href], toc_item))
+            elif href and os.path.basename(href) in spine_order_base:
+                sorted_toc.append((spine_order_base[os.path.basename(href)], toc_item))
+            else:
+                # Items not in spine (like gallery) go at the end
+                unsorted_items.append(toc_item)
+
+        # Sort by spine position
+        sorted_toc.sort(key=lambda x: x[0])
+
+        # Extract just the items (remove the sort key)
+        final_toc = [item for _, item in sorted_toc]
+
+        # Add any unsorted items at the end (like gallery)
+        final_toc.extend(unsorted_items)
+
+        # Deduplicate TOC entries if enabled
+        dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+        dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
+        if dedup_enabled:
+            seen_titles = set()
+            deduped_toc = []
+            removed = 0
+            for item in final_toc:
+                title = getattr(item, 'title', '') if hasattr(item, 'title') else ''
+                key = (title or '').strip()
+                if key and key in seen_titles:
+                    removed += 1
+                    continue
+                if key:
+                    seen_titles.add(key)
+                deduped_toc.append(item)
+            if removed:
+                self.log(f"🔁 Deduplicated EPUB TOC: removed {removed} duplicate entries ({len(deduped_toc)} remaining)")
+            final_toc = deduped_toc
+
+        # DEBUG: Log after sorting (only if debug mode is enabled)
+        if debug_mode_enabled:
+            self.log("\nTOC order (after sorting to match spine):")
+            for idx, item in enumerate(final_toc):
+                href = _get_toc_href(item)
+                title = getattr(item, 'title', '') if hasattr(item, 'title') else ''
+                if href:
+                    self.log(f"  TOC[{idx}]: {href} -> {title}")
+        
+        # Set the sorted TOC
+        book.toc = final_toc
+        
+        # Add NCX
+        ncx = epub.EpubNcx()
+        book.add_item(ncx)
+        
+        if use_ncx_only:
+            self.log(f"[INFO] NCX-only navigation forced - {len(final_toc)} chapters")
+            
+            # Build final spine: Cover (if exists) → Chapters
+            final_spine = []
+            if has_cover:
+                final_spine.append(cover_item)
+            final_spine.extend(spine)
+            
+            book.spine = final_spine
+            
+            if legacy:
+                self.log("📖 Using EPUB2 (legacy OEBPS/Text structure)")
+            else:
+                self.log("📖 Using EPUB 3.3 with NCX navigation only")
+            if has_cover:
+                self.log("📖 Reading order: Cover → Chapters")
+            else:
+                self.log("📖 Reading order: Chapters")
+                
+        else:
+            # Normal EPUB3 processing with Nav
+            self.log(f"[INFO] EPUB3 format - {len(final_toc)} chapters")
+            
+            # Create Nav with manual content using SORTED TOC
+            nav = epub.EpubNav()
+            nav.content = self._create_nav_content(final_toc, book.title).encode('utf-8')
+            nav.uid = 'nav'
+            nav.file_name = 'nav.xhtml'
+            book.add_item(nav)
+            
+            # Build final spine: Cover (if exists) → Nav → Chapters
+            final_spine = []
+            if has_cover:
+                final_spine.append(cover_item)
+            final_spine.append(nav)
+            final_spine.extend(spine)
+            
+            book.spine = final_spine
+            
+            self.log("📖 Using EPUB3 format with full navigation")
+            if has_cover:
+                self.log("📖 Reading order: Cover → Table of Contents → Chapters")
+            else:
+                self.log("📖 Reading order: Table of Contents → Chapters")
+
+    def _write_epub(self, book: epub.EpubBook, metadata: dict):
+        """Write EPUB file with automatic format selection"""
+        import time
+        import threading
+        
+        # Determine output filename
+        book_title = book.title
+        if book_title and book_title != os.path.basename(self.output_dir):
+            safe_filename = FileUtils.sanitize_filename_for_windows_path(
+                book_title,
+                self.output_dir,
+                extension=".epub",
+                allow_unicode=True,
+            )
+            original_filename = str(book_title or "").strip()
+            if safe_filename != original_filename:
+                preview = original_filename if len(original_filename) <= 120 else f"{original_filename[:117]}..."
+                self.log(f"[INFO] Adjusted EPUB filename for Windows compatibility: {preview!r} -> {safe_filename!r}")
+            out_path = os.path.join(self.output_dir, f"{safe_filename}.epub")
+        else:
+            base_name = os.path.basename(self.output_dir)
+            safe_filename = FileUtils.sanitize_filename_for_windows_path(
+                base_name,
+                self.output_dir,
+                extension=".epub",
+                allow_unicode=True,
+            )
+            if safe_filename != str(base_name or "").strip():
+                self.log(f"[INFO] Adjusted EPUB filename for Windows compatibility: {base_name!r} -> {safe_filename!r}")
+            out_path = os.path.join(self.output_dir, f"{safe_filename}.epub")
+        
+        # Check stop flag before starting the write operation
+        if self.is_stopped():
+            self.log("🛑 EPUB write cancelled - stop requested before write started")
+            return
+        
+        self.log(f"\n[DEBUG] Writing EPUB to: {out_path}")
+        
+        # Test if we can write to the target file BEFORE generating EPUB
+        try:
+            # Try to open the file in write mode to detect if it's locked
+            with open(out_path, 'ab') as test_file:
+                pass  # Just checking if we can open it
+        except PermissionError as e:
+            self.log(f"[ERROR] Cannot write to file - it may be opened in another program")
+            self.log(f"[ERROR] File: {out_path}")
+            self.log(f"[ERROR] Details: {e}")
+            raise Exception(f"File is locked or inaccessible: {out_path}") from e
+        except Exception as e:
+            self.log(f"[ERROR] Cannot access file for writing: {e}")
+            raise
+        
+        self.log("⏳ Writing EPUB file... (this may take a while for large files)")
+        
+        # Track elapsed time with periodic updates
+        start_time = time.time()
+        write_completed = threading.Event()
+        
+        def progress_logger():
+            """Log progress every 5 seconds during write"""
+            while not write_completed.is_set():
+                if write_completed.wait(5):  # Wait 5 seconds or until completed
+                    break
+                # Check stop flag during write
+                if self.is_stopped():
+                    elapsed = time.time() - start_time
+                    self.log(f"⏳ Still writing... ({elapsed:.0f}s elapsed) - Stop requested, will finish current write operation")
+                else:
+                    elapsed = time.time() - start_time
+                    self.log(f"⏳ Still writing... ({elapsed:.0f}s elapsed)")
+        
+        # Start progress logger thread
+        logger_thread = threading.Thread(target=progress_logger, daemon=True)
+        logger_thread.start()
+        
+        # Write as EPUB2 when legacy structure is enabled, otherwise EPUB3
+        try:
+            legacy = getattr(self, 'legacy_epub_structure', False)
+            opts = {'epub3': (not legacy)}
+            epub.write_epub(out_path, book, opts)
+            write_completed.set()  # Signal completion
+            logger_thread.join(timeout=1)  # Wait for logger to finish
+            
+            # Check if stop was requested during write
+            if self.is_stopped():
+                elapsed = time.time() - start_time
+                if legacy:
+                    self.log(f"[SUCCESS] Written as EPUB2 (took {elapsed:.1f}s) - Write completed before stop")
+                else:
+                    self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s) - Write completed before stop")
+                self.log("🛑 Note: Stop was requested but write operation finished normally")
+            else:
+                elapsed = time.time() - start_time
+                if legacy:
+                    self.log(f"[SUCCESS] Written as EPUB2 (took {elapsed:.1f}s)")
+                else:
+                    self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s)")
+            self.last_epub_output_path = out_path
+            replacement_path = _replace_organized_library_epub(
+                out_path, self.output_dir, self.log
+            )
+            if replacement_path:
+                self.last_epub_output_path = replacement_path
+            
+        except Exception as e:
+            self.log(f"[ERROR] Write failed: {e}")
+            raise
+        
+        # Verify the final file. Organized library replacements remove
+        # out_path after copying it into Library/Translated.
+        final_path = self.last_epub_output_path or out_path
+        if os.path.exists(final_path):
+            file_size = os.path.getsize(final_path)
+            if file_size > 0:
+                self.log(f"✅ EPUB created: {final_path}")
+                self.log(f"📊 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                if getattr(self, 'legacy_epub_structure', False):
+                    self.log("📝 Format: EPUB2 (legacy OEBPS/Text structure)")
+                else:
+                    self.log("📝 Format: EPUB 3.3")
+            else:
+                raise Exception("EPUB file is empty")
+        else:
+            raise Exception("EPUB file was not created")
+    
+    def _show_summary(self, chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                     css_items: List[epub.EpubItem]):
+        """Show compilation summary"""
+        if chapter_titles_info:
+            high = sum(1 for _, (_, conf, _) in chapter_titles_info.items() if conf > 0.7)
+            medium = sum(1 for _, (_, conf, _) in chapter_titles_info.items() if 0.4 < conf <= 0.7)
+            low = sum(1 for _, (_, conf, _) in chapter_titles_info.items() if conf <= 0.4)
+            
+            self.log(f"\n📊 Title Extraction Summary:")
+            self.log(f"   • High confidence: {high} chapters")
+            self.log(f"   • Medium confidence: {medium} chapters")
+            self.log(f"   • Low confidence: {low} chapters")
+        
+        if css_items:
+            self.log(f"\n✅ Successfully embedded {len(css_items)} CSS files")
+        # Gallery status
+        if os.environ.get('DISABLE_EPUB_GALLERY', '0') == '1':
+            self.log("\n📷 Image Gallery: Disabled by user preference")
+        
+        self.log("\n📱 Compatibility Notes:")
+        self.log("   • XHTML 1.1 compliant")
+        self.log("   • All tags properly closed")
+        self.log("   • Special characters escaped")
+        self.log("   • Extracted translated titles")
+        self.log("   • Enhanced entity decoding")
+
+
+    def _compress_images(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> Tuple[Dict[str, str], Optional[str]]:
+        """Compress images in parallel: convert to .webp, with configurable cover/GIF exclusion and quality"""
+        try:
+            from PIL import Image
+        except ImportError:
+            self.log("⚠️ Pillow not installed - image compression disabled. Install with: pip install Pillow")
+            return processed_images, cover_file
+        
+        import time as _time
+        
+        # Read compression settings
+        quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+        exclude_cover = os.environ.get('EXCLUDE_COVER_COMPRESSION', '1') == '1'
+        exclude_gif = os.environ.get('EXCLUDE_GIF_COMPRESSION', '1') == '1'
+        
+        self.log(f"\n🗜️ Compressing images (quality: {quality}%, exclude cover: {exclude_cover}, exclude GIF: {exclude_gif})...")
+        
+        new_processed = {}
+        new_cover = cover_file
+        compressed_count = 0
+        skipped_count = 0
+        total_original_bytes = 0
+        total_compressed_bytes = 0
+        
+        # Separate items into compressible and skippable
+        compress_jobs = []  # (original_name, safe_name, is_gif)
+        
+        for original_name, safe_name in processed_images.items():
+            img_path = os.path.join(self.images_dir, original_name)
+            if not os.path.isfile(img_path):
+                new_processed[original_name] = safe_name
+                continue
+            
+            ext = os.path.splitext(original_name)[1].lower()
+            is_cover = (safe_name == cover_file)
+            is_gif = (ext == '.gif')
+            
+            # Skip cover page if excluded
+            if is_cover and exclude_cover:
+                self.log(f"  ⏭️ Skipping cover: {original_name}")
+                new_processed[original_name] = safe_name
+                skipped_count += 1
+                continue
+            
+            # Skip GIF if excluded
+            if is_gif and exclude_gif:
+                self.log(f"  ⏭️ Skipping GIF: {original_name}")
+                new_processed[original_name] = safe_name
+                skipped_count += 1
+                continue
+            
+            compress_jobs.append((original_name, safe_name, is_gif, is_cover))
+        
+        if not compress_jobs:
+            self.log(f"✅ Image compression complete: 0 to compress, {skipped_count} skipped")
+            return new_processed, new_cover
+        
+        # Use ProcessPoolExecutor for true parallel compression
+        _env_workers = os.environ.get('EXTRACTION_WORKERS', '')
+        if _env_workers and _env_workers.isdigit() and int(_env_workers) >= 1:
+            num_workers = int(_env_workers)
+        else:
+            num_workers = max(2, (os.cpu_count() or 4) - 1)
+        self.log(f"  🔧 Compressing {len(compress_jobs)} images with {num_workers} workers...")
+        start_time = _time.time()
+        
+        def _fmt_size(b):
+            if b >= 1024 * 1024:
+                return f"{b / 1024 / 1024:.1f}MB"
+            elif b >= 1024:
+                return f"{b / 1024:.0f}KB"
+            return f"{b}B"
+        
+        import threading
+        _heartbeat_stop = threading.Event()
+        _completed_count = [0]  # mutable for closure
+        total_jobs = len(compress_jobs)
+        
+        def _heartbeat():
+            while not _heartbeat_stop.is_set():
+                if _heartbeat_stop.wait(3.0):
+                    break
+                elapsed = _time.time() - start_time
+                done = _completed_count[0]
+                if done == 0:
+                    self.log(f"  ⏳ Waiting for compression workers... ({elapsed:.1f}s elapsed)")
+                else:
+                    self.log(f"  ⏳ Compressing... {done}/{total_jobs} ({elapsed:.1f}s elapsed)")
+        
+        heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+        heartbeat_thread.start()
+        
+        # ── Spawn lightweight subprocess workers ────────────────────────────
+        # Using subprocess.Popen instead of ProcessPoolExecutor because PPE
+        # re-imports __main__ (the heavy GUI) in every worker on Windows (~30s).
+        # Subprocess workers run _compress_worker.py as __main__ (~1s).
+        import subprocess as _sp
+        
+        # Build command for frozen exe vs dev mode
+        if getattr(sys, 'frozen', False):
+            _worker_cmd = [sys.executable, '--run-compress-worker']
+        else:
+            _worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_compress_worker.py')
+            _worker_cmd = [sys.executable, _worker_script]
+        
+        _env = os.environ.copy()
+        _env['PYTHONIOENCODING'] = 'utf-8'
+        
+        # Spawn worker processes (none where subprocesses are unavailable:
+        # the sequential fallback below then compresses in-process)
+        workers = []
+        for _ in range(num_workers if mobile_runtime.subprocesses_available() else 0):
+            try:
+                p = _sp.Popen(
+                    _worker_cmd, stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.DEVNULL,
+                    env=_env, bufsize=0,
+                    creationflags=_sp.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                workers.append(p)
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to spawn compression worker: {e}")
+        self._active_compress_workers = workers  # Store for cleanup on shutdown
+        
+        if not workers:
+            self.log("  ⚠️ No compression workers could be started, falling back to sequential")
+            for original_name, safe_name, is_gif, is_cover in compress_jobs:
+                result = _compress_single_image(self.images_dir, original_name, safe_name, quality, is_gif)
+                new_processed[original_name] = result.get('new_safe_name', safe_name)
+                _completed_count[0] += 1
+            _heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1)
+            return new_processed, new_cover
+        
+        # Wait for all workers to signal READY
+        import select
+        ready_workers = []
+        for p in workers:
+            try:
+                line = p.stdout.readline().decode('utf-8', errors='replace').strip()
+                if line == 'READY':
+                    ready_workers.append(p)
+                else:
+                    p.terminate()
+            except Exception:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+        workers = ready_workers
+        
+        if not workers:
+            self.log("  ⚠️ No workers became ready, falling back to sequential")
+            for original_name, safe_name, is_gif, is_cover in compress_jobs:
+                result = _compress_single_image(self.images_dir, original_name, safe_name, quality, is_gif)
+                new_processed[original_name] = result.get('new_safe_name', safe_name)
+                _completed_count[0] += 1
+            _heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1)
+            return new_processed, new_cover
+        
+        self.log(f"  ✅ {len(workers)} compression workers ready")
+        
+        # Dispatch jobs using per-worker threads to avoid pipe deadlocks.
+        # Each thread: send job → read result → send next → read next → ...
+        import json as _json
+        import threading
+        
+        # Split jobs round-robin across workers
+        worker_job_lists = [[] for _ in range(len(workers))]
+        for job_idx, job in enumerate(compress_jobs):
+            worker_job_lists[job_idx % len(workers)].append(job)
+        
+        # Shared state for results (protected by lock)
+        _results_lock = threading.Lock()
+        
+        def _worker_thread(w_idx, proc, jobs):
+            """Send jobs one at a time and read result after each, avoiding pipe buffer buildup."""
+            nonlocal compressed_count, skipped_count, total_original_bytes, total_compressed_bytes, new_cover
+            for original_name, safe_name, is_gif, is_cover in jobs:
+                if self.is_stopped():
+                    with _results_lock:
+                        new_processed[original_name] = safe_name
+                    continue
+                
+                # Send one job
+                job_data = _json.dumps({
+                    'images_dir': self.images_dir,
+                    'original_name': original_name,
+                    'safe_name': safe_name,
+                    'quality': quality,
+                    'is_gif': is_gif
+                }) + '\n'
+                try:
+                    proc.stdin.write(job_data.encode('utf-8'))
+                    proc.stdin.flush()
+                except Exception as e:
+                    with _results_lock:
+                        self.log(f"  ⚠️ Failed to send job to worker: {e}")
+                        new_processed[original_name] = safe_name
+                        skipped_count += 1
+                        _completed_count[0] += 1
+                    continue
+                
+                # Read the result immediately
+                try:
+                    line = proc.stdout.readline().decode('utf-8', errors='replace').strip()
+                    if not line:
+                        with _results_lock:
+                            new_processed[original_name] = safe_name
+                            skipped_count += 1
+                            _completed_count[0] += 1
+                        continue
+                    result = _json.loads(line)
+                except Exception as e:
+                    with _results_lock:
+                        self.log(f"  ⚠️ Failed to read result for {original_name}: {e}")
+                        new_processed[original_name] = safe_name
+                        skipped_count += 1
+                        _completed_count[0] += 1
+                    continue
+                
+                with _results_lock:
+                    _completed_count[0] += 1
+                    
+                    if result['status'] == 'compressed':
+                        new_processed[original_name] = result['new_safe_name']
+                        compressed_count += 1
+                        orig_sz = result['original_size']
+                        comp_sz = result['compressed_size']
+                        total_original_bytes += orig_sz
+                        total_compressed_bytes += comp_sz
+                        
+                        if orig_sz > 0:
+                            saved_pct = (1 - comp_sz / orig_sz) * 100
+                            self.log(f"  🗜️ {original_name} → {result['new_safe_name']} "
+                                    f"{_fmt_size(orig_sz)} → {_fmt_size(comp_sz)} ({saved_pct:.0f}% saved)")
+                        
+                        if is_cover:
+                            new_cover = result['new_safe_name']
+                        
+                    elif result['status'] == 'failed':
+                        self.log(f"  ⚠️ Failed to compress {original_name}: {result['error']}")
+                        new_processed[original_name] = safe_name
+                        skipped_count += 1
+                    else:
+                        new_processed[original_name] = safe_name
+            
+            # Signal this worker is done — close stdin
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+        
+        # Launch a thread per worker
+        threads = []
+        for w_idx in range(len(workers)):
+            t = threading.Thread(
+                target=_worker_thread,
+                args=(w_idx, workers[w_idx], worker_job_lists[w_idx]),
+                daemon=True
+            )
+            t.start()
+            threads.append(t)
+        
+        # Wait for all threads to finish
+        for t in threads:
+            t.join()
+        
+        # Clean up worker processes
+        for p in workers:
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        
+        _heartbeat_stop.set()
+        heartbeat_thread.join(timeout=1)
+        
+        elapsed = _time.time() - start_time
+        
+        # Summary log (skip if stopped — the 🛑 message already covered it)
+        if not self.is_stopped():
+            if total_original_bytes > 0:
+                total_saved_pct = (1 - total_compressed_bytes / total_original_bytes) * 100
+                self.log(f"✅ Image compression complete in {elapsed:.1f}s: {compressed_count} compressed, {skipped_count} skipped")
+                self.log(f"   📊 Total: {_fmt_size(total_original_bytes)} → {_fmt_size(total_compressed_bytes)} ({total_saved_pct:.0f}% saved)")
+            else:
+                self.log(f"✅ Image compression complete in {elapsed:.1f}s: {compressed_count} compressed, {skipped_count} skipped")
+        
+        return new_processed, new_cover
+
+    def _generate_pdf(self, html_files: List[str], chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                      processed_images: Dict[str, str], cover_file: Optional[str], metadata: dict):
+        """Generate PDF from the output folder using WeasyPrint"""
+        import time as _time
+        
+        # Ensure fontconfig is available on Windows for WeasyPrint
+        import tempfile as _tempfile
+        if not os.environ.get("FONTCONFIG_FILE"):
+            _fc_dir = _tempfile.mkdtemp(prefix="fontconfig_")
+            _fc_path = os.path.join(_fc_dir, "fonts.conf")
+            if not os.path.exists(_fc_path):
+                with open(_fc_path, "w", encoding="utf-8") as _f:
+                    _f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+                             '<fontconfig><dir>WINDOWSFONTDIR</dir>'
+                             '<cachedir>~/.cache/fontconfig</cachedir></fontconfig>\n')
+            os.environ["FONTCONFIG_FILE"] = _fc_path
+            os.environ["FONTCONFIG_PATH"] = _fc_dir
+            os.environ["FC_CONFIG_FILE"] = _fc_path
+        
+        import pdf_mupdf_html
+        if pdf_mupdf_html.is_selected():
+            from pdf_mupdf_html import HTML as WeasyHTML
+            self.log(f"📄 PDF engine: {pdf_mupdf_html.ENGINE_NAME} (PyMuPDF Story, WeasyPrint subset)")
+        else:
+            try:
+                from weasyprint import HTML as WeasyHTML
+            except ImportError:
+                self.log("⚠️ WeasyPrint not installed - PDF generation disabled. Install with: pip install weasyprint")
+                self.log("   Also requires GTK libraries. See: https://doc.courtbouillon.org/weasyprint/stable/first_steps.html")
+                return
+        
+        self.log("\n📄 Generating PDF...")
+        start_time = _time.time()
+        
+        settings = {
+            'page_numbers': os.environ.get('PDF_PAGE_NUMBERS', '1') == '1',
+            'page_number_alignment': os.environ.get('PDF_PAGE_NUMBER_ALIGNMENT', 'center'),
+            'toc': os.environ.get('PDF_GENERATE_TOC', '1') == '1',
+            'toc_numbers': os.environ.get('PDF_TOC_PAGE_NUMBERS', '1') == '1',
+        }
+        
+        # Determine PDF output path
+        book_title = metadata.get('title', os.path.basename(self.output_dir))
+        safe_title = FileUtils.sanitize_filename_for_windows_path(
+            book_title,
+            self.output_dir,
+            extension=".pdf",
+            allow_unicode=True,
+        )
+        pdf_path = os.path.join(self.output_dir, f"{safe_title}.pdf")
+        
+        self.log(f"  PDF output: {pdf_path}")
+        self.log(f"  Settings: page_numbers={settings['page_numbers']}, toc={settings['toc']}, "
+                 f"toc_numbers={settings['toc_numbers']}, alignment={settings['page_number_alignment']}")
+        compression_enabled = os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1'
+        if compression_enabled:
+            pdf_img_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').upper()
+            if pdf_img_fmt == 'PNG':
+                img_detail = f"format=PNG"
+            else:
+                img_quality = os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
+                img_detail = f"format=JPEG, quality={img_quality}"
+            self.log(f"  Image: compression=enabled, {img_detail}")
+        else:
+            self.log(f"  Image: compression=disabled")
+        
+        import base64
+        import re
+        import threading
+        
+        # Build image lookup from images directory
+        _mime_fallback = {
+            '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.png': 'image/png', '.gif': 'image/gif', '.bmp': 'image/bmp',
+            '.svg': 'image/svg+xml',
+        }
+        images_by_name = {}
+        if os.path.isdir(self.images_dir):
+            for fname in os.listdir(self.images_dir):
+                fpath = os.path.join(self.images_dir, fname)
+                if os.path.isfile(fpath):
+                    ctype, _ = mimetypes.guess_type(fpath)
+                    if not ctype:
+                        ctype = _mime_fallback.get(os.path.splitext(fname)[1].lower())
+                    if ctype and ctype.startswith('image/'):
+                        images_by_name[fname] = (fpath, ctype)
+                        # Also index without extension for flexible matching
+                        base = os.path.splitext(fname)[0]
+                        images_by_name[base] = (fpath, ctype)
+        
+        def _read_image_as_pdf_compatible(fpath, ctype):
+            """Read image bytes, converting webp to JPEG/PNG since WeasyPrint does not support webp.
+            When ENABLE_IMAGE_COMPRESSION is off, converts to lossless PNG to avoid quality loss.
+            When enabled, respects PDF_IMAGE_FORMAT, IMAGE_COMPRESSION_QUALITY, and PDF_PNG_OPTIMIZE settings."""
+            if ctype == 'image/webp':
+                try:
+                    from PIL import Image
+                    from io import BytesIO
+                    _compression_on = os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1'
+                    with open_image(fpath) as img:
+                        buf = BytesIO()
+                        if not _compression_on:
+                            # Compression disabled: convert to lossless PNG
+                            if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                                img = img.convert('RGBA')
+                            img.save(buf, format='PNG')
+                            return buf.getvalue(), 'image/png'
+                        # Compression enabled: respect user format/quality settings
+                        pdf_fmt = os.environ.get('PDF_IMAGE_FORMAT', 'jpeg').lower()
+                        if pdf_fmt == 'png':
+                            # PNG: preserves transparency
+                            optimize = os.environ.get('PDF_PNG_OPTIMIZE', '1') == '1'
+                            compress_level = int(os.environ.get('PDF_PNG_COMPRESS_LEVEL', '6'))
+                            if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                                img = img.convert('RGBA')
+                            img.save(buf, format='PNG', optimize=optimize, compress_level=compress_level)
+                            return buf.getvalue(), 'image/png'
+                        else:
+                            # JPEG: lossy with quality control, flatten transparency
+                            quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+                            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                                background = Image.new('RGB', img.size, (255, 255, 255))
+                                if img.mode != 'RGBA':
+                                    img = img.convert('RGBA')
+                                background.paste(img, mask=img.split()[3])
+                                img = background
+                            elif img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            img.save(buf, format='JPEG', quality=quality, optimize=True)
+                            return buf.getvalue(), 'image/jpeg'
+                except Exception:
+                    pass
+            with open(fpath, 'rb') as f:
+                return f.read(), ctype
+        
+        # ── Pre-build ALL data URIs in parallel ────────────────────────────
+        # Instead of converting each image on-the-fly during the chapter loop,
+        # we pre-convert all images using a thread pool. This parallelizes the
+        # I/O + PIL conversion + base64 encoding across all cores.
+        _data_uri_cache = {}  # key (fname or base) -> data URI string
+        
+        # Deduplicate: only process each unique (fpath, ctype) once
+        _unique_images = {}  # fpath -> (ctype, [keys])
+        for key, (fpath, ctype) in images_by_name.items():
+            if fpath not in _unique_images:
+                _unique_images[fpath] = (ctype, [])
+            _unique_images[fpath][1].append(key)
+        
+        num_images = len(_unique_images)
+        if num_images > 0:
+            num_workers = int(os.environ.get('EXTRACTION_WORKERS', '4'))
+            num_workers = max(1, min(num_workers, num_images))
+            self.log(f"  🖼️ Pre-converting {num_images} images for PDF with {num_workers} threads...")
+            
+            _img_done = [0]
+            _img_lock = threading.Lock()
+            
+            def _convert_one_image(fpath, ctype, keys):
+                """Convert a single image to data URI and cache it under all its keys."""
+                try:
+                    img_bytes, final_ctype = _read_image_as_pdf_compatible(fpath, ctype)
+                    b64 = base64.b64encode(img_bytes).decode('utf-8')
+                    data_uri = f"data:{final_ctype};base64,{b64}"
+                    for k in keys:
+                        _data_uri_cache[k] = data_uri
+                except Exception:
+                    pass
+                with _img_lock:
+                    _img_done[0] += 1
+                    done = _img_done[0]
+                if done % 500 == 0 or done == num_images:
+                    self.log(f"  🖼️ Pre-converted {done}/{num_images} images")
+            
+            with ThreadPoolExecutor(max_workers=num_workers) as img_executor:
+                futures = []
+                for fpath, (ctype, keys) in _unique_images.items():
+                    if self.is_stopped():
+                        break
+                    futures.append(img_executor.submit(_convert_one_image, fpath, ctype, keys))
+                # Wait for all to complete
+                for f in futures:
+                    f.result()  # propagate exceptions if any
+            
+            self.log(f"  ✅ Image pre-conversion complete ({len(_data_uri_cache)} cache entries)")
+        
+        def _data_uri_for_src(src_value):
+            """Convert image src to data URI using pre-built cache"""
+            if not src_value or src_value.startswith('data:'):
+                return None
+            from urllib.parse import unquote
+            raw = unquote(src_value).replace('\\', '/')
+            filename = os.path.basename(raw)
+            
+            # Try exact match, then basename, then basename without extension
+            for key in [raw, filename, os.path.splitext(filename)[0]]:
+                if key in _data_uri_cache:
+                    return _data_uri_cache[key]
+            return None
+        
+        def _embed_images_in_html(content):
+            """Replace image src attributes AND CSS url() references with data URIs"""
+            def replace_attr(match):
+                attr = match.group(1)
+                quote = match.group(2)
+                src_value = match.group(3)
+                data_uri = _data_uri_for_src(src_value)
+                if data_uri:
+                    return f'{attr}={quote}{data_uri}{quote}'
+                return match.group(0)
+            content = re.sub(
+                r'(\b(?:src|href|xlink:href)\b)\s*=\s*([\'"])([^\'"]+)\2',
+                replace_attr, content, flags=re.IGNORECASE
+            )
+            # Also replace CSS url() references (inline styles, <style> blocks)
+            def replace_css_url(match):
+                quote = match.group(1) or ''
+                url_value = match.group(2)
+                if url_value.startswith('data:'):
+                    return match.group(0)
+                data_uri = _data_uri_for_src(url_value)
+                if data_uri:
+                    return f'url("{data_uri}")'
+                return match.group(0)
+            content = re.sub(
+                r'url\(\s*([\'"]?)([^\'")\s]+)\1\s*\)',
+                replace_css_url, content, flags=re.IGNORECASE
+            )
+            return content
+        
+        def _extract_body_content(html_content):
+            """Extract just the <body> inner content from a full HTML document to avoid nested HTML."""
+            body_match = re.search(r'<body[^>]*>(.*)</body>', html_content, re.DOTALL | re.IGNORECASE)
+            if body_match:
+                return body_match.group(1)
+            return html_content
+
+        def _rewrite_epub_hrefs(content, epub_file_map):
+            """Convert EPUB relative file hrefs to PDF internal anchors.
+            Uses #chapter-N (always exists) when the file is in the map.
+            Falls back to the raw #fragment only when the file is unknown.
+            """
+            def _replace(m):
+                val = m.group(1)
+                # Leave absolute URLs, data URIs, and already-internal anchors unchanged
+                low = val.lower()
+                if low.startswith(('#', 'data:', 'http://', 'https://', 'mailto:', 'tel:')):
+                    return m.group(0)
+                # Must look like a relative file reference
+                if not any(c in val for c in ('/', '.xhtml', '.html', '.htm')):
+                    return m.group(0)
+                # Extract file basename (strip fragment and query string)
+                file_part = val.split('#')[0].split('?')[0]
+                basename = os.path.basename(file_part)
+                # Prefer the guaranteed #chapter-N anchor from the map
+                anchor = epub_file_map.get(basename)
+                if anchor:
+                    return f'href="{anchor}"'
+                # File not in map — fall back to raw fragment if present
+                if '#' in val:
+                    frag = val.split('#', 1)[1]
+                    if frag:
+                        return f'href="#{frag}"'
+                return m.group(0)
+            return re.sub(r'href="([^"]*)"', _replace, content, flags=re.IGNORECASE)
+
+        # Collect CSS
+        styles = ""
+        if os.path.isdir(self.css_dir):
+            for css_file in sorted(os.listdir(self.css_dir)):
+                if css_file.endswith('.css'):
+                    try:
+                        with open(os.path.join(self.css_dir, css_file), 'r', encoding='utf-8') as f:
+                            styles += f.read() + "\n"
+                    except Exception:
+                        pass
+        
+        # Override any @page rules from EPUB CSS that may set margin: 0 (which clips page number footers)
+        styles += " @page { margin: 15mm; } "
+
+        # Add image styles for PDF rendering
+        styles += " img { max-width: 100%; height: auto; display: block; margin: 10px auto; } "
+        # Imported EPUB CSS can assign bookmark-level to paragraphs or arbitrary
+        # elements. Render no CSS-derived outline entries; one bookmark per
+        # source HTML file is injected from chapter anchors after rendering.
+        styles += " body * { bookmark-level: none !important; } "
+        # Neutralize legacy per-source-page markers in already translated
+        # bookmark-section HTML (the body cleaner removes their standard form).
+        styles += " .pdf-toc-page-break { display: none !important; break-before: auto !important; page-break-before: auto !important; break-after: auto !important; page-break-after: auto !important; } "
+        
+        # Page number CSS
+        alignment = settings['page_number_alignment']
+        page_position = f'@bottom-{alignment}' if alignment != 'center' else '@bottom-center'
+        if settings['page_numbers']:
+            styles += f" @page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }} "
+        
+        # Deduplication settings (match EPUB TOC behaviour)
+        _dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+        _dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
+        _seen_bm_titles = set()
+
+        # Embed any image url() references in collected CSS (e.g. background-image)
+        # so WeasyPrint doesn't try to resolve renamed .jpg -> .webp paths
+        styles = _embed_images_in_html(styles)
+
+        # Process chapters
+        documents = []
+        chapter_page_map = {}
+        current_page = 0
+        
+        # Render cover page first (TOC goes after cover)
+        if cover_file:
+            try:
+                # Find the actual cover file in the images directory
+                cover_path = None
+                for fname in os.listdir(self.images_dir):
+                    fpath = os.path.join(self.images_dir, fname)
+                    if os.path.isfile(fpath):
+                        # Match by safe name or by base name
+                        if fname == cover_file or os.path.splitext(fname)[0] == os.path.splitext(cover_file)[0]:
+                            cover_path = fpath
+                            break
+                
+                if cover_path:
+                    ctype, _ = mimetypes.guess_type(cover_path)
+                    if not ctype:
+                        ctype = _mime_fallback.get(os.path.splitext(cover_path)[1].lower())
+                    if ctype and ctype.startswith('image/'):
+                        cover_bytes, cover_ctype = _read_image_as_pdf_compatible(cover_path, ctype)
+                        b64 = base64.b64encode(cover_bytes).decode('utf-8')
+                        cover_data_uri = f"data:{cover_ctype};base64,{b64}"
+                        cover_html = (
+                            f'<html><head><style>'
+                            f'@page {{ margin: 0; }}'
+                            f'@page {{ @bottom-left {{ content: none; }} @bottom-center {{ content: none; }} @bottom-right {{ content: none; }} }}'
+                            f'body {{ margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }}'
+                            f'img {{ max-width: 100%; max-height: 100%; object-fit: contain; }}'
+                            f'</style></head><body>'
+                            f'<img src="{cover_data_uri}" alt="Cover" />'
+                            f'</body></html>'
+                        )
+                        cover_doc = WeasyHTML(string=cover_html, base_url=self.output_dir).render()
+                        documents.append(cover_doc)
+                        current_page += len(cover_doc.pages)
+                        self.log(f"  ✅ Added cover page to PDF")
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to add cover to PDF: {e}")
+        
+        # TOC dry run to estimate page count (after cover, before chapters)
+        toc_page_count = 0
+        toc_insert_index = len(documents)  # Insert TOC after whatever is already in documents (cover)
+        if settings['toc']:
+            self.log("  Calculating TOC size...")
+            dummy_toc_html = self._build_pdf_toc_html(chapter_titles_info, settings, None)
+            # TOC page should not have page numbers
+            toc_css = "<style>@page { @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }</style>"
+            dummy_toc_html = dummy_toc_html.replace("</head>", f"{toc_css}</head>")
+            try:
+                toc_doc = WeasyHTML(string=dummy_toc_html, base_url=self.output_dir).render()
+                toc_page_count = len(toc_doc.pages)
+            except Exception as e:
+                self.log(f"  ⚠️ TOC size estimation failed: {e}")
+                toc_page_count = 1
+            current_page += toc_page_count
+            self.log(f"  Estimated TOC: {toc_page_count} pages")
+        
+        # Create mapping from source filename to chapter number for TOC
+        source_to_chapter = {}
+        for chap_num, (title, conf, source) in chapter_titles_info.items():
+            if source:
+                source_to_chapter[source] = chap_num
+
+        # Build EPUB filename -> PDF chapter anchor map from the source EPUB OPF spine
+        epub_file_map = {}
+        _epub_path = os.environ.get('EPUB_PATH', '')
+        if _epub_path and os.path.exists(_epub_path):
+            try:
+                import zipfile as _zf_mod
+                with _zf_mod.ZipFile(_epub_path) as _zf:
+                    _container = _zf.read('META-INF/container.xml').decode('utf-8', errors='replace')
+                    _opf_m = re.search(r'full-path="([^"]+)"', _container)
+                    if _opf_m:
+                        _opf_txt = _zf.read(_opf_m.group(1)).decode('utf-8', errors='replace')
+                        _manifest = {m.group(1): m.group(2)
+                                     for m in re.finditer(r'<item\b[^>]*\bid="([^"]+)"[^>]*\bhref="([^"]+)"', _opf_txt)}
+                        _spine_hrefs = []
+                        for _iid in re.findall(r'<itemref\b[^>]*\bidref="([^"]+)"', _opf_txt):
+                            _href = _manifest.get(_iid, '')
+                            if not _href.lower().endswith(('.xhtml', '.html', '.htm')):
+                                continue
+                            _pm = re.search(rf'<item\b[^>]*\bid="{re.escape(_iid)}"[^>]*\bproperties="([^"]*)"', _opf_txt)
+                            if _pm and 'nav' in _pm.group(1):
+                                continue
+                            _spine_hrefs.append(_href)
+                        for _si, _sh in enumerate(_spine_hrefs):
+                            if _si < len(html_files):
+                                _hf = html_files[_si]
+                                _cn = source_to_chapter.get(_hf, _si)
+                                epub_file_map[os.path.basename(_sh)] = f'#chapter-{_cn}'
+            except Exception as _em:
+                self.log(f"  ⚠️ Could not build EPUB href map: {_em}")
+
+        # Build all chapters as a single HTML document for continuous page numbering
+        self.log(f"  Building combined chapter document ({len(html_files)} chapters)...")
+        all_chapters_html = ""
+        chapters_order = []  # Track chapter order for page mapping
+        
+        for i, html_file in enumerate(html_files):
+            if self.is_stopped():
+                self.log("🛑 PDF generation stopped by user")
+                return
+            
+            file_path = os.path.join(self.output_dir, html_file)
+            if not os.path.exists(file_path):
+                continue
+            
+            # Determine chapter number (use i as fallback since chapters are 0-indexed)
+            chap_num = source_to_chapter.get(html_file, i)
+            
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                content = _embed_images_in_html(content)
+                
+                # Extract just the body content to avoid nested <html><body> structures
+                body_content = _extract_body_content(content)
+                body_content = remove_pdf_source_page_break_markers(body_content)
+
+                # Convert EPUB-style relative hrefs to PDF internal anchors
+                body_content = _rewrite_epub_hrefs(body_content, epub_file_map)
+
+                # Add anchor ID for TOC linking and page break before each chapter (except first)
+                _bm_title = chapter_titles_info.get(chap_num, ('', 0, ''))[0]
+                # Skip untitled placeholders (matches EPUB TOC filtering)
+                if _bm_title and _bm_title.strip().lower() in ('untitled chapter', 'untitled'):
+                    _bm_title = ''
+                # Deduplicate bookmark titles when enabled
+                if _bm_title and _dedup_enabled:
+                    _bm_key = _bm_title if _dedup_use_translated else chapter_titles_info.get(chap_num, ('', 0, ''))[0]
+                    if _bm_key in _seen_bm_titles:
+                        _bm_title = ''
+                    else:
+                        _seen_bm_titles.add(_bm_key)
+                if i > 0:
+                    body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{body_content}</div>'
+                else:
+                    body_content = f'<div id="chapter-{chap_num}">{body_content}</div>'
+                
+                # Add to combined HTML
+                all_chapters_html += body_content
+                chapters_order.append((html_file, chap_num, _bm_title))
+                
+                if (i + 1) % 10 == 0 or (i + 1) == len(html_files):
+                    self.log(f"  [{i+1}/{len(html_files)}] Added to document")
+                    
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to process {html_file}: {e}")
+        
+        # Render all chapters as a single document
+        if all_chapters_html:
+            self.log("  Rendering combined chapter document...")
+            combined_html = f"<html><head><style>{styles}</style></head><body>{all_chapters_html}</body></html>"
+            try:
+                # Heartbeat while WeasyPrint renders (can take minutes for large docs)
+                _render_stop = threading.Event()
+                _render_start = _time.time()
+                def _render_heartbeat():
+                    while not _render_stop.is_set():
+                        if _render_stop.wait(3.0):
+                            break
+                        elapsed = _time.time() - _render_start
+                        self.log(f"  ⏳ Rendering... ({elapsed:.0f}s elapsed)")
+                _render_hb = threading.Thread(target=_render_heartbeat, daemon=True)
+                _render_hb.start()
+                chapters_doc = WeasyHTML(string=combined_html, base_url=self.output_dir).render()
+                _render_stop.set()
+                _render_hb.join(timeout=1)
+                _render_elapsed = _time.time() - _render_start
+                self.log(f"  ✅ Rendering complete ({_render_elapsed:.1f}s)")
+                documents.append(chapters_doc)
+
+                # Discard any source-derived outline entries and add exactly
+                # one compiler-owned bookmark at each HTML wrapper anchor.
+                replace_with_chapter_bookmarks(
+                    chapters_doc.pages, chapters_order)
+                
+                # Resolve accurate page numbers using WeasyPrint's Page.anchors.
+                # Each chapter div has id="chapter-{chap_num}"; iterate rendered
+                # pages and find which page each anchor lands on (1-indexed).
+                _anchor_to_page = {}
+                for _pidx, _pg in enumerate(chapters_doc.pages):
+                    for _aid in _pg.anchors:
+                        if _aid not in _anchor_to_page:
+                            _anchor_to_page[_aid] = _pidx + 1
+                _fallback_page = 1
+                for _html_file, _chap_num, _bm_title in chapters_order:
+                    _pg_num = _anchor_to_page.get(f'chapter-{_chap_num}')
+                    if _pg_num is not None:
+                        chapter_page_map[_html_file] = _pg_num
+                        chapter_page_map[_chap_num] = _pg_num
+                        _fallback_page = _pg_num + 1
+                    else:
+                        chapter_page_map[_html_file] = _fallback_page
+                        chapter_page_map[_chap_num] = _fallback_page
+                        _fallback_page += 1
+                
+                current_page += len(chapters_doc.pages)
+                self.log(f"  Combined document: {len(chapters_doc.pages)} pages")
+            except Exception as e:
+                self.log(f"  ⚠️ Failed to render combined document: {e}")
+        
+        if not documents:
+            self.log("⚠️ No chapters rendered for PDF")
+            return
+        
+        # Generate final TOC with real page numbers
+        if settings['toc'] and chapter_titles_info:
+            self.log("  Generating TOC with page numbers...")
+            real_toc_html = self._build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map)
+            # TOC page should not have page numbers
+            toc_css = "<style>@page { @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }</style>"
+            real_toc_html = real_toc_html.replace("</head>", f"{toc_css}</head>")
+            
+            try:
+                toc_doc = WeasyHTML(string=real_toc_html, base_url=self.output_dir).render()
+                documents.insert(toc_insert_index, toc_doc)
+            except Exception as e:
+                self.log(f"  ⚠️ TOC generation failed: {e}")
+        
+        # Merge and write PDF
+        self.log("  Merging all pages...")
+        all_pages = [page for doc in documents for page in doc.pages]
+        self.log(f"  Total pages: {len(all_pages)}")
+        self.log("  Writing PDF to disk...")
+        try:
+            # When image compression is disabled, tell WeasyPrint to write
+            # an uncompressed PDF so it does not re-encode images to lossy
+            # JPEG internally (which would shrink a 10 MB cover to ~2 MB).
+            _pdf_write_kwargs = {}
+            if compression_enabled:
+                _pdf_quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+                _pdf_write_kwargs['image_quality'] = _pdf_quality
+                self.log(f"  PDF image quality: {_pdf_quality}%")
+            else:
+                _pdf_write_kwargs['uncompressed_pdf'] = True
+                self.log("  PDF images: uncompressed (preserving original quality)")
+            _write_stop = threading.Event()
+            _write_start = _time.time()
+            def _write_heartbeat():
+                while not _write_stop.is_set():
+                    if _write_stop.wait(3.0):
+                        break
+                    elapsed = _time.time() - _write_start
+                    self.log(f"  ⏳ Writing PDF... ({elapsed:.0f}s elapsed)")
+            _write_hb = threading.Thread(target=_write_heartbeat, daemon=True)
+            _write_hb.start()
+            documents[0].copy(all_pages).write_pdf(pdf_path, **_pdf_write_kwargs)
+            _write_stop.set()
+            _write_hb.join(timeout=1)
+            _write_elapsed = _time.time() - _write_start
+            self.log(f"  ✅ PDF written ({_write_elapsed:.1f}s)")
+        except BaseException as e:
+            import traceback
+            self.log(f"  ❌ write_pdf failed: {type(e).__name__}: {e}")
+            self.log(f"  [DEBUG] {traceback.format_exc()}")
+            raise
+        
+        elapsed = _time.time() - start_time
+        if os.path.exists(pdf_path):
+            file_size = os.path.getsize(pdf_path)
+            self.log(f"✅ PDF created: {pdf_path}")
+            self.log(f"📊 PDF size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+            self.log(f"⏱️ PDF generation took {elapsed:.1f}s")
+        else:
+            self.log("❌ PDF file was not created")
+
+    def _build_pdf_toc_html(self, chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                            settings: dict, chapter_page_map: Optional[Dict[str, int]]) -> str:
+        """Build HTML for PDF table of contents with clickable links and page numbers"""
+        import html as _html
+        
+        toc_html = (
+            '<html><head><style>'
+            'body { font-family: serif; margin: 40px; }'
+            'h1 { text-align: center; margin-bottom: 30px; }'
+            '* { bookmark-level: none !important; }'
+            'ul { list-style-type: none; padding: 0; margin: 0; }'
+            'li { margin-bottom: 6px; padding: 4px 0; border-bottom: 1px dotted #ccc; }'
+            'a { text-decoration: none; color: #333; display: flex; justify-content: space-between; }'
+            'a:hover { color: #0066cc; text-decoration: underline; }'
+            '.title { flex: 1; }'
+            '.page-num { font-weight: bold; min-width: 40px; text-align: right; margin-left: 10px; }'
+            '</style></head><body>'
+            '<h1>Table of Contents</h1><ul>'
+        )
+        
+        _dedup_on = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+        _dedup_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
+        _seen_titles = set()
+
+        for chap_num in sorted(chapter_titles_info.keys()):
+            title, confidence, source = chapter_titles_info[chap_num]
+            # Skip untitled placeholders (matches EPUB TOC filtering)
+            if title.strip().lower() in ('untitled chapter', 'untitled'):
+                continue
+            # Deduplicate when enabled
+            if _dedup_on:
+                if title in _seen_titles:
+                    continue
+                _seen_titles.add(title)
+            safe_title = _html.escape(title)
+            
+            # Get page number - try chapter number key directly first
+            page_num = ""
+            if settings.get('toc_numbers') and chapter_page_map:
+                # Try chapter number directly (stored as integer key)
+                page_num = chapter_page_map.get(chap_num, "")
+                
+                # Fallback to source filename
+                if not page_num and source:
+                    page_num = chapter_page_map.get(source, "")
+                
+                page_num = str(page_num) if page_num else ""
+            
+            page_span = f'<span class="page-num">{page_num}</span>' if page_num else ''
+            
+            # Create clickable link
+            toc_html += f'<li><a href="#chapter-{chap_num}"><span class="title">{safe_title}</span>{page_span}</a></li>'
+        
+        toc_html += '</ul></body></html>'
+        return toc_html
+
+
+# Main entry point
+def compile_epub(
+    base_dir: str,
+    log_callback: Optional[Callable] = None,
+    api_client: Any = None,
+):
+    """Compile translated HTML files into EPUB"""
+    # This is a new operation. Reset every stop source used by the compiler's
+    # local work and its metadata/header/TOC API requests before constructing
+    # the compiler (which may construct a new UnifiedClient).
+    reset_stop_state_for_new_compilation(api_client)
+    
+    compiler = EPUBCompiler(base_dir, log_callback, api_client=api_client)
+    with _ACTIVE_COMPILERS_LOCK:
+        _ACTIVE_COMPILERS.add(compiler)
+    try:
+        return compiler.compile()
+    finally:
+        with _ACTIVE_COMPILERS_LOCK:
+            _ACTIVE_COMPILERS.discard(compiler)
+
+
+# Legacy alias
+fallback_compile_epub = compile_epub
+
+
+if __name__ == "__main__":
+    from shutdown_utils import run_cli_main
+    def _main():
+        if len(sys.argv) < 2:
+            print("Usage: python epub_converter.py <directory_path>")
+            return 1
+        
+        directory_path = sys.argv[1]
+        
+        try:
+            compile_epub(directory_path)
+        except Exception as e:
+            print(f"Error: {e}")
+            return 1
+        return 0
+    run_cli_main(_main)

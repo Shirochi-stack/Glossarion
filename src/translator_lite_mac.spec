@@ -1,0 +1,1499 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""
+Glossarion Lite - PyInstaller Specification File (macOS)
+Enhanced Translation Tool with QA Scanner, and AI Hunter
+Includes post-build step to create .dmg
+"""
+
+import sys
+import os
+
+SPEC_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+if SPEC_DIR not in sys.path:
+    sys.path.insert(0, SPEC_DIR)
+from app_version import APP_VERSION, get_spec_app_name
+from windows_version_info import get_windows_version_info
+
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+APP_NAME = get_spec_app_name("translator_lite_mac.spec")
+APP_ICON = 'Halgakos.ico'
+ENABLE_CONSOLE = False  # Console disabled for production
+ENABLE_UPX = False      # Compression (smaller file size but slower startup)
+ONE_FILE = False         # macOS .app bundles work best with folder distribution
+
+# ============================================================================
+# BLOCK CIPHER (for code obfuscation - optional)
+# ============================================================================
+
+block_cipher = None  # Set to pyi_crypto.PyiBlockCipher() if needed
+
+# ============================================================================
+# COLLECT DYNAMIC IMPORTS
+# ============================================================================
+
+# Collect all data files from specific packages
+datas = []
+binaries = []
+hiddenimports = []
+
+# Add custom DLL and CPP files
+binaries.extend([])
+
+# Collect data files from packages that need them
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
+    try:
+        data, bins, hidden = collect_all(package)
+        datas.extend(data)
+        binaries.extend(bins)
+        hiddenimports.extend(hidden)
+    except:
+        pass
+
+# Collect google.ai.generativelanguage submodules for gRPC Gemini client
+try:
+    hiddenimports.extend(collect_submodules('google.ai.generativelanguage_v1beta'))
+except:
+    pass
+
+# ============================================================================
+# APPLICATION FILES
+# ============================================================================
+
+# Main application files
+
+# Main application files
+app_files = [
+    ('manga_ocr_io.py', '.'),
+    ('gemini_policy.py', '.'),
+    ('request_parameters.py', '.'),
+    ('epub_package.py', '.'),
+    ('epub_special_files.py', '.'),
+    ('gender_tracking.py', '.'),
+    ('title_tag_translation.py', '.'),
+    ('chapter_chunk_progress.py', '.'),
+    ('chapter_display_numbering.py', '.'),
+    # Core GUI
+    ('translator_gui.py', '.'),
+    ('parallel_epub_glossary.py', '.'),
+    ('metadata_translation_worker.py', '.'),
+    ('language_options.py', '.'),
+    ('metadata_progress.py', '.'),
+    ('translation_artifacts.py', '.'),
+    ('splash_utils.py', '.'),
+    ('dpi_setup.py', '.'),
+    ('other_settings.py', '.'),
+    ('GlossaryManager.py', '.'),
+    ('GlossaryManager_GUI.py', '.'),
+    ('glossary_paths.py', '.'),
+    ('Retranslation_GUI.py', '.'),
+    ('QA_Scanner_GUI.py', '.'),
+    ('Chapter_Extractor.py', '.'),
+    ('image_reference_map.py', '.'),
+    ('PatternManager.py', '.'),
+    
+    # Translation modules
+    ('TransateKRtoEN.py', '.'),
+    ('subtitle_processor.py', '.'),
+    ('refinement_prompts.py', '.'),
+    ('unified_api_client.py', '.'),
+    ('ollamapull.py', '.'),
+    ('google_free_translate.py', '.'),
+    
+    # File processors
+    ('epub_converter.py', '.'),
+    ('image_archive_epub.py', '.'),
+    ('html_archive_epub.py', '.'),
+    ('html_tag_entities.py', '.'),
+    ('emoticon_patterns.py', '.'),
+    ('qa_scan_runtime.py', '.'),
+    ('txt_processor.py', '.'),
+    ('chapter_splitter.py', '.'),
+    
+    # Glossary extractors
+    ('extract_glossary_from_epub.py', '.'),
+    ('glossary_usage.py', '.'),
+    ('glossary_refinement.py', '.'),
+    ('glossary_translation_gate.py', '.'),
+    ('extract_glossary_from_txt.py', '.'),
+    ('glossary_process_worker.py', '.'),  # Glossary subprocess worker
+    ('chapter_extraction_worker.py', '.'),  # Chapter extraction subprocess worker
+    ('sdlxliff_extraction_worker.py', '.'),
+    ('sdlxliff_extraction_manager.py', '.'),
+    ('sdlxliff_extractor.py', '.'),
+    ('sdlxliff_converter.py', '.'),
+    ('sdlxliff_sidecar_writer.py', '.'),
+    ('md_txt_sidecar_writer.py', '.'),  # MD/TXT sidecar writer (html2text)
+    ('_compress_worker.py', '.'),  # Lightweight image compression worker
+    ('_empty_attr_fix.py', '.'),  # Shared LLM Token Fix (empty-attr) helper
+    ('html_duplicate_cleanup.py', '.'),
+    ('_pdf_worker.py', '.'),  # PDF generation subprocess worker
+    ('pdf_generation_manager.py', '.'),  # PDF generation manager
+    ('chapter_extraction_manager.py', '.'),  # Chapter extraction manager
+    
+    # Utilities
+    ('scan_html_folder.py', '.'),
+    ('history_manager.py', '.'),
+    ('image_translator.py', '.'),
+    ('check_epub_directory.py', '.'),
+    ('direct_imports.py', '.'),
+    ('api_key_encryption.py', '.'), 
+    ('http_logger.py', '.'),
+    ('shutdown_utils.py', '.'),
+    
+    # AI Hunter Enhanced
+    ('ai_hunter_enhanced.py', '.'),
+    
+    # Dialog animations
+    ('dialog_animations.py', '.'),
+    
+    # Spinning icon helper
+    ('spinning.py', '.'),
+    
+    # Rotatable label widget for animations
+    ('rotatable_label.py', '.'),
+    
+    # Update Manager
+    ('update_manager.py', '.'),
+	
+	# Async Processing
+    ('async_api_processor.py', '.'),
+	
+	# Metadata and header batch translation
+    ('metadata_batch_translator.py', '.'),
+    ('translate_headers_standalone.py', '.'),
+    ('review_dialog.py', '.'),
+    ('review_generator.py', '.'),
+    
+    # Resources
+    ('Halgakos.ico', '.'),
+	
+	('enhanced_text_extractor.py', '.'),	
+	('pdf_extractor.py', '.'),
+	('_pdf_extraction_worker.py', '.'),
+	('pdf_extraction_manager.py', '.'),
+	('pdf_bookmarks.py', '.'),
+	('output_workspace.py', '.'),
+	('pdf_fast_extractor.py', '.'),
+	('pdf_workspace_compiler.py', '.'),
+	('workspace_reader.py', '.'),
+	('reader_overlay.py', '.'),
+	('pdf_output_naming.py', '.'),
+	('installer_utils.py', '.'),
+	
+	('multi_api_key_manager.py', '.'),
+	('key_contexts.py', '.'),
+	('ollama_settings_dialog.py', '.'),
+	('individual_endpoint_dialog.py', '.'),
+	('model_options.py', '.'),
+	('hyphen_textwrap.py', '.'),
+	
+	# Duplicate detection
+	('duplicate_detection_config.py', '.'),
+
+	# Environment variable size limit workaround
+	('large_env.py', '.'),
+
+	# AuthGPT - ChatGPT subscription OAuth
+	('authgpt_auth.py', '.'),
+    ('authnan_auth.py', '.'),  # NanoGPT subscription browser login
+	('reasoning_compatibility.py', '.'),
+	('temperature_compatibility.py', '.'),
+	('authgrok_auth.py', '.'),  # xAI Grok subscription OAuth
+	('authgem_auth.py', '.'),
+	('authcd_auth.py', '.'),  # Claude subscription OAuth
+	('glm_proxy.py', '.'),
+	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
+	('authds_auth.py', '.'),  # DeepSeek web session
+	('cdp_browser.py', '.'),  # Chrome/Edge DevTools helper for authds/ and authchatgpt/
+	('authchatgpt_auth.py', '.'),  # ChatGPT web chat
+	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
+	('opera_aria.py', '.'),  # Opera Ask AI (Aria) backend route
+	('token_encryption.py', '.'),
+	('proxy_token_storage.py', '.'),
+
+	# Antigravity Cloud Code proxy
+	('ocagy_cli.py', '.'),  # OpenCode + opencode-antigravity-auth
+	('autharena_proxy.py', '.'),
+	('autharena_browser.py', '.'),
+	('antigravity_proxy.py', '.'),
+
+	# gRPC Gemini client
+	('grpc_gemini_client.py', '.'),
+
+	# EPUB Library & Reader
+	('epub_library.py', '.'),
+
+	# RPG Maker handler
+	('rpgmaker_handler.py', '.'),
+
+    # Added: src scripts that were missing from this spec
+    ('app_version.py', '.'),
+    ('config_backup.py', '.'),
+    ('epub_metadata_utils.py', '.'),
+    ('glossary_compressor.py', '.'),
+    ('glossary_match_shadow.py', '.'),
+    ('glossary_matching.py', '.'),
+    ('glossary_translit.py', '.'),
+    ('html_output_utils.py', '.'),
+    ('unified_glossary.py', '.'),
+    ('vision_ocr_source_epub.py', '.'),
+    # Mobile rewrite U1: GUI-free shared core + runtime gates
+    ('mobile_runtime.py', '.'),
+    ('app_paths.py', '.'),
+    ('config_store.py', '.'),
+    ('prompt_defaults.py', '.'),
+    ('metadata_defaults.py', '.'),
+    ('ollama_settings.py', '.'),
+    ('key_pools.py', '.'),
+    ('output_naming.py', '.'),
+    ('pdf_mupdf_html.py', '.'),
+    # Mobile rewrite U2: owner state/env/persistence mixins, HeadlessOwner, settings schema
+    ('owner_state.py', '.'),
+    ('run_env.py', '.'),
+    ('settings_persistence.py', '.'),
+    ('headless_owner.py', '.'),
+    ('settings_schema.py', '.'),
+    ('settings_schema_data.py', '.'),
+    # GUI-free Library registry + source-EPUB resolver (epub_library re-exports it)
+    ('library_core.py', '.'),
+    # Mobile rewrite U3: stop protocol, job scope, text/compile jobs, input preparation, the
+    # translation/glossary pipelines and the Direct Text chat store + stream (translator_gui imports them)
+    ('stop_control.py', '.'),
+    ('job_runner.py', '.'),
+    ('text_jobs.py', '.'),
+    ('input_preparation.py', '.'),
+    ('translation_pipeline.py', '.'),
+    ('direct_text_store.py', '.'),
+    ('direct_text_stream.py', '.'),
+    # Mobile rewrite U4: settings rules, model catalog, prompt profiles, key pools and the shared
+    # OAuth helpers (translator_gui, other_settings, the key manager and the auth modules import them)
+    ('settings_rules.py', '.'),
+    ('model_catalog_core.py', '.'),
+    ('prompt_profiles.py', '.'),
+    ('key_pool_service.py', '.'),
+    ('oauth_session.py', '.'),
+    # Mobile rewrite U5: Library covers, the reader document + live stream and the Progress Manager /
+    # Glossary Progress cores (epub_library, Retranslation_GUI and TransateKRtoEN import them)
+    ('library_covers.py', '.'),
+    ('reader_doc.py', '.'),
+    ('live_stream.py', '.'),
+    ('progress_core.py', '.'),
+    ('progress_actions.py', '.'),
+    ('glossary_progress_core.py', '.'),
+    # Mobile rewrite U6: the Glossary Editor document, the main window's glossary file actions and the
+    # Parallel EPUB pair core (GlossaryManager_GUI, translator_gui and parallel_epub_glossary import them)
+    ('glossary_document.py', '.'),
+    ('glossary_files.py', '.'),
+    ('parallel_epub_core.py', '.'),
+    # Mobile rewrite U7: the image / generative and RPG Maker runners (translation_pipeline), the async
+    # batch core (async_api_processor), the output tools core (other_settings) and the SDLXLIFF reviewer
+    # core (Retranslation_GUI, progress_actions import them)
+    ('image_job.py', '.'),
+    ('rpgmaker_job.py', '.'),
+    ('async_batch_core.py', '.'),
+    ('output_tools_core.py', '.'),
+    ('sdlxliff_review_core.py', '.'),
+    # Mobile rewrite U9: the browser-driver seam (authnd_auth / gemini_free; the mobile WebViewBridge
+    # registers a driver) and the GUI-free release check update_manager inherits (update_core)
+    ('browser_driver.py', '.'),
+    ('update_core.py', '.'),
+    ('safe_image.py', '.'),
+    ('tor_proxy.py', '.'),
+]
+# Add application files to datas
+datas.extend(app_files)
+datas.append(('memory_usage_reporter.py', '.'))
+datas.append(('tqdm_safety.py', '.'))
+datas.append(('debug_env_vars.py', '.'))
+datas.append(('enable_debug_mode.py', '.'))
+
+# ============================================================================
+# HIDDEN IMPORTS (Organized by category)
+# ============================================================================
+
+# Application modules
+app_modules = [
+    'manga_ocr_io',
+    'gemini_policy',
+    'request_parameters',
+    'epub_package',
+    'epub_special_files',
+    'gender_tracking',
+    'title_tag_translation',
+    'chapter_chunk_progress',
+    'chapter_display_numbering',
+    'TransateKRtoEN',
+    'metadata_translation_worker',
+    'subtitle_processor',
+    'language_options',
+    'metadata_progress',
+    'translation_artifacts',
+    'refinement_prompts',
+    'extract_glossary_from_epub',
+    'parallel_epub_glossary',
+    'glossary_usage',
+    'glossary_refinement',
+    'glossary_translation_gate',
+    'extract_glossary_from_txt',
+    'glossary_process_worker',  # Glossary subprocess worker
+    'chapter_extraction_worker',  # Chapter extraction subprocess worker
+    'sdlxliff_extraction_worker',
+    'sdlxliff_extraction_manager',
+    'sdlxliff_extractor',
+    'sdlxliff_converter',
+    'sdlxliff_sidecar_writer',
+    'md_txt_sidecar_writer',  # MD/TXT sidecar writer (html2text)
+    '_compress_worker',  # Lightweight image compression worker
+    '_empty_attr_fix',  # Shared LLM Token Fix (empty-attr) helper
+    'html_duplicate_cleanup',
+    '_pdf_worker',  # PDF generation subprocess worker
+    'pdf_generation_manager',  # PDF generation manager
+    'chapter_extraction_manager',  # Chapter extraction manager
+    'GlossaryManager',
+    'GlossaryManager_GUI',
+    'glossary_paths',
+    'Retranslation_GUI',
+    'QA_Scanner_GUI',
+    'Chapter_Extractor',
+    'image_reference_map',
+    'PatternManager',
+    'epub_converter',
+    'image_archive_epub',
+    'html_archive_epub',
+    'html_tag_entities',
+    'emoticon_patterns',
+    'qa_scan_runtime',
+    'txt_processor',
+    'scan_html_folder',
+    'unified_api_client',
+    'ollamapull',
+    'google_free_translate',
+    'chapter_splitter',
+    'history_manager',
+    'image_translator',
+    'check_epub_directory',
+    'direct_imports',
+    'splash_utils',
+    'dpi_setup',
+    'other_settings',      # Other Settings module
+    'ai_hunter_enhanced',  # AI Hunter Enhanced module
+    'dialog_animations',   # Dialog fade animations
+    'spinning',            # Spinning icon helper
+    'rotatable_label',     # Rotatable label widget
+    'update_manager',
+    'api_key_encryption',
+	'http_logger',
+	'shutdown_utils',
+	'async_api_processor',
+	'metadata_batch_translator',
+	'translate_headers_standalone',
+	'review_dialog',
+	'review_generator',
+	'enhanced_text_extractor.py',
+	'pdf_extractor',
+	'_pdf_extraction_worker',
+	'pdf_extraction_manager',
+	'pdf_bookmarks',
+	'output_workspace',
+	'pdf_fast_extractor',
+	'pdf_workspace_compiler',
+	'workspace_reader',
+	'reader_overlay',
+	'pdf_output_naming',
+	'installer_utils',
+	'multi_api_key_manager.py',
+	'individual_endpoint_dialog.py',
+	'model_options',
+	'hyphen_textwrap',
+	'duplicate_detection_config',
+	'large_env',
+	'authnan_auth',  # NanoGPT subscription browser login
+	'authgpt_auth',  # ChatGPT subscription OAuth
+	'reasoning_compatibility',
+	'temperature_compatibility',
+	'authgrok_auth',  # xAI Grok subscription OAuth
+	'authgem_auth',  # Gemini subscription OAuth
+	'authcd_auth',  # Claude subscription OAuth
+	'glm_proxy',  # Z.AI Coding Plan login proxy
+	'authnd_auth',  # NVIDIA Build browser-backed auth
+	'authds_auth',  # DeepSeek web session
+	'cdp_browser',  # Chrome/Edge DevTools helper for authds/ and authchatgpt/
+	'authchatgpt_auth',  # ChatGPT web chat
+	'gemini_free',  # Google Search/Gemini browser-backed route
+	'opera_aria',  # Opera Ask AI (Aria) backend route
+	'token_encryption',  # Encrypted token storage
+	'proxy_token_storage',  # Encrypted proxy token storage
+	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
+	'autharena_proxy',
+	'autharena_browser',
+	'antigravity_proxy',  # Antigravity Cloud Code proxy
+	'grpc_gemini_client',  # gRPC Gemini client
+	'epub_library',  # EPUB Library & Reader
+	'rpgmaker_handler',  # RPG Maker game file handler
+
+    # Added: src modules that were missing from this spec
+    'app_version',
+    'config_backup',
+    'enhanced_text_extractor',
+    'epub_metadata_utils',
+    'glossary_compressor',
+    'glossary_match_shadow',
+    'glossary_matching',
+    'glossary_translit',
+    'html_output_utils',
+    'individual_endpoint_dialog',
+    'multi_api_key_manager',
+    'key_contexts',
+    'ollama_settings_dialog',
+    'tqdm_safety',
+    'unified_glossary',
+    'vision_ocr_source_epub',
+    # Mobile rewrite U1: GUI-free shared core + runtime gates
+    'mobile_runtime',
+    'app_paths',
+    'config_store',
+    'prompt_defaults',
+    'metadata_defaults',
+    'ollama_settings',
+    'key_pools',
+    'output_naming',
+    'pdf_mupdf_html',
+    # Mobile rewrite U2: owner state/env/persistence mixins, HeadlessOwner, settings schema
+    'owner_state',
+    'run_env',
+    'settings_persistence',
+    'headless_owner',
+    'settings_schema',
+    'settings_schema_data',
+    # GUI-free Library registry + source-EPUB resolver (epub_library re-exports it)
+    'library_core',
+    # Mobile rewrite U3: stop protocol, job scope, text/compile jobs, input preparation, the
+    # translation/glossary pipelines and the Direct Text chat store + stream (translator_gui imports them)
+    'stop_control',
+    'job_runner',
+    'text_jobs',
+    'input_preparation',
+    'translation_pipeline',
+    'direct_text_store',
+    'direct_text_stream',
+    # Mobile rewrite U4: settings rules, model catalog, prompt profiles, key pools and the shared
+    # OAuth helpers (translator_gui, other_settings, the key manager and the auth modules import them)
+    'settings_rules',
+    'model_catalog_core',
+    'prompt_profiles',
+    'key_pool_service',
+    'oauth_session',
+    # Mobile rewrite U5: Library covers, the reader document + live stream and the Progress Manager /
+    # Glossary Progress cores (epub_library, Retranslation_GUI and TransateKRtoEN import them)
+    'library_covers',
+    'reader_doc',
+    'live_stream',
+    'progress_core',
+    'progress_actions',
+    'glossary_progress_core',
+    # Mobile rewrite U6: the Glossary Editor document, the main window's glossary file actions and the
+    # Parallel EPUB pair core (GlossaryManager_GUI, translator_gui and parallel_epub_glossary import them)
+    'glossary_document',
+    'glossary_files',
+    'parallel_epub_core',
+    # Mobile rewrite U7: the image / generative and RPG Maker runners (translation_pipeline), the async
+    # batch core (async_api_processor), the output tools core (other_settings) and the SDLXLIFF reviewer
+    # core (Retranslation_GUI, progress_actions import them)
+    'image_job',
+    'rpgmaker_job',
+    'async_batch_core',
+    'output_tools_core',
+    'sdlxliff_review_core',
+    # Mobile rewrite U9: the browser-driver seam (authnd_auth / gemini_free; the mobile WebViewBridge
+    # registers a driver) and the GUI-free release check update_manager inherits (update_core)
+    'browser_driver',
+    'update_core',
+    'safe_image',
+    'tor_proxy',
+]
+# GUI Framework
+gui_modules = [
+    # TTKBootstrap
+    'ttkbootstrap',
+    'ttkbootstrap.constants',
+    'ttkbootstrap.themes',
+    'ttkbootstrap.style',
+    'ttkbootstrap.utility',
+    'ttkbootstrap.widgets',
+    'ttkbootstrap.dialogs',
+    'ttkbootstrap.tooltip',
+    'ttkbootstrap.validation',
+    'ttkbootstrap.scrolled',
+    'ttkbootstrap.icons',
+    'ttkbootstrap.colorutils',
+    'ttkbootstrap.themes.standard',
+    'ttkbootstrap.themes.user',
+]
+
+# EPUB/HTML Processing
+epub_modules = [
+    # EbookLib
+    'ebooklib',
+    'ebooklib.epub',
+    'ebooklib.utils',
+    'ebooklib.plugins',
+    
+    # BeautifulSoup
+    'bs4',
+    'bs4.element',
+    'bs4.builder',
+    'bs4.builder._html5lib',
+    'bs4.builder._htmlparser',
+    'bs4.builder._lxml',
+    'soupsieve',
+    
+    # LXML
+    'lxml',
+    'lxml.etree',
+    'lxml._elementpath',
+    'lxml.html',
+    'lxml.html.clean',
+    'lxml.builder',
+    'lxml.cssselect',
+    
+    # HTML processing
+    'html5lib',
+    'html5lib.treebuilders',
+    'html5lib.treewalkers',
+    'html5lib.serializer',
+    'html',
+    'html.parser',
+    'html.entities',
+    'cgi',
+    'xml',
+    'xml.etree',
+    'xml.etree.ElementTree',
+    'xml.dom',
+    'xml.dom.minidom',
+    'xml.parsers',
+    'xml.parsers.expat',
+]
+
+# Image Processing (Enhanced for Manga)
+image_modules = [
+    'PIL',
+    'PIL.Image',
+    'PIL.ImageTk',
+    'PIL.ImageDraw',
+    'PIL.ImageFont',
+    'PIL.ImageEnhance',
+    'PIL.ImageFilter',
+    'PIL.ImageOps',
+    'PIL.ImageChops',
+    'PIL.ImageStat',
+    'PIL.ImagePalette',
+    'PIL.ImageSequence',
+    'PIL.ImageGrab',
+    'PIL.ImageMath',
+    'PIL.ImageMode',
+    'PIL.ImageShow',
+    'PIL.ImageTransform',
+    'PIL.ImageQt',
+    'PIL.ImageCms',
+    'PIL._binary',
+    'PIL._imaging',
+    'PIL._imagingft',
+    'PIL._imagingmath',
+    'PIL._imagingtk',
+    'PIL._imagingcms',
+    'PIL._webp',
+    
+    # Image format plugins
+    'PIL.BmpImagePlugin',
+    'PIL.GifImagePlugin',
+    'PIL.JpegImagePlugin',
+    'PIL.PngImagePlugin',
+    'PIL.PpmImagePlugin',
+    'PIL.TiffImagePlugin',
+    'PIL.WebPImagePlugin',
+    'PIL.IcoImagePlugin',
+    'PIL.ImImagePlugin',
+    'PIL.Jpeg2KImagePlugin',
+    'PIL.MspImagePlugin',
+    'PIL.PcxImagePlugin',
+    'PIL.SgiImagePlugin',
+    'PIL.TgaImagePlugin',
+    'PIL.XbmImagePlugin',
+    'PIL.XpmImagePlugin',
+    'PIL.DdsImagePlugin',
+    'PIL.BlpImagePlugin',
+    'PIL.FtexImagePlugin',
+    
+    'olefile',
+]
+
+# AI/API Clients (Including Google Cloud Vision)
+api_modules = [
+    # Google AI
+    'google',
+	'google.genai',
+	'google.genai.types',
+    'google.auth',
+    'google.auth.transport',
+    'google.auth.transport.requests',
+    'google.auth.transport.grpc',
+    'google.auth.crypt',
+    'google.auth.exceptions',
+    'google.oauth2',
+    'google.oauth2.credentials',
+    'google.api_core',
+    'google.api_core.client_options',
+    'google.api_core.exceptions',
+    'google.api_core.gapic_v1',
+    'google.api_core.operations_v1',
+    'google.api_core.protobuf_helpers',
+    'google.protobuf',
+    'google.protobuf.message',
+    'google.protobuf.descriptor',
+    'google.protobuf.json_format',
+    'google.protobuf.internal',
+    'google.protobuf.reflection',
+    'google.rpc',
+    'google.type',
+    
+    # Google AI Generative Language (gRPC Gemini client)
+    'google.ai',
+    'google.ai.generativelanguage',
+    'google.ai.generativelanguage_v1beta',
+    'google.ai.generativelanguage_v1beta.services',
+    'google.ai.generativelanguage_v1beta.services.generative_service',
+    'google.ai.generativelanguage_v1beta.types',
+    'google.ai.generativelanguage_v1beta.types.content',
+    'google.ai.generativelanguage_v1beta.types.generative_service',
+    'google.ai.generativelanguage_v1beta.types.safety_setting',
+    
+    # Azure (for Azure OpenAI endpoints - NOT Computer Vision)
+    'azure',
+    'azure.core',
+    'azure.core.credentials',
+    'azure.core.exceptions',
+    'azure.core.pipeline',
+    'azure.core.pipeline.transport',
+    'azure.core.pipeline.policies',
+    'azure.core.rest',
+    'azure.core.tracing',
+    'azure.core.utils',
+    'azure.identity',
+    'azure.common',
+    
+    # Additional Azure dependencies
+    'isodate',  # Required by Azure
+    'oauthlib',  # May be required for Azure auth
+    'requests_oauthlib',  # May be required for Azure auth
+	
+	# Google Cloud Translate
+	'google.cloud.translate',
+	'google.cloud.translate_v2',
+	'google.cloud.translate_v3',
+	'google.cloud.translate_v3.types',
+	'google.cloud.translate_v3.services',
+	'google.cloud.translate_v3.services.translation_service',
+	
+	# DeepL
+	'deepl',
+	'deepl.translator',
+	'deepl.exceptions',
+	'deepl.api',
+	'deepl.http',
+	'deepl.util',
+	'deepl.auth',
+	'deepl.model',	
+    
+    'proto',
+    'proto.message',
+    'grpcio',
+    'grpcio_status',
+    'googleapis_common_protos',
+	
+	# Google Vertex AI:
+    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted — they are
+    # auto-generated proto stub trees (~60 MB packed) stripped in a.pure below.
+    'google.cloud.aiplatform',
+    'vertexai',
+    'vertexai.generative_models',
+    'vertexai.language_models',
+    
+    # OpenAI
+    'openai',
+    'openai.api_resources',
+    'openai.error',
+    'openai.util',
+    'openai.version',
+    'openai.api_requestor',
+    'openai.openai_response',
+    'openai._base_client',
+    'openai._constants',
+    'openai._models',
+    'openai._response',
+    'openai._legacy_response',
+    'openai._streaming',
+    'openai._exceptions',
+    'openai.resources',
+    'openai.resources.chat',
+    'openai.resources.completions',
+    'openai.types',
+    'openai.types.chat',
+    
+    # Anthropic
+    'anthropic',
+    'anthropic._client',
+    'anthropic._base_client',
+    'anthropic._constants',
+    'anthropic._models',
+    'anthropic._response',
+    'anthropic._streaming',
+    'anthropic._exceptions',
+    'anthropic.resources',
+    'anthropic.resources.messages',
+    'anthropic.types',
+    'anthropic.types.message',
+    'anthropic.types.content_block',
+    'anthropic.types.usage',
+    
+    # HTTP clients
+    'httpx',
+    'httpx._client',
+    'httpx._config',
+    'httpx._models',
+    'httpx._transports',
+    'httpx._types',
+    'httpcore',
+    'httpcore._sync',
+    'httpcore._async',
+    'h11',
+    'h11._connection',
+    'h11._events',
+    'h11._state',
+    'h11._util',
+    'h11._writers',
+    'h2',
+    'hyperframe',
+    'hpack',
+    'socksio',
+    'sniffio',
+    'anyio',
+    'anyio._core',
+    'anyio._core._eventloop',
+    'anyio.streams',
+    'anyio.streams.memory',
+]
+
+# Text Processing & NLP
+text_modules = [
+
+    # Language detection
+    'langdetect',
+    'langdetect.detector',
+    'langdetect.lang_detect_exception',
+    'langdetect.language',
+    'langdetect.detector_factory',
+    'langdetect.utils',
+	
+	# Fuzzy string matching (ADD THIS SECTION)
+    'rapidfuzz',
+    'rapidfuzz.fuzz',
+    'rapidfuzz.process',
+    'rapidfuzz.distance',
+    'rapidfuzz.utils',
+    
+    # Token counting
+    'tiktoken',
+    'tiktoken_ext',
+    'tiktoken_ext.openai_public',
+    'tiktoken.core',
+    'tiktoken.registry',
+    'tiktoken.load',
+    'tiktoken.model',
+	
+	# Markdown2
+	'markdown2',
+    'markdown2.extras',
+
+    # HTML to text conversion
+    'html2text',
+    'html2text.__init__',
+    'html2text.config',
+    'html2text.compat',
+    'html2text.utils',
+	
+	# ilru cache
+	'functools',
+	'lru',
+ 
+    # AI Hunter (Datasketch)
+    'datasketch',
+    'datasketch.minhash',
+    'datasketch.lsh',
+    'datasketch.lshensemble',
+    'datasketch.weighted_minhash',
+    'datasketch.hyperloglog',
+    'datasketch.lshforest',
+    'datasketch.lean_minhash',
+    'datasketch.hashfunc',
+    'datasketch.storage',
+    'datasketch.experimental',
+    'datasketch.version',
+    
+    # Regex
+    'regex',
+    'regex._regex',
+    'regex._regex_core',
+    're',
+    '_sre',
+    'sre_compile',
+    'sre_parse',
+    'sre_constants',
+    
+    # JSON processing
+    'json',
+    'json.decoder',
+    'json.encoder',
+    'json.scanner',
+    '_json',
+    'simplejson',  # fallback
+]
+
+# Network & System
+network_modules = [
+    'requests',
+    'requests.models',
+    'requests.sessions',
+    'requests.auth',
+    'requests.cookies',
+    'requests.exceptions',
+    'requests.packages',
+    'requests.packages.urllib3',
+    'requests.adapters',
+    'requests.api',
+    'requests.structures',
+    'requests.utils',
+    'urllib',
+    'urllib.parse',
+    'urllib.request',
+    'urllib.error',
+    'urllib.response',
+    'urllib3',
+    'urllib3.connection',
+    'urllib3.connectionpool',
+    'urllib3.poolmanager',
+    'urllib3.response',
+    'urllib3.util',
+    'urllib3.util.ssl_',
+    'urllib3.util.retry',
+    'urllib3.contrib',
+    'certifi',
+    'certifi.core',
+    'ssl',
+    '_ssl',
+    'socket',
+    '_socket',
+    'select',
+    'selectors',
+    'socketserver',
+    'http',
+    'http.client',
+    'http.server',
+    'http.cookies',
+    'http.cookiejar',
+    'email',
+    'email.utils',
+    'email.message',
+    'email.header',
+    'email.charset',
+    'email.encoders',
+    'email.errors',
+    'email.generator',
+    'email.iterators',
+    'email.mime',
+    'email.parser',
+    'email.policy',
+    'mimetypes',
+    'base64',
+    'binascii',
+    'quopri',
+    'uu',
+]
+
+# Data Processing
+data_modules = [
+    'csv',
+    '_csv',
+    'pickle',
+    '_pickle',
+    'cPickle',
+    'cpickle',
+    'shelve',
+    'dbm',
+    'sqlite3',
+    '_sqlite3',
+    'gzip',
+    'zlib',
+    'bz2',
+    '_bz2',
+    'lzma',
+    '_lzma',
+    'zipfile',
+    'tarfile',
+    'shutil',
+    'glob',
+    'fnmatch',
+    'pathlib',
+    'tempfile',
+    'io',
+    '_io',
+    'StringIO',
+    'BytesIO',
+    'hashlib',
+    '_hashlib',
+    '_blake2',
+    '_sha3',
+    'hmac',
+    'secrets',
+    '_random',
+    'bisect',
+    '_bisect',
+    'heapq',
+    '_heapq',
+    'array',
+    'collections',
+    'collections.abc',
+    '_collections',
+    '_collections_abc',
+]
+
+# System & OS
+system_modules = [
+    'os',
+    'os.path',
+    'posixpath',
+    'genericpath',
+    'stat',
+    '_stat',
+    'sys',
+    'platform',
+    'subprocess',
+    'errno',
+    'signal',
+    '_signal',
+    'atexit',
+    'gc',
+    '_gc',
+    'multiprocessing',
+    'multiprocessing.freeze_support',
+    'multiprocessing.connection',
+    'multiprocessing.pool',
+    'multiprocessing.process',
+    'threading',
+    'queue',
+    'concurrent',
+    'concurrent.futures',
+    'concurrent.futures._base',
+    'asyncio',
+    'asyncio.base_events',
+    'asyncio.events',
+    'asyncio.futures',
+    'asyncio.tasks',
+    'asyncio.protocols',
+    'asyncio.streams',
+    'asyncio.subprocess',
+    'asyncio.queues',
+    'ctypes',
+    'ctypes.util',
+    'aiohttp',
+    'aiofiles',
+	'yarl',  # URL handling for aiohttp
+    'multidict',  # Required by aiohttp
+    'async_timeout',  # Required by aiohttp
+    'attrs',  # Required by aiohttp
+    'charset_normalizer',  # Encoding detection
+]
+
+# Date & Time
+datetime_modules = [
+    'datetime',
+    'time',
+    'calendar',
+    'zoneinfo',
+    '_zoneinfo',
+    'tzdata',
+    'pytz',
+    'dateutil',
+    'dateutil.parser',
+    'dateutil.tz',
+    'dateutil.relativedelta',
+    'dateutil.rrule',
+]
+
+# Utilities & Helpers
+utility_modules = [
+    'tqdm',
+    'tqdm.auto',
+	'dataclasses',
+    'tqdm.std',
+    'tqdm.gui',
+	'dataclasses',
+    'tqdm.notebook',
+	'concurrent.futures',
+    'tqdm.utils',
+    'tqdm.cli',
+    'logging',
+    'logging.handlers',
+    'logging.config',
+    'warnings',
+    'traceback',
+    'contextlib',
+    'functools',
+    'itertools',
+    'operator',
+    'copy',
+    'weakref',
+    'gc',
+    'atexit',
+    'signal',
+    'locale',
+    'gettext',
+    'uuid',
+    'random',
+    'math',
+    'decimal',
+    'fractions',
+    'numbers',
+    'cmath',
+    'statistics',
+    'argparse',
+    'getopt',
+    'cmd',
+    'shlex',
+    'pprint',
+    'reprlib',
+    'dis',
+    'inspect',
+    'ast',
+    'importlib',
+    'importlib.util',
+    'importlib.machinery',
+    'importlib.metadata',
+    'importlib.resources',
+    'pkg_resources',
+    'pkg_resources._vendor',
+    'pkg_resources.extern',
+    'setuptools',
+    'distutils',
+    'sysconfig',
+    'site',
+    'sitecustomize',
+    'usercustomize',
+    'dotenv',
+    'python-dotenv',
+    'os.environ',
+    'dotenv.main',
+    'dotenv.parser',
+    'dataclasses',  # For manga TextRegion dataclass
+    # ADDED: Version parsing for update manager
+    'packaging',
+    'packaging.version',
+    'packaging.specifiers',
+    'packaging.requirements',
+	'cryptography',
+    'cryptography.fernet',
+    'cryptography.hazmat',
+    'cryptography.hazmat.primitives',
+    'cryptography.hazmat.primitives.kdf',
+    'cryptography.hazmat.primitives.kdf.pbkdf2',
+    'cryptography.hazmat.primitives.hashes',
+    'cryptography.hazmat.backends',
+    'cryptography.hazmat.backends.openssl',
+	'numpy',
+]
+
+# Encoding support
+encoding_modules = [
+    'encodings',
+    'encodings.utf_8',
+    'encodings.ascii',
+    'encodings.latin_1',
+    'encodings.cp1252',
+    'encodings.cp437',
+    'encodings.utf_16',
+    'encodings.utf_16_le',
+    'encodings.utf_16_be',
+    'encodings.utf_32',
+    'encodings.utf_32_le',
+    'encodings.utf_32_be',
+    'encodings.unicode_escape',
+    'encodings.raw_unicode_escape',
+    'encodings.idna',
+    'encodings.aliases',
+    'codecs',
+]
+
+# Combine all hidden imports
+hiddenimports.append('memory_usage_reporter')
+hiddenimports.append('tqdm_safety')
+hiddenimports.extend(app_modules)
+hiddenimports.extend(gui_modules)
+hiddenimports.extend(epub_modules)
+hiddenimports.extend(image_modules)
+hiddenimports.extend(api_modules)
+hiddenimports.extend(text_modules)
+hiddenimports.extend(network_modules)
+hiddenimports.extend(data_modules)
+hiddenimports.extend(system_modules)
+hiddenimports.extend(datetime_modules)
+hiddenimports.extend(utility_modules)
+hiddenimports.extend(encoding_modules)
+
+# Remove duplicates
+hiddenimports = list(set(hiddenimports))
+
+# ============================================================================
+# EXCLUSIONS (Packages to exclude to reduce size)
+# ============================================================================
+
+excludes = [
+    # POE / websocket-client (no longer needed; imports guarded by try/except)
+    'poe_api_wrapper', 'poe_api_wrapper.*',
+    'ballyregan', 'ballyregan.*',
+    'websocket', 'websocket.*',
+
+    # ============================================================================
+    # MACHINE LEARNING & AI FRAMEWORKS (MAJOR SIZE REDUCTION)
+    # ============================================================================
+    
+    # PyTorch ecosystem (~800MB)
+    'torch', 'torch.*','torch-*',
+    'torchvision', 'torchvision.*', 
+    'torchaudio', 'torchaudio.*',
+    'torch.nn', 'torch.nn.*',
+    'torch.cuda', 'torch.cuda.*',
+    'torch.jit', 'torch.onnx', 'torch.autograd',
+    'torch.optim', 'torch.utils', 'torch.distributed',
+    'torch.multiprocessing', 'torch.serialization',
+    'torch.nn.modules.*',
+    
+    # HuggingFace ecosystem (~400MB)
+    'transformers', 'transformers.*',
+    'tokenizers', 'tokenizers.*',
+    'huggingface_hub', 'huggingface_hub.*',
+    'safetensors', 'safetensors.*',
+    'accelerate', 'accelerate.*',
+    
+    # Computer Vision & YOLO (~200MB)
+    'ultralytics', 'ultralytics.*',
+    'ultralytics-thop',
+    
+    # ONNX Runtime (~300MB)
+    'onnx', 'onnx.*',
+    'onnxruntime', 'onnxruntime.*',
+    'onnxruntime-gpu',
+    'onnxruntime.capi', 'onnxruntime.capi.*',
+    'onnxruntime.tools', 'onnxruntime.transformers',
+    'onnxruntime.backend', 'onnxruntime.backend.*',
+    
+    # OCR Libraries (~300MB) - MAJOR ADDITION
+    'easyocr', 'easyocr.*',
+    'manga-ocr', 'manga_ocr.*',
+    'paddleocr', 'paddleocr.*',
+    'paddlepaddle', 'paddlepaddle.*',
+    'paddlex', 'paddlex.*',
+    'python-doctr', 'python_doctr.*',
+    
+    # Multiple OpenCV versions (~150MB) - MAJOR ADDITION
+    'opencv-contrib-python',
+    'opencv-python',  # Keep opencv-python-headless only
+	'cv2',
+    'cv2.contrib',
+    
+    # Scientific Computing (Optional)
+    'matplotlib', 'matplotlib.*',
+    'pandas', 'pandas.*',
+    'scikit-image', 'skimage', 'skimage.*',
+    'sklearn', 'sklearn.*',
+    
+	# Remove AVIF support if not needed (7MB)
+    'PIL._avif',
+    'pillow.libs',
+    
+    # Remove PDF support if not needed (5MB)
+    'pypdfium2', 'pypdfium2.*',
+    'pypdfium2_raw',
+	
+	# Scientific/Data formats (15MB savings)
+    'h5py', 'h5py.*',
+    'tables', 'tables.*',
+    
+    # Geographic/Geometry (2MB)
+    'shapely', 'shapely.*',
+    'Shapely', 'Shapely.*',
+    
+    # Audio processing (2MB)
+    'soundfile', 'soundfile.*',
+    '_soundfile_data',
+    'librosa', 'librosa.*',
+	
+	# Fix numpy source directory issue
+    'numpy.f2py',
+    'numpy.f2py.*',
+    'numpy.testing',
+    'numpy.testing.*',
+    'numpy.tests',
+    'numpy.distutils',
+    'numpy.distutils.*',
+    'docstring_parser.numpydoc',  # This is pulling in numpy incorrectly
+    'numpy.doc',
+    'numpy.conftest',
+    # ============================================================================
+    # CUDA & GPU LIBRARIES
+    # ============================================================================
+    'nvidia', 'nvidia.*',
+    'cuda', 'cudart', 'cublas', 'curand', 'cusparse', 'cufft',
+    'cutlass', 'nccl', 'nvtx', 'cudnn',
+    
+    # ============================================================================
+    # OTHER ML FRAMEWORKS
+    # ============================================================================
+    'tensorflow', 'tensorflow.*',
+    'tensorflow_hub', 'tensorboard',
+    'keras', 'keras.*',
+    'jax', 'jax.*', 'flax', 'flax.*',
+    'xformers', 'triton',
+    
+    # ============================================================================
+    # DEVELOPMENT & TESTING TOOLS
+    # ============================================================================
+    'pytest', 'nose', 'unittest', 'doctest', 'test', 'tests',
+    'IPython', 'jupyter', 'notebook', 'ipykernel', 'ipywidgets',
+    'pylint', 'black', 'flake8', 'mypy', 'coverage',
+    'sphinx', 'docutils',
+    
+    # ============================================================================
+    # ALTERNATIVE GUI FRAMEWORKS
+    # ============================================================================
+    'PyQt5', 'PyQt6', 'PySide2',
+    'wx', 'kivy', 'pygame',
+    
+    # ============================================================================
+    # TKINTER (No longer used)
+    # ============================================================================
+    'tkinter', 'tkinter.*', '_tkinter',
+    
+    # ============================================================================
+    # WEB FRAMEWORKS
+    # ============================================================================
+    'tornado', 'flask', 'django', 'fastapi', 'uvicorn',
+    
+    # ============================================================================
+    # OPTIONAL/RARELY USED PACKAGES
+    # ============================================================================
+    'dask', 'dask.*',
+    'cupy', 'sparse',
+    'colorama',  # Unless you need colored console output
+    'win32com', 'pythoncom',  # Unless you need Windows COM
+    
+    # ============================================================================
+    # ADDITIONAL HEAVY PACKAGES FROM YOUR ENVIRONMENT
+    # ============================================================================
+    'modelscope', 'modelscope.*',
+    # Argos Translate (exclude from lite)
+    'argostranslate', 'argostranslate.*',
+    'aistudio-sdk',
+    'bce-python-sdk',
+    'briefcase',
+    'cookiecutter',
+    'fugashi', 'unidic-lite', 'jaconv',  # Japanese text processing
+    'python-bidi',  # BiDi text
+	
+		
+	# MORE AGGRESSIVE EXCLUDES
+	'bitsandbytes', 'bitsandbytes.*',
+	'polars', 'polars.*',
+	'pyarrow', 'pyarrow.*',
+    'scipy', 'scipy.*',
+    'scipy.libs'
+	
+	# Force exclude ALL torch variants
+	'*torch*',
+	'torch*',
+    '_torch*',
+]
+
+# ============================================================================
+# ANALYSIS
+# ============================================================================
+
+a = Analysis(
+    ['translator_gui.py'],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=['.'],  # Use custom hooks in current directory
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=excludes,
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+# Simple cleanup after Analysis
+a.binaries = [b for b in a.binaries if not any([
+    'scipy.libs' in b[0],
+    '_avif' in b[0],
+    'pypdfium' in b[0],
+    'metrics_cpp_avx2' in b[0],
+    'hdf5.dll' in b[0],
+    'libsndfile' in b[0],
+    'geos-' in b[0],
+])]
+
+# Remove torch only
+a.datas = [d for d in a.datas if not any([
+    'torch' in d[0].lower(),
+    'torch-' in d[0],
+    '.dist-info' in d[0] and 'torch' in d[0].lower(),
+])]
+
+a.pure = [p for p in a.pure if not any([
+    'torch' in str(p).lower(),
+    'pytorch' in str(p).lower(),
+    '_torchcodec' in str(p),
+    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped � it is a runtime dep of google.cloud.aiplatform
+])]
+
+# ============================================================================
+# PYZ (Python Zip archive)
+# ============================================================================
+
+pyz = PYZ(
+    a.pure,
+    a.zipped_data,
+    cipher=block_cipher
+)
+
+# ============================================================================
+# EXECUTABLE CONFIGURATION (macOS .app bundle)
+# ============================================================================
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name=APP_NAME,
+    version=get_windows_version_info(APP_NAME),
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=ENABLE_CONSOLE,
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=APP_ICON,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=ENABLE_UPX,
+    name=APP_NAME.replace(' ', '_'),
+)
+
+# macOS .app bundle
+app = BUNDLE(
+    coll,
+    name=APP_NAME.replace(' ', '_') + '.app',
+    icon=APP_ICON,
+    bundle_identifier='com.glossarion.lite',
+    info_plist={
+        'CFBundleName': 'Glossarion Lite',
+        'CFBundleDisplayName': 'Glossarion Lite',
+        'CFBundleVersion': APP_VERSION,
+        'CFBundleShortVersionString': APP_VERSION,
+        'NSHighResolutionCapable': True,
+        'LSMinimumSystemVersion': '10.15.0',
+    },
+)
+
+# ============================================================================
+# POST-BUILD: Create .dmg
+# ============================================================================
+
+import subprocess
+import platform
+
+if platform.system() == 'Darwin':
+    dist_dir = os.path.join(SPECPATH, 'dist')
+    app_path = os.path.join(dist_dir, APP_NAME.replace(' ', '_') + '.app')
+    dmg_name = APP_NAME.replace(' ', '_') + '.dmg'
+    dmg_path = os.path.join(dist_dir, dmg_name)
+
+    if os.path.exists(app_path):
+        print(f'\n🍎 Post-build: Creating {dmg_name}...')
+
+        # Remove old dmg if it exists
+        if os.path.exists(dmg_path):
+            os.remove(dmg_path)
+
+        try:
+            # Try create-dmg first (prettier output with Applications symlink)
+            result = subprocess.run(
+                ['which', 'create-dmg'],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                subprocess.run([
+                    'create-dmg',
+                    '--volname', 'Glossarion Lite',
+                    '--volicon', os.path.join(SPECPATH, APP_ICON),
+                    '--window-pos', '200', '120',
+                    '--window-size', '600', '400',
+                    '--icon-size', '100',
+                    '--app-drop-link', '435', '170',
+                    '--icon', APP_NAME.replace(' ', '_') + '.app', '175', '170',
+                    dmg_path,
+                    app_path,
+                ], check=True)
+                print(f'✅ Created DMG (create-dmg): {dmg_path}')
+            else:
+                raise FileNotFoundError('create-dmg not found, falling back to hdiutil')
+
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
+            print(f'   create-dmg not available, using hdiutil: {e}')
+            try:
+                subprocess.run([
+                    'hdiutil', 'create',
+                    '-volname', 'Glossarion Lite',
+                    '-srcfolder', app_path,
+                    '-ov',
+                    '-format', 'UDZO',
+                    dmg_path,
+                ], check=True)
+                print(f'✅ Created DMG (hdiutil): {dmg_path}')
+            except subprocess.CalledProcessError as e2:
+                print(f'❌ DMG creation failed: {e2}')
+
+        # Print final size
+        if os.path.exists(dmg_path):
+            size_mb = os.path.getsize(dmg_path) / (1024 * 1024)
+            print(f'📦 DMG size: {size_mb:.1f} MB')
+    else:
+        print(f'⚠️  Post-build: .app not found at {app_path}, skipping DMG creation')
+else:
+    print(f'\n⚠️  Post-build: DMG creation skipped (not running on macOS)')

@@ -1,0 +1,134 @@
+import zipfile
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+from epub_library import (
+    EpubLibraryDialog,
+    FORMAT_ALL,
+    _EPUB_SEARCH_METADATA_CACHE,
+    _book_matches_library_query,
+    _extract_epub_subjects,
+)
+
+
+def _book():
+    return {
+        "name": "The Shut-in Tower Master",
+        "subjects": ["Modern", "Apocalypse", "No Romance"],
+        "raw_subjects": ["현대", "아포칼립스", "노맨스"],
+        "metadata_json": {
+            "subject": ["Mage", "System"],
+            "original_subject": ["마법사", "시스템"],
+            "tags": "#Community #Gallery",
+            "genres": ["Fantasy"],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "tower master",
+        "apocalypse",
+        "romance",
+        "아포칼립스",
+        "마법사",
+        "community",
+        "fantasy",
+    ],
+)
+def test_library_query_matches_titles_and_tag_sources(query):
+    assert _book_matches_library_query(_book(), query)
+
+
+def test_library_query_rejects_unrelated_text():
+    assert not _book_matches_library_query(_book(), "historical cooking")
+
+
+def test_dialog_filter_uses_tag_matching():
+    class Search:
+        @staticmethod
+        def text():
+            return "Gallery"
+
+    class FakeDialog:
+        _search = Search()
+        _format_filter = FORMAT_ALL
+
+        @staticmethod
+        def _sorted_books(books):
+            return books
+
+        @staticmethod
+        def _format_of_book(book):
+            return book.get("type", "epub")
+
+    matching = _book()
+    unrelated = {"name": "Another Book", "subjects": ["Drama"]}
+
+    result = EpubLibraryDialog._filtered(FakeDialog(), [unrelated, matching])
+
+    assert result == [matching]
+
+
+def test_extract_epub_subjects_preserves_all_opf_tags(tmp_path):
+    epub_path = tmp_path / "tagged.epub"
+    opf = """<?xml version="1.0" encoding="UTF-8"?>
+    <package xmlns="http://www.idpf.org/2007/opf"
+             xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+      <metadata>
+        <dc:title>Tagged Book</dc:title>
+        <dc:subject>Modern</dc:subject>
+        <dc:subject>Apocalypse</dc:subject>
+        <dc:subject>TS</dc:subject>
+        <dc:subject>Apocalypse</dc:subject>
+      </metadata>
+    </package>"""
+    with zipfile.ZipFile(epub_path, "w") as epub:
+        epub.writestr("OEBPS/content.opf", opf.encode("utf-8"))
+
+    _EPUB_SEARCH_METADATA_CACHE.clear()
+
+    assert _extract_epub_subjects(str(epub_path)) == (
+        "Modern",
+        "Apocalypse",
+        "TS",
+    )
+
+
+def test_library_query_matches_raw_titles_regardless_of_toggle():
+    from epub_library import _book_matches_library_query
+
+    book = {
+        "name": "Sherlock + Academy Logic.4 Crime RPG",
+        "raw_source_path": r"C:\books\シャーロック アカデミー Logic.4 犯罪RPG.epub",
+        "metadata_json": {"original_title": "シャーロック＋アカデミー"},
+    }
+    assert _book_matches_library_query(book, "sherlock")
+    assert _book_matches_library_query(book, "犯罪RPG")
+    assert _book_matches_library_query(book, "シャーロック＋")
+    assert not _book_matches_library_query(book, "unrelated")
+
+
+def test_progress_summary_ignores_metadata_and_artifact_rows(tmp_path):
+    import json
+
+    from epub_library import _read_progress_summary
+
+    chapters = {
+        "__metadata__": {"status": "completed", "output_file": "metadata.json", "special_type": "metadata"},
+        "__translation_artifact__:toc": {"status": "completed", "output_file": "TOC.txt", "special_type": "toc"},
+        "__translation_artifact__:headers": {
+            "status": "completed", "output_file": "translated_headers.txt", "special_type": "headers",
+        },
+        "1": {"status": "completed", "output_file": "response_chapter1.html"},
+    }
+    for name in ("metadata.json", "TOC.txt", "translated_headers.txt", "response_chapter1.html"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    progress = tmp_path / "translation_progress.json"
+    progress.write_text(json.dumps({"chapters": chapters}), encoding="utf-8")
+
+    summary = _read_progress_summary(str(progress), exclude_special=False, config={})
+    assert (summary["total"], summary["completed"]) == (1, 1)

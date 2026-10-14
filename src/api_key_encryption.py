@@ -1,0 +1,420 @@
+"""
+Simple API Key Encryption Module for Glossarion
+Encrypts only specific API key fields including multi-key support
+"""
+
+import os
+import json
+import base64
+from pathlib import Path
+
+try:
+    from cryptography.fernet import Fernet
+    _HAS_CRYPTOGRAPHY = True
+except ImportError:
+    _HAS_CRYPTOGRAPHY = False
+    Fernet = None
+
+
+class _NullCipher:
+    """Passthrough cipher when cryptography is unavailable — no encryption."""
+    def encrypt(self, data: bytes) -> bytes:
+        return base64.b64encode(data)
+    def decrypt(self, token: bytes) -> bytes:
+        return base64.b64decode(token)
+
+
+# Process-local key material. Glossarion Mobile keeps the Fernet key in the
+# platform secure storage (Android Keystore / iOS Keychain) and passes it in
+# with set_key_material() before any backend import: on Android the app dir
+# next to __file__ is replaced on every update, and the iOS bundle is
+# read-only. The key never goes into os.environ on a device.
+# GLOSSARION_API_KEY_FERNET is a fallback for host tests only. When neither
+# is set, the desktop key-file logic in APIKeyEncryption runs unchanged.
+_key_material = None
+
+
+def _normalize_key_material(key):
+    """Return *key* as a url-safe base64 Fernet key (bytes) or raise ValueError.
+
+    Accepts a Fernet key (``Fernet.generate_key()``, bytes or str) or the
+    32 raw key bytes.
+    """
+    if isinstance(key, str):
+        key = key.strip().encode("ascii", "replace")
+    if not isinstance(key, (bytes, bytearray)):
+        raise ValueError("API key encryption key must be bytes")
+    key = bytes(key)
+    if len(key) == 32:
+        return base64.urlsafe_b64encode(key)
+    key = key.strip()
+    try:
+        raw = base64.urlsafe_b64decode(key)
+    except Exception:
+        raise ValueError("API key encryption key is not a Fernet key")
+    if len(raw) != 32:
+        raise ValueError("API key encryption key must decode to 32 bytes")
+    return key
+
+
+def set_key_material(key: bytes) -> None:
+    """Encrypt API keys with *key* in this process instead of the key file.
+
+    *key* is a Fernet key or its 32 raw bytes; ``None`` clears it. The shared
+    handler is rebuilt on its next use, so call this before the first
+    encrypt/decrypt. Desktop never calls it.
+    """
+    global _key_material, _handler
+    _key_material = None if key is None else _normalize_key_material(key)
+    _handler = None
+
+
+def _active_key_material():
+    """The set_key_material() key, else GLOSSARION_API_KEY_FERNET, else None."""
+    if _key_material is not None:
+        return _key_material
+    env_key = os.environ.get("GLOSSARION_API_KEY_FERNET", "").strip()
+    if env_key:
+        try:
+            return _normalize_key_material(env_key)
+        except ValueError:
+            print("Warning: GLOSSARION_API_KEY_FERNET is not a valid Fernet key; ignored")
+    return None
+
+
+class APIKeyEncryption:
+    """Simple encryption handler for API keys"""
+    
+    def __init__(self):
+        import sys
+        try:
+            self._init_cipher(sys)
+        except Exception as e:
+            # Absolute last resort: if anything goes wrong, use a null cipher
+            # so the app doesn't crash on startup
+            print(f"⚠️ API key encryption init failed ({e}) — keys will not be encrypted")
+            self.cipher = _NullCipher() if not _HAS_CRYPTOGRAPHY else Fernet(Fernet.generate_key())
+            self.key_file = None
+        
+        # Define which fields to encrypt
+        self.api_key_fields = [
+            'api_key',
+            'replicate_api_key',
+            'sdlxliff_machine_translation_deepl_api_key',
+            'sdlxliff_machine_translation_bing_api_key',
+            'sdlxliff_machine_translation_yandex_api_key',
+            # Add more field names here if needed
+        ]
+    
+    def _init_cipher(self, sys):
+        """Initialize cipher with proper error handling."""
+        key_material = _active_key_material()
+        if key_material is not None and _HAS_CRYPTOGRAPHY:
+            # Process-local key (mobile secure storage / host tests): no key file.
+            self.key_file = None
+            self.cipher = Fernet(key_material)
+            return
+        # Determine writable directory for the encryption key file
+        if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
+            # macOS .app bundles: Contents/MacOS/ is read-only on DMGs
+            # Use ~/Library/Application Support/Glossarion/ instead
+            _app_dir = Path.home() / 'Library' / 'Application Support' / 'Glossarion'
+            _app_dir.mkdir(parents=True, exist_ok=True)
+        elif getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+            _app_dir = Path(sys.executable).parent
+        else:
+            _app_dir = Path(__file__).parent
+        # On macOS use a plain .txt file (easier to find/manage)
+        if sys.platform == 'darwin':
+            self.key_file = _app_dir / 'glossarion_key.txt'
+            # Auto-migrate old .glossarion_key → glossarion_key.txt
+            old_key = _app_dir / '.glossarion_key'
+            if old_key.exists() and not self.key_file.exists():
+                try:
+                    old_key.rename(self.key_file)
+                    print(f"✅ Migrated encryption key: .glossarion_key → glossarion_key.txt")
+                except Exception:
+                    pass
+        else:
+            self.key_file = _app_dir / '.glossarion_key'
+        self.cipher = self._get_or_create_cipher()
+    
+    def _get_or_create_cipher(self):
+        """Get existing cipher or create new one"""
+        if not _HAS_CRYPTOGRAPHY:
+            print("⚠️ cryptography package not installed — using passthrough (keys stored unencrypted)")
+            return _NullCipher()
+        
+        if self.key_file and self.key_file.exists():
+            try:
+                key = self.key_file.read_bytes()
+                return Fernet(key)
+            except Exception:
+                pass
+        
+        # Generate new key
+        key = Fernet.generate_key()
+        try:
+            if self.key_file:
+                self.key_file.write_bytes(key)
+        except OSError:
+            # Fallback: write to home directory if primary path is read-only
+            try:
+                import sys as _sys
+                if _sys.platform == 'darwin':
+                    fallback = Path.home() / 'glossarion_key.txt'
+                else:
+                    fallback = Path.home() / '.glossarion_key'
+                fallback.write_bytes(key)
+                self.key_file = fallback
+            except OSError:
+                # Last resort: key lives in memory only for this session
+                return Fernet(key)
+        
+        # Hide file on Windows
+        if os.name == 'nt':
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(str(self.key_file), 2)
+            except Exception:
+                pass
+        else:
+            # Restrict permissions on Unix
+            try:
+                os.chmod(self.key_file, 0o600)
+            except OSError:
+                pass
+        
+        return Fernet(key)
+    
+    def encrypt_value(self, value):
+        """Encrypt a single value"""
+        try:
+            encrypted = self.cipher.encrypt(value.encode())
+            return f"ENC:{base64.b64encode(encrypted).decode()}"
+        except:
+            return value
+    
+    def decrypt_value(self, value):
+        """Decrypt a single value"""
+        if not isinstance(value, str) or not value.startswith('ENC:'):
+            return value
+        
+        try:
+            encrypted_data = base64.b64decode(value[4:])
+            return self.cipher.decrypt(encrypted_data).decode()
+        except:
+            return value
+    
+    def encrypt_multi_keys(self, multi_keys):
+        """Encrypt API keys in multi_api_keys array"""
+        if not isinstance(multi_keys, list):
+            return multi_keys
+        
+        encrypted_keys = []
+        for key_entry in multi_keys:
+            if isinstance(key_entry, dict):
+                encrypted_entry = key_entry.copy()
+                # Encrypt the api_key field in each entry
+                if 'api_key' in encrypted_entry and encrypted_entry['api_key']:
+                    value = encrypted_entry['api_key']
+                    if isinstance(value, str) and not value.startswith('ENC:'):
+                        encrypted_entry['api_key'] = self.encrypt_value(value)
+                encrypted_keys.append(encrypted_entry)
+            else:
+                encrypted_keys.append(key_entry)
+        
+        return encrypted_keys
+    
+    def decrypt_multi_keys(self, multi_keys):
+        """Decrypt API keys in multi_api_keys array"""
+        if not isinstance(multi_keys, list):
+            return multi_keys
+        
+        decrypted_keys = []
+        for key_entry in multi_keys:
+            if isinstance(key_entry, dict):
+                decrypted_entry = key_entry.copy()
+                # Decrypt the api_key field in each entry
+                if 'api_key' in decrypted_entry and decrypted_entry['api_key']:
+                    decrypted_entry['api_key'] = self.decrypt_value(decrypted_entry['api_key'])
+                decrypted_keys.append(decrypted_entry)
+            else:
+                decrypted_keys.append(key_entry)
+        
+        return decrypted_keys
+
+    def multi_key_list_fields(self):
+        """Config list fields that contain per-entry api_key values."""
+        return [
+            'multi_api_keys',
+            'fallback_keys',
+            'glossary_keys',
+            'glossary_refinement_keys',
+            'metadata_keys',
+            'qa_scan_keys',
+            'ai_truncation_detection_keys',
+            'rolling_summary_keys',
+            'truncation_retry_keys',
+            'inpainter_keys',
+            'tts_keys',
+        ]
+    
+    def encrypt_config(self, config):
+        """Encrypt specific API key fields including multi-key support"""
+        encrypted = config.copy()
+        
+        # Encrypt regular API key fields
+        for field in self.api_key_fields:
+            if field in encrypted and encrypted[field]:
+                value = encrypted[field]
+                # Only encrypt if not already encrypted
+                if isinstance(value, str) and not value.startswith('ENC:'):
+                    encrypted[field] = self.encrypt_value(value)
+        
+        for field in self.multi_key_list_fields():
+            if field in encrypted:
+                encrypted[field] = self.encrypt_multi_keys(encrypted[field])
+        
+        return encrypted
+    
+    def decrypt_config(self, config):
+        """Decrypt specific API key fields including multi-key support"""
+        decrypted = config.copy()
+        
+        # Decrypt regular API key fields
+        for field in self.api_key_fields:
+            if field in decrypted and decrypted[field]:
+                decrypted[field] = self.decrypt_value(decrypted[field])
+        
+        for field in self.multi_key_list_fields():
+            if field in decrypted:
+                decrypted[field] = self.decrypt_multi_keys(decrypted[field])
+        
+        return decrypted
+
+# Simple interface functions
+_handler = None
+
+def get_handler():
+    global _handler
+    if _handler is None:
+        try:
+            _handler = APIKeyEncryption()
+        except Exception as e:
+            print(f"⚠️ Failed to create encryption handler: {e}")
+            # Return a safe no-op handler
+            _handler = _NullHandler()
+    return _handler
+
+
+class _NullHandler:
+    """No-op handler that passes config through unchanged."""
+    api_key_fields = [
+        'api_key',
+        'replicate_api_key',
+        'sdlxliff_machine_translation_deepl_api_key',
+        'sdlxliff_machine_translation_bing_api_key',
+        'sdlxliff_machine_translation_yandex_api_key',
+    ]
+    def encrypt_config(self, config):
+        return config
+    def decrypt_config(self, config):
+        return config
+    def encrypt_value(self, value):
+        return value
+    def decrypt_value(self, value):
+        return value
+
+
+def encrypt_config(config):
+    """Encrypt API keys in config"""
+    try:
+        return get_handler().encrypt_config(config)
+    except Exception:
+        return config
+
+def decrypt_config(config):
+    """Decrypt API keys in config"""
+    try:
+        return get_handler().decrypt_config(config)
+    except Exception:
+        return config
+
+def migrate_config_file(config_file='config.json'):
+    """Migrate existing config to encrypted format"""
+    try:
+        # Read config
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        # Check if already encrypted
+        handler = get_handler()
+        needs_encryption = False
+        
+        # Check regular API key fields
+        for field in handler.api_key_fields:
+            if field in config and config[field]:
+                if isinstance(config[field], str) and not config[field].startswith('ENC:'):
+                    needs_encryption = True
+                    break
+        
+        for field in handler.multi_key_list_fields():
+            if field in config and isinstance(config[field], list):
+                for key_entry in config[field]:
+                    if isinstance(key_entry, dict) and 'api_key' in key_entry:
+                        if key_entry['api_key'] and not key_entry['api_key'].startswith('ENC:'):
+                            needs_encryption = True
+                            break
+            if needs_encryption:
+                break
+        
+        if not needs_encryption:
+            print("Config already encrypted or no API keys found.")
+            return True
+        
+        # Backup
+        backup_file = f"{config_file}.backup"
+        with open(backup_file, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        print(f"Created backup: {backup_file}")
+        
+        # Encrypt
+        encrypted = encrypt_config(config)
+        
+        # Save
+        with open(config_file, 'w', encoding='utf-8') as f:
+            json.dump(encrypted, f, ensure_ascii=False, indent=2)
+        
+        print("✅ Successfully encrypted API keys!")
+        
+        # Show summary
+        for field in handler.multi_key_list_fields():
+            if field in config:
+                print(f"  - Encrypted {len(config[field])} {field} entries")
+    
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+if __name__ == "__main__":
+    from shutdown_utils import run_cli_main
+    def _main():
+        # Simple migration script
+        import sys
+        
+        config_file = 'config.json'
+        if len(sys.argv) > 1:
+            config_file = sys.argv[1]
+        
+        if os.path.exists(config_file):
+            print(f"Encrypting API keys in {config_file}...")
+            ok = migrate_config_file(config_file)
+            return 0 if ok else 1
+        else:
+            print(f"Config file not found: {config_file}")
+            return 1
+    run_cli_main(_main)

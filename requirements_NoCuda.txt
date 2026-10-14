@@ -1,0 +1,131 @@
+# Python 3.12.9
+# Core packages
+pyinstaller
+pyinstaller-hooks-contrib
+ttkbootstrap
+pillow>=12.3.0
+beautifulsoup4
+lxml
+html5lib
+ebooklib
+requests
+psutil
+tqdm
+langdetect
+PySide6
+# discord
+
+# AI/API Clients
+openai
+anthropic
+mistralai
+cohere
+tiktoken
+#poe-api-wrapper
+#ballyregan
+google-genai
+google-cloud-aiplatform
+deepl
+vertexai
+
+# Data processing
+datasketch
+numpy<2.3
+scipy
+
+# HTTP/Networking
+httpx
+httpcore
+anyio
+sniffio
+websocket-client
+websockets
+aiohttp
+aiofiles<25.0
+multidict
+yarl
+async-timeout
+attrs
+
+# Text processing
+regex
+python-dotenv
+certifi
+chardet
+charset-normalizer
+olefile
+html2text
+markdown
+markdown2
+rapidfuzz
+pymupdf
+jellyfish
+
+# PDF Generation (optional - for HTML to PDF with images/formatting)
+weasyprint  # Recommended for best PDF output quality (requires MSYS2 DLLs)
+xhtml2pdf  # Pure Python fallback (bundleable, but limited CSS support)
+# pdfkit  # Alternative option (requires wkhtmltopdf binary - not bundleable)
+
+# Image processing
+opencv-python-headless
+
+# Pin typing-extensions
+typing-extensions
+
+# Google Cloud Services
+google-cloud-vision
+google-cloud-translate
+google-cloud-storage>=3.0.0
+google-auth
+google-auth-httplib2
+google-api-core
+googleapis-common-protos
+google-ai-generativelanguage
+grpcio
+grpcio-status
+proto-plus
+protobuf<6.0.0dev
+
+# Azure Vision APIs
+azure-ai-vision-imageanalysis==1.0.0  # New Image Analysis API (replaces old Computer Vision)
+azure-ai-documentintelligence==1.0.2  # Document Intelligence for OCR
+isodate
+azure-core
+azure-identity
+
+# YOLO Bubble Detection
+onnx
+onnxruntime
+# onnxruntime-gpu  # Optional, uncomment for GPU support
+ultralytics  # Optional, for PT to ONNX conversion
+lap>=0.5.12 
+
+# Inpainting
+replicate
+
+# heavy imports (increases .exe file size by 1.5gb)
+# CPU-only PyTorch wheels (avoid CUDA DLL load errors on Windows)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+onnxruntime
+safetensors
+transformers
+diffusers>=0.36.0
+accelerate
+huggingface-hub<1.0.0
+hf-xet>=1.2.0
+
+# Encryption/Decryption
+cryptography>=50.0.2
+
+# Version management
+packaging
+
+# Offline machine translator
+argostranslate
+
+# Silent truncation detection (optional - for QA Scanner truncation check)
+sentence-transformers
+deep-translator
+scikit-learn

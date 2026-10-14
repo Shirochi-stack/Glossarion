@@ -1,0 +1,257 @@
+# Glossarion Mobile (Android + iOS), built with Flet 1.0.3.
+# Build config lives under [tool.flet]; see src/mobile/README.md for commands.
+# The real version is always injected from src/app_version.py by tools/build.py
+# or CI (--build-version / --build-number), never edited here.
+
+[project]
+name = "glossarion"
+version = "0.0.0"
+description = "Glossarion - AI novel & manga translator"
+requires-python = ">=3.13,<3.14"   # Flet bundles CPython 3.13 on device
+dependencies = [
+  "flet==1.0.3",
+  "flet-secure-storage==1.0.3",
+  "flet-permission-handler==1.0.3",
+  "flet-webview==1.0.3",             # Reader (U5); Android/iOS/macOS only, native fallback elsewhere
+  "flet-audio==1.0.3",               # chat AudioCard / MediaViewer (U7)
+  "flet-video==1.0.3",               # chat VideoCard / MediaViewer (U7)
+  "flet-glossarion-native==0.1.0",   # in-repo extension (see dev_packages / tool.uv.sources)
+
+  # EPUB / HTML
+  "beautifulsoup4==4.12.3",
+  "soupsieve>=2.5",
+  "lxml==6.1.1",
+  "html5lib==1.1",
+  "ebooklib==0.18",
+  "six==1.17.0",
+
+  # Text / tokens
+  "tiktoken==0.13.0",
+  "regex==2026.5.9",
+  "rapidfuzz==3.14.5",
+  "langdetect==1.0.9",
+  "chardet==5.2.0",
+  "charset-normalizer==3.5.2",
+  "tqdm==4.66.6",
+  "html2text==2025.4.15",
+  "markdown==3.10.2",
+  "markdown2==2.5.5",
+
+  # HTTP
+  "requests==2.33.0",
+  "urllib3==2.8.0",
+  "certifi==2026.2.25",
+  "httpx==0.28.1",
+  "httpcore==1.0.9",
+  "anyio==4.14.2",
+
+  # LLM SDKs: the httpx-based majors the desktop is tested with
+  "openai>=2.32,<3",
+  "anthropic>=0.92,<1",
+  "google-genai>=1.73.1,<2",
+  "pydantic==2.13.4",
+  "pydantic-core==2.46.4",
+  "jiter==0.15.0",
+  "websockets>=13,<17",
+  "deepl==1.29.0",
+  "deep-translator==1.11.4",
+
+  # Auth / crypto
+  "google-auth==2.49.1",
+  "cryptography==50.0.2",  # includes PKCS#7 oracle fix; mobile builds need patched wheels
+  "cffi==2.0.0",
+
+  # Cloud OCR (manga, U8): Azure Computer Vision through its SDK; Google Cloud Vision and Azure
+  # Document Intelligence through the REST clients google_vision_rest / azure_document_intelligence_rest
+  # (no gRPC stack in the app, see Tier B below)
+  "azure-ai-vision-imageanalysis==1.0.0",
+  "azure-core>=1.30",
+  "isodate",
+
+  # PDF
+  "pymupdf==1.27.2.3",
+  "pypdf==6.19.0",
+
+  # Images / on-device ONNX
+  "pillow==12.3.0",  # patched iOS wheels available; Android needs compatible patched wheels
+  "numpy==2.4.6",
+  "opencv-python-headless==5.0.0.93",
+  "onnxruntime==1.27.0",
+  "protobuf==7.35.0",
+  "flatbuffers",
+  "packaging",
+
+  # Tier B (U9, plan dependency rule; check_mobile_wheels.py passes for all five Android/iOS
+  # targets). grpcio 1.81.0 is the newest Android/iOS cp313 build on pypi.flet.dev, so
+  # grpcio-status (>= 1.84 needs grpcio >= 1.84) and google-api-core (it pulls grpcio-status
+  # through its [grpc] extra) are pinned with it. Only grpcio is native; the rest are py3 wheels.
+  # grpcio < 1.83 has no post-quantum (PQC) TLS: google-api-core warns (FutureWarning) on import
+  # and Google raises its minimum to grpcio >= 1.83 in April 2027, so move this pin (and the two
+  # below) once pypi.flet.dev has 1.83+ builds. runtime_bootstrap.KNOWN_WARNINGS silences that
+  # warning, and unified_api_client imports its two gRPC SDKs on first use on mobile.
+  "grpcio==1.81.0",
+  "grpcio-status==1.81.0",
+  "google-api-core==2.41.0",
+  "google-ai-generativelanguage==0.12.1",  # Gemini gRPC transport (grpc_gemini_client)
+  "google-cloud-translate==3.28.0",        # paid google-translate route (translate_v2 client, REST)
+  "google-cloud-texttospeech==2.38.0",     # Audio output mode: Google Cloud TTS voices
+  "google-cloud-vision==3.16.0",           # manga OCR (google_vision_rest stays the no-SDK fallback)
+]
+# Tier B outcomes that add no pin (U9; details in tests_host/test_tier_b.py):
+# * google-cloud-aiplatform / vertexai: every release requires protobuf<7, which conflicts with
+#   protobuf==7.35.0 (the only Android/iOS protobuf build). Vertex routes run without them:
+#   Gemini through google-genai (vertexai=True) and Claude through anthropic.AnthropicVertex,
+#   both REST with google-auth service-account tokens; unified_api_client skips the unused
+#   aiplatform / vertexai imports on mobile only.
+# * Azure Document Intelligence: azure-ai-documentintelligence 1.0.2 (and azure-ai-formrecognizer
+#   3.3.3) resolve, but ocr_manager imports azure.ai.formrecognizer, never documentintelligence
+#   (DISCREPANCIES "U8 Integrate", OCR providers, desktop bug 3), so the REST client
+#   azure_document_intelligence_rest (U8) stays the mobile path and neither SDK is shipped.
+# * sentence-transformers (torch, hf-xet) and argostranslate (ctranslate2, sentencepiece, stanza ->
+#   torch) have no Android/iOS wheels: disabled with a reason (settings_schema UNAVAILABLE rules).
+
+[dependency-groups]
+dev = ["flet[all]==1.0.3", "pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.uv.sources]
+flet-glossarion-native = { path = "extensions/flet_glossarion_native", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests_host"]
+
+[tool.flet]
+org = "com.glossarion"
+product = "Glossarion"
+company = "Glossarion"
+copyright = "Copyright (C) 2026 Glossarion contributors"
+bundle_id = "com.glossarion.app"
+# ebooklib 0.18 ships only an sdist; langdetect 1.0.9 ships only a py2 wheel.
+source_packages = ["langdetect", "ebooklib"]
+dev_packages = { "flet-glossarion-native" = "extensions/flet_glossarion_native" }
+
+[tool.flet.app]
+path = "app"
+module = "main"
+
+[tool.flet.compile]
+app = true
+packages = true
+
+# Extra cleanup on top of serious_python's own junk globs (*.c/*.h/*.pyx/*.pxd/*.a/*.pdb,
+# __pycache__, bin/, and the .py sources of compiled packages). The U9 additions are trees nothing
+# imports at run time: onnxruntime's per-model transformer optimisers (quantization, which
+# bubble_detector / local_inpainter try, imports only transformers/onnx_utils + tools), numpy's
+# f2py (numpy imports it lazily on `np.f2py`) and PyMuPDF's build-time headers/libs. Stored
+# (uncompressed) in the APK's sitepackages.zip, every file costs its full size; see README "APK size"
+# and tests_host/test_ci_release.py::test_pyproject_cleanup_keeps_runtime_files.
+[tool.flet.cleanup]
+package_files = [
+  "**/tests/**", "**/test/**", "**/*.pyi", "cv2/data/**",
+  "onnxruntime/transformers/models/**", "numpy/f2py/**", "pymupdf/mupdf-devel/**",
+]
+
+[tool.flet.deep_linking]          # desktop/web targets only
+scheme = "glossarion"
+host = "app"
+
+# flet 1.0.3 build_base.py reads ONLY the platform-specific tables for Android/iOS
+# (no fallback to [tool.flet.deep_linking]), so all three must be set.
+[tool.flet.android.deep_linking]
+scheme = "glossarion"
+host = "app"
+
+[tool.flet.ios.deep_linking]
+scheme = "glossarion"
+host = "app"
+
+# app/assets/splash.png and icon.png are opaque on #121826; match the splash
+# background (flet defaults: #ffffff light / #222222 dark; build_base._resolve_splash).
+[tool.flet.splash]
+color = "#121826"
+dark_color = "#121826"
+
+[tool.flet.boot_screen.flet]
+spinner_size = 28
+prepare_message = "Unpacking Glossarion…"
+startup_message = "Starting translation engine…"
+
+# The flet 1.0.3 build template overrides jni to 1.0.0; jni_flutter 1.0.4 / 1.0.4+1 (2026-10-06)
+# generate bindings that assert jni ^1.1.0 (JniVersionCheck(1, 1)) and break the Dart compile on
+# Android and iOS. 1.0.3 is the last release whose bindings check jni 1.0 (JniVersionCheck(1, 0)).
+# Drop this pin once the template moves to jni 1.1.
+[tool.flet.flutter.pubspec.dependency_overrides]
+jni_flutter = "1.0.3"
+
+# RapidOCR (manga OCR provider, U8) is a device-only dependency, so the host `uv sync` keeps
+# only opencv-python-headless: rapidocr-onnxruntime requires opencv-python, which pypi.flet.dev
+# builds from the same OpenCV 5.0.0.93 as the headless wheel. Both install the same `cv2` package
+# into the one device site-packages (separate builds, so the later install's files win).
+# 1.2.3 is the newest release that installs on CPython 3.13 (1.2.4+ declare
+# Requires-Python < 3.11/3.12/3.13; verified on CPython 3.13 + numpy 2.4 + onnxruntime 1.27); it
+# bundles its PP-OCRv3 det/rec and v2.0 cls ONNX models (~13 MB) and reads them and config.yaml
+# through __file__, hence extract_packages on Android. check_mobile_wheels.py
+# resolves all three for every Android/iOS target.
+[tool.flet.android]
+min_sdk_version = 26
+target_arch = ["arm64-v8a", "x86_64"]          # onnxruntime has no armeabi-v7a wheel
+extract_packages = ["langdetect", "certifi", "cv2", "tiktoken_ext", "rapidocr_onnxruntime"]
+dependencies = [
+  "psutil==7.2.2",                             # Android only; every use is guarded
+  "rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2",
+]
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.ACCESS_NETWORK_STATE" = true
+"android.permission.POST_NOTIFICATIONS" = true
+"android.permission.FOREGROUND_SERVICE" = true
+"android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
+"android.permission.WAKE_LOCK" = true
+"android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" = true
+"android.permission.READ_EXTERNAL_STORAGE" = false
+"android.permission.WRITE_EXTERNAL_STORAGE" = false
+"android.permission.MANAGE_EXTERNAL_STORAGE" = false
+"android.permission.READ_MEDIA_IMAGES" = false
+"android.permission.READ_MEDIA_VIDEO" = false
+"android.permission.READ_MEDIA_AUDIO" = false
+
+# <application android:...> attributes (flet 1.0.3 build template). The Reader's WebView loads
+# http://127.0.0.1:<port>/<token>/ from the in-app server; Android 9+ blocks cleartext for
+# WebView unless allowed, so the extension's network security config allows it for the
+# loopback host only (extensions/.../android/src/main/res/xml/glossarion_network_security_config.xml).
+# The iOS template already sets NSAllowsArbitraryLoads.
+[tool.flet.android.manifest_application]
+networkSecurityConfig = "@xml/glossarion_network_security_config"
+
+[tool.flet.ios]
+export_method = "release-testing"   # used only when CI passes signing flags
+dependencies = ["rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2"]  # RapidOCR, see [tool.flet.android]
+
+[tool.flet.ios.info]
+# CFBundleDisplayName comes from [tool.flet].product (flet v1.0.3 ios/Runner/Info.plist template);
+# repeating it here would emit the key twice.
+UIFileSharingEnabled = true
+LSSupportsOpeningDocumentsInPlace = true
+ITSAppUsesNonExemptEncryption = false
+NSLocalNetworkUsageDescription = "Glossarion connects to model servers on your local network (Ollama, LM Studio) and receives sign-in callbacks on this device."
+UIBackgroundModes = ["processing"]
+BGTaskSchedulerPermittedIdentifiers = ["com.glossarion.app.job.*"]
+CFBundleDocumentTypes = [
+  { CFBundleTypeName = "EPUB", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["org.idpf.epub-container", "org.idpf.epub-folder"] },
+  { CFBundleTypeName = "Text", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.plain-text", "net.daringfireball.markdown", "public.html"] },
+  { CFBundleTypeName = "PDF", CFBundleTypeRole = "Viewer", LSHandlerRank = "Alternate", LSItemContentTypes = ["com.adobe.pdf"] },
+  { CFBundleTypeName = "Archive", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.zip-archive", "com.glossarion.app.cbz"] },
+  { CFBundleTypeName = "Subtitles", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["com.glossarion.app.srt", "com.glossarion.app.vtt", "com.glossarion.app.ass"] },
+  { CFBundleTypeName = "XLIFF", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["com.glossarion.app.sdlxliff", "com.glossarion.app.xliff"] },
+  { CFBundleTypeName = "Glossary", CFBundleTypeRole = "Editor", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.json", "public.comma-separated-values-text"] },
+  { CFBundleTypeName = "Image", CFBundleTypeRole = "Viewer", LSHandlerRank = "Alternate", LSItemContentTypes = ["public.image"] },
+]
+UTImportedTypeDeclarations = [
+  { UTTypeIdentifier = "com.glossarion.app.cbz", UTTypeConformsTo = ["public.zip-archive"], UTTypeDescription = "Comic Book Archive", UTTypeTagSpecification = { "public.filename-extension" = ["cbz"] } },
+  { UTTypeIdentifier = "com.glossarion.app.srt", UTTypeConformsTo = ["public.plain-text"], UTTypeDescription = "SubRip", UTTypeTagSpecification = { "public.filename-extension" = ["srt"] } },
+  { UTTypeIdentifier = "com.glossarion.app.vtt", UTTypeConformsTo = ["public.plain-text"], UTTypeDescription = "WebVTT", UTTypeTagSpecification = { "public.filename-extension" = ["vtt"] } },
+  { UTTypeIdentifier = "com.glossarion.app.ass", UTTypeConformsTo = ["public.plain-text"], UTTypeDescription = "ASS/SSA", UTTypeTagSpecification = { "public.filename-extension" = ["ass", "ssa"] } },
+  { UTTypeIdentifier = "com.glossarion.app.sdlxliff", UTTypeConformsTo = ["public.xml"], UTTypeDescription = "SDLXLIFF", UTTypeTagSpecification = { "public.filename-extension" = ["sdlxliff"] } },
+  { UTTypeIdentifier = "com.glossarion.app.xliff", UTTypeConformsTo = ["public.xml"], UTTypeDescription = "XLIFF", UTTypeTagSpecification = { "public.filename-extension" = ["xliff", "xlf"] } },
+]

@@ -1,0 +1,1042 @@
+import os
+import sys
+import threading
+import time
+import types
+from collections import deque
+
+import pytest
+
+from google_free_translate import (
+    GOOGLE_TRANSLATE_CO_IN_ENDPOINT,
+    GOOGLETRANS_AJAX_ENDPOINT,
+    GoogleFreeTranslateNew,
+    google_translate_language_code,
+)
+
+
+class FakeResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+class SlowInterruptClient:
+    def __init__(self, sleep_seconds=0.6):
+        self.sleep_seconds = sleep_seconds
+        self.cancel_calls = 0
+        self._cancelled = False
+        self._in_cleanup = False
+        self.tls = types.SimpleNamespace(local_cancel_check=None)
+
+    def _get_thread_local_client(self):
+        return self.tls
+
+    def is_globally_cancelled(self):
+        return False
+
+    def cancel_current_operation(self):
+        self.cancel_calls += 1
+        self._cancelled = True
+
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        time.sleep(self.sleep_seconds)
+        return "late result"
+
+
+class TupleInterruptClient(SlowInterruptClient):
+    def __init__(self):
+        super().__init__(sleep_seconds=0)
+
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        # Reproduce the real race: Stop is clicked after this request is
+        # already in flight, then the provider returns a normal tuple.
+        os.environ["GRACEFUL_STOP"] = "1"
+        return "translated text", "stop"
+
+
+class QueuedBoundaryClient(SlowInterruptClient):
+    """Fake a client which entered send() but has not reached HTTP dispatch."""
+
+    def __init__(self):
+        super().__init__(sleep_seconds=0)
+        self.send_entered = threading.Event()
+
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        self.send_entered.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            check = getattr(self.tls, "local_cancel_check", None)
+            if callable(check) and check():
+                return "cancelled before provider boundary"
+            time.sleep(0.01)
+        raise AssertionError("queued request was not cancelled")
+
+
+class ActiveBoundaryClient(SlowInterruptClient):
+    def __init__(self):
+        super().__init__(sleep_seconds=0)
+        self.provider_started = threading.Event()
+        self.release = threading.Event()
+
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        callback = getattr(self.tls, "pre_api_call_callback", None)
+        assert callable(callback)
+        callback()
+        self.provider_started.set()
+        assert self.release.wait(2.0)
+        return "active result"
+
+
+def _install_fake_argos(monkeypatch, translate_func):
+    calls = []
+
+    class FakeTranslation:
+        def translate(self, text):
+            calls.append(text)
+            return translate_func(text)
+
+    translation = FakeTranslation()
+
+    class FakeLanguage:
+        def __init__(self, code):
+            self.code = code
+
+        def get_translation(self, to_lang):
+            if self.code == "ko" and getattr(to_lang, "code", "") == "en":
+                return translation
+            return None
+
+    package_mod = types.ModuleType("argostranslate.package")
+    package_mod.update_package_index = lambda: None
+    package_mod.get_available_packages = lambda: []
+    package_mod.install_from_path = lambda path: None
+
+    translate_mod = types.ModuleType("argostranslate.translate")
+    translate_mod.get_installed_languages = lambda: [FakeLanguage("ko"), FakeLanguage("en")]
+
+    parent_mod = types.ModuleType("argostranslate")
+    parent_mod.package = package_mod
+    parent_mod.translate = translate_mod
+
+    monkeypatch.setitem(sys.modules, "argostranslate", parent_mod)
+    monkeypatch.setitem(sys.modules, "argostranslate.package", package_mod)
+    monkeypatch.setitem(sys.modules, "argostranslate.translate", translate_mod)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("display_name", "code"),
+    [
+        ("English", "en"),
+        ("Spanish", "es"),
+        ("French", "fr"),
+        ("German", "de"),
+        ("Italian", "it"),
+        ("Portuguese", "pt"),
+        ("Russian", "ru"),
+        ("Arabic", "ar"),
+        ("Hindi", "hi"),
+        ("Chinese (Simplified)", "zh-CN"),
+        ("Chinese (Traditional)", "zh-TW"),
+        ("Japanese", "ja"),
+        ("Korean", "ko"),
+        ("Turkish", "tr"),
+        ("Vietnamese", "vi"),
+    ],
+)
+def test_google_translate_language_code_matches_gui_dropdown(display_name, code):
+    assert google_translate_language_code(display_name) == code
+
+
+def test_google_free_translate_uses_co_in_first(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: False),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append(("post", url, dict(data or {})))
+        assert url == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+        assert data["client"] == "gtx"
+        return FakeResponse(200, [[["Hola", "Hello", None, None, 10]], None, "en"])
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(source_language="auto", target_language="Spanish")
+    translator.rate_limit = 0
+
+    result = translator.translate("Hello")
+
+    assert result["translatedText"] == "Hola"
+    assert result["endpoint"] == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+    assert calls[0] == (
+        "post",
+        GOOGLE_TRANSLATE_CO_IN_ENDPOINT,
+        {"client": "gtx", "sl": "auto", "tl": "es", "dt": "t", "q": "Hello"},
+    )
+
+
+def test_google_free_translate_co_in_uses_dropdown_target(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: False),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        assert url == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+        assert data["client"] == "gtx"
+        assert data["tl"] == "vi"
+        return FakeResponse(200, [[["Xin chao", "Hello", None, None, 10]], None, "en"])
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(source_language="auto", target_language="Vietnamese")
+    translator.rate_limit = 0
+
+    result = translator.translate("Hello")
+
+    assert result["translatedText"] == "Xin chao"
+    assert result["endpoint"] == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+
+
+def test_google_free_translate_honors_global_stop_by_default(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: True),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+
+    def fake_post(*_args, **_kwargs):
+        raise AssertionError("stopped translations must not hit Google endpoints")
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(source_language="auto", target_language="Spanish")
+    translator.rate_limit = 0
+
+    result = translator.translate("Hello")
+
+    assert result["translatedText"] == ""
+    assert result["provider"] == "auto"
+    assert "Operation cancelled" in result["error"]
+
+
+def test_google_free_translate_can_ignore_global_stop_for_viewer(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: True),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        assert url == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+        return FakeResponse(200, [[["Hola", "Hello", None, None, 10]], None, "en"])
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(
+        source_language="auto",
+        target_language="Spanish",
+        honor_global_stop=False,
+    )
+    translator.rate_limit = 0
+
+    result = translator.translate("Hello")
+
+    assert result["translatedText"] == "Hola"
+    assert result["endpoint"] == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+
+
+def test_send_with_interrupt_timeout_does_not_mark_user_cancel(monkeypatch):
+    from TransateKRtoEN import send_with_interrupt
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "1")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.delenv("GRACEFUL_STOP", raising=False)
+
+    client = SlowInterruptClient()
+
+    with pytest.raises(UnifiedClientError, match="timed out"):
+        send_with_interrupt(
+            [{"role": "user", "content": "hello"}],
+            client,
+            temperature=0.0,
+            max_tokens=8,
+            stop_check_fn=lambda: False,
+            chunk_timeout=0.01,
+            context="translation",
+        )
+
+    assert client.cancel_calls == 0
+    assert client._cancelled is False
+
+
+def test_send_with_interrupt_user_stop_marks_client_cancel(monkeypatch):
+    from TransateKRtoEN import send_with_interrupt
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "1")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.delenv("GRACEFUL_STOP", raising=False)
+
+    client = SlowInterruptClient()
+
+    with pytest.raises(UnifiedClientError, match="Translation stopped by user"):
+        send_with_interrupt(
+            [{"role": "user", "content": "hello"}],
+            client,
+            temperature=0.0,
+            max_tokens=8,
+            stop_check_fn=lambda: True,
+            chunk_timeout=10,
+            context="translation",
+        )
+
+    assert client.cancel_calls == 1
+    assert client._cancelled is True
+
+
+def test_send_with_interrupt_graceful_stop_does_not_cancel_active_call(monkeypatch):
+    from TransateKRtoEN import send_with_interrupt
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "1")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+
+    client = SlowInterruptClient(sleep_seconds=0.6)
+
+    result = send_with_interrupt(
+        [{"role": "user", "content": "hello"}],
+        client,
+        temperature=0.0,
+        max_tokens=8,
+        stop_check_fn=lambda: True,
+        chunk_timeout=10,
+        context="translation",
+    )
+
+    assert result == "late result"
+    assert client.cancel_calls == 0
+    assert client._cancelled is False
+    assert os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+
+
+def test_graceful_stop_clears_queued_send_without_cancelling_client(monkeypatch):
+    from TransateKRtoEN import (
+        cancel_queued_translation_sends,
+        send_with_interrupt,
+    )
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+
+    client = QueuedBoundaryClient()
+    outcome = {}
+
+    def run_send():
+        try:
+            send_with_interrupt(
+                [{"role": "user", "content": "hello"}],
+                client,
+                temperature=0.0,
+                max_tokens=8,
+                stop_check_fn=lambda: os.environ.get("GRACEFUL_STOP") == "1",
+                context="translation",
+                before_send_callback=lambda: pytest.fail(
+                    "queued request crossed the provider boundary"
+                ),
+            )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    runner = threading.Thread(target=run_send)
+    runner.start()
+    assert client.send_entered.wait(1.0)
+
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert cancel_queued_translation_sends() == 1
+    runner.join(1.0)
+
+    assert not runner.is_alive()
+    assert isinstance(outcome.get("error"), UnifiedClientError)
+    assert "queue cleared" in str(outcome["error"]).lower()
+    assert client.cancel_calls == 0
+    assert client._cancelled is False
+
+
+def test_graceful_stop_preserves_send_after_provider_boundary(monkeypatch):
+    from TransateKRtoEN import (
+        cancel_queued_translation_sends,
+        send_with_interrupt,
+    )
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+
+    client = ActiveBoundaryClient()
+    outcome = {}
+
+    def run_send():
+        try:
+            outcome["result"] = send_with_interrupt(
+                [{"role": "user", "content": "hello"}],
+                client,
+                temperature=0.0,
+                max_tokens=8,
+                stop_check_fn=lambda: os.environ.get("GRACEFUL_STOP") == "1",
+                context="translation",
+                before_send_callback=lambda: None,
+            )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    runner = threading.Thread(target=run_send)
+    runner.start()
+    assert client.provider_started.wait(1.0)
+
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert cancel_queued_translation_sends() == 0
+    client.release.set()
+    runner.join(1.0)
+
+    assert not runner.is_alive()
+    assert "error" not in outcome
+    assert outcome["result"] == "active result"
+    assert client.cancel_calls == 0
+
+
+def test_send_with_interrupt_marks_graceful_completion_for_normal_tuple_response(monkeypatch):
+    from TransateKRtoEN import send_with_interrupt
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+
+    result = send_with_interrupt(
+        [{"role": "user", "content": "hello"}],
+        TupleInterruptClient(),
+        temperature=0.0,
+        max_tokens=8,
+        stop_check_fn=lambda: False,
+        context="translation",
+    )
+
+    assert result == ("translated text", "stop", None)
+    assert os.environ.get("GRACEFUL_STOP_COMPLETED", "0") == "1"
+
+
+def test_glossary_idle_cleanup_cannot_clear_active_translation_stop(monkeypatch):
+    import translator_gui
+
+    class AliveThread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    owner = types.SimpleNamespace(
+        glossary_thread=None,
+        glossary_future=None,
+        translation_thread=AliveThread(),
+        translation_future=None,
+    )
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "1")
+
+    translator_gui.TranslatorGUI._reset_glossary_stop_flags_if_idle(owner)
+
+    assert os.environ.get("GRACEFUL_STOP", "0") == "1"
+    assert os.environ.get("GRACEFUL_STOP_COMPLETED", "0") == "1"
+
+
+def test_translation_idle_cleanup_clears_latched_stop_after_worker_exits(monkeypatch):
+    import translator_gui
+
+    owner = types.SimpleNamespace(
+        translation_thread=None,
+        translation_future=None,
+        stop_requested=True,
+        graceful_stop_active=True,
+    )
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "1")
+    monkeypatch.setenv("WAIT_FOR_CHUNKS", "1")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "1")
+
+    translator_gui.TranslatorGUI._reset_stop_flags_if_idle(owner)
+
+    assert owner.stop_requested is False
+    assert owner.graceful_stop_active is False
+    assert os.environ.get("GRACEFUL_STOP") == "0"
+    assert os.environ.get("GRACEFUL_STOP_COMPLETED") == "0"
+    assert os.environ.get("WAIT_FOR_CHUNKS") == "0"
+    assert "TRANSLATION_CANCELLED" not in os.environ
+
+
+class _TranslatorLogWakeSignal:
+    def __init__(self):
+        self.calls = 0
+
+    def emit(self):
+        self.calls += 1
+
+
+class _TranslatorDirectLogSignal:
+    def __init__(self):
+        self.messages = []
+
+    def emit(self, message):
+        self.messages.append(message)
+
+
+def _translator_log_queue_harness():
+    import translator_gui
+
+    return types.SimpleNamespace(
+        _pending_gui_logs=deque(
+            maxlen=translator_gui._GUI_LOG_PENDING_MAX_MESSAGES),
+        _pending_gui_log_lock=threading.Lock(),
+        _pending_gui_direct_logs=0,
+        _gui_log_flood_mode=False,
+        _gui_log_drain_scheduled=False,
+        log_signal=_TranslatorDirectLogSignal(),
+        log_queue_ready_signal=_TranslatorLogWakeSignal(),
+    )
+
+
+def test_translator_gui_init_uses_the_module_qtimer():
+    import translator_gui
+
+    # A function-local QTimer import anywhere in __init__ shadows the module
+    # import and makes early timer construction raise UnboundLocalError.
+    assert "QTimer" not in translator_gui.TranslatorGUI.__init__.__code__.co_varnames
+
+
+def test_translator_gui_retains_300000_live_log_lines():
+    import translator_gui
+
+    assert translator_gui._GUI_LOG_DOCUMENT_MAX_BLOCKS == 300_000
+
+
+def test_translator_gui_removes_plain_text_log_document_margin():
+    import inspect
+    import translator_gui
+
+    init_source = inspect.getsource(translator_gui.TranslatorGUI._create_log_section)
+
+    assert "self.log_text.document().setDocumentMargin(0)" in init_source
+
+
+def test_translator_worker_log_queue_coalesces_wakeups_without_dropping_lines():
+    import translator_gui
+
+    gui = _translator_log_queue_harness()
+    line_count = 12_000
+
+    def produce(start, stop):
+        for index in range(start, stop):
+            translator_gui.TranslatorGUI._queue_gui_log_message(gui, f"line {index}")
+
+    threads = [
+        threading.Thread(target=produce, args=(start, start + 3_000))
+        for start in range(0, line_count, 3_000)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(gui.log_signal.messages) == translator_gui._GUI_LOG_DIRECT_EVENT_LIMIT
+    assert gui.log_queue_ready_signal.calls == 1
+
+    drained = list(gui.log_signal.messages)
+    has_more = True
+    while has_more:
+        batch, has_more = translator_gui.TranslatorGUI._take_gui_log_batch(gui)
+        drained.extend(batch)
+
+    assert len(drained) == line_count
+    assert len(set(drained)) == line_count
+    assert gui._gui_log_drain_scheduled is False
+
+    # Model Qt having dispatched the direct events before the next ordinary
+    # line arrives.  With no flood backlog, it uses the immediate path again.
+    gui._pending_gui_direct_logs = 0
+    translator_gui.TranslatorGUI._queue_gui_log_message(gui, "after drain")
+    assert gui.log_signal.messages[-1] == "after drain"
+    assert gui.log_queue_ready_signal.calls == 1
+
+
+def test_translator_worker_normal_log_burst_bypasses_flood_throttle():
+    import translator_gui
+
+    gui = _translator_log_queue_harness()
+
+    for index in range(30):
+        translator_gui.TranslatorGUI._queue_gui_log_message(
+            gui, f"ordinary line {index}")
+
+    assert gui.log_signal.messages == [
+        f"ordinary line {index}" for index in range(30)
+    ]
+    assert list(gui._pending_gui_logs) == []
+    assert gui.log_queue_ready_signal.calls == 0
+    assert gui._gui_log_flood_mode is False
+
+    appended = []
+    gui._append_gui_log_batch = lambda messages: appended.extend(messages)
+    for message in list(gui.log_signal.messages):
+        translator_gui.TranslatorGUI.append_log_direct(gui, message)
+
+    assert appended == gui.log_signal.messages
+    assert gui._pending_gui_direct_logs == 0
+
+
+def test_translator_log_autoscroll_only_uses_timer_during_floods():
+    import translator_gui
+
+    class TimerStub:
+        def __init__(self):
+            self.active = False
+            self.starts = 0
+            self.stops = 0
+
+        def isActive(self):
+            return self.active
+
+        def start(self):
+            self.active = True
+            self.starts += 1
+
+        def stop(self):
+            self.active = False
+            self.stops += 1
+
+    timer = TimerStub()
+    scroll_calls = []
+    gui = _translator_log_queue_harness()
+    gui._log_scroll_timer = timer
+    gui._should_log_autoscroll = lambda: True
+    gui._scroll_log_after_append = lambda: scroll_calls.append(True)
+
+    translator_gui.TranslatorGUI._schedule_log_autoscroll(gui)
+
+    assert len(scroll_calls) == 1
+    assert timer.starts == 0
+
+    gui._gui_log_flood_mode = True
+    translator_gui.TranslatorGUI._schedule_log_autoscroll(gui)
+    translator_gui.TranslatorGUI._schedule_log_autoscroll(gui)
+
+    assert timer.starts == 1
+    assert len(scroll_calls) == 1
+
+
+def test_translator_gui_log_batch_takes_an_oversized_first_message():
+    import translator_gui
+
+    gui = _translator_log_queue_harness()
+    oversized = "x" * 100
+    gui._pending_gui_logs.extend((oversized, "next"))
+    gui._gui_log_drain_scheduled = True
+
+    batch, has_more = translator_gui.TranslatorGUI._take_gui_log_batch(
+        gui,
+        max_messages=10,
+        max_chars=10,
+    )
+
+    assert batch == [oversized]
+    assert has_more is True
+
+
+def test_translator_gui_flood_queue_keeps_the_newest_messages():
+    import translator_gui
+
+    gui = _translator_log_queue_harness()
+    gui._pending_gui_logs = deque(maxlen=5)
+    gui._pending_gui_direct_logs = translator_gui._GUI_LOG_DIRECT_EVENT_LIMIT
+
+    for index in range(12):
+        translator_gui.TranslatorGUI._queue_gui_log_message(
+            gui, f"line {index}")
+
+    assert list(gui._pending_gui_logs) == [
+        "line 7",
+        "line 8",
+        "line 9",
+        "line 10",
+        "line 11",
+    ]
+    assert gui.log_queue_ready_signal.calls == 1
+
+
+def test_translator_gui_direct_messages_are_persisted_once(monkeypatch):
+    import translator_gui
+
+    persisted = []
+    monkeypatch.setattr(
+        translator_gui,
+        "_persist_gui_log_message",
+        lambda message: persisted.append(message),
+    )
+    gui = types.SimpleNamespace(_extra_log_listeners=[])
+
+    translator_gui.TranslatorGUI.append_log(gui, "direct status")
+    translator_gui.TranslatorGUI.append_log(
+        gui, "backend status", _from_logging=True)
+
+    assert persisted == ["direct status"]
+
+
+def test_translator_gui_normalizes_surrogate_pairs_before_logging(caplog):
+    import translator_gui
+
+    malformed_target = chr(0xD83C) + chr(0xDFAF)
+
+    with caplog.at_level(
+        translator_gui.logging.INFO,
+        logger="glossarion.gui",
+    ):
+        translator_gui._persist_gui_log_message(
+            f"{malformed_target} Queued single-chapter translation"
+        )
+
+    persisted = [record.getMessage() for record in caplog.records]
+    assert "🎯 Queued single-chapter translation" in persisted
+    normalized = persisted[-1]
+    assert normalized.encode("utf-8").startswith(b"\xf0\x9f\x8e\xaf")
+
+
+def test_google_free_translate_keeps_ajax_endpoint_last(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: False),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append(("post", url, dict(data or {})))
+        raise RuntimeError("post endpoint unavailable")
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append(("get", url, dict(params or {})))
+        assert url == GOOGLETRANS_AJAX_ENDPOINT
+        assert params["client"] == "gtx"
+        return FakeResponse(200, [[["Hola", "Hello", None, None, 10]], None, "en"])
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+    monkeypatch.setattr("google_free_translate.requests.get", fake_get)
+
+    translator = GoogleFreeTranslateNew(source_language="auto", target_language="Spanish")
+    translator.rate_limit = 0
+
+    result = translator.translate("Hello")
+
+    assert result["translatedText"] == "Hola"
+    assert result["endpoint"] == GOOGLETRANS_AJAX_ENDPOINT
+    assert calls[0][0] == "post"
+    assert calls[0][1] == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+    assert calls[-1] == (
+        "get",
+        GOOGLETRANS_AJAX_ENDPOINT,
+        {"client": "gtx", "sl": "auto", "tl": "es", "dt": "t", "q": "Hello"},
+    )
+
+
+def test_auto_argos_fallback_reports_failed_google_endpoints(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: False),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+    _install_fake_argos(monkeypatch, lambda _text: "Hello")
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        raise RuntimeError(f"blocked {url}")
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        raise RuntimeError(f"blocked {url}")
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+    monkeypatch.setattr("google_free_translate.requests.get", fake_get)
+
+    endpoint_statuses = []
+    translator = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        endpoint_status_callback=endpoint_statuses.append,
+    )
+    translator.rate_limit = 0
+
+    result = translator.translate("안녕")
+
+    assert result["provider"] == "argos"
+    assert result["translatedText"] == "Hello"
+    assert result["fallback_from_provider"] == "google"
+    assert result["fallback_failed_endpoints"] == [
+        "translate.google.co.in/single",
+        "translate.google.com/single",
+        "clients5.google.com/t",
+        "clients5.google.com/single",
+        "clients1.google.com/single",
+        "clients3.google.com/t",
+        "translate.googleapis.com/single",
+    ]
+    assert result["fallback_note"] == (
+        "Auto fell back to Argos after Google endpoints failed: "
+        "translate.google.co.in/single, translate.google.com/single, clients5.google.com/t, "
+        "clients5.google.com/single, clients1.google.com/single, clients3.google.com/t, "
+        "translate.googleapis.com/single"
+    )
+    assert endpoint_statuses[0] == "Trying Google endpoint 1/7: translate.google.co.in/single"
+    assert "Google endpoint 1/7 failed: translate.google.co.in/single - blocked" in endpoint_statuses[1]
+    assert endpoint_statuses[-2] == "Google failed on 7 endpoints; trying Argos Translate fallback..."
+    assert endpoint_statuses[-1] == "Argos Translate fallback successful."
+
+
+def test_auto_uses_configured_deepl_before_argos_after_google_failure(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: False),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_fallback_only_provider", "argos", raising=False)
+    argos_calls = _install_fake_argos(monkeypatch, lambda _text: "Argos Hello")
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None, params=None, json=None):
+        if "deepl.com" in url:
+            calls.append(("deepl", url, dict(data or {})))
+            return FakeResponse(
+                200,
+                {"translations": [{"text": "DeepL Hello", "detected_source_language": "KO"}]},
+            )
+        calls.append(("google", url, dict(data or {})))
+        raise RuntimeError(f"blocked {url}")
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append(("google-get", url, dict(params or {})))
+        raise RuntimeError(f"blocked {url}")
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+    monkeypatch.setattr("google_free_translate.requests.get", fake_get)
+
+    endpoint_statuses = []
+    translator = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        api_keys={"deepl": {"api_key": "deepl-key:fx"}},
+        endpoint_status_callback=endpoint_statuses.append,
+    )
+    translator.rate_limit = 0
+
+    result = translator.translate("hello one")
+
+    assert result["provider"] == "deepl"
+    assert result["translatedText"] == "DeepL Hello"
+    assert result["fallback_provider"] == "deepl"
+    assert result["fallback_from_provider"] == "google"
+    assert "Auto fell back to DeepL after Google endpoints failed:" in result["fallback_note"]
+    assert argos_calls == []
+    assert "Google failed on 7 endpoints; trying DeepL fallback..." in endpoint_statuses
+    assert endpoint_statuses[-1] == "DeepL fallback successful."
+    assert GoogleFreeTranslateNew._fallback_only_provider == "deepl"
+
+    calls.clear()
+    second = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        api_keys={"deepl": {"api_key": "deepl-key:fx"}},
+    )
+    second.rate_limit = 0
+    second_result = second.translate("hello two")
+
+    assert second_result["provider"] == "deepl"
+    assert calls[0][0] == "deepl"
+    assert argos_calls == []
+
+
+def test_argos_fallback_translates_marked_html_segments_without_tag_bleed(monkeypatch):
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", True, raising=False)
+    calls = _install_fake_argos(
+        monkeypatch,
+        lambda text: {
+            "Title raw": "Title translated News /p>",
+            "Body raw": "Body translated </p><p>",
+        }.get(text, text),
+    )
+    batch_html = '<h1 data-sdl-tip="0">Title raw</h1>\n<p data-sdl-tip="1">Body raw</p>'
+
+    translator = GoogleFreeTranslateNew(source_language="Korean", target_language="English")
+    translator.rate_limit = 0
+    result = translator.translate(batch_html)
+
+    assert calls == ["Title raw", "Body raw"]
+    assert result["provider"] == "argos"
+    assert result["translatedText"] == (
+        '<h1 data-sdl-tip="0">Title translated News</h1>\n'
+        '<p data-sdl-tip="1">Body translated</p>'
+    )
+    assert "News /p>" not in result["translatedText"]
+    assert "</p><p>" not in result["translatedText"]
+
+
+def test_argos_fallback_sanitizes_plain_text_tag_fragments(monkeypatch):
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", True, raising=False)
+    _install_fake_argos(
+        monkeypatch,
+        lambda _text: "First sentence. News /p> Second p> <p>Third</p>",
+    )
+
+    translator = GoogleFreeTranslateNew(source_language="Korean", target_language="English")
+    translator.rate_limit = 0
+    result = translator.translate("Plain source")
+
+    assert result["provider"] == "argos"
+    assert result["translatedText"] == "First sentence. News Second Third"
+
+
+def test_deepl_provider_requires_api_key_without_raw_fallback(monkeypatch):
+    monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+
+    translator = GoogleFreeTranslateNew(source_language="auto", target_language="English", provider="deepl")
+    result = translator.translate("Hello")
+
+    assert result["provider"] == "deepl"
+    assert result["translatedText"] == ""
+    assert "API key is not configured" in result["error"]
+
+
+def test_deepl_provider_uses_auth_key_and_html_tag_handling(monkeypatch):
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append((url, dict(data or {}), dict(headers or {}), timeout))
+        return FakeResponse(
+            200,
+            {
+                "translations": [
+                    {
+                        "text": '<p data-sdl-tip="0">Hello</p>',
+                        "detected_source_language": "KO",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        provider="deepl",
+        api_keys={"deepl": {"api_key": "deepl-key:fx"}},
+    )
+    result = translator.translate('<p data-sdl-tip="0">안녕</p>')
+
+    assert result["provider"] == "deepl"
+    assert result["translatedText"] == '<p data-sdl-tip="0">Hello</p>'
+    assert calls[0][0] == "https://api-free.deepl.com/v2/translate"
+    assert calls[0][1]["tag_handling"] == "html"
+    assert calls[0][1]["target_lang"] == "EN-US"
+    assert calls[0][2]["Authorization"] == "DeepL-Auth-Key deepl-key:fx"
+
+
+def test_bing_provider_uses_subscription_key_and_html_mode(monkeypatch):
+    calls = []
+
+    def fake_post(url, params=None, headers=None, json=None, timeout=None):
+        calls.append((url, dict(params or {}), dict(headers or {}), json, timeout))
+        return FakeResponse(
+            200,
+            [
+                {
+                    "detectedLanguage": {"language": "ko"},
+                    "translations": [{"text": '<p data-sdl-tip="0">Hello</p>', "to": "en"}],
+                }
+            ],
+        )
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(
+        source_language="auto",
+        target_language="English",
+        provider="bing",
+        api_keys={"bing": {"api_key": "bing-key", "region": "eastus"}},
+    )
+    result = translator.translate('<p data-sdl-tip="0">안녕</p>')
+
+    assert result["provider"] == "bing"
+    assert result["translatedText"] == '<p data-sdl-tip="0">Hello</p>'
+    assert calls[0][0] == "https://api.cognitive.microsofttranslator.com/translate"
+    assert calls[0][1]["textType"] == "html"
+    assert calls[0][1]["to"] == "en"
+    assert calls[0][2]["Ocp-Apim-Subscription-Key"] == "bing-key"
+    assert calls[0][2]["Ocp-Apim-Subscription-Region"] == "eastus"
+    assert calls[0][3] == [{"Text": '<p data-sdl-tip="0">안녕</p>'}]
+
+
+def test_yandex_provider_uses_api_key_and_folder_id(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append((url, dict(headers or {}), dict(json or {}), timeout))
+        return FakeResponse(
+            200,
+            {
+                "translations": [
+                    {
+                        "text": '<p data-sdl-tip="0">Hello</p>',
+                        "detectedLanguageCode": "ko",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        provider="yandex",
+        api_keys={"yandex": {"api_key": "yandex-key", "folder_id": "folder-123"}},
+    )
+    result = translator.translate('<p data-sdl-tip="0">안녕</p>')
+
+    assert result["provider"] == "yandex"
+    assert result["translatedText"] == '<p data-sdl-tip="0">Hello</p>'
+    assert calls[0][0] == "https://translate.api.cloud.yandex.net/translate/v2/translate"
+    assert calls[0][1]["Authorization"] == "Api-Key yandex-key"
+    assert calls[0][2]["folderId"] == "folder-123"
+    assert calls[0][2]["format"] == "HTML"
+    assert calls[0][2]["texts"] == ['<p data-sdl-tip="0">안녕</p>']

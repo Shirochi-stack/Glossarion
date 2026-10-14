@@ -1,0 +1,809 @@
+"""BackgroundExecution: keep a job running when the app leaves the screen (plan §4, UI_SPEC §1.9/§7.6).
+
+Android
+  * first run: ask for the notification permission (``flet_permission_handler``,
+    Android 13+; ``request_notification_permission``, the one request the Run
+    tap, Welcome step 4 and Settings › Notifications use: Prefs
+    ``jobs_notification_permission_asked`` is only set for a definite answer, so
+    an errored or dismissed request is asked again by the next Run), and once,
+    on the first long job, explain and request the battery-optimisation
+    exemption (``Permission.IGNORE_BATTERY_OPTIMIZATIONS``; remembered in Prefs
+    ``jobs_battery_prompt_done``); a long job started while notifications are
+    off shows the one-time hint "Notifications are off …" · Turn on (Prefs
+    ``jobs_notifications_off_hint_shown``);
+  * job start: ``GlossarionNative.start_job_service(title, text)`` (dataSync
+    foreground service with wake + Wi-Fi locks, buttons Stop / Open);
+  * progress: ``update_job_service`` at most once per second; an update the
+    throttle holds back is sent on the next tick (trailing edge). While the app
+    is hidden the UI dispatcher parks the jobs view, so a ticker reads the
+    active job every second and keeps the notification text current
+    ("12/80 chapters", "waiting for your glossary decision");
+  * notification **Stop** -> ``JobService.request_stop()`` (graceful first, a
+    second tap forces); **Open** / tap -> the job's route;
+  * the notification swiped away (Android 14+ allows it for foreground services)
+    -> posted again while the job runs, at most once per second (like a VPN's);
+  * ``on_foreground(type=timeout)`` (Android 15 dataSync 6h/24h budget) ->
+    graceful stop (never escalates) + "Paused (system limit): tap to resume";
+  * job end: ``stop_job_service`` (the ``jobs.done`` notification follows).
+
+``notification_status()`` reads the real permission state on every call
+(``get_platform_info``: ``post_notifications_granted`` / ``notifications_enabled``,
+plus ``PermissionHandler.get_status``); ``open_notification_settings()`` opens the
+app's system settings.
+
+iOS
+  * the Run tap: ``start_continued_processing(com.glossarion.app.job.<id>)``
+    (iOS 26+, must be user-initiated, so ``prepare_for_run`` is awaited before
+    ``JobService.submit``);
+  * job start: ``begin_background_task`` (about 30 s after backgrounding on
+    iOS < 26) with an expiry notification;
+  * progress: ``update_continued_processing(done, total, subtitle)`` (1/s; the
+    same ticker keeps it current while the app is hidden);
+  * ``on_background_task(expiring | continued_expired)`` -> graceful stop +
+    local "Paused: tap to resume" notification; jobs resume from
+    ``translation_progress.json``;
+  * job end: ``finish_continued_processing`` + ``end_background_task``.
+
+Queued jobs inherit the running job's foreground service, background grant
+and continued-processing task (Android refuses to start a foreground service
+from the background), so they are only released when the queue drains. The
+service is shared with a sign-in waiting in the browser (``OAuthBridge``)
+through the bridge's ``ServiceHolds``: the last one to finish stops it.
+
+Both: ``Wakelock`` while a job runs when "Keep screen on during jobs" is on
+(Prefs ``keep_screen_on_during_jobs``; default on for iOS, off on Android
+where the foreground service holds a CPU wake lock with the screen off).
+
+Native calls go through ``NativeBridge`` (stub on desktop); permission and
+wakelock objects are injected (tests use fakes). Event handlers run on the UI
+loop. Pure asyncio, no Flet import at module scope.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+import uuid
+from typing import Any, Awaitable, Callable, Mapping, Optional
+
+from glossarion_mobile.services.native import service_holds
+
+__all__ = [
+    "BackgroundExecution",
+    "CONTINUED_ID_PREFIX",
+    "DEFINITE_PERMISSION_STATUSES",
+    "IOS_BACKGROUND_NOTICE",
+    "NOTIFICATIONS_OFF_HINT",
+    "NOTIFICATION_SETTINGS_ROUTE",
+    "PREF_BATTERY_PROMPT",
+    "PREF_KEEP_SCREEN_ON",
+    "PREF_NOTIFICATIONS_OFF_HINT",
+    "PREF_NOTIFICATION_ASKED",
+    "notification_state",
+]
+
+log = logging.getLogger("glossarion.background")
+
+CONTINUED_ID_PREFIX = "com.glossarion.app.job."
+PREF_BATTERY_PROMPT = "jobs_battery_prompt_done"
+PREF_NOTIFICATION_ASKED = "jobs_notification_permission_asked"
+#: seconds after launch before the first-run notification dialog (U11 item 8)
+LAUNCH_ASK_DELAY = 2.0
+PREF_NOTIFICATIONS_OFF_HINT = "jobs_notifications_off_hint_shown"
+PREF_KEEP_SCREEN_ON = "keep_screen_on_during_jobs"
+UPDATE_INTERVAL = 1.0  # seconds between foreground-service / Live Activity updates
+REPOST_INTERVAL = 1.0  # a swiped-away job notification is posted again at most once per second
+JOBS_HOLD = "jobs"  # ServiceHolds name of the job runner
+NOTIFICATION_SETTINGS_ROUTE = "/settings/notifications"
+
+#: ``flet_permission_handler`` answers that settle the question (the user saw the prompt or the system
+#: decided). Anything else ("unavailable …", "error …", "None" for a request that returned nothing) means
+#: the request did not happen, so the next Run asks again.
+DEFINITE_PERMISSION_STATUSES = frozenset({"granted", "denied", "permanentlyDenied", "limited", "provisional",
+                                          "restricted"})
+_ALLOWED_STATUSES = frozenset({"granted", "limited", "provisional"})
+_STATES = ("on", "off", "blocked", "unknown", "unavailable")
+
+NOTIFICATIONS_OFF_HINT = "Notifications are off: you won't see progress, finished jobs or glossary reviews"
+
+#: UI_SPEC §7.6: shown on iOS where jobs start (Jobs page, Plan card).
+IOS_BACKGROUND_NOTICE = (
+    "iOS may pause translation about 30 s after you leave the app (iOS 26+ continues in the background). "
+    "A paused job resumes from its saved progress: open Jobs and tap Resume."
+)
+
+BATTERY_EXPLANATION = (
+    "Long translations keep running with the screen off. Android may still pause them to save battery; "
+    "allow Glossarion to ignore battery optimisation so jobs are not cut short."
+)
+
+
+def notification_state(info: Any) -> str:
+    """``"on"`` / ``"off"`` (can be asked) / ``"blocked"`` (only the system settings can turn it on) /
+    ``"unknown"`` / ``"unavailable"`` for a ``notification_status()`` result (or a partial one with
+    ``granted`` / ``enabled`` / ``status``)."""
+    if not isinstance(info, Mapping):
+        return "unknown"
+    if info.get("state") in _STATES:
+        return str(info["state"])
+    status = str(info.get("status") or "")
+    granted, enabled = info.get("granted"), info.get("enabled")
+    if status == "unavailable":
+        return "unavailable"
+    if status in ("permanentlyDenied", "restricted"):
+        return "blocked"
+    if granted is False or status == "denied":
+        return "off"
+    if enabled is False:
+        return "blocked"  # allowed, but the app's notifications are turned off in the system settings
+    if granted is True or enabled is True or status in _ALLOWED_STATUSES:
+        return "on"
+    return "unknown"
+
+
+class _PermissionRequester:
+    """``flet_permission_handler.PermissionHandler`` created lazily (must be built on the loop)."""
+
+    def __init__(self) -> None:
+        self._handler: Any = None
+
+    def prime(self) -> bool:
+        """Build the handler now, inside the page context (app start), so Flet registers the service with
+        the page before the first request: built lazily from a later task it was not registered and the
+        request returned None without the system dialog (U11 item 8). True when it exists."""
+        try:
+            self._get()
+        except Exception as exc:  # no flet_permission_handler / no page (host tests)
+            log.debug("permission handler not primed: %s", exc)
+            return False
+        return True
+
+    def _get(self) -> tuple:
+        from flet_permission_handler import Permission, PermissionHandler
+
+        if self._handler is None:
+            self._handler = PermissionHandler()
+        return self._handler, Permission
+
+    async def request(self, name: str) -> str:
+        try:
+            handler, permission = self._get()
+        except ImportError as exc:
+            return f"unavailable ({exc})"
+        status = await asyncio.wait_for(handler.request(getattr(permission, name)), 120)
+        return str(getattr(status, "value", status))
+
+    async def status(self, name: str) -> str:
+        """The permission's current status without asking ("" when unknown)."""
+        try:
+            handler, permission = self._get()
+        except ImportError:
+            return ""
+        status = await asyncio.wait_for(handler.get_status(getattr(permission, name)), 10)
+        return "" if status is None else str(getattr(status, "value", status))
+
+    async def open_app_settings(self) -> bool:
+        try:
+            handler, _permission = self._get()
+        except ImportError:
+            return False
+        return bool(await asyncio.wait_for(handler.open_app_settings(), 10))
+
+
+class BackgroundExecution:
+    def __init__(
+        self,
+        native: Any,
+        *,
+        platform: str = "desktop",
+        jobs: Any = None,
+        notifications: Any = None,
+        prefs: Any = None,
+        permissions: Any = None,
+        wakelock: Any = None,
+        confirm: Optional[Callable[[str, str], Awaitable[bool]]] = None,
+        navigate_route: Optional[Callable[[str], Any]] = None,
+        clock: Callable[[], float] = time.monotonic,
+        update_interval: float = UPDATE_INTERVAL,
+        notify: Optional[Callable[..., Any]] = None,
+    ) -> None:
+        self.native = native
+        self.platform = platform
+        self.jobs = jobs
+        self.notifications = notifications
+        self.prefs = prefs
+        self.permissions = permissions if permissions is not None else _PermissionRequester()
+        if platform in ("android", "ios") and hasattr(self.permissions, "prime"):
+            self.permissions.prime()
+        self.wakelock = wakelock
+        self.confirm = confirm
+        self.navigate_route = navigate_route
+        self.clock = clock
+        self.update_interval = update_interval
+        self.notify = notify  # snackbar(message, action_label, on_action) for the one-time "notifications off" hint
+
+        self.service_running = False
+        self.service_job: Optional[str] = None
+        self.bg_task_id = -1
+        self.continued_id: Optional[str] = None
+        self.continued_started = False
+        self.wakelock_on = False
+        self._last_update = -1e9
+        self._last_text: Optional[str] = None
+        self._pending: Any = None  # the snapshot the 1/s throttle held back (sent on the next tick)
+        self._ticker: Optional[asyncio.Task] = None
+        self._last_repost = -1e9
+        self._repost_wanted = False  # a swipe the 1/s re-post limit held back (re-posted by the ticker)
+        self._pending_continued: Optional[str] = None
+        self.calls: list[str] = []  # what happened, for diagnostics and tests
+        self.app_visible = True
+        # Transitions are handled one at a time, in delivery order: a job that ends while its
+        # start (ensure_init + start_job_service round trips) is still pending must not see
+        # the service as not started yet and leave it running.
+        self._transition_lock: Optional[asyncio.Lock] = None
+        self._transition_loop: Any = None
+        # U10 (iOS): job_finished kept the job's background task / continued processing for a cloud save
+        # (the 'cloud' ServiceHolds holder); the outcome to report when ``release_kept_background`` ends them.
+        self._kept_background: Optional[bool] = None
+
+    # ---- helpers --------------------------------------------------------------------------
+
+    @property
+    def is_android(self) -> bool:
+        return self.platform == "android"
+
+    @property
+    def is_ios(self) -> bool:
+        return self.platform == "ios"
+
+    def _pref(self, key: str, default: Any = None) -> Any:
+        if self.prefs is None:
+            return default
+        try:
+            return self.prefs.get(key, default)
+        except Exception:
+            return default
+
+    def _set_pref(self, key: str, value: Any) -> None:
+        if self.prefs is not None:
+            try:
+                self.prefs.set(key, value)
+            except Exception:
+                log.debug("pref %s not saved", key, exc_info=True)
+
+    def keep_screen_on(self) -> bool:
+        return bool(self._pref(PREF_KEEP_SCREEN_ON, self.is_ios))
+
+    async def _native(self, method: str, *args: Any, default: Any = None, **kwargs: Any) -> Any:
+        self.calls.append(method)
+        try:
+            return await self.native.call(method, *args, default=default, **kwargs)
+        except Exception as exc:
+            log.warning("native %s failed: %s", method, exc)
+            return default
+
+    # ---- before submit (the Run tap) ---------------------------------------------------------
+
+    async def prepare_for_run(self, spec: Any, *, long_job: bool = True) -> None:
+        """Called from the Run/Send tap before ``JobService.submit``.
+
+        Android: notification permission (until it got a definite answer) and the
+        battery-optimisation sheet (once, for long jobs). iOS: submits the
+        BGContinuedProcessingTask request, which iOS only accepts in direct
+        response to a user action. Both: the one-time "Notifications are off"
+        hint on a long job.
+        """
+        if self.is_android:
+            status: Optional[str] = None
+            if not self._pref(PREF_NOTIFICATION_ASKED, False):
+                status = await self.request_notification_permission()
+            if long_job and not self._pref(PREF_BATTERY_PROMPT, False):
+                self._set_pref(PREF_BATTERY_PROMPT, True)
+                proceed = True
+                if self.confirm is not None:
+                    try:
+                        proceed = bool(await self.confirm("Keep translations running", BATTERY_EXPLANATION))
+                    except Exception:
+                        proceed = False
+                if proceed:
+                    battery = await self._request_permission("IGNORE_BATTERY_OPTIMIZATIONS")
+                    log.info("battery optimisation exemption: %s", battery)
+            if long_job:
+                await self._notifications_off_hint(status)
+        elif self.is_ios:
+            identifier = CONTINUED_ID_PREFIX + uuid.uuid4().hex[:12]
+            title = str(getattr(spec, "title", "") or "Glossarion")
+            started = await self._native(
+                "start_continued_processing",
+                identifier,
+                title,
+                "Starting…",
+                default=False,
+                expiration_title="Glossarion paused",
+                expiration_body=f"{title}: tap to resume",
+            )
+            if started:
+                self.continued_id = identifier
+                self.continued_started = True
+            if self.notifications is not None:
+                await self.notifications.ensure_init()  # iOS asks for notification permission here
+            if long_job:
+                await self._notifications_off_hint(None)
+
+    async def _request_permission(self, name: str) -> str:
+        self.calls.append(f"permission:{name}")
+        try:
+            return await self.permissions.request(name)
+        except Exception as exc:
+            return f"error {type(exc).__name__}: {exc}"
+
+    # ---- notification permission (launch, Run tap, Welcome step 4, Settings › Notifications) ------------
+
+    async def ask_notifications_on_launch(self, delay: float = LAUNCH_ASK_DELAY) -> Optional[str]:
+        """First launch (U11 item 8): show the system notification dialog by itself instead of waiting for
+        the user to find "Allow notifications". Asked until it gets a definite answer, like the Run tap."""
+        if not (self.is_android or self.is_ios) or self._pref(PREF_NOTIFICATION_ASKED, False):
+            return None
+        await asyncio.sleep(delay)  # let the first screen settle (the dialog covers it)
+        if self._pref(PREF_NOTIFICATION_ASKED, False) or getattr(self, "_notification_asked_now", False):
+            return None  # answered, or asked in this session already (a Run tap, Welcome): never twice
+        try:
+            return await self.request_notification_permission()
+        except Exception as exc:
+            log.info("launch notification request failed: %s", exc)
+            return None
+
+    async def ask_permissions_on_launch(self, delay: float = LAUNCH_ASK_DELAY) -> None:
+        """First launch: the notification dialog, then (Android) the battery-optimisation dialog by itself,
+        one after the other; each is asked once (a Run tap or Welcome step 4 can still ask)."""
+        await self.ask_notifications_on_launch(delay)
+        if not self.is_android or self._pref(PREF_BATTERY_PROMPT, False):
+            return
+        try:
+            if not await self.battery_exempt():
+                result = await self._request_permission("IGNORE_BATTERY_OPTIMIZATIONS")
+                log.info("launch battery optimisation exemption: %s", result)
+            self._set_pref(PREF_BATTERY_PROMPT, True)
+        except Exception as exc:
+            log.info("launch battery request failed: %s", exc)
+
+    async def battery_exempt(self) -> bool:
+        """Android: Glossarion is exempt from battery optimisation (False when unknown)."""
+        return await self._permission_status("IGNORE_BATTERY_OPTIMIZATIONS") == "granted"
+
+    async def request_notification_permission(self) -> str:
+        """One system dialog at a time: a caller while a request is pending (the first-launch ask, then a Run
+        tap) gets that request's answer instead of a second dialog."""
+        pending = getattr(self, "_notification_request", None)
+        if pending is not None and not pending.done():
+            return await asyncio.shield(pending)
+        self._notification_request = asyncio.ensure_future(self._request_notification_permission())
+        return await asyncio.shield(self._notification_request)
+
+    async def _request_notification_permission(self) -> str:
+        """Ask for the notification permission; the permission status.
+
+        Android 13+: ``POST_NOTIFICATIONS`` through ``flet_permission_handler``. ``PREF_NOTIFICATION_ASKED``
+        is only set for a definite answer (``DEFINITE_PERMISSION_STATUSES``): a request that errored, timed
+        out, was unavailable or returned nothing is asked again by the next Run. iOS: the notification set-up
+        asks (``init_notifications``); the status then comes from the system settings.
+        """
+        self._notification_asked_now = True
+        if self.is_ios:
+            if self.notifications is not None:
+                await self.notifications.ensure_init()
+            status = str((await self.notification_status()).get("status") or "")
+        elif self.is_android:
+            status = await self._request_permission("NOTIFICATION")
+        else:
+            return "unavailable (desktop)"
+        if status in DEFINITE_PERMISSION_STATUSES:
+            self._set_pref(PREF_NOTIFICATION_ASKED, True)
+        log.info("notification permission: %s", status)
+        return status
+
+    async def notification_status(self, *, with_permission: bool = True) -> dict:
+        """The real notification state, read fresh on every call (never the cached ``init_notifications``
+        result, which Android reports False until the grant).
+
+        ``{"state": "on"|"off"|"blocked"|"unknown"|"unavailable", "granted": bool|None, "enabled": bool|None,
+        "status": "granted"|"denied"|"permanentlyDenied"|…|""}``. Android: ``get_platform_info``
+        (``post_notifications_granted``, ``notifications_enabled``) plus ``PermissionHandler.get_status``
+        (``with_permission``); iOS: the system's authorisation status (denied = only the Settings app can
+        turn it on).
+        """
+        if not (self.is_android or self.is_ios):
+            return {"state": "unavailable", "granted": None, "enabled": None, "status": "unavailable"}
+        info: Mapping = {}
+        try:
+            raw = await self.native.call("get_platform_info", default={})
+            info = raw if isinstance(raw, Mapping) else {}
+        except Exception as exc:
+            log.info("get_platform_info failed: %s", exc)
+
+        def flag(key: str) -> Optional[bool]:
+            value = info.get(key)
+            return bool(value) if value is not None else None
+
+        enabled = flag("notifications_enabled")
+        if self.is_android:
+            granted = flag("post_notifications_granted")
+            status = await self._permission_status("NOTIFICATION") if with_permission else ""
+        else:
+            ios = str(info.get("notification_status") or "")
+            status = {"authorized": "granted", "denied": "permanentlyDenied"}.get(ios, ios)
+            granted = enabled
+        result = {"granted": granted, "enabled": enabled, "status": status}
+        result["state"] = notification_state(result)
+        return result
+
+    async def _permission_status(self, name: str) -> str:
+        getter = getattr(self.permissions, "status", None)
+        if not callable(getter):
+            return ""
+        try:
+            return str(await getter(name) or "")
+        except Exception as exc:
+            log.info("permission status %s failed: %s", name, exc)
+            return ""
+
+    async def open_notification_settings(self) -> bool:
+        """The app's page in the system settings (a permanently denied permission is only changed there)."""
+        self.calls.append("open_app_settings")
+        opener = getattr(self.permissions, "open_app_settings", None)
+        if not callable(opener):
+            return False
+        try:
+            return bool(await opener())
+        except Exception as exc:
+            log.info("open_app_settings failed: %s", exc)
+            return False
+
+    async def send_test_notification(self) -> bool:
+        """Settings › Notifications & background › "Send a test notification" (``jobs.done``)."""
+        if self.notifications is None:
+            return False
+        return bool(await self.notifications.test_notification())
+
+    async def _notifications_off_hint(self, status: Optional[str]) -> bool:
+        """Once, on a long job: say that notifications are off (status of the request just made, else the
+        real state) with "Turn on" -> Settings › Notifications & background."""
+        if self.notify is None or self._pref(PREF_NOTIFICATIONS_OFF_HINT, False):
+            return False
+        if status is not None:
+            if status not in DEFINITE_PERMISSION_STATUSES:
+                return False  # unknown: the next Run asks again
+            off = status not in _ALLOWED_STATUSES
+        else:
+            off = (await self.notification_status(with_permission=False))["state"] in ("off", "blocked")
+        if not off:
+            return False
+        self._set_pref(PREF_NOTIFICATIONS_OFF_HINT, True)
+        navigate = self.navigate_route
+        try:
+            self.notify(NOTIFICATIONS_OFF_HINT, "Turn on",
+                        (lambda: navigate(NOTIFICATION_SETTINGS_ROUTE)) if navigate is not None else None)
+        except Exception:
+            log.debug("notifications-off hint failed", exc_info=True)
+        return True
+
+    # ---- job lifecycle (transitions from JobService, on the loop) ---------------------------------
+
+    async def on_transition(self, snap: Any, previous: Any) -> None:
+        """One JobService transition; transitions run strictly one after another (the callers
+        spawn a task per transition, so without the lock a fast STARTING -> FAILED could run
+        ``job_finished`` before ``job_started`` recorded the foreground service)."""
+        from glossarion_mobile.services.jobs import JobState
+
+        loop = asyncio.get_running_loop()
+        if self._transition_lock is None or self._transition_loop is not loop:
+            self._transition_lock = asyncio.Lock()  # one per event loop (tests run several)
+            self._transition_loop = loop
+        async with self._transition_lock:
+            if snap.state is JobState.STARTING:
+                await self.job_started(snap)
+            elif snap.is_terminal and previous is not None and previous is not JobState.QUEUED:
+                await self.job_finished(snap)
+            elif snap.is_active:
+                await self.job_progress(snap, force=True)
+
+    async def job_started(self, snap: Any) -> None:
+        from glossarion_mobile.services.jobs import notification_text
+
+        text = notification_text(snap)
+        if self.is_android:
+            if self.notifications is not None:
+                await self.notifications.ensure_init()
+            if self.service_running:
+                # The service stayed up for this queued job (Android does not allow starting a
+                # foreground service while the app is in the background).
+                await self._native("update_job_service", title="Glossarion", text=text)
+            else:
+                started = await self._native("start_job_service", "Glossarion", text, default=False,
+                                             buttons=[{"id": "stop", "text": "Stop"}, {"id": "open", "text": "Open"}])
+                self.service_running = bool(started)
+            self.service_job = snap.id
+            holds = service_holds(self.native)
+            if holds is not None and self.service_running:
+                holds.hold(JOBS_HOLD, "Glossarion", text)
+        elif self.is_ios and self.bg_task_id < 0:
+            task_id = await self._native("begin_background_task", f"job-{snap.id}", default=-1,
+                                         expiration_title="Glossarion paused",
+                                         expiration_body=f"{snap.title}: tap to resume",
+                                         expiration_payload=f"glossarion://app/job/{snap.id}")
+            try:
+                self.bg_task_id = int(task_id)
+            except (TypeError, ValueError):
+                self.bg_task_id = -1
+        if self.keep_screen_on() and self.wakelock is not None and not self.wakelock_on:
+            try:
+                await self.wakelock.enable()
+                self.wakelock_on = True
+                self.calls.append("wakelock:on")
+            except Exception as exc:
+                log.info("wakelock enable failed: %s", exc)
+        self._last_update = self.clock()
+        self._last_text = text
+        self._pending = None
+        self._sync_ticker()  # a job that starts while the app is hidden
+
+    async def job_progress(self, snap: Any, *, force: bool = False) -> bool:
+        """Throttled (1/s) progress to the FGS notification / iOS Live Activity; a change the throttle holds
+        back is sent by the next tick (trailing edge)."""
+        from glossarion_mobile.services.jobs import notification_text
+
+        now = self.clock()
+        text = notification_text(snap)
+        if not force and now - self._last_update < self.update_interval:
+            if text != self._last_text:
+                self._pending = snap
+                self._sync_ticker()
+            return False
+        progress = snap.progress
+        if text == self._last_text and not force:
+            self._pending = None
+            return False
+        self._pending = None
+        self._last_update = now
+        self._last_text = text
+        if self.is_android and self.service_running:
+            holds = service_holds(self.native)
+            if holds is not None:
+                holds.hold(JOBS_HOLD, "Glossarion", text)  # what to show again after a sign-in releases it
+            await self._native("update_job_service", title="Glossarion", text=text)
+            return True
+        if self.is_ios and self.continued_started:
+            await self._native("update_continued_processing", int(progress.completed or 0),
+                               int(progress.total or 0), text)
+            return True
+        return False
+
+    async def job_finished(self, snap: Any) -> None:
+        from glossarion_mobile.services.jobs import JobState
+
+        self._pending = None
+        if self.notifications is not None:
+            await self.notifications.job_finished(snap)
+        if self._next_job_waiting():
+            if self.is_android and self.service_running:
+                await self._native("update_job_service", title="Glossarion", text="Starting the next job…")
+                self._last_text = "Starting the next job…"
+            return  # the next queued job inherits the service / background grant / wakelock (and the ticker)
+        if self.is_android and (self.service_running or self.service_job == snap.id):
+            holds = service_holds(self.native)
+            remaining = holds.release(JOBS_HOLD) if holds is not None else None
+            if remaining is not None:
+                # A sign-in waiting in the browser still needs the service: keep it, with its notification.
+                title, text = remaining
+                await self._native("update_job_service", title=title, text=text)
+            else:
+                await self._native("stop_job_service")
+            self.service_running = False
+            self.service_job = None
+        if self.is_ios:
+            holds = service_holds(self.native)
+            if holds is not None and any(name != JOBS_HOLD for name in holds.names()):
+                # U10: a cloud save still runs in this grant; its release ends it (release_kept_background)
+                self._kept_background = snap.state is JobState.DONE
+            else:
+                await self._end_ios_background(snap.state is JobState.DONE)
+        self._sync_ticker()  # the queue drained: nothing left to keep current
+        if self.wakelock_on and self.wakelock is not None:
+            try:
+                await self.wakelock.disable()
+                self.calls.append("wakelock:off")
+            except Exception as exc:
+                log.info("wakelock disable failed: %s", exc)
+            self.wakelock_on = False
+
+    async def _end_ios_background(self, success: bool) -> None:
+        if self.continued_started:
+            await self._native("finish_continued_processing", success)
+            self.continued_started = False
+            self.continued_id = None
+        if self.bg_task_id >= 0:
+            await self._native("end_background_task", self.bg_task_id)
+            self.bg_task_id = -1
+
+    async def release_kept_background(self) -> None:
+        """U10 (iOS): the cloud save that kept the finished job's background grant is done: end it, unless
+        another holder still saves or a new job took the grant over (its own end releases it)."""
+        kept, self._kept_background = self._kept_background, None
+        if kept is None or not self.is_ios:
+            return
+        holds = service_holds(self.native)
+        if holds is not None and any(name != JOBS_HOLD for name in holds.names()):
+            self._kept_background = kept
+            return
+        if self._active() is not None:
+            return
+        await self._end_ios_background(kept)
+
+    # ---- the ticker: the notification stays current while the app is hidden ------------------------
+
+    def _service_up(self) -> bool:
+        return (self.is_android and self.service_running) or (self.is_ios and self.continued_started)
+
+    def _ticker_wanted(self) -> bool:
+        """While the app is hidden the UI dispatcher parks the jobs view (``_on_view`` stops calling
+        ``job_progress``), so the ticker reads the active job itself; while visible it only runs to send an
+        update the throttle held back, or a swiped-away notification the re-post limit held back."""
+        return self._service_up() and (not self.app_visible or self._pending is not None or self._repost_wanted)
+
+    @property
+    def ticker_running(self) -> bool:
+        return self._ticker is not None and not self._ticker.done()
+
+    def _sync_ticker(self) -> None:
+        """Start or stop the ticker to match ``_ticker_wanted`` (UI loop)."""
+        task = self._ticker
+        if self._ticker_wanted():
+            if task is not None and not task.done():
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            self._ticker = loop.create_task(self._run_ticker())
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not None and not task.done() and task is not current:
+            task.cancel()
+            self._ticker = None
+
+    async def _run_ticker(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.update_interval)
+                if not self._ticker_wanted():
+                    break
+                await self.tick()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._ticker is asyncio.current_task():
+                self._ticker = None
+
+    async def tick(self) -> bool:
+        """One ticker step: a swiped-away notification the re-post limit held back, once the limit
+        allows it; else the active job (or the update the throttle held back) to the notification
+        (``job_progress`` skips an unchanged text)."""
+        if self._repost_wanted and self.clock() - self._last_repost >= REPOST_INTERVAL:
+            self._pending = None
+            return await self.repost_job_notification(self._active())
+        pending, self._pending = self._pending, None
+        snap = self._active() or pending
+        if snap is None:
+            return False
+        return await self.job_progress(snap)
+
+    def close(self) -> None:
+        """App shutdown: stop the ticker."""
+        task, self._ticker = self._ticker, None
+        if task is not None and not task.done():
+            task.cancel()
+
+    # ---- native events (UI loop) ---------------------------------------------------------------
+
+    def _active(self) -> Any:
+        jobs = self.jobs
+        return jobs.snapshot() if jobs is not None else None
+
+    def _next_job_waiting(self) -> bool:
+        """A queued job starts right after this one: keep the service / background grant."""
+        view = getattr(self.jobs, "view", None) if self.jobs is not None else None
+        if not callable(view):
+            return False
+        try:
+            current = view()
+        except Exception:
+            return False
+        return bool(getattr(current, "queue", ())) and not getattr(current, "paused", False)
+
+    async def on_foreground_event(self, event: Mapping[str, Any]) -> None:
+        """Android foreground-service events: Stop / Open buttons, tap, swiped away, system timeout."""
+        kind = str(event.get("type") or "")
+        button = str(event.get("button_id") or "")
+        snap = self._active()
+        if kind == "dismissed":
+            await self.repost_job_notification(snap)
+            return
+        if kind == "button" and button == "stop":
+            if self.jobs is not None:
+                self.jobs.request_stop(reason="Stop pressed in the notification")
+            return
+        if (kind == "button" and button == "open") or kind == "tap":
+            if snap is not None and self.navigate_route is not None:
+                self.navigate_route(f"/job/{snap.id}")
+            return
+        if kind in ("timeout", "destroyed"):
+            holds = service_holds(self.native)
+            # Every stop ends with "destroyed"; a late one may follow a service that already runs again.
+            if holds is not None and JOBS_HOLD in holds and not await self._native("is_job_service_running",
+                                                                                    default=False):
+                holds.release(JOBS_HOLD)  # the service is gone (OAuthBridge drops its own hold too)
+        if kind == "timeout" or (kind == "destroyed" and event.get("is_timeout")):
+            self.service_running = False
+            self._sync_ticker()
+            if snap is not None and self.jobs is not None:
+                self.jobs.request_stop(escalate=False, reason="Android ended the background service (time limit)")
+                if self.notifications is not None:
+                    await self.notifications.paused(snap, "system limit")
+            return
+        if kind == "destroyed":
+            self.service_running = False
+            self._sync_ticker()
+
+    async def repost_job_notification(self, snap: Any = None) -> bool:
+        """The job notification was swiped away (Android 14+ lets users dismiss foreground-service
+        notifications): post it again while the job runs, like a VPN's, at most once per second; a swipe
+        within that second is kept and the ticker posts it once the second is over. Nothing happens once
+        the service has stopped."""
+        if not (self.is_android and self.service_running):
+            self._repost_wanted = False
+            return False
+        now = self.clock()
+        if now - self._last_repost < REPOST_INTERVAL:
+            self._repost_wanted = True
+            self._sync_ticker()
+            return False
+        self._last_repost = now
+        self._repost_wanted = False
+        if snap is not None:
+            self._last_text = None  # the dedupe must not skip the same text
+            return await self.job_progress(snap, force=True)
+        text = self._last_text or "Glossarion"
+        holds = service_holds(self.native)
+        if holds is not None and JOBS_HOLD in holds:
+            holds.hold(JOBS_HOLD, "Glossarion", text)
+        await self._native("update_job_service", title="Glossarion", text=text)
+        return True
+
+    async def on_background_task_event(self, event: Mapping[str, Any]) -> None:
+        """iOS: the background grant or the continued-processing task is ending."""
+        kind = str(event.get("type") or "")
+        if kind == "expiring":
+            if event.get("task_id") is not None and event.get("task_id") == self.bg_task_id:
+                self.bg_task_id = -1  # the native side already ended it
+        elif kind in ("continued_expired", "continued_failed"):
+            self.continued_started = False
+            self._sync_ticker()
+            if kind == "continued_failed":
+                return
+        else:
+            return
+        snap = self._active()
+        if snap is not None and self.jobs is not None:
+            self.jobs.request_stop(escalate=False, reason="iOS paused the app in the background")
+            if self.notifications is not None and kind == "continued_expired":
+                await self.notifications.paused(snap, "background time ended")
+
+    def on_lifecycle(self, name: str) -> None:
+        """App lifecycle (UI loop): hidden -> the ticker keeps the job notification current; visible ->
+        the jobs view does it again."""
+        self.app_visible = name not in ("hide", "pause", "inactive", "detach")
+        self._sync_ticker()

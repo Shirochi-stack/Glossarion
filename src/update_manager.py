@@ -1,0 +1,2086 @@
+# update_manager.py - Auto-update functionality for Glossarion
+import os
+import sys
+
+# Suppress Qt SSL warnings in frozen builds (no SSL backend available, using verify=none)
+if getattr(sys, 'frozen', False):
+    os.environ['QT_LOGGING_RULES'] = 'qt.network.ssl=false'
+import json
+import requests
+import threading
+import concurrent.futures
+import time
+import re
+from html.parser import HTMLParser
+from typing import Optional, Dict, Tuple, List
+from packaging import version
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QRadioButton, QButtonGroup, QGroupBox, QTabWidget, QWidget,
+    QTextBrowser, QGridLayout, QProgressBar, QMessageBox, QApplication
+)
+from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QUrl, QRunnable, QThreadPool
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+from PySide6.QtGui import QFont, QIcon, QPixmap, QTextCursor, QTextDocument, QImage
+from datetime import datetime
+from update_core import UpdateCoreMixin
+
+
+class _ReleaseImageSignals(QObject):
+    finished = Signal(str, QImage)
+
+
+class _ReleaseImageTag(HTMLParser):
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == 'img':
+            self.attrs = dict(attrs)
+
+
+class _ReleaseImageDownload(QRunnable):
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+        self.signals = _ReleaseImageSignals()
+
+    def run(self):
+        image = QImage()
+        try:
+            # requests also works in packaged builds without a Qt SSL backend.
+            with requests.get(self.url, stream=True, timeout=(5, 15)) as response:
+                response.raise_for_status()
+                data = bytearray()
+                for chunk in response.iter_content(65536):
+                    data.extend(chunk)
+                    if len(data) > 10 * 1024 * 1024:
+                        raise ValueError("Release image exceeds 10 MB")
+                image = QImage.fromData(bytes(data))
+        except Exception:
+            pass  # Keep the document's missing-image/alt-text fallback.
+        self.signals.finished.emit(self.url, image)
+
+
+class ReleaseNotesBrowser(QTextBrowser):
+    """Rich GitHub release notes with asynchronous, viewport-sized images."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setOpenExternalLinks(True)
+        self._images = {}
+        self._pending_images = set()
+        self._image_sizes = {}
+        self._declared_image_sizes = {}
+        self._rendered_image_sizes = {}
+        # Outlive individual tabs: closing a dialog must not wait for downloads.
+        app = QApplication.instance()
+        if not hasattr(app, '_release_image_pool'):
+            app._release_image_pool = QThreadPool(app)
+            app._release_image_pool.setMaxThreadCount(3)
+        self._image_pool = app._release_image_pool
+
+    def set_release_notes(self, markdown):
+        # Qt treats standalone raw HTML images as inline content, even after a
+        # blank line. Convert GitHub's image tags to proper Markdown paragraphs.
+        self._image_sizes.clear()
+        self._declared_image_sizes.clear()
+        self._rendered_image_sizes.clear()
+        lines = []
+        fence = None
+        for line in (markdown or '').splitlines():
+            stripped = line.strip()
+            marker = re.match(r'^(`{3,}|~{3,})', stripped)
+            if marker:
+                token = marker.group(1)
+                if fence is None:
+                    fence = token
+                elif token[0] == fence[0] and len(token) >= len(fence):
+                    fence = None
+                lines.append(line)
+                continue
+            if fence is None and re.fullmatch(r'<img\b[^>]*>', stripped, re.IGNORECASE):
+                parser = _ReleaseImageTag()
+                parser.feed(stripped)
+                attrs = getattr(parser, 'attrs', {})
+                source = attrs.get('src')
+                if source:
+                    url = self.document().baseUrl().resolved(QUrl(source)).toString()
+                    try:
+                        width = max(0, float(attrs.get('width') or 0))
+                        height = max(0, float(attrs.get('height') or 0))
+                        self._declared_image_sizes[url] = (width, height)
+                    except ValueError:
+                        pass
+                    alt = (attrs.get('alt') or '').replace('[', '\\[').replace(']', '\\]')
+                    lines.extend(['', f'![{alt}](<{source}>)', ''])
+                    continue
+            lines.append(line)
+        self.setMarkdown('\n'.join(lines))
+        self._fit_images()
+
+    def loadResource(self, resource_type, url):
+        if resource_type != QTextDocument.ImageResource:
+            return super().loadResource(resource_type, url)
+        if url.scheme() not in ('https', 'http'):
+            return QImage()
+        key = url.toString()
+        if key in self._images:
+            return self._images[key]
+        if key not in self._pending_images:
+            self._pending_images.add(key)
+            task = _ReleaseImageDownload(key)
+            task.signals.finished.connect(self._image_loaded)
+            self._image_pool.start(task)
+        return QImage()
+
+    @Slot(str, QImage)
+    def _image_loaded(self, url, image):
+        self._pending_images.discard(url)
+        self._images[url] = image
+        if image.isNull():
+            return
+        self.document().addResource(QTextDocument.ImageResource, QUrl(url), image)
+        self._fit_images()
+        self.document().markContentsDirty(0, self.document().characterCount())
+        self.viewport().update()
+
+    def _fit_images(self):
+        document = self.document()
+        available = max(1, self.viewport().width() - 2 * document.documentMargin() - 12)
+        pixel_ratio = max(1.0, self.devicePixelRatioF())
+        block = document.begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid() and fragment.charFormat().isImageFormat():
+                    fmt = fragment.charFormat().toImageFormat()
+                    url = document.baseUrl().resolved(QUrl(fmt.name())).toString()
+                    image = self._images.get(url)
+                    if image is not None and not image.isNull():
+                        position = fragment.position()
+                        if position not in self._image_sizes:
+                            declared_width, declared_height = self._declared_image_sizes.get(url, (0, 0))
+                            width = declared_width or fmt.width() or image.width()
+                            height = declared_height or fmt.height() or image.height() * width / image.width()
+                            self._image_sizes[position] = (width, height)
+                        width, height = self._image_sizes[position]
+                        aspect = image.width() / image.height()
+                        # Compact previews, with no enlargement beyond the
+                        # source's physical pixels on high-DPI displays.
+                        width = min(width, height * aspect, available, 560,
+                                    320 * aspect, image.width() / pixel_ratio)
+                        height = width / aspect
+                        pixels = (max(1, round(width * pixel_ratio)),
+                                  max(1, round(height * pixel_ratio)), pixel_ratio)
+                        if self._rendered_image_sizes.get(url) != pixels:
+                            # Always resample the original, never an already
+                            # reduced preview, so repeated resizing stays sharp.
+                            preview = image.scaled(pixels[0], pixels[1],
+                                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            preview.setDevicePixelRatio(pixel_ratio)
+                            document.addResource(QTextDocument.ImageResource, QUrl(url), preview)
+                            self._rendered_image_sizes[url] = pixels
+                        if fmt.width() != width or fmt.height() != height or not fmt.isAnchor():
+                            fmt.setWidth(width)
+                            fmt.setHeight(height)
+                            fmt.setAnchor(True)
+                            fmt.setAnchorHref(url)
+                            fmt.setToolTip("Click to open the full-size image")
+                            cursor = QTextCursor(document)
+                            cursor.setPosition(position)
+                            cursor.setPosition(position + fragment.length(), QTextCursor.KeepAnchor)
+                            cursor.setCharFormat(fmt)
+                iterator += 1
+            block = block.next()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_images()
+
+class UpdateCheckWorker(QThread):
+    """Worker thread for checking updates in background"""
+    update_checked = Signal(bool, object)  # (update_available, release_data)
+    error_occurred = Signal(str)  # error message
+    
+    def __init__(self, update_manager, silent=True, force_show=False):
+        super().__init__()
+        self.update_manager = update_manager
+        self.silent = silent
+        self.force_show = force_show
+    
+    def run(self):
+        """Run update check in background thread"""
+        try:
+            result = self.update_manager._check_for_updates_internal(self.silent, self.force_show)
+            self.update_checked.emit(*result)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+class DownloadWorker(QObject):
+    """Worker that downloads a file and emits progress via Qt signals"""
+    progress = Signal(int, float, float)  # percent (-1 if unknown), downloaded_MB, total_MB
+    finished = Signal(str)  # file path
+    error = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, url: str, path: str):
+        super().__init__()
+        self.url = url
+        self.path = path
+        self._cancel = False
+
+    @Slot()
+    def run(self):
+        print(f"[DEBUG] DownloadWorker.run() started for {self.url}")
+        try:
+            # Get certifi CA bundle path for SSL verification in frozen builds
+            try:
+                import certifi
+                ca_bundle = certifi.where()
+                print(f"[DEBUG] Using CA bundle: {ca_bundle}")
+            except Exception as e:
+                print(f"[DEBUG] Certifi error: {e}, using default SSL")
+                ca_bundle = True  # Use default
+            
+            with requests.Session() as s:
+                self._session = s
+                headers = {
+                    'User-Agent': 'Glossarion-Updater',
+                    'Accept': 'application/octet-stream'
+                }
+                print(f"[DEBUG] Making GET request...")
+                with s.get(self.url, headers=headers, stream=True, timeout=(60, 300), allow_redirects=True, verify=ca_bundle) as r:
+                    print(f"[DEBUG] Got response: {r.status_code}")
+                    r.raise_for_status()
+                    total_size = int(r.headers.get('content-length', 0))
+                    print(f"[DEBUG] Content length: {total_size} bytes")
+                    downloaded = 0
+                    last_emit_percent = -1
+                    last_emit_time = time.time()
+                    print(f"[DEBUG] Opening file for writing: {self.path}")
+                    with open(self.path, 'wb') as f:
+                        print("[DEBUG] Starting chunk iteration...")
+                        chunk_count = 0
+                        for chunk in r.iter_content(chunk_size=65536):
+                            chunk_count += 1
+                            if chunk_count == 1:
+                                print(f"[DEBUG] First chunk received, size: {len(chunk) if chunk else 0}")
+                            if self._cancel:
+                                try:
+                                    f.flush()
+                                except Exception:
+                                    pass
+                                try:
+                                    f.close()
+                                except Exception:
+                                    pass
+                                try:
+                                    if os.path.exists(self.path):
+                                        os.remove(self.path)
+                                except Exception:
+                                    pass
+                                self.cancelled.emit()
+                                return
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            now = time.time()
+                            if total_size > 0:
+                                p = int(downloaded * 100 / total_size)
+                                # Throttle: emit only when percent changes or 0.2s passed
+                                if p != last_emit_percent or (now - last_emit_time) >= 0.2:
+                                    last_emit_percent = p
+                                    last_emit_time = now
+                                    self.progress.emit(p, downloaded / (1024 * 1024), total_size / (1024 * 1024))
+                            else:
+                                # Unknown total size (no content-length)
+                                if (now - last_emit_time) >= 0.5:
+                                    last_emit_time = now
+                                    self.progress.emit(-1, downloaded / (1024 * 1024), 0.0)
+            # Emit final progress and finished signal
+            try:
+                if total_size > 0:
+                    self.progress.emit(100, downloaded / (1024 * 1024), total_size / (1024 * 1024))
+            except Exception:
+                pass
+            self.finished.emit(self.path)
+        except Exception as e:
+            print(f"[DEBUG] DownloadWorker error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            # On error, ensure partial file is removed
+            try:
+                if os.path.exists(self.path):
+                    os.remove(self.path)
+            except Exception:
+                pass
+            self.error.emit(str(e))
+
+    @Slot()
+    def cancel(self):
+        self._cancel = True
+        try:
+            # Attempt to close the session to unblock reads
+            getattr(self, "_session", None) and self._session.close()
+        except Exception:
+            pass
+
+class QtDownloadJob(QObject):
+    progress = Signal(int, float, float)
+    finished = Signal(str)
+    error = Signal(int, str)  # (QNetworkReply.NetworkError, message)
+    cancelled = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.nam = QNetworkAccessManager(self)
+        self.reply: QNetworkReply | None = None
+        self._file = None
+        self._path = None
+        self._was_cancelled = False
+
+    def start(self, url: str, path: str):
+        self._path = path
+        try:
+            self._file = open(path, 'wb')
+        except Exception as e:
+            self.error.emit(int(QNetworkReply.UnknownNetworkError), f"Cannot open file for writing: {e}")
+            return
+        req = QNetworkRequest(QUrl(url))
+        req.setRawHeader(b'User-Agent', b'Glossarion-Updater')
+        req.setRawHeader(b'Accept', b'application/octet-stream')
+        # Follow safe redirects
+        try:
+            req.setAttribute(QNetworkRequest.FollowRedirectsAttribute, True)
+        except Exception:
+            pass
+        # Disable SSL verification in frozen builds (no SSL backend available)
+        try:
+            import sys
+            if getattr(sys, 'frozen', False):
+                from PySide6.QtNetwork import QSslConfiguration
+                ssl_config = QSslConfiguration.defaultConfiguration()
+                ssl_config.setPeerVerifyMode(QSslConfiguration.VerifyNone)
+                req.setSslConfiguration(ssl_config)
+        except Exception:
+            pass
+        self.reply = self.nam.get(req)
+        # Ignore SSL errors in frozen builds (no SSL backend)
+        try:
+            if getattr(sys, 'frozen', False):
+                self.reply.ignoreSslErrors()
+        except Exception:
+            pass
+        self.reply.downloadProgress.connect(self._on_progress)
+        self.reply.readyRead.connect(self._on_ready_read)
+        self.reply.finished.connect(self._on_finished)
+        self.reply.errorOccurred.connect(self._on_error)
+
+    def cancel(self):
+        self._was_cancelled = True
+        # Close and delete partial file ASAP
+        try:
+            if self._file:
+                try:
+                    self._file.flush()
+                except Exception:
+                    pass
+                try:
+                    self._file.close()
+                except Exception:
+                    pass
+            if self._path and os.path.exists(self._path):
+                os.remove(self._path)
+        except Exception:
+            pass
+        try:
+            if self.reply:
+                self.reply.abort()
+        except Exception:
+            pass
+        # Emit cancelled immediately so UI can update without waiting for Qt signals
+        try:
+            self.cancelled.emit()
+        except Exception:
+            pass
+
+    @Slot()
+    def _on_ready_read(self):
+        try:
+            # Bail early if cancelled or no reply/file
+            if self._was_cancelled or not self.reply or not self._file:
+                return
+            # Avoid reading from closed device
+            try:
+                if hasattr(self.reply, 'isOpen') and not self.reply.isOpen():
+                    return
+            except Exception:
+                pass
+            data = self.reply.readAll()
+            if data:
+                self._file.write(bytes(data))
+        except Exception as e:
+            self.error.emit(str(e))
+
+    @Slot(int, int)
+    def _on_progress(self, bytes_received: int, bytes_total: int):
+        try:
+            if self._was_cancelled:
+                return
+            if bytes_total > 0:
+                p = int(bytes_received * 100 / bytes_total)
+                self.progress.emit(p, bytes_received / (1024 * 1024), bytes_total / (1024 * 1024))
+            else:
+                self.progress.emit(-1, bytes_received / (1024 * 1024), 0.0)
+        except Exception:
+            pass
+
+    @Slot()
+    def _on_finished(self):
+        try:
+            # Safely close file; only drain buffer when not cancelled and on success
+            if self._file:
+                try:
+                    if not self._was_cancelled and self.reply and self.reply.error() == QNetworkReply.NoError:
+                        # Drain any remaining data
+                        self._on_ready_read()
+                except Exception:
+                    pass
+                # Flush/close defensively (file may already be closed)
+                try:
+                    if hasattr(self._file, 'closed') and not self._file.closed:
+                        self._file.flush()
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self._file, 'closed') and not self._file.closed:
+                        self._file.close()
+                except Exception:
+                    pass
+            if self.reply:
+                if self._was_cancelled or self.reply.error() == QNetworkReply.OperationCanceledError:
+                    # Ensure partial file is deleted on cancel
+                    try:
+                        if self._path and os.path.exists(self._path):
+                            os.remove(self._path)
+                    except Exception:
+                        pass
+                    try:
+                        self.cancelled.emit()
+                    except Exception:
+                        pass
+                    return
+                if self.reply.error() == QNetworkReply.NoError:
+                    self.finished.emit(self._path)
+                    return
+        finally:
+            try:
+                if self.reply:
+                    self.reply.deleteLater()
+            except Exception:
+                pass
+            self.reply = None
+            self._file = None
+
+    @Slot(QNetworkReply.NetworkError)
+    def _on_error(self, code):
+        try:
+            err = self.reply.errorString() if self.reply else str(code)
+        except Exception:
+            err = str(code)
+        # Treat user-initiated abort as cancellation, not an error dialog
+        try:
+            if code == QNetworkReply.OperationCanceledError:
+                self.cancelled.emit()
+                return
+        except Exception:
+            pass
+        # Convert code to int (it's a QNetworkReply.NetworkError enum)
+        try:
+            error_code = int(code)
+        except (TypeError, ValueError):
+            error_code = -1
+        self.error.emit(error_code, err)
+
+class UpdateManager(UpdateCoreMixin, QObject):
+    """Handles automatic update checking and installation for Glossarion"""
+    
+    # Signals for thread-safe communication
+    _download_progress_signal = Signal(int, float, float)
+    _download_complete_signal = Signal(str)
+    _download_error_signal = Signal(str)
+    _download_cancelled_signal = Signal()
+    
+    def __init__(self, main_gui, base_dir):
+        super().__init__()
+        self.main_gui = main_gui
+        self.dialog = main_gui  # Set dialog as the main GUI window for message box parent
+        self.base_dir = base_dir
+        self.update_available = False
+        self._check_in_progress = False  # Prevent concurrent checks
+        self._current_dialog = None  # Store current dialog for signal handlers
+        # Use shared executor from main GUI if available
+        try:
+            if hasattr(self.main_gui, '_ensure_executor'):
+                self.main_gui._ensure_executor()
+            self.executor = getattr(self.main_gui, 'executor', None)
+        except Exception:
+            self.executor = None
+        self.latest_release = None
+        self.all_releases = []  # Store all fetched releases
+        self.download_progress = 0
+        self.is_downloading = False
+        # Load persistent check time from config
+        self._last_check_time = self.main_gui.config.get('last_update_check_time', 0)
+        self._check_cache_duration = 1800  # Cache for 30 minutes
+        self.selected_asset = None  # Store selected asset for download
+        self._build_variant = self._detect_build_variant()
+        print(f"[DEBUG] Detected build variant: {self._build_variant}")
+        
+        # Get version from the main GUI's __version__ variable
+        if hasattr(main_gui, '__version__'):
+            self.CURRENT_VERSION = main_gui.__version__
+        else:
+            # Extract from window title as fallback
+            title = self.main_gui.windowTitle()
+            if 'v' in title:
+                self.CURRENT_VERSION = title.split('v')[-1].strip()
+            else:
+                self.CURRENT_VERSION = "0.0.0"
+
+    def _load_halgakos_pixmap(self, logical_size: int = 72):
+        """Load Halgakos icon with HiDPI scaling."""
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if not os.path.isfile(ico_path):
+                return None
+            pm = QPixmap(ico_path)
+            if pm.isNull():
+                return None
+            screen = QApplication.primaryScreen()
+            dpr = screen.devicePixelRatio() if screen else 1.0
+            target = int(logical_size * dpr)
+            scaled = pm.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            return scaled
+        except Exception:
+            return None
+    
+    def check_for_updates_async(self, silent=True, force_show=False):
+        """Run check_for_updates in background using QThread (PySide6 compatible).
+        """
+        
+        # Prevent concurrent update checks
+        if self._check_in_progress:
+            return None
+            
+        self._check_in_progress = True
+        
+        # Show loading dialog for manual checks (when not silent)
+        if not silent:
+            self._show_loading_dialog()
+        
+        # Create and start worker thread
+        self.worker = UpdateCheckWorker(self, silent, force_show)
+        self.worker.update_checked.connect(self._on_update_checked)
+        self.worker.error_occurred.connect(self._on_update_error)
+        self.worker.finished.connect(self._on_update_finished)  # Clean up flag
+        self.worker.start()
+        
+        return None  # Async, results will come via signals
+    
+    def _on_update_checked(self, update_available, release_data):
+        """Handle update check results from worker thread"""
+        if update_available or self.worker.force_show:
+            self.show_update_dialog()
+    
+    def _on_update_error(self, error_msg):
+        """Handle update check error from worker thread"""
+        # Close loading dialog first
+        self._close_loading_dialog()
+        if not self.worker.silent:
+            msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("Update Check Failed")
+            msg.setText(f"Failed to check for updates: {error_msg}")
+            msg.exec()
+    
+    def _on_update_finished(self):
+        """Clean up after update check is finished"""
+        self._check_in_progress = False
+        # Close loading dialog if it exists
+        self._close_loading_dialog()
+
+    def _check_for_updates_internal(self, silent=True, force_show=False) -> Tuple[bool, Optional[Dict]]:
+        """Check GitHub for newer releases
+        
+        Args:
+            silent: If True, don't show error messages
+            force_show: If True, show the dialog even when up to date
+            
+        Returns:
+            Tuple of (update_available, release_info)
+        """
+        try:
+            return self._check_for_updates_core(force_show)
+                
+        except requests.Timeout:
+            if not silent:
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
+                msg.setText("Connection timed out while checking for updates.\n\n"
+                          "This is usually due to network connectivity issues.\n"
+                          "The next update check will be in 1 hour.")
+                msg.exec()
+            return False, None
+            
+        except requests.ConnectionError as e:
+            if not silent:
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
+                if 'api.github.com' in str(e):
+                    msg.setText("Cannot reach GitHub servers for update check.\n\n"
+                              "This may be due to:\n"
+                              "• Internet connectivity issues\n"
+                              "• Firewall blocking GitHub API\n"
+                              "• GitHub API temporarily unavailable\n\n"
+                              "The next update check will be in 1 hour.")
+                else:
+                    msg.setText(f"Network error: {str(e)}\n\n"
+                              "The next update check will be in 1 hour.")
+                msg.exec()
+            return False, None
+            
+        except requests.HTTPError as e:
+            if not silent:
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
+                if e.response.status_code == 403:
+                    msg.setText("GitHub API rate limit exceeded. Please try again later.")
+                else:
+                    msg.setText(f"GitHub returned error: {e.response.status_code}")
+                msg.exec()
+            return False, None
+            
+        except ValueError as e:
+            if not silent:
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
+                msg.setText("Invalid response from GitHub. The update service may be temporarily unavailable.")
+                msg.exec()
+            return False, None
+            
+        except Exception as e:
+            if not silent:
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
+                msg.setText(f"An unexpected error occurred:\n{str(e)}")
+                msg.exec()
+            return False, None
+    
+    def check_for_updates_manual(self):
+        """Manual update check from menu - always shows dialog (async)"""
+        return self.check_for_updates_async(silent=False, force_show=True)
+    
+    def check_for_updates(self, silent=True, force_show=False):
+        """Public method for checking updates - delegates to async method"""
+        return self.check_for_updates_async(silent=silent, force_show=force_show)
+    
+    def format_markdown_to_qt(self, text_widget, markdown_text):
+        """Render Markdown and embedded GitHub HTML images as rich text."""
+        default_font = QFont()
+        default_font.setPointSize(10)
+        text_widget.setFont(default_font)
+        text_widget.set_release_notes(markdown_text or '')
+        cursor = text_widget.textCursor()
+        cursor.movePosition(QTextCursor.Start)
+        text_widget.setTextCursor(cursor)
+
+    def _clean_markdown_text(self, text):
+        """Remove markdown formatting from text
+        
+        Args:
+            text: Text with markdown formatting
+            
+        Returns:
+            Clean text without markdown symbols
+        """
+        # Remove inline code backticks
+        text = re.sub(r'`([^`]+)`', r'\1', text)
+        
+        # Remove bold markers
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+        text = re.sub(r'__([^_]+)__', r'\1', text)
+        
+        # Remove italic markers
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)
+        text = re.sub(r'_([^_]+)_', r'\1', text)
+        
+        # Remove links but keep link text
+        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+        
+        # Remove any remaining special characters that might cause issues
+        text = text.replace('\u200b', '')  # Remove zero-width spaces
+        text = text.replace('\ufeff', '')  # Remove BOM
+        
+        return text.strip()
+    
+    def _show_loading_dialog(self):
+        """Show loading dialog during update check"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtGui import QIcon, QPixmap
+        import os
+        
+        # Get the main GUI window for parenting - ensure it's a proper QWidget
+        from PySide6.QtWidgets import QWidget
+        parent = None
+        if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
+            parent = self.dialog
+        
+        # Create loading dialog
+        self.loading_dialog = QDialog(parent)
+        self.loading_dialog.setWindowTitle("Checking for Updates")
+        # Size by screen ratio for HiDPI friendliness
+        screen_rect = QApplication.primaryScreen().geometry()
+        dlg_w = max(300, int(screen_rect.width() * 0.17))
+        dlg_h = max(170, int(screen_rect.height() * 0.17))
+        self.loading_dialog.setMinimumSize(dlg_w, dlg_h)
+        self.loading_dialog.resize(dlg_w, dlg_h)
+        self.loading_dialog.setModal(True)
+        
+        # Set the proper application icon for the dialog
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                self.loading_dialog.setWindowIcon(QIcon(ico_path))
+        except Exception as e:
+            print(f"Could not load icon for loading dialog: {e}")
+        
+        # Position dialog at center of parent
+        if parent:
+            self.loading_dialog.move(parent.geometry().center() - self.loading_dialog.rect().center())
+        
+        # Create main layout
+        main_layout = QVBoxLayout(self.loading_dialog)
+        main_layout.setContentsMargins(20, 24, 20, 24)
+        main_layout.setSpacing(16)
+        
+        # Try to load and resize the icon (HiDPI-aware 72x72 logical)
+        try:
+            icon_pixmap = self._load_halgakos_pixmap(96)
+            if icon_pixmap:
+                icon_label = QLabel()
+                icon_label.setPixmap(icon_pixmap)
+                icon_label.setAlignment(Qt.AlignCenter)
+                icon_label.setFixedSize(96, 96)
+                main_layout.addWidget(icon_label, 0, Qt.AlignHCenter)
+                main_layout.addSpacing(24)
+        except Exception as e:
+            print(f"Could not load loading icon: {e}")
+        
+        # Add loading text
+        self.loading_text = QLabel("Checking for updates...")
+        self.loading_text.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(self.loading_text)
+        
+        # Add progress bar (centered)
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 0)  # Indeterminate mode
+        progress_bar.setTextVisible(False)
+        progress_bar.setFixedWidth(240)
+        main_layout.addWidget(progress_bar, 0, Qt.AlignHCenter)
+        
+        # Animation state
+        self.loading_animation_active = True
+        self.loading_rotation = 0
+        
+        def animate_text():
+            """Animate the loading text"""
+            if not self.loading_animation_active or not hasattr(self, 'loading_text'):
+                return
+                
+            try:
+                # Simple text-based animation
+                dots = "." * ((self.loading_rotation // 10) % 4)
+                self.loading_text.setText(f"Checking for updates{dots}")
+                self.loading_rotation += 1
+                
+                # Schedule next animation frame
+                QTimer.singleShot(100, animate_text)
+            except:
+                pass  # Dialog might have been destroyed
+        
+        # Start text animation
+        animate_text()
+        
+        # Show the dialog
+        self.loading_dialog.show()
+    
+    def _close_loading_dialog(self):
+        """Close the loading dialog if it exists"""
+        try:
+            if hasattr(self, 'loading_animation_active'):
+                self.loading_animation_active = False
+            if hasattr(self, 'loading_dialog') and self.loading_dialog:
+                self.loading_dialog.close()
+                delattr(self, 'loading_dialog')
+        except:
+            pass  # Dialog might already be destroyed
+    
+    def show_update_dialog(self):
+        """Show update dialog (for updates or version history)"""
+        print("[DEBUG] show_update_dialog called")
+        
+        if not self.latest_release and not self.all_releases:
+            print("[DEBUG] No release data, trying to fetch...")
+            # Try to fetch releases if we don't have them
+            try:
+                self.all_releases = self.fetch_multiple_releases(count=10)
+                if self.all_releases:
+                    self.latest_release = self.all_releases[0]
+                    print(f"[DEBUG] Fetched {len(self.all_releases)} releases")
+                else:
+                    print("[DEBUG] No releases fetched")
+                    msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+                    msg.setIcon(QMessageBox.Critical)
+                    msg.setWindowTitle("Error")
+                    msg.setText("Unable to fetch version information from GitHub.")
+                    msg.exec()
+                    return
+            except Exception as e:
+                print(f"[DEBUG] Error fetching releases in show_update_dialog: {e}")
+                return
+        
+        # Set appropriate title
+        if self.update_available:
+            title = "Update Available"
+        else:
+            title = "Version History"
+        
+        print(f"[DEBUG] Creating update dialog with title: {title}")
+        
+        # Use existing QApplication instance - never create a new one
+        app = QApplication.instance()
+        if not app:
+            print("[ERROR] No QApplication instance found - update dialog cannot be shown")
+            return
+        
+        # Determine parent window - prefer Other Settings dialog
+        from PySide6.QtWidgets import QWidget
+        reference_widget = None
+        try:
+            # Prefer use other_settings_dialog if it exists and is visible
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, '_other_settings_dialog'):
+                osd = self.main_gui._other_settings_dialog
+                if osd and isinstance(osd, QWidget) and osd.isVisible():
+                    reference_widget = osd
+            if not reference_widget:
+                # Check if there's an active modal widget (e.g., Other Settings dialog)
+                reference_widget = app.activeModalWidget()
+            if not reference_widget:
+                # Fall back to active window
+                reference_widget = app.activeWindow()
+            if not reference_widget:
+                # Fall back to main GUI if it's a proper QWidget
+                if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
+                    reference_widget = self.dialog
+        except Exception:
+            if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
+                reference_widget = self.dialog
+        
+        # Create dialog with parent to prevent it from minimizing the parent
+        dialog = QDialog(reference_widget)
+        dialog.setWindowTitle(title)
+        dialog.setModal(False)  # Non-modal so it doesn't block other windows
+        
+        # Apply dark theme styling to fix white background
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            QWidget {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+        """)
+        
+        print(f"[DEBUG] Dialog created successfully with dark theme")
+        
+        # Get screen dimensions and calculate size
+        screen = (reference_widget.screen() if reference_widget else app.primaryScreen()).availableGeometry()
+        dialog_width = min(screen.width() - 40, max(1000, int(screen.width() * 0.55)))
+        dialog_height = min(screen.height() - 40, max(720, int(screen.height() * 0.82)))
+        dialog.resize(dialog_width, dialog_height)
+        
+        # Set icon if available
+        icon_path = os.path.join(self.base_dir, 'halgakos.ico')
+        if os.path.exists(icon_path):
+            dialog.setWindowIcon(QIcon(icon_path))
+        
+        # Apply additional widget styling (radio buttons, group boxes, tabs)
+        dialog.setStyleSheet(dialog.styleSheet() + """
+            QRadioButton {
+                color: white;
+                spacing: 6px;
+            }
+            QRadioButton::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 7px;
+                background-color: #2d2d2d;
+            }
+            QRadioButton::indicator:hover {
+                border: 1px solid #7ab8e8;
+                background-color: #3d3d3d;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #5a9fd4;
+                border: 1px solid #5a9fd4;
+            }
+            QRadioButton::indicator:checked:hover {
+                background-color: #7ab8e8;
+                border: 1px solid #7ab8e8;
+            }
+            QRadioButton::indicator:disabled {
+                border: 1px solid #555555;
+                background-color: #1e1e1e;
+            }
+            QRadioButton::indicator:checked:disabled {
+                background-color: #5a9fd4;
+                border: 1px solid #5a9fd4;
+            }
+            QGroupBox {
+                color: white;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 10px;
+                padding: 0 5px;
+                color: #5a9fd4;
+                font-weight: bold;
+            }
+            QTabWidget {
+                background-color: #1b1b1b;
+            }
+            QTabWidget::pane {
+                border: 1px solid #5a9fd4;
+                border-radius: 6px;
+                top: 12px;
+                background-color: #111111;
+            }
+            QTabWidget::tab-bar {
+                alignment: center;
+            }
+            QTabBar::tab {
+                background: #2b2b2b;
+                color: #cfcfcf;
+                padding: 6px 14px;
+                border: 1px solid #3d3d3d;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 4px;
+                min-width: 70px;
+                font-weight: 600;
+            }
+            QTabBar::tab:!selected {
+                margin-top: 4px;
+                color: #9fa6b2;
+                background: #1f1f1f;
+            }
+            QTabBar::tab:hover {
+                background: #3a3a3a;
+                color: white;
+                border-color: #5a9fd4;
+            }
+            QTabBar::tab:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                             stop:0 #65b0ff, stop:1 #3c7dd9);
+                color: white;
+                border-color: #5a9fd4;
+            }
+            QTabBar::tab:disabled {
+                color: #555555;
+            }
+        """)
+        
+        # Populate content
+        self._populate_update_dialog(dialog, reference_widget)
+
+    def _populate_update_dialog(self, dialog, reference_widget=None):
+        """Populate the update dialog content"""
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(10)
+        
+        # Title row with Halgakos icons (72x72 logical)
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(14)
+        title_layout.setAlignment(Qt.AlignCenter)
+
+        left_pm = self._load_halgakos_pixmap(72)
+        left_icon = QLabel()
+        if left_pm:
+            left_icon.setPixmap(left_pm)
+            left_icon.setFixedSize(72, 72)
+        left_icon.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(left_icon, 0, Qt.AlignVCenter)
+
+        title_label = QLabel(dialog.windowTitle())
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(title_label, 0, Qt.AlignVCenter)
+
+        right_pm = self._load_halgakos_pixmap(72)
+        right_icon = QLabel()
+        if right_pm:
+            right_icon.setPixmap(right_pm)
+            right_icon.setFixedSize(72, 72)
+        right_icon.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(right_icon, 0, Qt.AlignVCenter)
+
+        main_layout.addWidget(title_container)
+        # Initialize selected_asset to None
+        self.selected_asset = None
+        
+        # Version info
+        version_group = QGroupBox("Version Information")
+        version_layout = QVBoxLayout()
+        version_layout.setContentsMargins(10, 10, 10, 10)
+        
+        current_label = QLabel(f"Current Version: {self.CURRENT_VERSION}")
+        version_layout.addWidget(current_label)
+        
+        if self.latest_release:
+            latest_version = self.latest_release['tag_name']
+            if self.update_available:
+                latest_label = QLabel(f"Latest Version: {latest_version}")
+                latest_font = QFont()
+                latest_font.setBold(True)
+                latest_font.setPointSize(10)
+                latest_label.setFont(latest_font)
+                version_layout.addWidget(latest_label)
+            else:
+                latest_label = QLabel(f"Latest Version: {latest_version} ✓ You are up to date!")
+                latest_font = QFont()
+                latest_font.setBold(True)
+                latest_font.setPointSize(10)
+                latest_label.setFont(latest_font)
+                latest_label.setStyleSheet("color: green;")
+                version_layout.addWidget(latest_label)
+        
+        version_group.setLayout(version_layout)
+        main_layout.addWidget(version_group)
+        
+        # ALWAYS show asset selection when we have the first release data (current or latest)
+        release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
+        
+        if release_to_check:
+            # Get downloadable files from the first/latest release (.exe for Windows, .dmg for macOS)
+            all_installable = [a for a in release_to_check.get('assets', []) 
+                               if a['name'].lower().endswith(('.exe', '.dmg', '.appimage', '.deb', '.tar.gz'))
+                               and self._eligible_update_asset(a)]
+
+            # Partition into same-platform and cross-platform assets
+            current_platform = self._detect_platform()
+            current_arch = self._detect_arch()
+            native_assets = [a for a in all_installable
+                             if self._asset_platform(a['name']) == current_platform]
+            cross_assets  = [a for a in all_installable
+                             if self._asset_platform(a['name']) != current_platform]
+            # Show native first, then cross-platform (disabled)
+            exe_assets = native_assets  # only native are selectable
+            
+            print(f"[DEBUG] Found {len(all_installable)} downloadable files "
+                  f"({len(native_assets)} native {current_platform}, "
+                  f"{len(cross_assets)} cross-platform) "
+                  f"in release {release_to_check.get('tag_name')}")
+            
+            # Show selection UI if there are downloadable files
+            if all_installable:
+                # Determine the title based on whether there are multiple variants
+                if len(exe_assets) > 1:
+                    frame_title = "Select Version to Download"
+                else:
+                    frame_title = "Available Download"
+                
+                asset_group = QGroupBox(frame_title)
+                asset_group.setObjectName("asset_group")
+                asset_layout = QGridLayout()
+                asset_layout.setContentsMargins(10, 10, 10, 10)
+                asset_layout.setHorizontalSpacing(24)
+                asset_layout.setColumnStretch(0, 1)
+                asset_layout.setColumnStretch(1, 1)
+                
+                if len(all_installable) > 1:
+                    # Multiple files - show radio buttons to choose
+                    self.asset_button_group = QButtonGroup()
+                    first_native_set = False  # track whether we set a default
+
+                    for i, asset in enumerate(all_installable):
+                        filename = asset['name']
+                        size_mb = asset['size'] / (1024 * 1024)
+                        asset_plat = self._asset_platform(filename)
+                        asset_arch = self._asset_arch(filename)
+                        is_native = (asset_plat == current_platform)
+                        is_native_arch = (
+                            is_native and
+                            (current_arch == 'unknown' or asset_arch == 'unknown' or asset_arch == current_arch)
+                        )
+                        
+                        # Identify variant type from filename keywords
+                        fname_lower = filename.lower()
+                        if 'omegalite' in fname_lower:
+                            variant_type = "OmegaLite"
+                        elif 'superlite' in fname_lower:
+                            variant_type = "SuperLite"
+                        elif 'turbolite' in fname_lower:
+                            variant_type = "TurboLite"
+                        elif 'nocuda' in fname_lower or fname_lower.startswith('n_'):
+                            variant_type = "NoCuda (Manga)"
+                        elif 'lite' in fname_lower and (fname_lower.startswith('l_') or fname_lower.endswith('.dmg')):
+                            variant_type = "Lite"
+                        else:
+                            first_letter = filename[0].upper() if filename else ''
+                            variant_type = "Standard" if first_letter == 'G' else filename
+
+                        # Mark if this matches current running build (variant + platform)
+                        is_current = (
+                            is_native_arch and
+                            variant_type.replace(' (Manga)', '').replace(' ', '') ==
+                            self._build_variant.replace(' ', '')
+                        )
+                        current_tag = " ✓ (current)" if is_current else ""
+
+                        # Add platform indicator
+                        if asset_plat == 'macos':
+                            if asset_arch == 'x64':
+                                platform_tag = " [macOS Intel]"
+                            elif asset_arch == 'arm64':
+                                platform_tag = " [macOS ARM]"
+                            else:
+                                platform_tag = " [macOS]"
+                        elif asset_plat == 'linux':
+                            platform_tag = " [Linux]"
+                        elif asset_plat == 'windows' and current_platform != 'windows':
+                            platform_tag = " [Windows]"
+                        else:
+                            platform_tag = ""
+
+                        variant_label = f"{variant_type}{current_tag}{platform_tag} — {size_mb:.1f} MB"
+                        
+                        rb = QRadioButton(variant_label)
+                        rb.setToolTip(filename)
+                        rb.setProperty("asset_index", i)
+                        self.asset_button_group.addButton(rb, i)
+                        asset_layout.addWidget(rb, i // 2, i % 2)
+
+                        # Disable cross-platform assets so user can't accidentally select them
+                        if not is_native:
+                            rb.setEnabled(False)
+                            rb.setToolTip(f"{filename}\nThis build is for {asset_plat.replace('macos','macOS').replace('windows','Windows').replace('linux','Linux')} — not your current platform")
+                        elif not is_native_arch:
+                            rb.setEnabled(False)
+                            rb.setToolTip(f"{filename}\nThis build is for {asset_arch}; your current architecture is {current_arch}.")
+                        
+                        # Auto-select: exact variant match on current platform wins;
+                        # otherwise first native asset is the default
+                        if is_current:
+                            rb.setChecked(True)
+                            self.selected_asset = asset
+                            first_native_set = True
+                        elif is_native_arch and not first_native_set:
+                            # Tentative default — may be overridden by an exact variant match
+                            rb.setChecked(True)
+                            self.selected_asset = asset
+                            first_native_set = True
+                    
+                    # Add listener for selection changes
+                    def on_asset_change(button_id):
+                        self.selected_asset = all_installable[button_id]
+                    
+                    self.asset_button_group.idClicked.connect(on_asset_change)
+                else:
+                    # Only one installable file - just show it and set it as selected
+                    asset = all_installable[0]
+                    self.selected_asset = asset
+                    filename = asset['name']
+                    size_mb = asset['size'] / (1024 * 1024)
+                    asset_label = QLabel(f"{filename} ({size_mb:.1f} MB)")
+                    asset_label.setWordWrap(True)
+                    asset_layout.addWidget(asset_label, 0, 0, 1, 2)
+                
+                asset_group.setLayout(asset_layout)
+                main_layout.addWidget(asset_group)
+        
+        # Create tab widget for version history
+        tab_widget = QTabWidget()
+        tab_widget.setMinimumHeight(300)
+
+        date_label = QLabel()
+        date_label.setObjectName("release_date_label")
+        date_font = QFont()
+        date_font.setItalic(True)
+        date_font.setPointSize(9)
+        date_label.setFont(date_font)
+        date_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        date_label.setContentsMargins(12, 0, 8, 0)
+        tab_widget.setCornerWidget(date_label, Qt.TopRightCorner)
+        
+        # Add tabs for different versions
+        if self.all_releases:
+            for i, release in enumerate(self.all_releases[:5]):  # Show up to 5 versions
+                version_tag = release['tag_name']
+                version_num = version_tag.lstrip('v')
+                is_current = version_num == self.CURRENT_VERSION
+                is_latest = i == 0
+                
+                # Create tab label
+                tab_label = version_tag
+                if is_current and is_latest:
+                    tab_label += " (Current)"
+                elif is_current:
+                    tab_label += " (Current)"
+                elif is_latest:
+                    tab_label += " (Latest)"
+                
+                # Create widget for this version
+                tab_widget_container = QWidget()
+                tab_layout = QVBoxLayout(tab_widget_container)
+                tab_layout.setContentsMargins(10, 10, 10, 10)
+                
+                tab_widget_container.setProperty("release_date", (release.get('published_at') or '')[:10])
+                
+                # Create text widget for release notes
+                notes_text = ReleaseNotesBrowser()
+                notes_text.setReadOnly(True)
+                notes_text.setMinimumHeight(200)
+                
+                # Format and insert release notes with markdown support
+                release_notes = release.get('body', 'No release notes available')
+                notes_text.document().setBaseUrl(QUrl(release.get('html_url', '')))
+                self.format_markdown_to_qt(notes_text, release_notes)
+                
+                tab_layout.addWidget(notes_text)
+                tab_widget.addTab(tab_widget_container, tab_label)
+        else:
+            # Fallback to simple display if no releases fetched
+            tab_widget_container = QWidget()
+            tab_layout = QVBoxLayout(tab_widget_container)
+            tab_layout.setContentsMargins(10, 10, 10, 10)
+            
+            notes_text = ReleaseNotesBrowser()
+            notes_text.setReadOnly(True)
+            notes_text.setMinimumHeight(200)
+            
+            if self.latest_release:
+                tab_widget_container.setProperty("release_date", (self.latest_release.get('published_at') or '')[:10])
+                release_notes = self.latest_release.get('body', 'No release notes available')
+                notes_text.document().setBaseUrl(QUrl(self.latest_release.get('html_url', '')))
+                self.format_markdown_to_qt(notes_text, release_notes)
+            else:
+                notes_text.setPlainText('Unable to fetch release notes.')
+            
+            tab_layout.addWidget(notes_text)
+            tab_widget.addTab(tab_widget_container, "Release Notes")
+        
+        def update_release_date(index):
+            page = tab_widget.widget(index)
+            date = page.property("release_date") if page is not None else ''
+            date_label.setText(f"Released: {date}" if date else '')
+            date_label.setVisible(bool(date))
+
+        tab_widget.currentChanged.connect(update_release_date)
+        update_release_date(tab_widget.currentIndex())
+        main_layout.addWidget(tab_widget, 1)
+        
+        # Download progress (initially hidden)
+        self.progress_widget = QWidget()
+        progress_layout = QVBoxLayout(self.progress_widget)
+        progress_layout.setContentsMargins(0, 10, 0, 10)
+        
+        self.progress_label = QLabel("")
+        progress_layout.addWidget(self.progress_label)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setTextVisible(True)
+        progress_layout.addWidget(self.progress_bar)
+        
+        # Add status label for download details
+        self.status_label = QLabel("")
+        status_font = QFont()
+        status_font.setPointSize(8)
+        self.status_label.setFont(status_font)
+        progress_layout.addWidget(self.status_label)
+        
+        # Add cancel button (hidden until download starts)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setVisible(False)
+        progress_layout.addWidget(self.cancel_btn)
+        
+        # Hide progress initially
+        self.progress_widget.setVisible(False)
+        
+        # Add progress widget to layout (hidden initially)
+        main_layout.addWidget(self.progress_widget)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+        
+        def start_download():
+            if not self.selected_asset:
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("No File Selected")
+                msg.setText("Please select a version to download.")
+                msg.exec()
+                return
+            
+            # Show progress and enable Cancel
+            self.progress_widget.setVisible(True)
+            self.cancel_btn.setVisible(True)
+            self.cancel_btn.setEnabled(True)
+            
+            # Disable only the download button and asset selector
+            try:
+                btn = dialog.findChild(QPushButton, "update_download_btn")
+                if btn:
+                    btn.setEnabled(False)
+                asset_box = dialog.findChild(QGroupBox, "asset_group")
+                if asset_box:
+                    asset_box.setEnabled(False)
+            except Exception:
+                pass
+            
+            # Reset progress
+            self.progress_bar.setRange(0, 0)  # indeterminate until we know size
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("Connecting to GitHub...")
+            self.status_label.setText("")
+            self.download_progress = 0
+
+            # Wire up cancel behavior (connected after worker is created inside download_update)
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+
+            # Start download using Qt thread worker (signals/slots)
+            try:
+                self.download_update(dialog)
+                # After starting thread, connect cancel to worker
+                def do_cancel():
+                    self.cancel_btn.setEnabled(False)
+                    try:
+                        if hasattr(self, 'download_worker') and self.download_worker:
+                            self.download_worker.cancel()
+                        # Immediately update UI to cancelled
+                        self._on_download_cancelled(dialog)
+                    except Exception:
+                        # Still try to update UI to cancelled
+                        try:
+                            self._on_download_cancelled(dialog)
+                        except Exception:
+                            pass
+                self.cancel_btn.clicked.connect(do_cancel)
+            except Exception as e:
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Download Error")
+                msg.setText(str(e))
+                msg.exec()
+                self.cancel_btn.setVisible(False)
+        
+        # Always show download button if we have exe files
+        has_exe_files = self.selected_asset is not None
+        
+        if self.update_available:
+            # Show update-specific buttons
+            download_btn = QPushButton("Download Update")
+            download_btn.setObjectName("update_download_btn")
+            download_btn.setMinimumHeight(35)
+            download_btn.clicked.connect(start_download)
+            download_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #28a745;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #218838; }
+            """)
+            button_layout.addWidget(download_btn)
+            
+            remind_btn = QPushButton("Remind Me Later")
+            remind_btn.setMinimumHeight(35)
+            remind_btn.clicked.connect(dialog.close)
+            remind_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #5a6268; }
+            """)
+            button_layout.addWidget(remind_btn)
+            
+            skip_btn = QPushButton("Skip This Version")
+            skip_btn.setMinimumHeight(35)
+            skip_btn.clicked.connect(lambda: self.skip_version(dialog))
+            skip_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: #007bff;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    border: none;
+                    text-decoration: underline;
+                }
+                QPushButton:hover { color: #0056b3; }
+            """)
+            button_layout.addWidget(skip_btn)
+        elif has_exe_files:
+            # We're up to date but have downloadable files
+            # Check if there are multiple downloadable files
+            release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
+            exe_count = 0
+            if release_to_check:
+                exe_count = len([a for a in release_to_check.get('assets', []) 
+                               if a['name'].lower().endswith(('.exe', '.dmg'))])
+            
+            if exe_count > 1:
+                # Multiple versions available
+                download_btn = QPushButton("Download Different Path")
+                download_btn.setObjectName("update_download_btn")
+                download_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #17a2b8;
+                        color: white;
+                        padding: 8px 20px;
+                        font-size: 11pt;
+                        font-weight: bold;
+                        border-radius: 4px;
+                    }
+                    QPushButton:hover { background-color: #117a8b; }
+                """)
+            else:
+                # Single version available
+                download_btn = QPushButton("Re-download")
+                download_btn.setObjectName("update_download_btn")
+                download_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #6c757d;
+                        color: white;
+                        padding: 8px 20px;
+                        font-size: 11pt;
+                        font-weight: bold;
+                        border-radius: 4px;
+                    }
+                    QPushButton:hover { background-color: #5a6268; }
+                """)
+            download_btn.setMinimumHeight(35)
+            download_btn.clicked.connect(start_download)
+            button_layout.addWidget(download_btn)
+            
+            close_btn = QPushButton("Close")
+            close_btn.setMinimumHeight(35)
+            close_btn.clicked.connect(dialog.close)
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #5a6268; }
+            """)
+            button_layout.addWidget(close_btn)
+        else:
+            # No downloadable files
+            close_btn = QPushButton("Close")
+            close_btn.setMinimumHeight(35)
+            close_btn.clicked.connect(dialog.close)
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #007bff;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #0056b3; }
+            """)
+            button_layout.addWidget(close_btn)
+        
+        # Add "View All Releases" link button
+        def open_releases_page():
+            import webbrowser
+            webbrowser.open("https://github.com/Shirochi-stack/Glossarion/releases")
+        
+        view_releases_btn = QPushButton("View All Releases")
+        view_releases_btn.setMinimumHeight(35)
+        view_releases_btn.clicked.connect(open_releases_page)
+        view_releases_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #007bff;
+                padding: 8px 20px;
+                font-size: 11pt;
+                border: none;
+                text-decoration: underline;
+            }
+            QPushButton:hover { color: #0056b3; }
+        """)
+        button_layout.addStretch()
+        button_layout.addWidget(view_releases_btn)
+        
+        # Add button layout to main layout
+        main_layout.addLayout(button_layout)
+        
+        # Set dialog layout
+        dialog.setLayout(main_layout)
+        
+        # Show dialog first so frame geometry is accurate
+        dialog.show()
+        
+        # Position dialog after showing for accurate centering (includes window decorations)
+        def center_dialog():
+            if reference_widget:
+                # Center the dialog on the reference widget
+                reference_geometry = reference_widget.geometry()
+                dialog_frame = dialog.frameGeometry()
+                center_point = reference_geometry.center()
+                dialog_frame.moveCenter(center_point)
+                dialog.move(dialog_frame.topLeft())
+            else:
+                # Center on screen
+                screen_geometry = app.primaryScreen().geometry()
+                dialog_frame = dialog.frameGeometry()
+                screen_center = screen_geometry.center()
+                dialog_frame.moveCenter(screen_center)
+                dialog.move(dialog_frame.topLeft())
+        
+        # Use QTimer to ensure window is fully shown before centering
+        QTimer.singleShot(0, center_dialog)
+        
+        # Keep reference to prevent garbage collection
+        self._update_dialog = dialog
+    
+    def skip_version(self, dialog):
+        """Mark this version as skipped and close dialog"""
+        if not self.latest_release:
+            dialog.close()
+            return
+        
+        version_tag = self._skip_latest_version()
+        
+        # Close dialog
+        dialog.close()
+        
+        # Show confirmation
+        msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("Version Skipped")
+        msg.setText(f"Version {version_tag} will be skipped in future update checks.\n"
+                   "You can manually check for updates from the Help menu.")
+        msg.exec()
+    
+    @Slot(int, float, float)
+    def _on_download_progress(self, p: int, downloaded_mb: float, total_mb: float):
+        # Reset watchdog on progress
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.start()
+        except Exception:
+            pass
+        """Update progress UI from worker signals"""
+        try:
+            if p >= 0:
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(p)
+                self.progress_label.setText(f"Downloading update... {p}%")
+                self.status_label.setText(f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB")
+            else:
+                # Unknown total size; show indeterminate bar with byte counter
+                self.progress_bar.setRange(0, 0)
+                self.progress_label.setText("Downloading update...")
+                self.status_label.setText(f"{downloaded_mb:.1f} MB downloaded")
+        except Exception:
+            pass
+
+    def _show_download_error(self, dialog, error_msg: str):
+        # Stop watchdog
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.stop()
+        except Exception:
+            pass
+        # Re-enable buttons on error and reset UI
+        try:
+            for btn in dialog.findChildren(QPushButton):
+                btn.setEnabled(True)
+            if hasattr(self, 'cancel_btn'):
+                self.cancel_btn.setVisible(False)
+                self.cancel_btn.setEnabled(True)
+            # Reset progress UI
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("")
+            self.status_label.setText("")
+        except Exception:
+            pass
+        msg = QMessageBox(dialog)
+        msg.setIcon(QMessageBox.Critical)
+        msg.setWindowTitle("Download Failed")
+        msg.setText(error_msg)
+        msg.exec()
+
+    def download_update(self, dialog):
+        """Start the update download in a QThread and update UI via signals"""
+        # Use the selected asset
+        asset = self.selected_asset
+        if not asset:
+            self._show_download_error(dialog, "No file selected for download.")
+            return
+
+        if not self._eligible_update_asset(asset):
+            self._show_download_error(dialog, "Update must contain Glossarion in its filename and be at least 60 MB.")
+            return
+
+        # Get the current executable path and target directory
+        if getattr(sys, 'frozen', False):
+            current_exe = sys.executable
+            download_dir = os.path.dirname(current_exe)
+        else:
+            current_exe = None
+            download_dir = self.base_dir
+
+        # Use the exact filename from GitHub
+        original_filename = asset['name']  # e.g., "Glossarion v3.1.3.exe"
+        new_exe_path = os.path.join(download_dir, original_filename)
+
+        # If new file would overwrite current executable, download to temp name first
+        if current_exe and os.path.normpath(new_exe_path) == os.path.normpath(current_exe):
+            download_path = new_exe_path + ".new"
+        else:
+            download_path = new_exe_path
+
+        url = asset['browser_download_url']
+        # Track path and expected size for cleanup/validation on cancel/error
+        self._current_download_path = download_path
+        self._expected_download_size = asset.get('size', 0)
+
+        # Reset and show initial progress state
+        self.progress_bar.setRange(0, 0)  # indeterminate until we know size
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Connecting to GitHub...")
+        self.status_label.setText("")
+
+        # Use Qt network only when NOT frozen (frozen builds lack SSL support)
+        if not getattr(sys, 'frozen', False):
+            try:
+                # Clean up any previous job
+                if hasattr(self, 'qt_downloader') and self.qt_downloader:
+                    try:
+                        self.qt_downloader.deleteLater()
+                    except Exception:
+                        pass
+                self.qt_downloader = QtDownloadJob()
+                # Reset cancel handled flag for this run
+                self._cancel_handled = False
+                self.qt_downloader.progress.connect(self._on_download_progress)
+                self.qt_downloader.finished.connect(lambda fp: self.download_complete(dialog, fp))
+                self.qt_downloader.cancelled.connect(lambda: self._on_download_cancelled(dialog))
+                self.qt_downloader.error.connect(lambda code, msg: self._on_qtnetwork_error(dialog, code, msg))
+                # Watchdog for no progress
+                try:
+                    if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                        self._download_watchdog.stop()
+                        self._download_watchdog.deleteLater()
+                except Exception:
+                    pass
+                self._download_watchdog = QTimer(self)
+                self._download_watchdog.setInterval(90000)
+                self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
+                self._download_watchdog.start()
+                self.qt_downloader.start(url, download_path)
+                # Hook cancel
+                if hasattr(self, 'cancel_btn') and self.cancel_btn:
+                    try:
+                        self.cancel_btn.clicked.disconnect()
+                    except Exception:
+                        pass
+                    # Cancel and immediately reflect UI as cancelled
+                    self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), self.qt_downloader.cancel(), self._on_download_cancelled(dialog)))
+                return
+            except Exception:
+                pass
+
+        # Fallback: Use plain threading.Thread (QThread + requests causes deadlock)
+        print(f"[DEBUG] Using requests downloader for {url}")
+        self._download_cancelled = False
+        self._current_dialog = dialog
+        
+        # Connect signals to handlers
+        self._download_progress_signal.connect(self._on_download_progress)
+        self._download_complete_signal.connect(lambda fp: self.download_complete(self._current_dialog, fp))
+        self._download_error_signal.connect(lambda msg: self._show_download_error(self._current_dialog, msg))
+        self._download_cancelled_signal.connect(lambda: self._on_download_cancelled(self._current_dialog))
+        
+        def download_thread_func():
+            # In frozen builds, SSL verification can be problematic - disable it
+            if getattr(sys, 'frozen', False):
+                print(f"[DEBUG] Frozen build detected, disabling SSL verification")
+                ca_bundle = False
+                # Suppress SSL warnings
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            else:
+                try:
+                    import certifi
+                    ca_bundle = certifi.where()
+                    print(f"[DEBUG] Using CA bundle: {ca_bundle}")
+                except Exception as e:
+                    print(f"[DEBUG] Certifi error: {e}, using default SSL")
+                    ca_bundle = True
+            
+            try:
+                print("[DEBUG] Starting download...")
+                
+                # Use urllib for frozen builds (requests has SSL issues)
+                if getattr(sys, 'frozen', False):
+                    print("[DEBUG] Using urllib for download")
+                    import urllib.request
+                    import ssl                   
+                    
+                    # Create unverified SSL context
+                    ssl_context = ssl._create_unverified_context()
+                    
+                    req = urllib.request.Request(url, headers={
+                        'User-Agent': 'Glossarion-Updater',
+                        'Accept': 'application/octet-stream'
+                    })
+                    
+                    with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
+                        print(f"[DEBUG] Got response: {response.status}")
+                        total_size = int(response.headers.get('content-length', 0))
+                        print(f"[DEBUG] Content length: {total_size} bytes")
+                        downloaded = 0
+                        last_emit_time = time.time()
+                        
+                        with open(download_path, 'wb') as f:
+                            while True:
+                                if self._download_cancelled:
+                                    try:
+                                        f.close()
+                                        if os.path.exists(download_path):
+                                            os.remove(download_path)
+                                    except Exception:
+                                        pass
+                                    self._download_cancelled_signal.emit()
+                                    return
+                                
+                                chunk = response.read(65536)
+                                if not chunk:
+                                    break
+                                    
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                now = time.time()
+                                
+                                if total_size > 0:
+                                    p = int(downloaded * 100 / total_size)
+                                    if (now - last_emit_time) >= 0.1:
+                                        last_emit_time = now
+                                        self._download_progress_signal.emit(p, downloaded / (1024 * 1024), total_size / (1024 * 1024))
+                        
+                        print(f"[DEBUG] Download complete: {downloaded} bytes")
+                        self._download_complete_signal.emit(download_path)
+                else:
+                    # Use requests for source builds
+                    print("[DEBUG] Using requests for download")
+                    with requests.Session() as s:
+                        headers = {
+                            'User-Agent': 'Glossarion-Updater',
+                            'Accept': 'application/octet-stream'
+                        }
+                        with s.get(url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True, verify=ca_bundle) as r:
+                            print(f"[DEBUG] Got response: {r.status_code}")
+                            r.raise_for_status()
+                            total_size = int(r.headers.get('content-length', 0))
+                            print(f"[DEBUG] Content length: {total_size} bytes")
+                            downloaded = 0
+                            last_emit_time = time.time()
+                            with open(download_path, 'wb') as f:
+                                for chunk in r.iter_content(chunk_size=65536):
+                                    if self._download_cancelled:
+                                        try:
+                                            f.close()
+                                            if os.path.exists(download_path):
+                                                os.remove(download_path)
+                                        except Exception:
+                                            pass
+                                        QTimer.singleShot(0, lambda: self._on_download_cancelled(dialog))
+                                        return
+                                    if not chunk:
+                                        continue
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    now = time.time()
+                                    if total_size > 0:
+                                        p = int(downloaded * 100 / total_size)
+                                        if (now - last_emit_time) >= 0.1:
+                                            last_emit_time = now
+                                            self._download_progress_signal.emit(p, downloaded / (1024 * 1024), total_size / (1024 * 1024))
+                            print(f"[DEBUG] Download complete: {downloaded} bytes")
+                            self._download_complete_signal.emit(download_path)
+            except Exception as e:
+                print(f"[DEBUG] Download error: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                try:
+                    if os.path.exists(download_path):
+                        os.remove(download_path)
+                except Exception:
+                    pass
+                self._download_error_signal.emit(str(e))
+        
+        self.download_thread = threading.Thread(target=download_thread_func, daemon=True)
+        # Watchdog: cancel if no progress
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.stop()
+                self._download_watchdog.deleteLater()
+        except Exception:
+            pass
+        self._download_watchdog = QTimer(self)
+        self._download_watchdog.setInterval(90000)
+        self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
+        self._download_watchdog.start()
+        # Hook cancel button
+        if hasattr(self, 'cancel_btn') and self.cancel_btn:
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), setattr(self, '_download_cancelled', True)))
+        print("[DEBUG] Starting download thread...")
+        self.download_thread.start()
+        print("[DEBUG] Download thread started")
+    
+    def _on_download_timeout(self, dialog):
+        try:
+            # Try cancel on either backend
+            if hasattr(self, 'qt_downloader') and self.qt_downloader:
+                self.qt_downloader.cancel()
+            if hasattr(self, 'download_worker') and self.download_worker:
+                self.download_worker.cancel()
+        except Exception:
+            pass
+        self._show_download_error(dialog, "Connection timed out. No data received.")
+
+    def _on_qtnetwork_error(self, dialog, code, message: str):
+        # Handle Qt network errors; treat cancellation gracefully
+        try:
+            if int(code) == int(QNetworkReply.OperationCanceledError):
+                if getattr(self, '_cancel_handled', False):
+                    return
+                self._on_download_cancelled(dialog)
+                return
+        except Exception:
+            pass
+        self._show_download_error(dialog, message)
+
+    def _on_download_cancelled(self, dialog):
+        # Gracefully handle user-cancelled download
+        self._cancel_handled = True
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.stop()
+        except Exception:
+            pass
+        # Attempt to delete any partial file leftover
+        try:
+            if hasattr(self, '_current_download_path') and self._current_download_path and os.path.exists(self._current_download_path):
+                os.remove(self._current_download_path)
+        except Exception:
+            pass
+        try:
+            # Reset progress UI and controls
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("Cancelled")
+            self.status_label.setText("")
+            if hasattr(self, 'cancel_btn'):
+                self.cancel_btn.setVisible(False)
+                self.cancel_btn.setEnabled(True)
+            # Re-enable controls
+            btn = dialog.findChild(QPushButton, "update_download_btn")
+            if btn:
+                btn.setEnabled(True)
+            asset_box = dialog.findChild(QGroupBox, "asset_group")
+            if asset_box:
+                asset_box.setEnabled(True)
+        except Exception:
+            pass
+
+    def download_complete(self, dialog, file_path):
+        """Handle completed download"""
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'cancel_btn'):
+                self.cancel_btn.setVisible(False)
+                self.cancel_btn.setEnabled(True)
+        except Exception:
+            pass
+        
+        # Validate downloaded file before offering install
+        try:
+            file_size = self._validate_update_file(file_path)
+
+            # Check expected size if we tracked it
+            expected_size = getattr(self, '_expected_download_size', 0)
+            if expected_size > 0 and file_size < expected_size * 0.95:
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+                self._show_download_error(
+                    dialog,
+                    f"Download incomplete ({file_size / (1024*1024):.1f} MB of "
+                    f"{expected_size / (1024*1024):.1f} MB expected).\n\n"
+                    "Please try downloading again."
+                )
+                return
+        except Exception as e:
+            self._show_download_error(dialog, f"Update rejected: {e}")
+            return
+        
+        dialog.close()
+        
+        # Proceed directly to install (no confirmation prompt — clicking
+        # "Download Update" already expressed intent, and declining leaves
+        # orphan .exe / .exe.new files in the directory).
+        self.install_update(file_path)
+    
+    def install_update(self, update_file):
+        """Launch the update installer and exit current app"""
+        try:
+            self._validate_update_file(update_file)
+            # Save current state/config if needed
+            self.main_gui.save_config(show_message=False)
+            
+            # Get current executable path
+            if getattr(sys, 'frozen', False):
+                current_exe = sys.executable
+                current_dir = os.path.dirname(current_exe)
+                
+                # Create a batch file to handle the update
+                # Note: uses ping instead of timeout for compatibility
+                # with CREATE_NO_WINDOW (timeout requires console input)
+                batch_content = f"""@echo off
+echo Updating Glossarion...
+echo Waiting for current version to close...
+ping -n 4 127.0.0.1 > nul
+
+:: Delete the old executable
+echo Deleting old version...
+if exist "{current_exe}" (
+    del /f /q "{current_exe}"
+    if exist "{current_exe}" (
+        echo Failed to delete old version, retrying...
+        ping -n 3 127.0.0.1 > nul
+        del /f /q "{current_exe}"
+    )
+)
+
+:: Start the new version
+echo Starting new version...
+start "" "{update_file}"
+
+:: Clean up this batch file
+(goto) 2>nul & del "%~f0"
+"""
+                batch_path = os.path.join(current_dir, "update_glossarion.bat")
+                with open(batch_path, 'w') as f:
+                    f.write(batch_content)
+                
+                # Run the batch file detached from this process so it
+                # survives our exit.  Redirect all handles to DEVNULL
+                # (close_fds=True conflicts with creationflags on Windows
+                # and silently fails to spawn).
+                import subprocess
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                CREATE_NO_WINDOW = 0x08000000
+                proc = subprocess.Popen(
+                    ['cmd.exe', '/c', batch_path],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                )
+                
+                print(f"[DEBUG] Update batch file created: {batch_path}")
+                print(f"[DEBUG] Batch process PID: {proc.pid}")
+                print(f"[DEBUG] Will delete: {current_exe}")
+                print(f"[DEBUG] Will start: {update_file}")
+            else:
+                # Running as script, just start the new exe
+                import subprocess
+                subprocess.Popen([update_file])
+            
+            # Hard-exit so QApplication cleanup doesn't kill children.
+            # os._exit skips atexit handlers and Python cleanup, which
+            # is exactly what we want – the batch must outlive us.
+            print("[DEBUG] Closing application for update...")
+            try:
+                self.main_gui.save_config(show_message=False)
+            except Exception:
+                pass
+            os._exit(0)
+            
+        except Exception as e:
+            msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("Installation Error")
+            msg.setText(f"Could not start update process:\n{str(e)}")
+            msg.exec()

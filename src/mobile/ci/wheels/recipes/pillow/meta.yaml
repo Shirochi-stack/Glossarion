@@ -1,0 +1,78 @@
+# Glossarion overlay of recipes/pillow/meta.yaml from flet-dev/mobile-forge
+# (https://github.com/flet-dev/mobile-forge at 0fadbfab0d63d11164030dfddc955ed980e32e2c,
+# BSD-3-Clause, see ../LICENSE.mobile-forge). build_wheels.sh runs forge on this directory
+# in place. Only two values differ from upstream: version "12.3.0" (the security pin;
+# upstream 12.2.0) and build number 1000 (upstream 2). patches/setup-12.x.patch is the
+# upstream file byte for byte (git blob 62279a3576b8e1ea0997eb1fe89c7c7e337729eb); it
+# applies to Pillow 12.3.0's setup.py. Forge is given a directory, so the template's
+# `version` is unset and the setup-10.x branch below is never rendered.
+#
+package:
+  name: Pillow
+  version: "12.3.0"
+
+requirements:
+  # PNG support is internal: libpng is not used.
+  #
+  # All three are linked STATICALLY into the extensions on iOS and dynamically on
+  # Android, so where they belong differs by platform. Under `host` they become a
+  # runtime Requires-Dist and every consuming app installs the wheel; on iOS that
+  # is ~16 MB of .a already folded into _imaging.so / _webp.so and unloadable at
+  # runtime. `host_build` extracts them for the link without putting them in the
+  # metadata. Android keeps `host`: there the payload is a real .so the extensions
+  # carry as DT_NEEDED, and flet stages it into jniLibs.
+# {% if sdk == 'android' %}
+  host:
+    - flet-libjpeg 3.0.90
+    - flet-libfreetype 2.13.3
+    - flet-libwebp 1.6.0
+# {% else %}
+  host_build:
+    - flet-libjpeg 3.0.90
+    - flet-libfreetype 2.13.3
+    - flet-libwebp 1.6.0
+# {% endif %}
+
+# {% if not version or version >= (12,0,0) %}
+# pillow >= 12.x  (12.x drops `self.add_imaging_libs = ""` from
+# initialize_options, so the 11.x patch's hunk-1 context no longer
+# matches; the 12.x patch is otherwise identical to the 11.x one.)
+
+patches:
+  - setup-12.x.patch
+
+# {% else %}
+# pillow <= 10.x
+
+patches:
+  - setup-10.x.patch
+
+# {% endif %}
+
+build:
+  number: 1000
+  script_env:
+# {% if sdk == 'android' %}
+    # pillow's setup.py manually probes `self.compiler.{include,library}_dirs`
+    # for zlib.h / libz / libjpeg / libfreetype rather than relying on the
+    # compiler's own --sysroot search. Our mobile.patch sets
+    # `disable_platform_guessing=True` to keep host-Linux paths out of the
+    # cross-build — which also drops the NDK sysroot from those lists.
+    # iOS gets away with it because Python-Apple-support's sysconfig
+    # populates `compiler.include_dirs` with the SDK include path; the
+    # Android cross-venv doesn't surface NDK paths the same way (they're
+    # in CFLAGS/LDFLAGS but distutils never reflects those into the dir
+    # lists). Pillow natively honors CPATH / LIBRARY_PATH (lines 538–548
+    # of its setup.py), so we feed the cross-compile paths back in that
+    # way — covering both the NDK sysroot (zlib, system headers) and the
+    # cross-venv's opt/ tree (libjpeg, libfreetype host wheels).
+    CPATH: '{NDK_SYSROOT}/usr/include:{platlib}/opt/include'
+    LIBRARY_PATH: '{NDK_SYSROOT}/usr/lib/{HOST_TRIPLET}/{ANDROID_API_LEVEL}:{platlib}/opt/lib'
+    # libfreetype links against libz internally; -lz needs to appear on
+    # pillow's link cmd so the resulting _imagingft.so resolves it.
+    LDFLAGS: -lz
+# {% else %}
+    # libfreetype references both libz and libbz2
+    # but doesn't link them into the static library
+    LDFLAGS: -lz -lbz2
+# {% endif %}

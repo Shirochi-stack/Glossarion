@@ -1,0 +1,613 @@
+# individual_endpoint_dialog.py
+"""
+Individual Endpoint Configuration Dialog for Glossarion
+- Allows enabling/disabling per-key custom endpoint (e.g., Azure, Ollama/local OpenAI-compatible)
+- Persists changes to the in-memory key object and refreshes the parent list
+"""
+import os
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QCheckBox, QComboBox, QGroupBox, QGridLayout,
+    QFrame, QScrollArea, QWidget, QMessageBox, QTableWidget,
+    QTableWidgetItem, QAbstractItemView, QHeaderView
+)
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QFont, QPixmap, QTransform, QGuiApplication
+from spinning import create_icon_label, animate_icon
+from typing import Callable
+import key_pool_service
+from request_parameters import (
+    RESERVED_REQUEST_PARAMETERS, display_parameter_value,
+    normalize_request_parameters, parse_parameter_value,
+)
+
+try:
+    # For type hints only; not required at runtime
+    from multi_api_key_manager import APIKeyEntry  # noqa: F401
+except Exception:
+    pass
+
+
+class _ParameterSuggestionLabel(QLabel):
+    def __init__(self, text, add_suggestion, parent=None):
+        super().__init__(text, parent)
+        self._add_suggestion = add_suggestion
+
+    def mouseDoubleClickEvent(self, event):
+        self._add_suggestion()
+        event.accept()
+
+
+class RequestParametersEditor(QWidget):
+    """Edit top-level request-body fields without requiring users to write JSON."""
+
+    def __init__(self, parameters=None, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.table = QTableWidget(0, 2, self)
+        self.table.setHorizontalHeaderLabels(["Parameter", "Value (text or JSON)"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setMinimumHeight(115)
+        layout.addWidget(self.table)
+
+        controls = QHBoxLayout()
+        add_button = QPushButton("Add parameter")
+        add_button.clicked.connect(lambda: self.add_row())
+        controls.addWidget(add_button)
+        remove_button = QPushButton("Remove selected")
+        remove_button.clicked.connect(self.remove_selected)
+        controls.addWidget(remove_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        suggestion = _ParameterSuggestionLabel(
+            'Suggestion: service_tier = flex  (double-click to add)',
+            lambda: self.set_parameter('service_tier', 'flex'), self,
+        )
+        suggestion.setStyleSheet('color: #80c9ef;')
+        suggestion.setToolTip('Double-click to add service_tier with the value flex')
+        layout.addWidget(suggestion)
+        note = QLabel(
+            'Add body fields directly; do not enter extra_body. OpenAI-compatible and AuthND requests send them; '
+            'native Gemini accepts supported settings. Plain values are text; use JSON for numbers, booleans, '
+            'lists or objects. Blank values are ignored; use JSON "" to send an empty string.'
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet('color: gray; font-size: 9pt;')
+        layout.addWidget(note)
+
+        for name, value in normalize_request_parameters(parameters).items():
+            self.add_row(name, display_parameter_value(value))
+
+    def add_row(self, name='', value=''):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(name))
+        self.table.setItem(row, 1, QTableWidgetItem(value))
+        if not name:
+            self.table.setCurrentCell(row, 0)
+            self.table.editItem(self.table.item(row, 0))
+
+    def remove_selected(self):
+        for row in sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True):
+            self.table.removeRow(row)
+
+    def set_parameter(self, name, value):
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.text().strip() == name:
+                self.table.item(row, 1).setText(value)
+                self.table.setCurrentCell(row, 1)
+                return
+        self.add_row(name, value)
+
+    def parameters(self):
+        result = {}
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            value_item = self.table.item(row, 1)
+            name = name_item.text().strip() if name_item else ''
+            value = value_item.text() if value_item else ''
+            if not value.strip():
+                continue
+            if not name:
+                raise ValueError(f'Row {row + 1} needs a parameter name.')
+            if name.lower() in RESERVED_REQUEST_PARAMETERS:
+                raise ValueError(f'{name} is managed by Glossarion and cannot be changed here.')
+            if name in result:
+                raise ValueError(f'{name} appears more than once.')
+            result[name] = parse_parameter_value(value)
+        if len(normalize_request_parameters(result)) != len(result):
+            raise ValueError('One or more values cannot be saved as JSON.')
+        return result
+
+
+class RequestParametersDialog(QDialog):
+    """Standalone editor opened from any API key entry’s context menu."""
+
+    def __init__(self, parent, model, parameters=None):
+        super().__init__(parent)
+        self.setWindowTitle(f'Custom Request Parameters — {model}')
+        self.resize(600, 350)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel('Parameters added to requests made with this API key:'))
+        self.editor = RequestParametersEditor(parameters, self)
+        layout.addWidget(self.editor)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(20)
+        buttons.addStretch()
+        cancel = QPushButton('Cancel')
+        cancel.setMinimumWidth(150)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = QPushButton('Save')
+        save.setMinimumWidth(150)
+        save.clicked.connect(self._save)
+        buttons.addWidget(save)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        self.request_parameters = normalize_request_parameters(parameters)
+
+    def _save(self):
+        try:
+            self.request_parameters = self.editor.parameters()
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid parameter', str(exc))
+            return
+        self.accept()
+
+
+class IndividualEndpointDialog(QDialog):
+    def __init__(self, parent, translator_gui, key, refresh_callback: Callable[[], None],
+                 status_callback: Callable[[str], None], persist_to_main_config=True):
+        super().__init__(parent)
+        self.translator_gui = translator_gui
+        self.key = key
+        self.refresh_callback = refresh_callback
+        self.status_callback = status_callback
+        self.persist_to_main_config = persist_to_main_config
+        
+        self._build()
+    
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        checkbox = QCheckBox(text)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 12px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_checkmark():
+            try:
+                if checkmark:
+                    checkmark.setGeometry(2, 1, 16, 16)  # Increased size from 14x14 to 16x16
+            except RuntimeError:
+                pass
+        
+        def update_checkmark():
+            try:
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                pass
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+        
+        QTimer.singleShot(0, safe_init)
+        
+        return checkbox
+
+    def _build(self):
+        title = f"Configure Individual Endpoint — {getattr(self.key, 'model', '')}"
+        self.setWindowTitle(title)
+        # Use screen ratios for sizing (decreased from 37% x 41% to 30% x 35%)
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().geometry()
+        width = min(screen.width() - 40, max(680, int(screen.width() * 0.35)))
+        height = min(screen.height() - 40, max(600, int(screen.height() * 0.55)))
+        self.setMinimumSize(width, height)
+        
+        # Main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 16, 20, 16)
+        main_layout.setSpacing(10)
+
+        # Title row with Halgakos icons
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(12)
+        title_layout.setAlignment(Qt.AlignCenter)
+
+        def _load_halgakos_pixmap(logical_size: int = 36):
+            try:
+                base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+                ico_path = os.path.join(base_dir, 'Halgakos.ico')
+                if not os.path.isfile(ico_path):
+                    return None
+                pm = QPixmap(ico_path)
+                if pm.isNull():
+                    return None
+                from PySide6.QtWidgets import QApplication
+                screen = QApplication.primaryScreen()
+                dpr = screen.devicePixelRatio() if screen else 1.0
+                target = int(logical_size * dpr)
+                scaled = pm.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled.setDevicePixelRatio(dpr)
+                return scaled
+            except Exception:
+                return None
+
+        icon_left = QLabel()
+        left_pm = _load_halgakos_pixmap(36)
+        if left_pm:
+            icon_left.setPixmap(left_pm)
+            icon_left.setFixedSize(36, 36)
+        icon_left.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(icon_left, 0, Qt.AlignVCenter)
+
+        header_label = QLabel("Per-Key Custom Endpoint")
+        header_font = QFont()
+        header_font.setPointSize(14)
+        header_font.setBold(True)
+        header_label.setFont(header_font)
+        header_label.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(header_label, 0, Qt.AlignVCenter)
+
+        icon_right = QLabel()
+        right_pm = _load_halgakos_pixmap(36)
+        if right_pm:
+            icon_right.setPixmap(right_pm)
+            icon_right.setFixedSize(36, 36)
+        icon_right.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(icon_right, 0, Qt.AlignVCenter)
+
+        main_layout.addWidget(title_container)
+        
+        # Header (enable toggle + spinner)
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Enable toggle using styled checkbox with icon
+        self.enable_checkbox = self._create_styled_checkbox("Enable")
+        self.enable_checkbox.setChecked(bool(getattr(self.key, 'use_individual_endpoint', False)))
+        self.enable_checkbox.toggled.connect(self._toggle_fields)
+        # Increase checkbox size
+        self.enable_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #e0e0e0;
+                spacing: 8px;
+                font-size: 12px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #5a5a5a;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4a7ba7;
+                border-color: #4a7ba7;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #6a6a6a;
+            }
+        """)
+        header_layout.addStretch()
+        
+        # Add Halgakos.ico next to the enable checkbox using HiDPI pixmap
+        icon_label = QLabel()
+        toggle_pm = _load_halgakos_pixmap(24)
+        if toggle_pm:
+            icon_label.setPixmap(toggle_pm)
+            icon_label.setFixedSize(24, 24)
+        icon_label.setAlignment(Qt.AlignCenter)
+
+        # Connect checkbox toggle to spinning animation (uses same label)
+        self.enable_checkbox.toggled.connect(lambda: animate_icon(icon_label))
+
+        header_layout.addWidget(icon_label)
+        header_layout.addWidget(self.enable_checkbox)
+        
+        main_layout.addLayout(header_layout)
+        
+        # Description
+        desc = (
+            "Use a custom endpoint for this API key only. Works with OpenAI-compatible servers\n"
+            "like Azure OpenAI or local providers (e.g., Ollama at http://localhost:11434/v1)."
+        )
+        desc_label = QLabel(desc)
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        main_layout.addWidget(desc_label)
+        
+        # Form group
+        form_group = QGroupBox("Endpoint Settings")
+        form_layout = QGridLayout(form_group)
+        form_layout.setContentsMargins(14, 12, 14, 12)
+        form_layout.setSpacing(6)
+        
+        # Endpoint URL
+        self.endpoint_label = QLabel("Endpoint Base URL:")
+        form_layout.addWidget(self.endpoint_label, 0, 0, Qt.AlignLeft)
+        
+        self.endpoint_entry = QLineEdit()
+        self.endpoint_entry.setText(getattr(self.key, 'azure_endpoint', '') or '')
+        form_layout.addWidget(self.endpoint_entry, 0, 1)
+
+        # Quick double-click shortcuts for common local OpenAI-compatible endpoints.
+        shortcuts_row = QWidget()
+        shortcuts_v = QVBoxLayout(shortcuts_row)
+        shortcuts_v.setContentsMargins(0, 0, 0, 4)
+        shortcuts_v.setSpacing(6)
+
+        def _make_endpoint_shortcut(label: str, url: str):
+            shortcut = QLabel(f"{label}: <a href='#'>{url}</a>")
+            shortcut.setStyleSheet("color: gray; font-size: 8pt;")
+            shortcut.setTextFormat(Qt.RichText)
+            shortcut.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+            shortcut.setOpenExternalLinks(False)
+            shortcut.setToolTip(f"Double-click to paste {label} URL into the endpoint field")
+            orig_style = shortcut.styleSheet()
+            orig_text = shortcut.text()
+
+            def _paste(event):
+                self.endpoint_entry.setText(url)
+                try:
+                    QGuiApplication.clipboard().setText(url)
+                except Exception:
+                    pass
+                try:
+                    shortcut.setStyleSheet(orig_style + " color: #00d084;")
+                    shortcut.setTextFormat(Qt.PlainText)
+                    shortcut.setText(f"✓ Pasted: {url}")
+                    QTimer.singleShot(900, lambda: (
+                        shortcut.setStyleSheet(orig_style),
+                        shortcut.setTextFormat(Qt.RichText),
+                        shortcut.setText(orig_text),
+                    ))
+                except Exception:
+                    pass
+
+            shortcut.mouseDoubleClickEvent = _paste
+            return shortcut
+
+        shortcut_row_one = QWidget()
+        shortcut_row_one_h = QHBoxLayout(shortcut_row_one)
+        shortcut_row_one_h.setContentsMargins(0, 0, 0, 0)
+        shortcut_row_one_h.setSpacing(0)
+        shortcut_row_one_h.addWidget(_make_endpoint_shortcut("Ollama", "http://localhost:11434/v1"))
+        sep_lbl = QLabel("  |  ")
+        sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+        shortcut_row_one_h.addWidget(sep_lbl)
+        shortcut_row_one_h.addWidget(_make_endpoint_shortcut("LM Studio", "http://localhost:1234/v1"))
+        shortcut_row_one_h.addStretch()
+        shortcuts_v.addWidget(shortcut_row_one)
+
+        shortcut_row_two = QWidget()
+        shortcut_row_two_h = QHBoxLayout(shortcut_row_two)
+        shortcut_row_two_h.setContentsMargins(0, 0, 0, 0)
+        shortcut_row_two_h.setSpacing(0)
+        shortcut_row_two_h.addWidget(_make_endpoint_shortcut("TTS", "http://localhost:8000/audio/speech"))
+        sep_lbl = QLabel("  |  ")
+        sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+        shortcut_row_two_h.addWidget(sep_lbl)
+        shortcut_row_two_h.addWidget(_make_endpoint_shortcut("TTS v1", "http://localhost:8000/v1/audio/speech"))
+        shortcut_row_two_h.addStretch()
+        shortcuts_v.addWidget(shortcut_row_two)
+        form_layout.addWidget(shortcuts_row, 1, 1, Qt.AlignLeft)
+        
+        # Azure API version
+        self.api_version_label = QLabel("Azure API Version:")
+        form_layout.addWidget(self.api_version_label, 2, 0, Qt.AlignLeft)
+        
+        self.api_version_combo = QComboBox()
+        self.api_version_combo.addItems([
+            '2025-01-01-preview',
+            '2024-12-01-preview',
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ])
+        current_version = getattr(self.key, 'azure_api_version', '2025-01-01-preview') or '2025-01-01-preview'
+        index = self.api_version_combo.findText(current_version)
+        if index >= 0:
+            self.api_version_combo.setCurrentIndex(index)
+        form_layout.addWidget(self.api_version_combo, 2, 1)
+        
+        # Helper text
+        hint = (
+            "Hints:\n"
+            "- Ollama: http://localhost:11434/v1\n"
+            "- Azure OpenAI: https://<resource>.openai.azure.com/ (version required)\n"
+            "- Other OpenAI-compatible: Provide the base URL ending with /v1 if applicable"
+        )
+        hint_label = QLabel(hint)
+        hint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        hint_label.setWordWrap(True)
+        form_layout.addWidget(hint_label, 3, 0, 1, 2, Qt.AlignLeft)
+        
+        # Make column 1 stretch
+        form_layout.setColumnStretch(1, 1)
+        
+        main_layout.addWidget(form_group)
+
+        parameters_group = QGroupBox('Custom Request Parameters')
+        parameters_layout = QVBoxLayout(parameters_group)
+        self.request_parameters_editor = RequestParametersEditor(
+            getattr(self.key, 'request_parameters', {}), parameters_group
+        )
+        parameters_layout.addWidget(self.request_parameters_editor)
+        main_layout.addWidget(parameters_group)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(8)
+        
+        disable_button = QPushButton("Disable")
+        disable_button.clicked.connect(self._on_disable)
+        button_layout.addWidget(disable_button)
+        
+        button_layout.addStretch()
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self._on_close)
+        button_layout.addWidget(cancel_button)
+        
+        save_button = QPushButton("Save")
+        save_button.setDefault(True)
+        save_button.clicked.connect(self._on_save)
+        button_layout.addWidget(save_button)
+        
+        main_layout.addLayout(button_layout)
+        
+        # Initial toggle state
+        self._toggle_fields()
+
+    def _toggle_fields(self):
+        enabled = self.enable_checkbox.isChecked()
+        
+        # Enable/disable input fields
+        self.endpoint_entry.setEnabled(enabled)
+        self.api_version_combo.setEnabled(enabled)
+        
+        # Enable/disable labels with color change
+        label_color = 'white' if enabled else 'gray'
+        self.endpoint_label.setEnabled(enabled)
+        self.endpoint_label.setStyleSheet(f"color: {label_color};")
+        self.api_version_label.setEnabled(enabled)
+        self.api_version_label.setStyleSheet(f"color: {label_color};")
+
+    def _is_azure_endpoint(self, url: str) -> bool:
+        # U9: the rule lives in key_pool_service (shared with Glossarion Mobile's KeyEditor)
+        return key_pool_service.is_azure_endpoint(url)
+
+    def _validate(self) -> bool:
+        # U9: key_pool_service.individual_endpoint_error holds the rules and messages (shared with mobile)
+        error = key_pool_service.individual_endpoint_error(
+            self.enable_checkbox.isChecked(), self.endpoint_entry.text(), self.api_version_combo.currentText()
+        )
+        if error:
+            QMessageBox.critical(self, "Validation Error", error)
+            return False
+        return True
+
+    def _persist_to_config_if_possible(self):
+        """Best-effort persistence: update translator_gui.config['multi_api_keys'] for this key entry.
+        We match by api_key and model to find the entry. If not found, skip silently.
+        """
+        try:
+            cfg = getattr(self.translator_gui, 'config', None)
+            if not isinstance(cfg, dict):
+                return
+            key_list = cfg.get('multi_api_keys', [])
+            # Find by api_key AND model (best-effort)
+            api_key = getattr(self.key, 'api_key', None)
+            model = getattr(self.key, 'model', None)
+            for entry in key_list:
+                if entry.get('api_key') == api_key and entry.get('model') == model:
+                    entry['use_individual_endpoint'] = bool(getattr(self.key, 'use_individual_endpoint', False))
+                    entry['azure_endpoint'] = getattr(self.key, 'azure_endpoint', None)
+                    entry['azure_api_version'] = getattr(self.key, 'azure_api_version', None)
+                    entry['request_parameters'] = normalize_request_parameters(
+                        getattr(self.key, 'request_parameters', {})
+                    )
+                    break
+            # Save without message
+            if hasattr(self.translator_gui, 'save_config'):
+                self.translator_gui.save_config(show_message=False)
+        except Exception:
+            # Non-fatal
+            pass
+
+    def _on_save(self):
+        if not self._validate():
+            return
+        try:
+            request_parameters = self.request_parameters_editor.parameters()
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid parameter', str(exc))
+            return
+        enabled = self.enable_checkbox.isChecked()
+        url = self.endpoint_entry.text().strip()
+        ver = self.api_version_combo.currentText().strip()
+        previous_endpoint = (
+            bool(getattr(self.key, 'use_individual_endpoint', False)),
+            getattr(self.key, 'azure_endpoint', None),
+            getattr(self.key, 'azure_api_version', None),
+        )
+
+        # Apply to key object
+        self.key.use_individual_endpoint = enabled
+        self.key.azure_endpoint = url if enabled else None
+        # Keep API version even if disabled, but it's only used when enabled
+        self.key.azure_api_version = ver or getattr(self.key, 'azure_api_version', '2025-01-01-preview')
+        self.key.request_parameters = request_parameters
+
+        # Notify parent UI
+        if callable(self.refresh_callback):
+            try:
+                self.refresh_callback()
+            except Exception:
+                pass
+        if callable(self.status_callback):
+            try:
+                current_endpoint = (
+                    self.key.use_individual_endpoint,
+                    self.key.azure_endpoint,
+                    self.key.azure_api_version,
+                )
+                if current_endpoint != previous_endpoint:
+                    if enabled and url:
+                        self.status_callback(f"Individual endpoint set: {url}")
+                    else:
+                        self.status_callback("Individual endpoint disabled")
+                else:
+                    self.status_callback("Key settings saved")
+            except Exception:
+                pass
+
+        # Best-effort persistence to config
+        if self.persist_to_main_config:
+            self._persist_to_config_if_possible()
+
+        self.accept()
+
+    def _on_disable(self):
+        # Disable quickly
+        self.enable_checkbox.setChecked(False)
+        self._toggle_fields()
+        # Apply immediately and close
+        self._on_save()
+
+    def _on_close(self):
+        self.reject()

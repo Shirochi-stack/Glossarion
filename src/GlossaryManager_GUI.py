@@ -1,0 +1,10508 @@
+"""
+Glossary Manager GUI Module
+Comprehensive glossary management for automatic and manual glossary extraction
+"""
+
+import os
+import settings_rules  # glossary-mode lock rules shared with the mobile app (U4)
+import sys
+import json
+import threading
+import time
+import html as _html
+from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton, 
+                                QCheckBox, QRadioButton, QTextEdit, QListWidget, QListWidgetItem,
+                                QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget, QTabBar,
+                                QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
+                                QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
+                                QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
+                                QComboBox, QMenu, QInputDialog, QStyledItemDelegate,
+                                QStyleOptionViewItem, QStyle)
+from PySide6.QtCore import (Qt, Signal, Slot, QTimer, Property, QObject,
+                            QEventLoop, QSize, QPoint, QRectF)
+from PySide6.QtGui import (QFont, QColor, QIcon, QKeySequence, QShortcut,
+                           QBrush, QPainter, QPainterPath, QPen)
+from glossary_usage import (
+    build_prepared_output_index,
+    entry_matches_output_index,
+    entry_matches_prepared_translated_output,
+    html_to_text,
+    prepare_translated_output_text,
+)
+from language_options import TARGET_LANGUAGES
+from translation_pipeline import GlossaryPipelineMixin
+from gender_tracking import (
+    BINARY_GENDERS,
+    collapse_tracked_gender_variants,
+    display_gender,
+    editor_gender_status,
+    normalize_bias,
+    normalize_entries_gender,
+    normalize_gender,
+    normalize_threshold,
+    occurrence_bounds,
+    resolved_storage_gender,
+    tracker_entry_for_raw,
+    tracker_path_for_glossary,
+)
+import glossary_document  # editor parse/save/edit logic shared with the mobile app (U6)
+# Moved verbatim to glossary_document (U6); imported under their old names.
+from glossary_document import (
+    collect_glossary_filter_values as _collect_glossary_filter_values,
+    editor_entry_has_gender as _editor_entry_has_gender,
+    gender_resolution_summary as _gender_resolution_summary,
+    load_editor_gender_tracker as _load_editor_gender_tracker,
+    prepare_editor_gender_tracking as _prepare_editor_gender_tracking,
+)
+
+
+_EDITOR_GENDER_STATUS_ROLE = int(Qt.UserRole) + 20
+
+
+def _wrapped_tooltip_html(text, width=430):
+    """Wrap plain tooltip text while preserving line breaks and literal tags."""
+    if not text:
+        return ""
+    safe_text = _html.escape(str(text)).replace("\n", "<br>")
+    return (
+        "<qt><p style='white-space: normal; margin: 0; "
+        f"width: {int(width)}px;'>{safe_text}</p></qt>"
+    )
+
+
+def _apply_editor_gender_presentation(item, status, gender_column=None):
+    """Apply the tracker label and unresolved-row color to one editor item."""
+    item.setData(0, _EDITOR_GENDER_STATUS_ROLE, status)
+    if isinstance(status, dict) and gender_column is not None:
+        item.setText(gender_column, status.get("label", item.text(gender_column)))
+        if status.get("conflict"):
+            stats = status.get("stats", {})
+            item.setToolTip(
+                gender_column,
+                _wrapped_tooltip_html(
+                    f"Tracked conflict: Male {stats.get('male', {}).get('count', 0)}, "
+                    f"Female {stats.get('female', {}).get('count', 0)}. "
+                    "Double-click to review or resolve."
+                ),
+            )
+
+    unresolved = isinstance(status, dict) and bool(status.get("unresolved"))
+    pink = QColor("#ec4899")
+    pink.setAlpha(72)
+    brush = QBrush(pink)
+    for column in range(item.columnCount()):
+        if unresolved:
+            item.setBackground(column, brush)
+        else:
+            item.setData(column, Qt.BackgroundRole, None)
+
+
+# _gender_resolution_summary, _collect_glossary_filter_values, _load_editor_gender_tracker,
+# _editor_entry_has_gender and _prepare_editor_gender_tracking: see glossary_document (U6).
+
+
+
+def _recent_glossary_filter_dismissal(
+    dismissed_state,
+    column,
+    *,
+    now=None,
+    max_age=0.25,
+):
+    """Return whether a header click is the click that just closed its popup."""
+    if not isinstance(dismissed_state, tuple) or len(dismissed_state) != 2:
+        return False
+    dismissed_column, dismissed_at = dismissed_state
+    try:
+        age = (time.monotonic() if now is None else float(now)) - float(dismissed_at)
+    except (TypeError, ValueError):
+        return False
+    return dismissed_column == column and 0.0 <= age <= max_age
+
+
+class _GlossaryFilterItemDelegate(QStyledItemDelegate):
+    """Paint fast, widget-free filter checkboxes in the glossary style."""
+
+    _CHECKED_COLOR = QColor("#5a9fd4")
+    _UNCHECKED_BORDER = QColor("#5a9fd4")
+    _CHECKMARK_COLOR = QColor("#ffffff")
+    _HOVER_COLOR = QColor("#3a3a3a")
+
+    @staticmethod
+    def _box_size(font_metrics):
+        return max(14, min(18, font_metrics.height()))
+
+    @classmethod
+    def _box_rect(cls, option):
+        size = cls._box_size(option.fontMetrics)
+        left = option.rect.left() + 8
+        top = option.rect.top() + max(0, (option.rect.height() - size) // 2)
+        return QRectF(left, top, size, size)
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.features &= ~QStyleOptionViewItem.HasCheckIndicator
+        indent = 8 + self._box_size(option.fontMetrics) + 10
+        option.rect.adjust(indent, 0, 0, 0)
+
+    def paint(self, painter, option, index):
+        original_option = QStyleOptionViewItem(option)
+        if option.state & QStyle.State_MouseOver:
+            painter.fillRect(option.rect, self._HOVER_COLOR)
+
+        text_option = QStyleOptionViewItem(option)
+        text_option.state &= ~QStyle.State_MouseOver
+        super().paint(painter, text_option, index)
+
+        try:
+            check_state = Qt.CheckState(index.data(Qt.CheckStateRole))
+        except (TypeError, ValueError):
+            check_state = Qt.Unchecked
+        box = self._box_rect(original_option)
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        if check_state == Qt.Unchecked:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(self._UNCHECKED_BORDER, 1.2))
+        else:
+            painter.setBrush(self._CHECKED_COLOR)
+            painter.setPen(QPen(self._CHECKED_COLOR, 1.0))
+        painter.drawRoundedRect(box, 2.5, 2.5)
+
+        mark_pen = QPen(self._CHECKMARK_COLOR, max(1.6, box.width() * 0.11))
+        mark_pen.setCapStyle(Qt.RoundCap)
+        mark_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(mark_pen)
+        if check_state == Qt.PartiallyChecked:
+            y = box.top() + box.height() * 0.52
+            painter.drawLine(
+                int(box.left() + box.width() * 0.25),
+                int(y),
+                int(box.right() - box.width() * 0.25),
+                int(y),
+            )
+        elif check_state == Qt.Checked:
+            path = QPainterPath()
+            path.moveTo(
+                box.left() + box.width() * 0.22,
+                box.top() + box.height() * 0.53,
+            )
+            path.lineTo(
+                box.left() + box.width() * 0.43,
+                box.top() + box.height() * 0.73,
+            )
+            path.lineTo(
+                box.left() + box.width() * 0.79,
+                box.top() + box.height() * 0.28,
+            )
+            painter.drawPath(path)
+        painter.restore()
+
+
+class _EditorTreeRow:
+    """glossary_document's editor-row protocol over a glossary tree item (UserRole = source ref)."""
+
+    __slots__ = ('item',)
+
+    def __init__(self, item):
+        self.item = item
+
+    def columnCount(self):
+        return self.item.columnCount()
+
+    def text(self, column):
+        return self.item.text(column)
+
+    def setText(self, column, value):
+        self.item.setText(column, value)
+
+    def ref(self):
+        return self.item.data(0, Qt.UserRole)
+
+    def set_ref(self, value):
+        self.item.setData(0, Qt.UserRole, value)
+
+
+# WindowManager and UIHelper removed - not needed in PySide6
+# Qt handles window management and UI utilities automatically
+
+
+class GlossaryManagerMixin:
+    """Mixin class containing glossary management methods for TranslatorGUI"""
+
+    GLOSSARY_PROMPT_DEFAULT_PROFILE = "Default"
+
+    @staticmethod
+    def _configured_glossary_refinement_chunking_mode(config):
+        """Return an explicitly configured request mode, if one is valid.
+
+        Runtime fallbacks must not be used to select a settings control.  The
+        combo box has its own stable first-item default; only a saved user
+        value is allowed to move it away from that state.
+        """
+        if not isinstance(config, dict) or 'glossary_refinement_chunking_mode' not in config:
+            return None
+        raw_mode = str(config.get('glossary_refinement_chunking_mode') or '').strip().lower()
+        if raw_mode in ('all', 'all_types', 'all_in_one', 'all_entries', 'combined'):
+            return 'all'
+        if raw_mode in ('separate', 'separate_requests', 'per_type'):
+            return 'separate'
+        return None
+
+    @classmethod
+    def _glossary_refinement_chunking_combo_index(cls, config):
+        """Return the request-mode combo index, defaulting the GUI to all types."""
+        saved_mode = cls._configured_glossary_refinement_chunking_mode(config)
+        return 0 if saved_mode == 'separate' else 1
+
+    # Moved verbatim to the shared GUI-free pipeline (translation_pipeline.GlossaryPipelineMixin,
+    # which TranslatorGUI inherits ahead of this mixin); re-exported so the name stays here.
+    _glossary_editor_input_sources = GlossaryPipelineMixin._glossary_editor_input_sources
+
+    def _prewarm_glossary_settings_tabs(self, dialog=None, notebook=None):
+        """Force hidden glossary settings tabs through their first layout pass."""
+        prewarm_start = time.perf_counter()
+        was_visible = True
+        old_opacity = 1.0
+        tab_timings = []
+        def _center_dialog():
+            try:
+                screen = dialog.screen() or QApplication.primaryScreen()
+                if screen is None:
+                    return
+                geo = screen.availableGeometry()
+                dialog.move(
+                    geo.x() + max(0, (geo.width() - dialog.width()) // 2),
+                    geo.y() + max(0, (geo.height() - dialog.height()) // 2),
+                )
+            except Exception:
+                pass
+        try:
+            dialog = dialog or getattr(self, '_glossary_dialog', None)
+            notebook = notebook or getattr(self, '_glossary_settings_notebook', None)
+            if dialog is None or notebook is None:
+                return False
+
+            self._glossary_settings_tabs_prewarmed = False
+
+            app = QApplication.instance()
+            previous_index = notebook.currentIndex()
+            if previous_index < 0:
+                previous_index = 0
+
+            was_visible = dialog.isVisible()
+            old_opacity = dialog.windowOpacity()
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            if not was_visible:
+                dialog.setWindowOpacity(0.0)
+                dialog.move(-20000, -20000)
+                dialog.show()
+                dialog._fade_native_window_seen = True
+                dialog.raise_()
+
+            def _warm_widget(widget):
+                if widget is None:
+                    return
+                try:
+                    widget.ensurePolished()
+                    widget.updateGeometry()
+                    layout = widget.layout()
+                    if layout is not None:
+                        layout.activate()
+                    if isinstance(widget, QScrollArea):
+                        inner = widget.widget()
+                        if inner is not None:
+                            inner.ensurePolished()
+                            inner.updateGeometry()
+                            inner_layout = inner.layout()
+                            if inner_layout is not None:
+                                inner_layout.activate()
+                except Exception:
+                    pass
+
+            for idx in range(notebook.count()):
+                tab_start = time.perf_counter()
+                notebook.setCurrentIndex(idx)
+                _warm_widget(notebook.widget(idx))
+                layout = dialog.layout()
+                if layout is not None:
+                    layout.activate()
+                if app is not None:
+                    app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                tab_timings.append(int((time.perf_counter() - tab_start) * 1000))
+
+            queued_start = time.perf_counter()
+            if app is not None:
+                deadline = time.perf_counter() + 1.5
+                while time.perf_counter() < deadline:
+                    app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    if getattr(self, '_glossary_editor_deferred_load_done', True):
+                        break
+                    time.sleep(0.01)
+            queued_ms = int((time.perf_counter() - queued_start) * 1000)
+
+            if notebook.count():
+                notebook.setCurrentIndex(min(previous_index, notebook.count() - 1))
+            if app is not None:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            if not was_visible:
+                dialog.hide()
+                _center_dialog()
+                dialog.setWindowOpacity(old_opacity)
+            self._glossary_settings_tabs_prewarmed = True
+            self._glossary_settings_prewarm_stats = {
+                'total_ms': int((time.perf_counter() - prewarm_start) * 1000),
+                'tab_count': notebook.count(),
+                'tab_ms': tab_timings,
+                'queued_ms': queued_ms,
+            }
+            return True
+        except Exception as e:
+            try:
+                if dialog is not None and not was_visible:
+                    dialog.hide()
+                    _center_dialog()
+                    dialog.setWindowOpacity(old_opacity)
+            except Exception:
+                pass
+            try:
+                print(f"Glossary settings tab prewarm failed: {e}")
+            except Exception:
+                pass
+            return False
+    
+    @staticmethod
+    def _disable_slider_mousewheel(slider):
+        """Disable mousewheel scrolling on a slider to prevent accidental changes"""
+        slider.wheelEvent = lambda event: None
+    
+    @staticmethod
+    def _disable_spinbox_mousewheel(spinbox):
+        """Disable mousewheel scrolling on a spinbox to prevent accidental changes"""
+        spinbox.wheelEvent = lambda event: None
+    
+    @staticmethod
+    def _disable_tabwidget_mousewheel(tabwidget):
+        """Disable mousewheel scrolling on a tab widget to prevent accidental tab switching"""
+        tabwidget.wheelEvent = lambda event: None
+    
+    @staticmethod
+    def _disable_combobox_mousewheel(combobox):
+        """Disable mousewheel scrolling on a combobox"""
+        combobox.wheelEvent = lambda event: None
+
+    def _apply_halgakos_combo_icons(self, combo, size=18):
+        """Apply the Halgakos mascot icon to every item in a combo box."""
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                combo_icon = QIcon(icon_path)
+                for i in range(combo.count()):
+                    combo.setItemIcon(i, combo_icon)
+                combo.setIconSize(QSize(size, size))
+        except Exception:
+            pass
+
+    def _glossary_prompt_profile_meta(self, profile_key):
+        """Metadata for user-defined glossary prompt profile buckets."""
+        return glossary_document.glossary_prompt_profile_meta(profile_key)
+
+    def _is_default_glossary_prompt_profile(self, profile_name):
+        return glossary_document.is_default_glossary_prompt_profile(profile_name)
+
+    def _ensure_glossary_prompt_profiles(self):
+        """Ensure glossary prompt profile containers exist without seeding defaults."""
+        return glossary_document.ensure_glossary_prompt_profiles(self)
+
+    def _glossary_prompt_profiles_for(self, profile_key):
+        return glossary_document.glossary_prompt_profiles_for(self, profile_key)
+
+    def _active_glossary_prompt_profile_for(self, profile_key):
+        return glossary_document.active_glossary_prompt_profile_for(self, profile_key)
+
+    def _set_active_glossary_prompt_profile(self, profile_key, profile_name):
+        glossary_document.set_active_glossary_prompt_profile(self, profile_key, profile_name)
+
+    def _default_glossary_prompt_profile_text(self, profile_key):
+        return glossary_document.default_glossary_prompt_profile_text(self, profile_key)
+
+    def _set_default_glossary_prompt_profile_text(self, profile_key, text):
+        glossary_document.set_default_glossary_prompt_profile_text(self, profile_key, text)
+
+    def _glossary_prompt_text(self, editor):
+        if editor is None:
+            return ''
+        try:
+            return self._sep_from_display(editor.toPlainText()).strip()
+        except Exception:
+            try:
+                return editor.toPlainText().strip()
+            except Exception:
+                return ''
+
+    def _set_glossary_prompt_editor_text(self, editor, text):
+        if editor is None:
+            return
+        try:
+            editor.blockSignals(True)
+            editor.setPlainText(self._sep_for_display(text or ''))
+        finally:
+            try:
+                editor.blockSignals(False)
+            except Exception:
+                pass
+
+    def _sync_glossary_prompt_profile_current_prompt(self, profile_key):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        editor = widgets.get('editor')
+        text = self._glossary_prompt_text(editor)
+        return glossary_document.store_glossary_prompt_current(self, profile_key, text)
+
+    def _persist_glossary_prompt_profiles(self):
+        """Persist profile changes through the main config saver when available."""
+        try:
+            if hasattr(self, 'save_config'):
+                return self.save_config(show_message=False)
+        except Exception:
+            return False
+
+    def _refresh_glossary_prompt_profile_combo(self, profile_key, selected_name=None):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        if combo is None:
+            return
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        selected_name = selected_name if selected_name is not None else self._active_glossary_prompt_profile_for(profile_key)
+        if not selected_name or self._is_default_glossary_prompt_profile(selected_name) or selected_name not in profiles:
+            selected_name = self.GLOSSARY_PROMPT_DEFAULT_PROFILE
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(self.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+            for name in profiles.keys():
+                if not self._is_default_glossary_prompt_profile(name):
+                    combo.addItem(name)
+            idx = combo.findText(selected_name)
+            if idx < 0:
+                idx = 0
+            combo.setCurrentIndex(idx)
+            try:
+                if combo.isEditable() and combo.lineEdit() is not None:
+                    combo.lineEdit().setText(selected_name)
+            except Exception:
+                pass
+            self._apply_halgakos_combo_icons(combo)
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _on_glossary_prompt_profile_selected(self, profile_key):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        editor = widgets.get('editor')
+        if combo is None or editor is None:
+            return
+        name = combo.currentText().strip()
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        if self._is_default_glossary_prompt_profile(name):
+            self._set_glossary_prompt_editor_text(editor, self._default_glossary_prompt_profile_text(profile_key))
+            self._set_active_glossary_prompt_profile(profile_key, '')
+            self._sync_glossary_prompt_profile_current_prompt(profile_key)
+            return
+        if not name or name not in profiles:
+            return
+        self._set_glossary_prompt_editor_text(editor, profiles.get(name, ''))
+        self._set_active_glossary_prompt_profile(profile_key, name)
+        self._sync_glossary_prompt_profile_current_prompt(profile_key)
+
+    def _auto_save_glossary_prompt_profile(self, profile_key):
+        """Stage edits into the active prompt profile in memory, matching system prompt profiles."""
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        editor = widgets.get('editor')
+        if combo is None or editor is None:
+            return
+        name = combo.currentText().strip()
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        active = self._active_glossary_prompt_profile_for(profile_key)
+        if active in profiles:
+            profiles[active] = self._glossary_prompt_text(editor)
+        elif not name or self._is_default_glossary_prompt_profile(name):
+            self._set_default_glossary_prompt_profile_text(profile_key, self._glossary_prompt_text(editor))
+            self._set_active_glossary_prompt_profile(profile_key, '')
+        self._sync_glossary_prompt_profile_current_prompt(profile_key)
+
+    def _new_glossary_prompt_profile(self, profile_key):
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        editor = widgets.get('editor')
+
+        existing = set(profiles.keys())
+        if combo is not None:
+            for i in range(combo.count()):
+                existing.add(combo.itemText(i))
+
+        n = 1
+        while f"New Profile #{n}" in existing:
+            n += 1
+        name = f"New Profile #{n}"
+
+        profiles[name] = ''
+        self.config['glossary_prompt_profiles'][profile_key] = profiles
+        self._set_active_glossary_prompt_profile(profile_key, name)
+        self._refresh_glossary_prompt_profile_combo(profile_key, name)
+        self._set_glossary_prompt_editor_text(editor, '')
+        self._sync_glossary_prompt_profile_current_prompt(profile_key)
+        self._persist_glossary_prompt_profiles()
+        if hasattr(self, 'append_log'):
+            self.append_log(f"✅ Created glossary prompt profile: '{name}'")
+
+    def _save_glossary_prompt_profile(self, profile_key):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        editor = widgets.get('editor')
+        if combo is None or editor is None:
+            return
+        name = combo.currentText().strip()
+        if not name:
+            QMessageBox.warning(self, "Profile Name Required", "Enter a profile name before saving.")
+            return
+
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        active = self._active_glossary_prompt_profile_for(profile_key)
+        if self._is_default_glossary_prompt_profile(name) and active:
+            QMessageBox.warning(self, "Default Profile", "Default is reserved. Choose another profile name.")
+            return
+        if name in profiles and name != active:
+            QMessageBox.warning(self, "Profile Name Exists", "A profile with this name already exists. Choose another name.")
+            return
+
+        if self._is_default_glossary_prompt_profile(name):
+            self._set_default_glossary_prompt_profile_text(profile_key, self._glossary_prompt_text(editor))
+            self._set_active_glossary_prompt_profile(profile_key, '')
+            self._refresh_glossary_prompt_profile_combo(profile_key, self.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+            self._sync_glossary_prompt_profile_current_prompt(profile_key)
+            self._persist_glossary_prompt_profiles()
+            if hasattr(self, 'append_log'):
+                self.append_log("✅ Saved default glossary prompt profile")
+            return
+
+        previous_profiles = dict(profiles)
+        text = self._glossary_prompt_text(editor)
+        if active in profiles and name != active:
+            profiles = {
+                (name if key == active else key): (text if key == active else value)
+                for key, value in profiles.items()
+            }
+        else:
+            profiles[name] = text
+        self.config['glossary_prompt_profiles'][profile_key] = profiles
+        self._set_active_glossary_prompt_profile(profile_key, name)
+        self._refresh_glossary_prompt_profile_combo(profile_key, name)
+        self._sync_glossary_prompt_profile_current_prompt(profile_key)
+        if self._persist_glossary_prompt_profiles() is False:
+            self.config['glossary_prompt_profiles'][profile_key] = previous_profiles
+            self._set_active_glossary_prompt_profile(profile_key, active)
+            self._refresh_glossary_prompt_profile_combo(profile_key, active)
+            combo.setEditText(name)
+            QMessageBox.warning(self, "Save Failed", "Could not save the glossary prompt profile. Please try again.")
+            return
+        if hasattr(self, 'append_log'):
+            self.append_log(f"✅ Saved glossary prompt profile: '{name}'")
+
+    def _delete_glossary_prompt_profile(self, profile_key):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        if combo is None:
+            return
+        name = combo.currentText().strip()
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        if self._is_default_glossary_prompt_profile(name):
+            QMessageBox.warning(self, "Default Profile", "The Default glossary prompt profile cannot be deleted.")
+            return
+        if not name or name not in profiles:
+            QMessageBox.warning(self, "Profile Not Found", "Select an existing profile to delete.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete Profile",
+            f"Delete glossary prompt profile '{name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        del profiles[name]
+        self.config['glossary_prompt_profiles'][profile_key] = profiles
+        next_name = next((profile for profile in profiles if not self._is_default_glossary_prompt_profile(profile)), '')
+        self._set_active_glossary_prompt_profile(profile_key, next_name)
+        self._refresh_glossary_prompt_profile_combo(profile_key, next_name or self.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+        self._on_glossary_prompt_profile_selected(profile_key)
+        self._persist_glossary_prompt_profiles()
+        if hasattr(self, 'append_log'):
+            self.append_log(f"🗑️ Deleted glossary prompt profile: '{name}'")
+
+    def _create_glossary_prompt_profile_controls(self, profile_key, editor):
+        """Create New/Save/Delete controls for one glossary prompt editor."""
+        self._ensure_glossary_prompt_profiles()
+        if not hasattr(self, '_glossary_prompt_profile_widgets'):
+            self._glossary_prompt_profile_widgets = {}
+
+        meta = self._glossary_prompt_profile_meta(profile_key)
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 6)
+        layout.setSpacing(8)
+
+        label = QLabel(meta['label'])
+        layout.addWidget(label)
+
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setMinimumWidth(220)
+        combo.setMaximumWidth(420)
+        combo.setToolTip(_wrapped_tooltip_html(meta['empty_tip']))
+        try:
+            combo.lineEdit().setPlaceholderText("Profile name")
+        except Exception:
+            pass
+        combo.setStyleSheet("""
+            QComboBox {
+                padding-right: 28px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
+        self._disable_combobox_mousewheel(combo)
+        self._add_combobox_arrow(combo)
+        layout.addWidget(combo)
+
+        new_btn = QPushButton("+ New Profile")
+        new_btn.setFixedHeight(28)
+        new_btn.setToolTip(_wrapped_tooltip_html("Create a new empty glossary prompt profile"))
+        new_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2d5a2d;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: bold;
+                border: 1px solid #3a7a3a;
+                border-radius: 4px;
+                padding: 0px 8px;
+            }
+            QPushButton:hover {
+                background-color: #3a7a3a;
+                border-color: #4a9a4a;
+            }
+            QPushButton:pressed {
+                background-color: #1e3e1e;
+            }
+        """)
+        new_btn.clicked.connect(lambda: self._new_glossary_prompt_profile(profile_key))
+        layout.addWidget(new_btn)
+
+        save_btn = QPushButton("💾 Save Profile")
+        save_btn.setFixedWidth(120)
+        save_btn.setFixedHeight(28)
+        save_btn.setToolTip(_wrapped_tooltip_html("Save the selected glossary prompt profile"))
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2f5f8f;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: bold;
+                border: 1px solid #4a78a8;
+                border-radius: 4px;
+                padding: 0px 8px;
+            }
+            QPushButton:hover {
+                background-color: #3f78ad;
+                border-color: #5a91c8;
+            }
+            QPushButton:pressed {
+                background-color: #244766;
+            }
+        """)
+        save_btn.clicked.connect(lambda: self._save_glossary_prompt_profile(profile_key))
+        layout.addWidget(save_btn)
+
+        delete_btn = QPushButton("🗑 Delete Profile")
+        delete_btn.setFixedWidth(128)
+        delete_btn.setFixedHeight(28)
+        delete_btn.setToolTip(_wrapped_tooltip_html("Delete the selected custom glossary prompt profile"))
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6f2f2f;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: bold;
+                border: 1px solid #944545;
+                border-radius: 4px;
+                padding: 0px 8px;
+            }
+            QPushButton:hover {
+                background-color: #8a3a3a;
+                border-color: #b65252;
+            }
+            QPushButton:pressed {
+                background-color: #512424;
+            }
+        """)
+        delete_btn.clicked.connect(lambda: self._delete_glossary_prompt_profile(profile_key))
+        layout.addWidget(delete_btn)
+        layout.addStretch()
+
+        self._glossary_prompt_profile_widgets[profile_key] = {
+            'combo': combo,
+            'editor': editor,
+        }
+        self._refresh_glossary_prompt_profile_combo(profile_key)
+        combo.currentIndexChanged.connect(lambda _idx: self._on_glossary_prompt_profile_selected(profile_key))
+        try:
+            combo.lineEdit().returnPressed.connect(lambda: self._on_glossary_prompt_profile_selected(profile_key))
+        except Exception:
+            pass
+        try:
+            editor.textChanged.connect(lambda: self._auto_save_glossary_prompt_profile(profile_key))
+        except Exception:
+            pass
+        return row
+
+    def _apply_active_glossary_prompt_profile(self, profile_key):
+        active = self._active_glossary_prompt_profile_for(profile_key)
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        if active and not self._is_default_glossary_prompt_profile(active) and active in profiles:
+            self._refresh_glossary_prompt_profile_combo(profile_key, active)
+            self._on_glossary_prompt_profile_selected(profile_key)
+        else:
+            self._refresh_glossary_prompt_profile_combo(profile_key, self.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+            self._on_glossary_prompt_profile_selected(profile_key)
+
+    def _set_glossary_tree_font_size(self, point_size, persist=True):
+        """Apply a bounded font size to the glossary editor tree."""
+        try:
+            point_size = int(point_size)
+        except Exception:
+            return
+
+        point_size = max(8, min(32, point_size))
+        self._glossary_tree_font_size = point_size
+
+        tree = getattr(self, 'glossary_tree', None)
+        if tree is not None:
+            font = tree.font()
+            font.setPointSize(point_size)
+            tree.setFont(font)
+            try:
+                header = tree.header()
+                header.setFont(font)
+                header.setMinimumHeight(header.fontMetrics().height() + 12)
+                header.setStyleSheet(f"""
+                    QHeaderView::section {{
+                        background-color: #252525;
+                        color: white;
+                        border: 1px solid #4a5568;
+                        padding: 4px;
+                        font-size: {point_size}pt;
+                    }}
+                """)
+            except Exception:
+                pass
+
+        entry = getattr(self, '_glossary_active_edit_entry', None)
+        if entry is not None:
+            try:
+                edit_font = entry.font()
+                edit_font.setPointSize(point_size)
+                entry.setFont(edit_font)
+            except RuntimeError:
+                self._glossary_active_edit_entry = None
+
+        if persist:
+            try:
+                self.config['glossary_editor_tree_font_size'] = point_size
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+
+    def _adjust_glossary_tree_font_size(self, delta):
+        """Zoom the glossary editor tree font in or out."""
+        try:
+            current = int(getattr(self, '_glossary_tree_font_size', 0) or 0)
+        except Exception:
+            current = 0
+
+        if current <= 0:
+            tree = getattr(self, 'glossary_tree', None)
+            if tree is not None:
+                current = tree.font().pointSize()
+            if current <= 0:
+                current = 10
+
+        self._set_glossary_tree_font_size(current + int(delta), persist=True)
+
+    def _clear_glossary_editor(self):
+        """Clear the inline glossary editor (tree, file combo, stats and the
+        in-memory data). Called when the associated input file has been cleared
+        so stale auto-loaded entries do not linger in the editor."""
+        stop_refresh_animation = getattr(self, '_stop_force_refresh_animation', None)
+        if callable(stop_refresh_animation):
+            stop_refresh_animation(force=True)
+        try:
+            tree = getattr(self, 'glossary_tree', None)
+            if tree is not None:
+                tree.clear()
+                tree.setColumnCount(1)
+                tree.setHeaderLabels(["#"])
+        except Exception:
+            pass
+        try:
+            combo = getattr(self, 'editor_file_combo', None)
+            if combo is not None:
+                combo.blockSignals(True)
+                combo.clear()
+                combo.blockSignals(False)
+        except Exception:
+            pass
+        # Cancel any asynchronous parse for the previously selected input.
+        # Otherwise a slow old glossary can repopulate the tree after a ZIP or
+        # subtitle-format switch.
+        self._editor_load_token = None
+        self._editor_last_mtime = 0.0
+        self._editor_glossary_source_map = {}
+        self._editor_glossary_epub_map = {}
+        glossary_document.reset_document(self)
+        self._glossary_editor_base_stats_text = "No glossary loaded"
+        self._glossary_editor_view_stats_text = "No glossary loaded"
+        self._glossary_column_filters = {}
+        try:
+            if hasattr(self, 'current_glossary_sections'):
+                self.current_glossary_sections = []
+        except Exception:
+            pass
+        try:
+            stats = getattr(self, 'stats_label', None)
+            if stats is not None:
+                stats.setText("No glossary loaded")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_update_editor_nav_buttons'):
+                self._update_editor_nav_buttons()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _sep_for_display(text):
+        """Replace raw Unit Separator (\x1F) with visible literal '\x1F' for QTextEdit display."""
+        if not text:
+            return text
+        return text.replace('\x1f', '\\x1F')
+
+    @staticmethod
+    def _sep_from_display(text):
+        """Convert visible literal '\x1F' back to raw Unit Separator (\x1F) for storage."""
+        if not text:
+            return text
+        return text.replace('\\x1F', '\x1f')
+
+    # Moved verbatim to glossary_document.display_glossary_path (U6).
+    _display_glossary_path = staticmethod(glossary_document.display_glossary_path)
+
+    def _unified_glossary_editor_files(self):
+        """Existing unified glossary files, this run's language pair first."""
+        return glossary_document.unified_glossary_editor_files(
+            self.config,
+            base_dir=getattr(self, 'base_dir', ''),
+            folder_key=self._unified_glossary_folder_key,
+            module_dir=os.path.dirname(os.path.abspath(__file__)),
+        )
+
+    def _append_unified_glossaries_to_editor_combo(self):
+        """List the unified glossaries after the book glossaries in the editor.
+
+        They are appended, never first, so the editor still opens on the
+        book's own glossary; the user switches to a unified one by hand.
+        """
+        combo = getattr(self, 'editor_file_combo', None)
+        if combo is None:
+            return
+        present = set()
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if data:
+                present.add(os.path.normcase(os.path.abspath(str(data))))
+        was_blocked = combo.blockSignals(True)
+        try:
+            for path in self._unified_glossary_editor_files():
+                if os.path.normcase(os.path.abspath(path)) in present:
+                    continue
+                combo.addItem("📚 " + self._display_glossary_path(path), path)
+                combo.setItemData(
+                    combo.count() - 1,
+                    "Unified glossary shared by every novel in this language pair.\n"
+                    "Edits are kept by later merges, but a full Generate rebuild "
+                    "recreates the file from the book glossaries.",
+                    Qt.ToolTipRole,
+                )
+        finally:
+            combo.blockSignals(was_blocked)
+
+    def _glossary_editor_entry_type_config(self):
+        """Entry types the editor status line ranks custom types by (attribute, else config)."""
+        return (
+            getattr(self, 'custom_entry_types', None)
+            or getattr(self, 'config', {}).get('custom_entry_types', {})
+            or {}
+        )
+
+    def _glossary_type_count_summary(self, entries, max_custom_types=7):
+        """Return built-in and prioritized custom entry-type counts for editor status."""
+        return glossary_document.glossary_type_count_summary(
+            entries, self._glossary_editor_entry_type_config(), max_custom_types
+        )
+
+    def _parse_editor_token_glossary_async(self, lines):
+        """Parse token-efficient glossary CSV text without touching Qt widgets."""
+        return glossary_document.parse_token_glossary(
+            lines,
+            self.config.get('custom_glossary_fields', []),
+            getattr(self, 'custom_entry_types', {}),
+        )
+
+    def _parse_glossary_file_for_editor_async(self, path):
+        """Read and parse a glossary file for the editor without touching Qt widgets."""
+        return glossary_document.parse_glossary_file(
+            path, self.config, getattr(self, 'custom_entry_types', None)
+        )
+    
+    @staticmethod
+    def _add_combobox_arrow(combobox):
+        """Add a unicode arrow overlay to a combobox"""
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QLabel
+        from PySide6.QtCore import Qt
+        
+        arrow_label = QLabel("▼", combobox)
+        arrow_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-size: 10pt;
+                border: none;
+            }
+        """)
+        arrow_label.setAlignment(Qt.AlignCenter)
+        arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_arrow():
+            try:
+                if arrow_label and combobox:
+                    width = combobox.width()
+                    height = combobox.height()
+                    arrow_label.setGeometry(width - 20, (height - 16) // 2, 20, 16)
+            except RuntimeError:
+                pass
+        
+        # Position arrow when combobox is resized
+        original_resize = combobox.resizeEvent
+        def new_resize(event):
+            original_resize(event)
+            position_arrow()
+        
+        combobox.resizeEvent = new_resize
+        
+        # Initial position
+        QTimer.singleShot(0, position_arrow)
+    
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with the same overlay checkmark used by the main GUI."""
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        from PySide6.QtCore import Qt, QTimer
+
+        checkbox = QCheckBox(text)
+        checkmark = QLabel("\u2713", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def position_checkmark():
+            try:
+                checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+
+        def update_checkmark():
+            try:
+                if checkbox.isChecked():
+                    checkmark.setText("−" if checkbox.checkState() == Qt.PartiallyChecked else "✓")
+                    position_checkmark()
+                    checkmark.show()
+                    checkmark.raise_()
+                    checkmark.update()
+                else:
+                    checkmark.hide()
+            except RuntimeError:
+                pass
+
+        try:
+            checkbox._checkmark_label = checkmark
+            checkbox._position_checkmark = position_checkmark
+            checkbox._update_checkmark = update_checkmark
+        except Exception:
+            pass
+
+        checkbox.stateChanged.connect(update_checkmark)
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+        return checkbox
+
+    def _on_glossary_manager_compress_glossary_toggle(self, state=None):
+        """Sync Glossary Manager compression toggle to manga without repaint glitches."""
+        try:
+            enabled = bool(self.compress_glossary_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_prompt'] = enabled
+            self.compress_glossary_prompt_var = enabled
+            os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
+        manga_tab = getattr(self, 'manga_translator', None)
+        if manga_tab is not None:
+            try:
+                manga_tab.compress_glossary_prompt_value = enabled
+                manga_tab._set_checkbox_checked_safely(
+                    getattr(manga_tab, 'manga_compress_glossary_checkbox', None),
+                    enabled,
+                    block_signals=True,
+                )
+            except Exception:
+                pass
+
+    # Precise Term Matching → "Whole term for": which entries must appear as
+    # the whole term rather than one word of it. Stored values / labels.
+    _STRICT_MATCHING_MODES = ('all', 'gender', 'custom', 'none')
+    _STRICT_MATCHING_LABELS = ("All", "Gender Entries", "Custom", "None")
+
+    def _strict_matching_mode(self):
+        """Current whole-term scope: all / gender / custom / none."""
+        mode = str(
+            getattr(self, 'compress_glossary_strict_matching_mode_var', None)
+            or self.config.get('compress_glossary_strict_matching_mode', 'all')
+            or 'all'
+        ).strip().lower()
+        if mode in ('characters', 'character'):
+            mode = 'gender'  # the scope was never the literal "character" type
+        return mode if mode in self._STRICT_MATCHING_MODES else 'all'
+
+    def _strict_matching_custom_types(self):
+        types = getattr(self, 'compress_glossary_strict_matching_custom_types_var', None)
+        if types is None:
+            types = self.config.get('compress_glossary_strict_matching_custom_types', [])
+        return [str(t) for t in (types or [])]
+
+    def _apply_strict_matching_scope(self, mode=None, custom_types=None):
+        """Write the scope to config, the live vars and the environment."""
+        mode = self._strict_matching_mode() if mode is None else mode
+        custom_types = self._strict_matching_custom_types() if custom_types is None else list(custom_types)
+        try:
+            self.config['compress_glossary_strict_matching_mode'] = mode
+            self.config['compress_glossary_strict_matching_custom_types'] = custom_types
+            self.compress_glossary_strict_matching_mode_var = mode
+            self.compress_glossary_strict_matching_custom_types_var = custom_types
+            os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_MODE'] = mode
+            os.environ['COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES'] = json.dumps(custom_types, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _refresh_strict_matching_row(self):
+        """Dropdown only while Precise Term Matching is on; Configure only for Custom."""
+        try:
+            enabled = bool(self.precise_matching_checkbox.isChecked())
+        except Exception:
+            enabled = False
+        combo = getattr(self, 'strict_matching_mode_combo', None)
+        button = getattr(self, 'strict_matching_configure_btn', None)
+        label = getattr(self, 'strict_matching_mode_label', None)
+        try:
+            if label is not None:
+                label.setVisible(enabled)
+            if combo is not None:
+                combo.setVisible(enabled)
+            if button is not None:
+                button.setVisible(enabled and self._strict_matching_mode() == 'custom')
+                chosen = self._strict_matching_custom_types()
+                button.setToolTip(_wrapped_tooltip_html(
+                    "Entry types that must appear as a whole term: "
+                    + (", ".join(t.capitalize() for t in chosen) if chosen else "none picked yet (All is used)")
+                ))
+        except Exception:
+            pass
+
+    def _on_glossary_manager_strict_matching_mode_change(self, index=None):
+        try:
+            index = int(self.strict_matching_mode_combo.currentIndex())
+        except Exception:
+            index = int(index or 0)
+        index = index if 0 <= index < len(self._STRICT_MATCHING_MODES) else 0
+        self._apply_strict_matching_scope(mode=self._STRICT_MATCHING_MODES[index])
+        self._refresh_strict_matching_row()
+
+    def _open_strict_matching_types_dialog(self, parent=None):
+        """Same entry-type picker as Emergency Glossary Compliance → Custom."""
+        try:
+            from other_settings import open_glossary_entry_types_dialog
+        except Exception as e:
+            print(f"⚠️ Entry type dialog unavailable: {e}")
+            return
+        selected = open_glossary_entry_types_dialog(
+            self, parent or getattr(self, 'dialog', None),
+            "Custom Whole-Term Types",
+            "Select which entry types must appear as a whole term:",
+            self._strict_matching_custom_types(),
+        )
+        if selected is not None:
+            self._apply_strict_matching_scope(custom_types=selected)
+            self._refresh_strict_matching_row()
+
+    def _apply_glossary_match_engine_env(self):
+        """Resolve the two matching checkboxes into GLOSSARY_MATCH_ENGINE.
+
+        Both handlers call this rather than each writing the variable, so
+        neither can leave a stale value behind when the other is toggled.
+        """
+        try:
+            precise = bool(self.precise_matching_checkbox.isChecked())
+        except Exception:
+            precise = bool(self.config.get('compress_glossary_precise_matching', True))
+        try:
+            shadow = bool(self.shadow_log_matching_checkbox.isChecked())
+        except Exception:
+            shadow = bool(self.config.get('compress_glossary_shadow_log', False))
+        engine = 'new' if precise else ('shadow' if shadow else 'legacy')
+        try:
+            os.environ['GLOSSARY_MATCH_ENGINE'] = engine
+        except Exception:
+            pass
+        return engine
+
+    def _on_glossary_manager_add_minimal_pass_toggle(self, state=None):
+        """Sync the extra minimal extraction pass to config and environment."""
+        try:
+            enabled = bool(self.glossary_add_minimal_pass_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['glossary_add_minimal_pass'] = enabled
+            self.glossary_add_minimal_pass_var = enabled
+            os.environ['GLOSSARY_ADD_MINIMAL_PASS'] = '1' if enabled else '0'
+        except Exception:
+            pass
+        # Open Glossary Progress windows show a Minimal Pass row that depends
+        # on this toggle; refresh them now instead of on their next tick.
+        try:
+            from PySide6.QtWidgets import QApplication
+            for widget in QApplication.topLevelWidgets():
+                refresh_visible = getattr(widget, '_gp_refresh_visible', None)
+                if callable(refresh_visible) and widget.isVisible():
+                    refresh_visible()
+        except Exception:
+            pass
+
+    def _unified_glossary_folder_key(self):
+        """The Unified Glossary subfolder the current settings resolve to."""
+        return glossary_document.unified_glossary_folder_key(getattr(self, 'config', None))
+
+    def _unified_glossary_hint_text(self):
+        return f"(Current: Glossary/Unified Glossary/{self._unified_glossary_folder_key()}/)"
+
+    def _refresh_unified_glossary_hint(self):
+        label = getattr(self, 'unified_glossary_label', None)
+        if label is None:
+            return
+        try:
+            label.setText(self._unified_glossary_hint_text())
+        except RuntimeError:
+            pass
+
+    def _set_unified_glossary_row_enabled(self, enabled):
+        """Generate Unified Glossary only means something while the master toggle is on."""
+        for widget in getattr(self, '_unified_generate_row_widgets', ()):
+            try:
+                widget.setEnabled(bool(enabled))
+            except RuntimeError:
+                pass
+
+    def _on_glossary_manager_enable_unified_glossary_toggle(self, state=None):
+        """Sync the unified glossary master toggle to config and environment."""
+        try:
+            enabled = bool(self.enable_unified_glossary_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['enable_unified_glossary'] = enabled
+            self.enable_unified_glossary_var = enabled
+            os.environ['ENABLE_UNIFIED_GLOSSARY'] = '1' if enabled else '0'
+            self._set_unified_glossary_row_enabled(enabled)
+        except Exception:
+            pass
+
+    def _on_glossary_manager_generate_unified_glossary_toggle(self, state=None):
+        """Sync the unified glossary rebuild toggle to config and environment."""
+        try:
+            enabled = bool(self.generate_unified_glossary_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['generate_unified_glossary'] = enabled
+            self.generate_unified_glossary_var = enabled
+            os.environ['GENERATE_UNIFIED_GLOSSARY'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
+    def _on_glossary_manager_precise_matching_toggle(self, state=None):
+        """Sync script-aware glossary matching to config and environment."""
+        try:
+            enabled = bool(self.precise_matching_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_precise_matching'] = enabled
+            self.compress_glossary_precise_matching_var = enabled
+            self._apply_glossary_match_engine_env()
+        except Exception:
+            pass
+        self._apply_strict_matching_scope()
+        self._refresh_strict_matching_row()
+
+    def _on_glossary_manager_shadow_log_matching_toggle(self, state=None):
+        """Sync shadow match logging to config and environment."""
+        try:
+            enabled = bool(self.shadow_log_matching_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_shadow_log'] = enabled
+            self.compress_glossary_shadow_log_var = enabled
+            self._apply_glossary_match_engine_env()
+        except Exception:
+            pass
+
+    def _on_glossary_manager_multipass_exclude_matching_toggle(self, state=None):
+        """Sync the multipass already-applied glossary exclusion to config and environment."""
+        try:
+            enabled = bool(self.multipass_exclude_matching_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_multipass_exclude_matching'] = enabled
+            self.compress_glossary_multipass_exclude_matching_var = enabled
+            os.environ['COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
+    def _on_glossary_manager_consider_translated_compression_toggle(self, state=None):
+        """Sync translated-column glossary compression matching to config and environment."""
+        try:
+            enabled = bool(self.consider_translated_compression_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_consider_translated_column'] = enabled
+            self.compress_glossary_consider_translated_column_var = enabled
+            os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
+    def glossary_manager(self, *args, show=True):
+        """Open comprehensive glossary management dialog"""
+        # Reuse existing dialog if it hasn't been destroyed
+        if hasattr(self, '_glossary_dialog') and self._glossary_dialog is not None:
+            try:
+                # Re-sync checkbox states from config before showing,
+                # because the auto glossary shortcut combo may have changed them
+                # while the dialog was hidden.
+                _sync_pairs = [
+                    ('append_glossary_checkbox', 'append_glossary', False),
+                    ('append_glossary_auto_load_checkbox', 'append_glossary_auto_load', False),
+                    ('fuzzy_auto_mapping_checkbox', 'fuzzy_auto_mapping', False),
+                    ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column', False),
+                    ('precise_matching_checkbox', 'compress_glossary_precise_matching', True),
+                    ('multipass_exclude_matching_checkbox', 'compress_glossary_multipass_exclude_matching', True),
+                    ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log', False),
+                    ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass', False),
+                    ('enable_unified_glossary_checkbox', 'enable_unified_glossary', False),
+                    ('generate_unified_glossary_checkbox', 'generate_unified_glossary', False),
+                    ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
+                    ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only', True),
+                ]
+                for attr, cfg_key, default in _sync_pairs:
+                    if hasattr(self, attr):
+                        cb = getattr(self, attr)
+                        cb.blockSignals(True)
+                        cb.setChecked(bool(self.config.get(cfg_key, default)))
+                        cb.blockSignals(False)
+                if hasattr(self, 'strict_matching_mode_combo'):
+                    self.strict_matching_mode_combo.blockSignals(True)
+                    self.strict_matching_mode_combo.setCurrentIndex(
+                        self._STRICT_MATCHING_MODES.index(self._strict_matching_mode())
+                    )
+                    self.strict_matching_mode_combo.blockSignals(False)
+                    self._refresh_strict_matching_row()
+
+                # Dialog still alive — just bring it back
+                if show:
+                    self._glossary_dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+                    try:
+                        from dialog_animations import show_dialog_with_fade
+                        show_dialog_with_fade(self._glossary_dialog, duration=180)
+                    except Exception:
+                        try:
+                            self._glossary_dialog.setWindowOpacity(1.0)
+                        except Exception:
+                            pass
+                        self._glossary_dialog.show()
+                    self._glossary_dialog.raise_()
+                    self._glossary_dialog.activateWindow()
+                elif not getattr(self, '_glossary_settings_tabs_prewarmed', False):
+                    self._prewarm_glossary_settings_tabs(self._glossary_dialog)
+                return
+            except RuntimeError:
+                # Underlying C++ object deleted; fall through to create a new one
+                self._glossary_dialog = None
+
+        # Create PySide6 dialog parented to the main translator window
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Glossary Settings")
+        dialog.setFont(QFont("Segoe UI", 10))
+        
+        # Make non-modal; parenting to self keeps it above the main window
+        # but NOT above other apps (e.g. Notepad++).
+        # Qt.Window flag gives it its own taskbar entry and standard window buttons.
+        dialog.setModal(False)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.Window)
+
+        # Override closeEvent so the dialog hides instead of being destroyed
+        # while the parent translator window is still open
+        def _hide_on_close(event):
+            try:
+                parent = dialog.parent()
+                if parent is not None and parent.isVisible():
+                    dialog.hide()
+                    event.ignore()
+                    return
+            except RuntimeError:
+                pass
+            # Parent gone — allow normal close / destruction
+            event.accept()
+        dialog.closeEvent = _hide_on_close
+
+        # Keep a reference so we can reuse it
+        self._glossary_dialog = dialog
+        
+        # Use screen ratios instead of fixed pixels
+        self._screen = QApplication.primaryScreen().geometry()
+        min_width = int(self._screen.width() * 0.6)   # 50% of screen width
+        min_height = int(self._screen.height() * 0.9)  # 90% of screen height (leaves room for taskbar)
+        dialog.setMinimumSize(min_width, min_height)
+        
+        # Set window icon
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+        except Exception as e:
+            print(f"Could not load window icon: {e}")
+        
+        # Store dialog reference for use in nested functions
+        self.dialog = dialog
+        
+        # Apply simplified dark mode stylesheet
+        global_stylesheet = """
+            /* Global dark mode styling */
+            QDialog {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            QWidget {
+                background-color: transparent;
+            }
+            QMenu {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 16px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #5a9fd4;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #4a5568;
+                margin: 4px 8px;
+            }
+            QGroupBox {
+                color: white;
+                border: 1px solid #555;
+                margin: 5px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                color: white;
+                left: 10px;
+                padding: 0 5px;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+                border: none;
+            }
+            /* Checkbox styling */
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: transparent;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: transparent;
+                border-color: #3a3a3a;
+            }
+            /* Radio button styling */
+            QRadioButton {
+                color: white;
+                spacing: 5px;
+            }
+            QRadioButton::indicator {
+                width: 13px;
+                height: 13px;
+                border: 2px solid #5a9fd4;
+                border-radius: 7px;
+                background-color: transparent;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #5a9fd4;
+                border: 2px solid #5a9fd4;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QRadioButton:disabled {
+                color: #666666;
+            }
+            QRadioButton::indicator:disabled {
+                background-color: transparent;
+                border-color: #3a3a3a;
+            }
+            
+            /* Input fields styling */
+            QLineEdit, QTextEdit {
+                background-color: transparent;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QLineEdit:focus, QTextEdit:focus {
+                border-color: #5a9fd4;
+            }
+            QLineEdit:disabled, QTextEdit:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            
+            /* Slider styling */
+            QSlider {
+                background-color: transparent;
+            }
+            QSlider::groove:horizontal, QSlider::groove:vertical {
+                background: transparent;
+            }
+            QSlider::add-page:horizontal, QSlider::sub-page:horizontal,
+            QSlider::add-page:vertical, QSlider::sub-page:vertical {
+                background: transparent;
+            }
+            QSlider::handle:horizontal, QSlider::handle:vertical {
+                background: #5a9fd4;
+                border: 2px solid #3b4f5e;
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+            }
+            
+            /* ComboBox styling */
+            QComboBox {
+                background-color: transparent;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QComboBox:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #5a9fd4;
+            }
+            
+            /* SpinBox styling */
+            QSpinBox, QDoubleSpinBox {
+                background-color: transparent;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QSpinBox:disabled, QDoubleSpinBox:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            
+            /* Slider styling */
+            QSlider::groove:horizontal {
+                background: transparent;
+                height: 6px;
+                border-radius: 3px;
+                border: 1px solid #4a5568;
+            }
+            QSlider::groove:vertical {
+                background: transparent;
+                width: 6px;
+                border-radius: 3px;
+                border: 1px solid #4a5568;
+            }
+            QSlider::handle:horizontal {
+                background: #5a9fd4;
+                border: 2px solid #3b4f5e;
+                width: 14px;
+                height: 14px;
+                margin: -5px 0;  /* center over 6px groove with 2px border */
+                border-radius: 7px;
+            }
+            QSlider::handle:vertical {
+                background: #5a9fd4;
+                border: 2px solid #3b4f5e;
+                width: 14px;
+                height: 14px;
+                margin: 0 -5px;  /* center for vertical groove */
+                border-radius: 7px;
+            }
+            QSlider::handle:horizontal:hover, QSlider::handle:vertical:hover {
+                background: #7bb3e0;
+            }
+            
+            /* GroupBox styling */
+            QGroupBox {
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background-color: #252525;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 2px 5px;
+                color: #5a9fd4;
+            }
+            
+            /* Label styling */
+            QLabel {
+                color: white;
+            }
+            QLabel:disabled {
+                color: #666666;
+            }
+            
+            /* ListWidget styling */
+            QListWidget {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+            }
+            QListWidget {
+                background-color: transparent;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+            }
+            QListWidget::item:selected {
+                background-color: #5a9fd4;
+            }
+            QListWidget::item:hover {
+                background-color: #3a3a3a;
+            }
+            
+            /* TreeWidget styling */
+            QTreeWidget {
+                background-color: transparent;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                alternate-background-color: transparent;
+            }
+            QTreeWidget::item:selected {
+                background-color: #5a9fd4;
+            }
+            QTreeWidget::item:hover {
+                background-color: #3a3a3a;
+            }
+            QHeaderView::section {
+                background-color: #252525;
+                color: white;
+                border: 1px solid #4a5568;
+                padding: 4px;
+            }
+            
+            /* TabWidget styling */
+            QTabWidget::pane {
+                border: 1px solid #4a5568;
+                background-color: #1e1e1e;
+            }
+            
+            /* ScrollArea styling */
+            QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+            QTabBar::tab {
+                background-color: #252525;
+                color: white;
+                border: 1px solid #4a5568;
+                padding: 8px 16px;
+                margin-right: 2px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background-color: #5a9fd4;
+                border-bottom: 2px solid #5a9fd4;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover {
+                background-color: #3a3a3a;
+            }
+            
+            /* ScrollBar styling */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4a5568;
+                min-height: 20px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #5a9fd4;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #4a5568;
+                min-width: 20px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #5a9fd4;
+            }
+        """
+        dialog.setStyleSheet(global_stylesheet)
+        
+        # Main layout
+        main_layout = QVBoxLayout(dialog)
+        
+        # Create notebook for tabs (placed directly in main_layout — individual tabs
+        # that need scrolling wrap their own content in a QScrollArea)
+        notebook = QTabWidget()
+        # Prevent wheel from switching tabs, but keep wheel events working inside tab contents
+        class NoWheelTabBar(QTabBar):
+            def wheelEvent(self, event):
+                event.ignore()
+        notebook.setTabBar(NoWheelTabBar())
+        self._glossary_settings_notebook = notebook
+        main_layout.addWidget(notebook)
+        
+        # Create and add tabs eagerly so switching tabs never pays a construction cost.
+        # Glossary file parsing still happens in the editor loader's background thread.
+        tabs = [
+            ("Balanced/Full Generation", self._setup_manual_glossary_tab, False),   # scrollable
+            ("Minimal Glossary Generation", self._setup_auto_glossary_tab, False),  # scrollable
+            ("General Settings", self._setup_glossary_general_tab, False),          # scrollable; shown first, see below
+            ("Glossary Refinement", self._setup_glossary_refinement_tab, False),     # scrollable
+            ("Glossary Editor", self._setup_glossary_editor_tab, True),              # non-scrollable
+        ]
+
+        self._glossary_settings_tabs_built = True
+
+        tab_pages = {}
+        for tab_idx, (tab_name, setup_method, is_editor) in enumerate(tabs):
+            if is_editor:
+                tab_widget = QWidget()
+                notebook.addTab(tab_widget, tab_name)
+                setup_method(tab_widget)
+                tab_pages[setup_method] = tab_widget
+            else:
+                tab_scroll = QScrollArea()
+                tab_scroll.setWidgetResizable(True)
+                tab_scroll.setFrameShape(QScrollArea.NoFrame)
+                tab_inner = QWidget()
+                tab_scroll.setWidget(tab_inner)
+                notebook.addTab(tab_scroll, tab_name)
+                setup_method(tab_inner)
+                tab_pages[setup_method] = tab_scroll
+
+        # General Settings holds the mode selector, so it is shown first. It is still built
+        # after the Minimal tab, because it finishes by running that tab's mode-state pass.
+        notebook.tabBar().moveTab(notebook.indexOf(tab_pages[self._setup_glossary_general_tab]), 0)
+        # Open on Balanced/Full Generation (the second tab), where most work happens.
+        notebook.setCurrentWidget(tab_pages[self._setup_manual_glossary_tab])
+
+        # Looked up by page so adding or reordering tabs cannot point these at the wrong tab.
+        _refinement_tab_idx = notebook.indexOf(tab_pages[self._setup_glossary_refinement_tab])
+        _editor_tab_idx = notebook.indexOf(tab_pages[self._setup_glossary_editor_tab])
+
+        def _on_tab_switched(idx):
+            if idx == _refinement_tab_idx and hasattr(self, '_refresh_glossary_refinement_type_list'):
+                try:
+                    self._refresh_glossary_refinement_type_list()
+                except Exception:
+                    pass
+            # Re-run glossary editor path resolution when switching to that tab
+            if idx == _editor_tab_idx and hasattr(self, '_refresh_glossary_editor'):
+                try:
+                    self._refresh_glossary_editor()
+                except Exception:
+                    pass
+
+        notebook.currentChanged.connect(_on_tab_switched)
+        
+        # Dialog Controls
+        control_frame = QWidget()
+        control_layout = QHBoxLayout(control_frame)
+        main_layout.addWidget(control_frame)
+        
+        def save_glossary_settings():
+            try:
+                # Update prompts from text widgets to instance variables
+                self.update_glossary_prompts()
+                
+                # Check if any types are enabled before saving
+                # Note: save_config will update enabled status from checkboxes automatically
+                enabled_types = []
+                if hasattr(self, 'type_enabled_checkboxes') and hasattr(self, 'custom_entry_types'):
+                    # Check from UI checkboxes
+                    for type_name, checkbox in self.type_enabled_checkboxes.items():
+                        if checkbox.isChecked():
+                            enabled_types.append(type_name)
+                elif hasattr(self, 'custom_entry_types'):
+                    # Fallback: check from custom_entry_types dict
+                    enabled_types = [t for t, cfg in self.custom_entry_types.items() if cfg.get('enabled', True)]
+                
+                # Only show warning if we have custom_entry_types and none are enabled
+                if hasattr(self, 'custom_entry_types') and not enabled_types:
+                    QMessageBox.warning(dialog, "Warning", "No entry types selected! The glossary extraction will not find any entries.")
+                
+                # CRITICAL: Update the main GUI's instance variables to match checkbox states
+                # These vars are checked at runtime in _get_environment_variables() and translate_image()
+                # Without updating them here, changes won't take effect until GUI restart
+                checkbox_to_var_mapping = [
+                    ('append_glossary_checkbox', 'append_glossary_var'),
+                    ('append_glossary_auto_load_checkbox', 'append_glossary_auto_load_var'),
+                    # auto_glossary_mode_combo is handled separately below (it's a QComboBox, not a checkbox)
+                    ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
+                    ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
+                    ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column_var'),
+                    ('precise_matching_checkbox', 'compress_glossary_precise_matching_var'),
+                    ('multipass_exclude_matching_checkbox', 'compress_glossary_multipass_exclude_matching_var'),
+                    ('shadow_log_matching_checkbox', 'compress_glossary_shadow_log_var'),
+                    ('glossary_add_minimal_pass_checkbox', 'glossary_add_minimal_pass_var'),
+                    ('enable_unified_glossary_checkbox', 'enable_unified_glossary_var'),
+                    ('generate_unified_glossary_checkbox', 'generate_unified_glossary_var'),
+                    ('save_glossary_in_output_checkbox', 'save_glossary_in_output_var'),
+                    ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
+                    ('include_gender_context_checkbox', 'include_gender_context_var'),
+                    ('include_description_checkbox', 'include_description_var'),
+                    ('strip_honorifics_checkbox', 'strip_honorifics_var'),
+                    ('disable_honorifics_checkbox', 'disable_honorifics_var'),
+                    ('use_legacy_csv_checkbox', 'use_legacy_csv_var'),
+                    ('glossary_auto_compression_checkbox', 'glossary_auto_compression_var'),
+                    ('glossary_json_output_checkbox', 'glossary_output_legacy_json_var'),
+                    ('include_all_characters_checkbox', 'glossary_include_all_characters_var'),
+                    ('skip_identical_entries_checkbox', 'glossary_skip_identical_entries_var'),
+                    ('skip_gender_tracking_checkbox', 'glossary_skip_gender_tracking_var'),
+                    ('disable_glossary_history_checkbox', 'disable_glossary_history_var'),
+                    ('glossary_skip_title_header_only_checkbox', 'glossary_skip_title_header_only_var'),
+                ]
+                
+                # Handle inverted logic for disable_smart_filtering_checkbox
+                if hasattr(self, 'disable_smart_filtering_checkbox'):
+                    # Checkbox is "disable" so checked=True means use_smart_filter=False
+                    use_smart_filter = not self.disable_smart_filtering_checkbox.isChecked()
+                    self.config['glossary_use_smart_filter'] = use_smart_filter
+                    setattr(self, 'glossary_use_smart_filter_var', use_smart_filter)
+                    
+                    # IMPORTANT: When smart filter is disabled, also disable frequency checking
+                    # This ensures ALL AI-generated entries are kept, not just the pre-filtered text
+                    # Without this, entries get filtered out during post-processing even though full text was sent
+                    skip_frequency = not use_smart_filter  # If smart filter disabled, skip frequency checks
+                    self.config['glossary_skip_frequency_check'] = skip_frequency
+                    setattr(self, 'glossary_skip_frequency_check_var', skip_frequency)
+                for checkbox_name, var_name in checkbox_to_var_mapping:
+                    if hasattr(self, checkbox_name):
+                        checked = getattr(self, checkbox_name).isChecked()
+                        setattr(self, var_name, checked)
+                        # Ensure these toggle states persist to config.json
+                        if checkbox_name == 'append_glossary_checkbox':
+                            self.config['append_glossary'] = bool(checked)
+                        elif checkbox_name == 'append_glossary_auto_load_checkbox':
+                            self.config['append_glossary_auto_load'] = bool(checked)
+                        # enable_auto_glossary_checkbox replaced by auto_glossary_mode_combo (handled below)
+                        elif checkbox_name == 'add_additional_glossary_checkbox':
+                            self.config['add_additional_glossary'] = bool(checked)
+                        elif checkbox_name == 'compress_glossary_checkbox':
+                            self.config['compress_glossary_prompt'] = bool(checked)
+                        elif checkbox_name == 'consider_translated_compression_checkbox':
+                            self.config['compress_glossary_consider_translated_column'] = bool(checked)
+                            os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if checked else '0'
+                        elif checkbox_name == 'precise_matching_checkbox':
+                            self.config['compress_glossary_precise_matching'] = bool(checked)
+                            # Both checkboxes feed one env var; resolve them together.
+                            self._apply_glossary_match_engine_env()
+                            self._apply_strict_matching_scope()
+                        elif checkbox_name == 'multipass_exclude_matching_checkbox':
+                            self.config['compress_glossary_multipass_exclude_matching'] = bool(checked)
+                            os.environ['COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING'] = '1' if checked else '0'
+                        elif checkbox_name == 'shadow_log_matching_checkbox':
+                            self.config['compress_glossary_shadow_log'] = bool(checked)
+                            self._apply_glossary_match_engine_env()
+                        elif checkbox_name == 'glossary_add_minimal_pass_checkbox':
+                            self.config['glossary_add_minimal_pass'] = bool(checked)
+                            os.environ['GLOSSARY_ADD_MINIMAL_PASS'] = '1' if checked else '0'
+                        elif checkbox_name == 'enable_unified_glossary_checkbox':
+                            self.config['enable_unified_glossary'] = bool(checked)
+                            os.environ['ENABLE_UNIFIED_GLOSSARY'] = '1' if checked else '0'
+                        elif checkbox_name == 'generate_unified_glossary_checkbox':
+                            self.config['generate_unified_glossary'] = bool(checked)
+                            os.environ['GENERATE_UNIFIED_GLOSSARY'] = '1' if checked else '0'
+                        elif checkbox_name == 'save_glossary_in_output_checkbox':
+                            self.config['save_glossary_in_output'] = bool(checked)
+                        elif checkbox_name == 'enable_gender_nuance_checkbox':
+                            self.config['enable_gender_nuance'] = bool(checked)
+                        elif checkbox_name == 'include_gender_context_checkbox':
+                            self.config['include_gender_context'] = bool(checked)
+                        elif checkbox_name == 'include_description_checkbox':
+                            self.config['include_description'] = bool(checked)
+                        elif checkbox_name == 'strip_honorifics_checkbox':
+                            self.config['strip_honorifics'] = bool(checked)
+                        elif checkbox_name == 'disable_honorifics_checkbox':
+                            self.config['glossary_disable_honorifics_filter'] = bool(checked)
+                        elif checkbox_name == 'use_legacy_csv_checkbox':
+                            self.config['glossary_use_legacy_csv'] = bool(checked)
+                        elif checkbox_name == 'glossary_auto_compression_checkbox':
+                            self.config['glossary_auto_compression'] = bool(checked)
+                        elif checkbox_name == 'glossary_json_output_checkbox':
+                            self.config['glossary_output_legacy_json'] = bool(checked)
+                        elif checkbox_name == 'include_all_characters_checkbox':
+                            self.config['glossary_include_all_characters'] = bool(checked)
+                        elif checkbox_name == 'skip_identical_entries_checkbox':
+                            self.config['glossary_skip_identical_entries'] = bool(checked)
+                        elif checkbox_name == 'skip_gender_tracking_checkbox':
+                            self.config['glossary_skip_gender_tracking'] = bool(checked)
+                            os.environ['GLOSSARY_SKIP_GENDER_TRACKING'] = '1' if checked else '0'
+                        elif checkbox_name == 'disable_glossary_history_checkbox':
+                            self.config['disable_glossary_history'] = bool(checked)
+                        elif checkbox_name == 'glossary_skip_title_header_only_checkbox':
+                            self.config['glossary_skip_title_header_only'] = bool(checked)
+
+                # If Append Glossary + Auto-load are enabled, auto-fill glossary selection/mapping
+                # (Skip if a glossary is already mapped — dialog is recreated each open)
+                try:
+                    _already_mapped = bool(getattr(self, 'manual_glossary_path', None))
+                    if (
+                        not _already_mapped and
+                        hasattr(self, 'append_glossary_checkbox') and self.append_glossary_checkbox.isChecked() and
+                        hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
+                    ):
+                        if hasattr(self, '_autofill_glossary_for_current_selection'):
+                            self._autofill_glossary_for_current_selection()
+                except Exception:
+                    pass
+                
+                # Save auto glossary mode from combo box
+                if hasattr(self, 'auto_glossary_mode_combo'):
+                    mode = self.auto_glossary_mode_combo.currentText().lower().replace(' ', '_')
+                    self.config['auto_glossary_mode'] = mode
+                    setattr(self, 'auto_glossary_mode_var', mode)
+                    # Backward compat: derive old boolean
+                    self.config['enable_auto_glossary'] = (mode != 'off')
+                    setattr(self, 'enable_auto_glossary_var', (mode != 'off'))
+                
+                # Update glossary request merging checkbox
+                if hasattr(self, 'glossary_request_merging_checkbox'):
+                    glossary_request_merging = self.glossary_request_merging_checkbox.isChecked()
+                    self.config['glossary_request_merging_enabled'] = glossary_request_merging
+                    setattr(self, 'glossary_request_merging_enabled_var', glossary_request_merging)
+
+                if hasattr(self, 'glossary_require_complete_checkbox'):
+                    require_complete = self.glossary_require_complete_checkbox.isChecked()
+                    self.config['glossary_require_complete_before_translation'] = bool(require_complete)
+                    self.glossary_require_complete_before_translation_var = bool(require_complete)
+                if hasattr(self, 'glossary_skip_api_error_retries_checkbox'):
+                    skip_api_errors = self.glossary_skip_api_error_retries_checkbox.isChecked()
+                    self.config['glossary_skip_api_error_retries'] = bool(skip_api_errors)
+                    self.glossary_skip_api_error_retries_var = bool(skip_api_errors)
+                
+                # Chapter split toggle (manual glossary)
+                if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
+                    split_enabled = self.glossary_enable_chapter_split_checkbox.isChecked()
+                    self.config['glossary_enable_chapter_split'] = split_enabled
+                    setattr(self, 'glossary_enable_chapter_split_var', split_enabled)
+
+                if hasattr(self, 'glossary_refinement_enabled_checkbox'):
+                    refinement_enabled = self.glossary_refinement_enabled_checkbox.isChecked()
+                    self.config['glossary_refinement_enabled'] = bool(refinement_enabled)
+                    self.glossary_refinement_enabled_var = bool(refinement_enabled)
+                if hasattr(self, 'glossary_refinement_type_mode_combo'):
+                    type_mode = 'selected' if self.glossary_refinement_type_mode_combo.currentIndex() == 1 else 'all'
+                    self.config['glossary_refinement_type_mode'] = type_mode
+                    self.glossary_refinement_type_mode_var = type_mode
+                if hasattr(self, 'glossary_refinement_type_list'):
+                    selected_refinement_types = []
+                    for i in range(self.glossary_refinement_type_list.count()):
+                        item = self.glossary_refinement_type_list.item(i)
+                        widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+                        if isinstance(widget, QCheckBox):
+                            if widget.isChecked():
+                                selected_refinement_types.append(widget.property('entry_type') or widget.text())
+                        elif item and item.checkState() == Qt.Checked:
+                            selected_refinement_types.append(item.data(Qt.UserRole) or item.text())
+                    self.config['glossary_refinement_selected_types'] = selected_refinement_types
+                    self.glossary_refinement_selected_types_var = selected_refinement_types
+                if hasattr(self, 'glossary_refinement_chunking_combo'):
+                    chunking_mode = 'all' if self.glossary_refinement_chunking_combo.currentIndex() == 1 else 'separate'
+                    self.config['glossary_refinement_chunking_mode'] = chunking_mode
+                    self.glossary_refinement_chunking_mode_var = chunking_mode
+                if hasattr(self, 'glossary_refinement_skip_dedupe_checkbox'):
+                    skip_refinement_dedupe = self.glossary_refinement_skip_dedupe_checkbox.isChecked()
+                    self.config['glossary_refinement_skip_dedupe'] = bool(skip_refinement_dedupe)
+                    self.glossary_refinement_skip_dedupe_var = bool(skip_refinement_dedupe)
+                if hasattr(self, 'glossary_refinement_wait_for_completion_checkbox'):
+                    wait_for_completion = self.glossary_refinement_wait_for_completion_checkbox.isChecked()
+                    self.config['glossary_refinement_wait_for_completion'] = bool(wait_for_completion)
+                    self.glossary_refinement_wait_for_completion_var = bool(wait_for_completion)
+                if hasattr(self, 'glossary_refinement_reopen_on_source_change_checkbox'):
+                    reopen_on_source_change = self.glossary_refinement_reopen_on_source_change_checkbox.isChecked()
+                    self.config['glossary_refinement_reopen_on_source_change'] = bool(reopen_on_source_change)
+                    self.glossary_refinement_reopen_on_source_change_var = bool(reopen_on_source_change)
+
+                # Gender tracker false-positive controls
+                if hasattr(self, 'gender_noise_threshold_slider'):
+                    threshold_value = int(self.gender_noise_threshold_slider.value())
+                    self.config['glossary_gender_noise_threshold'] = threshold_value
+                    setattr(self, 'glossary_gender_noise_threshold_var', threshold_value)
+                    os.environ['GLOSSARY_GENDER_NOISE_THRESHOLD'] = str(threshold_value)
+                if hasattr(self, 'gender_tracking_bias_combo'):
+                    bias_map = {0: 'none', 1: 'female', 2: 'male'}
+                    bias_value = bias_map.get(self.gender_tracking_bias_combo.currentIndex(), 'none')
+                    self.config['glossary_gender_tracking_bias'] = bias_value
+                    setattr(self, 'glossary_gender_tracking_bias_var', bias_value)
+                    os.environ['GLOSSARY_GENDER_TRACKING_BIAS'] = bias_value
+                
+                # Update text field variables from Targeted Extraction Settings
+                text_field_to_var_mapping = [
+                    ('glossary_min_frequency_entry', 'glossary_min_frequency', 'glossary_min_frequency_var'),
+                    ('glossary_max_names_entry', 'glossary_max_names', 'glossary_max_names_var'),
+                    ('glossary_max_titles_entry', 'glossary_max_titles', 'glossary_max_titles_var'),
+                    ('glossary_context_window_entry', 'glossary_context_window', 'glossary_context_window_var'),
+                    ('glossary_max_text_size_entry', 'glossary_max_text_size', 'glossary_max_text_size_var'),
+                    ('glossary_max_sentences_entry', 'glossary_max_sentences', 'glossary_max_sentences_var'),
+                    ('glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold', 'glossary_chapter_split_threshold_var'),
+                    ('glossary_request_merge_count_entry', 'glossary_request_merge_count', 'glossary_request_merge_count_var'),
+                ]
+                for field_name, config_key, var_name in text_field_to_var_mapping:
+                    if hasattr(self, field_name):
+                        try:
+                            value = int(getattr(self, field_name).text())
+                            self.config[config_key] = value
+                            # Also update the instance variable (used by _get_environment_variables)
+                            setattr(self, var_name, str(value))
+                        except ValueError:
+                            pass  # Keep existing value if invalid
+                
+                # Update glossary-specific float fields (compression factor)
+                if hasattr(self, 'glossary_compression_factor_entry'):
+                    try:
+                        value = float(self.glossary_compression_factor_entry.text())
+                        self.config['glossary_compression_factor'] = value
+                        setattr(self, 'glossary_compression_factor_var', str(value))
+                    except ValueError:
+                        pass
+                
+                # Update glossary max output tokens
+                if hasattr(self, 'glossary_output_token_limit_entry'):
+                    try:
+                        value = int(self.glossary_output_token_limit_entry.text())
+                        self.config['glossary_max_output_tokens'] = value
+                        setattr(self, 'glossary_max_output_tokens_var', str(value))
+                    except ValueError:
+                        pass
+                
+                # Update glossary anti-duplicate parameters
+                if hasattr(self, 'glossary_enable_anti_duplicate_var'):
+                    self.config['glossary_enable_anti_duplicate'] = bool(self.glossary_enable_anti_duplicate_var)
+                if hasattr(self, 'glossary_top_p_var'):
+                    self.config['glossary_top_p'] = float(self.glossary_top_p_var)
+                if hasattr(self, 'glossary_min_p_var'):
+                    self.config['glossary_min_p'] = float(self.glossary_min_p_var)
+                if hasattr(self, 'glossary_bypass_min_p_allowlist_var'):
+                    self.config['glossary_bypass_min_p_allowlist'] = bool(self.glossary_bypass_min_p_allowlist_var)
+                if hasattr(self, 'glossary_top_k_var'):
+                    self.config['glossary_top_k'] = int(self.glossary_top_k_var)
+                if hasattr(self, 'glossary_frequency_penalty_var'):
+                    self.config['glossary_frequency_penalty'] = float(self.glossary_frequency_penalty_var)
+                if hasattr(self, 'glossary_presence_penalty_var'):
+                    self.config['glossary_presence_penalty'] = float(self.glossary_presence_penalty_var)
+                if hasattr(self, 'glossary_repetition_penalty_var'):
+                    self.config['glossary_repetition_penalty'] = float(self.glossary_repetition_penalty_var)
+                if hasattr(self, 'glossary_candidate_count_var'):
+                    self.config['glossary_candidate_count'] = int(self.glossary_candidate_count_var)
+                if hasattr(self, 'glossary_custom_stop_sequences_var'):
+                    self.config['glossary_custom_stop_sequences'] = str(self.glossary_custom_stop_sequences_var)
+                if hasattr(self, 'glossary_logit_bias_enabled_var'):
+                    self.config['glossary_logit_bias_enabled'] = bool(self.glossary_logit_bias_enabled_var)
+                if hasattr(self, 'glossary_logit_bias_strength_var'):
+                    self.config['glossary_logit_bias_strength'] = float(self.glossary_logit_bias_strength_var)
+                if hasattr(self, 'glossary_bias_common_words_var'):
+                    self.config['glossary_bias_common_words'] = bool(self.glossary_bias_common_words_var)
+                if hasattr(self, 'glossary_bias_repetitive_phrases_var'):
+                    self.config['glossary_bias_repetitive_phrases'] = bool(self.glossary_bias_repetitive_phrases_var)
+                
+                # Update target language from combo box (check both auto and manual)
+                if hasattr(self, 'glossary_target_language_combo'):
+                    self.config['glossary_target_language'] = self.glossary_target_language_combo.currentText()
+                elif hasattr(self, 'manual_target_language_combo'):
+                    self.config['glossary_target_language'] = self.manual_target_language_combo.currentText()
+                
+                # Update duplicate detection algorithm from combo box
+                if hasattr(self, 'duplicate_algo_combo'):
+                    algo_index = self.duplicate_algo_combo.currentIndex()
+                    algo_map = {0: 'auto', 1: 'strict', 2: 'balanced', 3: 'aggressive', 4: 'basic'}
+                    self.glossary_duplicate_algorithm_var = algo_map.get(algo_index, 'auto')
+                    self.config['glossary_duplicate_algorithm'] = self.glossary_duplicate_algorithm_var
+
+                # Partial ratio weight (substring matcher)
+                if hasattr(self, 'partial_ratio_slider'):
+                    self.partial_ratio_weight = self.partial_ratio_slider.value() / 100.0
+                    self.config['glossary_partial_ratio_weight'] = self.partial_ratio_weight
+                    self.glossary_partial_ratio_weight_var = self.partial_ratio_weight
+                if hasattr(self, 'partial_ratio_gender_only_checkbox'):
+                    gender_only = self.partial_ratio_gender_only_checkbox.isChecked()
+                    self.config['glossary_partial_ratio_gender_only'] = gender_only
+                    self.glossary_partial_ratio_gender_only_var = gender_only
+                    os.environ['GLOSSARY_PARTIAL_RATIO_GENDER_ONLY'] = '1' if gender_only else '0'
+                if hasattr(self, 'alias_aware_name_matching_checkbox'):
+                    alias_matching = self.alias_aware_name_matching_checkbox.isChecked()
+                    self.config['glossary_alias_aware_name_matching'] = alias_matching
+                    self.glossary_alias_aware_name_matching_var = alias_matching
+                    os.environ['GLOSSARY_ALIAS_AWARE_NAME_MATCHING'] = '1' if alias_matching else '0'
+                if hasattr(self, 'alias_aware_gender_only_checkbox'):
+                    alias_gender_only = self.alias_aware_gender_only_checkbox.isChecked()
+                    self.config['glossary_alias_aware_gender_only'] = alias_gender_only
+                    self.glossary_alias_aware_gender_only_var = alias_gender_only
+                    os.environ['GLOSSARY_ALIAS_AWARE_GENDER_ONLY'] = '1' if alias_gender_only else '0'
+
+                # Entry type filter mode
+                if hasattr(self, 'entry_type_filter_combo'):
+                    filter_map = {0: 'strict', 1: 'loose', 2: 'none'}
+                    mode = filter_map.get(self.entry_type_filter_combo.currentIndex(), 'none')
+                    self.config['glossary_entry_type_filter_mode'] = mode
+                    os.environ['GLOSSARY_ENTRY_TYPE_FILTER_MODE'] = mode
+                
+                # CJK script filter toggle
+                if hasattr(self, 'cjk_script_filter_checkbox'):
+                    cjk_filter = self.cjk_script_filter_checkbox.isChecked()
+                    self.config['glossary_cjk_script_filter'] = cjk_filter
+                    self.glossary_cjk_script_filter_var = cjk_filter
+                    os.environ['GLOSSARY_CJK_SCRIPT_FILTER'] = '1' if cjk_filter else '0'
+
+                # Save auto compression state
+                if hasattr(self, 'glossary_auto_compression_checkbox'):
+                    self.config['glossary_auto_compression'] = self.glossary_auto_compression_checkbox.isChecked()
+                
+                # Call main save_config - it will:
+                # 1. Update custom_entry_types from checkboxes
+                # 2. Read from all UI widgets and instance variables
+                # 3. Write everything to config.json
+                # 4. Set environment variables
+                self.save_config(show_message=False)
+                
+                # CRITICAL: Reload config.json from disk, then reinitialize ALL environment variables
+                # This ensures environment variables are fully synced with the saved config
+                try:
+                    import json
+                    from api_key_encryption import decrypt_config
+                    # Use the proper CONFIG_FILE path (handles macOS app bundle paths)
+                    from translator_gui import CONFIG_FILE as _cfg_path
+                    with open(_cfg_path, 'r', encoding='utf-8') as f:
+                        self.config = json.load(f)
+                        self.config = decrypt_config(self.config)
+                    # Now call save_config to set ALL environment variables from the reloaded config
+                    self.save_config(show_message=False)
+                    
+                except Exception as e:
+                    self.append_log(f"⚠️ Failed to reload config: {e}")
+                
+                self.append_log("✅ Glossary settings saved successfully")
+                self.append_log("✅ Environment variables reinitialized")
+                dialog.hide()
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"Failed to save settings: {e}\n{traceback.format_exc()}"
+                QMessageBox.critical(dialog, "Error", f"Failed to save settings: {e}")
+                self.append_log(f"❌ Failed to save glossary settings: {e}")
+                print(error_msg)
+                
+        # Add buttons
+        save_button = QPushButton("Save All Settings")
+        save_button.clicked.connect(save_glossary_settings)
+        save_button.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 8px;")
+        control_layout.addWidget(save_button)
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(dialog.hide)
+        cancel_button.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+        control_layout.addWidget(cancel_button)
+        
+        if not show:
+            self._prewarm_glossary_settings_tabs(dialog, notebook)
+            dialog.hide()
+            return
+
+        # Show dialog with fade animation
+        if not dialog.isVisible():
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(dialog, duration=250)
+            except Exception:
+                dialog.show()
+        else:
+            dialog.raise_()
+            dialog.activateWindow()
+
+    def _setup_manual_glossary_tab(self, parent):
+        """Setup manual glossary tab - simplified for new format"""
+        # Create main layout for parent
+        manual_layout = QVBoxLayout(parent)
+        manual_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Type filtering section with custom types
+        type_filter_frame = QGroupBox("Entry Type Configuration")
+        type_filter_layout = QVBoxLayout(type_filter_frame)
+        type_filter_layout.setContentsMargins(8, 4, 8, 4)
+        type_filter_layout.setSpacing(2)
+        manual_layout.addWidget(type_filter_frame)
+        
+        # Always reload custom entry types from config to ensure latest saved state
+        self.custom_entry_types = self.config.get('custom_entry_types', {
+            'character': {'enabled': True, 'has_gender': True},
+            'terms': {'enabled': True, 'has_gender': False},
+            'surnames': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': True},
+            'locations': {'enabled': True, 'has_gender': False},
+            'nicknames': {'enabled': True, 'has_gender': True}
+        })
+        glossary_document.normalize_legacy_entry_types(self.custom_entry_types)
+        
+        # Main container with grid for better control
+        type_main_grid = QGridLayout()
+        type_main_grid.setVerticalSpacing(2)
+        type_filter_layout.addLayout(type_main_grid)
+        
+        # Left side - type list with checkboxes
+        type_list_widget = QWidget()
+        type_list_layout = QVBoxLayout(type_list_widget)
+        type_list_layout.setContentsMargins(0, 0, 15, 0)
+        type_list_layout.setSpacing(2)
+        type_main_grid.addWidget(type_list_widget, 0, 0)
+        type_main_grid.setColumnStretch(0, 3)
+        type_main_grid.setColumnStretch(1, 2)
+        
+        label = QLabel("Active Entry Types:")
+        label.setContentsMargins(0, 0, 0, 0)
+        type_list_layout.addWidget(label)
+        
+        # Scrollable frame for type checkboxes
+        type_scroll_area = QScrollArea()
+        type_scroll_area.setWidgetResizable(True)
+        type_list_layout.addWidget(type_scroll_area)
+        
+        self.type_checkbox_widget = QWidget()
+        self.type_checkbox_layout = QVBoxLayout(self.type_checkbox_widget)
+        self.type_checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        type_scroll_area.setWidget(self.type_checkbox_widget)
+        
+        # Store checkbox variables
+        self.type_enabled_checkboxes = {}
+        
+        def update_type_checkboxes():
+            """Rebuild the checkbox list"""
+            # Clear existing checkboxes
+            while self.type_checkbox_layout.count():
+                item = self.type_checkbox_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            
+            sorted_types = glossary_document.sorted_entry_types(self.custom_entry_types)
+            
+            # Create checkboxes for each type
+            for type_name, type_config in sorted_types:
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 2, 0, 2)
+                row_layout.setSpacing(6)
+                
+                # Checkbox (escape ampersand for Qt rendering)
+                display_name = type_name.replace('&', '&&')
+                cb = self._create_styled_checkbox(display_name)
+                cb.setChecked(type_config.get('enabled', True))
+                self.type_enabled_checkboxes[type_name] = cb
+                row_layout.addWidget(cb)
+                
+                # Add gender indicator for types that support it
+                if type_config.get('has_gender', False):
+                    label = QLabel("(has gender field)")
+                    # label.setStyleSheet("color: gray; font-size: 9pt;")
+                    row_layout.addWidget(label)
+                
+                # Delete button for custom types (place right after the label/text)
+                if type_name not in ['character', 'terms']:
+                    delete_btn = QPushButton("×")
+                    delete_btn.setFixedWidth(24)
+                    delete_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #dc3545;  /* red */
+                            color: white;
+                            font-weight: bold;
+                            border: 1px solid #a71d2a;
+                            border-radius: 4px;
+                            padding: 0px 6px;
+                            min-height: 18px;
+                        }
+                        QPushButton:hover { background-color: #c82333; }
+                        QPushButton:pressed { background-color: #bd2130; }
+                    """)
+                    delete_btn.clicked.connect(lambda checked, t=type_name: remove_type(t))
+                    row_layout.addWidget(delete_btn)
+                
+                # Push any remaining content to the far right
+                row_layout.addStretch()
+                
+                self.type_checkbox_layout.addWidget(row_widget)
+            
+            self.type_checkbox_layout.addStretch()
+        
+        # Right side - controls for adding custom types
+        type_control_widget = QWidget()
+        type_control_layout = QVBoxLayout(type_control_widget)
+        type_control_layout.setContentsMargins(0, 0, 0, 0)
+        type_main_grid.addWidget(type_control_widget, 0, 1)
+        
+        label = QLabel("Add Custom Type:")
+        # label.setStyleSheet("font-weight: bold;")
+        type_control_layout.addWidget(label)
+        
+        # Entry for new type field
+        type_control_layout.addWidget(QLabel("Type Field:"))
+        new_type_entry = QLineEdit()
+        new_type_entry.setMinimumWidth(120)
+        type_control_layout.addWidget(new_type_entry)
+        
+        # Checkbox for gender field
+        has_gender_checkbox = self._create_styled_checkbox("Include gender field")
+        type_control_layout.addWidget(has_gender_checkbox)
+        
+        def add_custom_type():
+            type_name, warning = glossary_document.add_entry_type(
+                self.custom_entry_types, new_type_entry.text(), has_gender_checkbox.isChecked())
+            if warning:
+                QMessageBox.warning(parent, *warning)
+                return
+
+            # Clear inputs
+            new_type_entry.clear()
+            has_gender_checkbox.setChecked(False)
+            
+            # Preserve current checkbox states into custom_entry_types
+            # before rebuilding, so toggled-off types stay disabled.
+            for t_name, cb in self.type_enabled_checkboxes.items():
+                if t_name in self.custom_entry_types:
+                    self.custom_entry_types[t_name]['enabled'] = cb.isChecked()
+
+            # Update display
+            update_type_checkboxes()
+            self.append_log(f"✅ Added custom type: {type_name}")
+        
+        def remove_type(type_name):
+            warning = glossary_document.entry_type_remove_warning(type_name)
+            if warning:
+                QMessageBox.warning(parent, *warning)
+                return
+            
+            reply = QMessageBox.question(parent, "Confirm Removal", f"Remove type '{type_name}'?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                # Preserve current checkbox states before rebuilding
+                for t_name, cb in self.type_enabled_checkboxes.items():
+                    if t_name in self.custom_entry_types:
+                        self.custom_entry_types[t_name]['enabled'] = cb.isChecked()
+                del self.custom_entry_types[type_name]
+                if type_name in self.type_enabled_checkboxes:
+                    del self.type_enabled_checkboxes[type_name]
+                update_type_checkboxes()
+                self.append_log(f"🗑️ Removed custom type: {type_name}")
+        
+        add_type_button = QPushButton("Add Type")
+        add_type_button.clicked.connect(add_custom_type)
+        # add_type_button.setStyleSheet("background-color: #28a745; color: white; padding: 5px;")
+        type_control_layout.addWidget(add_type_button)
+
+        # Entry type filter mode dropdown
+        type_control_layout.addSpacing(10)
+        filter_label = QLabel("Entry Type Filtering:")
+        type_control_layout.addWidget(filter_label)
+        filter_desc = QLabel(
+            "Strict = exact match only (e.g. 'term' rejected if type is 'terms')  •  "
+            "Loose = accepts enabled types and their plurals, rejects unknown types  •  "
+            "No Filtering = accepts any type (still normalizes plurals)"
+        )
+        filter_desc.setStyleSheet("font-size: 9pt; color: #aaa;")
+        filter_desc.setWordWrap(True)
+        type_control_layout.addWidget(filter_desc)
+
+        filter_combo_widget = QWidget()
+        filter_combo_layout = QHBoxLayout(filter_combo_widget)
+        filter_combo_layout.setContentsMargins(0, 0, 0, 0)
+        type_control_layout.addWidget(filter_combo_widget)
+
+        # Halgakos icon (HiDPI-aware)
+        filter_icon_label = QLabel()
+        filter_icon_label.setStyleSheet("background-color: transparent;")
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                from PySide6.QtGui import QIcon, QPixmap
+                from PySide6.QtCore import QSize
+                icon = QIcon(icon_path)
+                try:
+                    dpr = self.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                logical_px = 16
+                dev_px = int(logical_px * max(1.0, dpr))
+                pm = icon.pixmap(QSize(dev_px, dev_px))
+                if pm.isNull():
+                    raw = QPixmap(icon_path)
+                    img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    pm = QPixmap.fromImage(img)
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                filter_icon_label.setPixmap(pm)
+                filter_icon_label.setFixedSize(24, 24)
+        except Exception:
+            pass
+        filter_combo_layout.addWidget(filter_icon_label)
+
+        self.entry_type_filter_combo = QComboBox()
+        self.entry_type_filter_combo.addItems(["Strict", "Loose", "No Filtering"])
+        self.entry_type_filter_combo.wheelEvent = lambda event: event.ignore()
+        saved_mode = self.config.get('glossary_entry_type_filter_mode', 'loose')
+        mode_to_index = {'strict': 0, 'loose': 1, 'none': 2}
+        self.entry_type_filter_combo.setCurrentIndex(mode_to_index.get(saved_mode, 2))
+        filter_combo_layout.addWidget(self.entry_type_filter_combo)
+        self._add_combobox_arrow(self.entry_type_filter_combo)
+
+        # Skip identical entries toggle (right of the filter dropdown)
+        filter_combo_layout.addSpacing(15)
+        self.skip_identical_entries_checkbox = self._create_styled_checkbox("Skip identical entries (translated = raw)")
+        self.skip_identical_entries_checkbox.setChecked(self.config.get('glossary_skip_identical_entries', True))
+        self.skip_identical_entries_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Skip glossary entries where the translated name is identical to the raw name.\n"
+            "These typically indicate the AI returned the name unchanged (e.g. Amazon → Amazon)."
+        ))
+        filter_combo_layout.addWidget(self.skip_identical_entries_checkbox)
+
+        # CJK script filter toggle (right of skip identical)
+        filter_combo_layout.addSpacing(15)
+        self.cjk_script_filter_checkbox = self._create_styled_checkbox("Filter CJK script entries")
+        self.cjk_script_filter_checkbox.setChecked(self.config.get('glossary_cjk_script_filter', False))
+        self.cjk_script_filter_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Auto-detect CJK source text and reject entries where:\n"
+            "• translated_name still contains CJK characters (untranslated)\n"
+            "• raw_name has no CJK characters (not actual source text)\n\n"
+            "Only activates when the output language is a known non-CJK language\n"
+            "(English, Spanish, etc.) and the source is auto-detected as CJK."
+        ))
+        filter_combo_layout.addWidget(self.cjk_script_filter_checkbox)
+        filter_combo_layout.addStretch()
+
+        type_control_layout.addStretch()
+        
+        # Initialize checkboxes
+        update_type_checkboxes()
+        
+        # Custom fields section
+        custom_frame = QGroupBox("Custom Fields (Additional Columns)")
+        custom_frame_layout = QVBoxLayout(custom_frame)
+        manual_layout.addWidget(custom_frame)
+        
+        QLabel("Additional fields to extract (will be added as extra columns):").setParent(custom_frame)
+        custom_frame_layout.addWidget(QLabel("Additional fields to extract (will be added as extra columns):"))
+        
+        self.custom_fields_listbox = QListWidget()
+        self.custom_fields_listbox.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.custom_fields_listbox.setDefaultDropAction(Qt.DropAction.MoveAction)
+        # Use screen ratio: ~10% of screen height
+        listbox_height = int(self._screen.height() * 0.10)
+        self.custom_fields_listbox.setMaximumHeight(listbox_height)
+        custom_frame_layout.addWidget(self.custom_fields_listbox)
+
+        # Sync backing list when items are reordered via drag-and-drop
+        def _sync_custom_fields_order():
+            self.custom_glossary_fields = [
+                self.custom_fields_listbox.item(i).text()
+                for i in range(self.custom_fields_listbox.count())
+            ]
+        self.custom_fields_listbox.model().rowsMoved.connect(_sync_custom_fields_order)
+        
+        # Initialize custom_glossary_fields if not exists
+        if not hasattr(self, 'custom_glossary_fields'):
+            self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
+        
+        # Add "description" as default field if list is empty and user hasn't manually removed it
+        description_removed_flag = self.config.get('custom_field_description_removed', False)
+        if not self.custom_glossary_fields and not description_removed_flag:
+            self.custom_glossary_fields = ['description']
+            # Save to config so it persists
+            self.config['custom_glossary_fields'] = self.custom_glossary_fields
+            self.save_config(show_message=False)
+        
+        for field in self.custom_glossary_fields:
+            self.custom_fields_listbox.addItem(field)
+        
+        custom_controls_widget = QWidget()
+        custom_controls_layout = QHBoxLayout(custom_controls_widget)
+        custom_controls_layout.setContentsMargins(0, 5, 0, 0)
+        custom_frame_layout.addWidget(custom_controls_widget)
+        
+        self.custom_field_entry = QLineEdit()
+        self.custom_field_entry.setPlaceholderText("Enter field name...")
+        custom_controls_layout.addWidget(self.custom_field_entry)
+        
+        def add_custom_field():
+            field = self.custom_field_entry.text().strip()
+            if field and field not in self.custom_glossary_fields:
+                self.custom_glossary_fields.append(field)
+                self.custom_fields_listbox.addItem(field)
+                self.custom_field_entry.clear()
+
+                flag = glossary_document.description_removed_flag('add', field)
+                if flag is not None:
+                    self.config['custom_field_description_removed'] = flag
+                    self.save_config(show_message=False)
+        
+        def remove_custom_field():
+            current_row = self.custom_fields_listbox.currentRow()
+            if current_row >= 0:
+                item = self.custom_fields_listbox.item(current_row)
+                field = item.text()
+                self.custom_glossary_fields.remove(field)
+                self.custom_fields_listbox.takeItem(current_row)
+
+                flag = glossary_document.description_removed_flag('remove', field)
+                if flag is not None:
+                    self.config['custom_field_description_removed'] = flag
+                    self.save_config(show_message=False)
+        
+        # Use screen ratio for button widths: ~8% of screen width
+        button_width = int(self._screen.width() * 0.08)
+        
+        add_field_btn = QPushButton("Add")
+        add_field_btn.setFixedWidth(button_width)
+        add_field_btn.clicked.connect(add_custom_field)
+        custom_controls_layout.addWidget(add_field_btn)
+        
+        remove_field_btn = QPushButton("Remove")
+        remove_field_btn.setFixedWidth(button_width)
+        remove_field_btn.clicked.connect(remove_custom_field)
+        custom_controls_layout.addWidget(remove_field_btn)
+        
+        # Duplicate Detection Settings
+        duplicate_frame = QGroupBox("Duplicate Detection")
+        duplicate_frame_layout = QVBoxLayout(duplicate_frame)
+        manual_layout.addWidget(duplicate_frame)
+        
+        # Algorithm selection dropdown
+        algo_label = QLabel("Detection Algorithm:")
+        duplicate_frame_layout.addWidget(algo_label)
+        
+        algo_widget = QWidget()
+        algo_layout = QHBoxLayout(algo_widget)
+        algo_layout.setContentsMargins(0, 0, 0, 5)
+        duplicate_frame_layout.addWidget(algo_widget)
+        
+        # Add icon before dropdown (HiDPI-aware 36x36 like Extract Glossary)
+        algo_icon_label = QLabel()
+        algo_icon_label.setStyleSheet("background-color: transparent;")
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                from PySide6.QtGui import QIcon, QPixmap
+                from PySide6.QtCore import QSize
+                icon = QIcon(icon_path)
+                try:
+                    dpr = self.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                logical_px = 16
+                dev_px = int(logical_px * max(1.0, dpr))
+                pm = icon.pixmap(QSize(dev_px, dev_px))
+                if pm.isNull():
+                    raw = QPixmap(icon_path)
+                    img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    pm = QPixmap.fromImage(img)
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                algo_icon_label.setPixmap(pm)
+                algo_icon_label.setFixedSize(36, 36)
+                algo_icon_label.setAlignment(Qt.AlignCenter)
+            else:
+                algo_icon_label.setText("🎯")
+                algo_icon_label.setStyleSheet("font-size: 18pt;")
+        except Exception:
+            algo_icon_label.setText("🎯")
+            algo_icon_label.setStyleSheet("font-size: 18pt;")
+        
+        algo_layout.addWidget(algo_icon_label)
+        
+        self.duplicate_algo_combo = QComboBox()
+        self.duplicate_algo_combo.addItems([
+            "Auto - Uses all algorithms",
+            "Strict - High precision, minimal merging",
+            "Balanced - Token + Partial matching",
+            "Aggressive - Maximum duplicate detection",
+            "Basic Only - Simple Levenshtein distance"
+        ])
+        # Prevent accidental changes via mouse wheel
+        self._disable_combobox_mousewheel(self.duplicate_algo_combo)
+        
+        # Load saved setting or default to Auto
+        saved_algo = self.config.get('glossary_duplicate_algorithm', 'auto')
+        algo_index_map = {
+            'auto': 0,
+            'strict': 1,
+            'balanced': 2,
+            'aggressive': 3,
+            'basic': 4
+        }
+        self.duplicate_algo_combo.setCurrentIndex(algo_index_map.get(saved_algo, 0))
+        
+        # Try to set custom dropdown icon using Halgakos.ico
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                # Create a small icon for the dropdown arrow
+                icon = QIcon(icon_path)
+                # Set the icon for each item (optional, makes it appear next to text)
+                # self.duplicate_algo_combo.setItemIcon(0, icon)
+                
+                # Custom stylesheet for this combo box with icon-based dropdown
+                combo_style = """
+                    QComboBox {
+                        padding-right: 28px;
+                    }
+                    QComboBox::drop-down {
+                        subcontrol-origin: padding;
+                        subcontrol-position: top right;
+                        width: 24px;
+                        border-left: 1px solid #4a5568;
+                    }
+                    QComboBox::down-arrow {
+                        width: 16px;
+                        height: 16px;
+                        image: url(""" + icon_path.replace('\\', '/') + """);
+                    }
+                    QComboBox::down-arrow:on {
+                        top: 1px;
+                    }
+                """
+                self.duplicate_algo_combo.setStyleSheet(combo_style)
+        except Exception as e:
+            # If icon fails, just use default styling
+            pass
+        
+        algo_layout.addWidget(self.duplicate_algo_combo)
+        
+        # Info button
+        algo_info_btn = QPushButton("ℹ️")
+        algo_info_btn.setFixedWidth(42)
+        algo_info_btn.setStyleSheet("QPushButton { background-color: transparent; border: none; font-size: 14pt; } QPushButton:hover { color: #5a9fd4; }")
+        
+        def show_algorithm_info():
+            msg_box = QMessageBox(parent)
+            msg_box.setWindowTitle("Algorithm Information")
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setStyleSheet("""
+                QMessageBox { background-color: #1e1e1e; }
+                QMessageBox QLabel { color: white; background-color: transparent; }
+                QPushButton {
+                    background-color: #3d3d3d; color: white;
+                    border: 1px solid #4a5568; border-radius: 3px;
+                    padding: 6px 20px; min-width: 60px;
+                }
+                QPushButton:hover { background-color: #4d4d4d; border-color: #5a9fd4; }
+            """)
+            msg_box.setText(
+                "<b>Auto</b>: Uses all available algorithms (RapidFuzz, Jaro-Winkler, Token matching) and takes the best score.<br><br>"
+                "<b>Strict</b>: Only matches very similar names (95%+ similarity). Keeps more entries, minimal merging. Good if you want to review duplicates manually.<br><br>"
+                "<b>Balanced</b>: Uses token-based and partial matching. Handles word order ('Park Ji-sung' = 'Ji-sung Park') and substrings. Good middle ground.<br><br>"
+                "<b>Aggressive</b>: Lower threshold (80%) with all algorithms. Catches romanization variants ('Catherine' = 'Katherine'). May over-merge similar names.<br><br>"
+                "<b>Basic Only</b>: Simple Levenshtein distance. Faster but less accurate. May miss variants like 'Kim Sang-hyun' vs 'Kim Sanghyun'."
+            )
+            
+            # Set size using screen ratios
+            screen_width = self._screen.width()
+            screen_height = self._screen.height()
+            msg_box.setMinimumWidth(int(screen_width * 0.40))
+            msg_box.setMinimumHeight(int(screen_height * 0.50))
+            
+            msg_box.exec()
+        
+        algo_info_btn.clicked.connect(show_algorithm_info)
+        algo_layout.addWidget(algo_info_btn)
+        algo_layout.addStretch()
+        
+        # Update description when algorithm changes
+        def update_algo_description(index):
+            descriptions = [
+                "🎯 Auto mode uses multiple algorithms for best accuracy",
+                "🔒 Strict mode: High precision, keeps more entries",
+                "⚖️ Balanced mode: Handles word order and substrings",
+                "🔥 Aggressive mode: Maximum duplicate detection (may over-merge)",
+                "📄 Basic mode: Simple matching (faster, less accurate)"
+            ]
+            algo_desc.setText(descriptions[index])
+        
+        algo_desc = QLabel()
+        algo_desc.setStyleSheet("color: gray; font-size: 9pt; margin-bottom: 15px;")
+        duplicate_frame_layout.addWidget(algo_desc)
+        
+        # Set initial description based on saved algorithm
+        update_algo_description(self.duplicate_algo_combo.currentIndex())
+        
+        self.duplicate_algo_combo.currentIndexChanged.connect(update_algo_description)
+
+        # Partial ratio strength slider (controls substring matching weight)
+        partial_label = QLabel("Partial ratio strength (substring matcher):")
+        duplicate_frame_layout.addWidget(partial_label)
+
+        partial_desc = QLabel(
+            "0 disables substring matching; higher values increase partial-ratio influence.\n"
+            "Example: Your glossary has both 'Soo-hyun' and 'Kim Soo-hyun' as separate entries.\n"
+            "• Low/0 value → Keeps both entries (treats them as different names)\n"
+            "• High value → Skips 'Soo-hyun' (detects it's already inside 'Kim Soo-hyun')"
+        )
+        partial_desc.setWordWrap(True)
+        duplicate_frame_layout.addWidget(partial_desc)
+
+        partial_slider_row = QWidget()
+        partial_slider_layout = QHBoxLayout(partial_slider_row)
+        partial_slider_layout.setContentsMargins(0, 5, 0, 0)
+        duplicate_frame_layout.addWidget(partial_slider_row)
+
+        self.partial_ratio_weight = float(self.config.get('glossary_partial_ratio_weight', 0.45))
+
+        self.partial_ratio_slider = QSlider(Qt.Horizontal)
+        self.partial_ratio_slider.setMinimum(0)
+        self.partial_ratio_slider.setMaximum(100)
+        self.partial_ratio_slider.setValue(int(self.partial_ratio_weight * 100))
+        self._disable_slider_mousewheel(self.partial_ratio_slider)
+        partial_slider_layout.addWidget(self.partial_ratio_slider)
+
+        self.partial_ratio_value_label = QLabel(f"{self.partial_ratio_weight:.2f}")
+        partial_slider_layout.addWidget(self.partial_ratio_value_label)
+
+        self.partial_ratio_desc_label = QLabel("")
+        duplicate_frame_layout.addWidget(self.partial_ratio_desc_label)
+
+        def update_partial_ratio_label(value):
+            weight = value / 100.0
+            self.partial_ratio_weight = weight
+            self.partial_ratio_value_label.setText(f"{weight:.2f}")
+            if weight == 0:
+                desc = "Disabled (no substring matching)"
+            elif weight <= 0.30:
+                desc = "Very light substring influence"
+            elif weight <= 0.60:
+                desc = "Moderate substring influence"
+            else:
+                desc = "Strong substring influence (may over-merge)"
+            self.partial_ratio_desc_label.setText(desc)
+
+        self.partial_ratio_slider.valueChanged.connect(update_partial_ratio_label)
+        update_partial_ratio_label(self.partial_ratio_slider.value())
+
+        if not hasattr(self, 'partial_ratio_gender_only_checkbox'):
+            self.partial_ratio_gender_only_checkbox = self._create_styled_checkbox("Limit substring matcher to gendered active types")
+            self.partial_ratio_gender_only_checkbox.setChecked(self.config.get('glossary_partial_ratio_gender_only', False))
+        self.partial_ratio_gender_only_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, the partial-ratio substring matcher only applies when both compared entries belong to active entry types with a gender field.\n"
+            "Other duplicate algorithms still run normally for terms, locations, items, and non-gendered custom types."
+        ))
+        duplicate_frame_layout.addWidget(self.partial_ratio_gender_only_checkbox)
+
+        if not hasattr(self, 'alias_aware_name_matching_checkbox'):
+            self.alias_aware_name_matching_checkbox = self._create_styled_checkbox("Alias-aware name matching")
+            self.alias_aware_name_matching_checkbox.setChecked(self.config.get('glossary_alias_aware_name_matching', False))
+        self.alias_aware_name_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Uses raw-name containment to identify given-name/full-name aliases.\n"
+            "Keeps both raw forms for glossary matching, but normalizes the shorter translated alias when the full name reveals the better romanization."
+        ))
+        duplicate_frame_layout.addWidget(self.alias_aware_name_matching_checkbox)
+
+        if not hasattr(self, 'alias_aware_gender_only_checkbox'):
+            self.alias_aware_gender_only_checkbox = self._create_styled_checkbox("Limit alias-aware matching to gendered active types")
+            self.alias_aware_gender_only_checkbox.setChecked(self.config.get('glossary_alias_aware_gender_only', True))
+        self.alias_aware_gender_only_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, alias-aware matching only applies when both compared entries belong to active entry types with a gender field.\n"
+            "Disable this if you want raw-name alias matching for non-gendered active types too."
+        ))
+        duplicate_frame_layout.addWidget(self.alias_aware_gender_only_checkbox)
+        
+        # Honorifics filter toggle
+        if not hasattr(self, 'disable_honorifics_checkbox'):
+            self.disable_honorifics_checkbox = self._create_styled_checkbox("Disable honorifics filtering")
+            self.disable_honorifics_checkbox.setChecked(self.config.get('glossary_disable_honorifics_filter', False))
+        
+        duplicate_frame_layout.addWidget(self.disable_honorifics_checkbox)
+        
+        honorifics_label = QLabel("When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names")
+        # honorifics_label.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        duplicate_frame_layout.addWidget(honorifics_label)
+        
+        # Fuzzy matching slider
+        fuzzy_label = QLabel("Fuzzy Matching Threshold:")
+        # fuzzy_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        duplicate_frame_layout.addWidget(fuzzy_label)
+
+        desc_label = QLabel("Controls how similar names must be to be considered duplicates")
+        # desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        duplicate_frame_layout.addWidget(desc_label)
+
+        # Slider widget
+        slider_widget = QWidget()
+        slider_layout = QHBoxLayout(slider_widget)
+        slider_layout.setContentsMargins(0, 5, 0, 0)
+        duplicate_frame_layout.addWidget(slider_widget)
+
+        # Always reload fuzzy threshold value from config
+        self.fuzzy_threshold_value = self.config.get('glossary_fuzzy_threshold', 0.90)
+
+        # Slider (store as self.manual_fuzzy_slider for syncing)
+        self.manual_fuzzy_slider = QSlider(Qt.Horizontal)
+        self.manual_fuzzy_slider.setMinimum(50)  # 0.5 * 100
+        self.manual_fuzzy_slider.setMaximum(100)  # 1.0 * 100
+        self.manual_fuzzy_slider.setValue(int(self.fuzzy_threshold_value * 100))
+        # Use screen ratio: ~30% of screen width
+        slider_width = int(self._screen.width() * 0.30)
+        self.manual_fuzzy_slider.setMinimumWidth(slider_width)
+        self._disable_slider_mousewheel(self.manual_fuzzy_slider)  # Disable mouse wheel
+        slider_layout.addWidget(self.manual_fuzzy_slider)
+
+        # Value label
+        self.manual_fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
+        slider_layout.addWidget(self.manual_fuzzy_value_label)
+
+        # Description label
+        self.manual_fuzzy_desc_label = QLabel("")
+        # self.manual_fuzzy_desc_label.setStyleSheet("color: white; font-size: 9pt; margin-top: 5px;")
+        duplicate_frame_layout.addWidget(self.manual_fuzzy_desc_label)
+
+        # Token-efficient format toggle
+        format_frame = QGroupBox("Output Format")
+        format_frame_layout = QVBoxLayout(format_frame)
+        manual_layout.addWidget(format_frame)
+
+        # Initialize variable if not exists
+        if not hasattr(self, 'use_legacy_csv_checkbox'):
+            self.use_legacy_csv_checkbox = self._create_styled_checkbox("Use legacy CSV format")
+            self.use_legacy_csv_checkbox.setChecked(self.config.get('glossary_use_legacy_csv', False))
+
+        format_frame_layout.addWidget(self.use_legacy_csv_checkbox)
+
+        label1 = QLabel("When disabled (default): Uses token-efficient format with sections (=== CHARACTERS ===)")
+        # label1.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        format_frame_layout.addWidget(label1)
+
+        label2 = QLabel("When enabled: Uses traditional CSV format with repeated type columns")
+        # label2.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        format_frame_layout.addWidget(label2)
+
+        # Legacy JSON Output Toggle
+        if not hasattr(self, 'glossary_json_output_checkbox'):
+            self.glossary_json_output_checkbox = self._create_styled_checkbox("Output legacy JSON format")
+            # Default to False as requested
+            self.glossary_json_output_checkbox.setChecked(self.config.get('glossary_output_legacy_json', False))
+        
+        format_frame_layout.addWidget(self.glossary_json_output_checkbox)
+        
+        label3 = QLabel("When enabled: Outputs a .json file containing the glossary structure")
+        format_frame_layout.addWidget(label3)
+        
+        # Update label when slider moves
+        def update_manual_fuzzy_label(value):
+            float_value = value / 100.0
+            self.fuzzy_threshold_value = float_value
+            self.manual_fuzzy_value_label.setText(f"{float_value:.2f}")
+            
+            # Show description
+            if float_value >= 0.95:
+                desc = "Exact match only (strict)"
+            elif float_value >= 0.85:
+                desc = "Very similar names (recommended)"
+            elif float_value >= 0.75:
+                desc = "Moderately similar names"
+            elif float_value >= 0.65:
+                desc = "Loosely similar names"
+            else:
+                desc = "Very loose matching (may over-merge)"
+            
+            self.manual_fuzzy_desc_label.setText(desc)
+            
+            # Sync with auto glossary slider and labels if they exist
+            if hasattr(self, 'fuzzy_threshold_slider'):
+                self.fuzzy_threshold_slider.blockSignals(True)
+                self.fuzzy_threshold_slider.setValue(value)
+                self.fuzzy_threshold_slider.blockSignals(False)
+                
+                # Update auto labels directly without triggering signals
+                if hasattr(self, 'auto_fuzzy_value_label') and hasattr(self, 'auto_fuzzy_desc_label'):
+                    self.auto_fuzzy_value_label.setText(f"{float_value:.2f}")
+                    self.auto_fuzzy_desc_label.setText(desc)
+        
+        # Store update function for cross-tab syncing
+        self.update_manual_fuzzy_label_func = update_manual_fuzzy_label
+        
+        # Connect slider to update function
+        self.manual_fuzzy_slider.valueChanged.connect(update_manual_fuzzy_label)
+        
+        # Initialize description
+        update_manual_fuzzy_label(self.manual_fuzzy_slider.value())
+        
+        # Target language dropdown (above prompt)
+        language_frame = QGroupBox("Target Language")
+        language_frame_layout = QVBoxLayout(language_frame)
+        manual_layout.addWidget(language_frame)
+        
+        # Create language dropdown
+        if not hasattr(self, 'manual_target_language_combo'):
+            self.manual_target_language_combo = QComboBox()
+            self.manual_target_language_combo.setMaximumWidth(200)
+            self.manual_target_language_combo.setEditable(True)
+            self.manual_target_language_combo.addItems(list(TARGET_LANGUAGES))
+            
+            # Lock mousewheel scrolling on target language dropdown
+            self._disable_combobox_mousewheel(self.manual_target_language_combo)
+            
+            # Use icon in dropdown arrow like auto glossary dropdown
+            try:
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if os.path.exists(icon_path):
+                    combo_style = """
+                        QComboBox {
+                            padding-right: 28px;
+                        }
+                        QComboBox::drop-down {
+                            subcontrol-origin: padding;
+                            subcontrol-position: top right;
+                            width: 24px;
+                            border-left: 1px solid #4a5568;
+                        }
+                        QComboBox::down-arrow {
+                            width: 16px;
+                            height: 16px;
+                            image: url(""" + icon_path.replace('\\', '/') + """);
+                        }
+                        QComboBox::down-arrow:on {
+                            top: 1px;
+                        }
+                    """
+                    self.manual_target_language_combo.setStyleSheet(combo_style)
+            except Exception:
+                pass
+        
+        saved_language = self.config.get('glossary_target_language', self.config.get('output_language', 'English'))
+        index = self.manual_target_language_combo.findText(saved_language)
+        if index >= 0:
+            self.manual_target_language_combo.setCurrentIndex(index)
+        else:
+            self.manual_target_language_combo.setCurrentText(saved_language)
+        
+        # Sync with auto glossary language dropdown and main GUI
+        def sync_manual_to_auto(text):
+            # Sync with auto glossary dropdown
+            if hasattr(self, 'glossary_target_language_combo'):
+                auto_index = self.glossary_target_language_combo.findText(text)
+                if auto_index >= 0:
+                    self.glossary_target_language_combo.blockSignals(True)
+                    self.glossary_target_language_combo.setCurrentIndex(auto_index)
+                    self.glossary_target_language_combo.blockSignals(False)
+            
+            # Sync with main GUI dropdown
+            if hasattr(self, 'target_lang_combo'):
+                main_index = self.target_lang_combo.findText(text)
+                if main_index >= 0:
+                    self.target_lang_combo.blockSignals(True)
+                    self.target_lang_combo.setCurrentIndex(main_index)
+                    self.target_lang_combo.blockSignals(False)
+                else:
+                    self.target_lang_combo.blockSignals(True)
+                    self.target_lang_combo.setCurrentText(text)
+                    self.target_lang_combo.blockSignals(False)
+            
+            # Update configs
+            self.config['glossary_target_language'] = text
+            self.config['output_language'] = text
+            os.environ['OUTPUT_LANGUAGE'] = text
+        
+        self.manual_target_language_combo.currentTextChanged.connect(sync_manual_to_auto)
+        
+        language_frame_layout.addWidget(self.manual_target_language_combo)
+        
+        lang_desc = QLabel("Language for translated glossary entries (synced with Extraction Settings)")
+        language_frame_layout.addWidget(lang_desc)
+        
+        # Prompt section
+        prompt_frame = QGroupBox("Balanced/Full Extraction Prompt")
+        prompt_frame_layout = QVBoxLayout(prompt_frame)
+        manual_layout.addWidget(prompt_frame)
+        
+        label1 = QLabel("Placeholders will be replaced with actual values during extraction.")
+        prompt_frame_layout.addWidget(label1)
+
+        # Copyable placeholder helper (matches auto glossary tab style)
+        placeholders_line = QLineEdit(
+            "Available placeholders: {fields}, {fields1}, {language}, {entries}, "
+            "{description_mandatory}, {description_detailed}, {description_in_language}, "
+            "{description_excluded_note}, {description_example}, {example}, "
+            "{description_name_split_example}, {name_split_example}, {gender_instruction}, "
+            "{subject_tracking_instruction},  Separator: \\x1F"
+        )
+        placeholders_line.setReadOnly(True)
+        placeholders_line.setFrame(False)
+        placeholders_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+        placeholders_line.setCursorPosition(0)
+        placeholders_line.setToolTip(
+            "<qt><table width='600' style='font-size:9pt; border-collapse:collapse;' cellpadding='4'>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{fields}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>comma-separated columns/entry types list</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{fields1}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>\\x1F-separated columns/entry types list (recommended)</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{language}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>target language</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{entries}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>enabled custom entry types (comma list with ampersand)</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{description_mandatory}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'The description column is mandatory and must be detailed'</i>"
+            "<br/>Active when 'description' in Custom Fields; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{description_detailed}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'The description column must contain detailed context/explanation'</i>"
+            "<br/>Active when 'description' in Custom Fields; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{description_in_language}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>' and description'</i> (inline append)"
+            "<br/>Active when 'description' in Custom Fields; blank otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{description_excluded_note}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>' (The description column is excluded from this restriction)'</i>"
+            "<br/>Active when 'description' in Custom Fields; blank otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{description_example}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'For example:<br/>"
+            "&nbsp;&nbsp;character,이히리ᐐ 나애,Dihirit Ade,female,\"description...\"<br/>"
+            "&nbsp;&nbsp;character,뢤사난,Kim Sang-hyu,male,\"description...\"'</i>"
+            "<br/>Active when 'description' in Custom Fields; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{example}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'For example:<br/>"
+            "&nbsp;&nbsp;character,이히리ᐐ 나애,Dihirit Ade,female<br/>"
+            "&nbsp;&nbsp;character,뢤사난,Kim Sang-hyu,male<br/>"
+            "&nbsp;&nbsp;term,간편헤,Gale Hardest,'</i>"
+            "<br/>Active when 'description' NOT in Custom Fields; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{description_name_split_example}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'For character entries, the raw_name must contain ONLY the given name (first name), never a full name. "
+            "If the text mentions a character by full name (e.g. &quot;김상현&quot;), split it: create one entry with raw_name &quot;상현&quot; "
+            "(given name) and a second entry with raw_name &quot;김&quot; (surname). Example output:<br/>"
+            "&nbsp;&nbsp;character,상현,Sang-hyun,male,&quot;A knight of the royal guard&quot;<br/>"
+            "&nbsp;&nbsp;character,김,Kim,,&quot;Surname of Sang-hyun&quot;<br/>"
+            "&nbsp;&nbsp;Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male,…) — always split into given name + surname.'</i>"
+            "<br/>Active when 'description' in Custom Fields; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{name_split_example}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'For character entries, the raw_name must contain ONLY the given name (first name), never a full name. "
+            "If the text mentions a character by full name (e.g. &quot;김상현&quot;), split it: create one entry with raw_name &quot;상현&quot; "
+            "(given name) and a second entry with raw_name &quot;김&quot; (surname). Example output:<br/>"
+            "&nbsp;&nbsp;character,상현,Sang-hyun,male<br/>"
+            "&nbsp;&nbsp;character,김,Kim,<br/>"
+            "&nbsp;&nbsp;Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male) — always split into given name + surname.'</i>"
+            "<br/>Active when 'description' NOT in Custom Fields; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{gender_instruction}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'The gender column applies only to [types] entries — "
+            "determine gender from context clues, leave empty if insufficient. "
+            "For all other entry types, leave gender empty.'</i>"
+            "<br/>Blank if no entry types have 'has_gender' enabled</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{subject_tracking_instruction}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'Strictly follow a Subject Tracking & Pronoun Resolution process when extracting character data...'</i>"
+            "<br/>Active when Include Gender Context is ON; stripped otherwise</td></tr>"
+            "</table></qt>"
+        )
+        prompt_frame_layout.addWidget(placeholders_line)
+        
+        self.manual_prompt_text = QTextEdit()
+        self.manual_prompt_text.setContextMenuPolicy(Qt.DefaultContextMenu)  # keep copy/paste
+        # Use screen ratio: ~25% of screen height
+        prompt_height = int(self._screen.height() * 0.25)
+        self.manual_prompt_text.setMinimumHeight(prompt_height)
+        self.manual_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        prompt_frame_layout.addWidget(
+            self._create_glossary_prompt_profile_controls('balanced_full', self.manual_prompt_text)
+        )
+        prompt_frame_layout.addWidget(self.manual_prompt_text)
+
+        # If the user clears the prompt and leaves the field, restore the default.
+        # (Avoids persisting an empty template and doesn't interfere with copy/paste while typing.)
+        _orig_focus_out = self.manual_prompt_text.focusOutEvent
+        def _manual_prompt_focus_out(event):
+            try:
+                if not self._sep_from_display(self.manual_prompt_text.toPlainText()).strip():
+                    default_manual = getattr(self, 'default_manual_glossary_prompt', None)
+                    if default_manual:
+                        self.manual_prompt_text.setPlainText(self._sep_for_display(default_manual))
+            except Exception:
+                pass
+            return _orig_focus_out(event)
+        self.manual_prompt_text.focusOutEvent = _manual_prompt_focus_out
+        
+        # Always reload prompt from config to ensure fresh state
+        # Treat empty strings as missing so users always get a usable default.
+        # Import the canonical default from extract_glossary_from_epub so there
+        # is only one authoritative copy of the default prompt.
+        try:
+            from extract_glossary_from_epub import DEFAULT_GLOSSARY_PROMPT
+            default_manual_prompt = DEFAULT_GLOSSARY_PROMPT
+        except ImportError:
+            default_manual_prompt = ""
+        # Keep a copy for later (e.g., when saving and the field was cleared)
+        self.default_manual_glossary_prompt = default_manual_prompt
+
+        manual_prompt_from_config = self.config.get('manual_glossary_prompt3', default_manual_prompt)
+        if not manual_prompt_from_config or not manual_prompt_from_config.strip():
+            self.manual_glossary_prompt = default_manual_prompt
+        else:
+            self.manual_glossary_prompt = manual_prompt_from_config
+
+        self.manual_prompt_text.setPlainText(self._sep_for_display(self.manual_glossary_prompt))
+        self._apply_active_glossary_prompt_profile('balanced_full')
+        
+        prompt_controls_widget = QWidget()
+        prompt_controls_layout = QHBoxLayout(prompt_controls_widget)
+        prompt_controls_layout.setContentsMargins(0, 10, 0, 0)
+        manual_layout.addWidget(prompt_controls_widget)
+        
+        def reset_manual_prompt():
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset manual glossary prompt to default?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.manual_prompt_text.setPlainText(self._sep_for_display(getattr(self, 'default_manual_glossary_prompt', self._sep_from_display(self.manual_prompt_text.toPlainText()))))
+        
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.clicked.connect(reset_manual_prompt)
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;  /* dark yellow */
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        prompt_controls_layout.addWidget(reset_btn)
+        prompt_controls_layout.addStretch()
+        
+        # Settings
+        settings_frame = QGroupBox("Balanced/Full Extraction Settings")
+        settings_frame_layout = QVBoxLayout(settings_frame)
+        manual_layout.addWidget(settings_frame)
+
+        settings_content = QHBoxLayout()
+        settings_content.setContentsMargins(0, 0, 0, 0)
+        settings_content.setSpacing(20)
+        settings_frame_layout.addLayout(settings_content)
+        
+        settings_grid_host = QWidget()
+        settings_grid_host.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        settings_content.addWidget(settings_grid_host, 0, Qt.AlignTop)
+
+        settings_grid = QGridLayout(settings_grid_host)
+        settings_grid.setContentsMargins(2, 4, 6, 6)
+        settings_grid.setHorizontalSpacing(20)
+        settings_grid.setVerticalSpacing(10)
+        settings_grid.setColumnStretch(0, 0)
+        settings_grid.setColumnStretch(1, 0)
+        settings_grid.setColumnStretch(2, 0)
+        settings_grid.setColumnStretch(3, 0)
+        settings_grid.setColumnStretch(4, 0)
+        
+        # Compact label+field pair helper for manual Extraction Settings
+        def _m_pair(label_text, field_widget, label_width=120, tooltip=None):
+            cont = QWidget()
+            h = QHBoxLayout(cont)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(label_width)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if tooltip:
+                lbl.setToolTip(_wrapped_tooltip_html(tooltip))
+            h.addWidget(lbl)
+            h.addWidget(field_widget)
+            h.addStretch()
+            return cont
+        
+        # Row 0: Temperature, request controls, and glossary history toggle
+        self.manual_temp_entry = QLineEdit(str(self.config.get('manual_glossary_temperature', 0.1)))
+        self.manual_temp_entry.setFixedWidth(80)
+        settings_grid.addWidget(_m_pair(
+            "Temperature:", self.manual_temp_entry,
+            tooltip="AI creativity for manual extraction.\nLower = more deterministic (recommended 0.1–0.3)."
+        ), 0, 0)
+
+        # Column 3: run the minimal extractor first and merge its results in.
+        if not hasattr(self, 'glossary_add_minimal_pass_checkbox'):
+            self.glossary_add_minimal_pass_checkbox = self._create_styled_checkbox(
+                "Add minimal glossary pass"
+            )
+        self.glossary_add_minimal_pass_checkbox.setChecked(
+            self.config.get('glossary_add_minimal_pass', False)
+        )
+        self.glossary_add_minimal_pass_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Run the Minimal extractor first, then merge its entries into the "
+            "Balanced/Full glossary in the same folder.\n"
+            "Minimal is fast and pattern-based, so it catches names the AI pass "
+            "can miss; costs one extra pass up front.\n"
+            "Default OFF."
+        ))
+        if not getattr(self.glossary_add_minimal_pass_checkbox,
+                       '_glossary_manager_sync_connected', False):
+            self.glossary_add_minimal_pass_checkbox.stateChanged.connect(
+                self._on_glossary_manager_add_minimal_pass_toggle
+            )
+            self.glossary_add_minimal_pass_checkbox._glossary_manager_sync_connected = True
+        settings_grid.addWidget(
+            self.glossary_add_minimal_pass_checkbox, 0, 3, Qt.AlignLeft
+        )
+
+        # Column 4: large accent icon, spanning the three setting rows so row
+        # spacing does not squash it.
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon
+            icon_label = QLabel()
+            icon_label.setFixedSize(120, 120)
+            icon_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setPixmap(QIcon(icon_path).pixmap(120, 120))
+            settings_grid.addWidget(icon_label, 0, 4, 3, 1, Qt.AlignTop)
+        settings_content.addStretch()
+        
+        # Row 1: Compression Factor and Rolling window checkbox
+        self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 1.0)))
+        self.glossary_compression_factor_entry.setFixedWidth(60)
+
+        # Auto Compression Factor toggle
+        self.glossary_auto_compression_checkbox = self._create_styled_checkbox("Auto")
+        self.glossary_auto_compression_checkbox.setChecked(self.config.get('glossary_auto_compression', True))
+        
+        # Container for compression factor controls
+        comp_cont = QWidget()
+        comp_layout = QHBoxLayout(comp_cont)
+        comp_layout.setContentsMargins(0, 0, 0, 0)
+        comp_layout.setSpacing(8)
+        comp_layout.addWidget(self.glossary_compression_factor_entry)
+        comp_layout.addWidget(self.glossary_auto_compression_checkbox)
+        comp_layout.addStretch()
+        
+        settings_grid.addWidget(_m_pair(
+            "Compression Factor:", comp_cont,
+            tooltip="How much to compress text before sending to the model.\nAuto adjusts based on token limit; manual overrides fixed value."
+        ), 1, 0)
+        
+        self.glossary_history_rolling_var = True
+        self.config['glossary_history_rolling'] = True
+        
+        # Row 2: Output Token Limit
+        # Default changed to -1 (auto/inherit) instead of 65536
+        self.glossary_output_token_limit_entry = QLineEdit(str(self.config.get('glossary_max_output_tokens', -1)))
+        self.glossary_output_token_limit_entry.setFixedWidth(80)
+        self.glossary_output_token_limit_entry.setToolTip(_wrapped_tooltip_html("-1 = Use main translation Output Token Limit"))
+        
+        # Container for token limit to add "tokens" label
+        token_cont = QWidget()
+        token_layout = QHBoxLayout(token_cont)
+        token_layout.setContentsMargins(0, 0, 0, 0)
+        token_layout.setSpacing(6)
+        token_layout.addWidget(self.glossary_output_token_limit_entry)
+        
+        # Add a small helper label to show actual value if -1
+        self.token_limit_helper = QLabel("")
+        self.token_limit_helper.setStyleSheet("color: gray; font-size: 8pt;")
+        token_layout.addWidget(self.token_limit_helper)
+        token_layout.addStretch()
+        
+        settings_grid.addWidget(_m_pair(
+            "Output Token Limit:", token_cont,
+            tooltip="Max tokens allowed in AI responses for glossary extraction.\n-1 = inherit main translation limit."
+        ), 2, 0)
+        # Label tooltip
+        token_cont.parentWidget().layout().itemAt(0).widget().setToolTip(_wrapped_tooltip_html("Maximum tokens allowed in AI responses. -1 inherits main translation output limit."))
+
+        # Disable glossary conversation history
+        if not hasattr(self, 'disable_glossary_history_checkbox'):
+            self.disable_glossary_history_checkbox = self._create_styled_checkbox("Disable Glossary History")
+        self.disable_glossary_history_checkbox.setChecked(self.config.get('disable_glossary_history', True))
+        self.disable_glossary_history_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, Extract Glossary will not send previous glossary extraction\n"
+            "responses as contextual conversation history. Recommended ON."
+        ))
+        settings_grid.addWidget(self.disable_glossary_history_checkbox, 0, 2)
+
+        self.manual_context_entry = QLineEdit(str(self.config.get('manual_context_limit', 2)))
+        self.manual_context_entry.setFixedWidth(80)
+        glossary_history_limit_pair = _m_pair(
+            "Glossary History Limit:", self.manual_context_entry,
+            tooltip="This controls how many chapters to include with contextual translation"
+        )
+        settings_grid.addWidget(glossary_history_limit_pair, 1, 2)
+
+        def _sync_glossary_history_limit_enabled(*_args):
+            disabled = self.disable_glossary_history_checkbox.isChecked()
+            glossary_history_limit_pair.setEnabled(not disabled)
+            for label in glossary_history_limit_pair.findChildren(QLabel):
+                label.setStyleSheet("color: #777;" if disabled else "color: #ffffff;")
+
+        previous_slot = getattr(self, '_sync_glossary_history_limit_enabled_slot', None)
+        if previous_slot is not None:
+            try:
+                self.disable_glossary_history_checkbox.toggled.disconnect(previous_slot)
+            except (TypeError, RuntimeError):
+                pass
+        self.disable_glossary_history_checkbox.toggled.connect(_sync_glossary_history_limit_enabled)
+        self._sync_glossary_history_limit_enabled_slot = _sync_glossary_history_limit_enabled
+        _sync_glossary_history_limit_enabled()
+        
+        if not hasattr(self, 'glossary_request_merging_checkbox'):
+            self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")
+        self.glossary_request_merging_checkbox.setChecked(self.config.get('glossary_request_merging_enabled', False))
+        self.glossary_request_merging_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Merge multiple small glossary requests before sending.\nReduces API calls; controlled by Merge Count below."
+        ))
+        settings_grid.addWidget(self.glossary_request_merging_checkbox, 0, 1)
+
+        # Dynamic request splitting toggle (below Glossary Request Merging)
+        if not hasattr(self, 'glossary_enable_chapter_split_checkbox'):
+            self.glossary_enable_chapter_split_checkbox = self._create_styled_checkbox("Dynamic request splitting")
+        self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', False))
+        self.glossary_enable_chapter_split_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Automatically split large chapters using token/output limits\nso each glossary request stays under size caps."
+        ))
+        settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 1, 1)
+
+        # Logic for Auto Compression Factor
+        def _update_glossary_compression():
+            try:
+                # Update helper label for token limit (-1 resolves to max_output_tokens);
+                # the rule is shared with the mobile app (settings_rules, U9)
+                actual_limit, helper_text = settings_rules.glossary_output_limit(
+                    self.glossary_output_token_limit_entry.text(),
+                    getattr(self, 'max_output_tokens', 65536))
+                self.token_limit_helper.setText(helper_text)
+
+                if not self.glossary_auto_compression_checkbox.isChecked():
+                    self.glossary_compression_factor_entry.setEnabled(True)
+                    return
+
+                self.glossary_compression_factor_entry.setEnabled(False)
+
+                # Logic: 1.0 | 1.2 | 1.4 | 1.5
+                factor = settings_rules.glossary_auto_compression_factor(actual_limit)
+
+                self.glossary_compression_factor_entry.setText(str(factor))
+            except Exception as e:
+                print(f"Error updating glossary compression: {e}")
+
+        # Connect signals
+        self.glossary_auto_compression_checkbox.toggled.connect(_update_glossary_compression)
+        self.glossary_output_token_limit_entry.textChanged.connect(lambda: _update_glossary_compression())
+        
+        # Initial update
+        _update_glossary_compression()
+        
+        # Row 2: Glossary Merge Count (below Dynamic request splitting)
+        self.glossary_request_merge_count_entry = QLineEdit(str(self.config.get('glossary_request_merge_count', 10)))
+        self.glossary_request_merge_count_entry.setFixedWidth(80)
+        settings_grid.addWidget(_m_pair(
+            "Glossary Merge Count:", self.glossary_request_merge_count_entry,
+            tooltip="When request merging is on, combine this many chunks\nbefore one glossary API call."
+        ), 2, 1)
+
+        if not hasattr(self, 'glossary_skip_title_header_only_checkbox'):
+            self.glossary_skip_title_header_only_checkbox = self._create_styled_checkbox(
+                "Skip title/header-only chapters"
+            )
+        self.glossary_skip_title_header_only_checkbox.setChecked(
+            self.config.get('glossary_skip_title_header_only', True)
+        )
+        self.glossary_skip_title_header_only_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Skip glossary API requests when a chapter's only text is inside "
+            "the <title> tag, heading tags (<h1>-<h6>), or both.\n"
+            "Image-only chapters are always skipped and recorded separately."
+        ))
+        settings_grid.addWidget(
+            self.glossary_skip_title_header_only_checkbox,
+            2,
+            2,
+            Qt.AlignLeft,
+        )
+        
+        # Shortcut button: Anti Duplicate Parameters (glossary-specific)
+        anti_dup_btn = QPushButton("Anti Duplicate Parameters")
+        anti_dup_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b6cb0;
+                color: white;
+                padding: 5px 10px;
+                border: 1px solid #1e4e8c;
+                border-radius: 4px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #255f9a; }
+            QPushButton:pressed { background-color: #1f5286; }
+        """)
+        anti_dup_btn.setToolTip(_wrapped_tooltip_html("Configure anti-duplicate parameters for glossary generation only."))
+        anti_dup_btn.clicked.connect(lambda: self._open_glossary_anti_duplicate_dialog(parent))
+        manual_layout.addWidget(anti_dup_btn)
+
+    def update_glossary_prompts(self):
+        """Update glossary prompts from text widgets if they exist"""
+        try:
+            debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
+            
+            if hasattr(self, 'manual_prompt_text'):
+                manual_text = self._sep_from_display(self.manual_prompt_text.toPlainText())
+                self.manual_glossary_prompt = manual_text.strip()
+
+                # If the prompt was cleared, restore the default so we never persist an empty template.
+                if not self.manual_glossary_prompt:
+                    default_manual = getattr(self, 'default_manual_glossary_prompt', None)
+                    if default_manual:
+                        self.manual_glossary_prompt = default_manual.strip()
+                        # Update the UI to reflect the restored default
+                        try:
+                            self.manual_prompt_text.blockSignals(True)
+                            self.manual_prompt_text.setPlainText(self._sep_for_display(default_manual))
+                        finally:
+                            self.manual_prompt_text.blockSignals(False)
+
+                # Save to config (using new key)
+                self.config['manual_glossary_prompt3'] = self.manual_glossary_prompt
+                self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
+
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] manual_glossary_prompt3: {len(self.manual_glossary_prompt)} chars")
+            
+            if hasattr(self, 'auto_prompt_text'):
+                self.unified_auto_glosary_prompt3 = self._sep_from_display(self.auto_prompt_text.toPlainText()).strip()
+                self.config['unified_auto_glosary_prompt3'] = self.unified_auto_glosary_prompt3
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] unified_auto_glosary_prompt3: {len(self.unified_auto_glosary_prompt3)} chars")
+
+            if hasattr(self, '_glossary_prompt_profile_widgets'):
+                for _profile_key in ('balanced_full', 'minimal'):
+                    if _profile_key in self._glossary_prompt_profile_widgets:
+                        self._auto_save_glossary_prompt_profile(_profile_key)
+            
+            if hasattr(self, 'append_prompt_text'):
+                old_value = getattr(self, 'append_glossary_prompt', '<NOT SET>')
+                self.append_glossary_prompt = self._sep_from_display(self.append_prompt_text.toPlainText()).strip()
+                self.config['append_glossary_prompt'] = self.append_glossary_prompt
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] append_glossary_prompt: OLD='{old_value[:50]}...' NEW='{self.append_glossary_prompt[:50]}...' ({len(self.append_glossary_prompt)} chars)")
+                else:
+                    # Always print this one since it's the problematic field
+                    #print(f"Updated append_glossary_prompt from UI: '{self.append_glossary_prompt[:80]}...' ({len(self.append_glossary_prompt)} chars)")
+                    pass
+
+            if hasattr(self, 'single_pass_header_prompt_text'):
+                self.single_pass_glossary_header_prompt = self._sep_from_display(
+                    self.single_pass_header_prompt_text.toPlainText()
+                ).strip()
+                if not self.single_pass_glossary_header_prompt:
+                    self.single_pass_glossary_header_prompt = self._default_single_pass_header_prompt()
+                self.config['single_pass_glossary_header_prompt'] = self.single_pass_glossary_header_prompt
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] single_pass_glossary_header_prompt: {len(self.single_pass_glossary_header_prompt)} chars")
+            if hasattr(self, 'glossary_refinement_system_prompt_text'):
+                self.glossary_refinement_system_prompt = self._sep_from_display(
+                    self.glossary_refinement_system_prompt_text.toPlainText()
+                ).strip()
+                if not self.glossary_refinement_system_prompt:
+                    self.glossary_refinement_system_prompt = self._default_glossary_refinement_system_prompt()
+                self.config['glossary_refinement_system_prompt'] = self.glossary_refinement_system_prompt
+
+            if hasattr(self, 'glossary_refinement_user_prompt_text'):
+                self.glossary_refinement_user_prompt = self._sep_from_display(
+                    self.glossary_refinement_user_prompt_text.toPlainText()
+                ).strip()
+                self.config['glossary_refinement_user_prompt'] = self.glossary_refinement_user_prompt
+            
+        except Exception as e:
+            print(f"❌ Error updating glossary prompts: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _default_glossary_refinement_system_prompt(self):
+        return glossary_document.default_glossary_refinement_system_prompt()
+
+    def _default_glossary_refinement_user_prompt(self):
+        return glossary_document.default_glossary_refinement_user_prompt()
+
+    def _create_refinement_prompt_profile_controls(self, system_editor, user_editor):
+        """Prefill-style profiles storing a refinement system/user prompt pair."""
+        from copy import deepcopy
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        profiles_key = 'glossary_refinement_prompt_profiles'
+        default_key = 'glossary_refinement_prompt_profile_default'
+        active_key = 'active_glossary_refinement_prompt_profile'
+        system_key = 'glossary_refinement_system_prompt'
+        user_key = 'glossary_refinement_user_prompt'
+        keys = (profiles_key, default_key, active_key, system_key, user_key)
+
+        def read_pair():
+            return {'system': self._glossary_prompt_text(system_editor),
+                    'user': self._glossary_prompt_text(user_editor)}
+
+        def clean_pair(value, fallback):
+            if not isinstance(value, dict):
+                return dict(fallback)
+            return {key: str(value.get(key, fallback[key]) or '') for key in ('system', 'user')}
+
+        initial = read_pair()
+        raw_profiles = self.config.get(profiles_key, {})
+        profiles = {
+            name: clean_pair(pair, initial)
+            for name, pair in (raw_profiles.items() if isinstance(raw_profiles, dict) else ())
+            if isinstance(name, str) and name.strip() and name.strip().casefold() != 'default'
+            and isinstance(pair, dict)
+        }
+        default_pair = clean_pair(self.config.get(default_key), initial)
+        active = self.config.get(active_key, '')
+        if not isinstance(active, str) or active not in profiles:
+            active = ''
+
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 6)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("Refinement Profile:"))
+        combo = QComboBox()
+        combo.setObjectName("refinement_prompt_profile_combo")
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setCompleter(None)
+        combo.setMinimumWidth(220)
+        combo.setMaximumWidth(420)
+        combo.lineEdit().setPlaceholderText("Profile name")
+        combo.setToolTip(_wrapped_tooltip_html("Select a profile, or edit its name and save to rename it. Each profile stores both prompts."))
+        self._disable_combobox_mousewheel(combo)
+        self._add_combobox_arrow(combo)
+        combo.setStyleSheet(combo.styleSheet() + """
+            QComboBox { padding-right: 12px; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
+        layout.addWidget(combo)
+
+        def sync_config():
+            pair = read_pair()
+            self.config[profiles_key] = deepcopy(profiles)
+            self.config[default_key] = dict(default_pair)
+            self.config[active_key] = active
+            # Retain the runtime keys consumed by glossary_refinement.py.
+            self.glossary_refinement_system_prompt = pair['system'] or self._default_glossary_refinement_system_prompt()
+            self.glossary_refinement_user_prompt = pair['user']
+            self.config[system_key] = self.glossary_refinement_system_prompt
+            self.config[user_key] = self.glossary_refinement_user_prompt
+
+        def refresh():
+            blocked = combo.blockSignals(True)
+            try:
+                combo.clear()
+                combo.addItem("Default")
+                combo.addItems(list(profiles))
+                combo.setCurrentIndex(combo.findText(active or "Default"))
+                self._apply_halgakos_combo_icons(combo)
+            finally:
+                combo.blockSignals(blocked)
+
+        def set_pair(pair):
+            self._set_glossary_prompt_editor_text(system_editor, pair['system'])
+            self._set_glossary_prompt_editor_text(user_editor, pair['user'])
+
+        def stage():
+            nonlocal default_pair
+            if active in profiles:
+                profiles[active] = read_pair()
+            elif combo.currentText().strip().casefold() in ('', 'default'):
+                default_pair = read_pair()
+            sync_config()
+
+        def select(name=None):
+            nonlocal active
+            name = combo.currentText().strip() if name is None else name
+            if name.casefold() == 'default':
+                active = ''
+            elif name in profiles:
+                active = name
+            else:
+                return
+            refresh()
+            set_pair(profiles[active] if active else default_pair)
+            sync_config()
+
+        def snapshot():
+            return (deepcopy(profiles), dict(default_pair), active, read_pair(), combo.currentText(),
+                    {key: (key in self.config, deepcopy(self.config.get(key))) for key in keys})
+
+        def persist(before):
+            nonlocal profiles, default_pair, active
+            sync_config()
+            if self._persist_glossary_prompt_profiles() is not False:
+                return True
+            profiles, default_pair, active, pair, name, saved_config = before
+            refresh()
+            set_pair(pair)
+            combo.setEditText(name)
+            sync_config()
+            for key, (present, value) in saved_config.items():
+                if present:
+                    self.config[key] = value
+                else:
+                    self.config.pop(key, None)
+            QMessageBox.warning(row, "Save Failed", "Could not save the refinement prompt profiles. Please try again.")
+            return False
+
+        def new_profile():
+            nonlocal active
+            before = snapshot()
+            number = 1
+            while f"New Profile #{number}" in profiles:
+                number += 1
+            active = f"New Profile #{number}"
+            profiles[active] = {'system': '', 'user': ''}
+            refresh()
+            set_pair(profiles[active])
+            if persist(before) and hasattr(self, 'append_log'):
+                self.append_log(f"✅ Created refinement prompt profile: '{active}'")
+
+        def save_profile():
+            nonlocal profiles, default_pair, active
+            name = combo.currentText().strip()
+            if not name:
+                QMessageBox.warning(row, "Profile Name Required", "Enter a profile name before saving.")
+                return
+            if name.casefold() == 'default' and active:
+                QMessageBox.warning(row, "Default Profile", "Default is reserved. Choose another profile name.")
+                return
+            if name in profiles and name != active:
+                QMessageBox.warning(row, "Profile Name Exists", "A profile with this name already exists. Choose another name.")
+                return
+            before = snapshot()
+            pair = read_pair()
+            if name.casefold() == 'default':
+                default_pair = pair
+                active = ''
+            else:
+                if active in profiles and name != active:
+                    profiles = {(name if key == active else key): (pair if key == active else value)
+                                for key, value in profiles.items()}
+                else:
+                    profiles[name] = pair
+                active = name
+            refresh()
+            if persist(before) and hasattr(self, 'append_log'):
+                self.append_log(f"✅ Saved refinement prompt profile: '{active or 'Default'}'")
+
+        def delete_profile():
+            nonlocal active
+            name = combo.currentText().strip()
+            if name.casefold() == 'default':
+                QMessageBox.warning(row, "Default Profile", "The Default refinement prompt profile cannot be deleted.")
+                return
+            if name not in profiles:
+                QMessageBox.warning(row, "Profile Not Found", "Select an existing profile to delete.")
+                return
+            confirmation = QMessageBox(row)
+            confirmation.setWindowTitle("Delete Profile")
+            confirmation.setIcon(QMessageBox.Question)
+            confirmation.setText(f"Delete refinement prompt profile '{name}'?")
+            confirmation.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            button_box = confirmation.findChild(QDialogButtonBox)
+            if button_box is not None:
+                button_box.setCenterButtons(True)
+                button_box.layout().setSpacing(12)
+                for button in button_box.buttons():
+                    button.setMinimumWidth(button.sizeHint().width() + 12)
+            if confirmation.exec() != QMessageBox.Yes:
+                return
+            before = snapshot()
+            del profiles[name]
+            active = next(iter(profiles), '')
+            select(active or 'Default')
+            if persist(before) and hasattr(self, 'append_log'):
+                self.append_log(f"🗑️ Deleted refinement prompt profile: '{name}'")
+
+        actions = (
+            ("+ New Profile", new_profile, None, '#2d5a2d', '#3a7a3a', '#3a7a3a', '#4a9a4a', '#1e3e1e'),
+            ("💾 Save Profile", save_profile, 120, '#2f5f8f', '#4a78a8', '#3f78ad', '#5a91c8', '#244766'),
+            ("🗑 Delete Profile", delete_profile, 128, '#6f2f2f', '#944545', '#8a3a3a', '#b65252', '#512424'),
+        )
+        for label, callback, width, background, border, hover, hover_border, pressed in actions:
+            button = QPushButton(label)
+            button.setAutoDefault(False)
+            button.setFixedHeight(28)
+            if width is not None:
+                button.setFixedWidth(width)
+            button.setStyleSheet(f"""
+                QPushButton {{ background-color: {background}; color: #ffffff;
+                    font-size: 11px; font-weight: bold; border: 1px solid {border};
+                    border-radius: 4px; padding: 0px 8px; }}
+                QPushButton:hover {{ background-color: {hover}; border-color: {hover_border}; }}
+                QPushButton:pressed {{ background-color: {pressed}; }}
+            """)
+            button.clicked.connect(lambda _checked=False, action=callback: action())
+            layout.addWidget(button)
+        layout.addStretch()
+
+        select(active or 'Default')
+        combo.currentIndexChanged.connect(lambda index: select(combo.itemText(index)))
+        combo.activated.connect(lambda index: select(combo.itemText(index)))
+        combo.lineEdit().returnPressed.connect(select)
+        def select_clicked(index):
+            if (index.isValid() and QApplication.mouseButtons() & Qt.LeftButton
+                    and index.flags() & Qt.ItemIsEnabled and index.flags() & Qt.ItemIsSelectable):
+                combo.hidePopup()
+                select(combo.itemText(index.row()))
+        combo.view().pressed.connect(select_clicked)
+        system_editor.textChanged.connect(stage)
+        user_editor.textChanged.connect(stage)
+        return row
+
+    def _default_single_pass_header_prompt(self):
+        return """You have two tasks for this request.
+
+1. Extract a translation glossary from the source text according to the glossary instructions.
+2. Translate the source text using the generated glossary and the translation instructions.
+
+Rules:
+- Output the generated glossary first inside <glossary>...</glossary> tags.
+- Inside <glossary>, follow the glossary prompt's requested schema, fields, and formatting exactly.
+- Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.
+- After </glossary>, output only the translated content.
+- The translation must use the generated glossary consistently while still following the active translation prompt.
+- A response that contains only the glossary is invalid; the full translation after </glossary> is mandatory.
+- Do not explain the process, mention these tasks, or add notes outside the required glossary block and translation.
+
+[Glossary Prompt]
+{glossary_prompt}
+
+[Translation Prompt]
+{translation_prompt}
+
+[Final Single-Pass Override]
+The final answer must contain exactly:
+1. One <glossary>...</glossary> block.
+2. The complete translated source text immediately after </glossary>.
+Do not stop after the glossary."""
+
+    def _load_additional_glossary(self):
+        """Load an additional glossary file (CSV/TXT/JSON/PDF) to append to auto-generated glossary"""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        
+        # Open file dialog to select glossary file
+        file_path, _ = QFileDialog.getOpenFileName(
+            None,
+            "Select Additional Glossary File",
+            "",
+            "Glossary Files (*.csv *.txt *.json *.pdf *.md);;CSV Files (*.csv);;Text Files (*.txt);;JSON Files (*.json);;PDF Files (*.pdf);;Markdown Files (*.md);;All Files (*.*)"
+        )
+        
+        if not file_path:
+            return  # User cancelled
+        
+        # Validate file exists
+        if not os.path.exists(file_path):
+            QMessageBox.warning(self, "File Not Found", f"Selected file does not exist:\n{file_path}")
+            return
+        
+        # Load and validate the file content
+        try:
+            file_ext = os.path.splitext(file_path)[1].lower()
+            content_preview = ""
+            
+            if file_ext == '.csv':
+                # Read CSV and validate format
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    if lines:
+                        content_preview = f"CSV file with {len(lines)} lines\nFirst line: {lines[0][:100]}"
+            
+            elif file_ext == '.txt':
+                # Read text file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    content_preview = f"Text file ({len(content)} chars)\nFirst 100 chars: {content[:100]}"
+            
+            elif file_ext == '.md':
+                # Read markdown file (treat same as text)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    content_preview = f"Markdown file ({len(content)} chars)\nFirst 100 chars: {content[:100]}"
+            
+            elif file_ext == '.json':
+                # Read and validate JSON
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    content_preview = f"JSON file with {len(data)} entries" if isinstance(data, (list, dict)) else "JSON file"
+            
+            elif file_ext == '.pdf':
+                # Just validate PDF exists (parsing will happen during glossary generation)
+                file_size = os.path.getsize(file_path)
+                content_preview = f"PDF file ({file_size} bytes)"
+            
+            else:
+                QMessageBox.warning(self, "Unsupported Format", f"Unsupported file format: {file_ext}\nSupported formats: .csv, .txt, .json, .pdf, .md")
+                return
+            
+            # Save to config
+            self.config['additional_glossary_path'] = file_path
+            self.config['add_additional_glossary'] = True  # Auto-enable the checkbox
+            self.save_config()
+            
+            # Update checkbox if it exists
+            if hasattr(self, 'add_additional_glossary_checkbox'):
+                self.add_additional_glossary_checkbox.setChecked(True)
+            
+            # Update label if it exists
+            if hasattr(self, 'additional_glossary_label'):
+                self.additional_glossary_label.setText(f"(Current: {os.path.basename(file_path)})")
+            
+            # Animate the button to show success (no modal dialog)
+            btn = getattr(self, '_load_additional_glossary_btn', None)
+            if btn:
+                from PySide6.QtCore import QTimer
+                original_text = btn.text()
+                original_style = btn.styleSheet()
+                btn.setText("✅ Loaded!")
+                btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; border-radius: 3px; font-weight: bold; }")
+                btn.setEnabled(False)
+                def _restore_btn():
+                    try:
+                        btn.setText(original_text)
+                        btn.setStyleSheet(original_style)
+                        btn.setEnabled(True)
+                    except Exception:
+                        pass
+                QTimer.singleShot(2000, _restore_btn)
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading File",
+                f"Failed to load additional glossary:\n\n{str(e)}"
+            )
+            import traceback
+            traceback.print_exc()
+            
+    def _setup_auto_glossary_tab(self, parent):
+        """Setup automatic glossary tab with fully configurable prompts"""
+        # Create main layout for parent
+        auto_layout = QVBoxLayout(parent)
+        auto_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Include all characters toggle (Dynamic Max Limit)
+        # MOVED to row 3 next to max sentences entry for better context
+        # include_chars_widget = QWidget()
+        # include_chars_layout = QHBoxLayout(include_chars_widget)
+        # include_chars_layout.setContentsMargins(0, 0, 0, 15)
+        # auto_layout.addWidget(include_chars_widget)
+        
+        # if not hasattr(self, 'include_all_characters_checkbox'):
+        #     self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit: Include All Characters")
+        #     self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
+        #     self.include_all_characters_checkbox.setToolTip("Dynamically increases the Max Sentences limit to ensure every detected character name is included in the context, even if it exceeds the fixed limit.")
+        # include_chars_layout.addWidget(self.include_all_characters_checkbox)
+        
+        # label_chars = QLabel("(Dynamically increases sentence limit to cover ALL character names)")
+        # include_chars_layout.addWidget(label_chars)
+        # include_chars_layout.addStretch()
+        
+        # Include gender context toggle (below compress glossary)
+        gender_context_widget = QWidget()
+        gender_context_layout = QHBoxLayout(gender_context_widget)
+        gender_context_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(gender_context_widget)
+        
+        if not hasattr(self, 'include_gender_context_checkbox'):
+            self.include_gender_context_checkbox = self._create_styled_checkbox("Include Gender Context (More Expensive)")
+            self.include_gender_context_checkbox.setChecked(self.config.get('include_gender_context', False))
+        self.include_gender_context_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Expand snippets with surrounding sentences to infer gender.\n"
+            "Higher cost; required to enable gender nuance/description options."
+        ))
+        gender_context_layout.addWidget(self.include_gender_context_checkbox)
+        
+        label4 = QLabel("(Expands text snippets to include surrounding sentences for better gender detection)")
+        gender_context_layout.addWidget(label4)
+        gender_context_layout.addStretch()
+        # Gender nuance analysis toggle (depends on gender context)
+        gender_nuance_widget = QWidget()
+        gender_nuance_layout = QHBoxLayout(gender_nuance_widget)
+        gender_nuance_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(gender_nuance_widget)
+
+        if not hasattr(self, 'enable_gender_nuance_checkbox'):
+            self.enable_gender_nuance_checkbox = self._create_styled_checkbox("Enable Gender Nuance Analysis")
+            self.enable_gender_nuance_checkbox.setChecked(self.config.get('enable_gender_nuance', True))
+        self.enable_gender_nuance_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Adds a pronoun/honorific-aware scoring pass to prioritize\n"
+            "sentences that reveal gender. Slightly higher CPU/time cost."
+        ))
+        gender_nuance_layout.addWidget(self.enable_gender_nuance_checkbox)
+
+        gender_nuance_label = QLabel("(Prioritizes pronoun/honorific cues to improve gender assignment; adds a scoring pass)")
+        gender_nuance_layout.addWidget(gender_nuance_label)
+        gender_nuance_layout.addStretch()
+
+        # Include description column toggle (below gender context)
+        description_widget = QWidget()
+        description_layout = QHBoxLayout(description_widget)
+        description_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(description_widget)
+        
+        if not hasattr(self, 'include_description_checkbox'):
+            self.include_description_checkbox = self._create_styled_checkbox("Include Description Column")
+            self.include_description_checkbox.setChecked(self.config.get('include_description', False))
+        self.include_description_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Add a description/context field to each glossary entry.\n"
+            "Only available when gender context is enabled."
+        ))
+        description_layout.addWidget(self.include_description_checkbox)
+        
+        label5 = QLabel("(Adds a description/context field for each glossary entry)")
+        description_layout.addWidget(label5)
+        description_layout.addStretch()
+        
+        # Function to update description checkbox state based on gender context
+        def update_description_state():
+            gender_enabled = self.include_gender_context_checkbox.isChecked()
+            self.include_description_checkbox.setEnabled(gender_enabled)
+            label5.setEnabled(gender_enabled)
+            self.enable_gender_nuance_checkbox.setEnabled(gender_enabled)
+            gender_nuance_label.setEnabled(gender_enabled)
+        
+        # Connect gender context checkbox to update description state
+        self.include_gender_context_checkbox.stateChanged.connect(update_description_state)
+        # Initialize state
+        update_description_state()
+        
+        # Disable smart filtering toggle (below description)
+        disable_filtering_widget = QWidget()
+        disable_filtering_layout = QHBoxLayout(disable_filtering_widget)
+        disable_filtering_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(disable_filtering_widget)
+        
+        if not hasattr(self, 'disable_smart_filtering_checkbox'):
+            self.disable_smart_filtering_checkbox = self._create_styled_checkbox("Disable Smart Filtering (Send Full Text)")
+            # Invert the logic: checkbox is "disable" so checked=True means use_smart_filter=False
+            self.disable_smart_filtering_checkbox.setChecked(not self.config.get('glossary_use_smart_filter', True))
+        self.disable_smart_filtering_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Bypass all text filtering and send the entire novel to the extractor.\n"
+            "Extremely expensive; use only for debugging edge cases."
+        ))
+        disable_filtering_layout.addWidget(self.disable_smart_filtering_checkbox)
+        
+        label6 = QLabel("(Disables all text filtering and sends the entire novel to the API - very expensive!)")
+        disable_filtering_layout.addWidget(label6)
+        disable_filtering_layout.addStretch()
+        
+        # Create notebook for tabs
+        notebook = QTabWidget()
+        # Prevent wheel from switching tabs, but allow wheel scrolling inside sections
+        class NoWheelTabBar(QTabBar):
+            def wheelEvent(self, event):
+                event.ignore()
+        notebook.setTabBar(NoWheelTabBar())
+        auto_layout.addWidget(notebook)
+        
+        # Add stretch to eliminate the massive empty space
+        auto_layout.addStretch(1)
+        
+        # Tab 1: Extraction Settings
+        extraction_tab = QWidget()
+        extraction_tab_layout = QVBoxLayout(extraction_tab)
+        extraction_tab_layout.setContentsMargins(10, 10, 10, 10)
+        notebook.addTab(extraction_tab, "Extraction Settings")
+        
+        # Extraction settings
+        settings_label_frame = QGroupBox("Minimal Extraction Settings")
+        settings_label_layout = QVBoxLayout(settings_label_frame)
+        settings_label_layout.setContentsMargins(6, 6, 6, 6)
+        extraction_tab_layout.addWidget(settings_label_frame)
+        
+        extraction_grid = QGridLayout()
+        # Tighten spacing between labels and controls inside Targeted Extraction Settings
+        extraction_grid.setContentsMargins(2, 4, 6, 6)
+        extraction_grid.setHorizontalSpacing(8)
+        extraction_grid.setVerticalSpacing(6)
+        # Set column stretch factors to minimize gap between left and right columns
+        extraction_grid.setColumnStretch(0, 0)
+        extraction_grid.setColumnStretch(1, 1)
+        extraction_grid.setColumnStretch(2, 0)
+        extraction_grid.setColumnStretch(3, 1)
+        settings_label_layout.addLayout(extraction_grid)
+        
+        # Initialize entry widgets with config values
+        if not hasattr(self, 'glossary_min_frequency_entry'):
+            self.glossary_min_frequency_entry = QLineEdit()
+            self.glossary_min_frequency_entry.setFixedWidth(80)
+        self.glossary_min_frequency_entry.setText(str(self.config.get('glossary_min_frequency', 2)))
+        
+        if not hasattr(self, 'glossary_max_names_entry'):
+            self.glossary_max_names_entry = QLineEdit()
+            self.glossary_max_names_entry.setFixedWidth(80)
+        self.glossary_max_names_entry.setText(str(self.config.get('glossary_max_names', 100)))
+        
+        if not hasattr(self, 'glossary_max_titles_entry'):
+            self.glossary_max_titles_entry = QLineEdit()
+            self.glossary_max_titles_entry.setFixedWidth(80)
+        self.glossary_max_titles_entry.setText(str(self.config.get('glossary_max_titles', 50)))
+        
+        if not hasattr(self, 'glossary_context_window_entry'):
+            self.glossary_context_window_entry = QLineEdit()
+            self.glossary_context_window_entry.setFixedWidth(80)
+        self.glossary_context_window_entry.setText(str(self.config.get('glossary_context_window', 2)))
+        
+        if not hasattr(self, 'glossary_max_text_size_entry'):
+            self.glossary_max_text_size_entry = QLineEdit()
+            self.glossary_max_text_size_entry.setFixedWidth(80)
+        self.glossary_max_text_size_entry.setText(str(self.config.get('glossary_max_text_size', 0)))
+        
+        if not hasattr(self, 'glossary_chapter_split_threshold_entry'):
+            self.glossary_chapter_split_threshold_entry = QLineEdit()
+            self.glossary_chapter_split_threshold_entry.setFixedWidth(80)
+        self.glossary_chapter_split_threshold_entry.setText(str(self.config.get('glossary_chapter_split_threshold', 0)))
+        
+        if not hasattr(self, 'glossary_max_sentences_entry'):
+            self.glossary_max_sentences_entry = QLineEdit()
+            self.glossary_max_sentences_entry.setFixedWidth(80)
+        self.glossary_max_sentences_entry.setText(str(self.config.get('glossary_max_sentences', 200)))
+        
+        # Helper: compact label+field pair in one cell
+        def _pair(label_text, field_widget, label_width=180, tooltip=None):
+            cont = QWidget()
+            h = QHBoxLayout(cont)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(label_width)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if tooltip:
+                lbl.setToolTip(_wrapped_tooltip_html(tooltip))
+            h.addWidget(lbl)
+            h.addWidget(field_widget)
+            h.addStretch()
+            return cont
+        
+        # Row 1 (left/right pairs)
+        extraction_grid.addWidget(_pair(
+            "Min frequency:", self.glossary_min_frequency_entry,
+            tooltip="Times a name must appear before keeping it.\nLower = more terms; affects dynamic sentence limit."
+        ), 0, 0, 1, 2)
+        extraction_grid.addWidget(_pair(
+            "Max names:", self.glossary_max_names_entry,
+            tooltip="Prompt suggestion for how many character names to keep per chunk."
+        ), 0, 2, 1, 2)
+        
+        # Row 2
+        extraction_grid.addWidget(_pair(
+            "Max titles:", self.glossary_max_titles_entry,
+            tooltip="Prompt suggestion for how many titles/terms to keep per chunk."
+        ), 1, 0, 1, 2)
+        extraction_grid.addWidget(_pair(
+            "Context window size:", self.glossary_context_window_entry,
+            tooltip="Sentences before/after a hit used for gender detection (default: 2)."
+        ), 1, 2, 1, 2)
+        
+        # Row 3 - Max text size and target language
+        extraction_grid.addWidget(_pair(
+            "Max text size:", self.glossary_max_text_size_entry,
+            tooltip="Characters to analyze (0 = entire text, 50000 = first 50k chars)."
+        ), 2, 0, 1, 2)
+        
+        # Target language dropdown
+        if not hasattr(self, 'glossary_target_language_combo'):
+            self.glossary_target_language_combo = QComboBox()
+            self.glossary_target_language_combo.setMaximumWidth(120)
+            self.glossary_target_language_combo.setEditable(True)
+            self.glossary_target_language_combo.addItems(list(TARGET_LANGUAGES))
+            
+            # Lock mousewheel scrolling on target language dropdown
+            self._disable_combobox_mousewheel(self.glossary_target_language_combo)
+            
+            # Use icon in dropdown arrow like duplicate algorithm dropdown
+            try:
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if os.path.exists(icon_path):
+                    combo_style = """
+                        QComboBox {
+                            padding-right: 28px;
+                        }
+                        QComboBox::drop-down {
+                            subcontrol-origin: padding;
+                            subcontrol-position: top right;
+                            width: 24px;
+                            border-left: 1px solid #4a5568;
+                        }
+                        QComboBox::down-arrow {
+                            width: 16px;
+                            height: 16px;
+                            image: url(""" + icon_path.replace('\\', '/') + """);
+                        }
+                        QComboBox::down-arrow:on {
+                            top: 1px;
+                        }
+                    """
+                    self.glossary_target_language_combo.setStyleSheet(combo_style)
+            except Exception:
+                pass
+        
+        saved_language = self.config.get('glossary_target_language', self.config.get('output_language', 'English'))
+        index = self.glossary_target_language_combo.findText(saved_language)
+        if index >= 0:
+            self.glossary_target_language_combo.setCurrentIndex(index)
+        else:
+            self.glossary_target_language_combo.setCurrentText(saved_language)
+        
+        # Sync with manual glossary language dropdown and main GUI
+        def sync_auto_to_manual(text):
+            # Sync with manual glossary dropdown
+            if hasattr(self, 'manual_target_language_combo'):
+                manual_index = self.manual_target_language_combo.findText(text)
+                if manual_index >= 0:
+                    self.manual_target_language_combo.blockSignals(True)
+                    self.manual_target_language_combo.setCurrentIndex(manual_index)
+                    self.manual_target_language_combo.blockSignals(False)
+            
+            # Sync with main GUI dropdown
+            if hasattr(self, 'target_lang_combo'):
+                main_index = self.target_lang_combo.findText(text)
+                if main_index >= 0:
+                    self.target_lang_combo.blockSignals(True)
+                    self.target_lang_combo.setCurrentIndex(main_index)
+                    self.target_lang_combo.blockSignals(False)
+                else:
+                    self.target_lang_combo.blockSignals(True)
+                    self.target_lang_combo.setCurrentText(text)
+                    self.target_lang_combo.blockSignals(False)
+            
+            # Update configs
+            self.config['glossary_target_language'] = text
+            self.config['output_language'] = text
+            os.environ['OUTPUT_LANGUAGE'] = text
+        
+        self.glossary_target_language_combo.currentTextChanged.connect(sync_auto_to_manual)
+        
+        # Add tooltip explaining prompt placeholder + sync behavior
+        target_lang_label = QLabel("Target language:")
+        target_lang_label.setToolTip(_wrapped_tooltip_html("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns."))
+        target_lang_pair = _pair("", self.glossary_target_language_combo)
+        # swap label inside helper
+        target_lang_pair.layout().itemAt(0).widget().setText("Target language:")
+        target_lang_pair.layout().itemAt(0).widget().setToolTip(_wrapped_tooltip_html("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns."))
+        extraction_grid.addWidget(target_lang_pair, 2, 2, 1, 2)
+        
+        # Row 4 - Max sentences and chapter split threshold
+        # Max sentences for glossary (with inline hint)
+        ms_cont = QWidget()
+        ms_layout = QHBoxLayout(ms_cont)
+        ms_layout.setContentsMargins(0, 0, 0, 0)
+        ms_layout.setSpacing(6)
+        ms_label = QLabel("Max sentences:")
+        ms_label.setFixedWidth(180)
+        ms_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        ms_label.setToolTip(_wrapped_tooltip_html(
+            "Maximum sentences sent to AI.\nDynamic Limit adds +1 per detected character before dedup."
+        ))
+        ms_layout.addWidget(ms_label)
+        ms_layout.addWidget(self.glossary_max_sentences_entry)
+        
+        # Include All Characters toggle (dynamic limit)
+        if not hasattr(self, 'include_all_characters_checkbox'):
+            self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit Expansion")
+            self.include_all_characters_checkbox.setToolTip(_wrapped_tooltip_html(
+                "Dynamic Limit Expansion:\n"
+                "- Adds one sentence per detected character on top of 'Max sentences'.\n"
+                "- After selection, duplicate sentences are removed, so both the bonus and the base cap can shrink.\n"
+                "- Example: requesting 200 + 700 bonus may dedupe down to ~120 total."
+            ))
+            self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
+        ms_layout.addWidget(self.include_all_characters_checkbox)
+        
+        hint = QLabel("(Limit for AI processing)")
+        hint.setStyleSheet("color: gray;")
+        ms_layout.addWidget(hint)
+        ms_layout.addStretch()
+        extraction_grid.addWidget(ms_cont, 3, 0, 1, 2)
+        
+        extraction_grid.addWidget(_pair(
+            "Chapter split threshold:", self.glossary_chapter_split_threshold_entry,
+            tooltip="Split large texts into chunks (0 = token-based; 100000 = split at 100k chars)."
+        ), 3, 2, 1, 2)
+        
+        # Row 5 - Filter mode
+        filter_label = QLabel("Filter mode:")
+        filter_label.setToolTip(_wrapped_tooltip_html(
+            "Choose which names/terms to keep:\n"
+            "- All names & terms\n"
+            "- Names with honorifics only\n"
+            "- Names without honorifics & terms"
+        ))
+        extraction_grid.addWidget(filter_label, 4, 0)
+        filter_widget = QWidget()
+        filter_layout = QHBoxLayout(filter_widget)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(8)
+        extraction_grid.addWidget(filter_widget, 4, 1, 1, 3)
+        
+        if not hasattr(self, 'glossary_filter_mode_buttons'):
+            self.glossary_filter_mode_buttons = {}
+            filter_mode_value = self.config.get('glossary_filter_mode', 'all')
+            
+        radio1 = QRadioButton("All names & terms")
+        radio1.setChecked(self.config.get('glossary_filter_mode', 'all') == 'all')
+        self.glossary_filter_mode_buttons['all'] = radio1
+        filter_layout.addWidget(radio1)
+        
+        radio2 = QRadioButton("Names with honorifics only")
+        radio2.setChecked(self.config.get('glossary_filter_mode', 'all') == 'only_with_honorifics')
+        self.glossary_filter_mode_buttons['only_with_honorifics'] = radio2
+        filter_layout.addWidget(radio2)
+        
+        radio3 = QRadioButton("Names without honorifics & terms")
+        radio3.setChecked(self.config.get('glossary_filter_mode', 'all') == 'only_without_honorifics')
+        self.glossary_filter_mode_buttons['only_without_honorifics'] = radio3
+        filter_layout.addWidget(radio3)
+        filter_layout.addStretch()
+
+        # Row 6 - Strip honorifics
+        strip_label = QLabel("Strip honorifics:")
+        strip_label.setToolTip(_wrapped_tooltip_html("Remove suffixes from extracted names (e.g., '-nim', '-san')."))
+        extraction_grid.addWidget(strip_label, 5, 0)
+        if not hasattr(self, 'strip_honorifics_checkbox'):
+            self.strip_honorifics_checkbox = self._create_styled_checkbox("Remove honorifics from extracted names")
+        self.strip_honorifics_checkbox.setToolTip(_wrapped_tooltip_html("Remove suffixes from extracted names (e.g., '-nim', '-san')."))
+        # Always reload from config
+        self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
+        extraction_grid.addWidget(self.strip_honorifics_checkbox, 5, 1, 1, 3)
+        
+        # Row 7 - Fuzzy matching threshold (reuse existing value)
+        fuzzy_label = QLabel("Fuzzy threshold:")
+        fuzzy_label.setToolTip(_wrapped_tooltip_html("Similarity needed to merge duplicates.\n0.90 = very similar (recommended); 1.0 = exact match."))
+        extraction_grid.addWidget(fuzzy_label, 6, 0)
+        
+        auto_fuzzy_widget = QWidget()
+        auto_fuzzy_layout = QHBoxLayout(auto_fuzzy_widget)
+        auto_fuzzy_layout.setContentsMargins(0, 0, 0, 0)
+        auto_fuzzy_layout.setSpacing(8)
+        extraction_grid.addWidget(auto_fuzzy_widget, 6, 1, 1, 3)
+        
+        # Always reload fuzzy threshold value from config
+        try:
+            self.fuzzy_threshold_value = float(self.config.get('glossary_fuzzy_threshold', 0.90))
+        except Exception:
+            self.fuzzy_threshold_value = 0.90
+        
+        # Create slider and expose on self for save handler
+        self.fuzzy_threshold_slider = QSlider(Qt.Horizontal)
+        self.fuzzy_threshold_slider.setMinimum(50)
+        self.fuzzy_threshold_slider.setMaximum(100)
+        self.fuzzy_threshold_slider.setValue(int(self.fuzzy_threshold_value * 100))
+        self.fuzzy_threshold_slider.setMinimumWidth(250)
+        self._disable_slider_mousewheel(self.fuzzy_threshold_slider)  # Disable mouse wheel
+        auto_fuzzy_layout.addWidget(self.fuzzy_threshold_slider)
+        
+        self.auto_fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
+        auto_fuzzy_layout.addWidget(self.auto_fuzzy_value_label)
+        
+        self.auto_fuzzy_desc_label = QLabel("")
+        self.auto_fuzzy_desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        auto_fuzzy_layout.addWidget(self.auto_fuzzy_desc_label)
+        auto_fuzzy_layout.addStretch()
+        
+        # Update function for auto fuzzy slider
+        def update_auto_fuzzy_label(value):
+            float_value = value / 100.0
+            self.fuzzy_threshold_value = float_value
+            self.auto_fuzzy_value_label.setText(f"{float_value:.2f}")
+            
+            if float_value >= 0.95:
+                desc = "Exact match only (strict)"
+            elif float_value >= 0.85:
+                desc = "Very similar names (recommended)"
+            elif float_value >= 0.75:
+                desc = "Moderately similar names"
+            elif float_value >= 0.65:
+                desc = "Loosely similar names"
+            else:
+                desc = "Very loose matching (may over-merge)"
+            
+            self.auto_fuzzy_desc_label.setText(desc)
+            
+            # Sync with manual glossary slider and labels if they exist
+            if hasattr(self, 'manual_fuzzy_slider'):
+                self.manual_fuzzy_slider.blockSignals(True)
+                self.manual_fuzzy_slider.setValue(value)
+                self.manual_fuzzy_slider.blockSignals(False)
+                
+                # Update manual labels directly without triggering signals
+                if hasattr(self, 'manual_fuzzy_value_label') and hasattr(self, 'manual_fuzzy_desc_label'):
+                    self.manual_fuzzy_value_label.setText(f"{float_value:.2f}")
+                    self.manual_fuzzy_desc_label.setText(desc)
+        
+        # Store update function for cross-tab syncing
+        self.update_auto_fuzzy_label_func = update_auto_fuzzy_label
+        
+        self.fuzzy_threshold_slider.valueChanged.connect(update_auto_fuzzy_label)
+        update_auto_fuzzy_label(self.fuzzy_threshold_slider.value())
+        
+        # Row 8 - Reset to Defaults button
+        reset_extraction_btn = QPushButton("Reset to Defaults")
+        reset_extraction_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px 10px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        
+        def reset_extraction_settings():
+            reply = QMessageBox.question(parent, "Reset Settings", 
+                                         "Reset all extraction settings to defaults?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                # Reset all fields to defaults
+                self.glossary_min_frequency_entry.setText("2")
+                self.glossary_max_names_entry.setText("100")
+                self.glossary_max_titles_entry.setText("50")
+                self.glossary_context_window_entry.setText("2")
+                self.glossary_max_text_size_entry.setText("0")
+                self.glossary_chapter_split_threshold_entry.setText("0")
+                self.glossary_max_sentences_entry.setText("200")
+                self.glossary_target_language_combo.setCurrentText("English")
+                if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
+                    self.glossary_enable_chapter_split_checkbox.setChecked(False)
+                
+                # Reset filter mode to 'all'
+                if 'all' in self.glossary_filter_mode_buttons:
+                    self.glossary_filter_mode_buttons['all'].setChecked(True)
+                
+                # Reset strip honorifics to True
+                if hasattr(self, 'strip_honorifics_checkbox'):
+                    self.strip_honorifics_checkbox.setChecked(True)
+                
+                # Reset fuzzy threshold to 0.90
+                if hasattr(self, 'fuzzy_threshold_slider'):
+                    self.fuzzy_threshold_slider.setValue(90)
+        
+        reset_extraction_btn.clicked.connect(reset_extraction_settings)
+        extraction_grid.addWidget(reset_extraction_btn, 7, 0, 1, 2)
+        
+        # Row 8 - Anti Duplicate Parameters button (glossary-specific)
+        anti_dup_btn = QPushButton("Anti Duplicate Parameters")
+        anti_dup_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b6cb0;
+                color: white;
+                padding: 5px 10px;
+                border: 1px solid #1e4e8c;
+                border-radius: 4px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #255f9a; }
+            QPushButton:pressed { background-color: #1f5286; }
+        """)
+        anti_dup_btn.setToolTip(_wrapped_tooltip_html("Configure anti-duplicate parameters for glossary generation only."))
+        anti_dup_btn.clicked.connect(lambda: self._open_glossary_anti_duplicate_dialog(parent))
+        extraction_grid.addWidget(anti_dup_btn, 7, 2, 1, 2)
+        
+        # Help text
+        help_widget = QWidget()
+        help_layout = QVBoxLayout(help_widget)
+        help_layout.setContentsMargins(10, 10, 0, 0)
+        
+        # Make the Settings Guide taller by default, but add a scrollbar if it still clips
+        help_scroll = QScrollArea()
+        help_scroll.setWidgetResizable(True)
+        help_scroll.setFrameShape(QFrame.NoFrame)
+        help_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        help_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        help_scroll.setWidget(help_widget)
+        
+        try:
+            guide_h = int(self._screen.height() * 0.30)
+            guide_h = max(200, min(320, guide_h))
+            help_scroll.setMinimumHeight(guide_h)
+        except Exception:
+            help_scroll.setMinimumHeight(240)
+        help_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        
+        extraction_tab_layout.addWidget(help_scroll)
+        
+        help_title = QLabel("💡 Settings Guide:")
+        help_title.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        help_layout.addWidget(help_title)
+        
+        help_texts = [
+            "• Min frequency: How many times a name must appear (lower = more terms). Affects dynamic sentence limit.",
+            "• Max names/titles: AI Prompt placeholder only (limits are suggestions)",
+            "• Context window size: Number of sentences before/after for gender detection (default: 2)",
+            "• Max text size: Characters to analyze (0 = entire text, 50000 = first 50k chars)",
+            "• Chapter split: Split large texts into chunks (0 = Token based splitting, 100000 = split at 100k chars)",
+            "• Max sentences: Maximum sentences to send to AI. With Dynamic Limit on, base + character bonus is applied then deduped; duplicates can shrink both caps.",
+            "• Dynamic Limit Expansion: Adds one sentence per detected character before the cap; post-selection dedup drops overlapping sentences so final total may be lower than requested.",
+            "• Filter mode:",
+            "  - All names & terms: Extract character names (with/without honorifics) + titles/terms",
+            "  - Names with honorifics only: ONLY character names with honorifics (no titles/terms)",
+            "  - Names without honorifics & terms: Character names without honorifics + titles/terms",
+            "• Strip honorifics: Remove suffixes from extracted names (e.g., '김' instead of '김님')",
+            "• Fuzzy threshold: How similar terms must be to match (0.9 = 90% match, 1.0 = exact match)"
+        ]
+        help_wrap_width = int(self._screen.width() * 0.55)  # keep help text from forcing huge width
+        for txt in help_texts:
+            label = QLabel(txt)
+            label.setWordWrap(True)
+            label.setMaximumWidth(help_wrap_width)
+            label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
+            help_layout.addWidget(label)
+        
+        # Tab 2: Glossary Prompt (unified system + extraction)
+        glossary_prompt_tab = QWidget()
+        glossary_prompt_tab_layout = QVBoxLayout(glossary_prompt_tab)
+        glossary_prompt_tab_layout.setContentsMargins(10, 10, 10, 10)
+        notebook.addTab(glossary_prompt_tab, "Minimal Glossary Prompt")
+        
+        # Unified glossary prompt section
+        glossary_prompt_frame = QGroupBox("Minimal Glossary Extraction Prompt")
+        glossary_prompt_frame_layout = QVBoxLayout(glossary_prompt_frame)
+        glossary_prompt_tab_layout.addWidget(glossary_prompt_frame)
+        
+        desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
+        glossary_prompt_frame_layout.addWidget(desc_label)
+        
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker}, {description_example}, {example}, {description_name_split_example}, {name_split_example}, {gender_instruction}, {subject_tracking_instruction},  Separator: \\x1F")
+        placeholder_line.setReadOnly(True)
+        placeholder_line.setFrame(False)
+        placeholder_line.setCursorPosition(0)
+        placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+        placeholder_line.setToolTip(
+            "<qt><table width='600' style='font-size:9pt; border-collapse:collapse;' cellpadding='4'>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{fields}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>comma-separated columns/entry types list</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{fields1}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>\\x1F-separated columns/entry types list (recommended)</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{language}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>target language</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{entries}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>enabled custom entry types (comma list with ampersand)</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{min_frequency}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>minimum term frequency</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{max_names}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>max character names</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{max_titles}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>max titles</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{marker}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'>context window marker count</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{description_example}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'For example:<br/>"
+            "&nbsp;&nbsp;character,이히리ᐐ 나애,Dihirit Ade,female,\"description...\"<br/>"
+            "&nbsp;&nbsp;character,뢤사난,Kim Sang-hyu,male,\"description...\"'</i>"
+            "<br/>Active when Include Description Column is ON; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{example}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'For example:<br/>"
+            "&nbsp;&nbsp;character,이히리ᐐ 나애,Dihirit Ade,female<br/>"
+            "&nbsp;&nbsp;character,뢤사난,Kim Sang-hyu,male<br/>"
+            "&nbsp;&nbsp;term,간편헤,Gale Hardest,'</i>"
+            "<br/>Active when Include Description Column is OFF; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{description_name_split_example}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'For character entries, the raw_name must contain ONLY the given name (first name), never a full name. "
+            "If the text mentions a character by full name (e.g. &quot;김상현&quot;), split it: create one entry with raw_name &quot;상현&quot; "
+            "(given name) and a second entry with raw_name &quot;김&quot; (surname). Example output:<br/>"
+            "&nbsp;&nbsp;character,상현,Sang-hyun,male,&quot;A knight of the royal guard&quot;<br/>"
+            "&nbsp;&nbsp;character,김,Kim,,&quot;Surname of Sang-hyun&quot;<br/>"
+            "&nbsp;&nbsp;Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male,…) — always split into given name + surname.'</i>"
+            "<br/>Active when Include Description Column is ON; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{name_split_example}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'For character entries, the raw_name must contain ONLY the given name (first name), never a full name. "
+            "If the text mentions a character by full name (e.g. &quot;김상현&quot;), split it: create one entry with raw_name &quot;상현&quot; "
+            "(given name) and a second entry with raw_name &quot;김&quot; (surname). Example output:<br/>"
+            "&nbsp;&nbsp;character,상현,Sang-hyun,male<br/>"
+            "&nbsp;&nbsp;character,김,Kim,<br/>"
+            "&nbsp;&nbsp;Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male) — always split into given name + surname.'</i>"
+            "<br/>Active when Include Description Column is OFF; stripped otherwise</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{gender_instruction}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'The gender column applies only to [types] entries — "
+            "determine gender from context clues, leave empty if insufficient. "
+            "For all other entry types, leave gender empty.'</i>"
+            "<br/>Blank if no entry types have 'has_gender' enabled</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{subject_tracking_instruction}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'Strictly follow a Subject Tracking & Pronoun Resolution process when extracting character data...'</i>"
+            "<br/>Active when Include Gender Context is ON; stripped otherwise</td></tr>"
+            "</table></qt>"
+        )
+        glossary_prompt_frame_layout.addWidget(placeholder_line)
+        
+        self.auto_prompt_text = QTextEdit()
+        self.auto_prompt_text.setMinimumHeight(250)
+        self.auto_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        glossary_prompt_frame_layout.addWidget(
+            self._create_glossary_prompt_profile_controls('minimal', self.auto_prompt_text)
+        )
+        glossary_prompt_frame_layout.addWidget(self.auto_prompt_text)
+        
+        # Default unified prompt — imported from canonical source of truth
+        try:
+            from extract_glossary_from_epub import DEFAULT_AUTO_GLOSSARY_PROMPT
+            default_unified_prompt = DEFAULT_AUTO_GLOSSARY_PROMPT
+        except ImportError:
+            default_unified_prompt = ""
+        
+        # Load from config or use default
+        # Note: Ignoring old '...prompt2' key to force update to new prompt
+        # Also treat empty strings as missing to ensure users get the new default
+        self.unified_auto_glosary_prompt3 = self.config.get('unified_auto_glosary_prompt3', default_unified_prompt)
+        if not self.unified_auto_glosary_prompt3 or not self.unified_auto_glosary_prompt3.strip():
+            self.unified_auto_glosary_prompt3 = default_unified_prompt
+        self.auto_prompt_text.setPlainText(self._sep_for_display(self.unified_auto_glosary_prompt3))
+        self._apply_active_glossary_prompt_profile('minimal')
+        
+        glossary_prompt_controls_widget = QWidget()
+        glossary_prompt_controls_layout = QHBoxLayout(glossary_prompt_controls_widget)
+        glossary_prompt_controls_layout.setContentsMargins(0, 0, 0, 0)
+        glossary_prompt_tab_layout.addWidget(glossary_prompt_controls_widget)
+        
+        def reset_glossary_prompt():
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset glossary prompt to default?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.auto_prompt_text.setPlainText(self._sep_for_display(default_unified_prompt))
+        
+        reset_glossary_btn = QPushButton("Reset to Default")
+        reset_glossary_btn.clicked.connect(reset_glossary_prompt)
+        reset_glossary_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        glossary_prompt_controls_layout.addWidget(reset_glossary_btn)
+        glossary_prompt_controls_layout.addStretch()
+        
+        # Format Instructions removed - now hardcoded to just append {text_sample}
+        
+        # Update states function with proper error handling - converted to use signals
+        def update_auto_glossary_state(*_args):
+            mode_raw = self.auto_glossary_mode_combo.currentText() if hasattr(self, 'auto_glossary_mode_combo') else 'Off'
+            # Map display text to internal mode key (settings_rules, shared with the mobile app;
+            # the old label "Off (No Auto-Mapping)" is still accepted for backward
+            # compatibility with saved configs / older builds.)
+            mode = settings_rules.glossary_mode_from_display(mode_raw)
+            enabled = settings_rules.glossary_mode_extracts(mode)
+            # Targeted Extraction Settings only apply to Minimal mode
+            extraction_enabled = settings_rules.glossary_mode_targeted_extraction(mode)
+            
+            # Enable/disable the entire Targeted Extraction Settings group box
+            settings_label_frame.setEnabled(extraction_enabled)
+            
+            # Enable/disable all extraction grid widgets (for thorough coverage)
+            for i in range(extraction_grid.count()):
+                item = extraction_grid.itemAt(i)
+                if item:
+                    widget = item.widget()
+                    if widget:
+                        widget.setEnabled(extraction_enabled)
+                        # Also enable/disable all children within compound widgets
+                        for child in widget.findChildren(QWidget):
+                            child.setEnabled(extraction_enabled)
+            
+            # Enable/disable text widgets (prompt still relevant for all non-off modes)
+            self.auto_prompt_text.setEnabled(enabled)
+            # Update mode var and config immediately so other code can read it
+            try:
+                self.auto_glossary_mode_var = mode
+                self.config['auto_glossary_mode'] = mode
+                self.config['enable_auto_glossary'] = enabled
+                self.enable_auto_glossary_var = enabled
+            except Exception:
+                pass
+            # --- Lock/unlock helpers for mode-controlled toggles ---
+            def _lock_toggle(checkbox, label=None):
+                """Lock a toggle: purple text, 🔒 prefix, non-interactive."""
+                if not hasattr(checkbox, '_original_text'):
+                    checkbox._original_text = checkbox.text()
+                if not checkbox.text().startswith('🔒'):
+                    checkbox.setText(f"🔒 {checkbox._original_text}")
+                checkbox.setEnabled(False)
+                checkbox.setStyleSheet("QCheckBox { color: #b388ff; }")
+                checkbox._mode_locked = True
+                if label:
+                    label.setStyleSheet("color: #b388ff;")
+                    label._mode_locked = True
+
+            def _unlock_toggle(checkbox, label=None):
+                """Unlock a toggle: restore text and interactivity."""
+                if getattr(checkbox, '_mode_locked', False):
+                    if hasattr(checkbox, '_original_text'):
+                        checkbox.setText(checkbox._original_text)
+                    checkbox.setEnabled(True)
+                    checkbox.setStyleSheet("QCheckBox { color: #ddd; }")
+                    checkbox._mode_locked = False
+                if label and getattr(label, '_mode_locked', False):
+                    label.setStyleSheet("color: #ddd;")
+                    label._mode_locked = False
+
+            # Get the auto_load description label (it lives in the General Settings tab)
+            _auto_load_desc_label = getattr(self, '_auto_load_desc_label', None)
+
+            # Get the append glossary description label
+            _append_desc_label = getattr(self, '_append_glossary_desc_label', None)
+
+            def _find_fuzzy_desc_label():
+                _fuzzy_desc_label = None
+                try:
+                    if hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+                        parent_widget = self.fuzzy_auto_mapping_checkbox.parentWidget()
+                        if parent_widget:
+                            for child in parent_widget.findChildren(QLabel):
+                                if 'similar' in (child.text() or '').lower():
+                                    _fuzzy_desc_label = child
+                                    break
+                except Exception:
+                    pass
+                return _fuzzy_desc_label
+
+            def _set_fuzzy_slider_locked(locked):
+                if not locked:
+                    # Keep slider interactive (user can adjust threshold)
+                    if hasattr(self, 'fuzzy_mapping_slider'):
+                        self.fuzzy_mapping_slider.setEnabled(True)
+                        self.fuzzy_mapping_slider.setStyleSheet("")
+                        self.fuzzy_mapping_slider._mode_locked = False
+                    if hasattr(self, 'fuzzy_mapping_value_label'):
+                        self.fuzzy_mapping_value_label.setStyleSheet("color: white; font-size: 9pt; min-width: 30px;")
+                    try:
+                        if hasattr(self, 'fuzzy_mapping_slider'):
+                            _slider_parent = self.fuzzy_mapping_slider.parentWidget()
+                            if _slider_parent:
+                                for child in _slider_parent.findChildren(QLabel):
+                                    if 'similarity' in (child.text() or '').lower():
+                                        child.setStyleSheet("color: #aaa; font-size: 9pt;")
+                                        child._mode_locked = False
+                                        break
+                    except Exception:
+                        pass
+                else:
+                    # Lock slider with purple styling
+                    if hasattr(self, 'fuzzy_mapping_slider'):
+                        self.fuzzy_mapping_slider.setEnabled(False)
+                        self.fuzzy_mapping_slider.setStyleSheet("QSlider { color: #b388ff; }")
+                        self.fuzzy_mapping_slider._mode_locked = True
+                    if hasattr(self, 'fuzzy_mapping_value_label'):
+                        self.fuzzy_mapping_value_label.setStyleSheet("color: #b388ff; font-size: 9pt; min-width: 30px;")
+                    try:
+                        if hasattr(self, 'fuzzy_mapping_slider'):
+                            _slider_parent = self.fuzzy_mapping_slider.parentWidget()
+                            if _slider_parent:
+                                for child in _slider_parent.findChildren(QLabel):
+                                    if 'similarity' in (child.text() or '').lower():
+                                        child.setStyleSheet("color: #b388ff; font-size: 9pt;")
+                                        child._mode_locked = True
+                                        break
+                    except Exception:
+                        pass
+
+            # Mode-controlled toggles (Append Glossary, Auto-Mapping, Fuzzy Auto-Mapping): the
+            # force + lock / unlock steps for this mode come from settings_rules (shared with
+            # the mobile app); a later step for the same toggle wins.
+            _desc_labels = {
+                'append_glossary': _append_desc_label,
+                'append_glossary_auto_load': _auto_load_desc_label,
+            }
+            for _step in settings_rules.glossary_mode_toggle_steps(mode):
+                _checkbox_attr, _var_attr = settings_rules.GLOSSARY_MODE_TOGGLES[_step.key]
+                if not hasattr(self, _checkbox_attr):
+                    continue
+                _checkbox = getattr(self, _checkbox_attr)
+                if _step.key not in _desc_labels:
+                    # Fuzzy auto-mapping: its hint label sits next to the checkbox
+                    _desc_labels[_step.key] = _find_fuzzy_desc_label()
+                _desc_label = _desc_labels[_step.key]
+                if _step.locked:
+                    # Auto-enable / disable & lock (block label clicks when locked)
+                    if _checkbox.isChecked() != _step.value:
+                        _checkbox.setChecked(_step.value)
+                    _lock_toggle(_checkbox, _desc_label)
+                    if _desc_label:
+                        _desc_label.mousePressEvent = lambda _: None
+                    if _step.write_config:
+                        self.config[_step.key] = _step.value
+                        if hasattr(self, _var_attr):
+                            setattr(self, _var_attr, _step.value)
+                else:
+                    _unlock_toggle(_checkbox, _desc_label)
+                    # Restore label click
+                    if _desc_label:
+                        _desc_label.mousePressEvent = lambda _, _attr=_checkbox_attr: getattr(self, _attr).toggle()
+                if _step.key == 'fuzzy_auto_mapping':
+                    _set_fuzzy_slider_locked(not _step.value)
+
+            # Real-time glossary path switching when mode changes
+            try:
+                _automap_on = hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
+                _use_subfolder = _automap_on and mode != 'minimal'
+                source_path = None
+                sources = self._glossary_editor_input_sources()
+                if len(sources) == 1:
+                    source_path = sources[0]
+                if source_path:
+                    self.manual_glossary_path = None
+                    self.auto_loaded_glossary_path = None
+                    self.auto_loaded_glossary_for_file = None
+                    self.manual_glossary_manually_loaded = False
+                    if _use_subfolder:
+                        if hasattr(self, '_autofill_glossary_for_current_selection'):
+                            self._autofill_glossary_for_current_selection()
+                    else:
+                        self.auto_load_glossary_for_file(source_path)
+                    if hasattr(self, 'editor_file_entry'):
+                        new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if new_path and os.path.exists(new_path):
+                            self.editor_file_entry.setText(new_path)
+                            _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
+                            if getattr(self, '_last_editor_switch_log', '') != _log_msg:
+                                self.append_log(_log_msg)
+                                self._last_editor_switch_log = _log_msg
+                    refresh = getattr(self, '_refresh_glossary_editor', None)
+                    if callable(refresh):
+                        refresh()
+            except Exception:
+                pass
+        
+        def update_append_prompt_state(checked=None):
+            enabled = self.append_glossary_checkbox.isChecked()
+            self.append_prompt_text.setEnabled(enabled)
+        
+        # Sync main combo → shortcut dropdown on the main UI
+        def _sync_shortcut_from_combo(*_args):
+            if hasattr(self, 'auto_glossary_shortcut_combo'):
+                idx = self.auto_glossary_mode_combo.currentIndex()
+                self.auto_glossary_shortcut_combo.blockSignals(True)
+                self.auto_glossary_shortcut_combo.setCurrentIndex(idx)
+                self.auto_glossary_shortcut_combo.blockSignals(False)
+
+        # The mode combo and the Append Glossary / Auto-Mapping / Fuzzy Auto-Mapping rows it
+        # locks live in the General Settings tab, which is built after this one. The first
+        # state pass and the signal hookup run from _setup_glossary_general_tab.
+        def _init_auto_glossary_mode_state():
+            # Initialize states
+            update_auto_glossary_state()
+            update_append_prompt_state()
+
+            # Connect signals
+            self.auto_glossary_mode_combo.currentIndexChanged.connect(update_auto_glossary_state)
+            self.append_glossary_checkbox.stateChanged.connect(update_append_prompt_state)
+            self.auto_glossary_mode_combo.currentIndexChanged.connect(_sync_shortcut_from_combo)
+
+        self._init_auto_glossary_mode_state = _init_auto_glossary_mode_state
+
+    def _open_glossary_anti_duplicate_dialog(self, parent):
+        """Open glossary-specific anti-duplicate parameters dialog."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QLabel, QWidget
+        from PySide6.QtCore import Qt
+        
+        if hasattr(self, 'glossary_anti_duplicate_dialog') and self.glossary_anti_duplicate_dialog:
+            try:
+                self.glossary_anti_duplicate_dialog.showNormal()
+                self.glossary_anti_duplicate_dialog.raise_()
+                self.glossary_anti_duplicate_dialog.activateWindow()
+                return
+            except Exception:
+                pass
+        
+        dialog = QDialog(parent)
+        dialog.setWindowTitle("Glossary Anti-Duplicate Parameters")
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # Use screen ratios for sizing (smaller than settings dialog)
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.36)
+        height = int(screen.height() * 0.50)
+        dialog.setMinimumSize(width, height)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        
+        # Title
+        title_label = QLabel("Glossary Anti-Duplicate Parameters")
+        title_label.setStyleSheet("font-size: 16pt; font-weight: bold;")
+        main_layout.addWidget(title_label)
+        
+        # Anti-duplicate section (same layout as Other Settings)
+        section_box = self._create_glossary_anti_duplicate_section(dialog)
+        main_layout.addWidget(section_box)
+        # Ensure enabled/disabled state matches toggle
+        self._toggle_glossary_anti_duplicate_controls()
+        
+        # Close button
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(lambda: self._persist_glossary_anti_duplicate_settings(minimize_dialog=dialog))
+        controls_layout.addWidget(close_btn)
+        main_layout.addWidget(controls)
+        
+        # Store and override close behavior to minimize instead of destroying
+        self.glossary_anti_duplicate_dialog = dialog
+        def _close_on_close(event):
+            try:
+                self._persist_glossary_anti_duplicate_settings(minimize_dialog=dialog)
+                event.accept()
+            except Exception:
+                event.accept()
+        dialog.closeEvent = _close_on_close
+        
+        dialog.show()
+
+    def _persist_glossary_anti_duplicate_settings(self, minimize_dialog=None):
+        """Persist glossary anti-duplicate settings to config and optionally minimize dialog."""
+        try:
+            if hasattr(self, 'glossary_enable_anti_duplicate_var'):
+                self.config['glossary_enable_anti_duplicate'] = bool(self.glossary_enable_anti_duplicate_var)
+            if hasattr(self, 'glossary_top_p_var'):
+                self.config['glossary_top_p'] = float(self.glossary_top_p_var)
+            if hasattr(self, 'glossary_min_p_var'):
+                self.config['glossary_min_p'] = float(self.glossary_min_p_var)
+            if hasattr(self, 'glossary_bypass_min_p_allowlist_var'):
+                self.config['glossary_bypass_min_p_allowlist'] = bool(self.glossary_bypass_min_p_allowlist_var)
+            if hasattr(self, 'glossary_top_k_var'):
+                self.config['glossary_top_k'] = int(self.glossary_top_k_var)
+            if hasattr(self, 'glossary_frequency_penalty_var'):
+                self.config['glossary_frequency_penalty'] = float(self.glossary_frequency_penalty_var)
+            if hasattr(self, 'glossary_presence_penalty_var'):
+                self.config['glossary_presence_penalty'] = float(self.glossary_presence_penalty_var)
+            if hasattr(self, 'glossary_repetition_penalty_var'):
+                self.config['glossary_repetition_penalty'] = float(self.glossary_repetition_penalty_var)
+            if hasattr(self, 'glossary_candidate_count_var'):
+                self.config['glossary_candidate_count'] = int(self.glossary_candidate_count_var)
+            if hasattr(self, 'glossary_custom_stop_sequences_var'):
+                self.config['glossary_custom_stop_sequences'] = str(self.glossary_custom_stop_sequences_var)
+            if hasattr(self, 'glossary_logit_bias_enabled_var'):
+                self.config['glossary_logit_bias_enabled'] = bool(self.glossary_logit_bias_enabled_var)
+            if hasattr(self, 'glossary_logit_bias_strength_var'):
+                self.config['glossary_logit_bias_strength'] = float(self.glossary_logit_bias_strength_var)
+            if hasattr(self, 'glossary_bias_common_words_var'):
+                self.config['glossary_bias_common_words'] = bool(self.glossary_bias_common_words_var)
+            if hasattr(self, 'glossary_bias_repetitive_phrases_var'):
+                self.config['glossary_bias_repetitive_phrases'] = bool(self.glossary_bias_repetitive_phrases_var)
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        if minimize_dialog is not None:
+            try:
+                minimize_dialog.close()
+            except Exception:
+                pass
+
+    _UNIFIED_SOURCE_LANGUAGE_OPTIONS = [
+        'Auto', 'Korean', 'Japanese', 'Chinese', 'English', 'Spanish', 'French',
+        'German', 'Italian', 'Portuguese', 'Russian', 'Arabic', 'Hindi',
+        'Turkish', 'Hebrew', 'Thai', 'Other',
+    ]
+
+    def _open_unified_glossary_settings_dialog(self, parent):
+        """Open the unified glossary settings (source language / combine all).
+
+        Same shape as the anti-duplicate dialog: parented to the glossary
+        dialog so its stylesheet cascades, reused while open, persisted on
+        close.
+        """
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                                       QWidget, QPushButton, QGroupBox, QComboBox)
+        from PySide6.QtCore import Qt, QSize
+
+        existing = getattr(self, 'unified_glossary_settings_dialog', None)
+        if existing:
+            try:
+                existing.showNormal()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except Exception:
+                pass
+
+        dialog = QDialog(parent)
+        dialog.setWindowTitle("Unified Glossary Settings")
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        screen = QApplication.primaryScreen().geometry()
+        dialog.setMinimumSize(int(screen.width() * 0.30), int(screen.height() * 0.36))
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
+
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+
+        title_label = QLabel("Unified Glossary Settings")
+        title_label.setStyleSheet("font-size: 16pt; font-weight: bold;")
+        main_layout.addWidget(title_label)
+
+        section_box = QGroupBox("🌐 Unified Glossary")
+        section_v = QVBoxLayout(section_box)
+        # Top margin clears the group title; without it the first line of the
+        # description is drawn underneath the title.
+        section_v.setContentsMargins(14, 20, 14, 14)
+        section_v.setSpacing(8)
+
+        desc_label = QLabel(
+            "One deduplicated glossary shared by every novel, kept per source and target language. "
+            "It is updated at the start and end of each glossary run and sent alongside the main "
+            "glossary with the same compression settings."
+        )
+        desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        desc_label.setWordWrap(True)
+        desc_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        section_v.addWidget(desc_label)
+
+        def _fit_description():
+            """Give the wrapped label the height its current width needs.
+
+            A word-wrapped QLabel reports a size hint for a guessed width, so
+            the layout hands it too little height and clips the first and
+            last lines. Recomputed on every resize.
+            """
+            try:
+                width = max(200, desc_label.width())
+                desc_label.setMinimumHeight(desc_label.heightForWidth(width) + 6)
+            except RuntimeError:
+                pass
+
+        # Source language
+        lang_row = QWidget()
+        lang_layout = QHBoxLayout(lang_row)
+        lang_layout.setContentsMargins(0, 0, 0, 6)
+        lang_label = QLabel("Source language:")
+        lang_label.setToolTip(_wrapped_tooltip_html(
+            "Which unified glossary this book belongs to.\n"
+            "Auto reuses the source language already detected during extraction; pick a language "
+            "only if that detection is wrong for this book."
+        ))
+        lang_layout.addWidget(lang_label)
+
+        combo = QComboBox()
+        combo.addItems(self._UNIFIED_SOURCE_LANGUAGE_OPTIONS)
+        try:
+            _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(_ico_path):
+                _combo_icon = QIcon(_ico_path)
+                for i in range(combo.count()):
+                    combo.setItemIcon(i, _combo_icon)
+        except Exception:
+            pass
+        saved_language = str(self.config.get('unified_glossary_source_language', 'auto') or 'auto').strip().lower()
+        combo.setCurrentIndex(next(
+            (i for i, option in enumerate(self._UNIFIED_SOURCE_LANGUAGE_OPTIONS) if option.lower() == saved_language),
+            0,
+        ))
+        combo.setFixedWidth(220)
+        combo.setIconSize(QSize(18, 18))
+        combo.setStyleSheet(self.auto_glossary_mode_combo.styleSheet() if hasattr(self, 'auto_glossary_mode_combo') else "")
+        combo.wheelEvent = lambda event: None
+        self.unified_source_language_combo = combo
+        lang_layout.addWidget(combo)
+        lang_hint = QLabel("(Auto reuses the source language detected during extraction)")
+        lang_layout.addWidget(lang_hint)
+        lang_layout.addStretch()
+        section_v.addWidget(lang_row)
+
+        # Combine all languages
+        combine_row = QWidget()
+        combine_layout = QHBoxLayout(combine_row)
+        combine_layout.setContentsMargins(0, 0, 0, 6)
+        combine_cb = self._create_styled_checkbox("Combine all languages")
+        combine_cb.setChecked(bool(self.config.get('unified_glossary_combine_all_languages', False)))
+        combine_cb.setToolTip(_wrapped_tooltip_html(
+            "Put every source language into one glossary_unified.csv instead of one per language.\n"
+            "A workaround for the rare case where language detection fails; the target language "
+            "still keeps its own folder."
+        ))
+        self.unified_combine_all_languages_checkbox = combine_cb
+        combine_layout.addWidget(combine_cb)
+        combine_hint = QLabel("(Workaround if auto-detection fails: one glossary_unified.csv for every source language)")
+        combine_layout.addWidget(combine_hint)
+        combine_layout.addStretch()
+        section_v.addWidget(combine_row)
+
+        # Exclude gendered active entries
+        gender_row = QWidget()
+        gender_layout = QHBoxLayout(gender_row)
+        gender_layout.setContentsMargins(0, 0, 0, 6)
+        gender_cb = self._create_styled_checkbox("Exclude gendered active entries")
+        gender_cb.setChecked(bool(self.config.get('unified_glossary_exclude_gender_entries', True)))
+        gender_cb.setToolTip(_wrapped_tooltip_html(
+            "Keep entries whose type has gender enabled (characters, and any custom entry type with gender "
+            "on) and any row that carries a gender OUT of the unified glossary.\n"
+            "A name can belong to a woman in one novel and a man in another. Shared across novels, that row "
+            "would hand this book the other novel's gender whenever its own glossary has not recorded the "
+            "character yet.\n"
+            "ON takes effect on the next request; the file itself is cleaned at the next glossary run. "
+            "After turning it OFF, press Rebuild Now to bring the other novels' gendered entries back."
+        ))
+        self.unified_exclude_gender_entries_checkbox = gender_cb
+        gender_layout.addWidget(gender_cb)
+        gender_hint = QLabel("(Recommended: the same name can be a different gender in another novel)")
+        gender_layout.addWidget(gender_hint)
+        gender_layout.addStretch()
+        section_v.addWidget(gender_row)
+
+        location_label = QLabel()
+        location_label.setStyleSheet("color: #aaa; font-size: 9pt;")
+        location_label.setWordWrap(True)
+        location_label.setContentsMargins(0, 6, 0, 0)
+        section_v.addWidget(location_label)
+
+        # Rebuild Now: a forced full rebuild from every book glossary, off the
+        # GUI thread, without waiting for the next glossary run.
+        rebuild_row = QWidget()
+        rebuild_layout = QHBoxLayout(rebuild_row)
+        rebuild_layout.setContentsMargins(0, 10, 0, 0)
+        rebuild_btn = QPushButton("🔄 Rebuild Now")
+        rebuild_btn.setMinimumWidth(160)
+        rebuild_btn.setCursor(Qt.PointingHandCursor)
+        rebuild_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                padding: 6px 18px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7ab8e8; }
+            QPushButton:pressed { background-color: #4a8fc4; }
+            QPushButton:disabled { background-color: #3a4a5a; color: #9aa7b4; }
+        """)
+        rebuild_btn.setToolTip(_wrapped_tooltip_html(
+            "Rebuild every unified glossary from all book folders under Glossary/ right now.\n"
+            "Ignores the change fingerprints, runs in the background (large lists in a separate "
+            "process), and reports progress in the main log. Hand edits made to a "
+            "glossary_unified.csv are replaced by what the book glossaries contain."
+        ))
+        rebuild_layout.addWidget(rebuild_btn)
+        rebuild_status = QLabel("(Rebuilds from every book glossary now; progress appears in the main log)")
+        rebuild_layout.addWidget(rebuild_status)
+        rebuild_layout.addStretch()
+        section_v.addWidget(rebuild_row)
+        self._unified_rebuild_btn = rebuild_btn
+        self._unified_rebuild_status = rebuild_status
+        rebuild_btn.clicked.connect(lambda: self._rebuild_unified_glossary_now(dialog))
+
+        def _apply_from_widgets(*_args):
+            try:
+                self._apply_unified_glossary_settings_from_widgets()
+                location_label.setText(
+                    "Location: Glossary/Unified Glossary/"
+                    f"{self._unified_glossary_folder_key()}/glossary_unified.csv"
+                )
+            except Exception:
+                pass
+
+        combo.currentTextChanged.connect(_apply_from_widgets)
+        combine_cb.stateChanged.connect(_apply_from_widgets)
+        _apply_from_widgets()
+
+        main_layout.addWidget(section_box)
+        main_layout.addStretch()
+
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 6, 0, 0)
+        controls_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setMinimumWidth(220)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        # Same look as the glossary dialog's own Cancel button.
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                font-weight: bold;
+                padding: 8px 24px;
+                border-radius: 3px;
+            }
+            QPushButton:hover { background-color: #7d868e; }
+            QPushButton:pressed { background-color: #5c636a; }
+        """)
+        close_btn.clicked.connect(lambda: self._persist_unified_glossary_settings(minimize_dialog=dialog))
+        controls_layout.addWidget(close_btn)
+        controls_layout.addStretch()
+        main_layout.addWidget(controls)
+
+        self.unified_glossary_settings_dialog = dialog
+
+        def _close_on_close(event):
+            try:
+                self._persist_unified_glossary_settings()
+            except Exception:
+                pass
+            event.accept()
+        dialog.closeEvent = _close_on_close
+
+        def _on_resize(event):
+            QDialog.resizeEvent(dialog, event)
+            _fit_description()
+        dialog.resizeEvent = _on_resize
+
+        dialog.show()
+        _fit_description()
+        QTimer.singleShot(0, _fit_description)
+
+    def _unified_glossary_shared_dir(self):
+        """The shared Glossary/ folder, resolved the way a run resolves it."""
+        return glossary_document.unified_glossary_shared_dir(self.config)
+
+    def _unified_glossary_run_is_active(self):
+        """A translation or glossary run is in progress (its hooks write the same files)."""
+        for thread_attr in ('translation_thread', 'glossary_thread'):
+            thread = getattr(self, thread_attr, None)
+            try:
+                if thread is not None and thread.is_alive():
+                    return True
+            except Exception:
+                pass
+        for future_attr in ('translation_future', 'glossary_future'):
+            future = getattr(self, future_attr, None)
+            try:
+                if future is not None and not future.done():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _rebuild_unified_glossary_now(self, dialog=None):
+        """Rebuild Now: forced full rebuild on a worker thread.
+
+        The worker never touches Qt. A timer on the GUI thread watches it and
+        restores the button, so there is no cross-thread widget access.
+        """
+        import threading
+
+        button = getattr(self, '_unified_rebuild_btn', None)
+        status = getattr(self, '_unified_rebuild_status', None)
+        running = getattr(self, '_unified_rebuild_thread', None)
+        if running is not None and running.is_alive():
+            return
+        if self._unified_glossary_run_is_active():
+            self.append_log("⚠️ Unified glossary: wait for the current translation/glossary run to finish before rebuilding.")
+            if status is not None:
+                status.setText("(A run is in progress — try again when it finishes)")
+            return
+
+        # Rebuild with what the dialog shows, not what was last saved.
+        try:
+            self._apply_unified_glossary_settings_from_widgets()
+        except Exception:
+            pass
+        shared_dir = self._unified_glossary_shared_dir()
+        settings = glossary_document.unified_rebuild_settings(self.config, shared_dir)
+
+        def _worker():
+            try:
+                import unified_glossary
+                unified_glossary.rebuild_now(shared_dir=shared_dir, settings=settings, log=self.append_log)
+            except Exception as exc:
+                try:
+                    self.append_log(f"⚠️ Unified glossary rebuild failed: {exc}")
+                except Exception:
+                    pass
+
+        self.append_log(f"📚 Unified glossary: Rebuild Now started ({shared_dir})")
+        if button is not None:
+            button.setEnabled(False)
+            button.setText("⏳ Rebuilding…")
+        if status is not None:
+            status.setText("(Running in the background — progress appears in the main log)")
+
+        thread = threading.Thread(target=_worker, name="UnifiedGlossaryRebuild", daemon=True)
+        self._unified_rebuild_thread = thread
+        thread.start()
+
+        watcher = QTimer(dialog if dialog is not None else self)
+        watcher.setInterval(400)
+
+        def _check():
+            if thread.is_alive():
+                return
+            watcher.stop()
+            try:
+                if button is not None:
+                    button.setEnabled(True)
+                    button.setText("🔄 Rebuild Now")
+                if status is not None:
+                    status.setText("(Done — see the main log for the result)")
+                self._refresh_unified_glossary_hint()
+                # New files may exist now: make them selectable in the editor.
+                if hasattr(self, 'editor_file_combo'):
+                    self._append_unified_glossaries_to_editor_combo()
+                    if hasattr(self, '_update_editor_nav_buttons'):
+                        self._update_editor_nav_buttons()
+            except RuntimeError:
+                pass  # dialog widgets were destroyed while it ran
+
+        watcher.timeout.connect(_check)
+        watcher.start()
+        self._unified_rebuild_watcher = watcher
+
+    def _apply_unified_glossary_settings_from_widgets(self):
+        """Mirror the sub-dialog widgets into config, instance vars and env."""
+        combo = getattr(self, 'unified_source_language_combo', None)
+        if combo is not None:
+            language = str(combo.currentText() or 'auto').strip().lower() or 'auto'
+            self.config['unified_glossary_source_language'] = language
+            self.unified_glossary_source_language_var = language
+            os.environ['UNIFIED_GLOSSARY_SOURCE_LANGUAGE'] = language
+        checkbox = getattr(self, 'unified_combine_all_languages_checkbox', None)
+        if checkbox is not None:
+            combine = bool(checkbox.isChecked())
+            self.config['unified_glossary_combine_all_languages'] = combine
+            self.unified_glossary_combine_all_languages_var = combine
+            os.environ['UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES'] = '1' if combine else '0'
+        checkbox = getattr(self, 'unified_exclude_gender_entries_checkbox', None)
+        if checkbox is not None:
+            exclude_gender = bool(checkbox.isChecked())
+            self.config['unified_glossary_exclude_gender_entries'] = exclude_gender
+            self.unified_glossary_exclude_gender_entries_var = exclude_gender
+            os.environ['UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES'] = '1' if exclude_gender else '0'
+        self._refresh_unified_glossary_hint()
+
+    def _persist_unified_glossary_settings(self, minimize_dialog=None):
+        """Persist unified glossary settings to config and optionally close the dialog."""
+        try:
+            self._apply_unified_glossary_settings_from_widgets()
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        if minimize_dialog is not None:
+            try:
+                minimize_dialog.close()
+            except Exception:
+                pass
+
+    def _create_glossary_anti_duplicate_section(self, parent):
+        """Create glossary-specific anti-duplicate parameter controls with tabs (PySide6)."""
+        from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QLineEdit, QTabWidget, QSlider, QPushButton
+        from PySide6.QtCore import Qt
+        
+        section_box = QGroupBox("🎯 Anti-Duplicate Parameters")
+        section_v = QVBoxLayout(section_box)
+        
+        # Description
+        desc_label = QLabel("Configure parameters to reduce duplicate glossary outputs across all AI providers.")
+        desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        desc_label.setWordWrap(True)
+        desc_label.setMaximumWidth(520)
+        desc_label.setContentsMargins(0, 0, 0, 10)
+        section_v.addWidget(desc_label)
+        
+        # Enable/Disable toggle
+        self.glossary_enable_anti_duplicate_var = self.config.get('glossary_enable_anti_duplicate', False)
+        enable_cb = self._create_styled_checkbox("Enable Anti-Duplicate Parameters")
+        self.glossary_enable_anti_duplicate_checkbox = enable_cb
+        try:
+            enable_cb.setChecked(bool(self.glossary_enable_anti_duplicate_var))
+        except Exception:
+            pass
+        def _on_enable_anti_dup_toggle(checked):
+            try:
+                self.glossary_enable_anti_duplicate_var = bool(checked)
+                self._toggle_glossary_anti_duplicate_controls()
+            except Exception:
+                pass
+        enable_cb.toggled.connect(_on_enable_anti_dup_toggle)
+        enable_cb.setContentsMargins(0, 0, 0, 10)
+        section_v.addWidget(enable_cb)
+        
+        # Create container for all content below the main checkbox
+        content_container = QWidget()
+        content_layout = QVBoxLayout(content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(4)
+        
+        # Store reference for slide animation
+        self.glossary_anti_duplicate_content = content_container
+        
+        # Create tab widget for organized parameters
+        self.glossary_anti_duplicate_notebook = QTabWidget()
+        
+        # Enhanced tab styling
+        self.glossary_anti_duplicate_notebook.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #555;
+                background-color: #2d2d2d;
+                border-top-left-radius: 0px;
+                border-top-right-radius: 4px;
+                border-bottom-left-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QTabWidget::tab-bar {
+                left: 5px;
+            }
+            QTabBar::tab {
+                background-color: #404040;
+                color: #cccccc;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                min-width: 80px;
+                font-weight: 500;
+            }
+            QTabBar::tab:selected {
+                background-color: #2d2d2d;
+                color: #ffffff;
+                border-bottom: 2px solid #0078d4;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #4a4a4a;
+                color: #ffffff;
+            }
+            QTabBar::tab:first {
+                margin-left: 0;
+            }
+        """)
+        
+        content_layout.addWidget(self.glossary_anti_duplicate_notebook)
+        
+        # Tab 1: Core Parameters
+        core_frame = QWidget()
+        core_v = QVBoxLayout(core_frame)
+        core_v.setContentsMargins(10, 10, 10, 10)
+        self.glossary_anti_duplicate_notebook.addTab(core_frame, "Core Parameters")
+        
+        # Top-P (Nucleus Sampling)
+        def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False, off_at_zero=False):
+            """Helper to create a slider row with label and value display
+            var_holder: object that holds the variable (typically self)
+            var_name: string name of the attribute to set
+            """
+            row_w = QWidget()
+            row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(0, 5, 0, 5)
+            
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(200)
+            row_h.addWidget(lbl)
+            
+            slider = QSlider(Qt.Horizontal)
+            if is_int:
+                slider.setMinimum(int(min_val))
+                slider.setMaximum(int(max_val))
+                try:
+                    current_val = getattr(var_holder, var_name, min_val)
+                    slider.setValue(int(current_val))
+                except Exception:
+                    pass
+            else:
+                # For double values, use int slider and scale
+                steps = int((max_val - min_val) / (0.01 if decimals == 2 else 0.1))
+                slider.setMinimum(0)
+                slider.setMaximum(steps)
+                try:
+                    current = float(getattr(var_holder, var_name, min_val))
+                    slider.setValue(int((current - min_val) / (max_val - min_val) * steps))
+                except Exception:
+                    pass
+            slider.setFixedWidth(200)
+            # Disable mousewheel scrolling on slider
+            slider.wheelEvent = lambda event: None
+            row_h.addWidget(slider)
+            
+            value_lbl = QLabel("")
+            value_lbl.setFixedWidth(80)
+            row_h.addWidget(value_lbl)
+            row_h.addStretch()
+            
+            def _on_slider_change(value):
+                try:
+                    if is_int:
+                        actual_value = value
+                        setattr(var_holder, var_name, actual_value)
+                        if actual_value == 0:
+                            value_lbl.setText("OFF")
+                        else:
+                            value_lbl.setText(f"{actual_value}")
+                    else:
+                        actual_value = min_val + (value / slider.maximum()) * (max_val - min_val)
+                        setattr(var_holder, var_name, actual_value)
+                        if off_at_zero and actual_value <= 0:
+                            value_lbl.setText("OFF")
+                        elif decimals == 1:
+                            value_lbl.setText(f"{actual_value:.1f}" if actual_value > 0 else "OFF")
+                        else:
+                            value_lbl.setText(f"{actual_value:.2f}")
+                except Exception:
+                    pass
+            
+            slider.valueChanged.connect(_on_slider_change)
+            # Trigger initial update
+            _on_slider_change(slider.value())
+            
+            parent_layout.addWidget(row_w)
+            return slider, value_lbl
+        
+        self.glossary_top_p_var = self.config.get('glossary_top_p', 1.0)
+        top_p_slider, self.glossary_top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'glossary_top_p_var', 0.1, 1.0, decimals=2)
+        
+        # Min-P (Relative Probability Cutoff)
+        self.glossary_min_p_var = self.config.get('glossary_min_p', 0.0)
+        min_p_slider, self.glossary_min_p_value_label = _create_slider_row(core_v, "Min-P (Relative Cutoff):", self, 'glossary_min_p_var', 0.0, 1.0, decimals=2, off_at_zero=True)
+
+        # Min-P allowlist bypass
+        self.glossary_bypass_min_p_allowlist_var = self.config.get('glossary_bypass_min_p_allowlist', False)
+        bypass_min_p_cb = self._create_styled_checkbox("Bypass Min-P Provider Allowlist")
+        try:
+            bypass_min_p_cb.setChecked(bool(self.glossary_bypass_min_p_allowlist_var))
+            bypass_min_p_cb.setToolTip(_wrapped_tooltip_html(
+                "Default Min-P allowlist:\n"
+                "local/vLLM OpenAI-compatible endpoints\n"
+                "OpenRouter, Fireworks, Chutes, NanoGPT\n"
+                "NVIDIA, SambaNova, Opencode, custom OpenAI endpoints"
+            ))
+        except Exception:
+            pass
+        def _on_bypass_min_p_toggle(checked):
+            try:
+                self.glossary_bypass_min_p_allowlist_var = bool(checked)
+            except Exception:
+                pass
+        bypass_min_p_cb.toggled.connect(_on_bypass_min_p_toggle)
+        core_v.addWidget(bypass_min_p_cb)
+
+        bypass_min_p_desc = QLabel("Force-sends Min-P outside the default compatibility allowlist.")
+        bypass_min_p_desc.setStyleSheet("color: gray; font-size: 8pt;")
+        bypass_min_p_desc.setWordWrap(True)
+        bypass_min_p_desc.setContentsMargins(20, 0, 0, 8)
+        core_v.addWidget(bypass_min_p_desc)
+
+        # Top-K (Vocabulary Limit)
+        self.glossary_top_k_var = self.config.get('glossary_top_k', 0)
+        top_k_slider, self.glossary_top_k_value_label = _create_slider_row(core_v, "Top-K (Vocabulary Limit):", self, 'glossary_top_k_var', 0, 100, is_int=True)
+        
+        # Frequency Penalty
+        self.glossary_frequency_penalty_var = self.config.get('glossary_frequency_penalty', 0.0)
+        freq_slider, self.glossary_freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'glossary_frequency_penalty_var', 0.0, 2.0, decimals=2)
+        
+        # Presence Penalty
+        self.glossary_presence_penalty_var = self.config.get('glossary_presence_penalty', 0.0)
+        pres_slider, self.glossary_pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'glossary_presence_penalty_var', 0.0, 2.0, decimals=2)
+        
+        core_v.addStretch()
+        
+        # Tab 2: Advanced Parameters
+        advanced_frame = QWidget()
+        advanced_v = QVBoxLayout(advanced_frame)
+        advanced_v.setContentsMargins(10, 10, 10, 10)
+        self.glossary_anti_duplicate_notebook.addTab(advanced_frame, "Advanced")
+        
+        # Repetition Penalty
+        self.glossary_repetition_penalty_var = self.config.get('glossary_repetition_penalty', 1.0)
+        rep_slider, self.glossary_rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self, 'glossary_repetition_penalty_var', 1.0, 2.0, decimals=2)
+        
+        # Candidate Count (Gemini)
+        self.glossary_candidate_count_var = self.config.get('glossary_candidate_count', 1)
+        candidate_slider, self.glossary_candidate_value_label = _create_slider_row(advanced_v, "Candidate Count (Gemini):", self, 'glossary_candidate_count_var', 1, 4, is_int=True)
+        
+        advanced_v.addStretch()
+        
+        # Tab 3: Stop Sequences
+        stop_frame = QWidget()
+        stop_v = QVBoxLayout(stop_frame)
+        stop_v.setContentsMargins(10, 10, 10, 10)
+        self.glossary_anti_duplicate_notebook.addTab(stop_frame, "Stop Sequences")
+        
+        # Custom Stop Sequences
+        stop_row = QWidget()
+        stop_h = QHBoxLayout(stop_row)
+        stop_h.setContentsMargins(0, 5, 0, 5)
+        stop_h.addWidget(QLabel("Custom Stop Sequences:"))
+        
+        self.glossary_custom_stop_sequences_var = self.config.get('glossary_custom_stop_sequences', '')
+        stop_entry = QLineEdit()
+        stop_entry.setFixedWidth(300)
+        try:
+            stop_entry.setText(str(self.glossary_custom_stop_sequences_var))
+        except Exception:
+            pass
+        def _on_stop_seq_changed(text):
+            try:
+                self.glossary_custom_stop_sequences_var = text
+            except Exception:
+                pass
+        stop_entry.textChanged.connect(_on_stop_seq_changed)
+        stop_h.addWidget(stop_entry)
+        
+        stop_tip = QLabel("(comma-separated)")
+        stop_tip.setStyleSheet("color: gray; font-size: 8pt;")
+        stop_h.addWidget(stop_tip)
+        stop_h.addStretch()
+        stop_v.addWidget(stop_row)
+        stop_v.addStretch()
+        
+        # Tab 4: Logit Bias (OpenAI)
+        bias_frame = QWidget()
+        bias_v = QVBoxLayout(bias_frame)
+        bias_v.setContentsMargins(10, 10, 10, 10)
+        self.glossary_anti_duplicate_notebook.addTab(bias_frame, "Logit Bias")
+        
+        # Logit Bias Enable
+        self.glossary_logit_bias_enabled_var = self.config.get('glossary_logit_bias_enabled', False)
+        bias_cb = self._create_styled_checkbox("Enable Logit Bias (OpenAI only)")
+        try:
+            bias_cb.setChecked(bool(self.glossary_logit_bias_enabled_var))
+        except Exception:
+            pass
+        def _on_bias_enable_toggle(checked):
+            try:
+                self.glossary_logit_bias_enabled_var = bool(checked)
+            except Exception:
+                pass
+        bias_cb.toggled.connect(_on_bias_enable_toggle)
+        bias_cb.setContentsMargins(0, 0, 0, 5)
+        bias_v.addWidget(bias_cb)
+        
+        # Logit Bias Strength
+        self.glossary_logit_bias_strength_var = self.config.get('glossary_logit_bias_strength', -0.5)
+        bias_slider, self.glossary_bias_strength_value_label = _create_slider_row(bias_v, "Bias Strength:", self, 'glossary_logit_bias_strength_var', -2.0, 2.0, decimals=1)
+        
+        # Preset bias targets
+        preset_title = QLabel("Preset Bias Targets:")
+        preset_title.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        preset_title.setContentsMargins(0, 10, 0, 5)
+        bias_v.addWidget(preset_title)
+        
+        self.glossary_bias_common_words_var = self.config.get('glossary_bias_common_words', False)
+        common_cb = self._create_styled_checkbox("Bias against common words (the, and, said)")
+        try:
+            common_cb.setChecked(bool(self.glossary_bias_common_words_var))
+        except Exception:
+            pass
+        def _on_common_toggle(checked):
+            try:
+                self.glossary_bias_common_words_var = bool(checked)
+            except Exception:
+                pass
+        common_cb.toggled.connect(_on_common_toggle)
+        bias_v.addWidget(common_cb)
+        
+        self.glossary_bias_repetitive_phrases_var = self.config.get('glossary_bias_repetitive_phrases', False)
+        phrases_cb = self._create_styled_checkbox("Bias against repetitive phrases")
+        try:
+            phrases_cb.setChecked(bool(self.glossary_bias_repetitive_phrases_var))
+        except Exception:
+            pass
+        def _on_phrases_toggle(checked):
+            try:
+                self.glossary_bias_repetitive_phrases_var = bool(checked)
+            except Exception:
+                pass
+        phrases_cb.toggled.connect(_on_phrases_toggle)
+        bias_v.addWidget(phrases_cb)
+        bias_v.addStretch()
+        
+        # Provider compatibility info
+        compat_title = QLabel("Parameter Compatibility:")
+        compat_title.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        compat_title.setContentsMargins(0, 15, 0, 0)
+        content_layout.addWidget(compat_title)
+        
+        compat_text = QLabel("• Core: Most providers • Advanced: DeepSeek, Mistral, Groq • Logit Bias: OpenAI only")
+        compat_text.setStyleSheet("color: gray; font-size: 8pt;")
+        compat_text.setContentsMargins(0, 5, 0, 0)
+        content_layout.addWidget(compat_text)
+        
+        # Reset button
+        reset_row = QWidget()
+        reset_h = QHBoxLayout(reset_row)
+        reset_h.setContentsMargins(0, 10, 0, 0)
+        
+        reset_btn = QPushButton("🔄 Reset to Defaults")
+        reset_btn.setFixedWidth(180)
+        reset_btn.clicked.connect(lambda: self._reset_glossary_anti_duplicate_defaults())
+        reset_h.addWidget(reset_btn)
+        
+        reset_desc = QLabel("Reset all anti-duplicate parameters to default values")
+        reset_desc.setStyleSheet("color: gray; font-size: 8pt;")
+        reset_h.addWidget(reset_desc)
+        reset_h.addStretch()
+        content_layout.addWidget(reset_row)
+        
+        # Add content container to main section
+        section_v.addWidget(content_container)
+        
+        # Store all tab frames for enable/disable
+        self.glossary_anti_duplicate_tabs = [core_frame, advanced_frame, stop_frame, bias_frame]
+        
+        # Initialize anti-duplicate section visibility
+        self.toggle_glossary_anti_duplicate_section()
+        
+        return section_box
+
+    def toggle_glossary_anti_duplicate_section(self):
+        """Enable/disable glossary anti-duplicate content (no hide)."""
+        try:
+            if not hasattr(self, 'glossary_anti_duplicate_content'):
+                return
+            
+            if hasattr(self, 'glossary_enable_anti_duplicate_checkbox'):
+                enabled = bool(self.glossary_enable_anti_duplicate_checkbox.isChecked())
+            else:
+                enabled = bool(self.glossary_enable_anti_duplicate_var)
+            self.glossary_anti_duplicate_content.setVisible(True)
+            self.glossary_anti_duplicate_content.setEnabled(enabled)
+            
+        except Exception:
+            try:
+                if hasattr(self, 'glossary_anti_duplicate_content'):
+                    enabled = bool(self.glossary_enable_anti_duplicate_var)
+                    self.glossary_anti_duplicate_content.setVisible(True)
+                    self.glossary_anti_duplicate_content.setEnabled(enabled)
+            except Exception:
+                pass
+
+    def _toggle_glossary_anti_duplicate_controls(self):
+        """Enable/disable glossary anti-duplicate parameter controls."""
+        self.toggle_glossary_anti_duplicate_section()
+
+    def _reset_glossary_anti_duplicate_defaults(self):
+        """Reset all glossary anti-duplicate parameters to their default values."""
+        from PySide6.QtWidgets import QMessageBox
+        
+        parent = None
+        try:
+            parent = getattr(self, 'glossary_anti_duplicate_dialog', None)
+        except Exception:
+            parent = None
+        
+        reply = QMessageBox.question(
+            parent,
+            "Reset Anti-Duplicate Parameters",
+            "Are you sure you want to reset all anti-duplicate parameters to their default values?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        
+        if hasattr(self, 'glossary_enable_anti_duplicate_var'):
+            self.glossary_enable_anti_duplicate_var = False
+        if hasattr(self, 'glossary_top_p_var'):
+            self.glossary_top_p_var = 1.0
+        if hasattr(self, 'glossary_min_p_var'):
+            self.glossary_min_p_var = 0.0
+        if hasattr(self, 'glossary_bypass_min_p_allowlist_var'):
+            self.glossary_bypass_min_p_allowlist_var = False
+        if hasattr(self, 'glossary_top_k_var'):
+            self.glossary_top_k_var = 0
+        if hasattr(self, 'glossary_frequency_penalty_var'):
+            self.glossary_frequency_penalty_var = 0.0
+        if hasattr(self, 'glossary_presence_penalty_var'):
+            self.glossary_presence_penalty_var = 0.0
+        if hasattr(self, 'glossary_repetition_penalty_var'):
+            self.glossary_repetition_penalty_var = 1.0
+        if hasattr(self, 'glossary_candidate_count_var'):
+            self.glossary_candidate_count_var = 1
+        if hasattr(self, 'glossary_custom_stop_sequences_var'):
+            self.glossary_custom_stop_sequences_var = ""
+        if hasattr(self, 'glossary_logit_bias_enabled_var'):
+            self.glossary_logit_bias_enabled_var = False
+        if hasattr(self, 'glossary_logit_bias_strength_var'):
+            self.glossary_logit_bias_strength_var = -0.5
+        if hasattr(self, 'glossary_bias_common_words_var'):
+            self.glossary_bias_common_words_var = False
+        if hasattr(self, 'glossary_bias_repetitive_phrases_var'):
+            self.glossary_bias_repetitive_phrases_var = False
+        
+        self._toggle_glossary_anti_duplicate_controls()
+        
+        QMessageBox.information(parent, "Reset Complete", "All anti-duplicate parameters have been reset to their default values.")
+        
+        if hasattr(self, 'append_log'):
+            self.append_log("🔄 Glossary anti-duplicate parameters reset to defaults")
+
+    def _setup_glossary_general_tab(self, parent):
+        """Setup the General Settings tab: the glossary mode and everything that applies to every mode.
+
+        These rows used to open the Minimal tab, but none of them is specific to Minimal
+        generation. The tab is shown first and built after the Minimal tab: it finishes by
+        running that tab's mode-state pass, which needs both the mode selector and the
+        Append Glossary / Auto-Mapping rows built here.
+        """
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Master mode selector (replaces old checkbox toggle)
+        master_toggle_widget = QWidget()
+        master_toggle_layout = QHBoxLayout(master_toggle_widget)
+        master_toggle_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(master_toggle_widget)
+        
+        mode_label = QLabel("Automatic Glossary Generation:")
+        mode_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        master_toggle_layout.addWidget(mode_label)
+        
+        if not hasattr(self, 'auto_glossary_mode_combo'):
+            self.auto_glossary_mode_combo = QComboBox()
+            self.auto_glossary_mode_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
+            # Add Halgakos icon to each item
+            try:
+                _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if os.path.exists(_ico_path):
+                    _combo_icon = QIcon(_ico_path)
+                    for i in range(self.auto_glossary_mode_combo.count()):
+                        self.auto_glossary_mode_combo.setItemIcon(i, _combo_icon)
+            except Exception:
+                pass
+            # Read saved mode with backward compat
+            saved_mode = self.config.get('auto_glossary_mode', None)
+            if saved_mode is None:
+                # Migrate from old boolean
+                old_enabled = self.config.get('enable_auto_glossary', False)
+                saved_mode = 'minimal' if old_enabled else 'off'
+            mode_index = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass': 7}.get(saved_mode.lower(), 5)
+            self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
+        self.auto_glossary_mode_combo.setToolTip(_wrapped_tooltip_html(
+            "Off: No automatic glossary extraction + enables Auto-Mapping\n"
+            "Off (Fuzzy Mapping): Off + enables Auto-Mapping + Fuzzy Auto-Mapping\n"
+            "Manual Glossary Only: Off + disables Auto-Mapping (use the editor's Load Glossary button)\n"
+            "No Glossary: Runs without glossary (doesn't change toggle)\n"
+            "Minimal: Lightweight extraction during translation (in-process)\n"
+            "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
+            "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
+            "Single Pass: Extract glossary inline during each translation request"
+        ))
+        from PySide6.QtCore import QSize
+        self.auto_glossary_mode_combo.setFixedWidth(220)
+        self.auto_glossary_mode_combo.setIconSize(QSize(18, 18))
+        self.auto_glossary_mode_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #1a2a44;
+                color: #e8f0ff;
+                padding: 5px 10px;
+                border: 2px solid #4a8fd4;
+                border-radius: 4px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QComboBox:hover { border-color: #70b8ff; background-color: #223a58; }
+            QComboBox::drop-down {
+                border: none;
+                padding-right: 6px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #162848;
+                color: #e8f0ff;
+                selection-background-color: #4080d0;
+                selection-color: #ffffff;
+                border: 1px solid #4a8fd4;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 4px 8px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #2a4a70;
+            }
+        """)
+        self.auto_glossary_mode_combo.wheelEvent = lambda event: None
+        master_toggle_layout.addWidget(self.auto_glossary_mode_combo)
+        
+        # Keep old attribute for backward compatibility
+        # Other code checks enable_auto_glossary_checkbox — provide a shim
+        self.enable_auto_glossary_checkbox = type('_Shim', (), {
+            'isChecked': lambda s: self.auto_glossary_mode_combo.currentText().lower() != 'off',
+            'setChecked': lambda s, v: None,
+            'stateChanged': type('_Sig', (), {'connect': lambda s, f: None, 'disconnect': lambda s, f: None})()
+        })()
+        
+        desc_label = QLabel("(Automatic extraction and translation of character names/Terms)")
+        master_toggle_layout.addWidget(desc_label)
+        master_toggle_layout.addStretch()
+
+        self.glossary_require_complete_checkbox = self._create_styled_checkbox(
+            "Require 100% glossary progress before translation"
+        )
+        self.glossary_require_complete_checkbox.setChecked(bool(
+            self.config.get('glossary_require_complete_before_translation', False)
+        ))
+        self.glossary_require_complete_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Start translation only after automatic glossary extraction and any enabled "
+            "Minimal pass and refinement are complete. If glossary work remains incomplete "
+            "after retries, translation is blocked.\n"
+            "Default OFF: translation may start with an incomplete glossary."
+        ))
+        self.glossary_require_complete_checkbox.toggled.connect(
+            lambda checked: self.config.__setitem__(
+                'glossary_require_complete_before_translation', bool(checked)
+            )
+        )
+        layout.addWidget(self.glossary_require_complete_checkbox)
+
+        self.glossary_skip_api_error_retries_checkbox = self._create_styled_checkbox(
+            "Skip glossary retries for API_ERROR"
+        )
+        self.glossary_skip_api_error_retries_checkbox.setChecked(bool(
+            self.config.get('glossary_skip_api_error_retries', False)
+        ))
+        self.glossary_skip_api_error_retries_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, do not rerun glossary chapters whose only saved failure is API_ERROR. "
+            "Other failed chapters still retry. The API client still retries each request.\n"
+            "Default off: API_ERROR chapters also retry during this run."
+        ))
+        self.glossary_skip_api_error_retries_checkbox.toggled.connect(
+            lambda checked: self.config.__setitem__(
+                'glossary_skip_api_error_retries', bool(checked)
+            )
+        )
+        layout.addWidget(self.glossary_skip_api_error_retries_checkbox)
+
+        # Append glossary toggle
+        append_widget = QWidget()
+        append_layout = QHBoxLayout(append_widget)
+        append_layout.setContentsMargins(0, 0, 0, 6)
+        layout.addWidget(append_widget)
+        
+        if not hasattr(self, 'append_glossary_checkbox'):
+            self.append_glossary_checkbox = self._create_styled_checkbox("Append Glossary to System Prompt")
+            self.append_glossary_checkbox.setChecked(self.config.get('append_glossary', False))
+        self.append_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Send the current glossary to the model with every request.\n"
+            "Improves consistency across chapters."
+        ))
+        append_layout.addWidget(self.append_glossary_checkbox)
+        
+        self._append_glossary_desc_label = QLabel("(Applies to ALL glossaries - manual and automatic)")
+        self._append_glossary_desc_label.setCursor(Qt.PointingHandCursor)
+        self._append_glossary_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle() if not getattr(self.append_glossary_checkbox, '_mode_locked', False) else None
+        append_layout.addWidget(self._append_glossary_desc_label)
+        append_layout.addStretch()
+
+        # Auto-load glossaries toggle (under Append Glossary)
+        auto_load_widget = QWidget()
+        auto_load_layout = QHBoxLayout(auto_load_widget)
+        auto_load_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(auto_load_widget)
+
+        if not hasattr(self, 'append_glossary_auto_load_checkbox'):
+            self.append_glossary_auto_load_checkbox = self._create_styled_checkbox("Auto-Mapping (Auto-Fill)")
+        try:
+            self.append_glossary_auto_load_checkbox.setChecked(self.config.get('append_glossary_auto_load', False))
+        except Exception:
+            pass
+        self.append_glossary_auto_load_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When Append Glossary is enabled, automatically Auto-Fill glossary mapping\n"
+            "based on filename matching. If disabled, use Load Glossary / Auto-Fill manually."
+        ))
+        auto_load_layout.addWidget(self.append_glossary_auto_load_checkbox)
+        auto_load_desc = QLabel("(Maps Glossary subfolder content → Output folder automatically)")
+        auto_load_desc.setCursor(Qt.PointingHandCursor)
+        auto_load_desc.mousePressEvent = lambda _: self.append_glossary_auto_load_checkbox.toggle()
+        auto_load_layout.addWidget(auto_load_desc)
+        self._auto_load_desc_label = auto_load_desc  # the mode combo locks it
+        auto_load_layout.addStretch()
+
+        # Fuzzy Auto-Mapping toggle (under Auto-Mapping)
+        fuzzy_map_widget = QWidget()
+        fuzzy_map_layout = QHBoxLayout(fuzzy_map_widget)
+        fuzzy_map_layout.setContentsMargins(40, 0, 0, 5)
+        layout.addWidget(fuzzy_map_widget)
+
+        if not hasattr(self, 'fuzzy_auto_mapping_checkbox'):
+            self.fuzzy_auto_mapping_checkbox = self._create_styled_checkbox("Fuzzy Auto-Mapping")
+        try:
+            self.fuzzy_auto_mapping_checkbox.setChecked(self.config.get('fuzzy_auto_mapping', False))
+        except Exception:
+            pass
+        self.fuzzy_auto_mapping_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, auto-mapping will match files with similar names\n"
+            "(e.g. 'MyNovel_v2.epub' → 'MyNovel_glossary.csv').\n"
+            "Adjust the slider to control how similar names must be."
+        ))
+        fuzzy_map_layout.addWidget(self.fuzzy_auto_mapping_checkbox)
+        fuzzy_map_desc = QLabel("(Matches files with similar names)")
+        fuzzy_map_desc.setCursor(Qt.PointingHandCursor)
+        fuzzy_map_desc.mousePressEvent = lambda _: self.fuzzy_auto_mapping_checkbox.toggle() if not getattr(self.fuzzy_auto_mapping_checkbox, '_mode_locked', False) else None
+        fuzzy_map_layout.addWidget(fuzzy_map_desc)
+        fuzzy_map_layout.addStretch()
+
+        # Fuzzy threshold mini-slider
+        fuzzy_slider_widget = QWidget()
+        fuzzy_slider_layout = QHBoxLayout(fuzzy_slider_widget)
+        fuzzy_slider_layout.setContentsMargins(60, 0, 0, 10)
+        layout.addWidget(fuzzy_slider_widget)
+
+        fuzzy_slider_label = QLabel("Similarity:")
+        fuzzy_slider_label.setStyleSheet("color: #aaa; font-size: 9pt;")
+        fuzzy_slider_layout.addWidget(fuzzy_slider_label)
+
+        if not hasattr(self, 'fuzzy_auto_mapping_threshold_var'):
+            self.fuzzy_auto_mapping_threshold_var = self.config.get('fuzzy_auto_mapping_threshold', 50)
+        self.fuzzy_mapping_slider = QSlider(Qt.Horizontal)
+        self.fuzzy_mapping_slider.setMinimum(10)
+        self.fuzzy_mapping_slider.setMaximum(100)
+        self.fuzzy_mapping_slider.setValue(int(self.fuzzy_auto_mapping_threshold_var))
+        self.fuzzy_mapping_slider.setMaximumWidth(180)
+        self._disable_slider_mousewheel(self.fuzzy_mapping_slider)
+        fuzzy_slider_layout.addWidget(self.fuzzy_mapping_slider)
+
+        self.fuzzy_mapping_value_label = QLabel(f"{self.fuzzy_auto_mapping_threshold_var}%")
+        self.fuzzy_mapping_value_label.setStyleSheet("color: #ddd; font-size: 9pt; min-width: 30px;")
+        fuzzy_slider_layout.addWidget(self.fuzzy_mapping_value_label)
+
+        def _on_fuzzy_slider_changed(value):
+            self.fuzzy_auto_mapping_threshold_var = value
+            self.fuzzy_mapping_value_label.setText(f"{value}%")
+        self.fuzzy_mapping_slider.valueChanged.connect(_on_fuzzy_slider_changed)
+        fuzzy_slider_layout.addStretch()
+
+        # Sync fuzzy toggle enabled state with auto-mapping
+        def _sync_fuzzy_enabled(*_args):
+            try:
+                auto_map_on = bool(self.append_glossary_auto_load_checkbox.isChecked())
+                locked = getattr(self.fuzzy_auto_mapping_checkbox, '_mode_locked', False)
+                if not locked:
+                    self.fuzzy_auto_mapping_checkbox.setEnabled(auto_map_on)
+                self.fuzzy_mapping_slider.setEnabled(auto_map_on and self.fuzzy_auto_mapping_checkbox.isChecked())
+            except Exception:
+                pass
+
+        _sync_fuzzy_enabled()
+        try:
+            # Replace only the slots owned by this setup path. Broad disconnects
+            # emit PySide warnings when no slots exist and can remove unrelated slots.
+            previous_slot = getattr(self, '_sync_fuzzy_enabled_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_auto_load_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+                try:
+                    self.fuzzy_auto_mapping_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+            self.append_glossary_auto_load_checkbox.toggled.connect(_sync_fuzzy_enabled)
+            self.fuzzy_auto_mapping_checkbox.toggled.connect(_sync_fuzzy_enabled)
+            self._sync_fuzzy_enabled_slot = _sync_fuzzy_enabled
+        except Exception:
+            pass
+
+        # Auto-Mapping only makes sense when Append Glossary is enabled.
+        def _sync_auto_mapping_enabled_state(*_args):
+            try:
+                enabled = bool(self.append_glossary_checkbox.isChecked())
+            except Exception:
+                enabled = False
+            try:
+                self.append_glossary_auto_load_checkbox.setEnabled(enabled)
+            except Exception:
+                pass
+
+        # Set initial enabled/disabled state
+        _sync_auto_mapping_enabled_state()
+
+        # Keep it in sync when Append Glossary changes (avoid duplicate connections)
+        try:
+            previous_slot = getattr(self, '_sync_auto_mapping_enabled_state_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+            self.append_glossary_checkbox.toggled.connect(_sync_auto_mapping_enabled_state)
+            self._sync_auto_mapping_enabled_state_slot = _sync_auto_mapping_enabled_state
+        except Exception:
+            pass
+
+        # Real-time path switching when auto-mapping is toggled
+        def _on_auto_mapping_toggled(checked):
+            """Switch glossary path between Glossary subfolder and output folder in real time."""
+            try:
+                # Only act if Append Glossary is also enabled
+                if not (hasattr(self, 'append_glossary_checkbox') and self.append_glossary_checkbox.isChecked()):
+                    return
+
+                # Subtitle members resolve to their one archive-level source.
+                source_path = None
+                try:
+                    sources = self._glossary_editor_input_sources()
+                    if len(sources) == 1:
+                        source_path = sources[0]
+                except Exception:
+                    pass
+                if not source_path:
+                    return
+
+                if checked:
+                    # Auto-mapping ON → switch to Glossary subfolder file
+                    # BUT if Minimal mode is active, use output folder instead
+                    _use_subfolder = True
+                    try:
+                        _cur_mode = getattr(self, 'auto_glossary_mode_var', self.config.get('auto_glossary_mode', 'off'))
+                        if str(_cur_mode).lower() == 'minimal':
+                            _use_subfolder = False
+                    except Exception:
+                        pass
+
+                    # Clear the current state so the correct loader can take over
+                    try:
+                        _prev = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if _prev and not getattr(self, 'manual_glossary_manually_loaded', False):
+                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
+                        self.manual_glossary_path = None
+                        self.auto_loaded_glossary_path = None
+                        self.auto_loaded_glossary_for_file = None
+                        self.manual_glossary_manually_loaded = False
+                    except Exception:
+                        pass
+
+                    if _use_subfolder:
+                        try:
+                            if hasattr(self, '_autofill_glossary_for_current_selection'):
+                                self._autofill_glossary_for_current_selection()
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self.auto_load_glossary_for_file(source_path)
+                        except Exception:
+                            pass
+                else:
+                    # Auto-mapping OFF → fall back to output folder glossary
+                    try:
+                        _prev = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if _prev and not getattr(self, 'manual_glossary_manually_loaded', False):
+                            self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev)}")
+                        self.manual_glossary_path = None
+                        self.auto_loaded_glossary_path = None
+                        self.auto_loaded_glossary_for_file = None
+                        self.manual_glossary_manually_loaded = False
+                    except Exception:
+                        pass
+                    try:
+                        self.auto_load_glossary_for_file(source_path)
+                    except Exception:
+                        pass
+
+                # Refresh the glossary editor if it has been set up
+                try:
+                    if hasattr(self, 'editor_file_entry'):
+                        new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
+                        if new_path and os.path.exists(new_path):
+                            self.editor_file_entry.setText(new_path)
+                            _log_msg = f"📑 Glossary editor switched to: {os.path.basename(new_path)}"
+                            if getattr(self, '_last_editor_switch_log', '') != _log_msg:
+                                self.append_log(_log_msg)
+                                self._last_editor_switch_log = _log_msg
+                except Exception:
+                    pass
+                try:
+                    refresh = getattr(self, '_refresh_glossary_editor', None)
+                    if callable(refresh):
+                        refresh()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # Replace this handler without disturbing the fuzzy enabled-state sync.
+        try:
+            previous_slot = getattr(self, '_on_auto_mapping_toggled_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_auto_load_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+            self.append_glossary_auto_load_checkbox.toggled.connect(_on_auto_mapping_toggled)
+            self._on_auto_mapping_toggled_slot = _on_auto_mapping_toggled
+        except Exception:
+            pass
+
+        # Add additional glossary toggle
+        additional_glossary_widget = QWidget()
+        additional_glossary_layout = QHBoxLayout(additional_glossary_widget)
+        additional_glossary_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(additional_glossary_widget)
+        
+        if not hasattr(self, 'add_additional_glossary_checkbox'):
+            self.add_additional_glossary_checkbox = self._create_styled_checkbox("Add Additional Glossary")
+            self.add_additional_glossary_checkbox.setChecked(self.config.get('add_additional_glossary', False))
+        self.add_additional_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Always include an external glossary file (CSV/JSON/TXT/PDF/MD)\n"
+            "alongside the generated glossary when calling the API."
+        ))
+        additional_glossary_layout.addWidget(self.add_additional_glossary_checkbox)
+        
+        # Load additional glossary button
+        load_additional_btn = QPushButton("Load Additional Glossary")
+        load_additional_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7ab8e8; }
+            QPushButton:pressed { background-color: #4a8fc4; }
+            QPushButton:disabled { background-color: #cccccc; color: #666666; }
+        """)
+        load_additional_btn.clicked.connect(self._load_additional_glossary)
+        additional_glossary_layout.addWidget(load_additional_btn)
+        self._load_additional_glossary_btn = load_additional_btn  # Store reference for animation
+        
+        # Show current additional glossary path if exists
+        additional_glossary_path = self.config.get('additional_glossary_path', '')
+        if additional_glossary_path:
+            label_additional = QLabel(f"(Current: {os.path.basename(additional_glossary_path)})")
+        else:
+            label_additional = QLabel("(Sends additional glossary file alongside main glossary to API)")
+        additional_glossary_layout.addWidget(label_additional)
+        self.additional_glossary_label = label_additional  # Store reference to update later
+        additional_glossary_layout.addStretch()
+
+        # Unified glossary: one deduplicated glossary across every novel,
+        # sent like the extension (below Add Additional Glossary).
+        unified_glossary_widget = QWidget()
+        unified_glossary_layout = QHBoxLayout(unified_glossary_widget)
+        unified_glossary_layout.setContentsMargins(0, 0, 0, 6)
+        layout.addWidget(unified_glossary_widget)
+
+        if not hasattr(self, 'enable_unified_glossary_checkbox'):
+            self.enable_unified_glossary_checkbox = self._create_styled_checkbox("Enable Unified Glossary")
+            self.enable_unified_glossary_checkbox.setChecked(self.config.get('enable_unified_glossary', False))
+        if not getattr(self.enable_unified_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.enable_unified_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_enable_unified_glossary_toggle)
+            self.enable_unified_glossary_checkbox._glossary_manager_sync_connected = True
+        self.enable_unified_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Merge every book's glossary into one deduplicated glossary_unified.csv per language\n"
+            "(Glossary/Unified Glossary/<source>-<target>/) and send it alongside the main glossary\n"
+            "with the same compression settings.\n"
+            "Updated at the start and end of each glossary run; the copy sent to the API leaves out\n"
+            "entries the book's own glossary already has."
+        ))
+        unified_glossary_layout.addWidget(self.enable_unified_glossary_checkbox)
+
+        unified_settings_btn = QPushButton("Unified Glossary Settings")
+        unified_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7ab8e8; }
+            QPushButton:pressed { background-color: #4a8fc4; }
+            QPushButton:disabled { background-color: #cccccc; color: #666666; }
+        """)
+        unified_settings_btn.setToolTip(_wrapped_tooltip_html(
+            "Source language and language-combining options for the unified glossary."
+        ))
+        unified_settings_btn.clicked.connect(lambda: self._open_unified_glossary_settings_dialog(parent))
+        unified_glossary_layout.addWidget(unified_settings_btn)
+        self._unified_glossary_settings_btn = unified_settings_btn
+
+        self.unified_glossary_label = QLabel(self._unified_glossary_hint_text())
+        unified_glossary_layout.addWidget(self.unified_glossary_label)
+        unified_glossary_layout.addStretch()
+
+        generate_unified_widget = QWidget()
+        generate_unified_layout = QHBoxLayout(generate_unified_widget)
+        generate_unified_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(generate_unified_widget)
+
+        if not hasattr(self, 'generate_unified_glossary_checkbox'):
+            self.generate_unified_glossary_checkbox = self._create_styled_checkbox("Generate Unified Glossary")
+            self.generate_unified_glossary_checkbox.setChecked(self.config.get('generate_unified_glossary', False))
+        if not getattr(self.generate_unified_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.generate_unified_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_generate_unified_glossary_toggle)
+            self.generate_unified_glossary_checkbox._glossary_manager_sync_connected = True
+        self.generate_unified_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Rebuild the unified glossary from every book folder under Glossary/ at the start of the\n"
+            "next glossary run, reading the files in parallel (Parallel Extraction worker count).\n"
+            "Fingerprinted: the rebuild is skipped when no book glossary changed since the last one."
+        ))
+        generate_unified_layout.addWidget(self.generate_unified_glossary_checkbox)
+
+        generate_unified_hint = QLabel("(Rebuilds from every book glossary at the start of the next run; skipped when nothing changed)")
+        generate_unified_layout.addWidget(generate_unified_hint)
+        generate_unified_layout.addStretch()
+        self._unified_generate_row_widgets = (self.generate_unified_glossary_checkbox, generate_unified_hint)
+        self._set_unified_glossary_row_enabled(self.enable_unified_glossary_checkbox.isChecked())
+
+        # Compress glossary toggle
+        compress_widget = QWidget()
+        compress_layout = QHBoxLayout(compress_widget)
+        compress_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(compress_widget)
+        
+        if not hasattr(self, 'compress_glossary_checkbox'):
+            self.compress_glossary_checkbox = self._create_styled_checkbox("Compress Glossary Prompt")
+            self.compress_glossary_checkbox.setChecked(self.config.get('compress_glossary_prompt', True))
+        if not getattr(self.compress_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.compress_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_compress_glossary_toggle)
+            self.compress_glossary_checkbox._glossary_manager_sync_connected = True
+        self.compress_glossary_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Only send glossary entries that appear in the current source text.\n"
+            "Saves tokens and cost; recommended ON."
+        ))
+        compress_layout.addWidget(self.compress_glossary_checkbox)
+        
+        label3 = QLabel("(Excludes glossary entries that don't appear in source text before sending to API)")
+        # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
+        compress_layout.addWidget(label3)
+        compress_layout.addStretch()
+
+        consider_translated_widget = QWidget()
+        consider_translated_layout = QHBoxLayout(consider_translated_widget)
+        consider_translated_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(consider_translated_widget)
+
+        if not hasattr(self, 'consider_translated_compression_checkbox'):
+            self.consider_translated_compression_checkbox = self._create_styled_checkbox("Consider Translated Column")
+            self.consider_translated_compression_checkbox.setChecked(self.config.get('compress_glossary_consider_translated_column', False))
+        if not getattr(self.consider_translated_compression_checkbox, '_glossary_manager_sync_connected', False):
+            self.consider_translated_compression_checkbox.stateChanged.connect(self._on_glossary_manager_consider_translated_compression_toggle)
+            self.consider_translated_compression_checkbox._glossary_manager_sync_connected = True
+        self.consider_translated_compression_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When ON, glossary compression keeps an entry if either raw_name or translated_name appears in the source text.\n"
+            "Default OFF preserves raw-name-only matching."
+        ))
+        consider_translated_layout.addWidget(self.consider_translated_compression_checkbox)
+
+        consider_translated_hint = QLabel("(Optional: also match translated_name during compression; default OFF)")
+        consider_translated_layout.addWidget(consider_translated_hint)
+        consider_translated_layout.addStretch()
+
+        precise_matching_widget = QWidget()
+        precise_matching_layout = QHBoxLayout(precise_matching_widget)
+        precise_matching_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(precise_matching_widget)
+
+        if not hasattr(self, 'precise_matching_checkbox'):
+            self.precise_matching_checkbox = self._create_styled_checkbox("Precise Term Matching")
+            self.precise_matching_checkbox.setChecked(self.config.get('compress_glossary_precise_matching', True))
+        if not getattr(self.precise_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.precise_matching_checkbox.stateChanged.connect(self._on_glossary_manager_precise_matching_toggle)
+            self.precise_matching_checkbox._glossary_manager_sync_connected = True
+        self.precise_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When ON, glossary compression uses script-aware matching: word boundaries for Latin terms, "
+            "sub-word boundary checks for short CJK terms, and normalized/spacing/honorific variants.\n"
+            "When OFF, matching is a plain substring search and may keep an entry on a single CJK character.\n"
+            "Default ON."
+        ))
+        precise_matching_layout.addWidget(self.precise_matching_checkbox)
+
+        # "Whole term for": same All / Custom + Configure… pattern as Emergency
+        # Glossary Compliance, and the same entry-type dialog behind it. This
+        # replaces the old Strict Gender Entry Matching checkbox.
+        if not hasattr(self, 'strict_matching_mode_label'):
+            self.strict_matching_mode_label = QLabel("Whole term for:")
+        precise_matching_layout.addWidget(self.strict_matching_mode_label)
+        if not hasattr(self, 'strict_matching_mode_combo'):
+            self.strict_matching_mode_combo = QComboBox()
+            self.strict_matching_mode_combo.addItems(list(self._STRICT_MATCHING_LABELS))
+            self.strict_matching_mode_combo.setFixedWidth(150)
+            try:
+                self.strict_matching_mode_combo.setStyleSheet(self.auto_glossary_mode_combo.styleSheet())
+            except Exception:
+                pass
+            self._disable_combobox_mousewheel(self.strict_matching_mode_combo)
+            self.strict_matching_mode_combo.setCurrentIndex(
+                self._STRICT_MATCHING_MODES.index(self._strict_matching_mode())
+            )
+            self.strict_matching_mode_combo.currentIndexChanged.connect(
+                self._on_glossary_manager_strict_matching_mode_change
+            )
+        self.strict_matching_mode_combo.setToolTip(_wrapped_tooltip_html(
+            "Which entries must appear as the WHOLE term, not just one word of it. Particles, honorifics, "
+            "spacing and full/half-width differences still count as the whole term.\n"
+            "All (default) — every entry. 넥서스 alone no longer keeps 모노크롬 넥서스, 넥서스 신권 …\n"
+            "Gender Entries — only entries whose type has gender enabled (custom entry types included).\n"
+            "Custom — the entry types picked under Configure…\n"
+            "None — one word of a multi-word entry is enough for every entry.\n\n"
+            "Gender-enabled entries are people, so one part of a NAME still counts: 미샤 keeps 미샤 랄토스 "
+            "because the glossary transliterates it (Misha). A title word does not: 마법사 does not keep "
+            "3서클 마법사, because it is translated (Mage), not transliterated."
+        ))
+        precise_matching_layout.addWidget(self.strict_matching_mode_combo)
+
+        if not hasattr(self, 'strict_matching_configure_btn'):
+            self.strict_matching_configure_btn = QPushButton("Configure…")
+            self.strict_matching_configure_btn.setFixedWidth(100)
+            self.strict_matching_configure_btn.setStyleSheet(
+                "background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;"
+            )
+            self.strict_matching_configure_btn.clicked.connect(
+                lambda: self._open_strict_matching_types_dialog(self.strict_matching_configure_btn.window())
+            )
+        precise_matching_layout.addWidget(self.strict_matching_configure_btn)
+        self._refresh_strict_matching_row()
+
+        precise_matching_hint = QLabel("(Recommended: narrower, more accurate compression; default ON, turn OFF for the old loose matching)")
+        precise_matching_layout.addWidget(precise_matching_hint)
+        precise_matching_layout.addStretch()
+
+        multipass_exclude_widget = QWidget()
+        multipass_exclude_layout = QHBoxLayout(multipass_exclude_widget)
+        multipass_exclude_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(multipass_exclude_widget)
+
+        if not hasattr(self, 'multipass_exclude_matching_checkbox'):
+            self.multipass_exclude_matching_checkbox = self._create_styled_checkbox("Multipass: Exclude Already-Applied Entries")
+            self.multipass_exclude_matching_checkbox.setChecked(self.config.get('compress_glossary_multipass_exclude_matching', True))
+        if not getattr(self.multipass_exclude_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.multipass_exclude_matching_checkbox.stateChanged.connect(self._on_glossary_manager_multipass_exclude_matching_toggle)
+            self.multipass_exclude_matching_checkbox._glossary_manager_sync_connected = True
+        self.multipass_exclude_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Multipass refinement (Full, Full + raw, Failed, Partial, Partial.b, Partial.b2) always compresses the "
+            "glossary against the RAW chapter, so Consider Translated Column is not needed for it.\n"
+            "When ON, entries whose translated name already appears in the translated output are left out too, "
+            "so each request only carries the entries the translation still needs.\n"
+            "Default ON."
+        ))
+        multipass_exclude_layout.addWidget(self.multipass_exclude_matching_checkbox)
+
+        multipass_exclude_hint = QLabel("(Multipass only sends glossary entries whose translation is missing from the output; default ON)")
+        multipass_exclude_layout.addWidget(multipass_exclude_hint)
+        multipass_exclude_layout.addStretch()
+
+        shadow_log_widget = QWidget()
+        shadow_log_layout = QHBoxLayout(shadow_log_widget)
+        shadow_log_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(shadow_log_widget)
+
+        if not hasattr(self, 'shadow_log_matching_checkbox'):
+            self.shadow_log_matching_checkbox = self._create_styled_checkbox("Log Match Differences")
+            self.shadow_log_matching_checkbox.setChecked(self.config.get('compress_glossary_shadow_log', False))
+        if not getattr(self.shadow_log_matching_checkbox, '_glossary_manager_sync_connected', False):
+            self.shadow_log_matching_checkbox.stateChanged.connect(self._on_glossary_manager_shadow_log_matching_toggle)
+            self.shadow_log_matching_checkbox._glossary_manager_sync_connected = True
+        self.shadow_log_matching_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When ON, both the old and the new matcher run and their disagreements are written to "
+            "logs/glossary_match_shadow/. Translation output is unchanged.\n"
+            "Use with Precise Term Matching OFF to preview what it would change before switching."
+        ))
+        shadow_log_layout.addWidget(self.shadow_log_matching_checkbox)
+
+        shadow_log_hint = QLabel("(Optional: preview-only; writes a diff report without changing output)")
+        shadow_log_layout.addWidget(shadow_log_hint)
+        shadow_log_layout.addStretch()
+
+        # Save location toggle
+        output_save_widget = QWidget()
+        output_save_layout = QHBoxLayout(output_save_widget)
+        output_save_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(output_save_widget)
+
+        if not hasattr(self, 'save_glossary_in_output_checkbox'):
+            self.save_glossary_in_output_checkbox = self._create_styled_checkbox("Save Glossary Backup in Output")
+            self.save_glossary_in_output_checkbox.setChecked(self.config.get('save_glossary_in_output', False))
+        self.save_glossary_in_output_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Also save duplicate glossary files in the current output/source folder. Primary glossary mapping stays unchanged."
+        ))
+        output_save_layout.addWidget(self.save_glossary_in_output_checkbox)
+
+        output_save_hint = QLabel("(Creates output-side Glossary_Backup copies; manga always also writes MangaGlossary_Backup)")
+        output_save_layout.addWidget(output_save_hint)
+        output_save_layout.addStretch()
+
+        # Optional tracker file toggle
+        skip_gender_tracking_widget = QWidget()
+        skip_gender_tracking_layout = QHBoxLayout(skip_gender_tracking_widget)
+        skip_gender_tracking_layout.setContentsMargins(0, 0, 0, 15)
+        layout.addWidget(skip_gender_tracking_widget)
+
+        if not hasattr(self, 'skip_gender_tracking_checkbox'):
+            self.skip_gender_tracking_checkbox = self._create_styled_checkbox("Skip Gender Tracking")
+            self.skip_gender_tracking_checkbox.setChecked(self.config.get('glossary_skip_gender_tracking', False))
+        self.skip_gender_tracking_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Do not create or use the *_gender_tracker.json sidecar file.\n"
+            "Also disables the Male/Female dedupe protection, so same-name entries dedupe normally."
+        ))
+        skip_gender_tracking_layout.addWidget(self.skip_gender_tracking_checkbox)
+
+        skip_gender_tracking_label = QLabel("(Disables gender tracker and gender-variant dedupe protection)")
+        skip_gender_tracking_layout.addWidget(skip_gender_tracking_label)
+        skip_gender_tracking_layout.addStretch()
+
+        # Gender tracker false-positive controls
+        gender_noise_widget = QWidget()
+        gender_noise_layout = QHBoxLayout(gender_noise_widget)
+        gender_noise_layout.setContentsMargins(20, 0, 0, 15)
+        layout.addWidget(gender_noise_widget)
+
+        gender_noise_label = QLabel("Ignore rare gender flips:")
+        gender_noise_layout.addWidget(gender_noise_label)
+
+        if not hasattr(self, 'gender_noise_threshold_slider'):
+            self.gender_noise_threshold_slider = QSlider(Qt.Horizontal)
+            self.gender_noise_threshold_slider.setMinimum(0)
+            self.gender_noise_threshold_slider.setMaximum(100)
+            self.gender_noise_threshold_slider.setValue(int(self.config.get('glossary_gender_noise_threshold', 10)))
+            self.gender_noise_threshold_slider.setMaximumWidth(180)
+            self._disable_slider_mousewheel(self.gender_noise_threshold_slider)
+        gender_noise_layout.addWidget(self.gender_noise_threshold_slider)
+
+        self.gender_noise_threshold_value_label = QLabel(f"{self.gender_noise_threshold_slider.value()}%")
+        self.gender_noise_threshold_value_label.setMinimumWidth(42)
+        gender_noise_layout.addWidget(self.gender_noise_threshold_value_label)
+
+        def _update_gender_noise_label(value):
+            self.gender_noise_threshold_value_label.setText(f"{value}%")
+        self.gender_noise_threshold_slider.valueChanged.connect(_update_gender_noise_label)
+
+        gender_noise_bias_label = QLabel("Bias:")
+        gender_noise_layout.addWidget(gender_noise_bias_label)
+
+        if not hasattr(self, 'gender_tracking_bias_combo'):
+            self.gender_tracking_bias_combo = QComboBox()
+            self.gender_tracking_bias_combo.addItems(["No Bias", "Prefer Female", "Prefer Male"])
+            bias_index = {'none': 0, 'female': 1, 'male': 2}.get(
+                str(self.config.get('glossary_gender_tracking_bias', 'none')).lower(),
+                0
+            )
+            self.gender_tracking_bias_combo.setCurrentIndex(bias_index)
+            self._disable_combobox_mousewheel(self.gender_tracking_bias_combo)
+        self.gender_tracking_bias_combo.setToolTip(_wrapped_tooltip_html(
+            "No Bias: suppress a gender variant when it appears at or below the rare-flip percentage.\n"
+            "Prefer Female: never suppress rare female readings, but still suppress rare male readings.\n"
+            "Prefer Male: never suppress rare male readings, but still suppress rare female readings."
+        ))
+        gender_noise_layout.addWidget(self.gender_tracking_bias_combo)
+
+        gender_noise_hint = QLabel("(Default 10%: one-off AI misgenders are ignored during glossary compression)")
+        gender_noise_layout.addWidget(gender_noise_hint)
+        gender_noise_layout.addStretch()
+
+        # Custom append prompt section
+        append_prompt_frame = QGroupBox("Glossary Append Format")
+        append_prompt_layout = QVBoxLayout(append_prompt_frame)
+        append_prompt_layout.setContentsMargins(10, 10, 10, 10)  # Tighter margins
+        append_prompt_layout.setSpacing(5)  # Reduced spacing
+        layout.addWidget(append_prompt_frame)
+        
+        self.append_prompt_text = QTextEdit()
+        self.append_prompt_text.setFixedHeight(60)
+        self.append_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        append_prompt_layout.addWidget(self.append_prompt_text)
+        
+        # Always reload append prompt from config to ensure fresh state
+        # Treat empty string as missing to ensure users get the default
+        default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+        append_prompt_from_config = self.config.get('append_glossary_prompt', default_append_prompt)
+        if not append_prompt_from_config or not append_prompt_from_config.strip():
+            self.append_glossary_prompt = default_append_prompt
+        else:
+            self.append_glossary_prompt = append_prompt_from_config
+        
+        self.append_prompt_text.setPlainText(self._sep_for_display(self.append_glossary_prompt))
+        
+        append_prompt_controls_widget = QWidget()
+        append_prompt_controls_layout = QHBoxLayout(append_prompt_controls_widget)
+        append_prompt_controls_layout.setContentsMargins(0, 5, 0, 0)
+        append_prompt_layout.addWidget(append_prompt_controls_widget)
+        
+        def reset_append_prompt():
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default glossary append format?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.append_prompt_text.setPlainText("- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+        
+        reset_append_btn = QPushButton("Reset to Default")
+        reset_append_btn.clicked.connect(reset_append_prompt)
+        reset_append_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        append_prompt_controls_layout.addWidget(reset_append_btn)
+        append_prompt_controls_layout.addStretch()
+
+        single_pass_header_frame = QGroupBox("Single Pass Header Prompt")
+        single_pass_header_layout = QVBoxLayout(single_pass_header_frame)
+        single_pass_header_layout.setContentsMargins(10, 10, 10, 10)
+        single_pass_header_layout.setSpacing(5)
+        layout.addWidget(single_pass_header_frame)
+
+        self.single_pass_header_prompt_text = QTextEdit()
+        self.single_pass_header_prompt_text.setFixedHeight(130)
+        self.single_pass_header_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        single_pass_header_layout.addWidget(self.single_pass_header_prompt_text)
+
+        default_single_pass_header = self._default_single_pass_header_prompt()
+        single_pass_header_from_config = self.config.get(
+            'single_pass_glossary_header_prompt',
+            default_single_pass_header,
+        )
+        if not single_pass_header_from_config or not str(single_pass_header_from_config).strip():
+            self.single_pass_glossary_header_prompt = default_single_pass_header
+        elif (
+            "Balanced/Full glossary logic" in str(single_pass_header_from_config)
+            or "standard Balanced/Full extraction" in str(single_pass_header_from_config)
+        ):
+            self.single_pass_glossary_header_prompt = default_single_pass_header
+            self.config['single_pass_glossary_header_prompt'] = default_single_pass_header
+        else:
+            self.single_pass_glossary_header_prompt = single_pass_header_from_config
+        self.single_pass_header_prompt_text.setPlainText(
+            self._sep_for_display(self.single_pass_glossary_header_prompt)
+        )
+
+        single_pass_header_controls_widget = QWidget()
+        single_pass_header_controls_layout = QHBoxLayout(single_pass_header_controls_widget)
+        single_pass_header_controls_layout.setContentsMargins(0, 5, 0, 0)
+        single_pass_header_layout.addWidget(single_pass_header_controls_widget)
+
+        def reset_single_pass_header_prompt():
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default single pass header prompt?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.single_pass_header_prompt_text.setPlainText(default_single_pass_header)
+
+        reset_single_pass_header_btn = QPushButton("Reset to Default")
+        reset_single_pass_header_btn.clicked.connect(reset_single_pass_header_prompt)
+        reset_single_pass_header_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        single_pass_header_controls_layout.addWidget(reset_single_pass_header_btn)
+        single_pass_header_hint = QLabel("Use {glossary_prompt} and {translation_prompt} placeholders.")
+        single_pass_header_hint.setStyleSheet("color: gray; font-size: 9pt;")
+        single_pass_header_controls_layout.addWidget(single_pass_header_hint)
+        single_pass_header_controls_layout.addStretch()
+
+        layout.addStretch()
+
+        # The mode combo and the rows it locks now exist: run the Minimal tab's mode-state pass.
+        init_mode_state = getattr(self, '_init_auto_glossary_mode_state', None)
+        if callable(init_mode_state):
+            init_mode_state()
+
+    def _setup_glossary_refinement_tab(self, parent):
+        """Setup optional post-generation glossary refinement controls."""
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        header = QLabel("Glossary Refinement")
+        header.setStyleSheet("font-weight: bold; font-size: 12pt;")
+        layout.addWidget(header)
+
+        desc = QLabel("Optional cleanup pass after automatic glossary generation.")
+        desc.setStyleSheet("color: #aaa;")
+        layout.addWidget(desc)
+
+        refinement_enable_row = QWidget()
+        refinement_enable_layout = QHBoxLayout(refinement_enable_row)
+        refinement_enable_layout.setContentsMargins(0, 0, 0, 0)
+        refinement_enable_layout.setSpacing(10)
+
+        self.glossary_refinement_enabled_checkbox = self._create_styled_checkbox("Enable Glossary Refinement")
+        self.glossary_refinement_enabled_checkbox.setChecked(bool(self.config.get('glossary_refinement_enabled', False)))
+        self.glossary_refinement_enabled_checkbox.setToolTip(_wrapped_tooltip_html("Run a final refinement API pass after glossary extraction completes."))
+        refinement_enable_layout.addWidget(self.glossary_refinement_enabled_checkbox)
+
+        try:
+            from multi_api_key_manager import create_preview_pool_button
+            refinement_keys_btn = create_preview_pool_button(
+                getattr(self, '_glossary_dialog', None) or parent,
+                self,
+                'glossary_refinement',
+                "Refinement Keys",
+                _wrapped_tooltip_html("Open the Multi API Key Manager focused on the Refinement key pool."),
+            )
+            refinement_enable_layout.addWidget(refinement_keys_btn)
+        except Exception:
+            pass
+        refinement_enable_layout.addStretch()
+        layout.addWidget(refinement_enable_row)
+
+        self.glossary_refinement_wait_for_completion_checkbox = self._create_styled_checkbox(
+            "Do not refine until glossary completion is 100%"
+        )
+        self.glossary_refinement_wait_for_completion_checkbox.setChecked(
+            bool(self.config.get('glossary_refinement_wait_for_completion', False))
+        )
+        self.glossary_refinement_wait_for_completion_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Gate automatic refinement until every glossary extraction chapter is complete, "
+            "structurally skipped, or merged. Manual Refine this actions remain available."
+        ))
+        layout.addWidget(self.glossary_refinement_wait_for_completion_checkbox)
+
+        self.glossary_refinement_reopen_on_source_change_checkbox = self._create_styled_checkbox(
+            "Reopen completed types when source entries change"
+        )
+        self.glossary_refinement_reopen_on_source_change_checkbox.setObjectName(
+            'glossary_refinement_reopen_on_source_change_checkbox'
+        )
+        self.glossary_refinement_reopen_on_source_change_checkbox.setChecked(
+            bool(self.config.get('glossary_refinement_reopen_on_source_change', False))
+        )
+        self.glossary_refinement_reopen_on_source_change_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, adding, removing, or renaming source entries reopens the entire "
+            "completed entry type for automatic refinement. When off, completed types stay "
+            "completed. You can still refine them manually from the Glossary Progress Manager."
+        ))
+        layout.addWidget(self.glossary_refinement_reopen_on_source_change_checkbox)
+
+        options_box = QGroupBox("Refinement Scope")
+        options_layout = QVBoxLayout(options_box)
+        layout.addWidget(options_box)
+
+        type_mode_row = QWidget()
+        type_mode_layout = QHBoxLayout(type_mode_row)
+        type_mode_layout.setContentsMargins(0, 0, 0, 0)
+        type_mode_layout.addWidget(QLabel("Entry types:"))
+        self.glossary_refinement_type_mode_combo = QComboBox()
+        self.glossary_refinement_type_mode_combo.addItems(["All Active Entry Types", "Selected Entry Types"])
+        self._apply_halgakos_combo_icons(self.glossary_refinement_type_mode_combo)
+        saved_type_mode = str(self.config.get('glossary_refinement_type_mode', 'all')).lower()
+        self.glossary_refinement_type_mode_combo.setCurrentIndex(1 if saved_type_mode == 'selected' else 0)
+        self.glossary_refinement_type_mode_combo.wheelEvent = lambda event: None
+        type_mode_layout.addWidget(self.glossary_refinement_type_mode_combo)
+        type_mode_layout.addStretch()
+        options_layout.addWidget(type_mode_row)
+
+        self.glossary_refinement_type_list = QListWidget()
+        self.glossary_refinement_type_list.setObjectName("glossaryRefinementTypeList")
+        self.glossary_refinement_type_list.setMaximumHeight(150)
+        self.glossary_refinement_type_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.glossary_refinement_type_list.setFocusPolicy(Qt.NoFocus)
+        self.glossary_refinement_type_list.setStyleSheet("""
+            QListWidget#glossaryRefinementTypeList {
+                background-color: transparent;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 2px;
+            }
+            QListWidget#glossaryRefinementTypeList:disabled {
+                color: #777777;
+                border-color: #3a3a3a;
+                background-color: #202020;
+            }
+            QListWidget#glossaryRefinementTypeList::item {
+                min-height: 24px;
+                padding: 1px 4px;
+            }
+            QListWidget#glossaryRefinementTypeList::item:selected {
+                background-color: transparent;
+                color: white;
+            }
+        """)
+        from PySide6.QtWidgets import QListWidgetItem
+
+        def _current_refinement_entry_types():
+            custom_types = dict(getattr(self, 'custom_entry_types', {}) or self.config.get('custom_entry_types', {}) or {})
+            if not custom_types:
+                custom_types = {'character': {'enabled': True}, 'terms': {'enabled': True}, 'surnames': {'enabled': True}, 'titles': {'enabled': True}, 'locations': {'enabled': True}, 'nicknames': {'enabled': True}}
+            if 'term' in custom_types and 'terms' not in custom_types:
+                custom_types['terms'] = custom_types.pop('term')
+            if 'term' in custom_types and 'terms' in custom_types:
+                custom_types.pop('term', None)
+
+            live_checkboxes = getattr(self, 'type_enabled_checkboxes', {}) or {}
+            for type_name, checkbox in live_checkboxes.items():
+                if type_name in custom_types and isinstance(custom_types[type_name], dict):
+                    custom_types[type_name]['enabled'] = checkbox.isChecked()
+
+            return sorted(
+                (
+                    (type_name, type_cfg)
+                    for type_name, type_cfg in custom_types.items()
+                    if isinstance(type_cfg, dict) and type_cfg.get('enabled', True)
+                ),
+                key=lambda x: (x[0] not in ['character', 'terms'], x[0])
+            )
+
+        def _rebuild_refinement_type_list():
+            selected_types = set(self.config.get('glossary_refinement_selected_types', []))
+            current_checks = {}
+            for i in range(self.glossary_refinement_type_list.count()):
+                item = self.glossary_refinement_type_list.item(i)
+                widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+                if isinstance(widget, QCheckBox):
+                    current_checks[widget.property('entry_type') or widget.text()] = widget.isChecked()
+            if current_checks:
+                selected_types = {type_name for type_name, checked in current_checks.items() if checked}
+
+            self.glossary_refinement_type_list.clear()
+            active_types = _current_refinement_entry_types()
+            for type_name, _type_cfg in active_types:
+                list_item = QListWidgetItem()
+                list_item.setData(Qt.UserRole, type_name)
+                list_item.setFlags(Qt.ItemIsEnabled)
+                checkbox = self._create_styled_checkbox(type_name)
+                checkbox.setProperty('entry_type', type_name)
+                checkbox.setChecked(bool(not selected_types or type_name in selected_types))
+                try:
+                    list_item.setSizeHint(checkbox.sizeHint())
+                except Exception:
+                    pass
+                self.glossary_refinement_type_list.addItem(list_item)
+                self.glossary_refinement_type_list.setItemWidget(list_item, checkbox)
+
+            if hasattr(self, 'glossary_refinement_enabled_checkbox') and hasattr(self, 'glossary_refinement_type_mode_combo'):
+                type_list_enabled = (
+                    self.glossary_refinement_enabled_checkbox.isChecked()
+                    and self.glossary_refinement_type_mode_combo.currentIndex() == 1
+                )
+                self.glossary_refinement_type_list.setEnabled(type_list_enabled)
+                for i in range(self.glossary_refinement_type_list.count()):
+                    item = self.glossary_refinement_type_list.item(i)
+                    widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+                    if isinstance(widget, QCheckBox):
+                        widget.setEnabled(type_list_enabled)
+                        if hasattr(widget, '_update_checkmark'):
+                            QTimer.singleShot(0, widget._update_checkmark)
+
+        self._refresh_glossary_refinement_type_list = _rebuild_refinement_type_list
+        _rebuild_refinement_type_list()
+        options_layout.addWidget(self.glossary_refinement_type_list)
+
+        request_row = QWidget()
+        request_layout = QHBoxLayout(request_row)
+        request_layout.setContentsMargins(0, 0, 0, 0)
+        request_layout.addWidget(QLabel("Request mode:"))
+        self.glossary_refinement_chunking_combo = QComboBox()
+        self.glossary_refinement_chunking_combo.addItems(["Send each entry type in a separate request", "Send all entry types"])
+        self.glossary_refinement_chunking_combo.setToolTip(_wrapped_tooltip_html(
+            "Send all entry types combines them within the token budget. If splitting is needed, "
+            "characters and surnames are grouped first, followed by enabled gendered types, then other types. "
+            "A type that exceeds the budget on its own is split into smaller requests."
+        ))
+        self._apply_halgakos_combo_icons(self.glossary_refinement_chunking_combo)
+        self.glossary_refinement_chunking_combo.setCurrentIndex(
+            self._glossary_refinement_chunking_combo_index(self.config)
+        )
+        self.glossary_refinement_chunking_combo.wheelEvent = lambda event: None
+        request_layout.addWidget(self.glossary_refinement_chunking_combo)
+        request_layout.addStretch()
+        options_layout.addWidget(request_row)
+
+        self.glossary_refinement_skip_dedupe_checkbox = self._create_styled_checkbox("Skip deduplication after refinement")
+        self.glossary_refinement_skip_dedupe_checkbox.setChecked(bool(self.config.get('glossary_refinement_skip_dedupe', False)))
+        self.glossary_refinement_skip_dedupe_checkbox.setToolTip(_wrapped_tooltip_html("If enabled, refinement output is saved without the normal duplicate cleanup pass."))
+        options_layout.addWidget(self.glossary_refinement_skip_dedupe_checkbox)
+
+        prompt_box = QGroupBox("Refinement Prompts")
+        prompt_layout = QVBoxLayout(prompt_box)
+        layout.addWidget(prompt_box)
+
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {columns}, {fields1}, {entries}, {chunk_index}, {total_chunks}")
+        placeholder_line.setReadOnly(True)
+        placeholder_line.setFrame(False)
+        placeholder_line.setCursorPosition(0)
+        placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+        placeholder_line.setToolTip(
+            "<qt><table width='560' style='font-size:9pt; border-collapse:collapse;' cellpadding='4'>"
+            "<tr><td><b>{fields}</b></td><td>comma-separated glossary column schema, including active custom columns.</td></tr>"
+            "<tr><td><b>{columns}</b></td><td>alias for {fields}.</td></tr>"
+            "<tr><td><b>{fields1}</b></td><td>\\x1F-separated glossary column schema, only for prompts that explicitly want Unit Separator.</td></tr>"
+            "<tr><td><b>{entries}</b></td><td>comma-separated active refinement entry types.</td></tr>"
+            "<tr><td><b>{chunk_index}</b></td><td>current refinement chunk number.</td></tr>"
+            "<tr><td><b>{total_chunks}</b></td><td>total chunks for this entry type.</td></tr>"
+            "</table></qt>"
+        )
+        prompt_layout.addWidget(placeholder_line)
+
+        prompt_layout.addWidget(QLabel("System Prompt:"))
+        self.glossary_refinement_system_prompt_text = QTextEdit()
+        self.glossary_refinement_system_prompt_text.setMinimumHeight(220)
+        default_system = self._default_glossary_refinement_system_prompt()
+        system_prompt = self.config.get('glossary_refinement_system_prompt', default_system)
+        if not system_prompt or not str(system_prompt).strip():
+            system_prompt = default_system
+        self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(system_prompt))
+        prompt_layout.addWidget(self.glossary_refinement_system_prompt_text)
+
+        prompt_layout.addWidget(QLabel("User Prompt (optional):"))
+        self.glossary_refinement_user_prompt_text = QTextEdit()
+        self.glossary_refinement_user_prompt_text.setMinimumHeight(120)
+        default_user = self._default_glossary_refinement_user_prompt()
+        self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(self.config.get('glossary_refinement_user_prompt', default_user)))
+        self.glossary_refinement_user_prompt_text.setPlaceholderText("Leave empty to send only the glossary content.")
+        prompt_layout.addWidget(self.glossary_refinement_user_prompt_text)
+
+        prompt_layout.insertWidget(1, self._create_refinement_prompt_profile_controls(
+            self.glossary_refinement_system_prompt_text,
+            self.glossary_refinement_user_prompt_text,
+        ))
+
+        btn_row = QWidget()
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.setToolTip(_wrapped_tooltip_html("Restore both refinement prompt fields to their defaults."))
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;  /* dark yellow */
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+
+        def _reset_refinement_prompts_to_default():
+            reply = QMessageBox.question(
+                parent,
+                "Reset Prompt",
+                "Reset refinement system and user prompts to default?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(default_system))
+                self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(default_user))
+
+        reset_btn.clicked.connect(_reset_refinement_prompts_to_default)
+        btn_layout.addWidget(reset_btn)
+        btn_layout.addStretch()
+        prompt_layout.addWidget(btn_row)
+
+        def _sync_refinement_widgets(*_args):
+            enabled = self.glossary_refinement_enabled_checkbox.isChecked()
+            self.glossary_refinement_reopen_on_source_change_checkbox.setEnabled(enabled)
+            options_box.setEnabled(enabled)
+            prompt_box.setEnabled(enabled)
+            type_list_enabled = enabled and self.glossary_refinement_type_mode_combo.currentIndex() == 1
+            self.glossary_refinement_type_list.setEnabled(type_list_enabled)
+            for i in range(self.glossary_refinement_type_list.count()):
+                item = self.glossary_refinement_type_list.item(i)
+                widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+                if isinstance(widget, QCheckBox):
+                    widget.setEnabled(type_list_enabled)
+                    if hasattr(widget, '_update_checkmark'):
+                        QTimer.singleShot(0, widget._update_checkmark)
+
+        self.glossary_refinement_enabled_checkbox.toggled.connect(_sync_refinement_widgets)
+        self.glossary_refinement_type_mode_combo.currentIndexChanged.connect(_sync_refinement_widgets)
+        _sync_refinement_widgets()
+        layout.addStretch()
+
+    def _setup_glossary_editor_tab(self, parent):
+        """Set up the glossary editor/trimmer tab"""
+        # Create main layout
+        editor_layout = QVBoxLayout(parent)
+        editor_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Toggle: update output files when translated names change
+        html_toggle_widget = QWidget()
+        html_toggle_layout = QHBoxLayout(html_toggle_widget)
+        html_toggle_layout.setContentsMargins(0, 0, 0, 4)
+        self.update_html_on_save_checkbox = self._create_styled_checkbox("Update output files on save")
+        self.update_html_on_save_checkbox.setChecked(self.config.get('update_html_on_save', True))
+        self.update_html_on_save_checkbox.setToolTip(_wrapped_tooltip_html(
+            "When enabled, saving will also replace updated translated names in direct files in the book output folder."
+        ))
+        self.hide_unused_entries_checkbox = self._create_styled_checkbox("Hide unused entries")
+        self.hide_unused_entries_checkbox.setChecked(False)
+        self.hide_unused_entries_checkbox.setToolTip(_wrapped_tooltip_html(
+            "Hide glossary rows whose translated term does not appear in the translated output files."
+        ))
+        def _persist_update_html(state):
+            self.config['update_html_on_save'] = bool(state)
+            try:
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+        self.update_html_on_save_checkbox.stateChanged.connect(_persist_update_html)
+        html_toggle_layout.addWidget(self.update_html_on_save_checkbox)
+        html_toggle_layout.addSpacing(12)
+        html_toggle_layout.addWidget(self.hide_unused_entries_checkbox)
+        html_toggle_layout.addStretch()
+        # We'll place this above the save buttons inside the toolbar later
+
+        file_widget = QWidget()
+        file_layout = QHBoxLayout(file_widget)
+        file_layout.setContentsMargins(0, 0, 0, 10)
+        editor_layout.addWidget(file_widget)
+
+        file_layout.addWidget(QLabel("Glossary File:"))
+
+        # Navigation arrows
+        self._editor_prev_btn = QPushButton("◀")
+        self._editor_prev_btn.setFixedSize(24, 24)
+        self._editor_prev_btn.setStyleSheet(
+            "QPushButton { background: #444; color: white; border-radius: 4px; font-size: 10pt; padding: 0; } "
+            "QPushButton:hover { background: #666; }"
+        )
+        self._editor_prev_btn.setToolTip(_wrapped_tooltip_html("Previous glossary"))
+        self._editor_prev_btn.clicked.connect(lambda: self._editor_nav(-1))
+        file_layout.addWidget(self._editor_prev_btn)
+
+        self.editor_file_combo = QComboBox()
+        self.editor_file_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.editor_file_combo.setStyleSheet("QComboBox { padding: 4px; }")
+        self.editor_file_combo.wheelEvent = lambda e: e.ignore()
+        file_layout.addWidget(self.editor_file_combo)
+
+        self._editor_next_btn = QPushButton("▶")
+        self._editor_next_btn.setFixedSize(24, 24)
+        self._editor_next_btn.setStyleSheet(
+            "QPushButton { background: #444; color: white; border-radius: 4px; font-size: 10pt; padding: 0; } "
+            "QPushButton:hover { background: #666; }"
+        )
+        self._editor_next_btn.setToolTip(_wrapped_tooltip_html("Next glossary"))
+        self._editor_next_btn.clicked.connect(lambda: self._editor_nav(1))
+        file_layout.addWidget(self._editor_next_btn)
+
+        # Hide arrows when only 0-1 items
+        self._editor_prev_btn.setVisible(False)
+        self._editor_next_btn.setVisible(False)
+
+        # Compatibility shim: editor_file_entry.text() / .setText() still work
+        class _ComboShim:
+            def __init__(shim, combo, owner):
+                shim._combo = combo
+                shim._owner = owner
+            def text(shim):
+                return shim._combo.currentData() or shim._combo.currentText() or ''
+            def setText(shim, path):
+                # If path already in combo, select it; otherwise add it
+                for i in range(shim._combo.count()):
+                    if shim._combo.itemData(i) == path:
+                        shim._combo.setCurrentIndex(i)
+                        return
+                shim._combo.blockSignals(True)
+                shim._combo.clear()
+                if path:
+                    display = shim._owner._display_glossary_path(path)
+                    shim._combo.addItem(display, path)
+                shim._combo.blockSignals(False)
+                # Keep the unified glossaries reachable after a manual load.
+                try:
+                    shim._owner._append_unified_glossaries_to_editor_combo()
+                except Exception:
+                    pass
+                shim._owner._update_editor_nav_buttons()
+        self.editor_file_entry = _ComboShim(self.editor_file_combo, self)
+
+        stats_widget = QWidget()
+        stats_layout = QHBoxLayout(stats_widget)
+        stats_layout.setContentsMargins(0, 0, 0, 5)
+        editor_layout.addWidget(stats_widget)
+
+        # Spinning icon for reload indicator
+        from PySide6.QtGui import QPixmap, QTransform
+        from PySide6.QtCore import QPropertyAnimation
+
+        class SpinningIconLabel(QLabel):
+            """A QLabel that displays an icon and can spin 360° on demand."""
+            def __init__(self, icon_path, size=20, parent=None):
+                super().__init__(parent)
+                self._angle = 0.0
+                # Load with HiDPI scaling
+                dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+                scaled_size = int(size * dpr)
+                self._base_pixmap = QPixmap(icon_path).scaled(
+                    scaled_size, scaled_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+                self._base_pixmap.setDevicePixelRatio(dpr)
+                self.setFixedSize(size, size)
+                self._update_pixmap()
+
+            def _update_pixmap(self):
+                if self._base_pixmap.isNull():
+                    return
+                t = QTransform().rotate(self._angle)
+                rotated = self._base_pixmap.transformed(t, Qt.SmoothTransformation)
+                # Center-crop the rotated pixmap back to the original size
+                dpr = rotated.devicePixelRatio()
+                bw, bh = self._base_pixmap.width(), self._base_pixmap.height()
+                rw, rh = rotated.width(), rotated.height()
+                x = (rw - bw) // 2
+                y = (rh - bh) // 2
+                cropped = rotated.copy(x, y, bw, bh)
+                cropped.setDevicePixelRatio(dpr)
+                self.setPixmap(cropped)
+
+            def get_angle(self):
+                return self._angle
+
+            def set_angle(self, value):
+                self._angle = value
+                self._update_pixmap()
+
+            angle = Property(float, get_angle, set_angle)
+
+            def spin(self, duration=600):
+                """Trigger a single 360° spin animation."""
+                anim = QPropertyAnimation(self, b"angle")
+                anim.setStartValue(0.0)
+                anim.setEndValue(360.0)
+                anim.setDuration(duration)
+                anim.finished.connect(lambda: setattr(self, '_angle', 0.0))
+                # Keep reference so it doesn't get garbage collected
+                self._spin_anim = anim
+                anim.start()
+
+        _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        self._reload_icon = SpinningIconLabel(_icon_path, size=20, parent=stats_widget)
+        self._reload_icon.setToolTip(_wrapped_tooltip_html("Glossary reload indicator"))
+        stats_layout.addWidget(self._reload_icon)
+
+        self.stats_label = QLabel("No glossary loaded")
+        self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic;")
+        stats_layout.addWidget(self.stats_label)
+        stats_layout.addStretch()
+
+        content_frame = QGroupBox("Glossary Entries")
+        content_frame_layout = QVBoxLayout(content_frame)
+        editor_layout.addWidget(content_frame, 1)  # stretch=1 so tree fills available space
+
+        # Create tree widget
+        self.glossary_tree = QTreeWidget()
+        self.glossary_tree.setColumnCount(1)
+        self.glossary_tree.setHeaderLabels(["#"])
+        self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.glossary_tree.header().setSectionsClickable(True)
+        self.glossary_tree.header().viewport().setCursor(Qt.PointingHandCursor)
+        content_frame_layout.addWidget(self.glossary_tree)
+
+        configured_tree_font_size = self.config.get('glossary_editor_tree_font_size', None)
+        if configured_tree_font_size is None:
+            configured_tree_font_size = self.glossary_tree.font().pointSize() or 10
+        self._set_glossary_tree_font_size(configured_tree_font_size, persist=False)
+
+        self._glossary_tree_zoom_shortcuts = []
+        for sequence in (QKeySequence.ZoomIn, QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")):
+            shortcut = QShortcut(sequence, self.glossary_tree)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda: self._adjust_glossary_tree_font_size(1))
+            self._glossary_tree_zoom_shortcuts.append(shortcut)
+        for sequence in (QKeySequence.ZoomOut, QKeySequence("Ctrl+-")):
+            shortcut = QShortcut(sequence, self.glossary_tree)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda: self._adjust_glossary_tree_font_size(-1))
+            self._glossary_tree_zoom_shortcuts.append(shortcut)
+
+        original_glossary_tree_wheel_event = self.glossary_tree.wheelEvent
+
+        def glossary_tree_wheel_event(event):
+            try:
+                if event.modifiers() & Qt.ControlModifier:
+                    delta = event.angleDelta().y() or event.pixelDelta().y()
+                    if delta:
+                        self._adjust_glossary_tree_font_size(1 if delta > 0 else -1)
+                        event.accept()
+                        return
+            except Exception:
+                pass
+            original_glossary_tree_wheel_event(event)
+
+        self.glossary_tree.wheelEvent = glossary_tree_wheel_event
+
+        self.glossary_tree.itemDoubleClicked.connect(lambda item, col: self._on_tree_double_click(item, col))
+        self.glossary_tree.customContextMenuRequested.connect(lambda pos: None)  # will be rebound after helpers are defined
+
+        self.current_glossary_data = None
+        self.current_glossary_format = None
+        self.current_gender_tracker_data = None
+        self.current_gender_tracker_path = ''
+        self._pending_gender_decisions = {}
+        self._gender_variants_pending_save = 0
+        self.glossary_column_fields = []
+        self._glossary_column_filters = {}
+        self._glossary_editor_view_stats_text = "No glossary loaded"
+        self._original_translated_map = {}
+        # Tracks whether the editor's current content came from an explicit
+        # user Browse/Load (True) versus auto-association with an input file
+        # (False). Used to avoid wiping deliberately loaded glossaries when
+        # the input file path is cleared.
+        if not hasattr(self, '_glossary_editor_manual_source'):
+            self._glossary_editor_manual_source = False
+
+        class _EditorLoadBridge(QObject):
+            loaded = Signal(object)
+
+        class _HideUnusedFilterBridge(QObject):
+            progress = Signal(object)
+            finished = Signal(object)
+
+        self._editor_load_bridge = _EditorLoadBridge(parent)
+        self._editor_load_token = None
+        self._hide_unused_filter_bridge = _HideUnusedFilterBridge(parent)
+        self._hide_unused_filter_token = None
+
+        # Undo / redo history stacks (each entry is a deep copy of current_glossary_data)
+        self._undo_stack = []
+        self._redo_stack = []
+        self._undo_max = 50  # Keep at most 50 snapshots
+
+        # Row highlight helpers
+        orange_brush = QBrush(QColor("#f97316"))
+        gender_status_role = _EDITOR_GENDER_STATUS_ROLE
+
+        def _gender_settings():
+            return glossary_document.editor_gender_settings(self, self.config)
+
+        def _gender_tracker_entry(entry):
+            return glossary_document.tracker_entry_for_entry(
+                entry, getattr(self, 'current_gender_tracker_data', None)
+            )
+
+        def _gender_status(entry):
+            return glossary_document.entry_gender_status(
+                entry, getattr(self, 'current_gender_tracker_data', None), _gender_settings
+            )
+
+        def _apply_tracker_highlight(item):
+            status = item.data(0, gender_status_role) if item is not None else None
+            _apply_editor_gender_presentation(item, status)
+
+        def mark_row_updated(item, updated):
+            for c in range(item.columnCount()):
+                if updated:
+                    item.setBackground(c, orange_brush)
+            if not updated:
+                _apply_tracker_highlight(item)
+
+        def _decorate_gender_item(item, entry, column_fields):
+            status = _gender_status(entry)
+            gender_column = column_fields.index('gender') + 1 if 'gender' in column_fields else None
+            _apply_editor_gender_presentation(item, status, gender_column)
+
+        def get_baseline_translated(item, col_key):
+            return glossary_document.baseline_translated(
+                self._original_translated_map,
+                self.current_glossary_format,
+                item.data(0, Qt.UserRole),
+                col_key,
+            )
+
+        def update_row_highlight(item, col_key, new_val):
+            baseline = get_baseline_translated(item, col_key)
+            if baseline is None:
+                return
+            mark_row_updated(item, new_val != baseline)
+
+        self._mark_glossary_row_updated = mark_row_updated
+
+        def _editor_data_row_specs():
+            return glossary_document.editor_row_specs(
+                getattr(self, 'glossary_column_fields', []),
+                self.current_glossary_data,
+                self.current_glossary_format,
+            )
+
+        _editor_display_value = glossary_document.editor_display_value
+
+        def _active_glossary_column_filters():
+            filters = getattr(self, '_glossary_column_filters', {})
+            return filters if isinstance(filters, dict) else {}
+
+        def _refresh_glossary_filter_headers():
+            fields = list(getattr(self, 'glossary_column_fields', []) or [])
+            filters = _active_glossary_column_filters()
+            headers = ['#']
+            for field in fields:
+                label = field.replace('_', ' ').title()
+                filter_indicator = '🔽' if field in filters else '▾'
+                headers.append(f"{label} {filter_indicator}")
+            self.glossary_tree.setHeaderLabels(headers)
+            header_item = self.glossary_tree.headerItem()
+            if header_item is not None:
+                header_item.setToolTip(0, _wrapped_tooltip_html("Row number"))
+                for column, field in enumerate(fields, start=1):
+                    state = "Filter active. " if field in filters else ""
+                    header_item.setToolTip(
+                        column,
+                        _wrapped_tooltip_html(f"{state}Click to filter {field.replace('_', ' ')}."),
+                    )
+
+        def _tree_item_matches_glossary_filters(item):
+            return glossary_document.row_matches_column_filters(
+                item.text,
+                getattr(self, 'glossary_column_fields', []),
+                _active_glossary_column_filters(),
+            )
+
+        def _apply_glossary_column_filters(update_stats=True):
+            filters = _active_glossary_column_filters()
+            total = self.glossary_tree.topLevelItemCount()
+            visible = 0
+            self.glossary_tree.setUpdatesEnabled(False)
+            try:
+                for row in range(total):
+                    item = self.glossary_tree.topLevelItem(row)
+                    matches = _tree_item_matches_glossary_filters(item)
+                    item.setHidden(not matches)
+                    if matches:
+                        visible += 1
+            finally:
+                self.glossary_tree.setUpdatesEnabled(True)
+
+            _refresh_glossary_filter_headers()
+            if update_stats:
+                base_stats = (
+                    getattr(self, '_glossary_editor_view_stats_text', None)
+                    or getattr(self, '_glossary_editor_base_stats_text', None)
+                    or f"Total entries: {total}"
+                )
+                if filters:
+                    self.stats_label.setText(f"{base_stats} | Column filters: {visible}/{total} shown")
+                else:
+                    self.stats_label.setText(base_stats)
+            try:
+                self.glossary_tree.viewport().update()
+            except Exception:
+                pass
+            return visible, total
+
+        self._apply_glossary_column_filters = _apply_glossary_column_filters
+
+        def _open_glossary_column_filter(column):
+            fields = list(getattr(self, 'glossary_column_fields', []) or [])
+            if column <= 0 or column > len(fields):
+                return
+            field = fields[column - 1]
+            if field == '_section' or self.glossary_tree.isColumnHidden(column):
+                return
+
+            active_popup = getattr(self, '_glossary_column_filter_popup', None)
+            active_column = getattr(
+                self,
+                '_glossary_column_filter_popup_column',
+                None,
+            )
+            try:
+                active_popup_visible = bool(
+                    active_popup is not None and active_popup.isVisible()
+                )
+            except RuntimeError:
+                active_popup_visible = False
+            if active_popup_visible:
+                active_popup.reject()
+                if active_column == column:
+                    self._glossary_column_filter_dismissed = None
+                    return
+
+            dismissed_state = getattr(
+                self,
+                '_glossary_column_filter_dismissed',
+                None,
+            )
+            if _recent_glossary_filter_dismissal(dismissed_state, column):
+                self._glossary_column_filter_dismissed = None
+                return
+            self._glossary_column_filter_dismissed = None
+
+            values = glossary_document.column_filter_values(
+                self.glossary_tree.topLevelItem(row).text(column)
+                for row in range(self.glossary_tree.topLevelItemCount())
+            )
+            if not values:
+                return
+
+            filters = _active_glossary_column_filters()
+            currently_allowed = filters.get(field)
+            popup = QDialog(self.dialog)
+            popup.setWindowTitle(f"Filter {field.replace('_', ' ').title()}")
+            popup.setWindowFlags(Qt.Popup)
+            popup.setMinimumWidth(360)
+            popup.setMaximumWidth(560)
+            self._glossary_column_filter_popup = popup
+            self._glossary_column_filter_popup_column = column
+
+            def _remember_glossary_filter_popup_closed(_result):
+                if getattr(self, '_glossary_column_filter_popup', None) is popup:
+                    self._glossary_column_filter_popup = None
+                    self._glossary_column_filter_popup_column = None
+                self._glossary_column_filter_dismissed = (
+                    column,
+                    time.monotonic(),
+                )
+
+            popup.finished.connect(_remember_glossary_filter_popup_closed)
+
+            popup_layout = QVBoxLayout(popup)
+            popup_layout.setContentsMargins(12, 12, 12, 12)
+            popup_layout.setSpacing(8)
+
+            title = QLabel(f"Filter {field.replace('_', ' ').title()}")
+            title.setStyleSheet("font-weight: 600;")
+            popup_layout.addWidget(title)
+
+            search_entry = QLineEdit()
+            search_entry.setPlaceholderText("Search values...")
+            search_entry.setClearButtonEnabled(True)
+            popup_layout.addWidget(search_entry)
+
+            select_all = self._create_styled_checkbox("Select all")
+            select_all.setTristate(True)
+            popup_layout.addWidget(select_all)
+
+            value_list = QListWidget()
+            value_list.setSelectionMode(QAbstractItemView.NoSelection)
+            value_list.setUniformItemSizes(True)
+            value_list.setItemDelegate(_GlossaryFilterItemDelegate(value_list))
+            value_list.setMinimumHeight(230)
+            value_list.setMaximumHeight(390)
+            popup_layout.addWidget(value_list, 1)
+
+            value_rows = []
+            value_list.setUpdatesEnabled(False)
+            try:
+                item_height = select_all.sizeHint().height() + 8
+                for raw_value in values:
+                    display_value = raw_value if raw_value else "(Blanks)"
+                    list_item = QListWidgetItem(display_value)
+                    list_item.setData(Qt.UserRole, raw_value)
+                    list_item.setData(Qt.UserRole + 1, display_value)
+                    list_item.setFlags(
+                        list_item.flags() | Qt.ItemIsUserCheckable
+                    )
+                    list_item.setCheckState(
+                        Qt.Checked
+                        if currently_allowed is None or raw_value in currently_allowed
+                        else Qt.Unchecked
+                    )
+                    list_item.setSizeHint(QSize(0, item_height))
+                    value_list.addItem(list_item)
+                    value_rows.append(
+                        (list_item, raw_value, display_value.casefold())
+                    )
+            finally:
+                value_list.setUpdatesEnabled(True)
+
+            def _filter_item_checked(list_item):
+                return list_item.checkState() == Qt.Checked
+
+            def _set_filter_item_checked(list_item, checked):
+                state = Qt.Checked if checked else Qt.Unchecked
+                if list_item.checkState() != state:
+                    list_item.setCheckState(state)
+
+            def _toggle_filter_item(list_item):
+                if list_item.flags() & Qt.ItemIsUserCheckable:
+                    _set_filter_item_checked(
+                        list_item,
+                        not _filter_item_checked(list_item),
+                    )
+
+            count_label = QLabel()
+            count_label.setStyleSheet("color: #9ca3af;")
+            popup_layout.addWidget(count_label)
+
+            def _sync_select_all_state():
+                visible_items = [
+                    list_item
+                    for list_item, _raw_value, _display_value in value_rows
+                    if not list_item.isHidden()
+                ]
+                checked_count = sum(
+                    _filter_item_checked(list_item)
+                    for list_item in visible_items
+                )
+                select_all.blockSignals(True)
+                if not visible_items or checked_count == 0:
+                    select_all.setCheckState(Qt.Unchecked)
+                elif checked_count == len(visible_items):
+                    select_all.setCheckState(Qt.Checked)
+                else:
+                    select_all.setCheckState(Qt.PartiallyChecked)
+                select_all.blockSignals(False)
+                if hasattr(select_all, '_update_checkmark'):
+                    select_all._update_checkmark()
+                total_checked = sum(
+                    _filter_item_checked(list_item)
+                    for list_item, _raw_value, _display_value in value_rows
+                )
+                if search_entry.text().strip():
+                    count_label.setText(
+                        f"{checked_count} matching values selected"
+                    )
+                else:
+                    count_label.setText(
+                        f"{total_checked} of {len(value_rows)} values selected"
+                    )
+
+            selection_before_search = None
+
+            def _filter_value_list():
+                nonlocal selection_before_search
+                needle = search_entry.text().strip().casefold()
+                if needle and selection_before_search is None:
+                    selection_before_search = [
+                        _filter_item_checked(list_item)
+                        for list_item, _raw_value, _display_value in value_rows
+                    ]
+                restore_selection = (
+                    selection_before_search
+                    if not needle and selection_before_search is not None
+                    else None
+                )
+
+                signals_were_blocked = value_list.blockSignals(True)
+                value_list.setUpdatesEnabled(False)
+                try:
+                    for index, (
+                        list_item,
+                        _raw_value,
+                        folded_display_value,
+                    ) in enumerate(value_rows):
+                        matches = not needle or needle in folded_display_value
+                        list_item.setHidden(not matches)
+                        if needle:
+                            _set_filter_item_checked(list_item, matches)
+                        elif restore_selection is not None:
+                            _set_filter_item_checked(
+                                list_item,
+                                restore_selection[index],
+                            )
+                finally:
+                    value_list.setUpdatesEnabled(True)
+                    value_list.blockSignals(signals_were_blocked)
+
+                if restore_selection is not None:
+                    selection_before_search = None
+                _sync_select_all_state()
+                value_list.viewport().update()
+
+            def _set_visible_check_state(state):
+                try:
+                    state = Qt.CheckState(state)
+                except (TypeError, ValueError):
+                    return
+                if state == Qt.PartiallyChecked:
+                    return
+                signals_were_blocked = value_list.blockSignals(True)
+                value_list.setUpdatesEnabled(False)
+                try:
+                    for list_item, _raw_value, _display_value in value_rows:
+                        if not list_item.isHidden():
+                            _set_filter_item_checked(
+                                list_item,
+                                state == Qt.Checked,
+                            )
+                finally:
+                    value_list.setUpdatesEnabled(True)
+                    value_list.blockSignals(signals_were_blocked)
+                _sync_select_all_state()
+                value_list.viewport().update()
+
+            def _toggle_all_visible_values(_checked=False):
+                visible_items = [
+                    list_item
+                    for list_item, _raw_value, _display_value in value_rows
+                    if not list_item.isHidden()
+                ]
+                should_check = any(
+                    not _filter_item_checked(list_item)
+                    for list_item in visible_items
+                )
+                _set_visible_check_state(Qt.Checked if should_check else Qt.Unchecked)
+
+            def _apply_selected_values():
+                if filter_timer.isActive():
+                    filter_timer.stop()
+                    _filter_value_list()
+                selected = _collect_glossary_filter_values(
+                    (
+                        (
+                            raw_value,
+                            not list_item.isHidden(),
+                            _filter_item_checked(list_item),
+                        )
+                        for list_item, raw_value, _display_value in value_rows
+                    ),
+                    restrict_to_visible=bool(search_entry.text().strip()),
+                )
+                if len(selected) == len(values):
+                    filters.pop(field, None)
+                else:
+                    filters[field] = selected
+                self._glossary_column_filters = filters
+                _apply_glossary_column_filters()
+                popup.accept()
+
+            def _clear_current_filter():
+                filters.pop(field, None)
+                self._glossary_column_filters = filters
+                _apply_glossary_column_filters()
+                popup.accept()
+
+            def _clear_all_filters():
+                self._glossary_column_filters = {}
+                _apply_glossary_column_filters()
+                popup.accept()
+
+            filter_timer = QTimer(popup)
+            filter_timer.setSingleShot(True)
+            filter_timer.setInterval(60)
+            filter_timer.timeout.connect(_filter_value_list)
+            search_entry.textChanged.connect(lambda _text: filter_timer.start())
+            # Keep the partial state as status only. Using stateChanged here makes
+            # a tri-state checkbox require two clicks (unchecked -> partial -> checked).
+            select_all.clicked.connect(_toggle_all_visible_values)
+            value_list.itemChanged.connect(
+                lambda _item: _sync_select_all_state()
+            )
+            value_list.itemClicked.connect(_toggle_filter_item)
+            _sync_select_all_state()
+
+            button_row = QHBoxLayout()
+            clear_button = QPushButton("Clear column")
+            clear_button.setEnabled(field in filters)
+            clear_button.clicked.connect(_clear_current_filter)
+            button_row.addWidget(clear_button)
+            clear_all_button = QPushButton("Clear all")
+            clear_all_button.setEnabled(bool(filters))
+            clear_all_button.clicked.connect(_clear_all_filters)
+            button_row.addWidget(clear_all_button)
+            button_row.addStretch()
+            cancel_button = QPushButton("Cancel")
+            cancel_button.clicked.connect(popup.reject)
+            button_row.addWidget(cancel_button)
+            apply_button = QPushButton("Apply")
+            apply_button.setDefault(True)
+            apply_button.clicked.connect(_apply_selected_values)
+            search_entry.returnPressed.connect(_apply_selected_values)
+            button_row.addWidget(apply_button)
+            popup_layout.addLayout(button_row)
+
+            header = self.glossary_tree.header()
+            anchor = header.mapToGlobal(QPoint(header.sectionViewportPosition(column), header.height()))
+            popup.adjustSize()
+            popup.move(anchor)
+            search_entry.setFocus()
+            popup.exec()
+
+        self.glossary_tree.header().sectionClicked.connect(_open_glossary_column_filter)
+
+        def _configure_editor_tree_columns(column_fields):
+            self.glossary_column_fields = list(column_fields)
+            self._glossary_column_filters = glossary_document.prune_column_filters(
+                _active_glossary_column_filters(), column_fields
+            )
+            self.glossary_tree.setColumnCount(len(column_fields) + 1)
+            _refresh_glossary_filter_headers()
+            self.glossary_tree.setColumnWidth(0, 80)
+            for idx, field in enumerate(column_fields, start=1):
+                if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:
+                    width = 150
+                elif field in ['traits', 'locations', 'how_they_refer_to_others']:
+                    width = 200
+                else:
+                    width = 100
+                self.glossary_tree.setColumnWidth(idx, width)
+            if '_section' in column_fields:
+                self.glossary_tree.setColumnHidden(column_fields.index('_section') + 1, True)
+
+        def _make_editor_tree_item(display_idx, source_ref, entry, column_fields):
+            values = [str(display_idx)]
+            for field in column_fields:
+                values.append(_editor_display_value(entry, field))
+            item = QTreeWidgetItem(values)
+            item.setData(0, Qt.UserRole, source_ref)
+            _decorate_gender_item(item, entry, column_fields)
+            item.setHidden(not _tree_item_matches_glossary_filters(item))
+            return item
+
+        def _populate_editor_tree_from_data(visible_source_indices=None):
+            column_fields, specs = _editor_data_row_specs()
+            visible_set = None if visible_source_indices is None else set(visible_source_indices)
+            self.glossary_tree.setUpdatesEnabled(False)
+            try:
+                self.glossary_tree.clear()
+                _configure_editor_tree_columns(column_fields)
+                items = []
+                display_idx = 1
+                for source_idx, source_ref, entry in specs:
+                    if visible_set is not None and source_idx not in visible_set:
+                        continue
+                    item = _make_editor_tree_item(display_idx, source_ref, entry, column_fields)
+                    for col_idx, field in enumerate(column_fields, start=1):
+                        if field in ['translated_name', 'translated']:
+                            update_row_highlight(item, field, item.text(col_idx))
+                    items.append(item)
+                    display_idx += 1
+                self.glossary_tree.addTopLevelItems(items)
+            finally:
+                self.glossary_tree.setUpdatesEnabled(True)
+            _apply_glossary_column_filters(update_stats=False)
+            try:
+                self.glossary_tree.viewport().update()
+            except Exception:
+                pass
+
+        def _populate_editor_tree_from_data_batched(visible_source_indices=None, final_stats_text=None, batch_size=24):
+            column_fields, specs = _editor_data_row_specs()
+            visible_set = None if visible_source_indices is None else set(visible_source_indices)
+            rows = [
+                (source_ref, entry)
+                for source_idx, source_ref, entry in specs
+                if visible_set is None or source_idx in visible_set
+            ]
+            token = object()
+            self._editor_tree_populate_token = token
+            self.glossary_tree.clear()
+            _configure_editor_tree_columns(column_fields)
+            total_rows = len(rows)
+            if total_rows == 0:
+                if final_stats_text:
+                    self._glossary_editor_view_stats_text = final_stats_text
+                _apply_glossary_column_filters(update_stats=True)
+                try:
+                    self.glossary_tree.viewport().update()
+                except Exception:
+                    pass
+                return
+
+            def add_batch(start_idx=0):
+                if getattr(self, '_editor_tree_populate_token', None) is not token:
+                    return
+                end_idx = min(total_rows, start_idx + max(1, int(batch_size)))
+                items = []
+                for row_idx in range(start_idx, end_idx):
+                    source_ref, entry = rows[row_idx]
+                    item = _make_editor_tree_item(row_idx + 1, source_ref, entry, column_fields)
+                    for col_idx, field in enumerate(column_fields, start=1):
+                        if field in ['translated_name', 'translated']:
+                            update_row_highlight(item, field, item.text(col_idx))
+                    items.append(item)
+                if items:
+                    self.glossary_tree.addTopLevelItems(items)
+                if end_idx < total_rows:
+                    self.stats_label.setText(f"Applying filtered entries: {end_idx}/{total_rows}")
+                    QTimer.singleShot(0, lambda: add_batch(end_idx))
+                    return
+                if final_stats_text:
+                    self._glossary_editor_view_stats_text = final_stats_text
+                _apply_glossary_column_filters(update_stats=True)
+                try:
+                    self.glossary_tree.viewport().update()
+                except Exception:
+                    pass
+
+            add_batch(0)
+
+        def _loaded_glossary_stats_text(entries):
+            return glossary_document.loaded_stats_text(
+                entries, self.current_glossary_format, self._glossary_editor_entry_type_config()
+            )
+
+        def _repair_loading_stats_label_if_tree_loaded():
+            if self.stats_label.text() != "Loading glossary..." or self.glossary_tree.topLevelItemCount() <= 0:
+                return
+            data = self.current_glossary_data
+            if isinstance(data, list):
+                repaired_stats = _loaded_glossary_stats_text(data)
+            elif isinstance(data, dict):
+                entries = data.get('entries', {})
+                repaired_stats = f"Total entries: {len(entries)}"
+            else:
+                repaired_stats = f"Total entries: {self.glossary_tree.topLevelItemCount()}"
+            self._glossary_editor_view_stats_text = repaired_stats
+            _apply_glossary_column_filters(update_stats=True)
+
+        def apply_loaded_glossary_result(payload):
+            if payload.get('token') is not getattr(self, '_editor_load_token', None):
+                if getattr(self, '_editor_load_token', None) is None:
+                    _repair_loading_stats_label_if_tree_loaded()
+                return
+            self._editor_load_token = None
+            stop_refresh_animation = getattr(self, '_stop_force_refresh_animation', None)
+            if callable(stop_refresh_animation):
+                stop_refresh_animation()
+            if not payload.get('ok'):
+                error = payload.get('error', 'Unknown error')
+                print(f"load_glossary_for_editing failed: {error}")
+                if payload.get('traceback'):
+                    print(payload['traceback'])
+                self.stats_label.setText("Failed to load glossary")
+                self.append_log(f"Failed to load glossary: {error}")
+                return
+
+            entries, column_fields = glossary_document.apply_parse_payload(self, payload)
+            _populate_editor_tree_from_data()
+
+            loaded_stats = payload.get('stats_text', f"Total entries: {len(entries)}")
+            self.stats_label.setText(loaded_stats)
+            self._glossary_editor_base_stats_text = loaded_stats
+            self._glossary_editor_view_stats_text = loaded_stats
+            _apply_glossary_column_filters(update_stats=True)
+            log_msg = f"Loaded {len(entries)} entries from glossary"
+            if getattr(self, '_last_loaded_glossary_log', '') != log_msg:
+                self.append_log(log_msg)
+                self._last_loaded_glossary_log = log_msg
+
+            self._last_find_text = ""
+            self._last_find_pos = -1
+
+            self._undo_stack.clear()
+            self._redo_stack.clear()
+            if hasattr(self, '_undo_btn'):
+                self._undo_btn.setEnabled(False)
+                self._redo_btn.setEnabled(False)
+            if hasattr(self, '_apply_hide_unused_entries_filter'):
+                self._apply_hide_unused_entries_filter()
+
+        self._editor_load_bridge.loaded.connect(apply_loaded_glossary_result)
+
+        # Editor functions
+        def load_glossary_for_editing(skip_file_read=False):
+           path = self.editor_file_entry.text()
+           if not path or not os.path.exists(path):
+               QMessageBox.critical(parent, "Error", "Please select a valid glossary file")
+               return
+           
+           try:
+               # When restoring from undo/redo, save in-memory data to disk first
+               # then let the normal parse path re-read it. This avoids re-indenting
+               # hundreds of lines of the file-read block.
+               if skip_file_read and self.current_glossary_data is not None:
+                   # Pause the auto-reload watcher and re-baseline its mtime around
+                   # our own write. Otherwise the 500ms watcher sees the file change,
+                   # treats the undo/redo write as an *external* edit, and triggers a
+                   # full reload that clears the undo stack and resets the change
+                   # baseline — which would make a Save after Undo find no changes and
+                   # fail to revert the output HTML files.
+                   _ar_timer = getattr(self, '_editor_auto_reload_timer', None)
+                   try:
+                       if _ar_timer is not None:
+                           _ar_timer.stop()
+                   except Exception:
+                       _ar_timer = None
+                   save_current_glossary()
+                   try:
+                       self._editor_last_mtime = os.path.getmtime(path)
+                   except Exception:
+                       pass
+                   try:
+                       if _ar_timer is not None:
+                           _ar_timer.start()
+                   except Exception:
+                       pass
+               elif not skip_file_read:
+                   token = object()
+                   self._editor_load_token = token
+                   self.stats_label.setText("Loading glossary...")
+
+                   def worker():
+                       try:
+                           result = self._parse_glossary_file_for_editor_async(path)
+                           result['ok'] = True
+                       except Exception as exc:
+                           import traceback
+                           result = {
+                               'ok': False,
+                               'path': path,
+                               'error': str(exc),
+                               'traceback': traceback.format_exc(),
+                           }
+                       result['token'] = token
+                       try:
+                           self._editor_load_bridge.loaded.emit(result)
+                       except RuntimeError:
+                           pass
+
+                   threading.Thread(target=worker, name="GlossaryEditorLoad", daemon=True).start()
+                   return
+
+               # Restore path (undo / redo): re-read the file just written from the
+               # in-memory data (glossary_document.reparse_glossary_file, U6).
+               entries, column_fields, loaded_stats = glossary_document.reparse_glossary_file(
+                   self, path, self.config, getattr(self, 'custom_entry_types', None)
+               )
+               self.glossary_column_fields = list(column_fields)
+               _populate_editor_tree_from_data()
+
+               self._editor_load_token = None
+               self.stats_label.setText(loaded_stats)
+               self._glossary_editor_base_stats_text = loaded_stats
+               self._glossary_editor_view_stats_text = loaded_stats
+               _apply_glossary_column_filters(update_stats=True)
+               _log_msg = f"✅ Loaded {len(entries)} entries from glossary"
+               if getattr(self, '_last_loaded_glossary_log', '') != _log_msg:
+                   self.append_log(_log_msg)
+                   self._last_loaded_glossary_log = _log_msg
+               self._last_find_text = ""
+               self._last_find_pos = -1
+               # Capture baseline translated values for change tracking.
+               # IMPORTANT: skip this on undo/redo restores (skip_file_read=True).
+               # The baseline must keep representing what is currently written to
+               # the output HTML files (i.e. the last *saved* state). If undo/redo
+               # overwrote it with the restored values, the baseline would equal
+               # the current data and a subsequent Save would detect no change,
+               # leaving the output files stuck on the change that undo reverted.
+               if not skip_file_read:
+                   if self.current_glossary_format in ['list', 'token_csv']:
+                       self._original_translated_map = {
+                           idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data)
+                       }
+                   elif self.current_glossary_format == 'dict':
+                       self._original_translated_map = dict(self.current_glossary_data.get('entries', {}))
+                   else:
+                       self._original_translated_map = {}
+               # Clear any existing highlights
+               for i in range(self.glossary_tree.topLevelItemCount()):
+                   mark_row_updated(self.glossary_tree.topLevelItem(i), False)
+               # Reset undo/redo stacks on fresh load (not on undo/redo restore)
+               if not skip_file_read:
+                   self._undo_stack.clear()
+                   self._redo_stack.clear()
+               if hasattr(self, '_undo_btn'):
+                   self._undo_btn.setEnabled(len(self._undo_stack) > 0)
+                   self._redo_btn.setEnabled(len(self._redo_stack) > 0)
+               if hasattr(self, '_apply_hide_unused_entries_filter'):
+                   self._apply_hide_unused_entries_filter()
+               
+           except Exception as e:
+               import traceback
+               self._editor_load_token = None
+               self.stats_label.setText("Failed to load glossary")
+               print(f"⚠️ load_glossary_for_editing failed: {e}")
+               traceback.print_exc()
+               self.append_log(f"❌ Failed to load glossary: {e}")
+       
+        def browse_glossary():
+           start_dir = ""
+           try:
+               override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", "")
+               if override_dir:
+                   start_dir = os.path.abspath(override_dir)
+           except Exception:
+               start_dir = ""
+
+           path, _ = QFileDialog.getOpenFileName(
+               parent,
+               "Select glossary file",
+               start_dir,
+               "Glossary files (*.json *.csv);;JSON files (*.json);;CSV files (*.csv)"
+           )
+           if path:
+               self._glossary_editor_manual_source = True
+               self.editor_file_entry.setText(path)
+               load_glossary_for_editing()
+
+        # Common save helper
+        def save_current_glossary():
+           path = self.editor_file_entry.text()
+           if not path or self.current_glossary_data is None:
+               return False
+           try:
+               return glossary_document.save_document(self, path, self.config)
+           except Exception as e:
+               QMessageBox.critical(parent, "Error", f"Failed to save: {e}")
+               return False
+
+        def clean_empty_fields():
+            if not self.current_glossary_data:
+                QMessageBox.critical(parent, "Error", "No glossary loaded")
+                return
+            
+            if self.current_glossary_format in ['list', 'token_csv']:
+                # Check if there are any empty fields
+                empty_fields_found, fields_cleaned = glossary_document.count_empty_fields(
+                    self.current_glossary_data
+                )
+                
+                # If no empty fields found, show message and return
+                if not empty_fields_found:
+                    QMessageBox.information(parent, "Info", "No empty fields found in glossary")
+                    return
+                
+                # Only create backup if there are fields to clean
+                if not self.create_glossary_backup("before_clean"):
+                    return
+                
+                # Now actually clean the fields
+                total_cleaned = glossary_document.remove_empty_fields(self.current_glossary_data)
+                
+                if save_current_glossary():
+                    load_glossary_for_editing()
+                    
+                    # Provide detailed feedback
+                    msg = glossary_document.clean_empty_fields_message(total_cleaned, fields_cleaned)
+                    
+                    QMessageBox.information(parent, "Success", msg)
+        
+        def delete_selected_entries():
+            selected = self.glossary_tree.selectedItems()
+            if not selected:
+                QMessageBox.warning(parent, "No Selection", "Please select entries to delete")
+                return
+            
+            count = len(selected)
+            _del_msg = QMessageBox(QMessageBox.Question, "Confirm Delete", f"Delete {count} selected entries?", QMessageBox.Yes | QMessageBox.No, parent)
+            _del_msg.layout().setAlignment(Qt.AlignCenter)
+            reply = _del_msg.exec()
+            if reply == QMessageBox.Yes:
+                # automatic backup
+                if not self.create_glossary_backup(f"before_delete_{count}"):
+                    return
+                # Snapshot for undo
+                if hasattr(self, '_push_undo_snapshot'):
+                    self._push_undo_snapshot()
+                    
+                indices_to_delete, keys_to_delete = glossary_document.delete_entries(
+                    self, [item.data(0, Qt.UserRole) for item in selected]
+                )
+
+                if save_current_glossary():
+                   load_glossary_for_editing()
+                   QMessageBox.information(parent, "Success", f"Deleted {len(indices_to_delete) + len(keys_to_delete)} entries")
+                
+        def remove_duplicates():
+            if not self.current_glossary_data:
+                QMessageBox.critical(parent, "Error", "No glossary loaded")
+                return
+            
+            if self.current_glossary_format in ['list', 'token_csv']:
+                # Import the skip function from the updated script
+                try:
+                    # skip_duplicate_entries (the Balanced/Full dedup engine) via glossary_document
+                    original_count = len(self.current_glossary_data)
+                    self.current_glossary_data = glossary_document.remove_duplicate_entries(
+                        self.current_glossary_data,
+                        self.editor_file_entry.text(),
+                        getattr(self, 'current_gender_tracker_data', None),
+                        self.config.get('glossary_disable_honorifics_filter', False),
+                    )
+                    duplicates_removed = original_count - len(self.current_glossary_data)
+                    
+                    if duplicates_removed > 0:
+                        if self.config.get('glossary_auto_backup', False):
+                            self.create_glossary_backup(f"before_remove_{duplicates_removed}_dupes")
+                        
+                        if save_current_glossary():
+                            load_glossary_for_editing()
+                            QMessageBox.information(parent, "Success", f"Removed {duplicates_removed} duplicate entries")
+                            self.append_log(f"🗑️ Removed {duplicates_removed} duplicates based on raw_name")
+                    else:
+                        QMessageBox.information(parent, "Info", "No duplicates found")
+                        
+                except ImportError:
+                    # Fallback implementation
+                    unique_entries, duplicates = glossary_document.remove_duplicate_entries_fallback(
+                        self.current_glossary_data
+                    )
+                    
+                    if duplicates > 0:
+                        self.current_glossary_data = unique_entries
+                        if save_current_glossary():
+                            load_glossary_for_editing()
+                            QMessageBox.information(parent, "Success", f"Removed {duplicates} duplicate entries")
+                    else:
+                        QMessageBox.information(parent, "Info", "No duplicates found")
+
+        # dialog function for configuring duplicate detection mode
+        def duplicate_detection_settings():
+            """Show info about duplicate detection (simplified for new format)"""
+            QMessageBox.information(
+                parent,
+                glossary_document.DUPLICATE_DETECTION_INFO_TITLE,
+                glossary_document.DUPLICATE_DETECTION_INFO_TEXT,
+            )
+
+        def backup_settings_dialog():
+            """Show dialog for configuring automatic backup settings"""
+            # Create dialog
+            backup_dialog = QDialog(parent)
+            backup_dialog.setWindowTitle("Automatic Backup Settings")
+            # Use screen ratios for sizing
+            screen = QApplication.primaryScreen().geometry()
+            width = int(screen.width() * 0.26)  # 26% of screen width
+            height = int(screen.height() * 0.39)  # 39% of screen height
+            backup_dialog.setMinimumSize(width, height)
+            
+            # Main layout
+            main_layout = QVBoxLayout(backup_dialog)
+            main_layout.setContentsMargins(20, 20, 20, 20)
+            
+            # Title
+            title_label = QLabel("Automatic Backup Settings")
+            title_label.setStyleSheet("font-size: 22pt; font-weight: bold;")
+            main_layout.addWidget(title_label)
+            main_layout.addSpacing(20)
+            
+            # Backup toggle
+            backup_checkbox = self._create_styled_checkbox("Enable automatic backups before modifications")
+            backup_checkbox.setChecked(self.config.get('glossary_auto_backup', True))
+            main_layout.addWidget(backup_checkbox)
+            main_layout.addSpacing(5)
+            
+            # Settings frame (indented)
+            settings_widget = QWidget()
+            settings_layout = QVBoxLayout(settings_widget)
+            settings_layout.setContentsMargins(20, 10, 0, 0)
+            main_layout.addWidget(settings_widget)
+            
+            # Max backups setting
+            max_backups_widget = QWidget()
+            max_backups_layout = QHBoxLayout(max_backups_widget)
+            max_backups_layout.setContentsMargins(0, 5, 0, 5)
+            settings_layout.addWidget(max_backups_widget)
+            
+            max_backups_layout.addWidget(QLabel("Maximum backups to keep:"))
+            max_backups_spinbox = QSpinBox()
+            max_backups_spinbox.setRange(0, 999)
+            max_backups_spinbox.setValue(self.config.get('glossary_max_backups', 50))
+            max_backups_spinbox.setFixedWidth(80)
+            self._disable_spinbox_mousewheel(max_backups_spinbox)  # Disable mouse wheel
+            max_backups_layout.addWidget(max_backups_spinbox)
+            
+            unlimited_label = QLabel("(0 = unlimited)")
+            unlimited_label.setStyleSheet("color: gray; font-size: 9pt;")
+            max_backups_layout.addWidget(unlimited_label)
+            max_backups_layout.addStretch()
+            
+            # Backup naming pattern info
+            settings_layout.addSpacing(15)
+            
+            pattern_label = QLabel("Backup naming pattern:")
+            pattern_label.setStyleSheet("font-weight: bold;")
+            settings_layout.addWidget(pattern_label)
+            
+            pattern_text = QLabel("[original_name]_[operation]_[YYYYMMDD_HHMMSS].json")
+            pattern_text.setStyleSheet("color: #666; font-style: italic; font-size: 9pt; margin-left: 10px;")
+            settings_layout.addWidget(pattern_text)
+            
+            # Example
+            example_text = "Example: my_glossary_before_delete_5_20240115_143052.json"
+            example_label = QLabel(example_text)
+            example_label.setStyleSheet("color: gray; font-size: 8pt; margin-left: 10px; margin-top: 2px;")
+            settings_layout.addWidget(example_label)
+            
+            # Separator
+            main_layout.addSpacing(20)
+            separator = QFrame()
+            separator.setFrameShape(QFrame.HLine)
+            separator.setFrameShadow(QFrame.Sunken)
+            main_layout.addWidget(separator)
+            main_layout.addSpacing(15)
+            
+            # Backup location info
+            location_label = QLabel("📁 Backup Location:")
+            location_label.setStyleSheet("font-weight: bold;")
+            main_layout.addWidget(location_label)
+            
+            if self.editor_file_entry.text():
+                glossary_dir = os.path.dirname(self.editor_file_entry.text())
+                backup_path = "Backups"
+                full_path = os.path.join(glossary_dir, "Backups")
+                
+                path_label = QLabel(f"{backup_path}/")
+                path_label.setStyleSheet("color: #7bb3e0; font-size: 9pt; margin-left: 10px;")
+                main_layout.addWidget(path_label)
+                
+                # Check if backup folder exists and show count
+                if os.path.exists(full_path):
+                    backup_count = glossary_document.count_editor_backups(full_path)
+                    count_label = QLabel(f"Currently contains {backup_count} backup(s)")
+                    count_label.setStyleSheet("color: gray; font-size: 8pt; margin-left: 10px;")
+                    main_layout.addWidget(count_label)
+            else:
+                backup_label = QLabel("Backups")
+                backup_label.setStyleSheet("color: gray; font-size: 9pt; margin-left: 10px;")
+                main_layout.addWidget(backup_label)
+            
+            def toggle_settings_state(checked):
+                max_backups_spinbox.setEnabled(backup_checkbox.isChecked())
+            
+            backup_checkbox.stateChanged.connect(toggle_settings_state)
+            toggle_settings_state(backup_checkbox.isChecked())  # Set initial state
+            
+            # Buttons
+            main_layout.addSpacing(25)
+            
+            button_widget = QWidget()
+            button_layout = QHBoxLayout(button_widget)
+            button_layout.setContentsMargins(0, 0, 0, 0)
+            main_layout.addWidget(button_widget)
+            
+            button_layout.addStretch()
+            
+            def save_settings():
+                # Save backup settings
+                self.config['glossary_auto_backup'] = backup_checkbox.isChecked()
+                self.config['glossary_max_backups'] = max_backups_spinbox.value()
+                
+                # Save to config file (use proper macOS-aware config path)
+                from translator_gui import CONFIG_FILE as _cfg_path
+                with open(_cfg_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                
+                msg = glossary_document.backup_settings_message(
+                    backup_checkbox.isChecked(), max_backups_spinbox.value()
+                )
+                    
+                QMessageBox.information(backup_dialog, "Success", msg)
+                backup_dialog.accept()
+            
+            def create_manual_backup():
+                """Create a manual backup right now"""
+                if not self.current_glossary_data:
+                    QMessageBox.critical(backup_dialog, "Error", "No glossary loaded")
+                    return
+                    
+                if self.create_glossary_backup("manual"):
+                    QMessageBox.information(backup_dialog, "Success", "Manual backup created successfully!")
+            
+            save_btn = QPushButton("Save Settings")
+            save_btn.setFixedWidth(120)
+            save_btn.clicked.connect(save_settings)
+            save_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px;")
+            button_layout.addWidget(save_btn)
+            
+            backup_now_btn = QPushButton("Backup Now")
+            backup_now_btn.setFixedWidth(120)
+            backup_now_btn.clicked.connect(create_manual_backup)
+            backup_now_btn.setStyleSheet("background-color: #17a2b8; color: white; padding: 8px;")
+            button_layout.addWidget(backup_now_btn)
+            
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setFixedWidth(120)
+            cancel_btn.clicked.connect(backup_dialog.reject)
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+            button_layout.addWidget(cancel_btn)
+            
+            button_layout.addStretch()
+            
+            # Show dialog with fade animation
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(backup_dialog, duration=250)
+            except Exception:
+                backup_dialog.exec()
+    
+        def smart_trim_dialog():
+            if not self.current_glossary_data:
+                QMessageBox.critical(parent, "Error", "No glossary loaded")
+                return
+            
+            # Create dialog
+            trim_dialog = QDialog(parent)
+            trim_dialog.setWindowTitle("Smart Trim Glossary")
+            # Use screen ratios for sizing
+            screen = QApplication.primaryScreen().geometry()
+            width = int(screen.width() * 0.31)  # 31% of screen width
+            height = int(screen.height() * 0.49)  # 49% of screen height
+            trim_dialog.setMinimumSize(width, height)
+            
+            main_layout = QVBoxLayout(trim_dialog)
+            main_layout.setContentsMargins(20, 20, 20, 20)
+            
+            # Title and description
+            title = QLabel("Smart Glossary Trimming")
+            title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+            main_layout.addWidget(title)
+            
+            desc = QLabel("Limit the number of entries in your glossary")
+            desc.setStyleSheet("color: gray; font-size: 10pt;")
+            desc.setWordWrap(True)
+            main_layout.addWidget(desc)
+            main_layout.addSpacing(15)
+            
+            # Display current glossary stats
+            stats_group = QGroupBox("Current Glossary Statistics")
+            stats_layout = QVBoxLayout(stats_group)
+            main_layout.addWidget(stats_group)
+            
+            entry_count = glossary_document.document_entry_count(
+                self.current_glossary_data, self.current_glossary_format
+            )
+            stats_layout.addWidget(QLabel(f"Total entries: {entry_count}"))
+            
+            # For new format, show type breakdown
+            if self.current_glossary_format in ['list', 'token_csv'] and self.current_glossary_data and 'type' in self.current_glossary_data[0]:
+                stats_layout.addWidget(QLabel(self._glossary_type_count_summary(self.current_glossary_data)))
+            
+            main_layout.addSpacing(15)
+            
+            # Entry limit section
+            limit_group = QGroupBox("Entry Limit")
+            limit_layout = QVBoxLayout(limit_group)
+            main_layout.addWidget(limit_group)
+            
+            limit_desc = QLabel("Keep only the first N entries to reduce glossary size")
+            limit_desc.setStyleSheet("color: gray; font-size: 9pt;")
+            limit_desc.setWordWrap(True)
+            limit_layout.addWidget(limit_desc)
+            
+            top_widget = QWidget()
+            top_layout = QHBoxLayout(top_widget)
+            top_layout.setContentsMargins(0, 5, 0, 0)
+            limit_layout.addWidget(top_widget)
+            
+            top_layout.addWidget(QLabel("Keep first"))
+            top_entry = QLineEdit(str(min(100, entry_count)))
+            top_entry.setFixedWidth(80)
+            top_layout.addWidget(top_entry)
+            top_layout.addWidget(QLabel(f"entries (out of {entry_count})"))
+            top_layout.addStretch()
+            
+            main_layout.addSpacing(15)
+            
+            # Preview section
+            preview_group = QGroupBox("Preview")
+            preview_layout = QVBoxLayout(preview_group)
+            main_layout.addWidget(preview_group)
+            
+            preview_label = QLabel("Click 'Preview Changes' to see the effect")
+            preview_label.setStyleSheet("color: gray; font-size: 10pt;")
+            preview_layout.addWidget(preview_label)
+            
+            def preview_changes():
+                try:
+                    top_n = int(top_entry.text())
+                    preview_text = glossary_document.trim_preview_text(entry_count, top_n)
+                    
+                    preview_label.setText(preview_text)
+                    preview_label.setStyleSheet("color: #7bb3e0; font-size: 10pt;")
+                    
+                except ValueError:
+                    preview_label.setText("Please enter a valid number")
+                    preview_label.setStyleSheet("color: red; font-size: 10pt;")
+            
+            preview_btn = QPushButton("Preview Changes")
+            preview_btn.clicked.connect(preview_changes)
+            preview_btn.setStyleSheet("background-color: #17a2b8; color: white; padding: 5px;")
+            preview_layout.addWidget(preview_btn)
+            
+            main_layout.addSpacing(10)
+            
+            # Action buttons
+            button_widget = QWidget()
+            button_layout = QHBoxLayout(button_widget)
+            main_layout.addWidget(button_widget)
+            
+            def apply_smart_trim():
+                try:
+                    top_n = int(top_entry.text())
+                    
+                    # Calculate how many entries will be removed
+                    entries_to_remove = len(self.current_glossary_data) - top_n
+                    if entries_to_remove > 0:
+                        if not self.create_glossary_backup(f"before_trim_{entries_to_remove}"):
+                            return
+                    
+                    glossary_document.trim_entries(self, top_n)
+                    
+                    if save_current_glossary():
+                        load_glossary_for_editing()
+                        
+                        QMessageBox.information(trim_dialog, "Success", f"Trimmed glossary to {top_n} entries")
+                        trim_dialog.accept()
+                        
+                except ValueError:
+                    QMessageBox.critical(trim_dialog, "Error", "Please enter valid numbers")
+
+            button_layout.addStretch()
+            
+            apply_btn = QPushButton("Apply Trim")
+            apply_btn.setFixedWidth(120)
+            apply_btn.clicked.connect(apply_smart_trim)
+            apply_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px;")
+            button_layout.addWidget(apply_btn)
+            
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setFixedWidth(120)
+            cancel_btn.clicked.connect(trim_dialog.reject)
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+            button_layout.addWidget(cancel_btn)
+            
+            button_layout.addStretch()
+
+            # Info section at bottom
+            main_layout.addSpacing(20)
+            tip_label = QLabel("💡 Tip: Entries are kept in their original order")
+            tip_label.setStyleSheet("color: #666; font-size: 9pt; font-style: italic;")
+            main_layout.addWidget(tip_label)
+
+            # Show dialog with fade animation
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(trim_dialog, duration=250)
+            except Exception:
+                trim_dialog.exec()
+       
+        def filter_entries_dialog():
+            if not self.current_glossary_data:
+                QMessageBox.critical(self.dialog, "Error", "No glossary loaded")
+                return
+            
+            # Create dialog with scroll area
+            filter_dialog = QDialog(self.dialog)
+            filter_dialog.setWindowTitle("Filter Entries")
+            filter_dialog.setMinimumWidth(600)
+            filter_dialog.setMinimumHeight(800)
+            filter_dialog.resize(620, 1000)
+            
+            main_layout = QVBoxLayout(filter_dialog)
+            
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            main_layout.addWidget(scroll_area)
+            
+            main_frame = QWidget()
+            content_layout = QVBoxLayout(main_frame)
+            scroll_area.setWidget(main_frame)
+            
+            # Title and description
+            title_label = QLabel("Filter Glossary Entries")
+            title_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
+            content_layout.addWidget(title_label)
+            content_layout.addSpacing(5)
+            
+            desc_label = QLabel("Filter entries by type or content")
+            desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+            desc_label.setWordWrap(True)
+            content_layout.addWidget(desc_label)
+            content_layout.addSpacing(15)
+            
+            # Current stats
+            entry_count = glossary_document.document_entry_count(
+                self.current_glossary_data, self.current_glossary_format
+            )
+            
+            stats_group = QGroupBox("Current Status")
+            stats_layout = QVBoxLayout(stats_group)
+            stats_label = QLabel(f"Total entries: {entry_count}")
+            stats_label.setStyleSheet("font-size: 10pt;")
+            stats_layout.addWidget(stats_label)
+            content_layout.addWidget(stats_group)
+            content_layout.addSpacing(15)
+            
+            # Check if new format
+            is_new_format = glossary_document.is_new_format_data(
+                self.current_glossary_data, self.current_glossary_format
+            )
+            
+            # Filter conditions
+            conditions_group = QGroupBox("Filter Conditions")
+            conditions_layout = QVBoxLayout(conditions_group)
+            content_layout.addWidget(conditions_group)
+            content_layout.addSpacing(15)
+            
+            # Type filter for new format
+            type_checks = {}
+            type_limits = {}
+            if is_new_format:
+                type_group = QGroupBox("Entry Type")
+                type_layout = QVBoxLayout(type_group)
+                conditions_layout.addWidget(type_group)
+                conditions_layout.addSpacing(10)
+                
+                # Build type list from configured custom entry types (enabled only)
+                filter_types = glossary_document.filter_entry_types(self.config, self.current_glossary_data)
+
+                limit_hint = QLabel("Optional: keep only the first N entries of each type (blank = keep all)")
+                limit_hint.setStyleSheet("color: gray; font-size: 9pt;")
+                type_layout.addWidget(limit_hint)
+
+                _row_style = """
+                    QFrame#typeRow {
+                        border: 1px solid transparent;
+                        border-radius: 4px;
+                        background-color: transparent;
+                    }
+                    QFrame#typeRow:hover {
+                        border: 1px solid #4a6b8a;
+                        background-color: rgba(93, 173, 226, 0.08);
+                    }
+                    QFrame#typeRow[selected="true"] {
+                        border: 1px solid #5a9fd4;
+                        background-color: rgba(93, 173, 226, 0.15);
+                    }
+                """
+
+                from PySide6.QtCore import QEvent
+
+                class _RowHighlighter(QObject):
+                    """Highlights a row frame when it's clicked or a child gets focus."""
+                    def __init__(self, rows, parent=None):
+                        super().__init__(parent)
+                        self.rows = rows  # widget -> row frame
+
+                    def set_selected(self, frame):
+                        for f in set(self.rows.values()):
+                            sel = "true" if f is frame else "false"
+                            if f.property("selected") != sel:
+                                f.setProperty("selected", sel)
+                                f.style().unpolish(f)
+                                f.style().polish(f)
+
+                    def eventFilter(self, obj, event):
+                        if event.type() in (QEvent.MouseButtonPress, QEvent.FocusIn):
+                            frame = self.rows.get(obj)
+                            if frame is not None:
+                                self.set_selected(frame)
+                        return False
+
+                _row_highlighter = _RowHighlighter({}, filter_dialog)
+
+                for _type_name in filter_types:
+                    _row_frame = QFrame()
+                    _row_frame.setObjectName("typeRow")
+                    _row_frame.setStyleSheet(_row_style)
+                    _row_frame.setProperty("selected", "false")
+                    _row = QHBoxLayout(_row_frame)
+                    _row.setContentsMargins(6, 4, 6, 4)
+
+                    _check = self._create_styled_checkbox(f"Keep {_type_name}")
+                    _check.setChecked(True)
+                    type_checks[_type_name] = _check
+                    _row.addWidget(_check)
+                    _row.addStretch()
+
+                    _row.addWidget(QLabel("First N:"))
+                    _limit_edit = QLineEdit()
+                    _limit_edit.setFixedWidth(70)
+                    _limit_edit.setPlaceholderText("All")
+                    type_limits[_type_name] = _limit_edit
+                    _row.addWidget(_limit_edit)
+                    type_layout.addWidget(_row_frame)
+
+                    # Register row widgets for click/focus highlighting
+                    for _w in (_row_frame, _check, _limit_edit):
+                        _row_highlighter.rows[_w] = _row_frame
+                        _w.installEventFilter(_row_highlighter)
+            
+            # Text content filter
+            text_filter_group = QGroupBox("Text Content Filter")
+            text_filter_layout = QVBoxLayout(text_filter_group)
+            conditions_layout.addWidget(text_filter_group)
+            conditions_layout.addSpacing(10)
+            
+            text_hint_label = QLabel("Keep entries containing text (case-insensitive):")
+            text_hint_label.setStyleSheet("color: gray; font-size: 9pt;")
+            text_filter_layout.addWidget(text_hint_label)
+            text_filter_layout.addSpacing(5)
+            
+            search_entry = QLineEdit()
+            text_filter_layout.addWidget(search_entry)
+            
+            # Gender filter for new format
+            gender_value = "all"
+            gender_buttons = {}
+            if is_new_format:
+                gender_group = QGroupBox("Gender Filter (Gender-Enabled Types)")
+                gender_layout = QVBoxLayout(gender_group)
+                conditions_layout.addWidget(gender_group)
+                conditions_layout.addSpacing(10)
+                
+                gender_button_group = QButtonGroup(filter_dialog)
+                
+                all_radio = QRadioButton("All genders")
+                all_radio.setChecked(True)
+                gender_buttons['all'] = all_radio
+                gender_button_group.addButton(all_radio, 0)
+                gender_layout.addWidget(all_radio)
+                
+                male_radio = QRadioButton("Male only")
+                gender_buttons['Male'] = male_radio
+                gender_button_group.addButton(male_radio, 1)
+                gender_layout.addWidget(male_radio)
+                
+                female_radio = QRadioButton("Female only")
+                gender_buttons['Female'] = female_radio
+                gender_button_group.addButton(female_radio, 2)
+                gender_layout.addWidget(female_radio)
+                
+                unknown_radio = QRadioButton("Unknown only")
+                gender_buttons['Unknown'] = unknown_radio
+                gender_button_group.addButton(unknown_radio, 3)
+                gender_layout.addWidget(unknown_radio)
+                
+                def update_gender_value():
+                    nonlocal gender_value
+                    for val, btn in gender_buttons.items():
+                        if btn.isChecked():
+                            gender_value = val
+                            break
+                
+                gender_button_group.buttonClicked.connect(update_gender_value)
+            
+            # Preview section
+            preview_group = QGroupBox("Preview")
+            preview_layout = QVBoxLayout(preview_group)
+            content_layout.addWidget(preview_group)
+            content_layout.addSpacing(15)
+            
+            preview_label = QLabel("Click 'Preview Filter' to see how many entries match")
+            preview_label.setStyleSheet("color: gray; font-size: 10pt;")
+            preview_layout.addWidget(preview_label)
+            
+            def check_entry_matches(entry, type_counts=None):
+                """Check if an entry matches the filter conditions"""
+                return glossary_document.entry_matches_filter(
+                    entry,
+                    type_counts,
+                    is_new_format=is_new_format,
+                    kept_types={name: check.isChecked() for name, check in type_checks.items()},
+                    search_text=search_entry.text(),
+                    gender_value=gender_value,
+                    config=self.config,
+                    type_limits={name: edit.text() for name, edit in type_limits.items()},
+                )
+            
+            def preview_filter():
+                """Preview the filter results"""
+                nonlocal gender_value
+                # Update gender value first
+                for val, btn in gender_buttons.items():
+                    if btn.isChecked():
+                        gender_value = val
+                        break
+                
+                matching = glossary_document.count_filter_matches(
+                    self.current_glossary_data, self.current_glossary_format, check_entry_matches
+                )
+                
+                removed = entry_count - matching
+                preview_label.setText(f"Filter matches: {matching} entries ({removed} will be removed)")
+                preview_label.setStyleSheet(f"color: {'#5a9fd4' if matching > 0 else 'red'}; font-size: 10pt; font-style: italic;")
+            
+            preview_btn = QPushButton("Preview Filter")
+            preview_btn.clicked.connect(preview_filter)
+            preview_btn.setStyleSheet("background-color: #0dcaf0; color: white; padding: 8px;")
+            preview_layout.addWidget(preview_btn)
+            
+            # Action buttons
+            content_layout.addSpacing(10)
+            button_layout = QHBoxLayout()
+            content_layout.addLayout(button_layout)
+            content_layout.addSpacing(20)
+            
+            def apply_filter():
+                nonlocal gender_value
+                # Update gender value first
+                for val, btn in gender_buttons.items():
+                    if btn.isChecked():
+                        gender_value = val
+                        break
+                
+                if self.current_glossary_format in ['list', 'token_csv']:
+                    filtered = glossary_document.filter_list_entries(self.current_glossary_data, check_entry_matches)
+                    
+                    removed = len(self.current_glossary_data) - len(filtered)
+                    
+                    if removed > 0:
+                        if not self.create_glossary_backup(f"before_filter_remove_{removed}"):
+                            return
+                    
+                    self.current_glossary_data[:] = filtered
+                    
+                    if save_current_glossary():
+                        load_glossary_for_editing()
+                        QMessageBox.information(filter_dialog, "Success", 
+                            f"Filter applied!\n\nKept: {len(filtered)} entries\nRemoved: {removed} entries")
+                        filter_dialog.accept()
+            
+            button_layout.addStretch()
+            
+            apply_btn = QPushButton("Apply Filter")
+            apply_btn.setFixedWidth(120)
+            apply_btn.clicked.connect(apply_filter)
+            apply_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px;")
+            button_layout.addWidget(apply_btn)
+            
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setFixedWidth(120)
+            cancel_btn.clicked.connect(filter_dialog.reject)
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+            button_layout.addWidget(cancel_btn)
+            
+            button_layout.addStretch()
+            
+            # Show dialog with fade animation
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(filter_dialog, duration=250)
+            except Exception:
+                filter_dialog.exec()
+    
+        def export_selection():
+           selected = self.glossary_tree.selectedItems()
+           if not selected:
+               QMessageBox.warning(self.dialog, "Warning", "No entries selected")
+               return
+           
+           path, _ = QFileDialog.getSaveFileName(
+               self.dialog,
+               "Export Selected Entries",
+               "",
+               "JSON files (*.json);;CSV files (*.csv)"
+           )
+           
+           if not path:
+               return
+           
+           try:
+               glossary_document.export_selected_entries(
+                   path,
+                   self.current_glossary_data,
+                   self.current_glossary_format,
+                   [item.data(0, Qt.UserRole) for item in selected],
+                   self.config,
+               )
+               
+               QMessageBox.information(self.dialog, "Success", f"Exported {len(selected)} entries to {os.path.basename(path)}")
+               
+           except Exception as e:
+               QMessageBox.critical(self.dialog, "Error", f"Failed to export: {e}")
+       
+        def collect_translated_changes():
+            """Return list of (old, new) translated-name changes since last baseline."""
+            return glossary_document.collect_translated_changes(
+                self.current_glossary_data, self.current_glossary_format, self._original_translated_map
+            )
+
+        def _update_html_files_legacy(changes):
+            """Legacy sequential output-file updater."""
+            if not changes:
+                return 0, 0
+            
+            glossary_path = self.editor_file_entry.text()
+            if not glossary_path or not os.path.exists(glossary_path):
+                self.append_log("⚠️ Cannot update output files: no glossary file loaded.")
+                return 0, 0
+            
+            glossary_dir = os.path.dirname(glossary_path)
+            glossary_fname = os.path.splitext(os.path.basename(glossary_path))[0]  # e.g. "BookName_glossary" or "glossary"
+            parent_of_glossary_dir = os.path.dirname(glossary_dir)
+            is_shared_glossary_folder = os.path.basename(glossary_dir).lower() == 'glossary'
+            is_book_glossary_subfolder = os.path.basename(parent_of_glossary_dir).lower() == 'glossary'
+
+            # ----- Determine the book output directory -----
+            # Minimal mode:   <output_dir>/<book>/glossary.csv  OR  <output_dir>/<book>/Glossary/glossary.csv
+            # Balanced/Full:  <output_dir>/Glossary/<book>_glossary.csv
+            book_output_dir = None
+
+            if is_shared_glossary_folder:
+                # Try to extract book name from filename pattern <book>_glossary.<ext>
+                book_name = None
+                for suffix in ('_glossary', '_Glossary'):
+                    if glossary_fname.endswith(suffix):
+                        book_name = glossary_fname[:-len(suffix)]
+                        break
+                if not book_name:
+                    # Also try just the filename as book name (e.g. "BookName.csv" in Glossary/)
+                    book_name = glossary_fname
+
+                if book_name:
+                    candidate = os.path.join(parent_of_glossary_dir, book_name)
+                    if os.path.isdir(candidate):
+                        book_output_dir = candidate
+
+                # Fallback: if we couldn't resolve per-book dir, use parent
+                if not book_output_dir:
+                    book_output_dir = parent_of_glossary_dir
+            elif is_book_glossary_subfolder:
+                book_name = os.path.basename(glossary_dir)
+                grandparent = os.path.dirname(parent_of_glossary_dir)
+                candidate = os.path.join(grandparent, book_name)
+                book_output_dir = candidate if os.path.isdir(candidate) else grandparent
+            else:
+                # Glossary is directly in the book output dir (minimal mode without subfolder)
+                book_output_dir = glossary_dir
+
+            if not os.path.isdir(book_output_dir):
+                self.append_log(f"⚠️ Cannot update output files: directory not found: {book_output_dir}")
+                return 0, 0
+
+            self.append_log(f"📁 Scanning output files in: {book_output_dir}")
+
+            files_updated = 0
+            total_replacements = 0
+            
+            excluded_extensions = {'.csv', '.json'}
+            excluded_names = {'metadata.json', 'metadata.opf', 'metadata.xml', 'content.opf', 'toc.ncx'}
+
+            # Only process files directly in book_output_dir (no subfolders)
+            for name in os.listdir(book_output_dir):
+                path = os.path.join(book_output_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                lower_name = name.lower()
+                # Skip excluded extensions
+                if any(lower_name.endswith(ext) for ext in excluded_extensions):
+                    continue
+                if lower_name in excluded_names or lower_name.endswith('.opf'):
+                    continue
+                try:
+                    # Read as bytes so we do not mutate line endings or strip
+                    # invalid bytes on round-trip (earlier errors='ignore' text
+                    # mode could silently drop bytes, making the write look
+                    # like a no-op replacement).
+                    with open(path, 'rb') as f:
+                        raw_bytes = f.read()
+                    try:
+                        content = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = raw_bytes.decode('utf-8', errors='replace')
+
+                    # Apply replacements, tracking per-pair counts so the log
+                    # reflects what was *actually* replaced (not what happened
+                    # to exist in the original content for other pairs).
+                    new_content = content
+                    per_pair_counts = []
+                    for old, new in changes:
+                        if not old or not new or old == new:
+                            continue
+                        before_count = new_content.count(old)
+                        if before_count == 0:
+                            continue
+                        new_content = new_content.replace(old, new)
+                        per_pair_counts.append((old, new, before_count))
+
+                    if new_content == content:
+                        continue
+
+                    # Capture mtime/size before so we can confirm the OS
+                    # actually accepted our write (OneDrive / antivirus can
+                    # silently revert).
+                    try:
+                        stat_before = os.stat(path)
+                        mtime_before = stat_before.st_mtime
+                        size_before = stat_before.st_size
+                    except Exception:
+                        mtime_before, size_before = None, None
+
+                    # Write in binary mode to avoid CRLF translation and to
+                    # guarantee exactly the bytes we computed land on disk.
+                    new_bytes = new_content.encode('utf-8')
+                    with open(path, 'wb') as f:
+                        f.write(new_bytes)
+                        f.flush()
+                        try:
+                            os.fsync(f.fileno())
+                        except Exception:
+                            pass
+
+                    # Post-write verification: re-read and confirm old strings
+                    # are gone and file size matches what we intended.
+                    try:
+                        with open(path, 'rb') as f:
+                            verify_bytes = f.read()
+                        stat_after = os.stat(path)
+                        mtime_after = stat_after.st_mtime
+                        size_after = stat_after.st_size
+                    except Exception as ve:
+                        self.append_log(f"⚠️ Could not verify write of {path}: {ve}")
+                        verify_bytes = None
+                        mtime_after, size_after = None, None
+
+                    replaced_here = sum(c for _o, _n, c in per_pair_counts)
+                    total_replacements += replaced_here
+
+                    write_landed = (verify_bytes == new_bytes)
+                    if write_landed:
+                        files_updated += 1
+                        self.append_log(
+                            f"Updated file: {path} ({replaced_here} replacements, "
+                            f"{size_before} → {size_after} bytes)"
+                        )
+                    else:
+                        # Write did not persist as expected — tell the user
+                        # what is still there so they can diagnose.
+                        resolved = os.path.realpath(path)
+                        self.append_log(
+                            f"❌ Write did NOT persist for {path}"
+                            + (f" (realpath: {resolved})" if resolved != path else "")
+                        )
+                        self.append_log(
+                            f"   expected {len(new_bytes)} bytes, found {size_after} bytes"
+                            + (f" (mtime {mtime_before} → {mtime_after})" if mtime_before is not None else "")
+                        )
+                        if verify_bytes is not None:
+                            try:
+                                verify_text = verify_bytes.decode('utf-8', errors='replace')
+                                for old, new, cnt in per_pair_counts:
+                                    still = verify_text.count(old)
+                                    if still:
+                                        self.append_log(
+                                            f"   • '{old}' still present {still} time(s) (expected 0)"
+                                        )
+                            except Exception:
+                                pass
+                        self.append_log(
+                            "   Likely causes: file locked by another app, OneDrive/antivirus revert, "
+                            "or read-only attribute. Try closing viewers and retry."
+                        )
+                except Exception as e:
+                    self.append_log(f"⚠️ Failed to update {path}: {e}")
+            return files_updated, total_replacements
+
+        def update_html_files(changes):
+            """Replace old translated names with new ones across output files."""
+            return glossary_document.update_output_files(
+                self.editor_file_entry.text(),
+                changes,
+                self.append_log,
+                getattr(
+                    self,
+                    'enable_parallel_extraction_var',
+                    self.config.get('enable_parallel_extraction', False),
+                ),
+                getattr(
+                    self,
+                    'extraction_workers_var',
+                    self.config.get('extraction_workers', os.environ.get('EXTRACTION_WORKERS', 1)),
+                ),
+            )
+        
+        def save_edited_glossary():
+           changes = collect_translated_changes()
+           if self.update_html_on_save_checkbox.isChecked() and changes:
+               _prompt_title, _prompt_text, example_lines = glossary_document.update_output_files_prompt(changes)
+               msg = QMessageBox(self.dialog)
+               msg.setIcon(QMessageBox.Warning)
+               msg.setWindowTitle(_prompt_title)
+               msg.setText(_prompt_text)
+               msg.setInformativeText(example_lines)
+               msg.setTextFormat(Qt.RichText)
+               msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+               msg.setDefaultButton(QMessageBox.Yes)
+               if msg.exec() != QMessageBox.Yes:
+                   return
+
+           # Pause auto-reload during internal save to prevent flash
+           if hasattr(self, '_editor_auto_reload_timer'):
+               self._editor_auto_reload_timer.stop()
+           # Create backup before saving
+           if not self.create_glossary_backup("before_save"):
+               return
+           if save_current_glossary():
+               files_updated = 0
+               if self.update_html_on_save_checkbox.isChecked() and changes:
+                   files_updated, total_repl = update_html_files(changes)
+                   self.append_log(f"Updated {files_updated} files with translated-name changes ({total_repl} replacements).")
+               # Reset baseline and highlights
+               _saved_baseline = glossary_document.saved_translated_baseline(
+                   self.current_glossary_data, self.current_glossary_format
+               )
+               if _saved_baseline is not None:
+                   self._original_translated_map = _saved_baseline
+               for i in range(self.glossary_tree.topLevelItemCount()):
+                   tree_item = self.glossary_tree.topLevelItem(i)
+                   data_entry = _editor_entry_for_item(tree_item)
+                   if data_entry:
+                       _decorate_gender_item(tree_item, data_entry, self.glossary_column_fields)
+                   mark_row_updated(tree_item, False)
+               if (
+                   getattr(self, 'hide_unused_entries_checkbox', None) is not None
+                   and self.hide_unused_entries_checkbox.isChecked()
+                   and hasattr(self, '_apply_hide_unused_entries_filter')
+               ):
+                   self._apply_hide_unused_entries_filter()
+               _ok_msg = QMessageBox(QMessageBox.Information, "Success", "Glossary saved successfully", QMessageBox.Ok, self.dialog)
+               _ok_msg.layout().setAlignment(Qt.AlignCenter)
+               _ok_msg.exec()
+               self.append_log(f"✅ Saved glossary to: {self.editor_file_entry.text()}")
+               # Update auto-reload baseline so the timer doesn't re-trigger
+               try:
+                   self._editor_last_mtime = os.path.getmtime(self.editor_file_entry.text())
+               except Exception:
+                   pass
+       
+           # Resume auto-reload timer
+           if hasattr(self, '_editor_auto_reload_timer'):
+               self._editor_auto_reload_timer.start()
+        def save_as_glossary():
+           if not self.current_glossary_data:
+               QMessageBox.critical(self.dialog, "Error", "No glossary loaded")
+               return
+           
+           path, _ = QFileDialog.getSaveFileName(
+               self.dialog,
+               "Save Glossary As",
+               "",
+               "JSON files (*.json);;CSV files (*.csv)"
+           )
+           
+           if not path:
+               return
+           
+           try:
+               glossary_document.save_glossary_as(
+                   path, self.current_glossary_data, self.current_glossary_format, self.config
+               )
+               
+               self.editor_file_entry.setText(path)
+               QMessageBox.information(self.dialog, "Success", f"Glossary saved to {os.path.basename(path)}")
+               self.append_log(f"✅ Saved glossary as: {path}")
+               
+           except Exception as e:
+               QMessageBox.critical(self.dialog, "Error", f"Failed to save: {e}")
+
+        # ------------------------------------------------------------------
+        #  Editor navigation helpers (for multi-EPUB glossary switching)
+        # ------------------------------------------------------------------
+        def _editor_nav_impl(direction):
+            """Navigate ◀/▶ through glossary files."""
+            combo = self.editor_file_combo
+            if combo.count() <= 1:
+                return
+            new_idx = combo.currentIndex() + direction
+            if new_idx < 0:
+                new_idx = combo.count() - 1
+            elif new_idx >= combo.count():
+                new_idx = 0
+            combo.setCurrentIndex(new_idx)
+
+        self._editor_nav = _editor_nav_impl
+
+        def _on_editor_combo_changed_impl(idx):
+            """When user picks a different glossary from the combo, load it."""
+            if idx < 0:
+                return
+            path = self.editor_file_combo.itemData(idx)
+            if path and os.path.exists(path):
+                load_glossary_for_editing()
+
+        self._on_editor_combo_changed = _on_editor_combo_changed_impl
+
+        def _update_editor_nav_buttons_impl():
+            """Show/hide ◀ ▶ arrows depending on combo item count."""
+            show = self.editor_file_combo.count() > 1
+            self._editor_prev_btn.setVisible(show)
+            self._editor_next_btn.setVisible(show)
+
+        self._update_editor_nav_buttons = _update_editor_nav_buttons_impl
+
+        # Reconnect only this setup's previous handler; broad disconnects warn
+        # when there is nothing connected and can remove unrelated handlers.
+        previous_slot = getattr(self, '_on_editor_combo_changed_slot', None)
+        if previous_slot is not None:
+            try:
+                self.editor_file_combo.currentIndexChanged.disconnect(previous_slot)
+            except (TypeError, RuntimeError):
+                pass
+        self.editor_file_combo.currentIndexChanged.connect(_on_editor_combo_changed_impl)
+        self._on_editor_combo_changed_slot = _on_editor_combo_changed_impl
+
+        # ------------------------------------------------------------------
+        # Auto-select glossary: populates the combo for current input sources.
+        # ------------------------------------------------------------------
+        def auto_select_current_glossary():
+            try:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+
+                source_paths = self._glossary_editor_input_sources()
+
+                if not source_paths:
+                    # The input-file association was cleared. Don't leave stale
+                    # auto-loaded entries in the editor. Preserve a glossary the
+                    # user explicitly browsed/loaded.
+                    if not getattr(self, '_glossary_editor_manual_source', False):
+                        self._clear_glossary_editor()
+                    return
+
+                # ----------------------------------------------------------
+                # Trigger the same auto-mapping the Append-Glossary toggle
+                # uses, so `manual_glossary_path` / `auto_loaded_glossary_path`
+                # are populated on the very first open of the editor (no need
+                # to toggle Balanced off/on to wake it up).
+                # ----------------------------------------------------------
+                try:
+                    _append_on = bool(getattr(self, 'append_glossary_var', False)) or bool(
+                        self.config.get('append_glossary', False)
+                    )
+                    _auto_load_on = bool(self.config.get('append_glossary_auto_load', False))
+                    if _append_on and _auto_load_on and hasattr(self, '_autofill_glossary_for_current_selection'):
+                        self._autofill_glossary_for_current_selection()
+                except Exception:
+                    pass
+
+                # Already-resolved paths first, then the per-book / shared Glossary
+                # folders (glossary_document.resolve_editor_glossaries, U6).
+                found_glossaries, found_glossary_sources = glossary_document.resolve_editor_glossaries(
+                    source_paths,
+                    config=self.config,
+                    override_dir=override_dir,
+                    auto_loaded_glossary_path=getattr(self, 'auto_loaded_glossary_path', None),
+                    manual_glossary_path=getattr(self, 'manual_glossary_path', None),
+                    manual_glossary_map=getattr(self, 'manual_glossary_map', None),
+                    output_base_getter=getattr(self, '_get_output_base_dir', None),
+                    base_dir=getattr(self, 'base_dir', ''),
+                    module_dir=os.path.dirname(os.path.abspath(__file__)),
+                )
+
+                # Populate combo
+                self._editor_glossary_source_map = dict(found_glossary_sources)
+                # Keep the old attribute as a compatibility alias.
+                self._editor_glossary_epub_map = dict(found_glossary_sources)
+                self.editor_file_combo.blockSignals(True)
+                self.editor_file_combo.clear()
+                for display, fpath in found_glossaries:
+                    self.editor_file_combo.addItem(display, fpath)
+                # Unified glossaries go last so the editor still opens on the
+                # book's own file; the user switches to them from the list.
+                try:
+                    self._append_unified_glossaries_to_editor_combo()
+                except Exception:
+                    pass
+                self.editor_file_combo.blockSignals(False)
+                self._update_editor_nav_buttons()
+
+                # Load the first one
+                if self.editor_file_combo.count() > 0:
+                    self._glossary_editor_manual_source = False
+                    self.editor_file_combo.setCurrentIndex(0)
+                    load_glossary_for_editing()
+                elif not getattr(self, '_glossary_editor_manual_source', False):
+                    # Input selected but no associated glossary exists — clear
+                    # stale entries rather than leaving them on screen.
+                    self._clear_glossary_editor()
+
+            except Exception as e:
+                print(f"⚠️ auto_select_current_glossary failed: {e}")
+
+        self._refresh_glossary_editor = auto_select_current_glossary
+        # Populate the combo now (this finds glossary files and sets up the
+        # combo entries). load_glossary_for_editing() may fail because some
+        # widgets aren't created yet — that's OK; the deferred call at the
+        # end of this method will retry once everything is ready.
+        auto_select_current_glossary()
+       
+        # Quick toolbar above the entry list
+        toolbar_widget = QWidget()
+        toolbar_layout = QHBoxLayout(toolbar_widget)
+        toolbar_layout.setContentsMargins(0, 0, 0, 4)
+        # Place the HTML update toggle above the save controls
+        toolbar_layout.addWidget(html_toggle_widget)
+
+        for text, handler, color in [
+            ("Save", save_edited_glossary, "#15803d"),
+            ("Save As...", save_as_glossary, "#0f766e"),
+            ("Delete Selected", delete_selected_entries, "#991b1b"),
+            ("✏️ Edit in Notepad", lambda: _open_glossary_in_editor(), "#1e40af"),
+        ]:
+            btn = QPushButton(text)
+            btn.setFixedWidth(135)
+            btn.clicked.connect(handler)
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 6px; font-weight: bold;")
+            toolbar_layout.addWidget(btn)
+
+        # ── Undo / Redo / Open Backups ──
+        def _push_undo_snapshot():
+            """Snapshot current glossary data onto the undo stack (call BEFORE mutation)."""
+            if glossary_document.push_undo_snapshot(self, self._undo_stack, self._redo_stack, self._undo_max):
+                _update_undo_redo_state()
+
+        def _push_html_undo_snapshot(changes):
+            """Record a direct output-file (HTML) Find/Replace so it can be undone.
+
+            ``changes`` is the list of (old, new) replacements that were just
+            applied to the output files. Undo re-applies them in reverse; redo
+            re-applies them forward. This is independent of the glossary data, so
+            it lets the 'update output files directly' path participate in undo.
+            """
+            if glossary_document.push_html_undo_snapshot(self._undo_stack, self._redo_stack, self._undo_max, changes):
+                _update_undo_redo_state()
+
+        def _undo_action():
+            kind, reverse = glossary_document.undo_step(self, self._undo_stack, self._redo_stack)
+            if kind == 'html':
+                try:
+                    files_updated, total_repl = update_html_files(reverse)
+                    self.append_log(f"↶ Undo: reverted {total_repl} replacement(s) across {files_updated} output file(s).")
+                except Exception as e:
+                    self.append_log(f"⚠️ Undo (output files) failed: {e}")
+                _update_undo_redo_state()
+                return
+            if kind != 'glossary':
+                return
+            load_glossary_for_editing(skip_file_read=True)
+            _update_undo_redo_state()
+
+        def _redo_action():
+            kind, entry = glossary_document.redo_step(self, self._undo_stack, self._redo_stack)
+            if kind == 'html':
+                try:
+                    files_updated, total_repl = update_html_files(list(entry.get('changes', [])))
+                    self.append_log(f"↷ Redo: re-applied {total_repl} replacement(s) across {files_updated} output file(s).")
+                except Exception as e:
+                    self.append_log(f"⚠️ Redo (output files) failed: {e}")
+                _update_undo_redo_state()
+                return
+            if kind != 'glossary':
+                return
+            load_glossary_for_editing(skip_file_read=True)
+            _update_undo_redo_state()
+
+        def _update_undo_redo_state():
+            undo_count = len(self._undo_stack)
+            redo_count = len(self._redo_stack)
+            self._undo_btn.setEnabled(undo_count > 0)
+            self._redo_btn.setEnabled(redo_count > 0)
+            self._undo_btn.setToolTip(_wrapped_tooltip_html(f"Undo ({undo_count} steps)" if undo_count else "Nothing to undo"))
+            self._redo_btn.setToolTip(_wrapped_tooltip_html(f"Redo ({redo_count} steps)" if redo_count else "Nothing to redo"))
+
+        def _open_backups_folder():
+            path = self.editor_file_entry.text()
+            if not path:
+                QMessageBox.warning(parent, "No File", "No glossary file is loaded.")
+                return
+            backup_dir = glossary_document.editor_backup_dir(path)
+            if not os.path.isdir(backup_dir):
+                QMessageBox.information(parent, "No Backups",
+                    f"No backups folder found yet.\n\n"
+                    f"Expected location:\n{backup_dir}\n\n"
+                    "Backups are created automatically when you perform destructive operations (delete, filter, etc).")
+                return
+            import subprocess
+            if sys.platform == 'win32':
+                os.startfile(backup_dir)
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', backup_dir])
+            else:
+                subprocess.Popen(['xdg-open', backup_dir])
+
+        # Expose snapshot helpers so other functions (save_edit, delete, find/replace, etc.) can call them
+        self._push_undo_snapshot = _push_undo_snapshot
+        self._push_html_undo_snapshot = _push_html_undo_snapshot
+
+        # Separator
+        sep = QLabel("│")
+        sep.setStyleSheet("color: #555; font-size: 14pt; padding: 0 2px;")
+        toolbar_layout.addWidget(sep)
+
+        # Undo button
+        self._undo_btn = QPushButton("↶ Undo")
+        self._undo_btn.setFixedWidth(75)
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.clicked.connect(_undo_action)
+        self._undo_btn.setStyleSheet(
+            "QPushButton { background-color: #4a5568; color: white; padding: 6px; font-weight: bold; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #5a6a80; }"
+            "QPushButton:disabled { background-color: #2d3748; color: #666; }"
+        )
+        toolbar_layout.addWidget(self._undo_btn)
+
+        # Redo button
+        self._redo_btn = QPushButton("↷ Redo")
+        self._redo_btn.setFixedWidth(75)
+        self._redo_btn.setEnabled(False)
+        self._redo_btn.clicked.connect(_redo_action)
+        self._redo_btn.setStyleSheet(
+            "QPushButton { background-color: #4a5568; color: white; padding: 6px; font-weight: bold; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #5a6a80; }"
+            "QPushButton:disabled { background-color: #2d3748; color: #666; }"
+        )
+        toolbar_layout.addWidget(self._redo_btn)
+
+        # Open Backups button
+        backups_btn = QPushButton("📂 Backups")
+        backups_btn.setFixedWidth(90)
+        backups_btn.clicked.connect(_open_backups_folder)
+        backups_btn.setStyleSheet(
+            "QPushButton { background-color: #6b5b3a; color: white; padding: 6px; font-weight: bold; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #7d6b48; }"
+        )
+        backups_btn.setToolTip(_wrapped_tooltip_html("Open the Backups folder in your file explorer"))
+        toolbar_layout.addWidget(backups_btn)
+
+        toolbar_layout.addStretch()
+        content_frame_layout.insertWidget(0, toolbar_widget)
+
+        def _open_glossary_in_editor():
+            """Open current glossary file in the best available text editor."""
+            import subprocess
+            import shutil
+
+            file_path = self.editor_file_entry.text()
+            if not file_path or not os.path.exists(file_path):
+                self._show_message('error', "File Missing",
+                                   "No glossary file is currently loaded.",
+                                   parent=getattr(self, 'dialog', self))
+                return
+
+            # Determine line number by searching for the selected entry in the file
+            _line_num = 1
+            selected = self.glossary_tree.currentItem()
+            if selected:
+                _line_num = glossary_document.editor_entry_line_number(file_path, _EditorTreeRow(selected))
+
+            try:
+                if sys.platform == 'win32':
+                    _npp_paths = [
+                        r'C:\Program Files\Notepad++\notepad++.exe',
+                        r'C:\Program Files (x86)\Notepad++\notepad++.exe',
+                    ]
+                    _npp = next((p for p in _npp_paths if os.path.exists(p)), None)
+                    if _npp:
+                        subprocess.Popen([_npp, f'-n{_line_num}', file_path])
+                    else:
+                        subprocess.Popen(['notepad.exe', file_path])
+                elif sys.platform == 'darwin':
+                    if shutil.which('code'):
+                        subprocess.Popen(['code', '--goto', f'{file_path}:{_line_num}'])
+                    else:
+                        subprocess.Popen(['open', '-t', file_path])
+                else:
+                    if shutil.which('gedit'):
+                        subprocess.Popen(['gedit', f'+{_line_num}', file_path])
+                    elif shutil.which('kate'):
+                        subprocess.Popen(['kate', '-l', str(_line_num), file_path])
+                    elif shutil.which('code'):
+                        subprocess.Popen(['code', '--goto', f'{file_path}:{_line_num}'])
+                    else:
+                        _linux_editors = ['mousepad', 'xed', 'pluma', 'nano', 'xdg-open']
+                        _editor = next((e for e in _linux_editors if shutil.which(e)), 'xdg-open')
+                        subprocess.Popen([_editor, file_path])
+            except Exception as _e:
+                self._show_message('error', "Open Failed",
+                                   f"Could not open editor:\n{_e}",
+                                   parent=getattr(self, 'dialog', self))
+
+        def _editor_entry_for_item(item):
+            if item is None:
+                return None
+            return glossary_document.entry_for_ref(
+                self.current_glossary_data, self.current_glossary_format, item.data(0, Qt.UserRole)
+            )
+
+        def _can_resolve_gender(item):
+            status = item.data(0, gender_status_role) if item is not None else None
+            return glossary_document.can_resolve_gender(status)
+
+        def _open_gender_resolution(item, column_idx=None, require_gender_column=False):
+            if item is None or not _can_resolve_gender(item):
+                return False
+            try:
+                gender_column = self.glossary_column_fields.index('gender') + 1
+            except (ValueError, AttributeError):
+                return False
+            if require_gender_column and column_idx != gender_column:
+                return False
+
+            data_entry = _editor_entry_for_item(item)
+            tracker_entry = _gender_tracker_entry(data_entry)
+            if not data_entry or not tracker_entry:
+                return False
+
+            raw_name = str(data_entry.get('raw_name', '') or '').strip()
+            translated_name = str(data_entry.get('translated_name', '') or '').strip()
+            current_decision = glossary_document.current_gender_decision(tracker_entry)
+            threshold, bias = _gender_settings()
+            summary = _gender_resolution_summary(
+                tracker_entry,
+                data_entry.get('gender', ''),
+                threshold,
+                bias,
+            )
+            automatic_status = summary['status']
+            total = summary['total']
+
+            resolution_dialog = QDialog(self.dialog)
+            resolution_dialog.setWindowTitle("Resolve Tracked Gender")
+            resolution_dialog.setMinimumWidth(620)
+            layout = QVBoxLayout(resolution_dialog)
+            layout.setContentsMargins(18, 16, 18, 16)
+            layout.setSpacing(10)
+
+            heading = QLabel(
+                f"<b>{translated_name or raw_name}</b>"
+                + (f" <span style='color:#888'>({raw_name})</span>" if translated_name and raw_name else "")
+            )
+            heading.setTextFormat(Qt.RichText)
+            layout.addWidget(heading)
+
+            threshold_pct, bias_label = glossary_document.gender_settings_labels(threshold, bias)
+            overview = QLabel(
+                f"Calculated Auto result: <b>{summary['calculated_auto_gender'].title()}</b> "
+                f"&nbsp;·&nbsp; Editor display: <b>{automatic_status.get('label', '')}</b><br>"
+                f"Ignore rare flips: {threshold_pct:.0f}% &nbsp;·&nbsp; Bias: {bias_label}"
+            )
+            overview.setTextFormat(Qt.RichText)
+            overview.setWordWrap(True)
+            layout.addWidget(overview)
+
+            history_group = QGroupBox("Tracking history")
+            history_layout = QVBoxLayout(history_group)
+            for gender in BINARY_GENDERS:
+                history_layout.addWidget(QLabel(
+                    glossary_document.gender_history_line(gender, summary, total)
+                ))
+
+            history_layout.addWidget(QLabel(f"Gender flips: {summary['flip_count']}"))
+            if summary['latest_flips']:
+                latest_lines = []
+                for change in reversed(summary['latest_flips']):
+                    latest_lines.append(glossary_document.gender_flip_line(change))
+                latest = QLabel("Latest flips:\n" + "\n".join(latest_lines))
+                latest.setWordWrap(True)
+                history_layout.addWidget(latest)
+            note = QLabel("Counts are unique chapter/file tracker observations, not textual mention counts.")
+            note.setStyleSheet("color: #888; font-style: italic;")
+            note.setWordWrap(True)
+            history_layout.addWidget(note)
+            layout.addWidget(history_group)
+
+            choice_group = QGroupBox("Decision")
+            choice_layout = QHBoxLayout(choice_group)
+            buttons = QButtonGroup(choice_group)
+            radios = {}
+            for decision, label in (("auto", "Auto"), ("male", "Male"), ("female", "Female")):
+                radio = QRadioButton(label)
+                radio.setChecked(current_decision == decision)
+                buttons.addButton(radio)
+                radios[decision] = radio
+                choice_layout.addWidget(radio)
+            choice_layout.addStretch()
+            layout.addWidget(choice_group)
+
+            button_row = QHBoxLayout()
+            button_row.addStretch()
+            apply_button = QPushButton("Apply")
+            cancel_button = QPushButton("Cancel")
+            button_row.addWidget(apply_button)
+            button_row.addWidget(cancel_button)
+            layout.addLayout(button_row)
+
+            def apply_resolution():
+                selected = next((key for key, radio in radios.items() if radio.isChecked()), 'auto')
+                if hasattr(self, '_push_undo_snapshot'):
+                    self._push_undo_snapshot()
+                glossary_document.apply_gender_decision(self, tracker_entry, data_entry, raw_name, selected)
+                _decorate_gender_item(item, data_entry, self.glossary_column_fields)
+                mark_row_updated(item, True)
+                if hasattr(self, '_apply_glossary_column_filters'):
+                    self._apply_glossary_column_filters()
+                resolution_dialog.accept()
+
+            apply_button.clicked.connect(apply_resolution)
+            cancel_button.clicked.connect(resolution_dialog.reject)
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(resolution_dialog, duration=200)
+            except Exception:
+                resolution_dialog.exec()
+            return True
+
+        self._open_gender_resolution_for_item = _open_gender_resolution
+        self._can_resolve_gender_item = _can_resolve_gender
+
+        def show_tree_context_menu(pos):
+            menu = QMenu(self.glossary_tree)
+            menu.addAction("Save Changes", save_edited_glossary)
+            menu.addAction("Save As...", save_as_glossary)
+            menu.addSeparator()
+            # Ensure right-clicked item is selected (Qt's ExtendedSelection
+            # doesn't auto-select on right-click, making "Delete Selected"
+            # target stale/wrong rows).
+            current_item = self.glossary_tree.itemAt(pos)
+            if current_item and current_item not in self.glossary_tree.selectedItems():
+                self.glossary_tree.clearSelection()
+                current_item.setSelected(True)
+                self.glossary_tree.setCurrentItem(current_item)
+            # Edit selected entry using existing inline editor
+            current_col = self.glossary_tree.columnAt(pos.x())
+            if current_item and _can_resolve_gender(current_item):
+                menu.addAction(
+                    "Resolve Gender…",
+                    lambda: _open_gender_resolution(current_item),
+                )
+            if current_item and current_col > 0:
+                menu.addAction("Edit", lambda: self._on_tree_double_click(current_item, current_col))
+            else:
+                # fallback to current selection
+                item = self.glossary_tree.currentItem()
+                col = self.glossary_tree.currentColumn()
+                if item and col > 0:
+                    menu.addAction("Edit", lambda: self._on_tree_double_click(item, col))
+            # Edit in external editor (Notepad++ / notepad / platform editor)
+            _glossary_path = self.editor_file_entry.text()
+            if _glossary_path and os.path.exists(_glossary_path):
+                menu.addAction("✏️ Edit in Notepad", _open_glossary_in_editor)
+            menu.addSeparator()
+            menu.addAction("Delete Selected", delete_selected_entries)
+            menu.addAction("Reload", load_glossary_for_editing)
+            menu.exec(self.glossary_tree.viewport().mapToGlobal(pos))
+
+        previous_slot = getattr(self, '_show_tree_context_menu_slot', None)
+        if previous_slot is not None:
+            try:
+                self.glossary_tree.customContextMenuRequested.disconnect(previous_slot)
+            except (TypeError, RuntimeError):
+                pass
+        self.glossary_tree.customContextMenuRequested.connect(show_tree_context_menu)
+        self._show_tree_context_menu_slot = show_tree_context_menu
+
+        def _editor_associated_source_path():
+            return glossary_document.editor_associated_source_path(
+                self.editor_file_entry.text(),
+                (
+                    getattr(self, '_editor_glossary_source_map', None)
+                    or getattr(self, '_editor_glossary_epub_map', {})
+                    or {}
+                ),
+                self._glossary_editor_input_sources,
+                getattr(self, 'get_current_epub_path', None),
+                getattr(self, 'file_path', None),
+                self.config if hasattr(self, 'config') else None,
+            )
+
+        def _editor_tree_usage_entries():
+            fields, specs = _editor_data_row_specs()
+            return glossary_document.editor_usage_entries(fields, specs)
+
+        def _editor_output_dir_from_source(source_path):
+            return glossary_document.editor_output_dir_from_source(
+                source_path,
+                self.config if hasattr(self, 'config') else None,
+                getattr(self, '_resolve_open_output_folder_for_file', None),
+                getattr(self, '_get_output_base_dir', None),
+            )
+
+        def _editor_output_dir_from_glossary(glossary_path):
+            return glossary_document.editor_output_dir_from_glossary(
+                glossary_path,
+                (
+                    getattr(self, '_editor_glossary_source_map', None)
+                    or getattr(self, '_editor_glossary_epub_map', {})
+                    or {}
+                ),
+                _editor_output_dir_from_source,
+            )
+
+        def _editor_translated_output_dir():
+            source_dir = _editor_output_dir_from_source(
+                _editor_associated_source_path()
+            )
+            if source_dir:
+                return source_dir
+            return _editor_output_dir_from_glossary(self.editor_file_entry.text())
+
+        def _set_all_editor_rows_visible(final_stats_text=None):
+            _populate_editor_tree_from_data_batched(final_stats_text=final_stats_text)
+
+        def _apply_hide_unused_entries_progress(payload):
+            if payload.get('token') is not getattr(self, '_hide_unused_filter_token', None):
+                return
+            checkbox = getattr(self, 'hide_unused_entries_checkbox', None)
+            if checkbox is None or not checkbox.isChecked():
+                return
+            stage = payload.get('stage')
+            if stage == 'reading':
+                current = int(payload.get('current') or 0)
+                total_files = int(payload.get('total_files') or 0)
+                self.stats_label.setText(f"Reading translated output files: {current}/{total_files}")
+            elif stage == 'matching':
+                checked = int(payload.get('checked') or 0)
+                total_entries = int(payload.get('total') or 0)
+                used = int(payload.get('used') or 0)
+                self.stats_label.setText(f"Matching glossary entries: {checked}/{total_entries} checked, {used} used")
+            elif stage == 'starting':
+                total_entries = int(payload.get('total') or 0)
+                total_files = int(payload.get('total_files') or 0)
+                self.stats_label.setText(f"Matching glossary entries: 0/{total_entries} checked, 0 used ({total_files} files)")
+
+        def _apply_hide_unused_entries_result(payload):
+            if payload.get('token') is not getattr(self, '_hide_unused_filter_token', None):
+                return
+            checkbox = getattr(self, 'hide_unused_entries_checkbox', None)
+            if checkbox is None or not checkbox.isChecked():
+                return
+            self._hide_unused_filter_token = None
+            total = int(payload.get('total') or 0)
+            if not payload.get('ok'):
+                _set_all_editor_rows_visible(
+                    final_stats_text=f"Hide unused failed: {payload.get('error', 'Unknown error')}"
+                )
+                return
+
+            for line in payload.get('errors', []) or []:
+                try:
+                    self.append_log(line)
+                except Exception:
+                    pass
+
+            output_dir = payload.get('output_dir') or ''
+            if payload.get('no_files'):
+                _set_all_editor_rows_visible(
+                    final_stats_text=f"No translated output files found in: {output_dir}"
+                )
+                return
+
+            used_rows = set(payload.get('used_rows', []))
+            used_count = len(used_rows)
+            _populate_editor_tree_from_data_batched(
+                used_rows,
+                final_stats_text=f"Showing {used_count}/{total} used entries in translated output",
+            )
+
+        self._hide_unused_filter_bridge.progress.connect(_apply_hide_unused_entries_progress)
+        self._hide_unused_filter_bridge.finished.connect(_apply_hide_unused_entries_result)
+
+        def _apply_hide_unused_entries_filter():
+            checkbox = getattr(self, 'hide_unused_entries_checkbox', None)
+            _column_fields, all_specs = _editor_data_row_specs()
+            total = len(all_specs)
+            self._hide_unused_filter_token = None
+            if checkbox is None or not checkbox.isChecked():
+                base_stats = getattr(self, '_glossary_editor_base_stats_text', None)
+                if base_stats:
+                    final_stats = base_stats
+                elif total:
+                    final_stats = f"Total entries: {total}"
+                else:
+                    final_stats = None
+                if self.glossary_tree.topLevelItemCount() != total:
+                    _populate_editor_tree_from_data_batched(final_stats_text=final_stats)
+                elif final_stats:
+                    self._glossary_editor_view_stats_text = final_stats
+                    _apply_glossary_column_filters(update_stats=True)
+                return
+            if total <= 0:
+                return
+            output_dir = _editor_translated_output_dir()
+            if not output_dir:
+                _set_all_editor_rows_visible(
+                    final_stats_text="Hide unused entries needs a translated output folder"
+                )
+                return
+            token = object()
+            self._hide_unused_filter_token = token
+            entries = _editor_tree_usage_entries()
+            self.stats_label.setText("Scanning translated output for glossary usage...")
+
+            def worker():
+                def emit_progress(payload):
+                    payload = dict(payload or {})
+                    payload['token'] = token
+                    try:
+                        self._hide_unused_filter_bridge.progress.emit(payload)
+                    except RuntimeError:
+                        pass
+
+                result = glossary_document.compute_used_rows(entries, output_dir, total, token, emit_progress)
+                try:
+                    self._hide_unused_filter_bridge.finished.emit(result)
+                except RuntimeError:
+                    pass
+
+            threading.Thread(target=worker, name="GlossaryEditorHideUnused", daemon=True).start()
+
+        self._apply_hide_unused_entries_filter = _apply_hide_unused_entries_filter
+        self.hide_unused_entries_checkbox.toggled.connect(lambda _checked: _apply_hide_unused_entries_filter())
+       
+        def find_in_tree():
+            import re
+
+            dialog = QDialog(self.dialog)
+            dialog.setWindowTitle("Find / Replace")
+            dialog_layout = QVBoxLayout(dialog)
+
+            grid = QGridLayout()
+            dialog_layout.addLayout(grid)
+
+            find_edit = QLineEdit(getattr(self, "_last_find_text", ""))
+            replace_edit = QLineEdit(getattr(self, "_last_replace_text", ""))
+
+            grid.addWidget(QLabel("Find:"), 0, 0)
+            grid.addWidget(find_edit, 0, 1)
+            grid.addWidget(QLabel("Replace with:"), 1, 0)
+            grid.addWidget(replace_edit, 1, 1)
+
+            status_label = QLabel("")
+            status_label.setStyleSheet("color: #9ca3af;")
+            dialog_layout.addWidget(status_label)
+
+            def find_next():
+                text = find_edit.text()
+                if not text:
+                    return
+                total = self.glossary_tree.topLevelItemCount()
+                if total == 0:
+                    return
+                if text != getattr(self, "_last_find_text", ""):
+                    self._last_find_pos = -1
+                idx = glossary_document.find_next_index(
+                    text,
+                    total,
+                    lambda row: [
+                        self.glossary_tree.topLevelItem(row).text(c)
+                        for c in range(self.glossary_tree.topLevelItem(row).columnCount())
+                    ],
+                    getattr(self, "_last_find_pos", -1),
+                )
+                if idx is not None:
+                    item = self.glossary_tree.topLevelItem(idx)
+                    self.glossary_tree.setCurrentItem(item)
+                    self.glossary_tree.scrollToItem(item)
+                    self._last_find_text = text
+                    self._last_find_pos = idx
+                    status_label.setText(f"Found at row {idx + 1}")
+                    return
+                status_label.setText("No matches found.")
+
+            def replace_in_item(item):
+                """Replace occurrences in a single tree item and keep data in sync."""
+                text = find_edit.text()
+                repl = replace_edit.text()
+                if not text or item is None:
+                    return 0
+
+                return glossary_document.replace_in_row(
+                    self,
+                    _EditorTreeRow(item),
+                    self.glossary_column_fields,
+                    text,
+                    repl,
+                    on_replaced=lambda col_key, after: update_row_highlight(item, col_key, after),
+                )
+
+            def replace_current():
+                item = self.glossary_tree.currentItem()
+                find_text = find_edit.text()
+                # Only snapshot the undo state if this row actually contains a
+                # match, so a no-op Replace doesn't waste an undo step.
+                will_change = glossary_document.row_has_match(
+                    _EditorTreeRow(item) if item is not None else None, find_text
+                )
+                if will_change and hasattr(self, '_push_undo_snapshot'):
+                    self._push_undo_snapshot()
+                count = replace_in_item(item)
+                if count and hasattr(self, '_apply_glossary_column_filters'):
+                    self._apply_glossary_column_filters()
+                status_label.setText(f"Replaced {count} occurrence(s) in current row" if count else "No matches in current row.")
+
+            def replace_all():
+                total_items = self.glossary_tree.topLevelItemCount()
+                find_text = find_edit.text()
+                if total_items == 0 or not find_text:
+                    return
+                # Only snapshot the undo state if at least one match exists, so a
+                # no-op Replace All doesn't push an empty undo step.
+                _find_re = re.compile(re.escape(find_text), re.IGNORECASE)
+                will_change = False
+                for idx in range(total_items):
+                    item = self.glossary_tree.topLevelItem(idx)
+                    if item is None:
+                        continue
+                    if any(_find_re.search(item.text(c)) for c in range(1, item.columnCount())):
+                        will_change = True
+                        break
+                if will_change and hasattr(self, '_push_undo_snapshot'):
+                    self._push_undo_snapshot()
+                total_repl = 0
+                for idx in range(total_items):
+                    item = self.glossary_tree.topLevelItem(idx)
+                    total_repl += replace_in_item(item)
+                if hasattr(self, '_apply_glossary_column_filters'):
+                    self._apply_glossary_column_filters()
+                self._last_find_text = find_edit.text()
+                self._last_replace_text = replace_edit.text()
+                status_label.setText(f"Replaced {total_repl} occurrence(s) across all entries.")
+
+                # Fallback: if nothing replaced in glossary, offer to update files directly
+                if total_repl == 0:
+                    old = find_edit.text()
+                    new = replace_edit.text()
+                    prompt = QMessageBox(self.dialog)
+                    prompt.setIcon(QMessageBox.Question)
+                    prompt.setWindowTitle(glossary_document.NO_GLOSSARY_MATCH_TITLE)
+                    prompt.setText(glossary_document.NO_GLOSSARY_MATCH_TEXT)
+                    prompt.setInformativeText(f"{old} -> {new}")
+                    prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                    prompt.setDefaultButton(QMessageBox.Yes)
+                    if prompt.exec() == QMessageBox.Yes:
+                        files_updated, total_file_repl = update_html_files([(old, new)])
+                        # Make this direct output-file edit undoable
+                        if total_file_repl > 0 and hasattr(self, '_push_html_undo_snapshot'):
+                            self._push_html_undo_snapshot([(old, new)])
+                        self.append_log(f"Updated {files_updated} files directly from Find/Replace fallback ({total_file_repl} replacements).")
+                        status_label.setText(f"Updated {files_updated} files directly ({total_file_repl} replacements).")
+
+            buttons = QHBoxLayout()
+            dialog_layout.addLayout(buttons)
+
+            find_btn = QPushButton("Find Next")
+            find_btn.clicked.connect(find_next)
+            buttons.addWidget(find_btn)
+
+            replace_btn = QPushButton("Replace")
+            replace_btn.clicked.connect(replace_current)
+            buttons.addWidget(replace_btn)
+
+            replace_all_btn = QPushButton("Replace All")
+            replace_all_btn.clicked.connect(replace_all)
+            buttons.addWidget(replace_all_btn)
+
+            buttons.addStretch()
+
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            buttons.addWidget(close_btn)
+
+            find_edit.returnPressed.connect(find_next)
+            dialog.exec()
+       
+        # Buttons
+        browse_btn = QPushButton("Browse")
+        browse_btn.setFixedWidth(135)
+        browse_btn.clicked.connect(browse_glossary)
+        browse_btn.setStyleSheet("background-color: #495057; color: white; padding: 8px; font-weight: bold;")
+        file_layout.addWidget(browse_btn)
+
+        def force_refresh_glossary_editor():
+            """Reload the selected glossary from disk without relying on mtime."""
+            start_refresh_animation = getattr(self, '_start_force_refresh_animation', None)
+            if callable(start_refresh_animation):
+                start_refresh_animation()
+            path = self.editor_file_entry.text()
+            if path and os.path.exists(path):
+                try:
+                    self._editor_last_mtime = os.path.getmtime(path)
+                except OSError:
+                    self._editor_last_mtime = 0.0
+                try:
+                    self._reload_icon.spin(600)
+                except (AttributeError, RuntimeError):
+                    pass
+                self.append_log(
+                    f"Force refreshing glossary editor: {os.path.basename(path)}"
+                )
+                load_glossary_for_editing()
+                return
+
+            # If the editor has no valid current path, force the association
+            # scan too so a newly generated glossary can be discovered.
+            auto_select_current_glossary()
+            refreshed_path = self.editor_file_entry.text()
+            if not refreshed_path or not os.path.exists(refreshed_path):
+                stop_refresh_animation = getattr(self, '_stop_force_refresh_animation', None)
+                if callable(stop_refresh_animation):
+                    stop_refresh_animation(force=True)
+                QMessageBox.warning(
+                    parent,
+                    "No Glossary Found",
+                    "No glossary file is available to refresh.",
+                )
+
+        self.force_refresh_glossary_btn = QPushButton("🔄 Force Refresh")
+        self.force_refresh_glossary_btn.setFixedWidth(135)
+        self.force_refresh_glossary_btn.setToolTip(_wrapped_tooltip_html(
+            "Reload the glossary directly from disk, even when automatic change detection misses it."
+        ))
+        def _set_force_refresh_button_style(background, hover="#0e7490"):
+            try:
+                self.force_refresh_glossary_btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {background}; color: white; padding: 8px; "
+                    "font-weight: bold; } "
+                    f"QPushButton:hover {{ background-color: {hover}; }}"
+                )
+            except RuntimeError:
+                pass
+
+        self._force_refresh_animation_timer = QTimer(self.force_refresh_glossary_btn)
+        self._force_refresh_animation_timer.setInterval(160)
+        self._force_refresh_animation_frame = 0
+        refresh_animation_frames = (
+            ("🔄 Refreshing", "#0891b2"),
+            ("🔄 Refreshing.", "#0ea5c6"),
+            ("🔄 Refreshing..", "#22b8cf"),
+            ("🔄 Refreshing...", "#0ea5c6"),
+        )
+
+        def _advance_force_refresh_animation():
+            try:
+                frame = self._force_refresh_animation_frame % len(refresh_animation_frames)
+                text, background = refresh_animation_frames[frame]
+                self.force_refresh_glossary_btn.setText(text)
+                _set_force_refresh_button_style(background, background)
+                self._force_refresh_animation_frame = frame + 1
+            except (AttributeError, RuntimeError):
+                self._force_refresh_animation_timer.stop()
+
+        def _start_force_refresh_animation():
+            if self._force_refresh_animation_timer.isActive():
+                return
+            self._force_refresh_animation_frame = 0
+            self.force_refresh_glossary_btn.setEnabled(False)
+            _advance_force_refresh_animation()
+            self._force_refresh_animation_timer.start()
+
+        def _stop_force_refresh_animation(force=False):
+            try:
+                self._force_refresh_animation_timer.stop()
+                self._force_refresh_animation_frame = 0
+                self.force_refresh_glossary_btn.setText("🔄 Force Refresh")
+                self.force_refresh_glossary_btn.setEnabled(True)
+                _set_force_refresh_button_style("#0891b2")
+            except (AttributeError, RuntimeError):
+                pass
+
+        self._force_refresh_animation_timer.timeout.connect(_advance_force_refresh_animation)
+        self._start_force_refresh_animation = _start_force_refresh_animation
+        self._stop_force_refresh_animation = _stop_force_refresh_animation
+        self.force_refresh_glossary_btn.clicked.connect(force_refresh_glossary_editor)
+        _set_force_refresh_button_style("#0891b2")
+        file_layout.addWidget(self.force_refresh_glossary_btn)
+
+        # Load-Glossary shortcut: mirrors the main toolbar's "Load Glossary"
+        # button but uses the currently browsed file instead of prompting for
+        # one. When Auto Glossary mode is "Manual Glossary Only", it also
+        # physically copies the glossary into the selected EPUB's output
+        # folder as glossary.csv — same shape that running translation
+        # produces — so the translator picks it up on next run.
+        # _resolve_epub_output_dir: glossary_document.resolve_epub_output_dir (U6).
+
+
+        def load_current_glossary_as_manual():
+            # Multi-EPUB case: never force one glossary onto all inputs —
+            # delegate to the existing per-EPUB mapping dialog so the user
+            # can map a different glossary to each EPUB. The mapping
+            # dialog's save callback handles the "Manual Glossary Only"
+            # output-folder copy when that mode is active (see
+            # _open_glossary_mapping_dialog).
+            try:
+                _selected_epubs = [
+                    p for p in (getattr(self, 'selected_files', []) or [])
+                    if str(p).lower().endswith('.epub')
+                ]
+            except Exception:
+                _selected_epubs = []
+            if len(_selected_epubs) > 1 and hasattr(self, '_open_glossary_mapping_dialog'):
+                try:
+                    self._open_glossary_mapping_dialog(_selected_epubs)
+                except Exception as _e:
+                    QMessageBox.critical(
+                        parent,
+                        "Error",
+                        f"Could not open glossary mapping dialog: {_e}",
+                    )
+                return
+
+            path = self.editor_file_entry.text()
+            if not path or not os.path.exists(path):
+                QMessageBox.warning(
+                    parent,
+                    "No Glossary Selected",
+                    "Please browse to a valid glossary file first.",
+                )
+                return
+
+            # Current auto-glossary mode drives the behavior. When the mode
+            # is "Manual Glossary Only" (off_no_automap) we *also* copy the
+            # glossary into the EPUB's output folder so a subsequent run
+            # picks it up exactly like one produced during translation.
+            _current_mode_key = ''
+            _current_mode_raw = ''
+            try:
+                _current_mode_raw = (
+                    self.auto_glossary_mode_combo.currentText()
+                    if hasattr(self, 'auto_glossary_mode_combo') else ''
+                )
+            except Exception:
+                _current_mode_raw = ''
+            try:
+                _current_mode_key = str(
+                    getattr(self, 'auto_glossary_mode_var', None)
+                    or (self.config.get('auto_glossary_mode', '') if hasattr(self, 'config') else '')
+                    or ''
+                ).lower()
+            except Exception:
+                _current_mode_key = ''
+            _is_manual_only = _current_mode_key == 'off_no_automap'
+
+            msg = QMessageBox(parent)
+            msg.setWindowTitle("Load Glossary")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText(
+                f"Load this glossary for translation?\n\n"
+                f"{os.path.basename(path)}"
+            )
+            # Normalize the displayed current-mode label so we never show
+            # the legacy "Off (No Auto-Mapping)" text even if a stale combo
+            # or saved config slipped it back in.
+            _display_mode = str(_current_mode_raw or '').strip()
+            if _is_manual_only or _display_mode.lower() in (
+                'off (no auto-mapping)', 'off_no_automap',
+            ):
+                _display_mode = 'Manual Glossary Only'
+            elif not _display_mode:
+                _display_mode = 'unknown'
+
+            if _is_manual_only:
+                msg.setInformativeText(
+                    "Auto Glossary mode is \"Manual Glossary Only\" \u2014 "
+                    "the file will be copied into the selected EPUB's output "
+                    "folder as glossary.csv so translation picks it up on "
+                    "next run. The output folder will be created if it "
+                    "doesn't exist.\n\n"
+                    f"Current mode: {_display_mode}"
+                )
+            else:
+                msg.setInformativeText(
+                    "For the loaded glossary to take effect, Auto Glossary "
+                    "mode must be set to \"Manual Glossary Only\" \u2014 "
+                    "otherwise auto-mapping may override this manual "
+                    "selection.\n\n"
+                    f"Current mode: {_display_mode}"
+                )
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+            msg.setDefaultButton(QMessageBox.Yes)
+            if msg.exec() != QMessageBox.Yes:
+                return
+
+            # Mirror translator_gui.load_glossary() behavior: clear auto-load
+            # tracking, mark manually loaded, enable append glossary, update
+            # status label, and persist config.
+            try:
+                self.auto_loaded_glossary_path = None
+                self.auto_loaded_glossary_for_file = None
+                self.manual_glossary_path = path
+                self.manual_glossary_manually_loaded = True
+                self._glossary_editor_manual_source = True
+                self.manual_glossary_file_extension = os.path.splitext(path)[1].lower()
+                self.append_glossary_var = True
+                self.config['append_glossary'] = True
+                os.environ['APPEND_GLOSSARY'] = '1'
+                self.config['manual_glossary_path'] = path
+                os.environ['MANUAL_GLOSSARY'] = path
+                if hasattr(self, 'append_glossary_checkbox'):
+                    try:
+                        self.append_glossary_checkbox.setChecked(True)
+                    except Exception:
+                        pass
+                if hasattr(self, '_update_manual_glossary_status'):
+                    try:
+                        self._update_manual_glossary_status()
+                    except Exception:
+                        pass
+                try:
+                    self.save_config(show_message=False)
+                except Exception:
+                    pass
+                self.append_log(f"\U0001F4D1 Loaded manual glossary: {path}")
+                self.append_log("\u2705 Automatically enabled 'Append Glossary to System Prompt'")
+            except Exception as e:
+                QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
+                return
+
+            # Manual Glossary Only: also copy the file to the single
+            # selected EPUB's output folder as glossary.csv so `run
+            # translation` auto-loads it. Multi-EPUB is handled earlier by
+            # delegating to _open_glossary_mapping_dialog; we only reach
+            # this code for the single-EPUB (or no-selection) path.
+            if _is_manual_only:
+                try:
+                    # Try every source the main translator uses to know
+                    # which EPUB is "current":
+                    #   1. selected_files (a single EPUB)
+                    #   2. EPUB_PATH env var
+                    #   3. config['last_epub_path']
+                    epub_path = glossary_document.manual_only_epub_path(
+                        getattr(self, 'selected_files', []),
+                        self.config if hasattr(self, 'config') else None,
+                    )
+                    if not epub_path:
+                        self.append_log(
+                            "\u26a0\ufe0f Manual Glossary Only: no EPUB selected — skipping output-folder copy."
+                        )
+                    else:
+                        glossary_document.copy_glossary_to_epub_output(
+                            path,
+                            epub_path,
+                            self.config if hasattr(self, 'config') else None,
+                            self.append_log,
+                        )
+                except Exception as e:
+                    self.append_log(
+                        f"\u26a0\ufe0f Failed to copy glossary to EPUB output folder: {e}"
+                    )
+
+        load_btn = QPushButton("\U0001F4C4 Load")
+        load_btn.setFixedWidth(70)
+        load_btn.setToolTip(_wrapped_tooltip_html(
+            "Load the currently browsed glossary as the active manual "
+            "glossary for translation. Auto Glossary mode must be set to "
+            "\"Manual Glossary Only\" for it to take effect. When that mode "
+            "is active, the glossary is also copied into the EPUB's output "
+            "folder as glossary.csv (folder is created if missing)."
+        ))
+        load_btn.clicked.connect(load_current_glossary_as_manual)
+        load_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #c8c8d0; "
+            "border: 1px solid #555; border-radius: 3px; padding: 4px 8px; font-size: 9pt; } "
+            "QPushButton:hover { background-color: #2a2a3e; color: #fff; border-color: #f39c12; }"
+        )
+        file_layout.addWidget(load_btn)
+
+        # Advanced editing toggle and button grid placed above the tree
+        advanced_toggle_widget = QWidget()
+        advanced_toggle_layout = QHBoxLayout(advanced_toggle_widget)
+        advanced_toggle_layout.setContentsMargins(0, 4, 0, 4)
+        advanced_toggle_layout.addStretch()
+        advanced_checkbox = self._create_styled_checkbox("Advanced editing")
+        advanced_checkbox.setChecked(False)
+        advanced_toggle_layout.addWidget(advanced_checkbox)
+        content_frame_layout.insertWidget(0, advanced_toggle_widget)
+
+        advanced_tools_widget = QWidget()
+        advanced_tools_layout = QGridLayout(advanced_tools_widget)
+        advanced_tools_layout.setContentsMargins(0, 0, 0, 4)
+        advanced_tools_layout.setHorizontalSpacing(10)
+        advanced_tools_layout.setVerticalSpacing(8)
+
+        def add_adv_btn(row, col, text, handler, color, width=150):
+            btn = QPushButton(text)
+            btn.setFixedWidth(width)
+            btn.clicked.connect(handler)
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px; font-weight: bold;")
+            advanced_tools_layout.addWidget(btn, row, col)
+
+        add_adv_btn(0, 0, "Reload", load_glossary_for_editing, "#0891b2")
+        add_adv_btn(0, 1, "Clean Empty Fields", clean_empty_fields, "#b45309")
+        add_adv_btn(0, 2, "Remove Duplicates", remove_duplicates, "#b45309")
+        add_adv_btn(0, 3, "Backup Settings", backup_settings_dialog, "#15803d")
+
+        add_adv_btn(1, 0, "Trim Entries", smart_trim_dialog, "#1e40af")
+        add_adv_btn(1, 1, "Filter Entries", filter_entries_dialog, "#1e40af")
+        add_adv_btn(1, 2, "Convert Format", lambda: self.convert_glossary_format(load_glossary_for_editing), "#0891b2")
+        add_adv_btn(1, 3, "Export Selection", export_selection, "#4b5563")
+        add_adv_btn(1, 4, "About Format", duplicate_detection_settings, "#0891b2")
+
+        advanced_tools_widget.setVisible(False)
+        content_frame_layout.insertWidget(2, advanced_tools_widget)
+
+        def toggle_advanced(state):
+            advanced_tools_widget.setVisible(bool(state))
+        advanced_checkbox.stateChanged.connect(toggle_advanced)
+
+        # Keyboard shortcuts
+        QShortcut(QKeySequence.Save, self.dialog, activated=save_edited_glossary)
+        QShortcut(QKeySequence.Delete, self.dialog, activated=delete_selected_entries)
+        QShortcut(QKeySequence.Find, self.dialog, activated=find_in_tree)
+
+        # Auto-reload timer: detect external file changes every 2 seconds
+        self._editor_last_mtime = 0.0
+
+        def _silent_glossary_reload():
+            try:
+                path = self.editor_file_entry.text()
+                if not path or not os.path.exists(path):
+                    # No glossary loaded yet — poll for newly generated files
+                    try:
+                        auto_select_current_glossary()
+                    except Exception:
+                        pass
+                    return
+
+                current_mtime = os.path.getmtime(path)
+                if self._editor_last_mtime == 0.0:
+                    # First check — just record the baseline
+                    self._editor_last_mtime = current_mtime
+                    return
+                if current_mtime == self._editor_last_mtime:
+                    return  # No change
+
+                self._editor_last_mtime = current_mtime
+
+                saved_stats = self.stats_label.text()
+
+                # Snapshot current row data for change detection
+                old_rows = {}
+                try:
+                    for i in range(self.glossary_tree.topLevelItemCount()):
+                        item = self.glossary_tree.topLevelItem(i)
+                        if item:
+                            old_rows[i] = tuple(item.text(c) for c in range(item.columnCount()))
+                except (RuntimeError, AttributeError):
+                    pass
+
+                # Save scroll position & selection before reload
+                saved_scroll = None
+                selected_indices = []
+                try:
+                    saved_scroll = self.glossary_tree.verticalScrollBar().value()
+                    selected_indices = [
+                        self.glossary_tree.indexOfTopLevelItem(item)
+                        for item in self.glossary_tree.selectedItems()
+                    ]
+                except (RuntimeError, AttributeError):
+                    pass
+
+                # Suppress the "Loaded N entries" log on auto-reload
+                old_log = getattr(self, '_last_glossary_log', '')
+                load_glossary_for_editing()
+                self._last_glossary_log = old_log  # Keep old log to avoid spam
+
+                # Restore scroll position & selection
+                try:
+                    if saved_scroll is not None:
+                        self.glossary_tree.verticalScrollBar().setValue(saved_scroll)
+                    for idx in selected_indices:
+                        item = self.glossary_tree.topLevelItem(idx)
+                        if item:
+                            item.setSelected(True)
+                except (RuntimeError, AttributeError):
+                    pass
+
+                # Visual indicator: spin icon + brief stats label update
+                try:
+                    if hasattr(self, '_reload_icon'):
+                        self._reload_icon.spin(600)
+                    self.stats_label.setText("Reloaded externally")
+                    self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic; color: #fbbf24;")
+                    def _restore_stats():
+                        try:
+                            if self.stats_label.text() == "Reloaded externally":
+                                if saved_stats == "Loading glossary..." and self.glossary_tree.topLevelItemCount() > 0:
+                                    self.stats_label.setText("Loading glossary...")
+                                    _repair_loading_stats_label_if_tree_loaded()
+                                else:
+                                    self.stats_label.setText(saved_stats)
+                            self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic;")
+                        except (RuntimeError, AttributeError):
+                            pass
+                    QTimer.singleShot(1500, _restore_stats)
+                except Exception:
+                    pass
+
+                # Flash changed rows: orange for added/modified, red for deletions
+                try:
+                    # Build content sets (skip column 0 = row #, it always changes)
+                    def _row_key(item):
+                        return tuple(item.text(c) for c in range(1, item.columnCount()))
+
+                    flash_indices = glossary_document.reload_flash_rows(
+                        old_rows,
+                        [
+                            _row_key(self.glossary_tree.topLevelItem(i))
+                            if self.glossary_tree.topLevelItem(i) else None
+                            for i in range(self.glossary_tree.topLevelItemCount())
+                        ],
+                    )
+
+                    if flash_indices:
+                        # Save and clear selection so flash isn't hidden behind blue
+                        _saved_sel = [
+                            self.glossary_tree.indexOfTopLevelItem(it)
+                            for it in self.glossary_tree.selectedItems()
+                        ]
+                        self.glossary_tree.clearSelection()
+
+                        for idx, color in flash_indices:
+                            item = self.glossary_tree.topLevelItem(idx)
+                            if item:
+                                brush = QBrush(QColor(color))
+                                for c in range(item.columnCount()):
+                                    item.setBackground(c, brush)
+
+                        _flash_idx_list = [idx for idx, _ in flash_indices]
+                        def _clear_flash():
+                            try:
+                                for idx in _flash_idx_list:
+                                    item = self.glossary_tree.topLevelItem(idx)
+                                    if item:
+                                        mark_row_updated(item, False)
+                                # Restore selection only if user hasn't clicked something new
+                                if not self.glossary_tree.selectedItems() and _saved_sel:
+                                    for idx in _saved_sel:
+                                        item = self.glossary_tree.topLevelItem(idx)
+                                        if item:
+                                            item.setSelected(True)
+                            except (RuntimeError, AttributeError):
+                                pass
+                        QTimer.singleShot(600, _clear_flash)
+                except Exception:
+                    pass
+
+                # Update mtime again after reload (save may have touched the file)
+                try:
+                    self._editor_last_mtime = os.path.getmtime(path)
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
+        _auto_reload_timer = QTimer(parent)
+        _auto_reload_timer.setInterval(500)
+        _auto_reload_timer.timeout.connect(_silent_glossary_reload)
+        _auto_reload_timer.start()
+        self._editor_auto_reload_timer = _auto_reload_timer
+
+        # Deferred retry: the mid-setup call above populates the combo but
+        # load_glossary_for_editing() may have silently failed because some
+        # widgets were not yet constructed.  Re-run after the event loop
+        # completes this tick so the tree actually renders.
+        self._glossary_editor_deferred_load_done = False
+        def _deferred_editor_load():
+            try:
+                if self.glossary_tree.topLevelItemCount() == 0 and self.editor_file_combo.count() > 0:
+                    load_glossary_for_editing()
+            except Exception as e:
+                print(f"⚠️ Deferred glossary editor load failed: {e}")
+                pass
+            finally:
+                self._glossary_editor_deferred_load_done = True
+        QTimer.singleShot(0, _deferred_editor_load)
+
+    def _on_tree_double_click(self, item, column_idx):
+       """Handle double-click on treeview item for inline editing"""
+       if not item or column_idx <= 0:
+           return
+
+       gender_resolver = getattr(self, '_open_gender_resolution_for_item', None)
+       if callable(gender_resolver) and gender_resolver(
+           item,
+           column_idx,
+           require_gender_column=True,
+       ):
+           return
+       
+       if not self.glossary_column_fields or column_idx - 1 >= len(self.glossary_column_fields):
+           return
+       
+       col_key = self.glossary_column_fields[column_idx - 1]
+       current_value = item.text(column_idx)
+       is_description_field = col_key == 'description'
+       
+       edit_dialog = QDialog(self.dialog)
+       edit_dialog.setWindowTitle(f"Edit {col_key.replace('_', ' ').title()}")
+       edit_dialog.setSizeGripEnabled(True)
+       edit_dialog.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+       if is_description_field:
+           edit_dialog.setMinimumSize(900, 150)
+           default_dialog_size = QSize(980, 300)
+       else:
+           edit_dialog.setMinimumSize(400, 120)
+           default_dialog_size = QSize(560, 124)
+       remembered_sizes = getattr(self, '_glossary_edit_dialog_sizes', {})
+       remembered_size = remembered_sizes.get(col_key) if isinstance(remembered_sizes, dict) else None
+       if isinstance(remembered_size, QSize) and remembered_size.isValid():
+           edit_dialog.resize(remembered_size.expandedTo(edit_dialog.minimumSize()))
+       else:
+           edit_dialog.resize(default_dialog_size)
+       
+       dialog_layout = QVBoxLayout(edit_dialog)
+       dialog_layout.setContentsMargins(20, 8, 20, 8)
+       dialog_layout.setSpacing(6)
+       
+       label = QLabel(f"Edit {col_key.replace('_', ' ').title()}:")
+       dialog_layout.addWidget(label)
+       
+       if is_description_field:
+           entry = QTextEdit()
+           entry.setPlainText(current_value)
+           entry.setAcceptRichText(False)
+           entry.setLineWrapMode(QTextEdit.WidgetWidth)
+           entry.setMinimumHeight(42)
+           entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+       else:
+           entry = QTextEdit()
+           entry.setPlainText(current_value)
+           entry.setAcceptRichText(False)
+           entry.setLineWrapMode(QTextEdit.WidgetWidth)
+           entry.setMinimumHeight(28)
+           entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+       try:
+           entry.setFont(self.glossary_tree.font())
+           self._glossary_active_edit_entry = entry
+           edit_dialog.finished.connect(
+               lambda _result: setattr(self, '_glossary_active_edit_entry', None)
+               if getattr(self, '_glossary_active_edit_entry', None) is entry else None
+           )
+       except Exception:
+           pass
+       def _remember_edit_dialog_size(_result=None):
+           try:
+               sizes = getattr(self, '_glossary_edit_dialog_sizes', None)
+               if not isinstance(sizes, dict):
+                   sizes = {}
+                   self._glossary_edit_dialog_sizes = sizes
+               sizes[col_key] = QSize(edit_dialog.size())
+           except Exception:
+               pass
+       edit_dialog.finished.connect(_remember_edit_dialog_size)
+       dialog_layout.addWidget(entry, 1)
+       entry.setFocus()
+       entry.selectAll()
+       
+       def save_edit():
+           new_value = glossary_document.normalize_edit_value(col_key, entry.toPlainText())
+           item.setText(column_idx, new_value)
+           # Snapshot before mutation for undo
+           if hasattr(self, '_push_undo_snapshot'):
+               self._push_undo_snapshot()
+           
+           row_idx, new_ref, ref_changed = glossary_document.apply_entry_edit(
+               self, item.data(0, Qt.UserRole), col_key, new_value
+           )
+           if ref_changed:
+               item.setData(0, Qt.UserRole, new_ref)
+           # Local highlight update to mark changed translated fields
+           if col_key in ['translated_name', 'translated']:
+               try:
+                   orange = getattr(self, "_highlight_brush_orange", None)
+                   default = getattr(self, "_highlight_brush_default", None)
+                   if orange is None:
+                       orange = QBrush(QColor("#f97316"))
+                       default = QBrush()
+                       self._highlight_brush_orange = orange
+                       self._highlight_brush_default = default
+                   baseline = None
+                   if self.current_glossary_format in ['list', 'token_csv']:
+                       baseline = self._original_translated_map.get(row_idx, '')
+                   elif self.current_glossary_format == 'dict':
+                       baseline = self._original_translated_map.get(item.data(0, Qt.UserRole), '')
+                   if baseline is not None:
+                       if new_value != baseline:
+                           mark_updated = getattr(self, '_mark_glossary_row_updated', None)
+                           if callable(mark_updated):
+                               mark_updated(item, True)
+                           else:
+                               for c in range(item.columnCount()):
+                                   item.setBackground(c, orange)
+                       else:
+                           mark_updated = getattr(self, '_mark_glossary_row_updated', None)
+                           if callable(mark_updated):
+                               mark_updated(item, False)
+                           else:
+                               for c in range(item.columnCount()):
+                                   item.setData(c, Qt.BackgroundRole, None)
+               except Exception:
+                   pass
+
+           if hasattr(self, '_apply_glossary_column_filters'):
+               self._apply_glossary_column_filters()
+
+           edit_dialog.accept()
+       
+       button_layout = QHBoxLayout()
+       button_layout.setSpacing(18)
+       button_layout.addStretch(1)
+       dialog_layout.addLayout(button_layout, 0)
+       
+       save_btn = QPushButton("Save")
+       save_btn.setFixedWidth(140)
+       save_btn.clicked.connect(save_edit)
+       save_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px;")
+       button_layout.addWidget(save_btn)
+       
+       cancel_btn = QPushButton("Cancel")
+       cancel_btn.setFixedWidth(140)
+       cancel_btn.clicked.connect(edit_dialog.reject)
+       cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+       button_layout.addWidget(cancel_btn)
+       button_layout.addStretch(1)
+       
+       if is_description_field:
+           QShortcut(QKeySequence("Ctrl+Return"), edit_dialog, activated=save_edit)
+           QShortcut(QKeySequence("Ctrl+Enter"), edit_dialog, activated=save_edit)
+       else:
+           original_key_press = entry.keyPressEvent
+           def _text_entry_key_press(event):
+               if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                   if event.modifiers() & Qt.ShiftModifier:
+                       original_key_press(event)
+                   else:
+                       save_edit()
+                       event.accept()
+                   return
+               original_key_press(event)
+           entry.keyPressEvent = _text_entry_key_press
+       
+       try:
+           from dialog_animations import exec_dialog_with_fade
+           exec_dialog_with_fade(edit_dialog, duration=250)
+       except Exception:
+           edit_dialog.exec()
+
+    def convert_glossary_format(self, reload_callback):
+        """Export glossary to CSV format (token-efficient or legacy based on config)"""
+        if not self.current_glossary_data:
+            QMessageBox.critical(self.dialog, "Error", "No glossary loaded")
+            return
+        
+        # Create backup before conversion
+        if not self.create_glossary_backup("before_export"):
+            return
+        
+        # Get current file path
+        current_path = self.editor_file_entry.text()
+        default_csv_path = glossary_document.default_convert_path(current_path, self.config)
+        
+        # Ask user for CSV save location
+        csv_path, _ = QFileDialog.getSaveFileName(
+            self.dialog,
+            "Export Glossary to CSV",
+            default_csv_path,
+            "CSV files (*.csv);;All files (*.*)"
+        )
+        
+        if not csv_path:
+            return
+        
+        try:
+            fmt_label = glossary_document.convert_to_csv(self, csv_path, self.config)
+            if fmt_label is None:
+                QMessageBox.critical(self.dialog, "Error", "No entries to export")
+                return
+
+            QMessageBox.information(self.dialog, "Success", f"Glossary exported to {fmt_label} format:\n{csv_path}")
+            self.append_log(f"✅ Exported glossary to {fmt_label} format: {csv_path}")
+
+            # Reload the editor if the export overwrote the current file
+            current_path = self.editor_file_entry.text()
+            if current_path and os.path.normpath(csv_path) == os.path.normpath(current_path):
+                reload_callback()
+            
+        except Exception as e:
+            QMessageBox.critical(self.dialog, "Export Error", f"Failed to export CSV: {e}")
+            self.append_log(f"❌ CSV export failed: {e}")

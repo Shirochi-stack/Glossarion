@@ -1,0 +1,16134 @@
+# manga_translator.py
+"""
+Enhanced Manga Translation Pipeline with improved text visibility controls
+Handles OCR, translation, and advanced text rendering for manga panels
+Now with proper history management and full page context support
+"""
+
+from safe_image import open_image, open_page_image, cv2_imdecode, cv2_imread, cv2_refusal
+
+import os
+import json
+import base64
+import logging
+import time
+import traceback
+import cv2
+from PIL import ImageEnhance, ImageFilter
+from typing import List, Dict, Tuple, Optional, Any
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+BubbleDetector = None  # Lazy-loaded during splash screen; use _get_bubble_detector_class()
+
+def _get_bubble_detector_class():
+    """Lazy-load BubbleDetector to defer heavy ML imports to the splash screen."""
+    global BubbleDetector
+    if BubbleDetector is None:
+        from bubble_detector import BubbleDetector as _BD
+        BubbleDetector = _BD
+    return BubbleDetector
+from TransateKRtoEN import send_with_interrupt
+
+# Google Cloud Vision imports
+try:
+    from google.cloud import vision
+    GOOGLE_CLOUD_VISION_AVAILABLE = True
+except ImportError:
+    try:
+        # REST fallback (mobile, U8): same surface, used only when the SDK is not installed
+        from google_vision_rest import vision
+        GOOGLE_CLOUD_VISION_AVAILABLE = True
+    except ImportError:
+        GOOGLE_CLOUD_VISION_AVAILABLE = False
+        print("Warning: Google Cloud Vision not installed. Install with: pip install google-cloud-vision")
+
+
+def _manga_print_hijack_enabled():
+    """Whether process_image may replace ``builtins.print`` with the manga log router.
+
+    Desktop (default) keeps the hijack. Mobile (U8) never installs it: a job captures its
+    own stdout, and a process-global print left hijacked after a manga run would route
+    other features' prints into that finished job's log.
+    """
+    try:
+        from mobile_runtime import is_mobile
+    except Exception:
+        return True
+    return not is_mobile()
+
+
+def _manga_print_restore_enabled():
+    """Whether ``restore_print`` may reset ``builtins.print`` and ``unified_api_client.print``.
+
+    Desktop: always (unchanged). Mobile installs no manga print (see
+    ``_manga_print_hijack_enabled``), so a restore there only undoes a ``manga_print`` it finds
+    installed; otherwise both stay as they are, in particular unified_api_client's own module
+    ``print`` (its logger route) survives a manga job for the next feature in the process.
+    """
+    if _manga_print_hijack_enabled():
+        return True
+    import builtins
+    return getattr(builtins.print, '__name__', '') == 'manga_print'
+
+# Import HistoryManager for proper context management
+try:
+    from history_manager import HistoryManager
+except ImportError:
+    HistoryManager = None
+    print("Warning: HistoryManager not available. Context tracking will be limited.")
+
+logger = logging.getLogger(__name__)
+
+# MODULE-LEVEL RENDER FUNCTION (pickle-able for ProcessPoolExecutor)
+def _render_single_region_overlay(region_data: dict, image_size: tuple, render_settings: dict):
+    """
+    Render a single region overlay as RGBA PIL Image (pickle-able for multiprocessing)
+    
+    Args:
+        region_data: dict with 'text', 'bbox' (x,y,w,h), 'vertices'
+        image_size: (width, height)
+        render_settings: dict with font/color/outline settings
+    
+    Returns:
+        PIL RGBA Image of full size with transparent overlay
+    """
+    try:
+        # Create transparent overlay
+        overlay = Image.new('RGBA', image_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        
+        # Extract data
+        text = region_data.get('translated_text', '')
+        if not text:
+            return overlay
+        
+        x, y, w, h = region_data.get('bbox', (0, 0, 100, 100))
+        
+        # Get settings
+        font_size = render_settings.get('font_size', 24)
+        font_path = render_settings.get('font_path')
+        text_color = tuple(render_settings.get('text_color', (102, 0, 0))) + (255,)
+        outline_color = tuple(render_settings.get('outline_color', (255, 255, 255))) + (255,)
+        outline_width = render_settings.get('outline_width', 2)
+        force_caps = render_settings.get('force_caps_lock', False)
+        strict_wrapping = render_settings.get('strict_text_wrapping', True)
+        
+        if force_caps:
+            text = text.upper()
+        
+        # Load font
+        try:
+            if font_path and os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+            else:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        
+        # Proper word wrapping for parallel rendering (matches instance method behavior)
+        words = text.split()
+        lines = []
+        current_line = []
+        
+        for word in words:
+            test_line = current_line + [word]
+            test_text = ' '.join(test_line)
+            try:
+                bbox = draw.textbbox((0, 0), test_text, font=font)
+                text_width = bbox[2] - bbox[0]
+            except Exception:
+                text_width = len(test_text) * font_size * 0.6
+            
+            if text_width <= w:
+                current_line.append(word)
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                else:
+                    # Single word too long
+                    if not strict_wrapping:
+                        current_line = [word]
+                    else:
+                        lines.append(word)
+        
+        if current_line:
+            lines.append(' '.join(current_line))
+        line_height = int(font_size * 1.2)
+        total_height = len(lines) * line_height
+        start_y = y + (h - total_height) // 2
+        
+        # Render each line
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            
+            # Get text width
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                text_width = bbox[2] - bbox[0]
+            except Exception:
+                text_width = len(line) * font_size * 0.6
+            
+            tx = x + (w - text_width) // 2
+            ty = start_y + i * line_height
+            
+            # Clamp to bounds
+            tx = max(0, min(tx, image_size[0] - 10))
+            ty = max(0, min(ty, image_size[1] - 10))
+            
+            # Render with outline using PIL stroke parameter
+            try:
+                draw.text(
+                    (tx, ty), line, font=font,
+                    fill=text_color,
+                    stroke_width=outline_width,
+                    stroke_fill=outline_color
+                )
+            except TypeError:
+                # Fallback for older PIL
+                if outline_width > 0:
+                    for dx in range(-outline_width, outline_width + 1):
+                        for dy in range(-outline_width, outline_width + 1):
+                            if dx != 0 or dy != 0:
+                                draw.text((tx + dx, ty + dy), line, font=font, fill=outline_color)
+                draw.text((tx, ty), line, font=font, fill=text_color)
+        
+        return overlay
+    except Exception as e:
+        print(f"[RENDER] Error rendering region: {e}")
+        return Image.new('RGBA', image_size, (0, 0, 0, 0))
+
+@dataclass
+class TextRegion:
+    """Represents a detected text region (speech bubble, narration box, etc.)"""
+    text: str
+    vertices: List[Tuple[int, int]]  # Polygon vertices from Cloud Vision
+    bounding_box: Tuple[int, int, int, int]  # x, y, width, height
+    confidence: float
+    region_type: str  # 'text_block' from Cloud Vision
+    translated_text: Optional[str] = None
+    bubble_bounds: Optional[Tuple[int, int, int, int]] = None  # RT-DETR bubble bounds for rendering
+    
+    @property
+    def center(self) -> Tuple[float, float]:
+        """Get the center point of the text region"""
+        x, y, w, h = self.bounding_box
+        return (x + w / 2, y + h / 2)
+    
+    @property
+    def xyxy(self) -> Tuple[int, int, int, int]:
+        """Convert bounding box to (x1, y1, x2, y2) format"""
+        x, y, w, h = self.bounding_box
+        return (x, y, x + w, y + h)
+    
+    def to_dict(self):
+        data = {
+            'text': self.text,
+            'vertices': self.vertices,
+            'bounding_box': self.bounding_box,
+            'confidence': self.confidence,
+            'region_type': self.region_type,
+            'translated_text': self.translated_text
+        }
+        # Detector metadata is assigned dynamically. Preserve it so imported
+        # OCR keeps the same free-text and inpainting behavior as the first run.
+        for key in ('bubble_bounds', 'bubble_type', 'should_inpaint', 'shape', 'polygon', 'rect_index'):
+            value = getattr(self, key, None)
+            if value is not None:
+                data[key] = value
+        return data
+
+
+def _region_has_ocr_text(region) -> bool:
+    """Only actual OCR text can make a region eligible for inpainting."""
+    text = str(getattr(region, 'text', '') or '').strip()
+    if not text or text.upper() in {'[AI RESPONSE UNAVAILABLE]', '[API RESPONSE UNAVAILABLE]'}:
+        return False
+    from unified_api_client import UnifiedClient
+    return not UnifiedClient._is_api_error_placeholder(text)
+
+
+def _prepare_precomputed_regions(
+    regions: List[TextRegion],
+    *,
+    preserve_translations: bool = False,
+) -> List[TextRegion]:
+    """Copy precomputed regions and optionally retain imported translations."""
+    prepared = list(regions or [])
+    if not preserve_translations:
+        for region in prepared:
+            try:
+                region.translated_text = None
+            except Exception:
+                pass
+    return prepared
+
+
+def _regions_requiring_translation(
+    regions: List[TextRegion],
+    *,
+    reuse_existing: bool = False,
+) -> List[TextRegion]:
+    """Return only untranslated regions when restoring an imported session."""
+    prepared = list(regions or [])
+    if not reuse_existing:
+        return prepared
+    return [
+        region
+        for region in prepared
+        if not str(getattr(region, 'translated_text', None) or '').strip()
+    ]
+
+def does_rectangle_fit(bigger_rect: Tuple, smaller_rect: Tuple) -> bool:
+    """
+    Check if smaller_rect fits entirely inside bigger_rect.
+    Based on comic-translate's implementation.
+    
+    Args:
+        bigger_rect: (x, y, w, h) format - RT-DETR block
+        smaller_rect: (x, y, w, h) format - OCR line bbox
+    
+    Returns:
+        True if smaller_rect fits inside bigger_rect
+    """
+    # Both RT-DETR blocks and Azure OCR lines are in (x, y, w, h) format
+    if len(bigger_rect) != 4 or len(smaller_rect) != 4:
+        return False
+    
+    # Convert (x, y, w, h) to (x1, y1, x2, y2)
+    b_x1, b_y1, b_w, b_h = bigger_rect
+    b_x2, b_y2 = b_x1 + b_w, b_y1 + b_h
+    
+    s_x1, s_y1, s_w, s_h = smaller_rect
+    s_x2, s_y2 = s_x1 + s_w, s_y1 + s_h
+    
+    # Check containment
+    fits_horizontally = b_x1 <= s_x1 and b_x2 >= s_x2
+    fits_vertically = b_y1 <= s_y1 and b_y2 >= s_y2
+    
+    return fits_horizontally and fits_vertically
+
+def is_mostly_contained(bigger_rect: Tuple, smaller_rect: Tuple, threshold: float = 0.5) -> bool:
+    """
+    Check if most of smaller_rect is contained in bigger_rect.
+    Based on comic-translate's implementation.
+    
+    Args:
+        bigger_rect: (x1, y1, x2, y2) or (x, y, w, h) format
+        smaller_rect: (x1, y1, x2, y2) or (x, y, w, h) format  
+        threshold: Minimum overlap ratio (default 0.5 = 50%)
+    
+    Returns:
+        True if overlap ratio >= threshold
+    """
+    # Convert to (x1, y1, x2, y2) format
+    def to_xyxy(rect):
+        x1, y1, val3, val4 = rect
+        if val3 > x1 and val4 > y1:  # Already (x1,y1,x2,y2)
+            return x1, y1, val3, val4
+        else:  # (x, y, w, h)
+            return x1, y1, x1 + val3, y1 + val4
+    
+    b_x1, b_y1, b_x2, b_y2 = to_xyxy(bigger_rect)
+    s_x1, s_y1, s_x2, s_y2 = to_xyxy(smaller_rect)
+    
+    # Calculate intersection
+    ix1 = max(b_x1, s_x1)
+    iy1 = max(b_y1, s_y1)
+    ix2 = min(b_x2, s_x2)
+    iy2 = min(b_y2, s_y2)
+    
+    if ix2 <= ix1 or iy2 <= iy1:
+        return False  # No intersection
+    
+    intersection_area = (ix2 - ix1) * (iy2 - iy1)
+    smaller_area = (s_x2 - s_x1) * (s_y2 - s_y1)
+    
+    if smaller_area == 0:
+        return False
+    
+    overlap_ratio = intersection_area / smaller_area
+    return overlap_ratio >= threshold
+
+def set_should_inpaint_from_bubble_type(region, ocr_settings, main_gui):
+    """
+    Set region.should_inpaint based on region.bubble_type and the detect_free_text toggle.
+    
+    Simple helper that checks:
+    - If bubble_type is 'free_text': respect the detect_free_text toggle
+    - Otherwise (text_bubble, etc.): always inpaint
+    
+    Args:
+        region: TextRegion object with bubble_type attribute
+        ocr_settings: OCR settings dictionary
+        main_gui: Main GUI reference for live settings
+    
+    Returns:
+        None (modifies region.should_inpaint in-place)
+    """
+    if getattr(region, 'bubble_type', None) == 'free_text':
+        # Read from live GUI config for immediate setting changes
+        live_detect_free = None
+        free_text_only_bg = False
+        try:
+            if main_gui and hasattr(main_gui, 'config'):
+                cfg = main_gui.config
+                live_detect_free = cfg.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+                free_text_only_bg = bool(cfg.get('manga_free_text_only_bg_opacity', False))
+        except Exception:
+            live_detect_free = None
+        # Fallback to ocr_settings if GUI not available
+        cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
+        detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
+        region.should_inpaint = bool(detect_free) and not free_text_only_bg
+    else:
+        # Text bubbles and other types always get inpainted
+        region.should_inpaint = True
+
+
+def classify_rtdetr_region_and_set_inpaint(region, bbox, rtdetr_detections, ocr_settings, main_gui, log_func=None):
+    """
+    Classify a region based on RT-DETR detection class and set should_inpaint flag.
+    
+    Args:
+        region: TextRegion object to classify
+        bbox: Bounding box tuple (x, y, w, h)
+        rtdetr_detections: Dictionary with 'text_bubbles', 'text_free', 'bubbles' keys
+        ocr_settings: OCR settings dictionary
+        main_gui: Main GUI reference for live settings
+        log_func: Optional logging function
+    
+    Returns:
+        None (modifies region in-place)
+    """
+    # Helper to normalize boxes to int tuples
+    def _norm_box(b):
+        try:
+            x, y, w, h = b[:4]
+            return (int(round(x)), int(round(y)), int(round(w)), int(round(h)))
+        except Exception:
+            return tuple(b)
+    
+    # Build quick-lookup sets for class membership
+    text_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('text_bubbles', []) or [])
+    free_text_set = set(_norm_box(b) for b in rtdetr_detections.get('text_free', []) or [])
+    empty_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('bubbles', []) or [])
+    
+    # Normalize the input bbox
+    norm_bbox = _norm_box(bbox)
+    
+    # Classify by RT-DETR class membership
+    if norm_bbox in free_text_set:
+        # Always read from live GUI config for immediate setting changes
+        live_detect_free = None
+        free_text_only_bg = False
+        try:
+            # First try getting from live GUI config
+            if main_gui and hasattr(main_gui, 'config'):
+                cfg = main_gui.config
+                live_detect_free = cfg.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+                free_text_only_bg = bool(cfg.get('manga_free_text_only_bg_opacity', False))
+        except Exception:
+            live_detect_free = None
+        # Fallback to local settings if GUI not available
+        cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
+        detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
+        
+        region.region_type = 'free_text'
+        region.bubble_type = 'free_text'
+        region.should_inpaint = bool(detect_free) and not free_text_only_bg
+        
+        if log_func:
+            # Only log classification details when debug mode is enabled
+            try:
+                # Check if we have access to the main_gui to get debug mode setting
+                debug_mode = False
+                if main_gui and hasattr(main_gui, 'config'):
+                    debug_mode = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                
+                if debug_mode:
+                    if region.should_inpaint:
+                        log_func(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {norm_bbox}", "debug")
+                    else:
+                        log_func(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {norm_bbox}", "debug")
+            except Exception:
+                pass
+    elif norm_bbox in text_bubble_set or norm_bbox in empty_bubble_set:
+        region.region_type = 'text_bubble'
+        region.bubble_type = 'text_bubble'
+        region.should_inpaint = True
+        if log_func:
+            # Only log classification details when debug mode is enabled
+            try:
+                # Check if we have access to the main_gui to get debug mode setting
+                debug_mode = False
+                if main_gui and hasattr(main_gui, 'config'):
+                    debug_mode = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                
+                if debug_mode:
+                    log_func(f"💬 Classified RT-DETR block as TEXT BUBBLE: {norm_bbox}", "debug")
+            except Exception:
+                pass
+    else:
+        # Fallback - default to text_bubble with inpainting
+        region.region_type = 'text_block'
+        region.bubble_type = 'text_bubble'
+        region.should_inpaint = True
+        if log_func:
+            # Only log classification details when debug mode is enabled
+            try:
+                # Check if we have access to the main_gui to get debug mode setting
+                debug_mode = False
+                if main_gui and hasattr(main_gui, 'config'):
+                    debug_mode = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                
+                if debug_mode:
+                    log_func(f"⚠️ RT-DETR block not found in class sets, defaulting to text_bubble: {norm_bbox}", "debug")
+            except Exception:
+                pass
+
+
+def merge_overlapping_boxes(
+    bboxes: List[Tuple],
+    containment_threshold: float = 0.3,
+    overlap_threshold: float = 0.5,
+) -> List[Tuple]:
+    """
+    Merge boxes that are mostly contained within each other, and
+    prune out duplicates/overlaps immediately as you go.
+    
+    This is CRITICAL for RT-DETR which often detects nested/overlapping regions.
+    Based on comic-translate's merge_overlapping_boxes implementation.
+    
+    Args:
+        bboxes: List of bounding boxes (x, y, w, h)
+        containment_threshold: Threshold for containment-based merging
+        overlap_threshold: Threshold for overlap-based filtering
+    
+    Returns:
+        List of merged and filtered bounding boxes
+    """
+    if not bboxes:
+        return []
+    
+    # Helper: Convert (x,y,w,h) to (x1,y1,x2,y2) for easier overlap checking
+    def to_xyxy(bbox):
+        x, y, w, h = bbox
+        return [x, y, x+w, y+h]
+    
+    # Helper: Convert (x1,y1,x2,y2) back to (x,y,w,h)
+    def to_xywh(bbox):
+        x1, y1, x2, y2 = bbox
+        return (x1, y1, x2-x1, y2-y1)
+    
+    # Helper: Merge two boxes (in xyxy format)
+    def merge_boxes(box1, box2):
+        return [
+            min(box1[0], box2[0]),
+            min(box1[1], box2[1]),
+            max(box1[2], box2[2]),
+            max(box1[3], box2[3])
+        ]
+    
+    # Helper: Check if inner box is mostly contained in outer box
+    def is_mostly_contained_boxes(outer_box, inner_box, threshold):
+        ix1, iy1, ix2, iy2 = inner_box
+        ox1, oy1, ox2, oy2 = outer_box
+        
+        inner_area = (ix2 - ix1) * (iy2 - iy1)
+        if inner_area == 0:
+            return False
+        
+        # Calculate intersection
+        intersection_area = max(0, min(ix2, ox2) - max(ix1, ox1)) * max(0, min(iy2, oy2) - max(iy1, oy1))
+        
+        return intersection_area / inner_area >= threshold
+    
+    # Helper: Calculate IoU
+    def calculate_iou(rect1, rect2):
+        x1 = max(rect1[0], rect2[0])
+        y1 = max(rect1[1], rect2[1])
+        x2 = min(rect1[2], rect2[2])
+        y2 = min(rect1[3], rect2[3])
+        
+        intersection_area = max(0, x2 - x1) * max(0, y2 - y1)
+        
+        rect1_area = (rect1[2] - rect1[0]) * (rect1[3] - rect1[1])
+        rect2_area = (rect2[2] - rect2[0]) * (rect2[3] - rect2[1])
+        
+        union_area = rect1_area + rect2_area - intersection_area
+        
+        return intersection_area / union_area if union_area != 0 else 0
+    
+    # Helper: Check if boxes overlap
+    def do_rectangles_overlap(rect1, rect2, iou_threshold):
+        return calculate_iou(rect1, rect2) >= iou_threshold
+    
+    # Convert all bboxes to xyxy format for processing
+    bboxes_xyxy = [to_xyxy(bbox) for bbox in bboxes]
+    
+    accepted = []
+    
+    for i, box in enumerate(bboxes_xyxy):
+        # 1) Merge this box against all others based on containment:
+        merged = box.copy()
+        for j, other in enumerate(bboxes_xyxy):
+            if i == j:
+                continue
+            if (is_mostly_contained_boxes(merged, other, containment_threshold)
+             or is_mostly_contained_boxes(other, merged, containment_threshold)):
+                merged = merge_boxes(merged, other)
+        
+        # 2) On-the-fly pruning: see if `merged` overlaps or duplicates any accepted box
+        conflict = False
+        for acc in accepted:
+            if merged == acc or do_rectangles_overlap(merged, acc, overlap_threshold):
+                conflict = True
+                break
+        
+        if conflict:
+            # skip this one entirely
+            continue
+        
+        # 3) Remove any already-accepted boxes that overlap too much with the new merged box
+        accepted = [
+            acc for acc in accepted
+            if not (acc == merged or do_rectangles_overlap(merged, acc, overlap_threshold))
+        ]
+        
+        # 4) Finally accept the new box
+        accepted.append(merged)
+    
+    # Convert back to (x,y,w,h) format
+    return [to_xywh(bbox) for bbox in accepted]
+
+
+def match_ocr_to_rtdetr_blocks(ocr_lines: List, rtdetr_blocks: List[Tuple], source_lang: str = 'ja', debug: bool = False) -> List[Dict]:
+    """
+    Match OCR text lines to RT-DETR detected blocks (comic-translate approach).
+    
+    Args:
+        ocr_lines: List of OCR results, each with .bbox (x,y,w,h) and .text
+        rtdetr_blocks: List of RT-DETR blocks as (x, y, w, h) tuples
+        source_lang: Source language for text joining (ja/zh use no spaces)
+        debug: Enable detailed debug logging for matching
+    
+    Returns:
+        List of dicts with {'bbox': (x,y,w,h), 'text': str} for each RT-DETR block
+    """
+    right_to_left = source_lang in ['ja', 'ar', 'he']
+    results = []
+    
+    # For each RT-DETR block, find OCR lines that belong to it
+    for block_idx, block_bbox in enumerate(rtdetr_blocks):
+        matched_lines = []
+        skipped_lines = []
+        
+        # Check each OCR line
+        for ocr_line in ocr_lines:
+            # Get OCR line bbox (x, y, w, h)
+            line_bbox = ocr_line.bbox if hasattr(ocr_line, 'bbox') else None
+            if not line_bbox:
+                continue
+            
+            # Check if line fits in or is mostly contained by block
+            fits = does_rectangle_fit(block_bbox, line_bbox)
+            # Comic-translate uses 50% threshold, but we use 30% to catch narrow vertical text
+            # that Azure sometimes detects with very thin bounding boxes
+            contained = is_mostly_contained(block_bbox, line_bbox, threshold=0.3)
+            
+            if fits or contained:
+                matched_lines.append((line_bbox, ocr_line.text))
+                if debug:
+                    print(f"  ✅ Block {block_idx+1} matched OCR line: '{ocr_line.text[:50]}' (fits={fits}, contained={contained})")
+                    print(f"     Block bbox: {block_bbox}, Line bbox: {line_bbox}")
+            else:
+                if debug:
+                    skipped_lines.append((line_bbox, ocr_line.text, fits, contained))
+        
+        if not matched_lines:
+            # No text found in this block
+            if debug:
+                print(f"\n  ⚠️ Block {block_idx+1} at {block_bbox}: NO MATCHES")
+                print(f"     Checked {len(skipped_lines)} OCR lines:")
+                for line_bbox, line_text, fits, contained in skipped_lines[:3]:  # Show first 3
+                    print(f"       ❌ '{line_text[:30]}' at {line_bbox} (fits={fits}, contained={contained})")
+                if len(skipped_lines) > 3:
+                    print(f"       ... and {len(skipped_lines)-3} more")
+            results.append({'bbox': block_bbox, 'text': '', 'lines': []})
+            continue
+        
+        # Sort matched lines by reading order within this block
+        # Sort by y_center first (top to bottom), then by x_center (right-to-left or left-to-right)
+        sorted_lines = sorted(matched_lines, key=lambda item: (
+            item[0][1] + item[0][3] / 2,  # y_center
+            -(item[0][0] + item[0][2] / 2) if right_to_left else (item[0][0] + item[0][2] / 2)  # x_center
+        ))
+        
+        # Join text (no space for CJK, space for others)
+        if source_lang in ['ja', 'zh', 'ko']:
+            joined_text = ''.join(text for _, text in sorted_lines)
+        else:
+            joined_text = ' '.join(text for _, text in sorted_lines)
+        
+        results.append({
+            'bbox': block_bbox,
+            'text': joined_text,
+            'lines': sorted_lines  # Keep individual lines for debugging
+        })
+    
+    return results
+
+def sort_regions_by_reading_order(regions: List[TextRegion], right_to_left: bool = True) -> List[TextRegion]:
+    """
+    Sort text regions by manga reading order (right-to-left, top-to-bottom).
+    Based on comic-translate's sort_blk_list algorithm.
+    
+    Algorithm:
+    1. Sort regions by Y coordinate (top to bottom)
+    2. For regions on the same horizontal band:
+       - If right_to_left (manga/Japanese): sort by X descending (right to left)
+       - Otherwise: sort by X ascending (left to right)
+    
+    Args:
+        regions: List of TextRegion objects to sort
+        right_to_left: True for manga reading order (Japanese), False for Western
+    
+    Returns:
+        Sorted list of TextRegion objects in reading order
+    """
+    if not regions:
+        return []
+    
+    sorted_regions = []
+    
+    # First pass: sort by Y position (top to bottom)
+    for region in sorted(regions, key=lambda r: r.center[1]):
+        # Find where to insert this region
+        inserted = False
+        for i, sorted_region in enumerate(sorted_regions):
+            region_center_y = region.center[1]
+            sorted_xyxy = sorted_region.xyxy
+            
+            # If current region's center is below the sorted region's bottom, continue
+            if region_center_y > sorted_xyxy[3]:
+                continue
+            
+            # If current region's center is above the sorted region's top, insert after
+            if region_center_y < sorted_xyxy[1]:
+                sorted_regions.insert(i + 1, region)
+                inserted = True
+                break
+            
+            # Y center of region is within sorted_region's vertical bounds
+            # Sort by X based on reading direction
+            if right_to_left and region.center[0] > sorted_region.center[0]:
+                # Manga: higher X (more right) comes first
+                sorted_regions.insert(i, region)
+                inserted = True
+                break
+            elif not right_to_left and region.center[0] < sorted_region.center[0]:
+                # Western: lower X (more left) comes first
+                sorted_regions.insert(i, region)
+                inserted = True
+                break
+        
+        # If not inserted yet, append to end
+        if not inserted:
+            sorted_regions.append(region)
+    
+    return sorted_regions
+
+class MangaTranslator:
+    """Main class for manga translation pipeline using Google Cloud Vision + API Key"""
+    
+    # Global, process-wide registry to make local inpainting init safe across threads
+    # Only dictionary operations are locked (microseconds); heavy work happens outside the lock.
+    _inpaint_pool_lock = threading.Lock()
+    _inpaint_pool = {}  # (method, model_path) -> {'inpainter': obj|None, 'loaded': bool, 'event': threading.Event()}
+    
+    @property
+    def manga_settings(self):
+        """Always return fresh manga settings from main_gui.config"""
+        return self.main_gui.config.get('manga_settings', {})
+    
+    # Detector preloading pool for bubble detector instances
+    _detector_pool_lock = threading.Lock()
+    _detector_pool = {}  # (detector_type, model_id_or_path) -> {'spares': list[BubbleDetector], 'checked_out': list}
+    
+    # Class-level cancellation flag for all instances
+    _global_cancelled = False
+    _global_cancel_lock = threading.RLock()
+    
+    @classmethod
+    def set_global_cancellation(cls, cancelled: bool):
+        """Set global cancellation flag for all translator instances"""
+        with cls._global_cancel_lock:
+            cls._global_cancelled = cancelled
+    
+    @classmethod
+    def is_globally_cancelled(cls) -> bool:
+        """Check if globally cancelled"""
+        with cls._global_cancel_lock:
+            return cls._global_cancelled
+    
+    @classmethod
+    def reset_global_flags(cls):
+        """Reset global cancellation flags when starting new translation"""
+        with cls._global_cancel_lock:
+            cls._global_cancelled = False
+    
+    def _clear_checkout_references(self):
+        """Clear stale instance-level checkout references.
+        
+        This should be called at the start of processing to ensure we don't
+        reuse stale references from a previous (possibly interrupted) translation.
+        The pool's checked_out lists are managed separately by force_release_all_pool_checkouts().
+        """
+        # Clear inpainter checkout reference
+        self._checked_out_inpainter = None
+        self._inpainter_pool_key = None
+        
+        # Clear bubble detector checkout reference  
+        self._checked_out_bubble_detector = None
+        self._bubble_detector_pool_key = None
+        
+        # CRITICAL: Cancel and clear any early inpainting future
+        # This prevents stale futures from blocking new translations
+        try:
+            if hasattr(self, '_inpainting_future') and self._inpainting_future:
+                try:
+                    self._inpainting_future.cancel()
+                except Exception:
+                    pass
+                self._inpainting_future = None
+        except Exception:
+            pass
+        
+        # Also clear inpainting executor
+        try:
+            if hasattr(self, '_inpainting_executor') and self._inpainting_executor:
+                try:
+                    self._inpainting_executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    # Python < 3.9 doesn't have cancel_futures
+                    self._inpainting_executor.shutdown(wait=False)
+                except Exception:
+                    pass
+                self._inpainting_executor = None
+        except Exception:
+            pass
+        
+        # Clear inpainting start time - use delattr to fully remove (not just set to None)
+        # This ensures hasattr() returns False, avoiding None arithmetic errors
+        try:
+            if hasattr(self, '_inpainting_start_time'):
+                delattr(self, '_inpainting_start_time')
+        except AttributeError:
+            pass
+        
+        # CRITICAL: Reset thread-local entirely to ensure fresh state
+        # This forces re-checkout from pool on next use
+        try:
+            if hasattr(self, '_thread_local'):
+                # Delete the bubble_detector attribute entirely
+                try:
+                    del self._thread_local.bubble_detector
+                except AttributeError:
+                    pass
+                # Clear inpainters dict
+                try:
+                    self._thread_local.local_inpainters = {}
+                except AttributeError:
+                    pass
+        except Exception:
+            pass
+        
+        # Also reset the _thread_local object itself to ensure clean state
+        self._thread_local = None
+    
+    @classmethod
+    def force_release_all_pool_checkouts(cls, restart_workers: bool = False):
+        """Force-clear all checked_out lists in both inpainter and detector pools.
+        
+        This should be called when starting a new translation or after stopping,
+        to ensure any stale checkouts from interrupted translations are cleared.
+        Without this, stopped translations leave inpainters marked as 'checked out'
+        and they become unavailable for subsequent translations.
+        
+        Args:
+            restart_workers: If True, also restart worker processes for inpainters
+                           to clear any stuck/hung worker state from interrupted translations.
+        """
+        released_inpainters = 0
+        released_detectors = 0
+        restarted_workers = 0
+        
+        # Clear inpainter pool checkouts and optionally restart workers
+        try:
+            with cls._inpaint_pool_lock:
+                for key, rec in cls._inpaint_pool.items():
+                    if rec and 'checked_out' in rec:
+                        count = len(rec['checked_out'])
+                        if count > 0:
+                            released_inpainters += count
+                            rec['checked_out'].clear()
+                    
+                    # Restart worker processes to clear hung state and reset stop flags
+                    if restart_workers and rec:
+                        spares = rec.get('spares', [])
+                        for inpainter in spares:
+                            if inpainter is None:
+                                continue
+                            try:
+                                # Reset stop flags first
+                                if hasattr(inpainter, '_stopped'):
+                                    inpainter._stopped = False
+                                if hasattr(inpainter, 'stop_flag'):
+                                    # Don't clear stop_flag itself, just reset _stopped state
+                                    pass
+                                
+                                # Check if this inpainter uses worker processes
+                                if hasattr(inpainter, '_mp_enabled') and inpainter._mp_enabled:
+                                    # Capture model info BEFORE stopping (since _stop_worker clears state)
+                                    was_loaded = getattr(inpainter, 'model_loaded', False)
+                                    method = getattr(inpainter, 'current_method', None)
+                                    path = getattr(inpainter, '_last_model_path', None) or getattr(inpainter, 'model_path', None)
+                                    
+                                    # Stop the potentially stuck worker
+                                    if hasattr(inpainter, '_stop_worker'):
+                                        inpainter._stop_worker()
+                                    # Restart with fresh state
+                                    if hasattr(inpainter, '_start_worker'):
+                                        inpainter._start_worker()
+                                        # Reload model in new worker if it was loaded before
+                                        if was_loaded and method and path:
+                                            try:
+                                                inpainter._mp_load_model(method, path, force_reload=True)
+                                                restarted_workers += 1
+                                            except Exception as e:
+                                                print(f"[POOL] Warning: Failed to reload model in restarted worker: {e}")
+                            except Exception as e:
+                                print(f"[POOL] Warning: Failed to restart worker for inpainter: {e}")
+        except Exception:
+            pass
+        
+        # Clear detector pool checkouts and reset detector state
+        reset_detectors = 0
+        try:
+            with cls._detector_pool_lock:
+                for key, rec in cls._detector_pool.items():
+                    if rec and 'checked_out' in rec:
+                        count = len(rec['checked_out'])
+                        if count > 0:
+                            released_detectors += count
+                            rec['checked_out'].clear()
+                    
+                    # Reset detector state (stop flags, etc.)
+                    if restart_workers and rec:
+                        spares = rec.get('spares', [])
+                        for detector in spares:
+                            if detector is None:
+                                continue
+                            try:
+                                # Reset stop flags
+                                if hasattr(detector, 'reset_stop_flags'):
+                                    detector.reset_stop_flags()
+                                if hasattr(detector, '_stopped'):
+                                    detector._stopped = False
+                                
+                                # Reset ONNX session if it exists and might be in bad state
+                                # Note: We don't recreate the session, just mark for potential reload
+                                # The next use will reload if needed
+                                if hasattr(detector, 'rtdetr_onnx_session') and detector.rtdetr_onnx_session is not None:
+                                    # Session exists, mark detector for potential health check
+                                    reset_detectors += 1
+                            except Exception as e:
+                                print(f"[POOL] Warning: Failed to reset detector state: {e}")
+        except Exception:
+            pass
+        
+        if released_inpainters > 0 or released_detectors > 0 or restarted_workers > 0 or reset_detectors > 0:
+            print(f"[POOL] Force-released {released_inpainters} inpainter(s) and {released_detectors} detector(s) from checkout, restarted {restarted_workers} worker(s), reset {reset_detectors} detector(s)")
+        
+        return released_inpainters, released_detectors
+    
+    def _return_inpainter_to_pool(self):
+        """Return a checked-out inpainter instance back to the pool for reuse."""
+        if not hasattr(self, '_checked_out_inpainter') or not hasattr(self, '_inpainter_pool_key'):
+            return  # Nothing checked out
+        
+        # Also check if the key is None
+        if self._inpainter_pool_key is None or self._checked_out_inpainter is None:
+            return
+        
+        try:
+            with MangaTranslator._inpaint_pool_lock:
+                key = self._inpainter_pool_key
+                
+                # DEBUG: Log the inpainter model we're returning to pool
+                try:
+                    method, path = key
+                    path_basename = os.path.basename(path) if path else 'None'
+                    self._log(f"🔑 Return inpainter model: {method}/{path_basename}", "info")
+                    
+                    # Show all inpainter models in pool for comparison
+                    all_keys = list(MangaTranslator._inpaint_pool.keys())
+                    self._log(f"📊 Pool has {len(all_keys)} inpainter model(s)", "info")
+                    for pool_method, pool_path in all_keys:
+                        pool_rec = MangaTranslator._inpaint_pool.get((pool_method, pool_path))
+                        pool_spares = len(pool_rec.get('spares', [])) if pool_rec else 0
+                        pool_checked = len(pool_rec.get('checked_out', [])) if pool_rec else 0
+                        pool_path_basename = os.path.basename(pool_path) if pool_path else 'None'
+                        self._log(f"   - {pool_method}/{pool_path_basename}: {pool_spares} spares, {pool_checked} checked out", "info")
+                except Exception as e:
+                    self._log(f"   Debug error: {e}", "info")
+                
+                rec = MangaTranslator._inpaint_pool.get(key)
+                if rec and 'checked_out' in rec:
+                    checked_out = rec['checked_out']
+                    if self._checked_out_inpainter in checked_out:
+                        # Do NOT touch global CUDA state here; just clear per-instance temp refs
+                        try:
+                            inp = self._checked_out_inpainter
+                            for attr in ('_tmp_tensors', '_last_tensors'):
+                                try:
+                                    if hasattr(inp, attr):
+                                        setattr(inp, attr, None)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        
+                        checked_out.remove(self._checked_out_inpainter)
+                        # The spares list stays static - it contains all preloaded instances
+                        # We only track which ones are checked out, not which are available
+                        # Available = spares not in checked_out
+                        spares_list = rec.get('spares', [])
+                        total_spares = len(spares_list)
+                        checked_out_count = len(checked_out)
+                        available_count = total_spares - checked_out_count
+                        # Debug: count how many spares are actually valid
+                        valid_spares = sum(1 for s in spares_list if s and getattr(s, 'model_loaded', False))
+                        # Also log the pool key for debugging path mismatches
+                        try:
+                            method, path = key
+                            path_basename = os.path.basename(path) if path else 'None'
+                            self._log(f"🔄 Returned inpainter to pool [key: {method}/{path_basename}] ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
+                        except:
+                            self._log(f"🔄 Returned inpainter to pool ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
+            # Clear the references
+            self._checked_out_inpainter = None
+            self._inpainter_pool_key = None
+            
+            # CRITICAL: Clear thread-local cache so next checkout gets from pool
+            try:
+                if hasattr(self, '_thread_local') and hasattr(self._thread_local, 'local_inpainters'):
+                    # Clear the specific key from thread-local cache
+                    if key in self._thread_local.local_inpainters:
+                        self._thread_local.local_inpainters[key] = None
+            except Exception:
+                pass
+            
+            # Trigger immediate GUI pool tracker update
+            try:
+                if hasattr(self, 'update_queue'):
+                    self.update_queue.put(('update_pool_tracker',))
+            except Exception:
+                pass
+        except Exception as e:
+            # Non-critical - just log
+            try:
+                self._log(f"⚠️ Failed to return inpainter to pool: {e}", "debug")
+            except:
+                pass
+    
+    def _return_bubble_detector_to_pool(self):
+        """Return a checked-out bubble detector instance back to the pool for reuse."""
+        if not hasattr(self, '_checked_out_bubble_detector') or not hasattr(self, '_bubble_detector_pool_key'):
+            return  # Nothing checked out
+        
+        # Also check if the key is None
+        if self._bubble_detector_pool_key is None or self._checked_out_bubble_detector is None:
+            return
+        
+        try:
+            with MangaTranslator._detector_pool_lock:
+                key = self._bubble_detector_pool_key
+                
+                # DEBUG: Log the detector model we're returning to pool
+                try:
+                    det_type = key[0] if isinstance(key, (tuple, list)) and key else str(key)
+                    self._log(f"🔑 Return bubble detector model: {det_type}", "info")
+                    
+                    # Show all detector models in pool for comparison
+                    all_keys = list(MangaTranslator._detector_pool.keys())
+                    self._log(f"📊 Pool has {len(all_keys)} detector model(s)", "info")
+                    for pool_key in all_keys:
+                        pool_det_type = pool_key[0] if isinstance(pool_key, (tuple, list)) and pool_key else str(pool_key)
+                        pool_rec = MangaTranslator._detector_pool.get(pool_key)
+                        pool_spares = len(pool_rec.get('spares', [])) if pool_rec else 0
+                        pool_checked = len(pool_rec.get('checked_out', [])) if pool_rec else 0
+                        self._log(f"   - {pool_det_type}: {pool_spares} spares, {pool_checked} checked out", "info")
+                except Exception as e:
+                    self._log(f"   Debug error: {e}", "info")
+                
+                rec = MangaTranslator._detector_pool.get(key)
+                if rec and 'checked_out' in rec:
+                    checked_out = rec['checked_out']
+                    if self._checked_out_bubble_detector in checked_out:
+                        checked_out.remove(self._checked_out_bubble_detector)
+                        # The spares list stays static - only track checked_out
+                        spares_list = rec.get('spares', [])
+                        total_spares = len(spares_list)
+                        checked_out_count = len(checked_out)
+                        available_count = total_spares - checked_out_count
+                        # Debug: count how many spares are actually valid
+                        valid_spares = sum(1 for s in spares_list if s is not None)
+                        # Also log the pool key for debugging
+                        try:
+                            det_type = key[0] if isinstance(key, (tuple, list)) and key else str(key)
+                            self._log(f"🔄 Returned bubble detector to pool [model: {det_type}] ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
+                        except:
+                            self._log(f"🔄 Returned bubble detector to pool ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
+            # Clear the references
+            self._checked_out_bubble_detector = None
+            self._bubble_detector_pool_key = None
+            
+            # CRITICAL: Clear thread-local cache so next checkout gets from pool
+            try:
+                if hasattr(self, '_thread_local') and hasattr(self._thread_local, 'bubble_detector'):
+                    self._thread_local.bubble_detector = None
+            except Exception:
+                pass
+            
+            # Trigger immediate GUI pool tracker update
+            try:
+                if hasattr(self, 'update_queue'):
+                    self.update_queue.put(('update_pool_tracker',))
+            except Exception:
+                pass
+        except Exception as e:
+            # Non-critical - just log
+            try:
+                self._log(f"⚠️ Failed to return bubble detector to pool: {e}", "debug")
+            except:
+                pass
+    
+    
+    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None, skip_inpainter_init: bool = False, skip_ocr_init: bool = False):
+        """Initialize with OCR configuration and API client from main GUI
+        
+        Args:
+            ocr_config: Dictionary with OCR provider settings:
+                {
+                    'provider': 'google' or 'azure' or 'azure-document-intelligence',
+                    'google_credentials_path': str (if google),
+                    'azure_key': str (if azure),
+                    'azure_endpoint': str (if azure)
+                }
+            skip_inpainter_init: If True, skip automatic inpainter initialization (for pool access only)
+            skip_ocr_init: If True, skip OCR provider initialization (for bubble detector preload only)
+        """
+        # CRITICAL: Set thread limits FIRST before any heavy library operations
+        # This must happen before cv2, torch, numpy operations
+        try:
+            # Use parallel_panel_translation setting (NOT parallel_processing)
+            # parallel_panel_translation controls inpainting pool parallelism
+            parallel_panel_enabled = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False)
+            
+            # Set environment variable for LocalInpainter to detect parallel panel mode
+            os.environ['PARALLEL_PANEL_TRANSLATION_ENABLED'] = '1' if parallel_panel_enabled else '0'
+            
+            if parallel_panel_enabled:
+                # Parallel panel mode: use conservative threading to allow pool instances to run concurrently
+                # 4 threads per instance allows good parallelism without excessive spawning
+                os.environ['OMP_NUM_THREADS'] = '4'
+                os.environ['MKL_NUM_THREADS'] = '4'
+                os.environ['OPENBLAS_NUM_THREADS'] = '4'
+                os.environ['NUMEXPR_NUM_THREADS'] = '4'
+                os.environ['VECLIB_MAXIMUM_THREADS'] = '4'
+                os.environ['ONNXRUNTIME_NUM_THREADS'] = '4'
+                # Set torch and cv2 thread limits if already imported
+                try:
+                    import torch
+                    torch.set_num_threads(4)
+                except (ImportError, RuntimeError):
+                    pass
+                try:
+                    cv2.setNumThreads(4)
+                except (AttributeError, NameError):
+                    pass
+            else:
+                # Sequential mode: force single-threaded for all computational libraries
+                os.environ['OMP_NUM_THREADS'] = '1'
+                os.environ['MKL_NUM_THREADS'] = '1'
+                os.environ['OPENBLAS_NUM_THREADS'] = '1'
+                os.environ['NUMEXPR_NUM_THREADS'] = '1'
+                os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+                os.environ['ONNXRUNTIME_NUM_THREADS'] = '1'
+                # Set torch and cv2 thread limits if already imported
+                try:
+                    import torch
+                    torch.set_num_threads(1)
+                except (ImportError, RuntimeError):
+                    pass
+                try:
+                    cv2.setNumThreads(1)
+                except (AttributeError, NameError):
+                    pass
+        except Exception:
+            pass  # Silently fail if config not available
+        
+        # Set up logging first
+        self.log_callback = log_callback
+        self.main_gui = main_gui
+        
+        # Store init flags
+        self._skip_inpainter_init = skip_inpainter_init
+        self._skip_ocr_init = skip_ocr_init
+        
+        # Initialize batch_mode early so _log can check it
+        try:
+            self.batch_mode = os.getenv('BATCH_TRANSLATION', '0') == '1'
+        except Exception:
+            self.batch_mode = False
+        # New batching configuration (with legacy fallback)
+        try:
+            self.batching_mode = os.getenv('BATCHING_MODE', '').strip().lower() or \
+                                 getattr(main_gui, 'config', {}).get('batching_mode', 'direct')
+        except Exception:
+            self.batching_mode = 'direct'
+        try:
+            self.batch_group_size = int(os.getenv('BATCH_GROUP_SIZE', '0') or \
+                                        getattr(main_gui, 'config', {}).get('batch_group_size', 3) or 3)
+        except Exception:
+            self.batch_group_size = 3
+        # Legacy compatibility: CONSERVATIVE_BATCHING forces conservative mode
+        if os.getenv('CONSERVATIVE_BATCHING', '0') == '1':
+            self.batching_mode = 'conservative'
+        
+        # Store references for print hijacking (will be activated on demand, not during init)
+        import builtins
+        import sys
+        self._original_print = builtins.print
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+        
+        # Store the callback for later use
+        import threading
+        if not hasattr(builtins, '_manga_log_callbacks'):
+            builtins._manga_log_callbacks = {}
+        if log_callback:
+            builtins._manga_log_callbacks[id(self)] = log_callback
+        
+        # Store original print as class variable for fallback (only once)
+        if not hasattr(MangaTranslator, '_original_print_backup'):
+            MangaTranslator._original_print_backup = builtins.print
+        
+        # Pass log callback to unified client
+        self.client = unified_client
+        if hasattr(self.client, 'log_callback'):
+            self.client.log_callback = log_callback
+        elif hasattr(self.client, 'set_log_callback'):
+            self.client.set_log_callback(log_callback)
+        
+        # CRITICAL: Monkey-patch the UnifiedClient's _debug_log method to use our callback
+        # This ensures API logs from threads route to manga GUI instead of main GUI
+        if hasattr(self.client, '_debug_log'):
+            original_debug_log = self.client._debug_log
+            def patched_debug_log(message: str):
+                """Patched debug log that routes to manga callback"""
+                if log_callback:
+                    try:
+                        # Determine log level from message
+                        level = 'info'
+                        if '❌' in message or 'ERROR' in message or 'Error' in message:
+                            level = 'error'
+                        elif '⚠️' in message or 'WARNING' in message or 'Warning' in message:
+                            level = 'warning'
+                        elif '🔍' in message or 'DEBUG' in message or '[DEBUG]' in message:
+                            level = 'debug'
+                        elif '✅' in message or '🔑' in message or '📤' in message:
+                            level = 'info'
+                        
+                        # Clean up DEBUG prefixes
+                        message = message.replace('[DEBUG] ', '')
+                        
+                        log_callback(message, level)
+                    except Exception:
+                        # Fallback to original if callback fails
+                        original_debug_log(message)
+                else:
+                    original_debug_log(message)
+            
+            # Replace the method
+            self.client._debug_log = patched_debug_log
+            self._log("✅ Patched UnifiedClient debug logs to route to manga GUI", "debug")
+        self.ocr_config = ocr_config
+        self.main_gui = main_gui
+        self.log_callback = log_callback
+        self.config = main_gui.config
+        # Note: self.manga_settings is now a property that reads fresh from config
+        # Concise logging flag from Advanced settings
+        try:
+            # Default to False so logs are verbose by default (user must opt-in to concise mode)
+            concise_value = self.manga_settings.get('advanced', {}).get('concise_logs', False)
+            self.concise_logs = bool(concise_value)
+        except Exception as e:
+            self.concise_logs = False
+            print(f"[MANGA_TRANSLATOR INIT] Exception reading concise_logs: {e}")
+            print(f"[MANGA_TRANSLATOR INIT] Defaulting self.concise_logs = False")
+
+        # Ensure all GUI environment variables are set
+        self._sync_environment_variables()
+        
+        # Initialize attributes
+        self.current_image = None
+        self.current_mask = None
+        self.text_regions = []
+        self.translated_regions = []
+        self.final_image = None
+        
+        # Initialize inpainter attributes
+        self.local_inpainter = None
+        self.hybrid_inpainter = None
+        self.inpainter = None
+        
+        # Initialize bubble detector (will use pool system)
+        self.bubble_detector = None
+        
+        # Processing flags
+        self.is_processing = False
+        self.cancel_requested = False
+        self.stop_flag = None  # Initialize stop_flag attribute
+
+        # Initialize batch size from environment (batch_mode was already initialized earlier)
+        # OCR ROI cache - PER IMAGE ONLY (cleared aggressively to prevent text leakage)
+        # CRITICAL: This cache MUST be cleared before every new image to prevent text contamination
+        # THREAD-SAFE: Each translator instance has its own cache (safe for parallel panel translation)
+        self.ocr_roi_cache = {}
+        self._current_image_hash = None  # Track current image to force cache invalidation
+        
+        # Thread-safe lock for cache operations (critical for parallel panel translation)
+        import threading
+        self._cache_lock = threading.Lock()
+        # Serialize inpainting calls to avoid concurrent RAM spikes with shared instances
+        # For parallel panel translation with separate pool instances, no lock is needed
+        # Only use lock if parallel panel translation is disabled
+        parallel_panels_enabled = self.manga_settings.get('advanced', {}).get('parallel_panel_translation', False)
+        use_inpaint_lock = not parallel_panels_enabled
+        self._inpaint_lock = threading.Lock() if use_inpaint_lock else None
+        try:
+            self.batch_size = int(os.getenv('BATCH_SIZE', '1'))
+        except Exception:
+            # Fallback to GUI entry if present; otherwise default to 1
+            try:
+                self.batch_size = int(main_gui.batch_size_var.get()) if hasattr(main_gui, 'batch_size_var') else 1
+            except Exception:
+                self.batch_size = 1
+        self.batch_current = 1 
+        
+        if self.batch_mode:
+            mode_label = self.batching_mode.capitalize() if isinstance(getattr(self, 'batching_mode', ''), str) else 'Aggressive'
+            self._log(f"📦 BATCH MODE: Processing {self.batch_size} images (Mode: {mode_label}, Group: {self.batch_group_size})")
+            self._log(f"⏱️ Keeping API delay for rate limit protection")
+            
+            # NOTE: We NO LONGER preload models here!
+            # Models should only be loaded when actually needed
+            # This was causing unnecessary RAM usage
+            ocr_settings = self.manga_settings.get('ocr', {})
+            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
+            if bubble_detection_enabled:
+                self._log("📦 BATCH MODE: Bubble detection will be loaded on first use")
+            else:
+                self._log("📦 BATCH MODE: Bubble detection is disabled")
+        
+        # Cache for processed images - DEPRECATED/UNUSED (kept for backward compatibility)
+        # DO NOT USE THIS FOR TEXT DATA - IT CAN LEAK BETWEEN IMAGES
+        self.cache = {}
+        
+        # Skip OCR initialization if requested (e.g., when only preloading bubble detectors)
+        if not skip_ocr_init:
+            # Determine OCR provider
+            self.ocr_provider = ocr_config.get('provider', 'google')
+
+            if self.ocr_provider == 'google':
+                if not GOOGLE_CLOUD_VISION_AVAILABLE:
+                    raise ImportError("Google Cloud Vision required. Install with: pip install google-cloud-vision")
+                
+                google_path = ocr_config.get('google_credentials_path')
+                if not google_path:
+                    raise ValueError("Google credentials path required")
+                    
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_path
+                self.vision_client = vision.ImageAnnotatorClient()
+                
+            elif self.ocr_provider == 'azure':
+                # Import Azure libraries
+                try:
+                    from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                    from azure.core.credentials import AzureKeyCredential
+                    self.azure_client_class = ImageAnalysisClient
+                    self.azure_cred_class = AzureKeyCredential
+                except ImportError:
+                    raise ImportError("Azure Computer Vision required. Install with: pip install azure-ai-vision-imageanalysis")
+                
+                azure_key = ocr_config.get('azure_key')
+                azure_endpoint = ocr_config.get('azure_endpoint')
+                
+                if not azure_key or not azure_endpoint:
+                    raise ValueError("Azure key and endpoint required")
+                
+                # OPTIMIZATION: Configure Azure client with better connection settings
+                try:
+                    from azure.core.pipeline.policies import RetryPolicy
+                    # Create retry policy with shorter timeouts
+                    retry_policy = RetryPolicy(
+                        retry_total=3,
+                        retry_backoff_factor=1,
+                        retry_backoff_max=10,
+                        retry_on_status_codes=[429, 500, 502, 503, 504]  # Retry on rate limit and server errors
+                    )
+                    
+                    # Create client with custom retry policy
+                    self.vision_client = self.azure_client_class(
+                        endpoint=azure_endpoint,
+                        credential=self.azure_cred_class(azure_key),
+                        retry_policy=retry_policy
+                    )
+                except Exception:
+                    # Fallback to standard client creation
+                    self.vision_client = self.azure_client_class(
+                        endpoint=azure_endpoint,
+                        credential=self.azure_cred_class(azure_key)
+                    )
+            else:
+                # New OCR providers handled by OCR manager
+                try:
+                    from ocr_manager import OCRManager
+                    self.ocr_manager = OCRManager(log_callback=log_callback)
+                    print(f"Initialized OCR Manager for {self.ocr_provider}")
+                    # Initialize OCR manager with stop flag awareness
+                    if hasattr(self.ocr_manager, 'reset_stop_flags'):
+                        self.ocr_manager.reset_stop_flags()
+                except Exception as _e:
+                    self.ocr_manager = None
+                    self._log(f"Failed to initialize OCRManager: {str(_e)}", "error")
+        else:
+            # OCR initialization skipped - set defaults
+            self.ocr_provider = ocr_config.get('provider', 'google')
+            self.vision_client = None
+            self.ocr_manager = None
+        
+        self.client = unified_client
+        self.main_gui = main_gui
+        self.log_callback = log_callback
+        
+        # Prefer allocator that can return memory to OS (effective before torch loads)
+        try:
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        except Exception:
+            pass
+        
+        # Get all settings from GUI - Support both Tkinter (.get()) and PySide6 (plain values)
+        # API delay
+        try:
+            if hasattr(main_gui, 'delay_entry'):
+                if hasattr(main_gui.delay_entry, 'get'):
+                    self.api_delay = float(main_gui.delay_entry.get())
+                elif hasattr(main_gui.delay_entry, 'text'):
+                    self.api_delay = float(main_gui.delay_entry.text())
+                else:
+                    self.api_delay = 2.0
+            else:
+                self.api_delay = 2.0
+        except Exception:
+            self.api_delay = 2.0
+        
+        # Propagate API delay to unified_api_client via env var so its internal pacing/logging matches GUI
+        try:
+            os.environ["SEND_INTERVAL_SECONDS"] = str(self.api_delay)
+        except Exception:
+            pass
+        
+        # Temperature
+        try:
+            if hasattr(main_gui, 'trans_temp'):
+                if hasattr(main_gui.trans_temp, 'get'):
+                    self.temperature = float(main_gui.trans_temp.get())
+                else:
+                    self.temperature = float(main_gui.trans_temp)
+            else:
+                self.temperature = 0.3
+        except Exception:
+            self.temperature = 0.3
+        
+        # Max tokens - check for manga-specific limit first, fallback to main GUI limit
+        default_max_tokens = int(main_gui.max_output_tokens if hasattr(main_gui, 'max_output_tokens') else 4000)
+        manga_token_limit = -1
+        try:
+            manga_settings = main_gui.config.get('manga_settings', {}) or {}
+            manual_edit = manga_settings.get('manual_edit', {}) or {}
+            manga_token_limit = int(manual_edit.get('manga_output_token_limit', -1))
+        except Exception:
+            manga_token_limit = -1
+        
+        # If manga token limit is <= 0, use main GUI's limit; otherwise use manga-specific limit
+        if manga_token_limit > 0:
+            self.max_tokens = manga_token_limit
+            self._log(f"📊 Using manga-specific output token limit: {self.max_tokens}")
+        else:
+            self.max_tokens = default_max_tokens
+            self._log(f"📊 Using main GUI output token limit: {self.max_tokens}")
+        
+        # Token limit
+        if hasattr(main_gui, 'token_limit_disabled') and main_gui.token_limit_disabled:
+            self.input_token_limit = None  # None means no limit
+            self._log("📊 Input token limit: DISABLED (unlimited)")
+        else:
+            try:
+                if hasattr(main_gui, 'token_limit_entry'):
+                    if hasattr(main_gui.token_limit_entry, 'get'):
+                        token_limit_value = main_gui.token_limit_entry.get()
+                    elif hasattr(main_gui.token_limit_entry, 'text'):
+                        token_limit_value = main_gui.token_limit_entry.text()
+                    else:
+                        token_limit_value = '120000'
+                else:
+                    token_limit_value = '120000'
+                
+                if token_limit_value and token_limit_value.strip().isdigit():
+                    self.input_token_limit = int(token_limit_value.strip())
+                else:
+                    self.input_token_limit = 120000  # Default
+            except Exception:
+                self.input_token_limit = 120000
+            self._log(f"📊 Input token limit: {self.input_token_limit} tokens")
+        
+        # Get contextual settings from GUI - Support both Tkinter and PySide6
+        try:
+            if hasattr(main_gui, 'contextual_var'):
+                if hasattr(main_gui.contextual_var, 'get'):
+                    self.contextual_enabled = main_gui.contextual_var.get()
+                else:
+                    self.contextual_enabled = main_gui.contextual_var
+            else:
+                self.contextual_enabled = False
+        except Exception:
+            self.contextual_enabled = False
+        
+        try:
+            if hasattr(main_gui, 'trans_history'):
+                if hasattr(main_gui.trans_history, 'get'):
+                    self.translation_history_limit = int(main_gui.trans_history.get())
+                else:
+                    self.translation_history_limit = int(main_gui.trans_history)
+            else:
+                self.translation_history_limit = 3
+        except Exception:
+            self.translation_history_limit = 3
+        
+        self.rolling_history_enabled = True
+        
+        # Initialize HistoryManager placeholder
+        self.history_manager = None
+        self.history_manager_initialized = False
+        self.history_output_dir = None
+        
+        # Full page context translation settings
+        self.full_page_context_enabled = True
+        
+        # Default prompt for full page context mode
+        self.full_page_context_prompt = (
+            "You will receive multiple text segments from a manga page, each prefixed with an index like [0], [1], etc. "
+            "Translate each segment considering the context of all segments together. "
+            "Maintain consistency in character names, tone, and style across all translations.\n\n"
+            "CRITICAL: Return your response as a valid JSON object where each key includes BOTH the index prefix "
+            "AND the original text EXACTLY as provided (e.g., '[0] こんにちは'), and each value is the translation.\n"
+            "This is essential for correct mapping - do not modify or omit the index prefixes!\n\n"
+            "Make sure to properly escape any special characters in the JSON:\n"
+            "- Use \\n for newlines\n"
+            "- Use \\\" for quotes\n"
+            "- Use \\\\ for backslashes\n\n"
+            "Example:\n"
+            '{\n'
+            '  "[0] こんにちは": "Hello",\n'
+            '  "[1] ありがとう": "Thank you",\n'
+            '  "[2] さようなら": "Goodbye"\n'
+            '}\n\n'
+            'REMEMBER: Keep the [index] prefix in each JSON key exactly as shown in the input!'
+        )
+
+        # Visual context setting (for non-vision model support)
+        self.visual_context_enabled = main_gui.config.get('manga_visual_context_enabled', True)
+        
+        # Store context for contextual translation (backwards compatibility)
+        self.translation_context = []
+        
+        # Thread safety lock for contextual translation (microsecond lock)
+        self._contextual_lock = threading.Lock()
+        
+        # Font settings for text rendering
+        self.font_path = self._find_font()
+        self.min_font_size = 10
+        self.max_font_size = 60
+        try:
+            _ms = main_gui.config.get('manga_settings', {}) or {}
+            _rend = _ms.get('rendering', {}) or {}
+            _font = _ms.get('font_sizing', {}) or {}
+            self.min_readable_size = int(_rend.get('auto_min_size', _font.get('min_size', 16)))
+        except Exception:
+            self.min_readable_size = int(main_gui.config.get('manga_min_readable_size', 16))
+        self.max_font_size_limit = main_gui.config.get('manga_max_font_size', 24)
+        self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', True)
+        
+        # Enhanced text rendering settings - Load from config if available
+        config = main_gui.config if hasattr(main_gui, 'config') else {}
+        
+        self.text_bg_opacity = config.get('manga_bg_opacity', 0)  # 0-255, default transparent
+        self.text_bg_style = config.get('manga_bg_style', 'box')  # 'box', 'circle', 'wrap'
+        self.text_bg_reduction = config.get('manga_bg_reduction', 1.0)  # Size reduction factor (0.5-1.0)
+        self.constrain_to_bubble = config.get('manga_constrain_to_bubble', True) 
+        
+        # Text color from config
+        manga_text_color = config.get('manga_text_color', [0, 0, 0])
+        self.text_color = tuple(manga_text_color)  # Convert list to tuple
+        
+        # Outline color defaults to white, but when shadow is enabled we tint outline to the shadow color
+        self.outline_color = (255, 255, 255)
+        self.outline_width_factor = 15  # Divider for font_size to get outline width
+        self.selected_font_style = config.get('manga_font_path', None)  # Will store selected font path
+        self.custom_font_size = config.get('manga_font_size', None) if config.get('manga_font_size', 0) > 0 else None
+        
+        # Text shadow settings from config
+        self.shadow_enabled = config.get('manga_shadow_enabled', False)
+        manga_shadow_color = config.get('manga_shadow_color', [128, 128, 128])
+        self.shadow_color = tuple(manga_shadow_color)  # Convert list to tuple
+        # If shadow is enabled, use its color for outline as well (prevents "white shadow" look)
+        if self.shadow_enabled and isinstance(self.shadow_color, tuple) and len(self.shadow_color) == 3:
+            self.outline_color = self.shadow_color
+        self.shadow_offset_x = config.get('manga_shadow_offset_x', 2)
+        self.shadow_offset_y = config.get('manga_shadow_offset_y', 2)
+        self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
+        self.force_caps_lock = config.get('manga_force_caps_lock', False)
+        self.skip_inpainting = config.get('manga_skip_inpainting', False)  # Default: perform inpainting
+        self.free_text_only_bg_opacity = bool(config.get('manga_free_text_only_bg_opacity', False))
+
+        # Safe area controls
+        self.safe_area_enabled = bool(config.get('manga_safe_area_enabled', False))
+        try:
+            self.safe_area_scale = float(config.get('manga_safe_area_scale', 1.0))
+        except Exception:
+            self.safe_area_scale = 1.0
+        # Clamp scale
+        if self.safe_area_scale <= 0:
+            self.safe_area_scale = 1.0
+
+        # Font size multiplier mode - Load from config
+        self.font_size_mode = config.get('manga_font_size_mode', 'fixed')  # 'fixed' or 'multiplier'
+        self.font_size_multiplier = config.get('manga_font_size_multiplier', 1.0)  # Default multiplierr
+        
+        #inpainting quality
+        self.inpaint_quality = config.get('manga_inpaint_quality', 'high')  # 'high' or 'fast'
+        
+        self._log("\n🔧 MangaTranslator initialized with settings:")
+        self._log(f"   API Delay: {self.api_delay}s")
+        self._log(f"   Temperature: {self.temperature}")
+        self._log(f"   Max Output Tokens: {self.max_tokens}")
+        self._log(f"   Input Token Limit: {'DISABLED' if self.input_token_limit is None else self.input_token_limit}")
+        self._log(f"   Contextual Translation: {'ENABLED' if self.contextual_enabled else 'DISABLED'}")
+        self._log(f"   Translation History Limit: {self.translation_history_limit}")
+        self._log(f"   Rolling History: {'ENABLED' if self.rolling_history_enabled else 'DISABLED'}")
+        self._log(f"   Font Path: {self.font_path or 'Default'}")
+        self._log(f"   Text Rendering: BG {self.text_bg_style}, Opacity {int(self.text_bg_opacity/255*100)}%")
+        self._log(f"   Shadow: {'ENABLED' if self.shadow_enabled else 'DISABLED'}\n")
+        
+        # Note: self.manga_settings is a property that reads fresh from config
+
+        # Initialize local inpainter if configured (uses pool system).
+        # Skip if:
+        #   - skip_inpainter_init=True (e.g., when creating temp instance for pool access), OR
+        #   - the Skip Inpainter toggle is on (self.skip_inpainting set from
+        #     config['manga_skip_inpainting'] a few lines above). Without this
+        #     check, the constructor blocks on a 30s inpaint-pool polling loop
+        #     and spams "⏳ Still waiting for inpainter pool..." even though the
+        #     user asked for inpainting to be skipped entirely.
+        if (
+            not skip_inpainter_init
+            and not getattr(self, 'skip_inpainting', False)
+            and self.manga_settings.get('inpainting', {}).get('method') == 'local'
+        ):
+            self._initialize_local_inpainter()
+        elif getattr(self, 'skip_inpainting', False):
+            self._log("🚫 Skip Inpainter enabled — not initializing local inpainter pool", "debug")
+            
+        # NOTE: All advanced settings are now accessed dynamically via properties
+        # This allows settings changes to take effect immediately without GUI restart
+        # Cached variables have been removed - see properties below in this class
+        
+        # RAM cap
+        adv = self.manga_settings.get('advanced', {})
+        self.ram_cap_enabled = bool(adv.get('ram_cap_enabled', False))
+        self.ram_cap_mb = int(adv.get('ram_cap_mb', 0) or 0)
+        self.ram_cap_mode = str(adv.get('ram_cap_mode', 'soft'))
+        self.ram_check_interval_sec = float(adv.get('ram_check_interval_sec', 1.0))
+        self.ram_recovery_margin_mb = int(adv.get('ram_recovery_margin_mb', 256))
+        self._mem_over_cap = False
+        self._mem_stop_event = threading.Event()
+        self._mem_thread = None
+        # Advanced RAM gate tuning
+        self.ram_gate_timeout_sec = float(adv.get('ram_gate_timeout_sec', 10.0))
+        self.ram_min_floor_over_baseline_mb = int(adv.get('ram_min_floor_over_baseline_mb', 128))
+        # Measure baseline at init
+        try:
+            self.ram_baseline_mb = self._get_process_rss_mb() or 0
+        except Exception:
+            self.ram_baseline_mb = 0
+        if self.ram_cap_enabled and self.ram_cap_mb > 0:
+            self._init_ram_cap()
+    
+    def set_stop_flag(self, stop_flag):
+        """Set the stop flag for checking interruptions"""
+        self.stop_flag = stop_flag
+        self.cancel_requested = False
+    
+    def reset_stop_flags(self):
+        """Reset all stop flags when starting new translation"""
+        self.cancel_requested = False
+        self.is_processing = False
+        # Reset global flags
+        self.reset_global_flags()
+        self._log("🔄 Stop flags reset for new translation", "debug")
+
+    def _check_stop(self):
+        """Check if stop has been requested using multiple sources"""
+        # During graceful stop, ALWAYS return False to let current image complete fully
+        # The main loop will check GRACEFUL_STOP at the START of each new image
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        
+        # Check global cancellation first
+        if self.is_globally_cancelled():
+            self.cancel_requested = True
+            return True
+            
+        # Check local stop flag (only if it exists and is set)
+        if hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set():
+            self.cancel_requested = True
+            return True
+            
+        # Check processing flag
+        if hasattr(self, 'cancel_requested') and self.cancel_requested:
+            return True
+            
+        return False
+
+    def _setup_stdout_capture(self):
+        """Set up stdout capture to redirect print statements to GUI"""
+        import sys
+        import builtins
+        
+        # Store original print function
+        self._original_print = builtins.print
+        
+        # Create custom print function
+        def gui_print(*args, **kwargs):
+            """Custom print that redirects to GUI"""
+            # Convert args to string
+            message = ' '.join(str(arg) for arg in args)
+            
+            # Check if this is one of the specific messages we want to capture
+            # Added [FALLBACK and [MAIN markers to capture key attempts in GUI
+            if any(marker in message for marker in ['🔍', '✅', '⏳', '❌', '🔑', '[FALLBACK', '[MAIN', 'INFO:', 'ERROR:', 'WARNING:']):
+                if self.log_callback:
+                    # Clean up the message
+                    message = message.strip()
+                    
+                    # Determine level
+                    level = 'info'
+                    if 'ERROR:' in message or '❌' in message:
+                        level = 'error'
+                    elif 'WARNING:' in message or '⚠️' in message:
+                        level = 'warning'
+                    
+                    # Remove prefixes like "INFO:" if present
+                    for prefix in ['INFO:', 'ERROR:', 'WARNING:', 'DEBUG:']:
+                        message = message.replace(prefix, '').strip()
+                    
+                    # Send to GUI
+                    self.log_callback(message, level)
+                    return  # Don't print to console
+            
+            # For other messages, use original print
+            self._original_print(*args, **kwargs)
+        
+        # Replace the built-in print
+        builtins.print = gui_print
+    
+    def restore_print(self):
+        """Restore original print function to builtins"""
+        try:
+            import builtins
+            import sys
+            
+            # Remove this instance's log callback from the global registry
+            if hasattr(builtins, '_manga_log_callbacks'):
+                builtins._manga_log_callbacks.pop(id(self), None)
+                
+                # If no more manga translators are active, restore original print
+                # (mobile: only a manga print that is installed, _manga_print_restore_enabled)
+                if not builtins._manga_log_callbacks and _manga_print_restore_enabled():
+                    if hasattr(MangaTranslator, '_original_print_backup'):
+                        builtins.print = MangaTranslator._original_print_backup
+                        # Also restore in unified_api_client module
+                        try:
+                            import unified_api_client
+                            uc_module = sys.modules.get('unified_api_client')
+                            if uc_module:
+                                uc_module.__dict__['print'] = MangaTranslator._original_print_backup
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    
+    def __del__(self):
+        """Restore original print when MangaTranslator is destroyed"""
+        # Restore original print function
+        try:
+            self.restore_print()
+        except Exception:
+            pass
+        
+        # DO NOT call shutdown() here. During interpreter/GC teardown, frozen
+        # modules (ntpath, pathlib) may be partially unloaded, causing hard
+        # crashes in scan_cache_dir → pathlib.resolve → ntpath.realpath.
+        # Callers should call shutdown() explicitly when done.
+
+    def _cleanup_thread_locals(self):
+        """Aggressively release thread-local heavy objects (onnx sessions, detectors).
+        Respects unload_models_after_translation setting.
+        """
+        try:
+            # Check if unload is enabled in settings
+            unload_enabled = False
+            try:
+                if hasattr(self, 'manga_settings'):
+                    unload_enabled = self.manga_settings.get('advanced', {}).get('unload_models_after_translation', False)
+            except Exception:
+                pass
+            
+            if hasattr(self, '_thread_local'):
+                tl = self._thread_local
+                # Release thread-local inpainters only if unload is enabled
+                if hasattr(tl, 'local_inpainters') and isinstance(tl.local_inpainters, dict):
+                    try:
+                        if unload_enabled:
+                            for inp in list(tl.local_inpainters.values()):
+                                try:
+                                    if hasattr(inp, 'unload'):
+                                        inp.unload()
+                                except Exception:
+                                    pass
+                            tl.local_inpainters.clear()
+                        else:
+                            # Just clear references, don't unload models
+                            tl.local_inpainters.clear()
+                    except Exception:
+                        pass
+                # Return thread-local bubble detector to pool (DO NOT unload)
+                if hasattr(tl, 'bubble_detector') and tl.bubble_detector is not None:
+                    try:
+                        # Return to pool for reuse WITHOUT touching global CUDA caches
+                        self._return_bubble_detector_to_pool()
+                        # Keep thread-local reference intact for reuse in next image
+                        # Only clear if we're truly shutting down the thread
+                    except Exception:
+                        pass
+            
+            # Return checked-out inpainter to pool if we have one
+            try:
+                self._return_inpainter_to_pool()
+            except Exception:
+                pass
+        except Exception:
+            # Best-effort cleanup only
+            pass
+
+    def shutdown(self):
+        """Fully release resources for MangaTranslator (models, detectors, torch caches, threads)."""
+        try:
+            # Stop memory watchdog thread if running
+            if hasattr(self, '_mem_stop_event') and getattr(self, '_mem_stop_event', None) is not None:
+                try:
+                    self._mem_stop_event.set()
+                except Exception:
+                    pass
+            # Perform deep cleanup if enabled in settings
+            try:
+                self._deep_cleanup_models(force=True)
+            except Exception:
+                pass
+            try:
+                self._force_torch_teardown()
+            except Exception:
+                pass
+            try:
+                self._huggingface_teardown()
+            except Exception:
+                pass
+            try:
+                self._trim_working_set()
+            except Exception:
+                pass
+            # Null out heavy references
+            for attr in [
+                'client', 'vision_client', 'local_inpainter', 'hybrid_inpainter', 'inpainter',
+                'bubble_detector', 'ocr_manager', 'history_manager', 'current_image', 'current_mask',
+                'text_regions', 'translated_regions', 'final_image'
+            ]:
+                try:
+                    if hasattr(self, attr):
+                        setattr(self, attr, None)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self._log(f"⚠️ shutdown() encountered: {e}", "warning")
+            except Exception:
+                pass
+
+    def _sync_environment_variables(self):
+        """Sync all GUI environment variables to ensure manga translation respects GUI settings
+        This ensures settings like RETRY_TRUNCATED, THINKING_BUDGET, etc. are properly set
+        """
+        try:
+            # Get config from main_gui if available
+            if not hasattr(self, 'main_gui') or not self.main_gui:
+                return
+            
+            # Use the main_gui's set_all_environment_variables method if available
+            if hasattr(self.main_gui, 'set_all_environment_variables'):
+                self.main_gui.set_all_environment_variables()
+            else:
+                # Fallback: manually set key variables
+                config = self.main_gui.config if hasattr(self.main_gui, 'config') else {}
+                
+                # Thinking settings (most important for speed)
+                thinking_enabled = config.get('enable_gemini_thinking', True)
+                # Use unified config keys (saved by GUI)
+                thinking_budget = config.get('thinking_budget', config.get('gemini_thinking_budget', -1))
+                thinking_level = config.get('thinking_level', config.get('gemini_thinking_level', 'high'))
+                
+                # CRITICAL FIX: If thinking is disabled, force budget to 0 regardless of config value
+                if not thinking_enabled:
+                    thinking_budget = 0
+                
+                os.environ['ENABLE_GEMINI_THINKING'] = '1' if thinking_enabled else '0'
+                os.environ['GEMINI_THINKING_BUDGET'] = str(thinking_budget)
+                os.environ['THINKING_BUDGET'] = str(thinking_budget)  # Also set for unified_api_client
+                os.environ['GEMINI_THINKING_LEVEL'] = str(thinking_level)
+                
+                # Retry settings
+                retry_truncated = config.get('retry_truncated', False)
+                max_retry_tokens = config.get('max_retry_tokens', -1)
+                try:
+                    max_retry_tokens_int = int(max_retry_tokens)
+                except Exception:
+                    max_retry_tokens_int = -1
+                if max_retry_tokens_int <= 0:
+                    max_retry_tokens_int = int(config.get('max_output_tokens', getattr(self.main_gui, 'max_output_tokens', 65536)))
+                max_retries = config.get('max_retries', 7)
+                os.environ['RETRY_TRUNCATED'] = '1' if retry_truncated else '0'
+                os.environ['MAX_RETRY_TOKENS'] = str(max_retry_tokens_int)
+                os.environ['MAX_RETRIES'] = str(max_retries)
+                
+                # Safety settings
+                disable_gemini_safety = config.get('disable_gemini_safety', False)
+                os.environ['DISABLE_GEMINI_SAFETY'] = '1' if disable_gemini_safety else '0'
+
+            try:
+                config = self.main_gui.config if hasattr(self.main_gui, 'config') else {}
+                ocr_settings = ((config.get('manga_settings') or {}).get('ocr') or {})
+                os.environ['MANGA_OCR_DISABLE_THINKING'] = '1' if ocr_settings.get('manga_ocr_disable_thinking', True) else '0'
+            except Exception:
+                os.environ.setdefault('MANGA_OCR_DISABLE_THINKING', '1')
+                
+        except Exception as e:
+            self._log(f"⚠️ Failed to sync environment variables: {e}", "warning")
+    
+    def _force_torch_teardown(self):
+        """Best-effort teardown of PyTorch CUDA context and caches to drop closer to baseline.
+        Safe to call even if CUDA is not available.
+        """
+        try:
+            import torch, os, gc
+            # CPU: free cached tensors
+            try:
+                gc.collect()
+            except Exception:
+                pass
+            # CUDA path
+            if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+                # Try to clear cuBLAS workspaces (not always available)
+                try:
+                    getattr(torch._C, "_cuda_clearCublasWorkspaces")()
+                except Exception:
+                    pass
+                # Optional hard reset via CuPy if present
+                reset_done = False
+                try:
+                    import cupy
+                    try:
+                        cupy.cuda.runtime.deviceReset()
+                        reset_done = True
+                        self._log("CUDA deviceReset via CuPy", "debug")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # Fallback: attempt to call cudaDeviceReset from cudart on Windows
+                if os.name == 'nt' and not reset_done:
+                    try:
+                        import ctypes
+                        candidates = [
+                            "cudart64_12.dll", "cudart64_120.dll", "cudart64_110.dll",
+                            "cudart64_102.dll", "cudart64_101.dll", "cudart64_100.dll", "cudart64_90.dll"
+                        ]
+                        for name in candidates:
+                            try:
+                                dll = ctypes.CDLL(name)
+                                dll.cudaDeviceReset.restype = ctypes.c_int
+                                rc = dll.cudaDeviceReset()
+                                self._log(f"cudaDeviceReset via {name} rc={rc}", "debug")
+                                reset_done = True
+                                break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _huggingface_teardown(self):
+        """Best-effort teardown of HuggingFace/transformers/tokenizers state.
+        - Clears on-disk model cache for known repos (via _clear_hf_cache)
+        - Optionally purges relevant modules from sys.modules (AGGRESSIVE_HF_UNLOAD=1)
+        """
+        try:
+            import os, sys, gc
+            # Clear disk cache for detectors (and any default repo) to avoid growth across runs
+            try:
+                self._clear_hf_cache()
+            except Exception:
+                pass
+            # Optional aggressive purge of modules to free Python-level caches
+            if os.getenv('AGGRESSIVE_HF_UNLOAD', '1') == '1':
+                prefixes = (
+                    'transformers',
+                    'huggingface_hub',
+                    'tokenizers',
+                    'safetensors',
+                    'accelerate',
+                )
+                to_purge = [m for m in list(sys.modules.keys()) if m.startswith(prefixes)]
+                for m in to_purge:
+                    try:
+                        del sys.modules[m]
+                    except Exception:
+                        pass
+                gc.collect()
+        except Exception:
+            pass
+
+    def _deep_cleanup_models(self, force=False):
+        """Release ALL model references and caches to reduce RAM after translation.
+        This is the COMPREHENSIVE cleanup that ensures all models are unloaded from RAM.
+        
+        Args:
+            force: If True, bypass the unload_models_after_translation setting check.
+                   Used during app shutdown to always release resources.
+        """
+        # Check if unload is enabled in settings before proceeding
+        if not force:
+            unload_enabled = self.manga_settings.get('advanced', {}).get('unload_models_after_translation', False)
+            if not unload_enabled:
+                self._log("⏭️ Skipping model cleanup - unload is disabled in settings", "info")
+                return
+            
+        self._log("🧹 Starting comprehensive model cleanup to free RAM...", "info")
+        
+        try:
+            # ========== 1. CLEANUP OCR MODELS ==========
+            try:
+                if hasattr(self, 'ocr_manager'):
+                    ocr_manager = getattr(self, 'ocr_manager', None)
+                    if ocr_manager:
+                        self._log("   Cleaning up OCR models...", "debug")
+                        # Clear all loaded OCR providers
+                        if hasattr(ocr_manager, 'providers'):
+                            for provider_name, provider in ocr_manager.providers.items():
+                                try:
+                                    # Unload the model
+                                    if hasattr(provider, 'model'):
+                                        provider.model = None
+                                    if hasattr(provider, 'processor'):
+                                        provider.processor = None
+                                    if hasattr(provider, 'tokenizer'):
+                                        provider.tokenizer = None
+                                    if hasattr(provider, 'reader'):
+                                        provider.reader = None
+                                    if hasattr(provider, 'is_loaded'):
+                                        provider.is_loaded = False
+                                    self._log(f"      ✓ Unloaded {provider_name} OCR provider", "debug")
+                                except Exception as e:
+                                    self._log(f"      Warning: Failed to unload {provider_name}: {e}", "debug")
+                        # Clear the entire OCR manager
+                        self.ocr_manager = None
+                        self._log("   ✓ OCR models cleaned up", "debug")
+            except Exception as e:
+                self._log(f"   Warning: OCR cleanup failed: {e}", "debug")
+
+            # ========== 2. CLEANUP BUBBLE DETECTOR (YOLO/RT-DETR) ==========
+            try:
+                # Instance-level bubble detector
+                if hasattr(self, 'bubble_detector') and self.bubble_detector is not None:
+                    self._log("   Cleaning up bubble detector (YOLO/RT-DETR)...", "debug")
+                    bd = self.bubble_detector
+                    try:
+                        if hasattr(bd, 'unload'):
+                            bd.unload(release_shared=True)  # This unloads YOLO and RT-DETR models
+                            self._log("      ✓ Called bubble detector unload", "debug")
+                    except Exception as e:
+                        self._log(f"      Warning: Bubble detector unload failed: {e}", "debug")
+                    self.bubble_detector = None
+                    self._log("   ✓ Bubble detector cleaned up", "debug")
+                    
+                # Also clean class-level shared RT-DETR models
+                try:
+                    from bubble_detector import BubbleDetector
+                    if hasattr(BubbleDetector, '_rtdetr_shared_model'):
+                        BubbleDetector._rtdetr_shared_model = None
+                    if hasattr(BubbleDetector, '_rtdetr_shared_processor'):
+                        BubbleDetector._rtdetr_shared_processor = None
+                    if hasattr(BubbleDetector, '_rtdetr_loaded'):
+                        BubbleDetector._rtdetr_loaded = False
+                    self._log("      ✓ Cleared shared RT-DETR cache", "debug")
+                except Exception:
+                    pass
+                # Clear preloaded detector spares
+                try:
+                    with MangaTranslator._detector_pool_lock:
+                        for rec in MangaTranslator._detector_pool.values():
+                            try:
+                                rec['spares'] = []
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            except Exception as e:
+                self._log(f"   Warning: Bubble detector cleanup failed: {e}", "debug")
+
+            # ========== 3. CLEANUP INPAINTERS ==========
+            try:
+                self._log("   Cleaning up inpainter models...", "debug")
+                
+                # Instance-level inpainter
+                if hasattr(self, 'local_inpainter') and self.local_inpainter is not None:
+                    try:
+                        if hasattr(self.local_inpainter, 'unload'):
+                            self.local_inpainter.unload()
+                            self._log("      ✓ Unloaded local inpainter", "debug")
+                    except Exception:
+                        pass
+                    self.local_inpainter = None
+                
+                # Hybrid inpainter
+                if hasattr(self, 'hybrid_inpainter') and self.hybrid_inpainter is not None:
+                    try:
+                        if hasattr(self.hybrid_inpainter, 'unload'):
+                            self.hybrid_inpainter.unload()
+                            self._log("      ✓ Unloaded hybrid inpainter", "debug")
+                    except Exception:
+                        pass
+                    self.hybrid_inpainter = None
+                
+                # Generic inpainter reference
+                if hasattr(self, 'inpainter') and self.inpainter is not None:
+                    try:
+                        if hasattr(self.inpainter, 'unload'):
+                            self.inpainter.unload()
+                            self._log("      ✓ Unloaded inpainter", "debug")
+                    except Exception:
+                        pass
+                    self.inpainter = None
+
+                # Clear preload pool - unload all spare instances
+                with MangaTranslator._inpaint_pool_lock:
+                    for key, rec in list(MangaTranslator._inpaint_pool.items()):
+                        try:
+                            # Unload all spare instances
+                            for spare in rec.get('spares') or []:
+                                try:
+                                    if hasattr(spare, 'unload'):
+                                        spare.unload()
+                                except Exception:
+                                    pass
+                            rec['spares'] = []
+                            rec['checked_out'] = []
+                        except Exception:
+                            pass
+                    MangaTranslator._inpaint_pool.clear()
+                    self._log("      ✓ Cleared inpainter preload pool", "debug")
+
+                # Release process-wide shared inpainter
+                if hasattr(MangaTranslator, '_shared_local_inpainter'):
+                    shared = getattr(MangaTranslator, '_shared_local_inpainter', None)
+                    if shared is not None:
+                        try:
+                            if hasattr(shared, 'unload'):
+                                shared.unload()
+                                self._log("      ✓ Unloaded shared inpainter", "debug")
+                        except Exception:
+                            pass
+                        setattr(MangaTranslator, '_shared_local_inpainter', None)
+                
+                self._log("   ✓ Inpainter models cleaned up", "debug")
+            except Exception as e:
+                self._log(f"   Warning: Inpainter cleanup failed: {e}", "debug")
+
+            # ========== 4. CLEANUP THREAD-LOCAL MODELS ==========
+            try:
+                if hasattr(self, '_thread_local') and self._thread_local is not None:
+                    self._log("   Cleaning up thread-local models...", "debug")
+                    tl = self._thread_local
+                    
+                    # Thread-local inpainters
+                    if hasattr(tl, 'local_inpainters') and isinstance(tl.local_inpainters, dict):
+                        for key, inp in list(tl.local_inpainters.items()):
+                            try:
+                                if hasattr(inp, 'unload'):
+                                    inp.unload()
+                                    self._log(f"      ✓ Unloaded thread-local inpainter: {key}", "debug")
+                            except Exception:
+                                pass
+                        tl.local_inpainters.clear()
+                    
+                    # Thread-local bubble detector
+                    if hasattr(tl, 'bubble_detector') and tl.bubble_detector is not None:
+                        try:
+                            if hasattr(tl.bubble_detector, 'unload'):
+                                tl.bubble_detector.unload(release_shared=False)
+                                self._log("      ✓ Unloaded thread-local bubble detector", "debug")
+                        except Exception:
+                            pass
+                        tl.bubble_detector = None
+                    
+                    self._log("   ✓ Thread-local models cleaned up", "debug")
+            except Exception as e:
+                self._log(f"   Warning: Thread-local cleanup failed: {e}", "debug")
+
+            # ========== 5. CLEAR PYTORCH/CUDA CACHE ==========
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    self._log("   ✓ Cleared CUDA cache", "debug")
+            except Exception:
+                pass
+
+            # ========== 6. FORCE GARBAGE COLLECTION ==========
+            try:
+                import gc
+                gc.collect()
+                # Multiple passes for stubborn references
+                gc.collect()
+                gc.collect()
+                self._log("   ✓ Forced garbage collection", "debug")
+            except Exception:
+                pass
+            
+            self._log("✅ Model cleanup complete - RAM should be freed", "info")
+            
+        except Exception as e:
+            # Never raise from deep cleanup
+            self._log(f"⚠️ Model cleanup encountered error: {e}", "warning")
+            pass
+
+    def _clear_hf_cache(self, repo_id: str = None):
+        """Best-effort: clear Hugging Face cache for a specific repo (RT-DETR by default).
+        This targets disk cache; it won’t directly reduce RAM but helps avoid growth across runs.
+        """
+        try:
+            # Determine repo_id from BubbleDetector if not provided
+            if repo_id is None:
+                try:
+                    import bubble_detector as _bdmod
+                    BD = getattr(_bdmod, 'BubbleDetector', None)
+                    if BD is not None and hasattr(BD, '_rtdetr_repo_id'):
+                        repo_id = getattr(BD, '_rtdetr_repo_id') or 'ogkalu/comic-text-and-bubble-detector'
+                    else:
+                        repo_id = 'ogkalu/comic-text-and-bubble-detector'
+                except Exception:
+                    repo_id = 'ogkalu/comic-text-and-bubble-detector'
+
+            # Try to use huggingface_hub to delete just the matching repo cache
+            try:
+                from huggingface_hub import scan_cache_dir
+                info = scan_cache_dir()
+                repos = getattr(info, 'repos', [])
+                to_delete = []
+                for repo in repos:
+                    rid = getattr(repo, 'repo_id', None) or getattr(repo, 'id', None)
+                    if rid == repo_id:
+                        to_delete.append(repo)
+                if to_delete:
+                    # Prefer the high-level deletion API if present
+                    if hasattr(info, 'delete_repos'):
+                        info.delete_repos(to_delete)
+                    else:
+                        import shutil
+                        for repo in to_delete:
+                            repo_dir = getattr(repo, 'repo_path', None) or getattr(repo, 'repo_dir', None)
+                            if repo_dir and os.path.exists(repo_dir):
+                                shutil.rmtree(repo_dir, ignore_errors=True)
+            except Exception:
+                # Fallback: try removing default HF cache dir for this repo pattern
+                try:
+                    from pathlib import Path
+                    hf_home = os.environ.get('HF_HOME')
+                    if hf_home:
+                        base = Path(hf_home)
+                    else:
+                        base = Path.home() / '.cache' / 'huggingface' / 'hub'
+                    # Repo cache dirs are named like models--{org}--{name}
+                    safe_name = repo_id.replace('/', '--')
+                    candidates = list(base.glob(f'models--{safe_name}*'))
+                    import shutil
+                    for c in candidates:
+                        shutil.rmtree(str(c), ignore_errors=True)
+                except Exception:
+                    pass
+        except Exception:
+            # Best-effort only
+            pass
+
+    def _trim_working_set(self):
+        """Release freed memory back to the OS where possible.
+        - On Windows: use EmptyWorkingSet on current process
+        - On Linux: attempt malloc_trim(0)
+        - On macOS: no direct API; rely on GC
+        """
+        import sys
+        import platform
+        try:
+            system = platform.system()
+            if system == 'Windows':
+                import ctypes
+                psapi = ctypes.windll.psapi
+                kernel32 = ctypes.windll.kernel32
+                h_process = kernel32.GetCurrentProcess()
+                psapi.EmptyWorkingSet(h_process)
+            elif system == 'Linux':
+                import ctypes
+                libc = ctypes.CDLL('libc.so.6')
+                try:
+                    libc.malloc_trim(0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _get_process_rss_mb(self) -> int:
+        """Return current RSS in MB (cross-platform best-effort)."""
+        try:
+            import psutil, os as _os
+            return int(psutil.Process(_os.getpid()).memory_info().rss / (1024*1024))
+        except Exception:
+            # Windows fallback
+            try:
+                import ctypes, os as _os
+                class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                    _fields_ = [
+                        ("cb", ctypes.c_uint),
+                        ("PageFaultCount", ctypes.c_uint),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t),
+                    ]
+                GetCurrentProcess = ctypes.windll.kernel32.GetCurrentProcess
+                GetProcessMemoryInfo = ctypes.windll.psapi.GetProcessMemoryInfo
+                counters = PROCESS_MEMORY_COUNTERS()
+                counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+                GetProcessMemoryInfo(GetCurrentProcess(), ctypes.byref(counters), counters.cb)
+                return int(counters.WorkingSetSize / (1024*1024))
+            except Exception:
+                return 0
+
+    def _apply_windows_job_memory_limit(self, cap_mb: int) -> bool:
+        """Apply a hard memory cap using Windows Job Objects. Returns True on success."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
+            JobObjectExtendedLimitInformation = 9
+
+            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                    ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_void_p),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD),
+                ]
+
+            class IO_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_ulonglong),
+                    ("WriteOperationCount", ctypes.c_ulonglong),
+                    ("OtherOperationCount", ctypes.c_ulonglong),
+                    ("ReadTransferCount", ctypes.c_ulonglong),
+                    ("WriteTransferCount", ctypes.c_ulonglong),
+                    ("OtherTransferCount", ctypes.c_ulonglong),
+                ]
+
+            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                    ("IoInfo", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
+                ]
+
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            CreateJobObject = kernel32.CreateJobObjectW
+            CreateJobObject.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+            CreateJobObject.restype = wintypes.HANDLE
+            SetInformationJobObject = kernel32.SetInformationJobObject
+            SetInformationJobObject.argtypes = [wintypes.HANDLE, wintypes.INT, ctypes.c_void_p, wintypes.DWORD]
+            SetInformationJobObject.restype = wintypes.BOOL
+            AssignProcessToJobObject = kernel32.AssignProcessToJobObject
+            AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            AssignProcessToJobObject.restype = wintypes.BOOL
+            GetCurrentProcess = kernel32.GetCurrentProcess
+            GetCurrentProcess.restype = wintypes.HANDLE
+
+            hJob = CreateJobObject(None, None)
+            if not hJob:
+                return False
+
+            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY
+            info.JobMemoryLimit = ctypes.c_size_t(int(cap_mb) * 1024 * 1024)
+
+            ok = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info))
+            if not ok:
+                return False
+
+            ok = AssignProcessToJobObject(hJob, GetCurrentProcess())
+            if not ok:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _memory_watchdog(self):
+        try:
+            import time
+            while not self._mem_stop_event.is_set():
+                if not self.ram_cap_enabled or self.ram_cap_mb <= 0:
+                    break
+                rss = self._get_process_rss_mb()
+                if rss and rss > self.ram_cap_mb:
+                    self._mem_over_cap = True
+                    # Aggressive attempt to reduce memory (respects unload setting)
+                    try:
+                        self._deep_cleanup_models()
+                    except Exception:
+                        pass
+                    try:
+                        self._trim_working_set()
+                    except Exception:
+                        pass
+                    # Wait a bit before re-checking
+                    time.sleep(max(0.2, self.ram_check_interval_sec / 2))
+                    time.sleep(0.1)  # Brief pause for stability
+                    self._log("💤 Memory watchdog pausing briefly for stability", "debug")
+                else:
+                    # Below cap or couldn't read RSS
+                    self._mem_over_cap = False
+                    time.sleep(self.ram_check_interval_sec)
+        except Exception:
+            pass
+
+    def _init_ram_cap(self):
+        # Hard cap via Windows Job Object if selected and on Windows
+        try:
+            import platform
+            if self.ram_cap_mode.startswith('hard') or self.ram_cap_mode == 'hard':
+                if platform.system() == 'Windows':
+                    if not self._apply_windows_job_memory_limit(self.ram_cap_mb):
+                        self._log("⚠️ Failed to apply hard RAM cap; falling back to soft mode", "warning")
+                        self.ram_cap_mode = 'soft'
+                else:
+                    self._log("⚠️ Hard RAM cap only supported on Windows; using soft mode", "warning")
+                    self.ram_cap_mode = 'soft'
+        except Exception:
+            self.ram_cap_mode = 'soft'
+        # Start watchdog regardless of mode to proactively stay under cap during operations
+        try:
+            self._mem_thread = threading.Thread(target=self._memory_watchdog, daemon=True)
+            self._mem_thread.start()
+        except Exception:
+            pass
+
+    def _block_if_over_cap(self, context_msg: str = ""):
+        # If over cap, block until we drop under cap - margin
+        if not self.ram_cap_enabled or self.ram_cap_mb <= 0:
+            return
+        import time
+        # Never require target below baseline + floor margin
+        baseline = max(0, getattr(self, 'ram_baseline_mb', 0))
+        floor = baseline + max(0, self.ram_min_floor_over_baseline_mb)
+        # Compute target below cap by recovery margin, but not below floor
+        target = self.ram_cap_mb - max(64, min(self.ram_recovery_margin_mb, self.ram_cap_mb // 4))
+        target = max(target, floor)
+        start = time.time()
+        waited = False
+        last_log = 0
+        while True:
+            rss = self._get_process_rss_mb()
+            now = time.time()
+            if rss and rss <= target:
+                break
+            # Timeout to avoid deadlock when baseline can't go lower than target
+            if now - start > max(2.0, self.ram_gate_timeout_sec):
+                self._log(f"⌛ RAM gate timeout for {context_msg}: RSS={rss} MB, target={target} MB; proceeding in low-memory mode", "warning")
+                break
+            waited = True
+            # Periodic log to help diagnose
+            if now - last_log > 3.0 and rss:
+                self._log(f"⏳ Waiting for RAM drop: RSS={rss} MB, target={target} MB ({context_msg})", "info")
+                last_log = now
+            # Attempt cleanup while waiting (respects unload setting)
+            try:
+                self._deep_cleanup_models()
+            except Exception:
+                pass
+            try:
+                self._trim_working_set()
+            except Exception:
+                pass
+            if self._check_stop():
+                break
+            time.sleep(0.1)  # Brief pause for stability
+            self._log("💤 RAM gate pausing briefly for stability", "debug")
+        if waited and context_msg:
+            self._log(f"🧹 Proceeding with {context_msg} (RSS now {self._get_process_rss_mb()} MB; target {target} MB)", "info")
+
+    def set_batch_mode(self, enabled: bool, batch_size: int = 1):
+        """Enable or disable batch mode optimizations"""
+        self.batch_mode = enabled
+        self.batch_size = batch_size
+        
+        if enabled:
+            # Check if bubble detection is actually enabled before considering preload
+            ocr_settings = self.manga_settings.get('ocr', {}) if hasattr(self, 'manga_settings') else {}
+            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
+            
+            # Only suggest preloading if bubble detection is actually going to be used
+            if bubble_detection_enabled:
+                self._log("📦 BATCH MODE: Bubble detection models will load on first use")
+                # NOTE: We don't actually preload anymore to save RAM
+                # Models are loaded on-demand when first needed
+            
+            # Similarly for OCR models - they load on demand
+            if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                self._log(f"📦 BATCH MODE: {self.ocr_provider} will load on first use")
+                # NOTE: We don't preload OCR models either
+            
+            self._log(f"📦 BATCH MODE ENABLED: Processing {batch_size} images")
+            self._log(f"⏱️ API delay: {self.api_delay}s (preserved for rate limiting)")
+        else:
+            self._log("📝 BATCH MODE DISABLED")
+
+    def _get_custom_api_ocr_batch_size(self) -> int:
+        """Use custom-api OCR's separate batch toggle and size."""
+        try:
+            cfg = getattr(self.main_gui, 'config', {}) or {}
+            if not bool(cfg.get('manga_custom_api_ocr_batch_enabled', True)):
+                return 1
+            return max(1, int(cfg.get('manga_custom_api_ocr_batch_size', 5)))
+        except Exception:
+            return 1
+
+    def _get_rtdetr_onnx_filename(self, ocr_settings: Dict[str, Any]) -> str:
+        """Return the configured RT-DETR ONNX export filename."""
+        try:
+            from bubble_detector import BubbleDetector
+            return BubbleDetector.normalize_rtdetr_onnx_filename(
+                (ocr_settings or {}).get('rtdetr_onnx_variant', 'detector.onnx')
+            )
+        except Exception:
+            return 'detector.onnx'
+
+    def _detector_pool_key(self, det_type: str, model_id: str, ocr_settings: Dict[str, Any]):
+        if det_type == 'rtdetr_onnx':
+            return (det_type, model_id, self._get_rtdetr_onnx_filename(ocr_settings))
+        return (det_type, model_id)
+
+    def _current_detector_selection(self):
+        """Return (detector_type, model_id, pool_key) for the current live OCR settings."""
+        ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
+        det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+        model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+        try:
+            if det_type in ('rtdetr', 'rtdetr_onnx'):
+                if model_id and (model_id.lower().endswith('.json') or os.path.isfile(model_id)):
+                    model_id = ''
+                if not model_id:
+                    model_id = 'ogkalu/comic-text-and-bubble-detector'
+            elif det_type in ('yolo', 'custom'):
+                if model_id and model_id.lower().endswith('.json'):
+                    model_id = ''
+        except Exception:
+            pass
+        return det_type, model_id, self._detector_pool_key(det_type, model_id, ocr_settings)
+
+    def _ensure_bubble_detector_ready(self, ocr_settings):
+        """Ensure a usable BubbleDetector for current thread, auto-reloading models after cleanup."""
+        try:
+            bd = self._get_thread_bubble_detector()
+            detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            # Sanitize model reference (ignore JSON paths)
+            try:
+                model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path')
+                if isinstance(model_id, str) and model_id.lower().endswith('.json'):
+                    model_id = ''
+            except Exception:
+                model_id = None
+            if detector_type == 'rtdetr_onnx':
+                onnx_filename = self._get_rtdetr_onnx_filename(ocr_settings)
+                already_loaded = (
+                    getattr(bd, 'rtdetr_onnx_loaded', False)
+                    and getattr(bd, 'rtdetr_onnx_filename', None) == onnx_filename
+                )
+                if not already_loaded:
+                    if not model_id:
+                        return None
+                    if not bd.load_rtdetr_onnx_model(model_id=model_id, onnx_filename=onnx_filename):
+                        return None
+            elif detector_type == 'rtdetr':
+                if not getattr(bd, 'rtdetr_loaded', False):
+                    if not model_id:
+                        return None
+                    if not bd.load_rtdetr_model(model_id=model_id):
+                        return None
+            elif detector_type == 'yolo':
+                model_path = ocr_settings.get('bubble_model_path')
+                if model_path and not getattr(bd, 'model_loaded', False):
+                    if not bd.load_model(model_path):
+                        return None
+            else:  # auto
+                # Prefer RT-DETR if available, else YOLO if configured
+                if not getattr(bd, 'rtdetr_loaded', False):
+                    bd.load_rtdetr_model(model_id=ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path'))
+            return bd
+        except Exception:
+            return None
+
+    def _merge_with_bubble_detection(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
+        """Merge text regions by bubble and filter based on RT-DETR class settings"""
+        try:
+                # Get detector settings from config
+            ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
+            detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            
+            # Log critical settings
+            self._log("\n🔍 CRITICAL DETECTION SETTINGS:", "info")
+            self._log(f"   • Detector type: {detector_type}", "info")
+            self._log(f"   • RT-DETR for OCR regions: {ocr_settings.get('use_rtdetr_for_ocr_regions', True)}", "info")
+            self._log(f"   • Bubble detection: {ocr_settings.get('bubble_detection_enabled', True)}", "info")
+            self._log(f"   • Free text enabled: {ocr_settings.get('detect_free_text', True)}", "info")
+            
+            # Log current OCR and detection settings
+            self._log("⚙️ Current OCR Settings:", "info")
+            self._log(f"   • Detector: {detector_type}", "info")
+            self._log(f"   • Bubble detection: {ocr_settings.get('bubble_detection_enabled', True)}", "info")
+            self._log(f"   • RT-DETR guide: {ocr_settings.get('use_rtdetr_for_ocr_regions', True)}", "info")
+            self._log(f"   • Free text detection: {ocr_settings.get('detect_free_text', True)}", "info")
+            self._log(f"   • RT-DETR confidence: {ocr_settings.get('rtdetr_confidence', 0.3)}", "info")
+            
+            # Ensure detector is ready (auto-reload after cleanup)
+            bd = self._ensure_bubble_detector_ready(ocr_settings)
+            if bd is None:
+                self._log("⚠️ Bubble detector unavailable after cleanup; falling back to proximity merge", "warning")
+                # Use more conservative threshold for Azure/Google to avoid cross-bubble merging
+                threshold = 30 if getattr(self, 'ocr_provider', '').lower() in ('azure', 'google') else 50
+                return self._merge_nearby_regions(regions, threshold=threshold)
+            
+            # Check if bubble detection is enabled
+            if not ocr_settings.get('bubble_detection_enabled', True):
+                self._log("📦 Bubble detection is disabled in settings", "info")
+                # Use more conservative threshold for Azure/Google to avoid cross-bubble merging
+                threshold = 30 if getattr(self, 'ocr_provider', '').lower() in ('azure', 'google') else 50
+                return self._merge_nearby_regions(regions, threshold=threshold)
+            
+            # Initialize thread-local detector
+            bd = self._get_thread_bubble_detector()
+            
+            bubbles = None
+            rtdetr_detections = None
+            
+            if detector_type == 'rtdetr_onnx':
+                self._log("🤖 Using RTEDR_onnx for bubble detection", "info")
+                onnx_filename = self._get_rtdetr_onnx_filename(ocr_settings)
+                already_loaded = (
+                    getattr(bd, 'rtdetr_onnx_loaded', False)
+                    and getattr(bd, 'rtdetr_onnx_filename', None) == onnx_filename
+                )
+                if not already_loaded:
+                    self._log("📥 Loading RTEDR_onnx model...", "info")
+                    model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or 'ogkalu/comic-text-and-bubble-detector'
+                    if not bd.load_rtdetr_onnx_model(model_id=model_id, onnx_filename=onnx_filename):
+                        self._log("⚠️ Failed to load RTEDR_onnx, falling back to traditional merging", "warning")
+                        return self._merge_nearby_regions(regions)
+                    else:
+                        # Model loaded successfully - mark in pool for reuse
+                        try:
+                            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                            key = self._detector_pool_key('rtdetr_onnx', model_id, ocr_settings)
+                            with MangaTranslator._detector_pool_lock:
+                                if key not in MangaTranslator._detector_pool:
+                                    MangaTranslator._detector_pool[key] = {'spares': []}
+                                # Mark this detector type as loaded for next run
+                                MangaTranslator._detector_pool[key]['loaded'] = True
+                        except Exception:
+                            pass
+                rtdetr_confidence = ocr_settings.get('rtdetr_confidence', 0.3)
+                detect_empty = ocr_settings.get('detect_empty_bubbles', True)
+                detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
+                detect_free_text = ocr_settings.get('detect_free_text', True)
+                use_rtdetr_guide = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+                
+                self._log(f"📋 RT-DETR ONNX Settings:", "info")
+                self._log(f"   RT-DETR Guide: {'✓' if use_rtdetr_guide else '✗'}", "info")
+                self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
+                self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
+                self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
+                self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
+                self._log(f"🔍 Running RT-DETR detection on: {image_path}", "info")
+                # Get raw detections for logging
+                self._log("\n🔍 Running RT-DETR detection...", "info")
+                rtdetr_detections = bd.detect_with_rtdetr_onnx(
+                    image_path=image_path,
+                    confidence=rtdetr_confidence,
+                    return_all_bubbles=True  # Get all detections for analysis
+                )
+                
+                # Log what was detected
+                self._log("📊 RT-DETR detection results:", "info")
+                for class_name, boxes in rtdetr_detections.items():
+                    self._log(f"   • {class_name}: {len(boxes)} detected", "info")
+                    if boxes:
+                        for i, box in enumerate(boxes):
+                            conf = box[4] if len(box) > 4 else 'N/A'
+                            self._log(f"     - Box {i+1}: conf={conf}", "debug")
+                
+                # Log raw detection counts and confidence scores
+                self._log("📊 RT-DETR raw detections:", "info")
+                for class_name, boxes in rtdetr_detections.items():
+                    if boxes:
+                        conf_scores = [box[4] if len(box) > 4 else 0.0 for box in boxes]
+                        avg_conf = sum(conf_scores) / len(conf_scores) if conf_scores else 0
+                        self._log(f"   • {class_name}: {len(boxes)} detected (avg conf: {avg_conf:.2f})", "info")
+                        for i, box in enumerate(boxes):
+                            self._log(f"     Box {i+1}: {box[:4]}, conf={box[4] if len(box) > 4 else 'N/A'}", "debug")
+                    else:
+                        self._log(f"   • {class_name}: None detected", "info")
+                
+                # Combine enabled bubble types for merging based on settings
+                bubbles = []
+                if detect_empty and 'bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['bubbles'])
+                if detect_text_bubbles and 'text_bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['text_bubbles'])
+                # Store free text locations for filtering later
+                free_text_regions = rtdetr_detections.get('text_free', []) if detect_free_text else []
+                self._log(f"✅ RTEDR_onnx detected:", "success")
+                self._log(f"   {len(rtdetr_detections.get('bubbles', []))} empty bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_bubbles', []))} text bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_free', []))} free text regions", "info")
+            elif detector_type == 'rtdetr':
+                self._log("🤖 Using RT-DETR for bubble detection", "info")
+                
+                if not bd.rtdetr_loaded:
+                    self._log("📥 Loading RT-DETR model...", "info")
+                    if not bd.load_rtdetr_model():
+                        self._log("⚠️ Failed to load RT-DETR, falling back to traditional merging", "warning")
+                        return self._merge_nearby_regions(regions)
+                    else:
+                        # Model loaded successfully - mark in pool for reuse
+                        try:
+                            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                            key = ('rtdetr', model_id)
+                            with MangaTranslator._detector_pool_lock:
+                                if key not in MangaTranslator._detector_pool:
+                                    MangaTranslator._detector_pool[key] = {'spares': []}
+                                # Mark this detector type as loaded for next run
+                                MangaTranslator._detector_pool[key]['loaded'] = True
+                        except Exception:
+                            pass
+                
+                # Get settings
+                rtdetr_confidence = ocr_settings.get('rtdetr_confidence', 0.3)
+                detect_empty = ocr_settings.get('detect_empty_bubbles', True)
+                detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
+                detect_free_text = ocr_settings.get('detect_free_text', True)
+                
+                self._log(f"📋 RT-DETR class filters:", "info")
+                self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
+                self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
+                self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
+                self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
+
+                # Get FULL RT-DETR detections (not just bubbles)
+                rtdetr_detections = bd.detect_with_rtdetr(
+                    image_path=image_path,
+                    confidence=rtdetr_confidence,
+                    return_all_bubbles=False  # Get dict with all classes
+                )
+                
+                # Combine enabled bubble types for merging
+                bubbles = []
+                if detect_empty and 'bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['bubbles'])
+                if detect_text_bubbles and 'text_bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['text_bubbles'])
+                
+                # Store free text locations for filtering later
+                free_text_regions = rtdetr_detections.get('text_free', []) if detect_free_text else []
+
+                # Helper to test if a point lies in any bbox
+                def _point_in_any_bbox(cx, cy, boxes):
+                    try:
+                        for (bx, by, bw, bh) in boxes or []:
+                            if bx <= cx <= bx + bw and by <= cy <= by + bh:
+                                return True
+                    except Exception:
+                        pass
+                    return False
+                
+                self._log(f"✅ RT-DETR detected:", "success")
+                self._log(f"   {len(rtdetr_detections.get('bubbles', []))} empty bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_bubbles', []))} text bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_free', []))} free text regions", "info")
+                
+            elif detector_type == 'yolo':
+                # Use YOLOv8 (existing code)
+                self._log("🤖 Using YOLOv8 for bubble detection", "info")
+                
+                model_path = ocr_settings.get('bubble_model_path')
+                if not model_path:
+                    self._log("⚠️ No YOLO model configured, falling back to traditional merging", "warning")
+                    return self._merge_nearby_regions(regions)
+                
+                if not bd.model_loaded:
+                    self._log(f"📥 Loading YOLO model: {os.path.basename(model_path)}")
+                    if not bd.load_model(model_path):
+                        self._log("⚠️ Failed to load YOLO model, falling back to traditional merging", "warning")
+                        return self._merge_nearby_regions(regions)
+                
+                confidence = ocr_settings.get('bubble_confidence', 0.3)
+                self._log(f"🎯 Detecting bubbles with YOLO (confidence >= {confidence:.2f})")
+                bubbles = bd.detect_bubbles(image_path, confidence=confidence, use_rtdetr=False)
+                
+            else:
+                # Unknown detector type
+                self._log(f"❌ Unknown detector type: {detector_type}", "error")
+                self._log("   Valid options: rtdetr_onnx, rtdetr, yolo", "error")
+                return self._merge_nearby_regions(regions)
+            
+            if not bubbles:
+                self._log("⚠️ No bubbles detected, using traditional merging", "warning")
+                return self._merge_nearby_regions(regions)
+            
+            self._log(f"✅ Found {len(bubbles)} bubbles for grouping", "success")
+            
+            # Merge regions within bubbles
+            merged_regions = []
+            used_indices = set()
+            
+            # Build lookup of free text regions for exclusion
+            free_text_bboxes = free_text_regions if detector_type in ('rtdetr', 'rtdetr_onnx') else []
+            
+            # DEBUG: Log free text bboxes
+            if free_text_bboxes:
+                self._log(f"🔍 Free text exclusion zones: {len(free_text_bboxes)} regions", "debug")
+                for idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                    self._log(f"   Free text zone {idx + 1}: x={fx:.0f}, y={fy:.0f}, w={fw:.0f}, h={fh:.0f}", "debug")
+            else:
+                self._log(f"⚠️ No free text exclusion zones detected by RT-DETR", "warning")
+            
+            # Helper to check if a point is in any free text region
+            def _point_in_free_text(cx, cy, free_boxes):
+                try:
+                    for idx, (fx, fy, fw, fh) in enumerate(free_boxes or []):
+                        if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                            self._log(f"      ✓ Point ({cx:.0f}, {cy:.0f}) is in free text zone {idx + 1}", "debug")
+                            return True
+                except Exception as e:
+                    self._log(f"      ⚠️ Error checking free text: {e}", "debug")
+                    pass
+                return False
+            
+            for bubble_idx, (bx, by, bw, bh) in enumerate(bubbles):
+                bubble_regions = []
+                self._log(f"\n   Processing bubble {bubble_idx + 1}: x={bx:.0f}, y={by:.0f}, w={bw:.0f}, h={bh:.0f}", "debug")
+                
+                for idx, region in enumerate(regions):
+                    if idx in used_indices:
+                        continue
+                        
+                    rx, ry, rw, rh = region.bounding_box
+                    region_center_x = rx + rw / 2
+                    region_center_y = ry + rh / 2
+                    
+                    # Check if center is inside this bubble
+                    if (bx <= region_center_x <= bx + bw and 
+                        by <= region_center_y <= by + bh):
+                        
+                        self._log(f"      Region '{region.text[:20]}...' center ({region_center_x:.0f}, {region_center_y:.0f}) is in bubble", "debug")
+                        
+                        # CRITICAL: Don't merge if this region is in a free text area
+                        # Free text should stay separate from bubbles
+                        if _point_in_free_text(region_center_x, region_center_y, free_text_bboxes):
+                            # This region is in a free text area, don't merge it into bubble
+                            self._log(f"      ❌ SKIPPING: Region overlaps with free text area", "debug")
+                            continue
+                        
+                        self._log(f"      ✓ Adding region to bubble {bubble_idx + 1}", "debug")
+                        bubble_regions.append(region)
+                        used_indices.add(idx)
+                
+                if bubble_regions:
+                    # CRITICAL: Check if this "bubble" actually contains multiple separate bubbles
+                    # This happens when RT-DETR detects one large bubble over stacked speech bubbles
+                    split_groups = self._split_bubble_if_needed(bubble_regions)
+                    
+                    # Process each split group as a separate bubble
+                    for group_idx, group in enumerate(split_groups):
+                        merged_text = " ".join(r.text for r in group)
+                        
+                        min_x = min(r.bounding_box[0] for r in group)
+                        min_y = min(r.bounding_box[1] for r in group)
+                        max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in group)
+                        max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in group)
+                        
+                        all_vertices = []
+                        for r in group:
+                            if hasattr(r, 'vertices') and r.vertices:
+                                all_vertices.extend(r.vertices)
+                        
+                        if not all_vertices:
+                            all_vertices = [
+                                (min_x, min_y),
+                                (max_x, min_y),
+                                (max_x, max_y),
+                                (min_x, max_y)
+                            ]
+                        
+                        merged_region = TextRegion(
+                            text=merged_text,
+                            vertices=all_vertices,
+                            bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
+                            confidence=0.95,
+                            region_type='bubble_detected',
+                            bubble_bounds=(bx, by, bw, bh)  # Pass bubble_bounds in constructor
+                        )
+                        
+                        # Store original regions for masking
+                        merged_region.original_regions = group
+                        # Set both type flags consistently
+                        merged_region.region_type = 'text_bubble'
+                        merged_region.bubble_type = 'text_bubble'
+                        # Mark that this should be inpainted
+                        merged_region.should_inpaint = True
+                        
+                        self._log(f"   • Set region type: {merged_region.region_type}/{merged_region.bubble_type}", "debug")
+                        self._log(f"   • Inpainting: enabled", "debug")
+                        
+                        merged_regions.append(merged_region)
+                        
+                        # DEBUG: Verify bubble_bounds was set
+                        if not getattr(self, 'concise_logs', False):
+                            has_bb = hasattr(merged_region, 'bubble_bounds') and merged_region.bubble_bounds is not None
+                            self._log(f"   🔍 Merged region has bubble_bounds: {has_bb}", "debug")
+                            if has_bb:
+                                self._log(f"      bubble_bounds = {merged_region.bubble_bounds}", "debug")
+                        
+                        if len(split_groups) > 1:
+                            self._log(f"   Bubble {bubble_idx + 1}.{group_idx + 1}: Merged {len(group)} text regions (split from {len(bubble_regions)} total)", "info")
+                        else:
+                            self._log(f"   Bubble {bubble_idx + 1}: Merged {len(group)} text regions", "info")
+            
+            # Handle text outside bubbles based on RT-DETR settings
+            for idx, region in enumerate(regions):
+                if idx not in used_indices:
+                    # This text is outside any bubble
+                    
+                    # For RT-DETR mode, check if we should include free text
+                    if detector_type in ('rtdetr', 'rtdetr_onnx'):
+                        # Log region state before processing
+                        self._log(f"⚡ Processing text region outside bubbles: '{region.text[:30]}...'", "debug")
+                        self._log(f"   • Current state: {getattr(region, 'bubble_type', 'unclassified')}, should_inpaint={getattr(region, 'should_inpaint', False)}", "debug")
+                        self._log(f"   • Free text enabled: {ocr_settings.get('detect_free_text', True)}", "debug")
+                        self._log(f"   • RT-DETR guide enabled: {ocr_settings.get('use_rtdetr_for_ocr_regions', True)}", "debug")
+                        
+                        # If "Free Text" checkbox is checked, include ALL text outside bubbles
+                        # Don't require RT-DETR to specifically detect it as free text
+                        if ocr_settings.get('detect_free_text', True):
+                            region.should_inpaint = not getattr(self, 'free_text_only_bg_opacity', False)
+                            self._log(f"   • Setting should_inpaint=True (detect_free_text is enabled)", "debug")
+                            # If RT-DETR detected free text box covering this region's center, mark explicitly
+                            try:
+                                cx = region.bounding_box[0] + region.bounding_box[2] / 2
+                                cy = region.bounding_box[1] + region.bounding_box[3] / 2
+                                # Find which free text bbox this region belongs to (if any)
+                                found_free_text_box = False
+                                for fx, fy, fw, fh in free_text_bboxes:
+                                    if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                                        # Ensure this region is properly marked as free text
+                                        region.bubble_type = 'free_text'
+                                        region.region_type = 'free_text'  # Critical: Set both type flags
+                                        # CRITICAL: Set bubble_bounds to the RT-DETR free text detection box
+                                        # This ensures rendering uses the full RT-DETR bounds, not just OCR polygon
+                                        if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
+                                            region.bubble_bounds = (fx, fy, fw, fh)
+                                        found_free_text_box = True
+                                        self._log(f"✨ Free text region INCLUDED: '{region.text[:30]}...'", "debug")
+                                        self._log(f"   • Region type set to: {region.region_type}/{region.bubble_type}", "debug")
+                                        self._log(f"   • RT-DETR bounds: {(fx, fy, fw, fh)}", "debug")
+                                        self._log(f"   • Region text: '{region.text[:30]}...'", "debug")
+                                        self._log(f"   • RT-DETR box: {(fx, fy, fw, fh)}", "debug")
+                                        self._log(f"   • OCR box: {getattr(region, 'bounding_box', 'unknown')}", "debug")
+                                        self._log(f"   • Current state: bubble_type=free_text, should_inpaint={getattr(region, 'should_inpaint', True)}", "debug")
+                                        self._log(f"   Free text region INCLUDED: '{region.text[:30]}...'", "debug")
+                                        break
+                                
+                                if not found_free_text_box:
+                                    # Text outside bubbles but not in free text box - still mark as free text
+                                    region.bubble_type = 'free_text'
+                                    region.region_type = 'free_text'
+                                    # Use region's own bbox if no RT-DETR free text box found
+                                    if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
+                                        region.bubble_bounds = region.bounding_box
+                                    self._log(f"   Text outside bubbles INCLUDED (as free text): '{region.text[:30]}...'", "debug")
+                            except Exception:
+                                # Default to free text if check fails
+                                region.bubble_type = 'free_text'
+                                region.region_type = 'free_text'
+                                if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
+                                    region.bubble_bounds = region.bounding_box
+                        else:
+                            region.should_inpaint = False
+                            self._log(f"❌ Excluding text region (Free Text disabled):", "debug")
+                            self._log(f"   • Region text: '{region.text[:30]}...'", "debug")
+                            self._log(f"   • Current state: {getattr(region, 'bubble_type', 'unclassified')}, should_inpaint=False", "debug")
+                            self._log(f"   • Box coordinates: {getattr(region, 'bounding_box', 'unknown')}", "debug")
+                            self._log(f"   Text outside bubbles EXCLUDED (Free Text unchecked): '{region.text[:30]}...'", "info")
+                    else:
+                        # For YOLO/auto, include all text by default
+                        region.should_inpaint = True
+                    
+                    merged_regions.append(region)
+
+            # Log summary
+            regions_to_inpaint = sum(1 for r in merged_regions if getattr(r, 'should_inpaint', True))
+            regions_to_skip = len(merged_regions) - regions_to_inpaint
+
+            self._log(f"📊 Bubble detection complete: {len(regions)} → {len(merged_regions)} regions", "success")
+            if detector_type == 'rtdetr':
+                self._log(f"   {regions_to_inpaint} regions will be inpainted", "info")
+                if regions_to_skip > 0:
+                    self._log(f"   {regions_to_skip} regions will be preserved (Free Text unchecked)", "info")
+
+            return merged_regions
+            
+        except Exception as e:
+            self._log(f"❌ Bubble detection error: {str(e)}", "error")
+            self._log("   Falling back to traditional merging", "warning")
+            return self._merge_nearby_regions(regions)
+        
+    def set_full_page_context(self, enabled: bool, custom_prompt: str = None):
+        """Configure full page context translation mode
+        
+        Args:
+            enabled: Whether to translate all text regions in a single contextual request
+            custom_prompt: Optional custom prompt for full page context mode
+        """
+        self.full_page_context_enabled = enabled
+        if custom_prompt:
+            self.full_page_context_prompt = custom_prompt
+        
+        self._log(f"📄 Full page context mode: {'ENABLED' if enabled else 'DISABLED'}")
+        if enabled:
+            self._log("   All text regions will be sent together for contextual translation")
+        else:
+            self._log("   Text regions will be translated individually")
+    
+    def update_text_rendering_settings(self, 
+                                     bg_opacity: int = None,
+                                     bg_style: str = None,
+                                     bg_reduction: float = None,
+                                     font_style: str = None,
+                                     font_size: int = None,
+                                     text_color: tuple = None,
+                                     shadow_enabled: bool = None,
+                                     shadow_color: tuple = None,
+                                     shadow_offset_x: int = None,
+                                     shadow_offset_y: int = None,
+                                     shadow_blur: int = None,
+                                     force_caps_lock: bool = None):  # ADD THIS PARAMETER
+        """Update text rendering settings"""
+        self._log("📐 Updating text rendering settings:", "info")
+        
+        if bg_opacity is not None:
+            self.text_bg_opacity = max(0, min(255, bg_opacity))
+            self._log(f"  Background opacity: {int(self.text_bg_opacity/255*100)}%", "info")
+        if bg_style is not None and bg_style in ['box', 'circle', 'wrap']:
+            self.text_bg_style = bg_style
+            self._log(f"  Background style: {bg_style}", "info")
+        if bg_reduction is not None:
+            self.text_bg_reduction = max(0.5, min(2.0, bg_reduction))
+            self._log(f"  Background size: {int(self.text_bg_reduction*100)}%", "info")
+        if font_style is not None:
+            self.selected_font_style = font_style
+            font_name = os.path.basename(font_style) if font_style else 'Default'
+            self._log(f"  Font: {font_name}", "info")
+        if font_size is not None:
+            if font_size < 0:
+                # Negative value indicates multiplier mode
+                self.font_size_mode = 'multiplier'
+                self.font_size_multiplier = abs(font_size)
+                self.custom_font_size = None  # Clear fixed size
+                self._log(f"  Font size mode: Dynamic multiplier ({self.font_size_multiplier:.1f}x)", "info")
+            else:
+                # Positive value or 0 indicates fixed mode
+                self.font_size_mode = 'fixed'
+                self.custom_font_size = font_size if font_size > 0 else None
+                self._log(f"  Font size mode: Fixed ({font_size if font_size > 0 else 'Auto'})", "info")
+        if text_color is not None:
+            self.text_color = text_color
+            self._log(f"  Text color: RGB{text_color}", "info")
+        if shadow_enabled is not None:
+            self.shadow_enabled = shadow_enabled
+            self._log(f"  Shadow: {'Enabled' if shadow_enabled else 'Disabled'}", "info")
+        if shadow_color is not None:
+            self.shadow_color = shadow_color
+            self._log(f"  Shadow color: RGB{shadow_color}", "info")
+        # Keep outline color in sync so users don't see a white "shadow" from the outline
+        try:
+            if self.shadow_enabled and self.shadow_color is not None:
+                self.outline_color = self.shadow_color
+            else:
+                self.outline_color = (255, 255, 255)
+        except Exception:
+            pass
+        if shadow_offset_x is not None:
+            self.shadow_offset_x = shadow_offset_x
+        if shadow_offset_y is not None:
+            self.shadow_offset_y = shadow_offset_y
+        if shadow_blur is not None:
+            self.shadow_blur = max(0, shadow_blur)
+        if force_caps_lock is not None:  # ADD THIS BLOCK
+            self.force_caps_lock = force_caps_lock
+            self._log(f"  Force Caps Lock: {'Enabled' if force_caps_lock else 'Disabled'}", "info")
+            
+        self._log("✅ Rendering settings updated", "info")
+    
+    def _log(self, message: str, level: str = "info"):
+        """Log message to GUI or console, and also to file logger.
+        The file logger is configured in translator_gui._setup_file_logging().
+        """
+        # Concise pipeline logs: keep only high-level messages and errors/warnings
+        # Exclude all debug messages (blue text) in concise mode
+        if getattr(self, 'concise_logs', False):
+            # Always suppress debug messages in concise mode
+            if level == "debug":
+                return
+            # Keep errors and warnings
+            if level in ("error", "warning"):
+                pass
+            else:
+                _msg = message.lstrip() if isinstance(message, str) else str(message)
+                
+                # Always allow API-related logs (these should always be visible)
+                api_indicators = [
+                    '[Thread-', 'Thread-Thread',  # Thread logs from API calls
+                    '🔑',  # Key emoji
+                    'HTTP Request:', 'Sending request', 'API call',
+                    'Using Key#', 'Temperature:', 'Max tokens:',
+                    'Waiting', 'waiting', 'before next API',
+                    'staggered', 'staggering', 'queuing',
+                    'marked', 'rotation', 'error',
+                    'thinking', 'Thinking',  # Thinking tokens
+                    'fallback', 'Fallback', 'main', 'refusal', 'Refusal',
+                    'Extracting text', 'Got text from',
+                    'openai client', 'Gemini', 'gemini', 'Safety',
+                ]
+                is_api_log = any(indicator in _msg for indicator in api_indicators)
+                
+                if not is_api_log:
+                    # For non-API logs, check if it starts with an emoji
+                    # Emojis are in Unicode ranges: U+1F300-U+1F9FF, U+2600-U+26FF, U+2700-U+27BF
+                    if _msg:
+                        first_char = _msg[0]
+                        # Check if first character is an emoji
+                        is_emoji = (
+                            '\U0001F300' <= first_char <= '\U0001F9FF' or  # Emoticons, symbols, misc
+                            '\u2600' <= first_char <= '\u26FF' or          # Misc symbols
+                            '\u2700' <= first_char <= '\u27BF' or          # Dingbats
+                            first_char in '✅❌⚠ℹ✍❤⭐⭕⬇⬆'  # Common emojis
+                        )
+                        if not is_emoji:
+                            return
+        
+        # REMOVED: Batch mode log filtering was conflicting with concise logs toggle
+        # Users can control verbosity via the concise logs toggle instead
+        
+        # Send to GUI if available
+        if self.log_callback:
+            try:
+                self.log_callback(message, level)
+            except Exception:
+                # Fall back to print if GUI callback fails
+                print(message)
+        else:
+            print(message)
+        
+        # Always record to the Python logger (file)
+        try:
+            _logger = logging.getLogger(__name__)
+            if level == "error":
+                _logger.error(message)
+            elif level == "warning":
+                _logger.warning(message)
+            elif level == "debug":
+                _logger.debug(message)
+            else:
+                # Map custom levels like 'success' to INFO
+                _logger.info(message)
+        except Exception:
+            pass
+
+    def _is_primarily_english(self, text: str) -> bool:
+        """Heuristic: treat text as English if it has no CJK and a high ASCII ratio.
+        Conservative by default to avoid dropping legitimate content.
+        Tunable via manga_settings.ocr:
+          - english_exclude_threshold (float, default 0.70)
+          - english_exclude_min_chars (int, default 4)
+          - english_exclude_short_tokens (bool, default False)
+        """
+        if not text:
+            return False
+        
+        # Pull tuning knobs from settings (with safe defaults)
+        ocr_settings = {}
+        try:
+            ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
+        except Exception:
+            pass
+        threshold = float(ocr_settings.get('english_exclude_threshold', 0.70))
+        min_chars = int(ocr_settings.get('english_exclude_min_chars', 4))
+        exclude_short = bool(ocr_settings.get('english_exclude_short_tokens', False))
+        
+        # 1) If text contains any CJK or full-width characters, do NOT treat as English
+        has_cjk = any(
+            '\u4e00' <= char <= '\u9fff' or  # Chinese
+            '\u3040' <= char <= '\u309f' or  # Hiragana  
+            '\u30a0' <= char <= '\u30ff' or  # Katakana
+            '\uac00' <= char <= '\ud7af' or  # Korean
+            '\uff00' <= char <= '\uffef'     # Full-width characters
+            for char in text
+        )
+        if has_cjk:
+            return False
+        
+        text_stripped = text.strip()
+        non_space_len = sum(1 for c in text_stripped if not c.isspace())
+        
+        # 2) By default, do not exclude very short tokens to avoid losing interjections like "Ah", "Eh?", etc.
+        if not exclude_short and non_space_len < max(1, min_chars):
+            return False
+        
+        # Optional legacy behavior: aggressively drop very short pure-ASCII tokens
+        if exclude_short:
+            if len(text_stripped) == 1 and text_stripped.isalpha() and ord(text_stripped) < 128:
+                self._log(f"   Excluding single English letter: '{text_stripped}'", "debug")
+                return True
+            if len(text_stripped) <= 3:
+                ascii_letters = sum(1 for char in text_stripped if char.isalpha() and ord(char) < 128)
+                if ascii_letters >= len(text_stripped) * 0.5:
+                    self._log(f"   Excluding short English text: '{text_stripped}'", "debug")
+                    return True
+        
+        # 3) Compute ASCII ratio (exclude spaces)
+        ascii_chars = sum(1 for char in text if 33 <= ord(char) <= 126)
+        total_chars = sum(1 for char in text if not char.isspace())
+        if total_chars == 0:
+            return False
+        ratio = ascii_chars / total_chars
+        
+        if ratio > threshold:
+            self._log(f"   Excluding English text ({ratio:.0%} ASCII, threshold {threshold:.0%}, len={non_space_len}): '{text[:30]}...'", "debug")
+            return True
+        return False
+
+    def _load_bubble_detector(self, ocr_settings, image_path):
+        """Load bubble detector with appropriate model based on settings.
+        Optimized to check pool for preloaded instances before attempting load.
+        
+        Returns:
+            dict: Detection results or None if failed
+        """
+        detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+        model_path = ocr_settings.get('bubble_model_path', '')
+        confidence = ocr_settings.get('bubble_confidence', 0.3)
+        # Sanitize RT-DETR model id (ignore JSON paths)
+        model_id = ocr_settings.get('rtdetr_model_url') or model_path
+        try:
+            if isinstance(model_id, str) and model_id.lower().endswith('.json'):
+                model_id = ''
+        except Exception:
+            model_id = None
+        
+        max_attempts = 2
+        retry_delay = 0.5
+        start_time = time.time()
+        
+        for attempt in range(1, max_attempts + 1):
+            # OPTIMIZATION: Get detector from pool (may already be loaded)
+            bd = self._get_thread_bubble_detector()
+            if bd is None:
+                elapsed = time.time() - start_time
+                if attempt < max_attempts:
+                    self._log(f"⚠️ Bubble detector checkout failed (attempt {attempt}/{max_attempts}, elapsed {elapsed:.1f}s) — retrying in {retry_delay}s", "warning")
+                    time.sleep(retry_delay)
+                    continue
+                self._log(f"❌ Bubble detector checkout failed after {max_attempts} attempts ({elapsed:.1f}s)", "error")
+                return None
+            
+            try:
+                # OPTIMIZATION: Check if detector is already loaded from pool before calling load
+                # This avoids redundant load checks inside the detector itself
+                if detector_type == 'rtdetr_onnx' or 'RTEDR_onnx' in str(detector_type):
+                    # Check if RT-DETR ONNX is already loaded (from pool or previous load)
+                    onnx_filename = self._get_rtdetr_onnx_filename(ocr_settings)
+                    already_loaded = (
+                        getattr(bd, 'rtdetr_onnx_loaded', False)
+                        and getattr(bd, 'rtdetr_onnx_filename', None) == onnx_filename
+                    )
+                    if not already_loaded:
+                        # Load RT-DETR ONNX model
+                        self._log(f"📥 Loading RT-DETR ONNX model (attempt {attempt}/{max_attempts})", "info")
+                        if not model_id:
+                            raise RuntimeError("Invalid RT-DETR model id (empty or JSON)")
+                        if not bd.load_rtdetr_onnx_model(model_id=model_id, onnx_filename=onnx_filename):
+                            raise RuntimeError("load_rtdetr_onnx_model returned False")
+                    # Model is loaded (either from pool or just loaded), run detection
+                    return bd.detect_with_rtdetr_onnx(
+                        image_path=image_path,
+                        confidence=ocr_settings.get('rtdetr_confidence', confidence),
+                        return_all_bubbles=False
+                    )
+                elif detector_type == 'rtdetr' or 'RT-DETR' in str(detector_type):
+                    # Check if RT-DETR PyTorch is already loaded
+                    already_loaded = getattr(bd, 'rtdetr_loaded', False)
+                    if not already_loaded:
+                        # Load RT-DETR (PyTorch) model
+                        self._log(f"📥 Loading RT-DETR model (attempt {attempt}/{max_attempts})", "info")
+                        if not model_id:
+                            raise RuntimeError("Invalid RT-DETR model id (empty or JSON)")
+                        if not bd.load_rtdetr_model(model_id=model_id):
+                            raise RuntimeError("load_rtdetr_model returned False")
+                    # Model is loaded, run detection
+                    return bd.detect_with_rtdetr(
+                        image_path=image_path,
+                        confidence=ocr_settings.get('rtdetr_confidence', confidence),
+                        return_all_bubbles=False
+                    )
+                elif detector_type == 'custom':
+                    # Custom model - try to determine type from path
+                    custom_path = ocr_settings.get('custom_model_path', model_path)
+                    if not custom_path:
+                        self._log("⚠️ Custom bubble model path not set; cannot load", "warning")
+                        return None
+                    if 'rtdetr' in custom_path.lower():
+                        # Custom RT-DETR model
+                        self._log(f"📥 Loading custom RT-DETR model (attempt {attempt}/{max_attempts})", "info")
+                        if not bd.load_rtdetr_model(model_id=custom_path):
+                            raise RuntimeError("custom load_rtdetr_model returned False")
+                        return bd.detect_with_rtdetr(
+                            image_path=image_path,
+                            confidence=confidence,
+                            return_all_bubbles=False
+                        )
+                    else:
+                        # Assume YOLO format for other custom models
+                        self._log(f"📥 Loading custom YOLO model (attempt {attempt}/{max_attempts})", "info")
+                        if not bd.load_model(custom_path):
+                            raise RuntimeError("custom load_model returned False")
+                        detections = bd.detect_bubbles(
+                            image_path,
+                            confidence=confidence
+                        )
+                        return {
+                            'text_bubbles': detections if detections else [],
+                            'text_free': [],
+                            'bubbles': []
+                        }
+                else:
+                    # Standard YOLO model
+                    # Check if YOLO is already loaded
+                    already_loaded = getattr(bd, 'model_loaded', False) and getattr(bd, 'model', None) is not None
+                    if not already_loaded:
+                        if not model_path:
+                            self._log("⚠️ Bubble model path not set for YOLO; cannot load", "warning")
+                            return None
+                        self._log(f"📥 Loading YOLO model (attempt {attempt}/{max_attempts})", "info")
+                        if not bd.load_model(model_path):
+                            raise RuntimeError("load_model returned False")
+                    # Model is loaded, run detection
+                    detections = bd.detect_bubbles(
+                        image_path,
+                        confidence=confidence
+                    )
+                    return {
+                        'text_bubbles': detections if detections else [],
+                        'text_free': [],
+                        'bubbles': []
+                    }
+            except Exception as e:
+                elapsed = time.time() - start_time
+                if attempt < max_attempts:
+                    self._log(f"⚠️ Bubble detector load/detect failed (attempt {attempt}/{max_attempts}, elapsed {elapsed:.1f}s): {e}", "warning")
+                    self._log(f"🔄 Retrying bubble detector in {retry_delay}s...", "info")
+                    time.sleep(retry_delay)
+                    continue
+                self._log(f"❌ Bubble detector failed after {max_attempts} attempts ({elapsed:.1f}s): {e}", "error")
+                return None
+        return None
+            
+    def _ensure_google_client(self):
+        try:
+            if getattr(self, 'vision_client', None) is None:
+                try:
+                    from google.cloud import vision
+                except ImportError:
+                    from google_vision_rest import vision  # REST fallback (U8): only without the SDK
+                google_path = self.ocr_config.get('google_credentials_path') if hasattr(self, 'ocr_config') else None
+                if google_path:
+                    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_path
+                self.vision_client = vision.ImageAnnotatorClient()
+                self._log("✅ Reinitialized Google Vision client", "debug")
+        except Exception as e:
+            self._log(f"❌ Failed to initialize Google Vision client: {e}", "error")
+
+    def _ensure_azure_client(self):
+        try:
+            if getattr(self, 'vision_client', None) is None:
+                from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                from azure.core.credentials import AzureKeyCredential
+                key = None
+                endpoint = None
+                try:
+                    key = (self.ocr_config or {}).get('azure_key')
+                    endpoint = (self.ocr_config or {}).get('azure_endpoint')
+                except Exception:
+                    pass
+                if not key:
+                    key = self.main_gui.config.get('azure_vision_key', '') if hasattr(self, 'main_gui') else None
+                if not endpoint:
+                    endpoint = self.main_gui.config.get('azure_vision_endpoint', '') if hasattr(self, 'main_gui') else None
+                if not key or not endpoint:
+                    raise ValueError("Azure credentials missing for client init")
+                self.vision_client = ImageAnalysisClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+                self._log("✅ Reinitialized Azure Computer Vision client", "debug")
+        except Exception as e:
+            self._log(f"❌ Failed to initialize Azure CV client: {e}", "error")
+
+    def detect_text_regions(self, image_path: str) -> List[TextRegion]:
+        """Detect text regions using configured OCR provider"""
+        # Reduce logging in batch mode
+        if not self.batch_mode:
+            self._log(f"🔍 Detecting text regions in: {os.path.basename(image_path)}")
+            self._log(f"   Using OCR provider: {self.ocr_provider.upper()}")
+        else:
+            # Only show batch progress if batch_current is set properly
+            if hasattr(self, 'batch_current') and hasattr(self, 'batch_size'):
+                self._log(f"🔍 [{self.batch_current}/{self.batch_size}] {os.path.basename(image_path)}")
+            else:
+                self._log(f"🔍 Detecting text: {os.path.basename(image_path)}")
+        
+        try:
+            # ============================================================
+            # CRITICAL: FORCE CLEAR ALL TEXT-RELATED CACHES
+            # This MUST happen for EVERY image to prevent text contamination
+            # NO EXCEPTIONS - batch mode or not, ALL caches get cleared
+            # ============================================================
+            
+            # 1. Clear OCR ROI cache (prevents text from previous images leaking)
+            # THREAD-SAFE: Use lock to prevent race conditions in parallel panel translation
+            if hasattr(self, 'ocr_roi_cache'):
+                with self._cache_lock:
+                    self.ocr_roi_cache.clear()
+                self._log("🧹 Cleared OCR ROI cache", "debug")
+            
+            # 2. Clear OCR manager caches (multiple potential cache locations)
+            if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                # Clear last_results (can contain text from previous image)
+                if hasattr(self.ocr_manager, 'last_results'):
+                    self.ocr_manager.last_results = None
+                # Clear generic cache
+                if hasattr(self.ocr_manager, 'cache'):
+                    self.ocr_manager.cache.clear()
+                # Clear provider-level caches
+                if hasattr(self.ocr_manager, 'providers'):
+                    for provider_name, provider in self.ocr_manager.providers.items():
+                        if hasattr(provider, 'last_results'):
+                            provider.last_results = None
+                        if hasattr(provider, 'cache'):
+                            provider.cache.clear()
+                self._log("🧹 Cleared OCR manager caches", "debug")
+            
+            # 3. Clear bubble detector cache (can contain text region info)
+            if hasattr(self, 'bubble_detector') and self.bubble_detector:
+                if hasattr(self.bubble_detector, 'last_detections'):
+                    self.bubble_detector.last_detections = None
+                if hasattr(self.bubble_detector, 'cache'):
+                    self.bubble_detector.cache.clear()
+                self._log("🧹 Cleared bubble detector cache", "debug")
+            
+            # Get manga settings from main_gui config
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            preprocessing = manga_settings.get('preprocessing', {})
+            ocr_settings = manga_settings.get('ocr', {})
+            
+            # Get text filtering settings
+            min_text_length = ocr_settings.get('min_text_length', 2)
+            exclude_english = ocr_settings.get('exclude_english_text', True)
+            
+            # Confidence threshold: Cloud providers (Google/Azure/Azure Document Intelligence) vs Local OCR
+            # Comic-translate approach: Local OCR uses RT-DETR confidence only (no OCR filtering)
+            if self.ocr_provider in ['google', 'azure', 'azure-document-intelligence']:
+                # Cloud providers: use configurable threshold (default 0.0 like comic-translate)
+                confidence_threshold = ocr_settings.get('cloud_ocr_confidence', 0.0)
+            else:
+                # Local OCR (RapidOCR, PaddleOCR, etc.): no filtering (trust RT-DETR regions)
+                confidence_threshold = 0.0
+            
+            # Load and preprocess image if enabled
+            if preprocessing.get('enabled', False):
+                self._log("📐 Preprocessing enabled - enhancing image quality")
+                processed_image_data = self._preprocess_image(image_path, preprocessing)
+            else:
+                # Read image with optional compression (separate from preprocessing)
+                try:
+                    comp_cfg = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+                    if comp_cfg.get('enabled', False):
+                        processed_image_data = self._load_image_with_compression_only(image_path, comp_cfg)
+                    else:
+                        with open(image_path, 'rb') as image_file:
+                            processed_image_data = image_file.read()
+                except Exception:
+                    with open(image_path, 'rb') as image_file:
+                        processed_image_data = image_file.read()
+            
+            # Compute per-image hash for caching (based on uploaded bytes)
+            # CRITICAL FIX #1: Never allow None page_hash to prevent cache key collisions
+            try:
+                import hashlib
+                page_hash = hashlib.sha1(processed_image_data).hexdigest()
+                
+                # CRITICAL: Never allow None page_hash
+                if page_hash is None:
+                    # Fallback: use image path + timestamp for uniqueness
+                    import time
+                    import uuid
+                    page_hash = hashlib.sha1(
+                        f"{image_path}_{time.time()}_{uuid.uuid4()}".encode()
+                    ).hexdigest()
+                    self._log("⚠️ Using fallback page hash for cache isolation", "warning")
+                
+                # CRITICAL: If image hash changed, force clear ROI cache
+                # THREAD-SAFE: Use lock for parallel panel translation
+                if hasattr(self, '_current_image_hash') and self._current_image_hash != page_hash:
+                    if hasattr(self, 'ocr_roi_cache'):
+                        with self._cache_lock:
+                            self.ocr_roi_cache.clear()
+                        self._log("🧹 Image changed - cleared ROI cache", "debug")
+                self._current_image_hash = page_hash
+            except Exception as e:
+                # Emergency fallback - never let page_hash be None
+                import uuid
+                page_hash = str(uuid.uuid4())
+                self._current_image_hash = page_hash
+                self._log(f"⚠️ Page hash generation failed: {e}, using UUID fallback", "error")
+            
+            regions = []
+            
+            # Route to appropriate provider
+            if self.ocr_provider == 'google':
+                # === GOOGLE CLOUD VISION ===
+                # Ensure client exists (it might have been cleaned up between runs)
+                try:
+                    self._ensure_google_client()
+                except Exception:
+                    pass
+                
+                # Check if we should use RT-DETR for text region detection (NEW FEATURE)
+                # IMPORTANT: bubble_detection_enabled should default to True for optimal detection
+                if ocr_settings.get('bubble_detection_enabled', True) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
+                    self._log("🎯 Using RT-DETR to guide Google Cloud Vision OCR")
+                    
+                    # Run RT-DETR to detect text regions first
+                    _ = self._get_thread_bubble_detector()
+                    rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                    
+                    if rtdetr_detections:
+                        # Collect all text-containing regions WITH TYPE TRACKING
+                        all_regions = []
+                        # Track region type to assign bubble_type later
+                        region_types = {}
+                        idx = 0
+                        if 'text_bubbles' in rtdetr_detections:
+                            for bbox in rtdetr_detections.get('text_bubbles', []):
+                                all_regions.append(bbox)
+                                region_types[idx] = 'text_bubble'
+                                idx += 1
+                        if 'text_free' in rtdetr_detections:
+                            for bbox in rtdetr_detections.get('text_free', []):
+                                all_regions.append(bbox)
+                                region_types[idx] = 'free_text'
+                                idx += 1
+                        
+                        if all_regions:
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE OCR processing
+                            # This prevents duplicate OCR on the same text (e.g., table of contents with nested boxes)
+                            skip_merging = bool(ocr_settings.get('skip_rtdetr_merging', False))
+                            if skip_merging:
+                                self._log("⛔ Skipping RT-DETR region merging (per settings)")
+                                all_regions_merged = all_regions
+                            else:
+                                original_count = len(all_regions)
+                                all_regions_merged = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                if len(all_regions_merged) < original_count:
+                                    self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions_merged)} unique blocks (removed {original_count - len(all_regions_merged)} overlaps)")
+                            
+                            # CRITICAL: After merge, reclassify based on RT-DETR detection sets
+                            # Don't rely on pre-merge types as merge can combine different types
+                            # Use the same classification logic as Azure Vision for consistency
+                            all_regions = all_regions_merged
+                            
+                            # Helper to normalize boxes to int tuples for classification
+                            def _norm_box(b):
+                                try:
+                                    x, y, w, h = b[:4]
+                                    return (int(round(x)), int(round(y)), int(round(w)), int(round(h)))
+                                except Exception:
+                                    return tuple(b)
+                            
+                            # Build quick-lookup sets for class membership (same as Azure)
+                            text_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('text_bubbles', []) or [])
+                            free_text_set = set(_norm_box(b) for b in rtdetr_detections.get('text_free', []) or [])
+                            empty_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('bubbles', []) or [])
+                            
+                            # Classify each merged region by checking RT-DETR class membership
+                            region_types = {}
+                            for idx, bbox in enumerate(all_regions):
+                                norm_bbox = _norm_box(bbox)
+                                # Classify same as Azure: free_text if in free_text set, else text_bubble
+                                if norm_bbox in free_text_set:
+                                    region_types[idx] = 'free_text'
+                                elif norm_bbox in text_bubble_set or norm_bbox in empty_bubble_set:
+                                    region_types[idx] = 'text_bubble'
+                                else:
+                                    # Fallback: default to text_bubble
+                                    region_types[idx] = 'text_bubble'
+                            
+                            self._log(f"📊 RT-DETR detected {len(all_regions)} text regions, OCR-ing each with Google Vision")
+                            
+                            # Load image for cropping
+                            import cv2
+                            cv_image = cv2_imread(image_path)
+                            if cv_image is None:
+                                self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
+                            else:
+                                # Define worker function for concurrent OCR
+                                def ocr_region_google(region_data):
+                                    i, region_idx, x, y, w, h = region_data
+                                    try:
+                                        # RATE LIMITING: Add small delay to avoid potential rate limits
+                                        # Google has high limits (1,800/min paid tier) but being conservative
+                                        import time
+                                        import random
+                                        time.sleep(0.1 + random.random() * 0.2)  # 0.1-0.3s random delay
+                                        
+                                        # Crop region
+                                        cropped = self._safe_crop_region(cv_image, x, y, w, h)
+                                        if cropped is None:
+                                            return None
+                                        
+                                        # Validate and resize crop if needed (Google Vision requires minimum dimensions)
+                                        h_crop, w_crop = cropped.shape[:2]
+                                        MIN_SIZE = ocr_settings.get('min_region_size', 50)  # Configurable minimum (0 = disabled)
+                                        MIN_AREA = MIN_SIZE * MIN_SIZE if MIN_SIZE > 0 else 0  # Area based on MIN_SIZE
+                                        
+                                        # Skip completely invalid/corrupted regions (0 or negative dimensions)
+                                        if h_crop <= 0 or w_crop <= 0:
+                                            self._log(f"⚠️ Region {i} has invalid dimensions ({w_crop}x{h_crop}px), skipping", "debug")
+                                            return None
+                                        
+                                        # Only apply minimum size check if MIN_SIZE > 0
+                                        if MIN_SIZE > 0 and (h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA):
+                                            # Region too small - resize it
+                                            scale_w = MIN_SIZE / w_crop if w_crop < MIN_SIZE else 1.0
+                                            scale_h = MIN_SIZE / h_crop if h_crop < MIN_SIZE else 1.0
+                                            scale = max(scale_w, scale_h)
+                                            
+                                            if scale > 1.0:
+                                                new_w = int(w_crop * scale)
+                                                new_h = int(h_crop * scale)
+                                                cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                                                self._log(f"🔍 Region {i} resized from {w_crop}x{h_crop}px to {new_w}x{new_h}px for OCR", "debug")
+                                                h_crop, w_crop = new_h, new_w
+                                        
+                                        # Encode cropped image
+                                        _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                        region_image_data = encoded.tobytes()
+                                        
+                                        # Create Vision API image object
+                                        vision_image = vision.Image(content=region_image_data)
+                                        image_context = vision.ImageContext(
+                                            language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                                        )
+                                        
+                                        # Detect text in this region
+                                        detection_mode = ocr_settings.get('text_detection_mode', 'document')
+                                        if detection_mode == 'document':
+                                            response = self.vision_client.document_text_detection(
+                                                image=vision_image,
+                                                image_context=image_context
+                                            )
+                                        else:
+                                            response = self.vision_client.text_detection(
+                                                image=vision_image,
+                                                image_context=image_context
+                                            )
+                                        
+                                        if response.error.message:
+                                            self._log(f"⚠️ Region {i} error: {response.error.message}", "warning")
+                                            return None
+                                        
+                                        # Extract text from this region
+                                        region_text = response.full_text_annotation.text if response.full_text_annotation else ""
+                                        if region_text.strip():
+                                            # Clean the text
+                                            region_text = self._fix_encoding_issues(region_text)
+                                            region_text = self._sanitize_unicode_characters(region_text)
+                                            region_text = region_text.strip()
+                                            
+                                            # Create TextRegion with original image coordinates
+                                            region = TextRegion(
+                                                text=region_text,
+                                                vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                                                bounding_box=(x, y, w, h),
+                                                confidence=0.9,  # RT-DETR confidence
+                                                region_type='text_block'
+                                            )
+                                            # Assign bubble_type from RT-DETR detection
+                                            region.bubble_type = region_types.get(region_idx, 'text_bubble')
+                                            # Set should_inpaint based on bubble_type and toggle
+                                            set_should_inpaint_from_bubble_type(
+                                                region, ocr_settings,
+                                                self.main_gui if hasattr(self, 'main_gui') else None
+                                            )
+                                            if not getattr(self, 'concise_logs', False):
+                                                self._log(f"✅ Region {i}/{len(all_regions)} ({region.bubble_type}): {region_text[:50]}...")
+                                            return region
+                                        return None
+                                    
+                                    except Exception as e:
+                                        # Provide more detailed error info for debugging
+                                        error_msg = str(e)
+                                        if 'Bad Request' in error_msg or 'invalid' in error_msg.lower():
+                                            self._log(f"⏭️ Skipping region {i}: Too small or invalid for Google Vision (dimensions < 10x10px or area < 100px²)", "debug")
+                                        else:
+                                            self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
+                                        return None
+                                
+                                # Process regions concurrently with RT-DETR concurrency control
+                                from concurrent.futures import ThreadPoolExecutor, as_completed
+                                # Use rtdetr_max_concurrency setting (default 12) to control parallel OCR calls
+                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 12), len(all_regions))
+                                
+                                region_data_list = [(i+1, i, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
+                                
+                                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                    futures = {executor.submit(ocr_region_google, rd): rd for rd in region_data_list}
+                                    for future in as_completed(futures):
+                                        try:
+                                            result = future.result()
+                                            if result:
+                                                regions.append(result)
+                                        finally:
+                                            # Clean up future to free memory
+                                            del future
+                                
+                                # If we got results, sort and post-process
+                                if regions:
+                                    # CRITICAL: Sort regions by position (top-to-bottom, left-to-right)
+                                    # Concurrent processing returns them in completion order, not detection order
+                                    regions.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+                                    self._log(f"✅ RT-DETR + Google Vision: {len(regions)} text regions detected (sorted by position)")
+                                    
+                                    # POST-PROCESS: Check for text_bubbles that overlap with free_text regions
+                                    # If a text_bubble's center is within a free_text bbox, reclassify it as free_text
+                                    free_text_bboxes = rtdetr_detections.get('text_free', [])
+                                    if free_text_bboxes:
+                                        reclassified_count = 0
+                                        for region in regions:
+                                            if getattr(region, 'bubble_type', None) == 'text_bubble':
+                                                # Get region center
+                                                x, y, w, h = region.bounding_box
+                                                cx = x + w / 2
+                                                cy = y + h / 2
+                                                
+                                                self._log(f"   Checking text_bubble '{region.text[:30]}...' at center ({cx:.0f}, {cy:.0f})", "debug")
+                                                
+                                                # Check if center is in any free_text bbox
+                                                for bbox_idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                                                    in_x = fx <= cx <= fx + fw
+                                                    in_y = fy <= cy <= fy + fh
+                                                    self._log(f"      vs free_text bbox {bbox_idx+1}: in_x={in_x}, in_y={in_y}", "debug")
+                                                    
+                                                    if in_x and in_y:
+                                                        # Reclassify as free text
+                                                        old_type = region.bubble_type
+                                                        region.bubble_type = 'free_text'
+                                                        region.region_type = 'free_text'
+                                                        # Set should_inpaint based on free text toggle
+                                                        set_should_inpaint_from_bubble_type(
+                                                            region, ocr_settings,
+                                                            self.main_gui if hasattr(self, 'main_gui') else None
+                                                        )
+                                                        reclassified_count += 1
+                                                        self._log(f"      ✅ RECLASSIFIED '{region.text[:30]}...' from {old_type} to free_text", "info")
+                                                        break
+                                        
+                                        if reclassified_count > 0:
+                                            self._log(f"🔄 Reclassified {reclassified_count} overlapping regions as free_text", "info")
+                                            
+                                            # MERGE: Combine free_text regions that are within the same free_text bbox
+                                            # Group free_text regions by which free_text bbox they belong to
+                                            free_text_groups = {}
+                                            other_regions = []
+                                            
+                                            for region in regions:
+                                                if getattr(region, 'bubble_type', None) == 'free_text':
+                                                    # Find which free_text bbox this region belongs to
+                                                    x, y, w, h = region.bounding_box
+                                                    cx = x + w / 2
+                                                    cy = y + h / 2
+                                                    
+                                                    for bbox_idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                                                        if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                                                            if bbox_idx not in free_text_groups:
+                                                                free_text_groups[bbox_idx] = []
+                                                            free_text_groups[bbox_idx].append(region)
+                                                            break
+                                                    else:
+                                                        # Free text region not in any bbox (shouldn't happen, but handle it)
+                                                        other_regions.append(region)
+                                                else:
+                                                    other_regions.append(region)
+                                            
+                                            # Merge each group of free_text regions
+                                            merged_free_text = []
+                                            for bbox_idx, group in free_text_groups.items():
+                                                if len(group) > 1:
+                                                    # Merge multiple free text regions in same bbox
+                                                    merged_text = " ".join(r.text for r in group)
+                                                    
+                                                    min_x = min(r.bounding_box[0] for r in group)
+                                                    min_y = min(r.bounding_box[1] for r in group)
+                                                    max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in group)
+                                                    max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in group)
+                                                    
+                                                    all_vertices = []
+                                                    for r in group:
+                                                        if hasattr(r, 'vertices') and r.vertices:
+                                                            all_vertices.extend(r.vertices)
+                                                    
+                                                    if not all_vertices:
+                                                        all_vertices = [
+                                                            (min_x, min_y),
+                                                            (max_x, min_y),
+                                                            (max_x, max_y),
+                                                            (min_x, max_y)
+                                                        ]
+                                                    
+                                                    merged_region = TextRegion(
+                                                        text=merged_text,
+                                                        vertices=all_vertices,
+                                                        bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
+                                                        confidence=0.95,
+                                                        region_type='free_text'
+                                                    )
+                                                    merged_region.bubble_type = 'free_text'
+                                                    # Set should_inpaint based on free text toggle
+                                                    set_should_inpaint_from_bubble_type(
+                                                        merged_region, ocr_settings,
+                                                        self.main_gui if hasattr(self, 'main_gui') else None
+                                                    )
+                                                    merged_free_text.append(merged_region)
+                                                    self._log(f"🔀 Merged {len(group)} free_text regions into one: '{merged_text[:50]}...'", "debug")
+                                                else:
+                                                    # Single region, keep as-is
+                                                    merged_free_text.extend(group)
+                                            
+                                            # Combine all regions
+                                            regions = other_regions + merged_free_text
+                                            self._log(f"✅ Final: {len(regions)} regions after reclassification and merging", "info")
+                                    
+                                    # Skip merging section and return directly
+                                    return regions
+                                else:
+                                    self._log("⚠️ No text found in RT-DETR regions, falling back to full-page OCR", "warning")
+                
+                # If bubble detection is enabled and batch variables suggest batching, do ROI-based batched OCR
+                try:
+                    use_roi_locality = ocr_settings.get('bubble_detection_enabled', True) and ocr_settings.get('roi_locality_enabled', False)
+                    # Determine OCR batching enable
+                    if 'ocr_batch_enabled' in ocr_settings:
+                        ocr_batch_enabled = bool(ocr_settings.get('ocr_batch_enabled'))
+                    else:
+                        ocr_batch_enabled = (os.getenv('BATCH_OCR', '0') == '1') or (os.getenv('BATCH_TRANSLATION', '0') == '1') or getattr(self, 'batch_mode', False)
+                    # Determine OCR batch size
+                    bs = int(ocr_settings.get('ocr_batch_size') or 0)
+                    if bs <= 0:
+                        bs = int(os.getenv('OCR_BATCH_SIZE', '0') or 0)
+                    if bs <= 0:
+                        bs = int(os.getenv('BATCH_SIZE', str(getattr(self, 'batch_size', 1))) or 1)
+                    ocr_batch_size = max(1, bs)
+                except Exception:
+                    use_roi_locality = False
+                    ocr_batch_enabled = False
+                    ocr_batch_size = 1
+                if use_roi_locality and (ocr_batch_enabled or ocr_batch_size > 1):
+                    rois = self._prepare_ocr_rois_from_bubbles(image_path, ocr_settings, preprocessing, page_hash)
+                    if rois:
+                        # Determine concurrency for Google: OCR_MAX_CONCURRENCY env or min(BATCH_SIZE,2)
+                        try:
+                            max_cc = int(ocr_settings.get('ocr_max_concurrency') or 0)
+                            if max_cc <= 0:
+                                max_cc = int(os.getenv('OCR_MAX_CONCURRENCY', '0') or 0)
+                            if max_cc <= 0:
+                                max_cc = min(max(1, ocr_batch_size), 2)
+                        except Exception:
+                            max_cc = min(max(1, ocr_batch_size), 2)
+                        regions = self._google_ocr_rois_batched(rois, ocr_settings, max(1, ocr_batch_size), max_cc, page_hash)
+                        self._log(f"✅ Google OCR batched over {len(rois)} ROIs → {len(regions)} regions (cc={max_cc})", "info")
+                        
+                        # Force garbage collection after concurrent OCR to reduce memory spikes
+                        try:
+                            import gc
+                            gc.collect()
+                        except Exception:
+                            pass
+                        
+                        return regions
+
+                # Start local inpainter preload while Google OCR runs (background; multiple if panel-parallel)
+                try:
+                    if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
+                        already_loaded, _lm = self._is_local_inpainter_loaded()
+                        if not already_loaded:
+                            import threading as _threading
+                            local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
+                            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                            adv = self.main_gui.config.get('manga_settings', {}).get('advanced', {}) if hasattr(self, 'main_gui') else {}
+                            # Determine desired instances from panel-parallel settings
+                            desired = 1
+                            if adv.get('parallel_panel_translation', False):
+                                try:
+                                    desired = max(1, int(adv.get('panel_max_workers', 2)))
+                                except Exception:
+                                    desired = 2
+                            # Honor advanced toggle for panel-local preload; for non-panel (desired==1) always allow
+                            allow = True if desired == 1 else bool(adv.get('preload_local_inpainting_for_panels', True))
+                            if allow:
+                                self._inpaint_preload_event = _threading.Event()
+                                def _preload_inp_many():
+                                    try:
+                                        self.preload_local_inpainters_concurrent(local_method, model_path, desired)
+                                    finally:
+                                        try:
+                                            self._inpaint_preload_event.set()
+                                        except Exception:
+                                            pass
+                                _threading.Thread(target=_preload_inp_many, name="InpaintPreload@GoogleOCR", daemon=True).start()
+                except Exception:
+                    pass
+
+                # Create Vision API image object (full-page fallback)
+                image = vision.Image(content=processed_image_data)
+                
+                # Build image context with all parameters
+                image_context = vision.ImageContext(
+                    language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                )
+                
+                # Add text detection params if available in your API version
+                if hasattr(vision, 'TextDetectionParams'):
+                    image_context.text_detection_params = vision.TextDetectionParams(
+                        enable_text_detection_confidence_score=True
+                    )
+                
+                # Configure text detection based on settings
+                detection_mode = ocr_settings.get('text_detection_mode', 'document')
+                
+                if detection_mode == 'document':
+                    response = self.vision_client.document_text_detection(
+                        image=image,
+                        image_context=image_context
+                    )
+                else:
+                    response = self.vision_client.text_detection(
+                        image=image,
+                        image_context=image_context
+                    )
+                
+                if response.error.message:
+                    raise Exception(f"Cloud Vision API error: {response.error.message}")
+                
+                # Process each page (usually just one for manga)
+                for page in response.full_text_annotation.pages:
+                    for block in page.blocks:
+                        # Extract text first to check if it's worth processing
+                        block_text = ""
+                        total_confidence = 0.0
+                        word_count = 0
+                        
+                        for paragraph in block.paragraphs:
+                            for word in paragraph.words:
+                                # Get word-level confidence (more reliable than block level)
+                                word_confidence = getattr(word, 'confidence', 0.0)  # Default to 0 if not available
+                                word_text = ''.join([symbol.text for symbol in word.symbols])
+                                
+                                # Only include words above threshold
+                                if word_confidence >= confidence_threshold:
+                                    block_text += word_text + " "
+                                    total_confidence += word_confidence
+                                    word_count += 1
+                                else:
+                                    if not getattr(self, 'concise_logs', False):
+                                        self._log(f"   Skipping low confidence word ({word_confidence:.2f}): {word_text}")
+                        
+                        block_text = block_text.strip()
+                        
+                        # CLEAN ORIGINAL OCR TEXT - Fix cube characters and encoding issues
+                        original_text = block_text
+                        block_text = self._fix_encoding_issues(block_text)
+                        block_text = self._sanitize_unicode_characters(block_text)
+                        
+                        # Log cleaning if changes were made
+                        if block_text != original_text:
+                            self._log(f"🧹 Cleaned OCR text: '{original_text[:30]}...' → '{block_text[:30]}...'", "debug")
+                        
+                        # TEXT FILTERING SECTION
+                        # Skip if text is too short (after cleaning)
+                        if len(block_text.strip()) < min_text_length:
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping short text ({len(block_text)} chars): {block_text}")
+                            continue
+                        
+                        # Skip if primarily English and exclude_english is enabled
+                        if exclude_english and self._is_primarily_english(block_text):
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping English text: {block_text[:50]}...")
+                            continue
+                        
+                        # Skip if no confident words found
+                        if word_count == 0 or not block_text:
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping block - no words above threshold {confidence_threshold}")
+                            continue
+                        
+                        # Calculate average confidence for the block
+                        avg_confidence = total_confidence / word_count if word_count > 0 else 0.0
+                        
+                        # Extract vertices and create region
+                        vertices = [(v.x, v.y) for v in block.bounding_box.vertices]
+                        
+                        # Calculate bounding box
+                        xs = [v[0] for v in vertices]
+                        ys = [v[1] for v in vertices]
+                        x_min, x_max = min(xs), max(xs)
+                        y_min, y_max = min(ys), max(ys)
+                        
+                        region = TextRegion(
+                            text=block_text,
+                            vertices=vertices,
+                            bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                            confidence=avg_confidence,  # Use average confidence
+                            region_type='text_block'
+                        )
+                        regions.append(region)
+                        if not getattr(self, 'concise_logs', False):
+                            self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
+                        
+            elif self.ocr_provider == 'azure':
+                # === AZURE COMPUTER VISION ===
+                # Ensure client exists (it might have been cleaned up between runs)
+                try:
+                    self._ensure_azure_client()
+                except Exception:
+                    pass
+                import io
+                
+                # Check if we should use RT-DETR for text region detection (NEW FEATURE)
+                if ocr_settings.get('bubble_detection_enabled', True) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
+                    self._log("🎯 Azure Vision full image → match to RT-DETR blocks")
+                    
+                    # Run RT-DETR to detect text regions first
+                    _ = self._get_thread_bubble_detector()
+                    rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                    
+                    if rtdetr_detections:
+                        # Get all text-containing regions
+                        all_regions = []
+                        if 'text_bubbles' in rtdetr_detections:
+                            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                        if 'text_free' in rtdetr_detections:
+                            all_regions.extend(rtdetr_detections.get('text_free', []))
+                        
+                        if not all_regions:
+                            self._log("⚠️ No RT-DETR text regions found")
+                        else:
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE matching with OCR
+                            # RT-DETR often detects both large containing boxes and smaller nested boxes
+                            # (e.g., a big table of contents box + individual entry boxes)
+                            # Without merging, we get duplicate text rendered for every overlapping block
+                            skip_merging = bool(ocr_settings.get('skip_rtdetr_merging', False))
+                            if skip_merging:
+                                self._log("⛔ Skipping RT-DETR region merging (per settings)")
+                            else:
+                                original_count = len(all_regions)
+                                all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                if len(all_regions) < original_count:
+                                    self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
+                            # Load image for full-image OCR if not already loaded
+                            if 'image' not in locals():
+                                import cv2
+                                image = cv2_imread(image_path)
+                                if image is None:
+                                    from PIL import Image as PILImage
+                                    import numpy as np
+                                    pil_image = open_page_image(image_path)
+                                    image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                            
+                            
+                            # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
+                            # This is MUCH better for Azure Vision:
+                            # - Preserves document layout context
+                            # - Only one API call instead of N calls
+                            # - Better text recognition with surrounding context
+                            # - No tight cropping artifacts
+                            self._log(f"📊 Step 1: Running Azure Vision on full image to detect text lines")
+                            
+                            # OPTIMIZATION: Add caching and better async handling for Azure Vision
+                            from azure.ai.vision.imageanalysis.models import VisualFeatures
+                            import time
+                            import hashlib
+                            
+                            # Cache key based on image content hash
+                            image_hash = hashlib.sha256(processed_image_data).hexdigest()
+                            cache_key = f"azure_ocr_{image_hash}"
+                            
+                            # Check if we have cached results for this exact image
+                            if hasattr(self, '_azure_ocr_cache') and cache_key in self._azure_ocr_cache:
+                                self._log("   ⚡ Using cached Azure Vision results", "info")
+                                result = self._azure_ocr_cache[cache_key]
+                            else:
+                                # Initialize cache if needed
+                                if not hasattr(self, '_azure_ocr_cache'):
+                                    self._azure_ocr_cache = {}
+                                
+                                max_retries = 3
+                                retry_delay = 0.5  # Start with shorter delay
+                                result = None
+                                
+                                for attempt in range(max_retries):
+                                    try:
+                                        # Check for stop signal before making API call
+                                        if self._check_stop():
+                                            self._log("⏹️ OCR stopped by user", "warning")
+                                            return []
+                                        
+                                        # Make the Azure Vision API call - NO QUALITY REDUCTION
+                                        start_time = time.time()
+                                        result = self.vision_client.analyze(
+                                            image_data=processed_image_data,
+                                            visual_features=[VisualFeatures.READ]
+                                        )
+                                        elapsed = time.time() - start_time
+                                        
+                                        if elapsed > 10:
+                                            self._log(f"   ⚠️ Azure Vision took {elapsed:.1f}s (slow response)", "warning")
+                                        else:
+                                            self._log(f"   ✅ Azure Vision completed in {elapsed:.1f}s", "debug")
+                                        
+                                        # Cache successful result
+                                        self._azure_ocr_cache[cache_key] = result
+                                        break  # Success, exit retry loop
+                                        
+                                    except Exception as e:
+                                        if attempt < max_retries - 1:
+                                            self._log(f"   ⚠️ Azure Vision attempt {attempt + 1} failed: {str(e)[:100]}", "warning")
+                                            self._log(f"   🔄 Retrying in {retry_delay}s...", "info")
+                                            time.sleep(retry_delay)
+                                            retry_delay = min(retry_delay * 2, 4.0)  # Cap at 4s
+                                        else:
+                                            self._log(f"   ❌ Azure Vision failed after {max_retries} attempts", "error")
+                                            raise
+                                
+                                if result is None:
+                                    self._log("❌ Azure Vision returned no result", "error")
+                                    return []
+                            
+                            # Extract text lines from Azure Vision result
+                            # CRITICAL: Use blocks[0] only (comic-translate approach)
+                            # blocks[0] contains ALL text lines in reading order
+                            full_image_ocr = []
+                            if result and result.read and result.read.blocks:
+                                # OPTIMIZATION: Add progress tracking for large results
+                                total_lines = sum(len(block.lines) for block in result.read.blocks if hasattr(block, 'lines'))
+                                if total_lines > 50:
+                                    self._log(f"   📋 Processing {total_lines} text lines...", "info")
+                                
+                                processed_lines = 0
+                                for line in result.read.blocks[0].lines:
+                                    # Check for cancellation periodically
+                                    if processed_lines % 10 == 0 and self._check_stop():
+                                        self._log("⏹️ OCR processing stopped by user", "warning")
+                                        return []
+                                    processed_lines += 1
+                                    # Get bounding box from Azure Vision line
+                                    # Azure Vision provides bounding_polygon with points
+                                    if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                                        points = line.bounding_polygon
+                                        xs = [p.x for p in points]
+                                        ys = [p.y for p in points]
+                                        x_min, x_max = int(min(xs)), int(max(xs))
+                                        y_min, y_max = int(min(ys)), int(max(ys))
+                                        
+                                        # DEBUG: Print actual Azure bbox format for the problematic line
+                                        if '浸かりましょうね' in line.text:
+                                            print(f"\n🔍 DEBUG Azure bbox for '浸かりましょうね':")
+                                            print(f"   Points: {[(int(p.x), int(p.y)) for p in points]}")
+                                            print(f"   xs: {xs}")
+                                            print(f"   ys: {ys}")
+                                            print(f"   x_min={x_min}, x_max={x_max}, y_min={y_min}, y_max={y_max}")
+                                            print(f"   Final bbox (x,y,w,h): ({x_min}, {y_min}, {x_max - x_min}, {y_max - y_min})\n")
+                                        
+                                        # Create OCR result compatible with ocr_manager format
+                                        from ocr_manager import OCRResult
+                                        ocr_line = OCRResult(
+                                            text=line.text,
+                                            bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                            confidence=0.9,
+                                            vertices=[(int(p.x), int(p.y)) for p in points]
+                                        )
+                                        full_image_ocr.append(ocr_line)
+                            
+                            if full_image_ocr:
+                                self._log(f"✅ Azure Vision detected {len(full_image_ocr)} text lines in full image")
+                                
+                                # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
+                                self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                # Enable debug mode based on manga settings  
+                                debug_matching = self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                                matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=debug_matching)
+                                
+                                # Convert matched blocks to TextRegion format
+                                regions = []
+
+                                # Helper to normalize boxes to int tuples
+                                def _norm_box(b):
+                                    try:
+                                        x, y, w, h = b[:4]
+                                        return (int(round(x)), int(round(y)), int(round(w)), int(round(h)))
+                                    except Exception:
+                                        return tuple(b)
+
+                                # Build quick-lookup sets for class membership
+                                text_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('text_bubbles', []) or [])
+                                free_text_set = set(_norm_box(b) for b in rtdetr_detections.get('text_free', []) or [])
+                                empty_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('bubbles', []) or [])
+
+                                for block_data in matched_blocks:
+                                    # CRITICAL: Include ALL blocks (even empty ones) for fallback OCR
+                                    # Empty blocks will be processed by fallback OCR after this loop
+                                    bbox = _norm_box(block_data['bbox'])
+                                    # Create TextRegion with RT-DETR bubble bounds
+                                    region = TextRegion(
+                                        text=block_data['text'],  # May be empty - fallback OCR will fill it
+                                        vertices=[(bbox[0], bbox[1]),
+                                                 (bbox[0]+bbox[2], bbox[1]),
+                                                 (bbox[0]+bbox[2], bbox[1]+bbox[3]),
+                                                 (bbox[0], bbox[1]+bbox[3])],
+                                        bounding_box=bbox,
+                                        confidence=0.0,
+                                        region_type='text_block'
+                                    )
+                                    # Use RT-DETR bubble bounds for rendering
+                                    region.bubble_bounds = bbox
+
+                                    # Classify by RT-DETR class membership and set should_inpaint
+                                    classify_rtdetr_region_and_set_inpaint(
+                                        region, bbox, rtdetr_detections, ocr_settings, 
+                                        self.main_gui if hasattr(self, 'main_gui') else None,
+                                        log_func=self._log
+                                    )
+
+                                    regions.append(region)
+                                
+                                self._log(f"✅ Matched text to {len(regions)} RT-DETR blocks (comic-translate style)")
+                                empty_blocks_count = sum(1 for r in regions if not r.text.strip())
+                                if empty_blocks_count > 0:
+                                    self._log(f"⚠️ {empty_blocks_count} blocks have NO matched OCR text")
+                                for i, region in enumerate(regions, 1):
+                                    line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
+                                    self._log(f"   Block {i}: {line_count} lines → '{region.text[:50]}...'")
+                                
+                                # FALLBACK OCR FOR EMPTY BLOCKS
+                                # If some RT-DETR blocks got NO OCR matches (empty text), re-run Azure OCR on cropped regions
+                                # This catches small text that full-image OCR missed
+                                # IMPORTANT: Disabled by default to reduce API costs - enable via settings
+                                enable_fallback_ocr = ocr_settings.get('enable_fallback_ocr', False)
+                                if empty_blocks_count > 0 and enable_fallback_ocr:
+                                    self._log(f"🔍 Step 3: Running fallback OCR for {empty_blocks_count} empty blocks")
+                                    
+                                    # Load the original image for cropping
+                                    import cv2
+                                    original_image = cv2_imread(image_path)
+                                    if original_image is None:
+                                        self._log("❌ Failed to load original image for fallback OCR", "error")
+                                    else:
+                                        from azure.ai.vision.imageanalysis.models import VisualFeatures
+                                        
+                                        for idx, region in enumerate(regions):
+                                            if region.text.strip():  # Skip blocks that already have text
+                                                continue
+                                            
+                                            # Get block bounding box
+                                            x, y, w, h = region.bounding_box
+                                            
+                                            # Add padding to capture surrounding text (like "...")
+                                            # 20% padding on each side to ensure we get the full text
+                                            img_h, img_w = original_image.shape[:2]
+                                            padding_ratio = 0.2
+                                            pad_w = int(w * padding_ratio)
+                                            pad_h = int(h * padding_ratio)
+                                            
+                                            # Expand bounding box with padding
+                                            crop_x = max(0, x - pad_w)
+                                            crop_y = max(0, y - pad_h)
+                                            crop_w = min(img_w - crop_x, w + 2 * pad_w)
+                                            crop_h = min(img_h - crop_y, h + 2 * pad_h)
+                                            
+                                            # Ensure minimum size of 50x50 before cropping
+                                            MIN_CROP_SIZE = 50
+                                            if crop_w < MIN_CROP_SIZE:
+                                                expand_w = (MIN_CROP_SIZE - crop_w) // 2
+                                                crop_x = max(0, crop_x - expand_w)
+                                                crop_w = min(img_w - crop_x, MIN_CROP_SIZE)
+                                            if crop_h < MIN_CROP_SIZE:
+                                                expand_h = (MIN_CROP_SIZE - crop_h) // 2
+                                                crop_y = max(0, crop_y - expand_h)
+                                                crop_h = min(img_h - crop_y, MIN_CROP_SIZE)
+                                            
+                                            # Safety check for valid crop region
+                                            if crop_x < 0 or crop_y < 0 or crop_x + crop_w > img_w or crop_y + crop_h > img_h or crop_w <= 0 or crop_h <= 0:
+                                                self._log(f"   Block {idx+1}: Invalid expanded crop region, skipping")
+                                                continue
+                                            
+                                            # Crop the expanded region
+                                            cropped = original_image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w].copy()
+                                            original_crop_size = f"{crop_w}x{crop_h}"
+                                            
+                                            # Upscale if too small (small text may not be detected by full-image OCR)
+                                            MIN_SIZE = 100
+                                            actual_h, actual_w = cropped.shape[:2]
+                                            if actual_h < MIN_SIZE or actual_w < MIN_SIZE:
+                                                scale_factor = max(MIN_SIZE / actual_w, MIN_SIZE / actual_h)
+                                                new_w = int(actual_w * scale_factor)
+                                                new_h = int(actual_h * scale_factor)
+                                                cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                                                self._log(f"   Block {idx+1}: Expanded to {original_crop_size} (+20% padding), upscaled to {new_w}x{new_h}")
+                                            else:
+                                                self._log(f"   Block {idx+1}: Expanded to {original_crop_size} (+20% padding)")
+                                            
+                                            # Encode cropped image to JPEG for Azure
+                                            _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                            cropped_bytes = encoded.tobytes()
+                                            
+                                            try:
+                                                # Run Azure OCR on this specific crop
+                                                crop_result = self.vision_client.analyze(
+                                                    image_data=cropped_bytes,
+                                                    visual_features=[VisualFeatures.READ]
+                                                )
+                                                
+                                                # Extract text from crop result
+                                                # Use blocks[0] only (comic-translate approach)
+                                                crop_texts = []
+                                                if crop_result.read and crop_result.read.blocks:
+                                                    for line in crop_result.read.blocks[0].lines:
+                                                        if line.text:
+                                                            crop_texts.append(line.text.strip())
+                                                
+                                                if crop_texts:
+                                                    # Success! Replace empty text with fallback OCR result
+                                                    source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                                    if source_lang in ['ja', 'zh', 'ko']:
+                                                        fallback_text = ''.join(crop_texts)  # No spaces for CJK
+                                                    else:
+                                                        fallback_text = ' '.join(crop_texts)  # Spaces for others
+                                                    
+                                                    region.text = fallback_text
+                                                    self._log(f"   ✅ Block {idx+1}: Fallback OCR detected text: '{fallback_text[:50]}...'")
+                                                else:
+                                                    self._log(f"   ⚠️ Block {idx+1}: Fallback OCR found no text")
+                                            
+                                            except Exception as e:
+                                                self._log(f"   ❌ Block {idx+1}: Fallback OCR failed: {str(e)}", "warning")
+                                                continue
+                                    
+                                    # FINAL CLEANUP: Remove any blocks that are STILL empty after fallback OCR
+                                    # These are genuinely empty bubbles with no text
+                                    original_count = len(regions)
+                                    regions = [r for r in regions if r.text.strip()]
+                                    removed_count = original_count - len(regions)
+                                    if removed_count > 0:
+                                        self._log(f"🧹 Removed {removed_count} genuinely empty blocks (no text after fallback OCR)")
+                                elif empty_blocks_count > 0:
+                                    if bool(ocr_settings.get('preserve_empty_blocks', False)):
+                                        self._log(f"ℹ️ Fallback OCR disabled - preserving {empty_blocks_count} empty blocks (per settings)")
+                                    else:
+                                        # Fallback OCR is disabled, just remove empty blocks
+                                        self._log(f"ℹ️ Fallback OCR disabled - removing {empty_blocks_count} empty blocks")
+                                        original_count = len(regions)
+                                        regions = [r for r in regions if r.text.strip()]
+                                        removed_count = original_count - len(regions)
+                                        if removed_count > 0:
+                                            self._log(f"🧹 Removed {removed_count} empty blocks (no text matched)")
+                                
+                                # Clear detections
+                                rtdetr_detections = None
+                                all_regions = None
+                                
+                                # Return results directly
+                                return regions
+                            else:
+                                self._log("⚠️ Azure Vision found no text lines in full image")
+                        
+                        # Clear detections
+                        rtdetr_detections = None
+                        all_regions = None
+                
+                # ROI-based concurrent OCR when bubble detection is enabled and batching is requested
+                # This is an advanced feature that should only run if:
+                # 1. Bubble detection is enabled AND
+                # 2. ROI locality is explicitly enabled AND
+                # 3. use_rtdetr_for_ocr_regions is NOT explicitly disabled (or RT-DETR guidance is intended)
+                try:
+                    use_roi_locality = (ocr_settings.get('bubble_detection_enabled', True) and 
+                                       ocr_settings.get('roi_locality_enabled', False) and 
+                                       ocr_settings.get('use_rtdetr_for_ocr_regions', True))
+                    if 'ocr_batch_enabled' in ocr_settings:
+                        ocr_batch_enabled = bool(ocr_settings.get('ocr_batch_enabled'))
+                    else:
+                        ocr_batch_enabled = (os.getenv('BATCH_OCR', '0') == '1') or (os.getenv('BATCH_TRANSLATION', '0') == '1') or getattr(self, 'batch_mode', False)
+                    bs = int(ocr_settings.get('ocr_batch_size') or 0)
+                    if bs <= 0:
+                        bs = int(os.getenv('OCR_BATCH_SIZE', '0') or 0)
+                    if bs <= 0:
+                        bs = int(os.getenv('BATCH_SIZE', str(getattr(self, 'batch_size', 1))) or 1)
+                    ocr_batch_size = max(1, bs)
+                except Exception:
+                    use_roi_locality = False
+                    ocr_batch_enabled = False
+                    ocr_batch_size = 1
+                if use_roi_locality and (ocr_batch_enabled or ocr_batch_size > 1):
+                    rois = self._prepare_ocr_rois_from_bubbles(image_path, ocr_settings, preprocessing, page_hash)
+                    if rois:
+                        # AZURE RATE LIMITING: Force low concurrency to prevent "Too Many Requests"
+                        # Azure has strict rate limits that vary by tier:
+                        # - Free tier: 20 requests/minute
+                        # - Standard tier: Higher but still limited
+                        try:
+                            azure_workers = int(ocr_settings.get('ocr_max_concurrency') or 0)
+                            if azure_workers <= 0:
+                                azure_workers = 1  # Force sequential by default
+                            else:
+                                azure_workers = min(2, max(1, azure_workers))  # Cap at 2 max
+                        except Exception:
+                            azure_workers = 1  # Safe default
+                        regions = self._azure_ocr_rois_concurrent(rois, ocr_settings, azure_workers, page_hash)
+                        self._log(f"✅ Azure OCR concurrent over {len(rois)} ROIs → {len(regions)} regions (workers={azure_workers})", "info")
+                        
+                        # Force garbage collection after concurrent OCR to reduce memory spikes
+                        try:
+                            import gc
+                            gc.collect()
+                        except Exception:
+                            pass
+                        
+                        return regions
+
+                # Start local inpainter preload while Azure OCR runs (background; multiple if panel-parallel)
+                try:
+                    if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
+                        already_loaded, _lm = self._is_local_inpainter_loaded()
+                        if not already_loaded:
+                            import threading as _threading
+                            local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
+                            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                            adv = self.main_gui.config.get('manga_settings', {}).get('advanced', {}) if hasattr(self, 'main_gui') else {}
+                            desired = 1
+                            if adv.get('parallel_panel_translation', False):
+                                try:
+                                    desired = max(1, int(adv.get('panel_max_workers', 2)))
+                                except Exception:
+                                    desired = 2
+                            allow = True if desired == 1 else bool(adv.get('preload_local_inpainting_for_panels', True))
+                            if allow:
+                                self._inpaint_preload_event = _threading.Event()
+                                def _preload_inp_many():
+                                    try:
+                                        self.preload_local_inpainters_concurrent(local_method, model_path, desired)
+                                    finally:
+                                        try:
+                                            self._inpaint_preload_event.set()
+                                        except Exception:
+                                            pass
+                                _threading.Thread(target=_preload_inp_many, name="InpaintPreload@AzureOCR", daemon=True).start()
+                except Exception:
+                    pass
+                
+                # Ensure Azure-supported format for the BYTES we are sending.
+                # If compression is enabled and produced an Azure-supported format (JPEG/PNG/BMP/TIFF),
+                # DO NOT force-convert to PNG. Only convert when the current bytes are in an unsupported format.
+                file_ext = os.path.splitext(image_path)[1].lower()
+                azure_supported_exts = ['.jpg', '.jpeg', '.png', '.bmp', '.pdf', '.tiff']
+                azure_supported_fmts = ['jpeg', 'jpg', 'png', 'bmp', 'tiff']
+
+                # Probe the actual byte format we will upload
+                try:
+                    from PIL import Image as _PILImage
+                    img_probe = open_image(io.BytesIO(processed_image_data))
+                    fmt = (img_probe.format or '').lower()
+                except Exception:
+                    fmt = ''
+
+                # If original is a PDF, allow as-is (Azure supports PDF streams)
+                if file_ext == '.pdf':
+                    needs_convert = False
+                else:
+                    # Decide based on the detected format of the processed bytes
+                    needs_convert = fmt not in azure_supported_fmts
+
+                if needs_convert:
+                    # If compression settings are enabled and target format is Azure-supported, prefer that
+                    try:
+                        comp_cfg = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+                    except Exception:
+                        comp_cfg = {}
+
+                    # Determine if conversion is actually needed based on compression and current format
+                    try:
+                        from PIL import Image as _PILImage
+                        img2 = open_image(io.BytesIO(processed_image_data))
+                        fmt_lower = (img2.format or '').lower()
+                    except Exception:
+                        img2 = None
+                        fmt_lower = ''
+
+                    accepted = {'jpeg', 'jpg', 'png', 'bmp', 'tiff'}
+                    convert_needed = False
+                    target_fmt = None
+
+                    if comp_cfg.get('enabled', False):
+                        cf = str(comp_cfg.get('format', '')).lower()
+                        desired = None
+                        if cf in ('jpeg', 'jpg'):
+                            desired = 'JPEG'
+                        elif cf == 'png':
+                            desired = 'PNG'
+                        elif cf == 'bmp':
+                            desired = 'BMP'
+                        elif cf == 'tiff':
+                            desired = 'TIFF'
+                        # If WEBP or others, desired remains None and we fall back to PNG only if unsupported
+
+                        if desired is not None:
+                            # Skip conversion if already in the desired supported format
+                            already_matches = ((fmt_lower in ('jpeg', 'jpg') and desired == 'JPEG') or (fmt_lower == desired.lower()))
+                            if not already_matches:
+                                convert_needed = True
+                                target_fmt = desired
+                        else:
+                            # Compression format not supported by Azure (e.g., WEBP); convert only if unsupported
+                            if fmt_lower not in accepted:
+                                convert_needed = True
+                                target_fmt = 'PNG'
+                    else:
+                        # No compression preference; convert only if unsupported by Azure
+                        if fmt_lower not in accepted:
+                            convert_needed = True
+                            target_fmt = 'PNG'
+
+                    if convert_needed:
+                        self._log(f"🖼️ Converting image to {target_fmt} for Azure compatibility")
+                        try:
+                            if img2 is None:
+                                from PIL import Image as _PILImage
+                                img2 = open_image(io.BytesIO(processed_image_data))
+                            buffer = io.BytesIO()
+                            if target_fmt == 'JPEG' and img2.mode != 'RGB':
+                                img2 = img2.convert('RGB')
+                            img2.save(buffer, format=target_fmt)
+                            processed_image_data = buffer.getvalue()
+                        except Exception:
+                            pass
+                
+                # Use Azure Image Analysis API (synchronous, no polling needed)
+                from azure.ai.vision.imageanalysis.models import VisualFeatures
+                import time
+                
+                self._log("   Using Azure Image Analysis API for OCR")
+                
+                # Get language from settings (same as Google uses)
+                language_hints = ocr_settings.get('language_hints', ['ja'])
+                azure_language = language_hints[0] if language_hints else 'ja'
+                
+                # Map language codes to Azure-supported values
+                language_map = {
+                    'ja': 'ja',
+                    'ko': 'ko',
+                    'zh': 'zh-Hans',  # Simplified Chinese
+                    'zh-TW': 'zh-Hant',  # Traditional Chinese
+                    'en': 'en'
+                }
+                azure_language = language_map.get(azure_language, 'ja')
+                
+                self._log(f"   🌐 Azure language: {azure_language}")
+                
+                # Retry logic for rate limiting
+                max_retries = self.main_gui.config.get('max_retries', 7)
+                retry_delay = 60  # 60 seconds for rate limits
+                result = None
+                
+                for retry_attempt in range(max_retries):
+                    try:
+                        # Ensure client is alive
+                        if getattr(self, 'vision_client', None) is None:
+                            self._log("⚠️ Azure client missing; reinitializing...", "warning")
+                            self._ensure_azure_client()
+                        if getattr(self, 'vision_client', None) is None:
+                            raise RuntimeError("Azure Computer Vision client is not initialized. Check your key/endpoint and azure-ai-vision-imageanalysis installation.")
+                        
+                        # Call synchronous analyze API with language and model_version
+                        result = self.vision_client.analyze(
+                            image_data=processed_image_data,
+                            visual_features=[VisualFeatures.READ],
+                            language=azure_language,
+                            model_version='latest'
+                        )
+                        # Success! Break out of retry loop
+                        break
+                        
+                    except Exception as e:
+                        error_msg = str(e)
+                        
+                        # Handle rate limit errors with fixed 60s wait
+                        if 'Too Many Requests' in error_msg or '429' in error_msg:
+                            if retry_attempt < max_retries - 1:
+                                wait_time = retry_delay
+                                self._log(f"⚠️ Azure rate limit hit. Waiting {wait_time}s before retry {retry_attempt + 1}/{max_retries}...", "warning")
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                self._log(f"❌ Azure rate limit: Exhausted {max_retries} retries", "error")
+                                raise
+                        else:
+                            # Other error, don't retry
+                            raise
+                
+                if result is None:
+                    raise RuntimeError("Failed to get response from Azure Image Analysis API after retries")
+                
+                # Process results
+                # Use blocks[0] only (comic-translate approach)
+                total_lines = 0
+                
+                if result.read and result.read.blocks:
+                    for line in result.read.blocks[0].lines:
+                        # Extract text
+                        line_text = line.text
+                        
+                        # Clean text
+                        cleaned_line_text = self._fix_encoding_issues(line_text)
+                        cleaned_line_text = self._sanitize_unicode_characters(cleaned_line_text)
+                        
+                        # Log cleaning if changes were made
+                        if cleaned_line_text != line_text:
+                            self._log(f"🧹 Cleaned Azure OCR text: '{line_text[:30]}...' → '{cleaned_line_text[:30]}...'", "debug")
+                        
+                        # TEXT FILTERING FOR AZURE
+                        # Skip if text is too short (after cleaning)
+                        if len(cleaned_line_text.strip()) < min_text_length:
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping short text ({len(cleaned_line_text)} chars): {cleaned_line_text}")
+                            continue
+                        
+                        # Skip if primarily English and exclude_english is enabled
+                        if exclude_english and self._is_primarily_english(cleaned_line_text):
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping English text: {cleaned_line_text[:50]}...")
+                            continue
+                        
+                        # Extract bounding polygon (new API format)
+                        vertices = []
+                        if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                            for vertex in line.bounding_polygon:
+                                if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                                    vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x, 
+                                                   vertex['y'] if isinstance(vertex, dict) else vertex.y))
+                        
+                        # If we have vertices, use them; otherwise create rectangle from words
+                        if len(vertices) >= 2:
+                            # Calculate rectangular bounding box from vertices
+                            xs = [v[0] for v in vertices]
+                            ys = [v[1] for v in vertices]
+                            x_min, x_max = min(xs), max(xs)
+                            y_min, y_max = min(ys), max(ys)
+                        else:
+                            # Fallback: try to get bbox from words
+                            if hasattr(line, 'words') and line.words:
+                                all_word_vertices = []
+                                for word in line.words:
+                                    if hasattr(word, 'bounding_polygon') and word.bounding_polygon:
+                                        for vertex in word.bounding_polygon:
+                                            if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                                                all_word_vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x,
+                                                                        vertex['y'] if isinstance(vertex, dict) else vertex.y))
+                                if all_word_vertices:
+                                    vertices = all_word_vertices
+                                    xs = [v[0] for v in vertices]
+                                    ys = [v[1] for v in vertices]
+                                    x_min, x_max = min(xs), max(xs)
+                                    y_min, y_max = min(ys), max(ys)
+                                else:
+                                    # Skip if no bbox available
+                                    continue
+                            else:
+                                # Skip if no bbox available
+                                continue
+                        
+                        # Default high confidence (new API doesn't expose confidence scores)
+                        confidence = 0.95
+                        
+                        # Apply confidence threshold filtering
+                        if confidence >= confidence_threshold:
+                            region = TextRegion(
+                                text=cleaned_line_text,
+                                vertices=vertices if len(vertices) >= 4 else [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)],
+                                bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                confidence=confidence,
+                                region_type='text_line'
+                            )
+                            
+                            regions.append(region)
+                            total_lines += 1
+                            
+                            # More detailed logging
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Found text region ({confidence:.2f}): {cleaned_line_text[:50]}...")
+                        else:
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping low confidence text ({confidence:.2f}): {cleaned_line_text[:30]}...")
+                
+                # Log summary statistics
+                if total_lines > 0 and not getattr(self, 'concise_logs', False):
+                    self._log(f"   Total lines detected: {total_lines}")
+                    
+            else:
+                # === NEW OCR PROVIDERS ===
+                import cv2
+                import numpy as np
+                from ocr_manager import OCRManager
+                
+                # Load image as numpy array
+                image = None
+                if isinstance(processed_image_data, bytes):
+                    # Convert bytes to numpy array
+                    nparr = np.frombuffer(processed_image_data, np.uint8)
+                    image = cv2_imdecode(nparr, cv2.IMREAD_COLOR)
+                if image is None:
+                    # Load from file path (also when the decoder gate refused the bytes)
+                    image = cv2_imread(image_path)
+                    if image is None:
+                        # Try with PIL for Unicode paths
+                        from PIL import Image as PILImage
+                        pil_image = open_page_image(image_path)
+                        image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                
+                # Ensure OCR manager is available
+                if not hasattr(self, 'ocr_manager') or self.ocr_manager is None:
+                    try:
+                        # Prefer GUI-provided manager if available
+                        if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'ocr_manager') and self.main_gui.ocr_manager is not None:
+                            self.ocr_manager = self.main_gui.ocr_manager
+                        else:
+                            from ocr_manager import OCRManager
+                            self.ocr_manager = OCRManager(log_callback=self.log_callback)
+                            self._log("Initialized internal OCRManager instance", "info")
+                    except Exception as _e:
+                        self.ocr_manager = None
+                        self._log(f"Failed to initialize OCRManager: {str(_e)}", "error")
+                if self.ocr_manager is None:
+                    raise RuntimeError("OCRManager is not available; cannot proceed with OCR provider.")
+                
+                # Check provider status and load if needed
+                provider_status = self.ocr_manager.check_provider_status(self.ocr_provider)
+
+                if not provider_status['installed']:
+                    self._log(f"❌ {self.ocr_provider} is not installed", "error")
+                    self._log(f"   Please install it from the GUI settings", "error")
+                    raise Exception(f"{self.ocr_provider} OCR provider is not installed")
+                
+                # Start local inpainter preload while provider is being readied/used (non-cloud path only; background)
+                try:
+                    if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
+                        already_loaded, _lm = self._is_local_inpainter_loaded()
+                        if not already_loaded:
+                            import threading as _threading
+                            local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
+                            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                            adv = self.main_gui.config.get('manga_settings', {}).get('advanced', {}) if hasattr(self, 'main_gui') else {}
+                            desired = 1
+                            if adv.get('parallel_panel_translation', False):
+                                try:
+                                    desired = max(1, int(adv.get('panel_max_workers', 2)))
+                                except Exception:
+                                    desired = 2
+                            allow = True if desired == 1 else bool(adv.get('preload_local_inpainting_for_panels', True))
+                            if allow:
+                                self._inpaint_preload_event = _threading.Event()
+                                def _preload_inp_many():
+                                    try:
+                                        self.preload_local_inpainters_concurrent(local_method, model_path, desired)
+                                    finally:
+                                        try:
+                                            self._inpaint_preload_event.set()
+                                        except Exception:
+                                            pass
+                                _threading.Thread(target=_preload_inp_many, name="InpaintPreload@OCRProvider", daemon=True).start()
+                except Exception:
+                    pass
+                
+                if not provider_status['loaded']:
+                    # Check if Qwen2-VL - if it's supposedly not loaded but actually is, skip
+                    if self.ocr_provider == 'Qwen2-VL':
+                        provider = self.ocr_manager.get_provider('Qwen2-VL')
+                        if provider and hasattr(provider, 'model') and provider.model is not None:
+                            self._log("✅ Qwen2-VL model actually already loaded, skipping reload")
+                            success = True
+                        else:
+                            # Only actually load if truly not loaded
+                            model_size = self.ocr_config.get('model_size', '2') if hasattr(self, 'ocr_config') else '2'
+                            self._log(f"Loading Qwen2-VL with model_size={model_size}")
+                            success = self.ocr_manager.load_provider(self.ocr_provider, model_size=model_size)
+                            if not success:
+                                raise Exception(f"Failed to load {self.ocr_provider} model")
+                    elif self.ocr_provider == 'custom-api':
+                        # Custom API needs to initialize UnifiedClient with credentials
+                        self._log("📡 Loading custom-api provider...")
+                        # Try to get API key and model from GUI if available
+                        load_kwargs = {'context': 'manga_ocr'}
+                        if hasattr(self, 'main_gui'):
+                            # Get API key from GUI - Support both Tkinter and PySide6
+                            if hasattr(self.main_gui, 'api_key_entry'):
+                                try:
+                                    if hasattr(self.main_gui.api_key_entry, 'get'):
+                                        api_key = self.main_gui.api_key_entry.get()
+                                    elif hasattr(self.main_gui.api_key_entry, 'text'):
+                                        api_key = self.main_gui.api_key_entry.text()
+                                    else:
+                                        api_key = ''
+                                    if api_key:
+                                        load_kwargs['api_key'] = api_key
+                                except Exception:
+                                    pass
+                            # Get model from GUI - Support both Tkinter and PySide6
+                            if hasattr(self.main_gui, 'model_var'):
+                                try:
+                                    if hasattr(self.main_gui.model_var, 'get'):
+                                        model = self.main_gui.model_var.get()
+                                    else:
+                                        model = self.main_gui.model_var
+                                    if model:
+                                        load_kwargs['model'] = model
+                                except Exception:
+                                    pass
+                        success = self.ocr_manager.load_provider(self.ocr_provider, **load_kwargs)
+                        if not success:
+                            raise Exception(f"Failed to initialize {self.ocr_provider}")
+                    elif self.ocr_provider == 'azure-document-intelligence':
+                        # Azure Document Intelligence is a cloud API - just initialize with credentials
+                        self._log("☁️ Initializing Azure Document Intelligence (cloud API)...")
+                        load_kwargs = {}
+                        if hasattr(self, 'main_gui'):
+                            # Get credentials from config
+                            load_kwargs['azure_endpoint'] = self.main_gui.config.get('azure_document_intelligence_endpoint', '')
+                            load_kwargs['azure_key'] = self.main_gui.config.get('azure_document_intelligence_key', '')
+                        
+                        # Initialize the provider with credentials
+                        success = self.ocr_manager.load_provider(self.ocr_provider, **load_kwargs)
+                        if not success:
+                            raise Exception(f"Failed to initialize {self.ocr_provider} - check credentials")
+                    else:
+                        # Other providers
+                        success = self.ocr_manager.load_provider(self.ocr_provider)
+                        if not success:
+                            raise Exception(f"Failed to load {self.ocr_provider} model")
+                    
+                    if not success:
+                        raise Exception(f"Failed to load {self.ocr_provider} model")
+                
+                # Initialize ocr_results here before any provider-specific code
+                ocr_results = []
+                
+                # Special handling for manga-ocr (needs region detection first)
+                if self.ocr_provider == 'manga-ocr':
+                    # IMPORTANT: Initialize fresh results list
+                    ocr_results = []
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', True):
+                        self._log("📝 Using bubble detection regions for manga-ocr...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process detections immediately and don't store
+                            all_regions = []
+                            
+                            # ONLY ADD TEXT-CONTAINING REGIONS
+                            # Skip empty bubbles since they shouldn't have text
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # DO NOT ADD empty bubbles - they're duplicates of text_bubbles
+                            # if 'bubbles' in rtdetr_detections:  # <-- REMOVE THIS
+                            #     all_regions.extend(rtdetr_detections.get('bubbles', []))
+                            
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE OCR processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text-containing regions (skipping empty bubbles)")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            # Store in instance variable so we can classify regions later
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
+                            
+                            # Check if parallel processing is enabled
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with manga-ocr")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'manga-ocr', confidence_threshold)
+                            else:
+                                # Process each region with manga-ocr
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
+                                    result = self.ocr_manager.detect_text(cropped, 'manga-ocr', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        # CRITICAL: Store RT-DETR bubble bounds for rendering
+                                        # The bbox/vertices are the small OCR polygon, but bubble_bounds is the full RT-DETR bubble
+                                        result[0].bubble_bounds = (x, y, w, h)
+                                        ocr_results.append(result[0])
+                                        self._log(f"🔍 Processing region {i+1}/{len(all_regions)} with manga-ocr...")
+                                        self._log(f"✅ Detected text: {result[0].text[:50]}...")
+
+                            # Clear regions list after processing
+                            all_regions = None
+                    else:
+                        # NO bubble detection - just process full image
+                        self._log("📝 Processing full image with manga-ocr (no bubble detection)")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider, confidence=confidence_threshold)  
+                    
+                elif self.ocr_provider == 'Qwen2-VL':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure Qwen2-VL for Korean text
+                    language_hints = ocr_settings.get('language_hints', ['ko'])
+                    self._log("🍩 Qwen2-VL OCR for Korean text recognition")
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', True):
+                        self._log("📝 Using bubble detection regions for Qwen2-VL...")
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE OCR processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with Qwen2-VL")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
+                            
+                            # Check if parallel processing is enabled
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with Qwen2-VL")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'Qwen2-VL', confidence_threshold)
+                            else:
+                                # Process each region with Qwen2-VL
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
+                                    result = self.ocr_manager.detect_text(cropped, 'Qwen2-VL', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with Qwen2-VL")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                elif self.ocr_provider == 'custom-api':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure Custom API for text extraction
+                    self._log("🔌 Using Custom API for OCR")
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', True):
+                        self._log("📝 Using bubble detection regions for Custom API...")
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE sorting/processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
+                            # Sort regions by manga reading order (comic-translate style)
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with Custom API")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
+                            
+                            custom_api_ocr_batch_size = self._get_custom_api_ocr_batch_size()
+                            if custom_api_ocr_batch_size > 1 and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions (custom-api; workers={min(custom_api_ocr_batch_size, len(all_regions))})")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'custom-api', confidence_threshold)
+                            else:
+                                # Original sequential processing
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
+                                    result = self.ocr_manager.detect_text(
+                                        cropped, 
+                                        'custom-api', 
+                                        confidence=confidence_threshold
+                                    )
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"🔍 Region {i+1}/{len(all_regions)}: {result[0].text[:50]}...")
+                            
+                            # Clear regions list after processing
+                            all_regions = None
+                            # Note: rtdetr_detections preserved in self._current_rtdetr_detections
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with Custom API")
+                        ocr_results = self.ocr_manager.detect_text(
+                            image, 
+                            'custom-api',
+                            confidence=confidence_threshold
+                        )
+
+                elif self.ocr_provider == 'easyocr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure EasyOCR languages
+                    language_hints = ocr_settings.get('language_hints', ['ja', 'en'])
+                    validated_languages = self._validate_easyocr_languages(language_hints)
+                    
+                    easyocr_provider = self.ocr_manager.get_provider('easyocr')
+                    if easyocr_provider:
+                        if easyocr_provider.languages != validated_languages:
+                            easyocr_provider.languages = validated_languages
+                            easyocr_provider.is_loaded = False
+                            self._log(f"🔥 Reloading EasyOCR with languages: {validated_languages}")
+                            self.ocr_manager.load_provider('easyocr')
+                    
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', True):
+                        self._log("📝 Using bubble detection regions for EasyOCR...")
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE sorting/processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
+                            # Sort regions by manga reading order (comic-translate style)
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with EasyOCR")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
+                            
+                            # Check if parallel processing is enabled
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with EasyOCR")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'easyocr', confidence_threshold)
+                            else:
+                                # Process each region with EasyOCR
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
+                                    result = self.ocr_manager.detect_text(cropped, 'easyocr', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with EasyOCR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                elif self.ocr_provider == 'paddleocr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure PaddleOCR language
+                    language_hints = ocr_settings.get('language_hints', ['ja'])
+                    lang_map = {'ja': 'japan', 'ko': 'korean', 'zh': 'ch', 'en': 'en'}
+                    paddle_lang = lang_map.get(language_hints[0] if language_hints else 'ja', 'japan')
+                    
+                    # Reload if language changed
+                    paddle_provider = self.ocr_manager.get_provider('paddleocr')
+                    if paddle_provider and paddle_provider.is_loaded:
+                        if hasattr(paddle_provider.model, 'lang') and paddle_provider.model.lang != paddle_lang:
+                            from paddleocr import PaddleOCR
+                            paddle_provider.model = PaddleOCR(
+                                use_angle_cls=True,
+                                lang=paddle_lang,
+                                use_gpu=True,
+                                show_log=False
+                            )
+                            self._log(f"🔥 Reloaded PaddleOCR with language: {paddle_lang}")
+                    
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', True):
+                        self._log("📝 Using bubble detection regions for PaddleOCR...")
+                        
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE sorting/processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
+                            # Sort regions by manga reading order (comic-translate style)
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with PaddleOCR")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
+                            
+                            # Check if parallel processing is enabled
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with PaddleOCR")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'paddleocr', confidence_threshold)
+                            else:
+                                # Process each region with PaddleOCR
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
+                                    result = self.ocr_manager.detect_text(cropped, 'paddleocr', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with PaddleOCR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                elif self.ocr_provider == 'doctr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    self._log("📄 DocTR OCR for document text recognition")
+                    
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', True):
+                        self._log("📝 Using bubble detection regions for DocTR...")
+                        
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE sorting/processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
+                            # Sort regions by manga reading order (comic-translate style)
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with DocTR")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
+                            
+                            # Check if parallel processing is enabled
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with DocTR")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'doctr', confidence_threshold)
+                            else:
+                                # Process each region with DocTR
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
+                                    result = self.ocr_manager.detect_text(cropped, 'doctr', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with DocTR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                elif self.ocr_provider == 'azure-document-intelligence':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    self._log("📋 Azure Document Intelligence OCR (successor to Azure AI Vision)")
+                    
+                    # Check if we should use RT-DETR for text region detection (same check as Azure Vision)
+                    if ocr_settings.get('bubble_detection_enabled', True) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
+                        self._log("🎯 Azure Doc Intelligence full image → match to RT-DETR blocks")
+                        
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            if not all_regions:
+                                self._log("⚠️ No RT-DETR text regions found")
+                            else:
+                                # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE matching with OCR
+                                skip_merging = bool(ocr_settings.get('skip_rtdetr_merging', False))
+                                if skip_merging:
+                                    self._log("⛔ Skipping RT-DETR region merging (per settings)")
+                                else:
+                                    original_count = len(all_regions)
+                                    all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                    if len(all_regions) < original_count:
+                                        self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                                
+                                # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
+                                # This is MUCH better for Azure Document Intelligence:
+                                # - Preserves document layout context
+                                # - Utilizes Azure's layout analysis features
+                                # - Better reading order detection
+                                # - Only one API call instead of N calls
+                                self._log(f"📊 Step 1: Running Azure Document Intelligence on full image to detect text lines")
+                                
+                                # Get language hint for better OCR accuracy
+                                language_hints = ocr_settings.get('language_hints', ['ja'])
+                                language_hint = language_hints[0] if language_hints else 'ja'
+                                
+                                full_image_ocr = self.ocr_manager.detect_text(
+                                    image,
+                                    'azure-document-intelligence',
+                                    confidence=confidence_threshold,
+                                    language_hint=language_hint
+                                )
+                                
+                                if full_image_ocr:
+                                    self._log(f"✅ Azure detected {len(full_image_ocr)} text lines in full image")
+                                    
+                                    # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
+                                    self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
+                                    source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False))
+                                    
+                                    # Convert matched blocks to OCR results
+                                    ocr_results = []
+                                    for block_data in matched_blocks:
+                                        # CRITICAL: Include ALL blocks (even empty ones) for fallback OCR
+                                        # Empty blocks will be processed by fallback OCR
+                                        # Create OCR result object
+                                        class OCRResult:
+                                            def __init__(self, text, bbox):
+                                                self.text = text
+                                                self.bbox = bbox
+                                                self.vertices = [(bbox[0], bbox[1]), (bbox[0]+bbox[2], bbox[1]),
+                                                               (bbox[0]+bbox[2], bbox[1]+bbox[3]), (bbox[0], bbox[1]+bbox[3])]
+                                                self.confidence = 0.9  # High confidence since RT-DETR detected it
+                                                self.bubble_bounds = bbox  # Use RT-DETR bounds for rendering
+                                                # Initialize attributes for classification
+                                                self.region_type = 'text_block'
+                                                self.bubble_type = 'text_bubble'
+                                                self.should_inpaint = True
+                                        
+                                        result = OCRResult(block_data['text'], block_data['bbox'])
+                                        
+                                        # CRITICAL: Classify by RT-DETR class and set should_inpaint flag
+                                        # This enables free text inpainting exclusion
+                                        classify_rtdetr_region_and_set_inpaint(
+                                            result, result.bbox, rtdetr_detections, ocr_settings,
+                                            self.main_gui if hasattr(self, 'main_gui') else None,
+                                            log_func=self._log
+                                        )
+                                        
+                                        ocr_results.append(result)
+                                    
+                                    self._log(f"✅ Matched text to {len(ocr_results)} RT-DETR blocks (comic-translate style)")
+                                    empty_blocks_count = sum(1 for r in ocr_results if not r.text.strip())
+                                    if empty_blocks_count > 0:
+                                        self._log(f"⚠️ {empty_blocks_count} blocks have NO matched OCR text")
+                                    for i, result in enumerate(ocr_results, 1):
+                                        line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
+                                        self._log(f"   Block {i}: {line_count} lines → '{result.text[:50]}...'")
+                                    
+                                    # FALLBACK OCR FOR EMPTY BLOCKS
+                                    # If some RT-DETR blocks got NO OCR matches (empty text), re-run Azure Document Intelligence on cropped regions
+                                    # This catches small text that full-image OCR missed
+                                    # IMPORTANT: Disabled by default to reduce API costs - enable via settings
+                                    enable_fallback_ocr = ocr_settings.get('enable_fallback_ocr', False)
+                                    if empty_blocks_count > 0 and enable_fallback_ocr:
+                                        self._log(f"🔍 Step 3: Running fallback OCR for {empty_blocks_count} empty blocks")
+                                        
+                                        # Load the original image for cropping
+                                        import cv2
+                                        original_image = cv2_imread(image_path)
+                                        if original_image is None:
+                                            self._log("❌ Failed to load original image for fallback OCR", "error")
+                                        else:
+                                            # Get the Azure Document Intelligence client from OCR manager
+                                            doc_intel_provider = self.ocr_manager.get_provider('azure-document-intelligence')
+                                            if doc_intel_provider and hasattr(doc_intel_provider, 'client'):
+                                                
+                                                for idx, result in enumerate(ocr_results):
+                                                    if result.text.strip():  # Skip blocks that already have text
+                                                        continue
+                                                    
+                                                    # Get block bounding box
+                                                    x, y, w, h = result.bbox
+                                                    
+                                                    # Crop the region (with padding for better OCR)
+                                                    img_h, img_w = original_image.shape[:2]
+                                                    padding_ratio = 0.1
+                                                    pad_w = int(w * padding_ratio)
+                                                    pad_h = int(h * padding_ratio)
+                                                    
+                                                    # Expand bounding box with padding
+                                                    crop_x = max(0, x - pad_w)
+                                                    crop_y = max(0, y - pad_h)
+                                                    crop_w = min(img_w - crop_x, w + 2 * pad_w)
+                                                    crop_h = min(img_h - crop_y, h + 2 * pad_h)
+                                                    
+                                                    # Crop the region
+                                                    cropped = original_image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w].copy()
+                                                    
+                                                    # Upscale if too small (small text may not be detected by full-image OCR)
+                                                    MIN_SIZE = 100
+                                                    actual_h, actual_w = cropped.shape[:2]
+                                                    if actual_h < MIN_SIZE or actual_w < MIN_SIZE:
+                                                        scale_factor = max(MIN_SIZE / actual_w, MIN_SIZE / actual_h)
+                                                        new_w = int(actual_w * scale_factor)
+                                                        new_h = int(actual_h * scale_factor)
+                                                        cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                                                        self._log(f"   Block {idx+1}: Upscaled from {actual_w}x{actual_h} to {new_w}x{new_h}")
+                                                    
+                                                    # Encode cropped image to JPEG
+                                                    _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                                    cropped_bytes = encoded.tobytes()
+                                                    
+                                                    try:
+                                                        # Run Azure Document Intelligence on this specific crop
+                                                        # Get language hint for better accuracy
+                                                        language_hints = ocr_settings.get('language_hints', ['ja'])
+                                                        locale_hint = language_hints[0] if language_hints else 'ja'
+                                                        
+                                                        # Map to Azure locale codes
+                                                        locale_map = {
+                                                            'ja': 'ja', 'ko': 'ko', 'zh': 'zh-Hans',
+                                                            'zh-Hans': 'zh-Hans', 'zh-Hant': 'zh-Hant',
+                                                            'en': 'en', 'ar': 'ar', 'he': 'he'
+                                                        }
+                                                        locale = locale_map.get(locale_hint, locale_hint)
+                                                        
+                                                        # Call Document Intelligence API
+                                                        if locale:
+                                                            poller = doc_intel_provider.client.begin_analyze_document(
+                                                                "prebuilt-read",
+                                                                document=cropped_bytes,
+                                                                locale=locale
+                                                            )
+                                                        else:
+                                                            poller = doc_intel_provider.client.begin_analyze_document(
+                                                                "prebuilt-read",
+                                                                document=cropped_bytes
+                                                            )
+                                                        
+                                                        crop_result = poller.result()
+                                                        
+                                                        # Extract text from crop result
+                                                        crop_texts = []
+                                                        if crop_result.pages:
+                                                            for page in crop_result.pages:
+                                                                if hasattr(page, 'lines') and page.lines:
+                                                                    for line in page.lines:
+                                                                        if line.content:
+                                                                            crop_texts.append(line.content.strip())
+                                                        
+                                                        if crop_texts:
+                                                            # Success! Replace empty text with fallback OCR result
+                                                            source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                                            if source_lang in ['ja', 'zh', 'ko']:
+                                                                fallback_text = ''.join(crop_texts)  # No spaces for CJK
+                                                            else:
+                                                                fallback_text = ' '.join(crop_texts)  # Spaces for others
+                                                            
+                                                            result.text = fallback_text
+                                                            self._log(f"   ✅ Block {idx+1}: Fallback OCR detected text: '{fallback_text[:50]}...'")
+                                                        else:
+                                                            self._log(f"   ⚠️ Block {idx+1}: Fallback OCR found no text")
+                                                    
+                                                    except Exception as e:
+                                                        self._log(f"   ❌ Block {idx+1}: Fallback OCR failed: {str(e)}", "warning")
+                                                        continue
+                                            else:
+                                                self._log("⚠️ Azure Document Intelligence client not available for fallback OCR", "warning")
+                                        
+                                        # FINAL CLEANUP: Remove any blocks that are STILL empty after fallback OCR
+                                        original_count = len(ocr_results)
+                                        ocr_results = [r for r in ocr_results if r.text.strip()]
+                                        removed_count = original_count - len(ocr_results)
+                                        if removed_count > 0:
+                                            self._log(f"🧹 Removed {removed_count} empty bubbles after fallback OCR")
+                                    elif empty_blocks_count > 0:
+                                        if bool(ocr_settings.get('preserve_empty_blocks', False)):
+                                            self._log(f"ℹ️ Fallback OCR disabled - preserving {empty_blocks_count} empty blocks (per settings)")
+                                        else:
+                                            # Fallback OCR is disabled, just remove empty blocks
+                                            self._log(f"ℹ️ Fallback OCR disabled - removing {empty_blocks_count} empty blocks")
+                                            original_count = len(ocr_results)
+                                            ocr_results = [r for r in ocr_results if r.text.strip()]
+                                            removed_count = original_count - len(ocr_results)
+                                            if removed_count > 0:
+                                                self._log(f"🧹 Removed {removed_count} empty blocks (no text matched)")
+                                else:
+                                    self._log("⚠️ Azure Document Intelligence found no text lines in full image")
+                            
+                            # Clear detections
+                            rtdetr_detections = None
+                            all_regions = None
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with Azure Document Intelligence")
+                        
+                        # Get language hint for better OCR accuracy
+                        language_hints = ocr_settings.get('language_hints', ['ja'])
+                        language_hint = language_hints[0] if language_hints else 'ja'
+                        
+                        # Provider already initialized with credentials, just use it
+                        ocr_results = self.ocr_manager.detect_text(
+                            image, 
+                            self.ocr_provider,
+                            language_hint=language_hint
+                        )
+
+                elif self.ocr_provider == 'rapidocr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Get RapidOCR settings
+                    use_recognition = self.main_gui.config.get('rapidocr_use_recognition', True)
+                    language = self.main_gui.config.get('rapidocr_language', 'auto')
+                    detection_mode = self.main_gui.config.get('rapidocr_detection_mode', 'document')
+                    
+                    self._log(f"⚡ RapidOCR - Recognition: {'Full' if use_recognition else 'Detection Only'}")
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', True):
+                        self._log("🎯 Using comic-translate approach: RapidOCR full image → match to RT-DETR blocks")
+                        
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Get all text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            if not all_regions:
+                                self._log("⚠️ No RT-DETR text regions found")
+                            else:
+                                # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE matching with OCR
+                                skip_merging = bool(ocr_settings.get('skip_rtdetr_merging', False))
+                                if skip_merging:
+                                    self._log("⛔ Skipping RT-DETR region merging (per settings)")
+                                else:
+                                    original_count = len(all_regions)
+                                    all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                    if len(all_regions) < original_count:
+                                        self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                                
+                                # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
+                                self._log(f"📊 Step 1: Running RapidOCR on full image to detect text lines")
+                                full_image_ocr = self.ocr_manager.detect_text(
+                                    image,
+                                    'rapidocr',
+                                    confidence=confidence_threshold,
+                                    use_recognition=use_recognition,
+                                    language=language,
+                                    detection_mode=detection_mode
+                                )
+                                
+                                if full_image_ocr:
+                                    self._log(f"✅ RapidOCR detected {len(full_image_ocr)} text lines in full image")
+                                    
+                                    # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
+                                    self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
+                                    source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False))
+                                    
+                                    # Convert matched blocks to OCR results
+                                    ocr_results = []
+                                    for block_data in matched_blocks:
+                                        if block_data['text'].strip():  # Only include blocks with text
+                                            # Create a fake OCR result object
+                                            class OCRResult:
+                                                def __init__(self, text, bbox):
+                                                    self.text = text
+                                                    self.bbox = bbox
+                                                    self.vertices = [(bbox[0], bbox[1]), (bbox[0]+bbox[2], bbox[1]),
+                                                                   (bbox[0]+bbox[2], bbox[1]+bbox[3]), (bbox[0], bbox[1]+bbox[3])]
+                                                    self.confidence = 0.9  # High confidence since RT-DETR detected it
+                                                    self.bubble_bounds = bbox  # Use RT-DETR bounds for rendering
+                                                    # Initialize attributes for classification
+                                                    self.region_type = 'text_block'
+                                                    self.bubble_type = 'text_bubble'
+                                                    self.should_inpaint = True
+                                            
+                                            result = OCRResult(block_data['text'], block_data['bbox'])
+                                            
+                                            # CRITICAL: Classify by RT-DETR class and set should_inpaint flag
+                                            # This enables free text inpainting exclusion
+                                            classify_rtdetr_region_and_set_inpaint(
+                                                result, result.bbox, rtdetr_detections, ocr_settings,
+                                                self.main_gui if hasattr(self, 'main_gui') else None,
+                                                log_func=self._log
+                                            )
+                                            
+                                            ocr_results.append(result)
+                                    
+                                    self._log(f"✅ Matched text to {len(ocr_results)} RT-DETR blocks (comic-translate style)")
+                                    for i, result in enumerate(ocr_results, 1):
+                                        line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
+                                        self._log(f"   Block {i}: {line_count} lines → '{result.text[:50]}...'")
+                                else:
+                                    self._log("⚠️ RapidOCR found no text lines in full image")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
+                            all_regions = None
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📊 Processing full image with RapidOCR")
+                        ocr_results = self.ocr_manager.detect_text(
+                            image, 
+                            'rapidocr',
+                            confidence=confidence_threshold,
+                            use_recognition=use_recognition,
+                            language=language,
+                            detection_mode=detection_mode
+                        )
+
+                else:
+                    # Default processing for any other providers
+                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                # Convert OCR results to TextRegion format
+                for result in ocr_results:
+                    # CLEAN ORIGINAL OCR TEXT - Fix cube characters and encoding issues
+                    original_ocr_text = result.text
+                    cleaned_result_text = self._fix_encoding_issues(result.text)
+                    cleaned_result_text = self._normalize_unicode_width(cleaned_result_text)
+                    cleaned_result_text = self._sanitize_unicode_characters(cleaned_result_text)
+                    
+                    # Log cleaning if changes were made
+                    if cleaned_result_text != original_ocr_text:
+                        self._log(f"🧹 Cleaned OCR manager text: '{original_ocr_text[:30]}...' → '{cleaned_result_text[:30]}...'", "debug")
+                    
+                    # Apply filtering (use cleaned text)
+                    if len(cleaned_result_text.strip()) < min_text_length:
+                        if not getattr(self, 'concise_logs', False):
+                            self._log(f"   Skipping short text ({len(cleaned_result_text)} chars): {cleaned_result_text}")
+                        continue
+                    
+                    if exclude_english and self._is_primarily_english(cleaned_result_text):
+                        if not getattr(self, 'concise_logs', False):
+                            self._log(f"   Skipping English text: {cleaned_result_text[:50]}...")
+                        continue
+                    
+                    if result.confidence < confidence_threshold:
+                        if not getattr(self, 'concise_logs', False):
+                            self._log(f"   Skipping low confidence ({result.confidence:.2f}): {cleaned_result_text[:30]}...")
+                        continue
+                    
+                    # Create TextRegion (use cleaned text)
+                    # CRITICAL: Preserve bubble_bounds if it was set during OCR (e.g., manga-ocr with RT-DETR)
+                    region_kwargs = {
+                        'text': cleaned_result_text,  # Use cleaned text instead of original
+                        'vertices': result.vertices if result.vertices else [
+                            (result.bbox[0], result.bbox[1]),
+                            (result.bbox[0] + result.bbox[2], result.bbox[1]),
+                            (result.bbox[0] + result.bbox[2], result.bbox[1] + result.bbox[3]),
+                            (result.bbox[0], result.bbox[1] + result.bbox[3])
+                        ],
+                        'bounding_box': result.bbox,
+                        'confidence': result.confidence,
+                        'region_type': 'text_block'
+                    }
+                    # Preserve bubble_bounds from OCR result if present
+                    if hasattr(result, 'bubble_bounds') and result.bubble_bounds is not None:
+                        region_kwargs['bubble_bounds'] = result.bubble_bounds
+                        self._log(f"   🔍 Preserved bubble_bounds from OCR: {result.bubble_bounds}", "debug")
+                    else:
+                        if hasattr(result, 'bubble_bounds'):
+                            self._log(f"   ⚠️ OCR result has bubble_bounds but it's None!", "debug")
+                        else:
+                            self._log(f"   ℹ️ OCR result has no bubble_bounds attribute", "debug")
+                    
+                    region = TextRegion(**region_kwargs)
+                    
+                    # CRITICAL: Apply RT-DETR classification if detections were preserved
+                    # This enables free text inpainting exclusion for cropped-region providers
+                    if hasattr(self, '_current_rtdetr_detections') and self._current_rtdetr_detections:
+                        # Get the bbox to classify (prefer bubble_bounds if available)
+                        classify_bbox = result.bubble_bounds if hasattr(result, 'bubble_bounds') and result.bubble_bounds else result.bbox
+                        classify_rtdetr_region_and_set_inpaint(
+                            region, classify_bbox, self._current_rtdetr_detections, ocr_settings,
+                            self.main_gui if hasattr(self, 'main_gui') else None,
+                            log_func=self._log
+                        )
+                    
+                    regions.append(region)
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"   Found text ({result.confidence:.2f}): {cleaned_result_text[:50]}...")
+            
+            # MERGING SECTION (applies to all providers)
+            # Check if bubble detection is enabled
+            if ocr_settings.get('bubble_detection_enabled', True):
+                # Build list of providers that should skip merging
+                skip_merge_providers = ['rapidocr', 'manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']
+                
+                # If RT-DETR guidance is enabled for cloud providers, they also skip merging
+                # (they use full-image OCR + RT-DETR matching, so results are already aligned to bubbles)
+                use_rtdetr_guidance = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+                if use_rtdetr_guidance:
+                    if self.ocr_provider in ['google', 'azure', 'azure-document-intelligence']:
+                        skip_merge_providers.extend(['google', 'azure', 'azure-document-intelligence'])
+                
+                if self.ocr_provider in skip_merge_providers:
+                    self._log("🎯 Skipping bubble detection merge (regions already aligned with RT-DETR)")
+                    # RapidOCR: Already matched to RT-DETR blocks via comic-translate approach
+                    # Google/Azure/Azure Doc Intelligence (with RT-DETR guidance): Full-image OCR + RT-DETR matching, already aligned
+                    # Others: Regions already have bubble_bounds set from OCR phase - no need to merge
+                else:
+                    # Cloud providers (without RT-DETR guidance) return full-image line-level results that need merging
+                    self._log("🤖 Using AI bubble detection for merging")
+                    regions = self._merge_with_bubble_detection(regions, image_path)
+            else:
+                # Traditional merging
+                merge_threshold = ocr_settings.get('merge_nearby_threshold', 20)
+                
+                # Apply provider-specific adjustments
+                if self.ocr_provider == 'azure':
+                    azure_multiplier = ocr_settings.get('azure_merge_multiplier', 2.0)
+                    merge_threshold = int(merge_threshold * azure_multiplier)
+                    self._log(f"📋 Using Azure-adjusted merge threshold: {merge_threshold}px")
+                    
+                    # Pre-group Azure lines if the method exists
+                    if hasattr(self, '_pregroup_azure_lines'):
+                        regions = self._pregroup_azure_lines(regions, merge_threshold)
+                
+                elif self.ocr_provider in ['paddleocr', 'easyocr', 'doctr']:
+                    # These providers often return smaller text segments
+                    line_multiplier = ocr_settings.get('line_ocr_merge_multiplier', 1.5)
+                    merge_threshold = int(merge_threshold * line_multiplier)
+                    self._log(f"📋 Using line-based OCR adjusted threshold: {merge_threshold}px")
+                
+                # Apply standard merging
+                regions = self._merge_nearby_regions(regions, threshold=merge_threshold)
+            
+            self._log(f"✅ Detected {len(regions)} text regions after merging")
+            
+            # Clear preserved RT-DETR detections to avoid persistence across images
+            if hasattr(self, '_current_rtdetr_detections'):
+                self._current_rtdetr_detections = None
+            
+            # Apply manga reading order sorting (comic-translate style)
+            # This ensures proper translation mapping for all providers
+            if regions:
+                # Determine reading direction based on source language
+                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                right_to_left = source_lang in ['ja', 'ar', 'he']  # Japanese, Arabic, Hebrew
+                
+                regions = sort_regions_by_reading_order(regions, right_to_left=right_to_left)
+                direction_label = "right→left" if right_to_left else "left→right"
+                self._log(f"📖 Sorted {len(regions)} regions by manga reading order (top→bottom, {direction_label})")
+            
+            # NOTE: Debug images are saved in process_image() with correct output_dir
+            # Removed duplicate save here to avoid creating unexpected 'translated_images' folders
+            
+            return regions
+            
+        except Exception as e:
+            self._log(f"❌ Error detecting text: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "error")
+            raise
+
+    def _validate_easyocr_languages(self, languages):
+        """Validate EasyOCR language combinations"""
+        # EasyOCR compatibility rules
+        incompatible_sets = [
+            {'ja', 'ko'},  # Japanese + Korean
+            {'ja', 'zh'},  # Japanese + Chinese  
+            {'ko', 'zh'}   # Korean + Chinese
+        ]
+        
+        lang_set = set(languages)
+        
+        for incompatible in incompatible_sets:
+            if incompatible.issubset(lang_set):
+                # Conflict detected - keep first language + English
+                primary_lang = languages[0] if languages else 'en'
+                result = [primary_lang, 'en'] if primary_lang != 'en' else ['en']
+                
+                self._log(f"⚠️ EasyOCR: {' + '.join(incompatible)} not compatible", "warning")
+                self._log(f"🔧 Auto-adjusted from {languages} to {result}", "info")
+                return result
+        
+        return languages
+
+    def _parallel_ocr_regions(self, image: np.ndarray, regions: List, provider: str, confidence_threshold: float) -> List:
+        """Process multiple regions in parallel using ThreadPoolExecutor"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        ocr_results = []
+        results_lock = threading.Lock()
+        
+        def process_single_region(index: int, bbox: Tuple[int, int, int, int]):
+            """Process a single region with OCR"""
+            x, y, w, h = bbox
+            try:
+                # Use the safe crop method
+                cropped = self._safe_crop_region(image, x, y, w, h)
+                
+                # Skip if crop failed
+                if cropped is None:
+                    self._log(f"⚠️ Skipping region {index} - invalid crop", "warning")
+                    return
+                
+                # Run OCR on this region with retry logic for failures
+                result = None
+                # Get OCR-specific retry setting (separate from translation retries)
+                # Default: 0 retries (disabled) - empty regions are often genuinely empty
+                try:
+                    ocr_max_retries = int(self.manga_settings.get('ocr', {}).get('ocr_max_retries', 0)) if hasattr(self, 'manga_settings') else 0
+                    max_retries = max(0, min(ocr_max_retries, 5))  # Cap at 5 max (6 total attempts)
+                except Exception:
+                    max_retries = 0  # Fallback: disabled (1 attempt only)
+                
+                for attempt in range(max_retries + 1):
+                    result = self.ocr_manager.detect_text(
+                        cropped, 
+                        provider,
+                        confidence=confidence_threshold
+                    )
+                    
+                    # Check if result indicates a failure
+                    if result and len(result) > 0 and result[0].text.strip():
+                        text = result[0].text.strip()
+                        
+                        # Check for content blocked - should trigger fallback, not retry
+                        # The unified API client should handle this, but if it reaches here, skip this region
+                        if "[CONTENT BLOCKED" in text:
+                            self._log(f"⚠️ Region {index+1} content blocked by API safety filters", "warning")
+                            return (index, None)  # Skip this region, fallback already attempted
+                        
+                        # Check for retryable failure markers (transient errors)
+                        failure_markers = [
+                            "[TRANSLATION FAILED",
+                            "[ORIGINAL TEXT PRESERVED]",
+                            "[IMAGE TRANSLATION FAILED]",
+                            "[EXTRACTION FAILED",
+                            "[RATE LIMITED"
+                        ]
+                        
+                        has_failure = any(marker in text for marker in failure_markers)
+                        
+                        if has_failure and attempt < max_retries:
+                            # Retry this region
+                            self._log(f"⚠️ Region {index+1} OCR failed (attempt {attempt + 1}/{max_retries + 1}), retrying...", "warning")
+                            import time
+                            time.sleep(1 * (attempt + 1))  # Progressive delay: 1s, 2s
+                            result = None
+                            continue
+                        elif has_failure:
+                            # All retries exhausted
+                            self._log(f"❌ Region {index+1} OCR failed after {max_retries + 1} attempts", "error")
+                            return (index, None)
+                        else:
+                            # Success - break retry loop
+                            break
+                    else:
+                        # No result or empty text
+                        if attempt < max_retries:
+                            self._log(f"⚠️ Region {index+1} returned empty (attempt {attempt + 1}/{max_retries + 1}), retrying...", "warning")
+                            import time
+                            time.sleep(1 * (attempt + 1))
+                            result = None
+                            continue
+                        else:
+                            # All retries exhausted, no valid result
+                            return (index, None)
+                
+                if result and len(result) > 0 and result[0].text.strip():
+                    # Adjust coordinates to full image space
+                    result[0].bbox = (x, y, w, h)
+                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                    # CRITICAL: Store RT-DETR bubble bounds for rendering (for non-Azure/Google providers)
+                    result[0].bubble_bounds = (x, y, w, h)
+                    return (index, result[0])
+                return (index, None)
+                
+            except Exception as e:
+                self._log(f"Error processing region {index}: {str(e)}", "error")
+                return (index, None)
+        
+        # Process regions in parallel
+        max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        
+        # For cloud OCR providers (custom-api, azure-document-intelligence), use OCR-specific concurrency settings
+        try:
+            if provider == 'custom-api':
+                bs = self._get_custom_api_ocr_batch_size()
+                if bs and bs > 0:
+                    max_workers = bs
+            elif provider == 'azure-document-intelligence':
+                # Use OCR Max Concurrency setting from manga settings
+                ocr_max_conc = self.manga_settings.get('ocr', {}).get('ocr_max_concurrency', 2)
+                max_workers = max(1, min(int(ocr_max_conc), 8))  # Azure: cap at 8 to avoid rate limits
+                self._log(f"📊 Azure Document Intelligence: Using {max_workers} concurrent workers", "debug")
+        except Exception:
+            pass
+        
+        # Never spawn more workers than regions
+        max_workers = max(1, min(max_workers, len(regions)))
+        original_ocr_parallel_env = None
+        if provider == 'custom-api' and max_workers > 1:
+            keys = (
+                'BATCH_TRANSLATION',
+                'BATCH_SIZE',
+                'MANGA_OCR_THINKING_OVERRIDE_ACTIVE',
+                'ENABLE_ANTHROPIC_THINKING',
+                'ENABLE_GEMINI_THINKING',
+                'ENABLE_DEEPSEEK_THINKING',
+                'GEMINI_THINKING_LEVEL',
+                'THINKING_BUDGET',
+            )
+            original_ocr_parallel_env = {key: os.environ.get(key) for key in keys}
+            os.environ['BATCH_TRANSLATION'] = '1'
+            os.environ['BATCH_SIZE'] = str(max_workers)
+            if str(os.environ.get('MANGA_OCR_DISABLE_THINKING', '1')).strip().lower() in ('1', 'true', 'yes', 'on'):
+                os.environ['MANGA_OCR_THINKING_OVERRIDE_ACTIVE'] = '1'
+                os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
+                os.environ['ENABLE_GEMINI_THINKING'] = '0'
+                os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+                os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
+                os.environ.pop('THINKING_BUDGET', None)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_index = {}
+            for i, bbox in enumerate(regions):
+                future = executor.submit(process_single_region, i, bbox)
+                future_to_index[future] = i
+            
+            # Collect results
+            results_dict = {}
+            completed = 0
+            for future in as_completed(future_to_index):
+                try:
+                    index, result = future.result(timeout=30)
+                    if result:
+                        results_dict[index] = result
+                        completed += 1
+                        self._log(f"✅ [{completed}/{len(regions)}] Processed region {index+1}")
+                except Exception as e:
+                    self._log(f"Failed to process region: {str(e)}", "error")
+            
+            # Sort results by index to maintain order
+            for i in range(len(regions)):
+                if i in results_dict:
+                    ocr_results.append(results_dict[i])
+        
+        self._log(f"📊 Parallel OCR complete: {len(ocr_results)}/{len(regions)} regions extracted")
+        if original_ocr_parallel_env is not None:
+            for key, value in original_ocr_parallel_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        return ocr_results
+    
+    def _pregroup_azure_lines(self, lines: List[TextRegion], base_threshold: int) -> List[TextRegion]:
+        """Pre-group Azure lines that are obviously part of the same text block
+        This makes them more like Google's blocks before the main merge logic"""
+        
+        if len(lines) <= 1:
+            return lines
+        
+        # Sort by vertical position first, then horizontal
+        lines.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+        
+        pregrouped = []
+        i = 0
+        
+        while i < len(lines):
+            current_group = [lines[i]]
+            current_bbox = list(lines[i].bounding_box)
+            
+            # Look ahead for lines that should obviously be grouped
+            j = i + 1
+            while j < len(lines):
+                x1, y1, w1, h1 = current_bbox
+                x2, y2, w2, h2 = lines[j].bounding_box
+                
+                # Calculate gaps
+                vertical_gap = y2 - (y1 + h1) if y2 > y1 + h1 else 0
+                
+                # Check horizontal alignment
+                center_x1 = x1 + w1 / 2
+                center_x2 = x2 + w2 / 2
+                horizontal_offset = abs(center_x1 - center_x2)
+                avg_width = (w1 + w2) / 2
+                
+                # Group if:
+                # 1. Lines are vertically adjacent (small gap)
+                # 2. Lines are well-aligned horizontally (likely same bubble)
+                if (vertical_gap < h1 * 0.5 and  # Less than half line height gap
+                    horizontal_offset < avg_width * 0.5):  # Well centered
+                    
+                    # Add to group
+                    current_group.append(lines[j])
+                    
+                    # Update bounding box to include new line
+                    min_x = min(x1, x2)
+                    min_y = min(y1, y2)
+                    max_x = max(x1 + w1, x2 + w2)
+                    max_y = max(y1 + h1, y2 + h2)
+                    current_bbox = [min_x, min_y, max_x - min_x, max_y - min_y]
+                    
+                    j += 1
+                else:
+                    break
+            
+            # Create merged region from group
+            if len(current_group) > 1:
+                merged_text = " ".join([line.text for line in current_group])
+                all_vertices = []
+                for line in current_group:
+                    all_vertices.extend(line.vertices)
+                
+                merged_region = TextRegion(
+                    text=merged_text,
+                    vertices=all_vertices,
+                    bounding_box=tuple(current_bbox),
+                    confidence=0.95,
+                    region_type='pregrouped_lines'
+                )
+                pregrouped.append(merged_region)
+                
+                self._log(f"   Pre-grouped {len(current_group)} Azure lines into block")
+            else:
+                # Single line, keep as is
+                pregrouped.append(lines[i])
+            
+            i = j if j > i + 1 else i + 1
+        
+        self._log(f"   Azure pre-grouping: {len(lines)} lines → {len(pregrouped)} blocks")
+        return pregrouped
+
+    def _safe_crop_region(self, image, x, y, w, h):
+        """Safely crop a region from image with validation"""
+        img_h, img_w = image.shape[:2]
+        
+        # Validate and clamp coordinates
+        x = max(0, min(x, img_w - 1))
+        y = max(0, min(y, img_h - 1))
+        x2 = min(x + w, img_w)
+        y2 = min(y + h, img_h)
+        
+        # Ensure valid region
+        if x2 <= x or y2 <= y:
+            self._log(f"⚠️ Invalid crop region: ({x},{y},{w},{h}) for image {img_w}x{img_h}", "warning")
+            return None
+        
+        # Minimum size check
+        if (x2 - x) < 5 or (y2 - y) < 5:
+            self._log(f"⚠️ Region too small: {x2-x}x{y2-y} pixels", "warning")
+            return None
+        
+        cropped = image[y:y2, x:x2]
+        
+        if cropped.size == 0:
+            self._log(f"⚠️ Empty crop result", "warning")
+            return None
+        
+        return cropped
+
+    def _prepare_ocr_rois_from_bubbles(self, image_path: str, ocr_settings: Dict, preprocessing: Dict, page_hash: str) -> List[Dict[str, Any]]:
+        """Prepare ROI crops (bytes) from bubble detection to use with OCR locality.
+        - Enhancements/resizing are gated by preprocessing['enabled'].
+        - Compression/encoding is controlled by manga_settings['compression'] independently.
+        Returns list of dicts: {id, bbox, bytes, type}
+        """
+        try:
+            # Run bubble detector and collect text-containing boxes
+            detections = self._load_bubble_detector(ocr_settings, image_path)
+            if not detections:
+                return []
+            regions = []
+            for key in ('text_bubbles', 'text_free'):
+                for i, (bx, by, bw, bh) in enumerate(detections.get(key, []) or []):
+                    regions.append({'type': 'text_bubble' if key == 'text_bubbles' else 'free_text',
+                                    'bbox': (int(bx), int(by), int(bw), int(bh)),
+                                    'id': f"{key}_{i}"})
+            if not regions:
+                return []
+
+            # Open original image once
+            pil = open_image(image_path)
+            if pil.mode != 'RGB':
+                pil = pil.convert('RGB')
+
+            pad_ratio = float(ocr_settings.get('roi_padding_ratio', 0.08))  # 8% padding default
+            preproc_enabled = bool(preprocessing.get('enabled', False))
+            # Compression settings (separate from preprocessing)
+            comp = {}
+            try:
+                comp = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+            except Exception:
+                comp = {}
+            comp_enabled = bool(comp.get('enabled', False))
+            comp_format = str(comp.get('format', 'jpeg')).lower()
+            jpeg_q = int(comp.get('jpeg_quality', 85))
+            png_lvl = int(comp.get('png_compress_level', 6))
+            webp_q = int(comp.get('webp_quality', 85))
+
+            out = []
+            W, H = pil.size
+            # Pre-filter tiny ROIs (skip before cropping)
+            min_side_px = int(ocr_settings.get('roi_min_side_px', 12))
+            min_area_px = int(ocr_settings.get('roi_min_area_px', 100))
+            for rec in regions:
+                x, y, w, h = rec['bbox']
+                if min(w, h) < max(1, min_side_px) or (w * h) < max(1, min_area_px):
+                    # Skip tiny ROI
+                    continue
+                # Apply padding
+                px = int(w * pad_ratio)
+                py = int(h * pad_ratio)
+                x1 = max(0, x - px)
+                y1 = max(0, y - py)
+                x2 = min(W, x + w + px)
+                y2 = min(H, y + h + py)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                crop = pil.crop((x1, y1, x2, y2))
+
+                # Quality-affecting steps only when preprocessing enabled
+                if preproc_enabled:
+                    try:
+                        # Enhance contrast/sharpness/brightness if configured
+                        c = float(preprocessing.get('contrast_threshold', 0.4))
+                        s = float(preprocessing.get('sharpness_threshold', 0.3))
+                        g = float(preprocessing.get('enhancement_strength', 1.5))
+                        if c:
+                            crop = ImageEnhance.Contrast(crop).enhance(1 + c)
+                        if s:
+                            crop = ImageEnhance.Sharpness(crop).enhance(1 + s)
+                        if g and g != 1.0:
+                            crop = ImageEnhance.Brightness(crop).enhance(g)
+                        # Optional ROI resize limit (short side cap)
+                        roi_max_side = int(ocr_settings.get('roi_max_side', 0) or 0)
+                        if roi_max_side and (crop.width > roi_max_side or crop.height > roi_max_side):
+                            ratio = min(roi_max_side / crop.width, roi_max_side / crop.height)
+                            crop = crop.resize((max(1, int(crop.width * ratio)), max(1, int(crop.height * ratio))), Image.Resampling.LANCZOS)
+                    except Exception:
+                        pass
+                # Encoding/Compression independent of preprocessing
+                from io import BytesIO
+                buf = BytesIO()
+                try:
+                    if comp_enabled:
+                        if comp_format in ('jpeg', 'jpg'):
+                            if crop.mode != 'RGB':
+                                crop = crop.convert('RGB')
+                            crop.save(buf, format='JPEG', quality=max(1, min(95, jpeg_q)), optimize=True, progressive=True)
+                        elif comp_format == 'png':
+                            crop.save(buf, format='PNG', optimize=True, compress_level=max(0, min(9, png_lvl)))
+                        elif comp_format == 'webp':
+                            crop.save(buf, format='WEBP', quality=max(1, min(100, webp_q)))
+                        else:
+                            crop.save(buf, format='PNG', optimize=True)
+                    else:
+                        # Default lossless PNG
+                        crop.save(buf, format='PNG', optimize=True)
+                    img_bytes = buf.getvalue()
+                except Exception:
+                    buf = BytesIO()
+                    crop.save(buf, format='PNG', optimize=True)
+                    img_bytes = buf.getvalue()
+
+                out.append({
+                    'id': rec['id'],
+                    'bbox': (x, y, w, h),  # keep original bbox without padding for placement
+                    'bytes': img_bytes,
+                    'type': rec['type'],
+                    'page_hash': page_hash
+                })
+            return out
+        except Exception as e:
+            self._log(f"⚠️ ROI preparation failed: {e}", "warning")
+            return []
+
+    def _google_ocr_rois_batched(self, rois: List[Dict[str, Any]], ocr_settings: Dict, batch_size: int, max_concurrency: int, page_hash: str) -> List[TextRegion]:
+        """Batch OCR of ROI crops using Google Vision batchAnnotateImages.
+        - Uses bounded concurrency for multiple batches in flight.
+        - Consults and updates an in-memory ROI OCR cache.
+        """
+        try:
+            try:
+                from google.cloud import vision as _vision
+            except ImportError:
+                from google_vision_rest import vision as _vision  # REST fallback (U8): only without the SDK
+        except Exception:
+            self._log("❌ Google Vision SDK not available for ROI batching", "error")
+            return []
+
+        lang_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+        detection_mode = ocr_settings.get('text_detection_mode', 'document')
+        feature_type = _vision.Feature.Type.DOCUMENT_TEXT_DETECTION if detection_mode == 'document' else _vision.Feature.Type.TEXT_DETECTION
+        feature = _vision.Feature(type=feature_type)
+
+        results: List[TextRegion] = []
+        min_text_length = int(ocr_settings.get('min_text_length', 2))
+        exclude_english = bool(ocr_settings.get('exclude_english_text', True))
+
+        # Check cache first and build work list of uncached ROIs
+        work_rois = []
+        for roi in rois:
+            x, y, w, h = roi['bbox']
+            # Include region type in cache key to prevent mismapping
+            cache_key = ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode, roi.get('type', 'unknown'))
+            # THREAD-SAFE: Use lock for cache access in parallel panel translation
+            with self._cache_lock:
+                cached_text = self.ocr_roi_cache.get(cache_key)
+            if cached_text:
+                region = TextRegion(
+                    text=cached_text,
+                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                    bounding_box=(x, y, w, h),
+                    confidence=0.95,
+                    region_type='ocr_roi'
+                )
+                try:
+                    region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
+                    # Set should_inpaint based on bubble_type and toggle
+                    set_should_inpaint_from_bubble_type(
+                        region, ocr_settings,
+                        self.main_gui if hasattr(self, 'main_gui') else None
+                    )
+                except Exception:
+                    pass
+                results.append(region)
+            else:
+                roi['cache_key'] = cache_key
+                work_rois.append(roi)
+
+        if not work_rois:
+            return results
+
+        # Create batches
+        batch_size = max(1, batch_size)
+        batches = [work_rois[i:i+batch_size] for i in range(0, len(work_rois), batch_size)]
+        max_concurrency = max(1, int(max_concurrency or 1))
+
+        def do_batch(batch):
+            # RATE LIMITING: Add small delay before batch submission
+            self._sleep_before_ocr_request(ocr_settings, default_delay_ms=100, jitter_ms=200)
+            
+            requests = []
+            for roi in batch:
+                img = _vision.Image(content=roi['bytes'])
+                ctx = _vision.ImageContext(language_hints=list(lang_hints))
+                req = _vision.AnnotateImageRequest(image=img, features=[feature], image_context=ctx)
+                requests.append(req)
+            return self.vision_client.batch_annotate_images(requests=requests), batch
+
+        # Execute with concurrency
+        if max_concurrency == 1 or len(batches) == 1:
+            iter_batches = [do_batch(batch) for batch in batches]
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            iter_batches = []
+            with ThreadPoolExecutor(max_workers=max_concurrency) as ex:
+                futures = [ex.submit(do_batch, b) for b in batches]
+                for fut in as_completed(futures):
+                    try:
+                        iter_batches.append(fut.result())
+                    except Exception as e:
+                        self._log(f"⚠️ Google batch failed: {e}", "warning")
+                        continue
+
+        # Consume responses and update cache
+        for resp, batch in iter_batches:
+            for roi, ann in zip(batch, resp.responses):
+                if getattr(ann, 'error', None) and ann.error.message:
+                    self._log(f"⚠️ ROI OCR error: {ann.error.message}", "warning")
+                    continue
+                text = ''
+                try:
+                    if getattr(ann, 'full_text_annotation', None) and ann.full_text_annotation.text:
+                        text = ann.full_text_annotation.text
+                    elif ann.text_annotations:
+                        text = ann.text_annotations[0].description
+                except Exception:
+                    text = ''
+                text = (text or '').strip()
+                text_clean = self._sanitize_unicode_characters(self._fix_encoding_issues(text))
+                if len(text_clean.strip()) < min_text_length:
+                    continue
+                if exclude_english and self._is_primarily_english(text_clean):
+                    continue
+                x, y, w, h = roi['bbox']
+                # Update cache
+                # THREAD-SAFE: Use lock for cache write in parallel panel translation
+                try:
+                    ck = roi.get('cache_key') or ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode)
+                    with self._cache_lock:
+                        self.ocr_roi_cache[ck] = text_clean
+                except Exception:
+                    pass
+                region = TextRegion(
+                    text=text_clean,
+                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                    bounding_box=(x, y, w, h),
+                    confidence=0.95,
+                    region_type='ocr_roi'
+                )
+                try:
+                    region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
+                    # Set should_inpaint based on bubble_type and toggle
+                    set_should_inpaint_from_bubble_type(
+                        region, ocr_settings,
+                        self.main_gui if hasattr(self, 'main_gui') else None
+                    )
+                except Exception:
+                    pass
+                results.append(region)
+        return results
+
+    def _ocr_request_delay_seconds(self, ocr_settings: Dict, default_delay_ms: int) -> float:
+        """Return the configured base delay before OCR requests."""
+        try:
+            delay_ms = ocr_settings.get('ocr_request_delay_ms', default_delay_ms)
+            delay_ms = float(delay_ms)
+        except Exception:
+            delay_ms = float(default_delay_ms)
+        return max(0.0, delay_ms / 1000.0)
+
+    def _sleep_before_ocr_request(self, ocr_settings: Dict, default_delay_ms: int, jitter_ms: int = 0) -> None:
+        """Sleep before an OCR request, preserving the old default jitter behavior."""
+        base_delay = self._ocr_request_delay_seconds(ocr_settings, default_delay_ms)
+        if base_delay <= 0:
+            return
+        jitter = 0.0
+        try:
+            import random
+            jitter = random.random() * max(0.0, float(jitter_ms) / 1000.0)
+        except Exception:
+            jitter = 0.0
+        time.sleep(base_delay + jitter)
+
+    def _azure_ocr_rois_concurrent(self, rois: List[Dict[str, Any]], ocr_settings: Dict, max_workers: int, page_hash: str) -> List[TextRegion]:
+        """Concurrent ROI OCR for Azure Image Analysis API. Each ROI is sent as a separate call.
+        Concurrency is bounded by max_workers. Consults/updates cache.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from azure.ai.vision.imageanalysis.models import VisualFeatures
+        import io
+        results: List[TextRegion] = []
+
+        min_text_length = int(ocr_settings.get('min_text_length', 2))
+        exclude_english = bool(ocr_settings.get('exclude_english_text', True))
+
+        # Check cache first and split into cached vs work rois
+        cached_regions: List[TextRegion] = []
+        work_rois: List[Dict[str, Any]] = []
+        for roi in rois:
+            x, y, w, h = roi['bbox']
+            # Include region type in cache key to prevent mismapping (simplified for new API)
+            cache_key = ("azure_v2", page_hash, x, y, w, h, roi.get('type', 'unknown'))
+            # THREAD-SAFE: Use lock for cache access in parallel panel translation
+            with self._cache_lock:
+                text_cached = self.ocr_roi_cache.get(cache_key)
+            if text_cached:
+                region = TextRegion(
+                    text=text_cached,
+                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                    bounding_box=(x, y, w, h),
+                    confidence=0.95,
+                    region_type='ocr_roi'
+                )
+                try:
+                    region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
+                    # Set should_inpaint based on bubble_type and toggle
+                    set_should_inpaint_from_bubble_type(
+                        region, ocr_settings,
+                        self.main_gui if hasattr(self, 'main_gui') else None
+                    )
+                except Exception:
+                    pass
+                cached_regions.append(region)
+            else:
+                roi['cache_key'] = cache_key
+                work_rois.append(roi)
+
+        # OPTIMIZATION: Better concurrency control for Azure OCR
+        import threading
+        api_semaphore = threading.Semaphore(2)  # Limit concurrent Azure API calls to 2
+        
+        def ocr_one(roi):
+            try:
+                # OPTIMIZATION: Use semaphore to limit concurrent API calls
+                with api_semaphore:
+                    # RATE LIMITING: Shorter delay with semaphore protection
+                    self._sleep_before_ocr_request(ocr_settings, default_delay_ms=50, jitter_ms=100)
+
+                # Ensure Azure-supported format for ROI bytes; honor compression preference when possible
+                data = roi['bytes']
+                try:
+                    from PIL import Image as _PILImage
+                    im = open_image(io.BytesIO(data))
+                    fmt = (im.format or '').lower()
+                    if fmt not in ['jpeg', 'jpg', 'png', 'bmp', 'tiff']:
+                        # Choose conversion target based on compression settings if available
+                        try:
+                            comp_cfg = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+                        except Exception:
+                            comp_cfg = {}
+                        target_fmt = 'PNG'
+                        try:
+                            if comp_cfg.get('enabled', False):
+                                cf = str(comp_cfg.get('format', '')).lower()
+                                if cf in ('jpeg', 'jpg'):
+                                    target_fmt = 'JPEG'
+                                elif cf == 'png':
+                                    target_fmt = 'PNG'
+                                elif cf == 'bmp':
+                                    target_fmt = 'BMP'
+                                elif cf == 'tiff':
+                                    target_fmt = 'TIFF'
+                        except Exception:
+                            pass
+                        buf2 = io.BytesIO()
+                        if target_fmt == 'JPEG' and im.mode != 'RGB':
+                            im = im.convert('RGB')
+                        im.save(buf2, format=target_fmt)
+                        data = buf2.getvalue()
+                except Exception:
+                    pass
+                
+                # Call synchronous Azure Image Analysis API
+                result = self.vision_client.analyze(
+                    image_data=data,
+                    visual_features=[VisualFeatures.READ]
+                )
+                
+                # Aggregate text lines
+                # Use blocks[0] only (comic-translate approach)
+                texts = []
+                if result.read and result.read.blocks:
+                    for line in result.read.blocks[0].lines:
+                        t = self._sanitize_unicode_characters(self._fix_encoding_issues(line.text or ''))
+                        if t:
+                            texts.append(t)
+                
+                text_all = ' '.join(texts).strip()
+                if len(text_all) < min_text_length:
+                    return None
+                if exclude_english and self._is_primarily_english(text_all):
+                    return None
+                x, y, w, h = roi['bbox']
+                # Update cache
+                # THREAD-SAFE: Use lock for cache write in parallel panel translation
+                try:
+                    ck = roi.get('cache_key')
+                    if ck:
+                        with self._cache_lock:
+                            self.ocr_roi_cache[ck] = text_all
+                except Exception:
+                    pass
+                region = TextRegion(
+                    text=text_all,
+                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                    bounding_box=(x, y, w, h),
+                    confidence=0.95,
+                    region_type='ocr_roi'
+                )
+                try:
+                    region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
+                    # Set should_inpaint based on bubble_type and toggle
+                    set_should_inpaint_from_bubble_type(
+                        region, ocr_settings,
+                        self.main_gui if hasattr(self, 'main_gui') else None
+                    )
+                except Exception:
+                    pass
+                return region
+            except Exception:
+                return None
+
+        # Combine cached and new results
+        results.extend(cached_regions)
+        
+        if work_rois:
+            max_workers = max(1, min(max_workers, len(work_rois)))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                fut_map = {ex.submit(ocr_one, r): r for r in work_rois}
+                for fut in as_completed(fut_map):
+                    reg = fut.result()
+                    if reg is not None:
+                        results.append(reg)
+        return results
+
+    def _detect_text_azure(self, image_data: bytes, ocr_settings: dict) -> List[TextRegion]:
+        """Detect text using Azure Image Analysis API"""
+        from azure.ai.vision.imageanalysis.models import VisualFeatures
+        
+        # Use synchronous Image Analysis API
+        result = self.vision_client.analyze(
+            image_data=image_data,
+            visual_features=[VisualFeatures.READ]
+        )
+        
+        regions = []
+        confidence_threshold = ocr_settings.get('confidence_threshold', 0.0)
+        
+        # Use blocks[0] only (comic-translate approach)
+        if result.read and result.read.blocks:
+            for line in result.read.blocks[0].lines:
+                # Extract bounding polygon
+                vertices = []
+                if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                    for vertex in line.bounding_polygon:
+                        if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                            vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x,
+                                           vertex['y'] if isinstance(vertex, dict) else vertex.y))
+                
+                if len(vertices) < 2:
+                    continue
+                
+                xs = [v[0] for v in vertices]
+                ys = [v[1] for v in vertices]
+                x_min, x_max = min(xs), max(xs)
+                y_min, y_max = min(ys), max(ys)
+                
+                # Azure doesn't provide per-line confidence in Read API
+                confidence = 0.95  # Default high confidence
+                
+                if confidence >= confidence_threshold:
+                    region = TextRegion(
+                        text=line.text,
+                        vertices=vertices,
+                        bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                        confidence=confidence,
+                        region_type='text_line'
+                    )
+                    regions.append(region)
+        
+        return regions
+
+    def _load_image_with_compression_only(self, image_path: str, comp: Dict) -> bytes:
+        """Load image and apply compression settings only (no enhancements/resizing)."""
+        from io import BytesIO
+        pil = open_image(image_path)
+        if pil.mode != 'RGB':
+            pil = pil.convert('RGB')
+        buf = BytesIO()
+        try:
+            fmt = str(comp.get('format', 'jpeg')).lower()
+            if fmt in ('jpeg', 'jpg'):
+                q = max(1, min(95, int(comp.get('jpeg_quality', 85))))
+                pil.save(buf, format='JPEG', quality=q, optimize=True, progressive=True)
+            elif fmt == 'png':
+                lvl = max(0, min(9, int(comp.get('png_compress_level', 6))))
+                pil.save(buf, format='PNG', optimize=True, compress_level=lvl)
+            elif fmt == 'webp':
+                wq = max(1, min(100, int(comp.get('webp_quality', 85))))
+                pil.save(buf, format='WEBP', quality=wq)
+            else:
+                pil.save(buf, format='PNG', optimize=True)
+        except Exception:
+            pil.save(buf, format='PNG', optimize=True)
+        return buf.getvalue()
+
+    def _preprocess_image(self, image_path: str, preprocessing_settings: Dict) -> bytes:
+        """Preprocess image for better OCR results
+        - Enhancements/resizing controlled by preprocessing_settings
+        - Compression controlled by manga_settings['compression'] independently
+        """
+        try:
+            # Open image with PIL
+            pil_image = open_image(image_path)
+            
+            # Convert to RGB if necessary
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # Auto-detect quality issues if enabled
+            if preprocessing_settings.get('auto_detect_quality', True):
+                needs_enhancement = self._detect_quality_issues(pil_image, preprocessing_settings)
+                if needs_enhancement:
+                    self._log("   Auto-detected quality issues - applying enhancements")
+            else:
+                needs_enhancement = True
+            
+            if needs_enhancement:
+                # Apply contrast enhancement
+                contrast_threshold = preprocessing_settings.get('contrast_threshold', 0.4)
+                enhancer = ImageEnhance.Contrast(pil_image)
+                pil_image = enhancer.enhance(1 + contrast_threshold)
+                
+                # Apply sharpness enhancement
+                sharpness_threshold = preprocessing_settings.get('sharpness_threshold', 0.3)
+                enhancer = ImageEnhance.Sharpness(pil_image)
+                pil_image = enhancer.enhance(1 + sharpness_threshold)
+                
+                # Apply general enhancement strength
+                enhancement_strength = preprocessing_settings.get('enhancement_strength', 1.5)
+                if enhancement_strength != 1.0:
+                    # Brightness adjustment
+                    enhancer = ImageEnhance.Brightness(pil_image)
+                    pil_image = enhancer.enhance(enhancement_strength)
+            
+            # Resize if too large
+            max_dimension = preprocessing_settings.get('max_image_dimension', 2000)
+            if pil_image.width > max_dimension or pil_image.height > max_dimension:
+                ratio = min(max_dimension / pil_image.width, max_dimension / pil_image.height)
+                new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
+                self._log(f"   Resized image to {new_size[0]}x{new_size[1]}")
+            
+            # Convert back to bytes with compression settings from global config
+            from io import BytesIO
+            buffered = BytesIO()
+            comp = {}
+            try:
+                comp = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+            except Exception:
+                comp = {}
+            try:
+                if comp.get('enabled', False):
+                    fmt = str(comp.get('format', 'jpeg')).lower()
+                    if fmt in ('jpeg', 'jpg'):
+                        if pil_image.mode != 'RGB':
+                            pil_image = pil_image.convert('RGB')
+                        quality = max(1, min(95, int(comp.get('jpeg_quality', 85))))
+                        pil_image.save(buffered, format='JPEG', quality=quality, optimize=True, progressive=True)
+                        self._log(f"   Compressed image as JPEG (q={quality})")
+                    elif fmt == 'png':
+                        level = max(0, min(9, int(comp.get('png_compress_level', 6))))
+                        pil_image.save(buffered, format='PNG', optimize=True, compress_level=level)
+                        self._log(f"   Compressed image as PNG (level={level})")
+                    elif fmt == 'webp':
+                        q = max(1, min(100, int(comp.get('webp_quality', 85))))
+                        pil_image.save(buffered, format='WEBP', quality=q)
+                        self._log(f"   Compressed image as WEBP (q={q})")
+                    else:
+                        pil_image.save(buffered, format='PNG', optimize=True)
+                        self._log("   Unknown compression format; saved as optimized PNG")
+                else:
+                    pil_image.save(buffered, format='PNG', optimize=True)
+            except Exception as _e:
+                self._log(f"   ⚠️ Compression failed ({_e}); saved as optimized PNG", "warning")
+                pil_image.save(buffered, format='PNG', optimize=True)
+            return buffered.getvalue()
+            
+        except Exception as e:
+            self._log(f"⚠️ Preprocessing failed: {str(e)}, using original image", "warning")
+            with open(image_path, 'rb') as f:
+                return f.read()
+
+    def _detect_quality_issues(self, image: Image.Image, settings: Dict) -> bool:
+        """Auto-detect if image needs quality enhancement"""
+        # Convert to grayscale for analysis
+        gray = image.convert('L')
+        
+        # Get histogram
+        hist = gray.histogram()
+        
+        # Calculate contrast (simplified)
+        pixels = sum(hist)
+        mean = sum(i * hist[i] for i in range(256)) / pixels
+        variance = sum(hist[i] * (i - mean) ** 2 for i in range(256)) / pixels
+        std_dev = variance ** 0.5
+        
+        # Low contrast if std deviation is low
+        contrast_threshold = settings.get('contrast_threshold', 0.4) * 100
+        if std_dev < contrast_threshold:
+            self._log("   Low contrast detected")
+            return True
+        
+        # Check for blur using Laplacian variance
+        import numpy as np
+        gray_array = np.array(gray)
+        laplacian = cv2.Laplacian(gray_array, cv2.CV_64F)
+        variance = laplacian.var()
+        
+        sharpness_threshold = settings.get('sharpness_threshold', 0.3) * 100
+        if variance < sharpness_threshold:
+            self._log("   Blur detected")
+            return True
+        
+        return False
+
+    def _save_debug_image(self, image_path: str, regions: List[TextRegion], debug_base_dir: str = None):
+        """Save debug image with detected regions highlighted, respecting save_intermediate toggle.
+        All files are written under <translated_images>/debug (or provided debug_base_dir)."""
+        advanced_settings = self.manga_settings.get('advanced', {})
+        # Skip debug images in batch mode unless explicitly requested
+        if self.batch_mode and not advanced_settings.get('force_debug_batch', False):
+            return
+        # Respect the 'Save intermediate images' toggle only
+        if not advanced_settings.get('save_intermediate', False):
+            return
+        # Compute debug directory under translated_images
+        if debug_base_dir is None:
+            translated_dir = os.path.join(os.path.dirname(image_path), 'translated_images')
+            debug_dir = os.path.join(translated_dir, 'debug')
+        else:
+            debug_dir = os.path.join(debug_base_dir, 'debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        
+        try:
+            import cv2
+            import numpy as np
+            from PIL import Image as PILImage
+            
+            # Handle Unicode paths
+            try:
+                img = cv2_imread(image_path)
+                if img is None:
+                    # Fallback to PIL for Unicode paths
+                    pil_image = open_page_image(image_path)
+                    img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            except Exception as e:
+                self._log(f"   Failed to load image for debug: {str(e)}", "warning")
+                return
+            
+            # Debug directory prepared earlier; compute base name
+            # base_name already computed above
+            
+            # Draw rectangles around detected text regions
+            overlay = img.copy()
+            
+            # Calculate statistics
+            total_chars = sum(len(r.text) for r in regions)
+            avg_confidence = np.mean([r.confidence for r in regions]) if regions else 0
+            
+            for i, region in enumerate(regions):
+                # Convert to int to avoid OpenCV type errors
+                x, y, w, h = map(int, region.bounding_box)
+                
+                # Color based on confidence
+                if region.confidence > 0.95:
+                    color = (0, 255, 0)  # Green - high confidence
+                elif region.confidence > 0.8:
+                    color = (0, 165, 255)  # Orange - medium confidence
+                else:
+                    color = (0, 0, 255)  # Red - low confidence
+                
+                # Draw rectangle
+                cv2.rectangle(overlay, (x, y), (x + w, y + h), color, 2)
+                
+                # Add region info
+                info_text = f"#{i} ({region.confidence:.2f})"
+                cv2.putText(overlay, info_text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.5, color, 1, cv2.LINE_AA)
+                
+                # Add character count
+                char_count = len(region.text.strip())
+                cv2.putText(overlay, f"{char_count} chars", (x, y + h + 15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                
+                # Add detected text preview if in verbose debug mode
+                if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                    text_preview = region.text[:20] + "..." if len(region.text) > 20 else region.text
+                    cv2.putText(overlay, text_preview, (x, y + h + 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                               0.4, color, 1, cv2.LINE_AA)
+            
+            # Add overall statistics to the image
+            stats_bg = overlay.copy()
+            cv2.rectangle(stats_bg, (10, 10), (300, 90), (0, 0, 0), -1)
+            cv2.addWeighted(stats_bg, 0.7, overlay, 0.3, 0, overlay)
+            
+            stats_text = [
+                f"Regions: {len(regions)}",
+                f"Total chars: {total_chars}",
+                f"Avg confidence: {avg_confidence:.2f}"
+            ]
+            
+            for i, text in enumerate(stats_text):
+                cv2.putText(overlay, text, (20, 35 + i*20), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            
+            # Save main debug image (always under translated_images/debug when enabled)
+            debug_path = os.path.join(debug_dir, f"{base_name}_debug_regions.png")
+            cv2.imwrite(debug_path, overlay)
+            self._log(f"   📸 Saved debug image: {debug_path}")
+            
+            # Save text mask
+            mask = self.create_text_mask(img, regions)
+            mask_debug_path = debug_path.replace('_debug', '_mask')
+            cv2.imwrite(mask_debug_path, mask)
+            mask_percentage = ((mask > 0).sum() / mask.size) * 100
+            self._log(f"   🎭 Saved mask image: {mask_debug_path}", "info")
+            self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
+                        
+            # If save_intermediate is enabled, save additional debug images
+            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                # Save confidence heatmap
+                heatmap = self._create_confidence_heatmap(img, regions)
+                heatmap_path = os.path.join(debug_dir, f"{base_name}_confidence_heatmap.png")
+                cv2.imwrite(heatmap_path, heatmap)
+                self._log(f"   🌡️ Saved confidence heatmap: {heatmap_path}")
+                
+                # Save polygon visualization with safe text areas
+                if any(hasattr(r, 'vertices') and r.vertices for r in regions):
+                    polygon_img = img.copy()
+                    for region in regions:
+                        if hasattr(region, 'vertices') and region.vertices:
+                            # Draw polygon
+                            pts = np.array(region.vertices, np.int32)
+                            pts = pts.reshape((-1, 1, 2))
+                            
+                            # Fill with transparency
+                            overlay_poly = polygon_img.copy()
+                            cv2.fillPoly(overlay_poly, [pts], (0, 255, 255))
+                            cv2.addWeighted(overlay_poly, 0.2, polygon_img, 0.8, 0, polygon_img)
+                            
+                            # Draw outline
+                            cv2.polylines(polygon_img, [pts], True, (255, 0, 0), 2)
+                            
+                            # Draw safe text area
+                            try:
+                                safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region)
+                                # Convert to int for OpenCV
+                                safe_x, safe_y, safe_w, safe_h = map(int, (safe_x, safe_y, safe_w, safe_h))
+                                cv2.rectangle(polygon_img, (safe_x, safe_y), 
+                                            (safe_x + safe_w, safe_y + safe_h), 
+                                            (0, 255, 0), 1)
+                            except:
+                                pass  # Skip if get_safe_text_area fails
+                    
+                    # Add legend to explain colors
+                    legend_bg = polygon_img.copy()
+                    legend_height = 140
+                    legend_width = 370
+                    cv2.rectangle(legend_bg, (10, 10), (10 + legend_width, 10 + legend_height), (0, 0, 0), -1)
+                    cv2.addWeighted(legend_bg, 0.8, polygon_img, 0.2, 0, polygon_img)
+                    
+                    # Add legend items
+                    # Note: OpenCV uses BGR format, so (255, 0, 0) = Blue, (0, 0, 255) = Red
+                    legend_items = [
+                        ("Blue outline: OCR polygon (detected text)", (255, 0, 0)),
+                        ("Yellow fill: Mask area (will be inpainted)", (0, 255, 255)),
+                        ("Green rect: Safe text area (algorithm-based)", (0, 255, 0)),
+                        ("Magenta rect: Mask bounds (actual render area)", (255, 0, 255))
+                    ]
+                    
+                    for i, (text, color) in enumerate(legend_items):
+                        y_pos = 30 + i * 30
+                        # Draw color sample
+                        if i == 1:  # Yellow fill
+                            cv2.rectangle(polygon_img, (20, y_pos - 8), (35, y_pos + 8), color, -1)
+                        else:
+                            cv2.rectangle(polygon_img, (20, y_pos - 8), (35, y_pos + 8), color, 2)
+                        # Draw text
+                        cv2.putText(polygon_img, text, (45, y_pos + 5), cv2.FONT_HERSHEY_SIMPLEX,
+                                   0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                    
+                    polygon_path = os.path.join(debug_dir, f"{base_name}_polygons.png")
+                    cv2.imwrite(polygon_path, polygon_img)
+                    self._log(f"   🔷 Saved polygon visualization: {polygon_path}")
+                
+                # Save individual region crops with more info
+                regions_dir = os.path.join(debug_dir, 'regions')
+                os.makedirs(regions_dir, exist_ok=True)
+                
+                for i, region in enumerate(regions[:10]):  # Limit to first 10 regions
+                    # Convert to int to avoid OpenCV type errors
+                    x, y, w, h = map(int, region.bounding_box)
+                    # Add padding
+                    pad = 10
+                    x1 = max(0, x - pad)
+                    y1 = max(0, y - pad)
+                    x2 = min(img.shape[1], x + w + pad)
+                    y2 = min(img.shape[0], y + h + pad)
+                    
+                    region_crop = img[y1:y2, x1:x2].copy()
+                    
+                    # Draw bounding box on crop
+                    cv2.rectangle(region_crop, (pad, pad), 
+                                (pad + w, pad + h), (0, 255, 0), 2)
+                    
+                    # Add text info on the crop
+                    info = f"Conf: {region.confidence:.2f} | Chars: {len(region.text)}"
+                    cv2.putText(region_crop, info, (5, 15), cv2.FONT_HERSHEY_SIMPLEX,
+                               0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                    
+                    # Save with meaningful filename
+                    safe_text = region.text[:20].replace('/', '_').replace('\\', '_').strip()
+                    region_path = os.path.join(regions_dir, f"region_{i:03d}_{safe_text}.png")
+                    cv2.imwrite(region_path, region_crop)
+                
+                self._log(f"   📁 Saved individual region crops to: {regions_dir}")
+            
+        except Exception as e:
+            self._log(f"   ❌ Failed to save debug image: {str(e)}", "warning")
+            if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                # If debug mode is on, log the full traceback
+                import traceback
+                self._log(traceback.format_exc(), "warning")
+
+    def _create_confidence_heatmap(self, img, regions):
+        """Create a heatmap showing OCR confidence levels"""
+        heatmap = np.zeros_like(img[:, :, 0], dtype=np.float32)
+        
+        for region in regions:
+            # Convert to int for array indexing
+            x, y, w, h = map(int, region.bounding_box)
+            confidence = region.confidence
+            heatmap[y:y+h, x:x+w] = confidence
+        
+        # Convert to color heatmap
+        heatmap_normalized = (heatmap * 255).astype(np.uint8)
+        heatmap_colored = cv2.applyColorMap(heatmap_normalized, cv2.COLORMAP_JET)
+        
+        # Blend with original image
+        result = cv2.addWeighted(img, 0.7, heatmap_colored, 0.3, 0)
+        return result
+
+    @staticmethod
+    def _detect_image_mime(data: bytes) -> str:
+        """Detect image MIME type from raw bytes via magic-number sniffing."""
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
+            return 'image/png'
+        if data[:3] == b'\xff\xd8\xff':
+            return 'image/jpeg'
+        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            return 'image/webp'
+        if data[:6] in (b'GIF87a', b'GIF89a'):
+            return 'image/gif'
+        if data[:4] == b'\x00\x00\x01\x00':
+            return 'image/x-icon'
+        # Default fallback – PNG is the safest assumption for unknown formats
+        return 'image/png'
+
+    def _get_image_request_quality_config(self) -> Dict[str, Any]:
+        try:
+            comp = ((self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {}) or {})
+        except Exception:
+            comp = {}
+        return {
+            'enabled': bool(comp.get('enabled', False)),
+            'format': str(comp.get('format', 'jpeg') or 'jpeg').strip().lower(),
+            'jpeg_quality': max(1, min(95, int(comp.get('jpeg_quality', 85)))),
+            'png_compress_level': max(0, min(9, int(comp.get('png_compress_level', 6)))),
+            'webp_quality': max(1, min(100, int(comp.get('webp_quality', 85)))),
+        }
+
+    def _prepare_manga_image_request_bytes(self, image_path: str, label: str = "image request") -> bytes:
+        """Read a manga image request, preserving original bytes unless the quality override is enabled."""
+        with open(image_path, 'rb') as img_file:
+            original_data = img_file.read()
+
+        comp = self._get_image_request_quality_config()
+        if not comp.get('enabled'):
+            return original_data
+
+        from io import BytesIO
+        pil_image = open_image(image_path)
+        if pil_image.mode != 'RGB':
+            pil_image = pil_image.convert('RGB')
+        buf = BytesIO()
+        fmt = comp.get('format', 'jpeg')
+        if fmt in ('jpg', 'jpeg'):
+            pil_image.save(buf, format='JPEG', quality=comp['jpeg_quality'], optimize=True, progressive=True)
+            self._log(f"   Encoded {label} as JPEG (q={comp['jpeg_quality']})")
+        elif fmt == 'png':
+            pil_image.save(buf, format='PNG', optimize=True, compress_level=comp['png_compress_level'])
+            self._log(f"   Encoded {label} as PNG (level={comp['png_compress_level']})")
+        elif fmt == 'webp':
+            pil_image.save(buf, format='WEBP', quality=comp['webp_quality'])
+            self._log(f"   Encoded {label} as WEBP (q={comp['webp_quality']})")
+        else:
+            return original_data
+        return buf.getvalue()
+
+    def _build_memory_image_part(self, image_path: str) -> Optional[Dict[str, Any]]:
+        """Build an image_url content part for memory messages.
+
+        Uses similar resizing logic as translate_text / full-page context to
+        keep images within reasonable size limits.
+        """
+        if not image_path or not self.visual_context_enabled:
+            return None
+        try:
+            import base64
+            from PIL import Image as PILImage
+            from io import BytesIO
+
+            if not os.path.exists(image_path):
+                self._log(f"⚠️ Memory image not found: {image_path}", "warning")
+                return None
+
+            img_data = self._prepare_manga_image_request_bytes(image_path, "memory visual context")
+
+            img_size_mb = len(img_data) / (1024 * 1024)
+            if img_size_mb > 10:
+                # Resize large images to stay within API limits
+                pil_image = open_image(image_path)
+                max_size = 2048
+                ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                if ratio < 1:
+                    new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                    pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                    buffered = BytesIO()
+                    pil_image.save(buffered, format="PNG", optimize=True)
+                    img_data = buffered.getvalue()
+
+            img_b64 = base64.b64encode(img_data).decode("utf-8")
+            img_mime = self._detect_image_mime(img_data)
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{img_mime};base64,{img_b64}"},
+            }
+        except Exception as e:
+            self._log(f"⚠️ Failed to build memory image from '{image_path}': {e}", "warning")
+            return None
+
+    def _get_translation_history_context(self) -> List[Dict[str, Any]]:
+        """Get translation history as a single assistant memory block.
+
+        This mirrors the main text translator semantics more closely and adds
+        optional visual context when enabled:
+        - History is stored as a list of chat messages (role/content).
+        - CONTENT can be either plain text (legacy) or a structured dict with
+          image_path/text fields for manga.
+        - INCLUDE_SOURCE_IN_HISTORY controls whether previous *source* text
+          (user messages) are reused as memory.
+        - When used, memory is wrapped in [MEMORY] blocks inside one assistant
+          message so the model treats it as prior context, with optional
+          image_url parts when visual context is enabled.
+        """
+        if not self.history_manager or not self.contextual_enabled:
+            return []
+
+        include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
+
+        # Determine how many past exchanges to keep (same semantics as HIST_LIMIT)
+        hist_limit = getattr(self, "translation_history_limit", 0) or 0
+        try:
+            hist_limit = int(hist_limit)
+        except (TypeError, ValueError):
+            hist_limit = 0
+        if hist_limit <= 0:
+            return []
+
+        # Thread-safe history access (prevents race conditions if used in batch mode)
+        with self._contextual_lock:
+            try:
+                full_history = self.history_manager.load_history() or []
+                if not full_history:
+                    return []
+
+                # Keep up to hist_limit exchanges (user+assistant) like main translator
+                trimmed = full_history[-hist_limit * 2 :]
+
+                if not trimmed:
+                    return []
+
+                # Helper to extract text and image metadata from stored content
+                def _extract_payload(content):
+                    image_path = None
+                    source_text = None
+                    translated_text = None
+
+                    if isinstance(content, dict):
+                        ctype = content.get("type")
+                        if ctype in {"manga_exchange", "manga_page"}:
+                            image_path = content.get("image_path") or content.get("page_image_path")
+                            # Source-side fields
+                            if "text" in content:
+                                source_text = content.get("text")
+                            elif "texts" in content and isinstance(content.get("texts"), list):
+                                source_text = "\n".join(str(t) for t in content.get("texts") if t)
+                            # Translation-side fields
+                            if "translated_text" in content:
+                                translated_text = content.get("translated_text")
+                            elif "translations" in content and isinstance(content.get("translations"), list):
+                                translated_text = "\n".join(str(t) for t in content.get("translations") if t)
+                        else:
+                            # Unknown dict payload - treat as plain text
+                            text_val = str(content)
+                            source_text = text_val
+                            translated_text = text_val
+                    else:
+                        text_val = str(content) if content is not None else ""
+                        source_text = text_val
+                        translated_text = text_val
+
+                    return image_path, source_text, translated_text
+
+                # Build memory content parts (text + optional images)
+                memory_content_parts: List[Dict[str, Any]] = []
+
+                i = 0
+                while i < len(trimmed):
+                    entry = trimmed[i]
+                    if not isinstance(entry, dict):
+                        i += 1
+                        continue
+
+                    role = entry.get("role", "user")
+                    # Expect pairs: user then assistant. If not, fall back to single-entry handling.
+                    if role == "user" and i + 1 < len(trimmed) and isinstance(trimmed[i + 1], dict):
+                        user_entry = entry
+                        assistant_entry = trimmed[i + 1]
+                        if assistant_entry.get("role") != "assistant":
+                            # Roles out of sync, treat current entry alone
+                            assistant_entry = None
+                            i += 1
+                        else:
+                            i += 2
+                    else:
+                        user_entry = entry if role == "user" else None
+                        assistant_entry = None
+                        i += 1
+
+                    image_path = None
+                    source_text = None
+                    translated_text = None
+
+                    if user_entry is not None:
+                        img_u, src_text, _ = _extract_payload(user_entry.get("content"))
+                        image_path = img_u or image_path
+                        source_text = src_text
+
+                    if assistant_entry is not None:
+                        img_a, _, trans_text = _extract_payload(assistant_entry.get("content"))
+                        image_path = img_a or image_path
+                        translated_text = trans_text
+
+                    # Build source memory block (optional)
+                    if include_source and source_text:
+                        source_text = str(source_text).strip()
+                        if source_text:
+                            prefix = (
+                                "[MEMORY - PREVIOUS SOURCE TEXT]\n"
+                                "This is prior source content provided for context only.\n"
+                                "Do NOT translate or repeat this text directly in your response.\n\n"
+                            )
+                            footer = "\n\n[END MEMORY BLOCK]\n"
+                            memory_content_parts.append({
+                                "type": "text",
+                                "text": prefix + source_text + footer,
+                            })
+
+                    # Build translation memory block (always, if we have translations)
+                    if translated_text:
+                        translated_text = str(translated_text).strip()
+                        if translated_text:
+                            prefix = (
+                                "[MEMORY - PREVIOUSLY TRANSLATED MANGA PANELS]\\n"
+                                "These are previously translated manga panels or page text provided for context only.\\n"
+                                "Do NOT repeat or re-output these translations directly in your response.\\n\\n"
+                            )
+                            footer = "\\n\\n[END MEMORY BLOCK]\\n"
+
+                            if self.visual_context_enabled and image_path:
+                                # When image context is enabled and we have an image path,
+                                # include the image in the translation memory block.
+                                memory_content_parts.append({"type": "text", "text": prefix})
+                                img_part = self._build_memory_image_part(image_path)
+                                if img_part is not None:
+                                    memory_content_parts.append(img_part)
+                                memory_content_parts.append({
+                                    "type": "text",
+                                    "text": translated_text + footer,
+                                })
+                            else:
+                                # Text-only memory block
+                                memory_content_parts.append({
+                                    "type": "text",
+                                    "text": prefix + translated_text + footer,
+                                })
+
+                if not memory_content_parts:
+                    return []
+                
+                # Check if using Gemini 3 model that needs natural conversation format
+                is_gemini_3 = False
+                if hasattr(self.client, 'model'):
+                    model_name = str(self.client.model).lower()
+                    if 'gemini-3' in model_name or 'gemini-exp-' in model_name:
+                        is_gemini_3 = True
+                
+                if is_gemini_3:
+                    # For Gemini 3, return natural conversation history with thought signatures
+                    natural_msgs = []
+                    i = 0
+                    while i < len(trimmed):
+                        entry = trimmed[i]
+                        if not isinstance(entry, dict):
+                            i += 1
+                            continue
+                        
+                        role = entry.get("role", "user")
+                        raw_content = entry.get("content")
+                        
+                        # Skip user messages if not including source
+                        if role == "user" and not include_source:
+                            i += 1
+                            continue
+                        
+                        # Extract text content
+                        if isinstance(raw_content, dict):
+                            if raw_content.get("type") == "manga_exchange":
+                                if role == 'user':
+                                    text_content = raw_content.get("text", "")
+                                else:
+                                    text_content = raw_content.get("translated_text", "")
+                            elif raw_content.get("type") == "manga_page":
+                                if role == 'user':
+                                    texts = raw_content.get("texts", [])
+                                    text_content = "\n".join(str(t) for t in texts if t)
+                                else:
+                                    translations = raw_content.get("translations", [])
+                                    text_content = "\n".join(str(t) for t in translations if t)
+                            else:
+                                text_content = str(raw_content)
+                        else:
+                            text_content = str(raw_content) if raw_content else ""
+                        
+                        if text_content.strip():
+                            msg = {"role": role, "content": text_content}
+                            # Preserve thought signatures if present
+                            if "_raw_content_object" in entry:
+                                msg["_raw_content_object"] = entry["_raw_content_object"]
+                            natural_msgs.append(msg)
+                        
+                        i += 1
+                    
+                    return natural_msgs
+                else:
+                    # For other models, use memory blocks as assistant message
+                    return [{"role": "assistant", "content": memory_content_parts}]
+
+            except Exception as e:
+                self._log(f"⚠️ Error loading history context: {str(e)}", "warning")
+                return []
+    
+    def _get_manga_glossary_text(self) -> str:
+        """Return the generated manga glossary text for prompt embedding."""
+        for source in (self, getattr(self, 'main_gui', None)):
+            try:
+                glossary_text = getattr(source, 'manga_generated_glossary_text', '')
+                if isinstance(glossary_text, str) and glossary_text.strip():
+                    return glossary_text.strip()
+            except Exception:
+                pass
+        return ""
+
+    def _get_manga_glossary_path(self) -> str:
+        """Return the saved manga glossary path when available."""
+        for source in (self, getattr(self, 'main_gui', None)):
+            try:
+                for attr in ('manga_generated_glossary_path', 'manga_custom_glossary_path'):
+                    path = getattr(source, attr, '')
+                    if isinstance(path, str) and path.strip():
+                        return path.strip()
+            except Exception:
+                pass
+        try:
+            config = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}
+            return (
+                config.get('manga_generated_glossary_path', '')
+                or config.get('manga_custom_glossary_path', '')
+                or ''
+            )
+        except Exception:
+            return ""
+
+    def _manga_glossary_compression_enabled(self) -> bool:
+        """Return whether glossary prompt compression is enabled for manga."""
+        env_value = os.getenv("COMPRESS_GLOSSARY_PROMPT")
+        if env_value is not None:
+            return str(env_value).strip().lower() in ("1", "true", "yes", "on")
+        try:
+            return bool(getattr(self.main_gui, 'config', {}).get('compress_glossary_prompt', True))
+        except Exception:
+            return True
+
+    def _compress_manga_glossary_for_source(self, glossary_text: str, source_text: str = "", image_path: str = None) -> str:
+        """Use the shared glossary compressor to keep only entries relevant to the current manga text."""
+        if not glossary_text or not source_text or not self._manga_glossary_compression_enabled():
+            return glossary_text
+        try:
+            from glossary_compressor import compress_glossary
+            glossary_path = self._get_manga_glossary_path()
+            chapter_ref = {
+                "chapter_num": None,
+                "chapter_file": os.path.basename(image_path) if image_path else os.getenv("CURRENT_CHAPTER_FILE", ""),
+            }
+            original_length = len(glossary_text)
+            compressed = compress_glossary(
+                glossary_text,
+                source_text,
+                glossary_format='auto',
+                glossary_path=glossary_path,
+                chapter_ref=chapter_ref,
+            )
+            compressed = compressed if isinstance(compressed, str) else str(compressed or "")
+            compressed_length = len(compressed)
+            reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length else 0
+            self._log(
+                f"🗜️ Manga glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%)",
+                "info",
+            )
+            return compressed
+        except Exception as e:
+            self._log(f"Warning: Manga glossary compression failed: {e}", "warning")
+            return glossary_text
+
+    def _append_manga_glossary_to_system_prompt(self, system_prompt: str, source_text: str = "", image_path: str = None) -> str:
+        """Append the generated manga glossary using the configured glossary append prompt."""
+        glossary_text = self._get_manga_glossary_text()
+        if not glossary_text:
+            return system_prompt or ""
+        glossary_text = self._compress_manga_glossary_for_source(glossary_text, source_text, image_path)
+        if not glossary_text or not glossary_text.strip():
+            self._log("Manga glossary skipped for this page (no matching entries after compression)", "info")
+            return system_prompt or ""
+
+        default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+        append_prompt = default_append_prompt
+        try:
+            append_prompt = getattr(self.main_gui, 'append_glossary_prompt', None) or self.main_gui.config.get('append_glossary_prompt', default_append_prompt)
+        except Exception:
+            append_prompt = default_append_prompt
+
+        glossary_block = f"{str(append_prompt).rstrip()}\n{glossary_text}"
+        if not getattr(self, '_manga_glossary_prompt_logged', False):
+            entry_count = sum(1 for line in glossary_text.splitlines() if line.lstrip().startswith("* "))
+            self._log(f"📚 Embedding generated manga glossary in translation prompt ({entry_count} entries)")
+            self._manga_glossary_prompt_logged = True
+        self._log(f"✅ Manga glossary appended ({len(glossary_text):,} characters)", "info")
+
+        if system_prompt:
+            return f"{system_prompt}\n\n{glossary_block}"
+        return glossary_block
+
+    def translate_text(self, text: str, context: Optional[List[Dict]] = None, image_path: str = None, region: TextRegion = None) -> str:
+        """Translate text using API with GUI system prompt and full image context"""
+        try:
+            # Build per-request log prefix for clearer parallel logs
+            try:
+                import threading
+                thread_name = threading.current_thread().name
+            except Exception:
+                thread_name = "MainThread"
+            bbox_info = ""
+            try:
+                if region and hasattr(region, 'bounding_box') and region.bounding_box:
+                    x, y, w, h = region.bounding_box
+                    bbox_info = f" [bbox={x},{y},{w}x{h}]"
+            except Exception:
+                pass
+            prefix = f"[{thread_name}]{bbox_info}"
+            
+            self._log(f"\n{prefix} 🌐 Starting translation for text: '{text[:50]}...'")
+            # CHECK 1: Before starting
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before full page context processing", "warning")
+                return {}
+            
+            # Get system prompt from GUI profile - Support both Tkinter and PySide6
+            try:
+                if hasattr(self.main_gui.profile_var, 'get'):
+                    profile_name = self.main_gui.profile_var.get()
+                else:
+                    profile_name = self.main_gui.profile_var
+            except Exception:
+                profile_name = 'Default'
+
+            # Get the prompt from prompt_profiles dictionary
+            system_prompt = ''
+            if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
+                system_prompt = self.main_gui.prompt_profiles[profile_name]
+                # Replace {target_lang} placeholder with actual target language
+                target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+                if "{target_lang}" in system_prompt:
+                    system_prompt = system_prompt.replace("{target_lang}", target_lang)
+                self._log(f"📋 Using profile: {profile_name}")
+            else:
+                self._log(f"⚠️ Profile '{profile_name}' not found in prompt_profiles", "warning")
+
+            glossary_source_text = getattr(self, '_current_page_source_text', '') or text
+            system_prompt = self._append_manga_glossary_to_system_prompt(
+                system_prompt,
+                source_text=glossary_source_text,
+                image_path=image_path,
+            )
+
+            self._log(f"{prefix} 📝 System prompt: {system_prompt[:100]}..." if system_prompt else f"{prefix} 📝 No system prompt configured")
+
+            if system_prompt:
+                messages = [{"role": "system", "content": system_prompt}]
+            else:
+                messages = []
+            
+            
+            # Add contextual translations if enabled
+            if self.contextual_enabled and self.history_manager:
+                # Get history from HistoryManager as a [MEMORY] assistant block
+                # Microsecond lock to prevent race conditions when reading history
+                import time
+                time.sleep(0.000001)
+                with self.history_manager.lock:
+                    history_context = self._get_translation_history_context()
+                
+                if history_context:
+                    self._log(
+                        f"🔗 Adding contextual memory from previous translations "
+                        f"(limit: {self.translation_history_limit})"
+                    )
+                    messages.extend(history_context)
+                else:
+                    self._log("🔗 Contextual enabled but no history available yet")
+            else:
+                self._log(
+                    f"{prefix} 🔗 Contextual: "
+                    f"{'Disabled' if not self.contextual_enabled else 'No HistoryManager'}"
+                )
+            
+            # Add full image context if available AND visual context is enabled
+            if image_path and self.visual_context_enabled:
+                try:
+                    import base64
+                    from PIL import Image as PILImage
+                    
+                    self._log(f"{prefix} 📷 Adding full page visual context for translation")
+                    
+                    # Read and optionally encode the full image for manga requests
+                    img_data = self._prepare_manga_image_request_bytes(image_path, "single-region visual context")
+                    
+                    # Check image size
+                    img_size_mb = len(img_data) / (1024 * 1024)
+                    self._log(f"{prefix} 📊 Image size: {img_size_mb:.2f} MB")
+                    
+                    # Optionally resize if too large (Gemini has limits)
+                    if img_size_mb > 10:  # If larger than 10MB
+                        self._log(f"📉 Resizing large image for API limits...")
+                        pil_image = open_image(image_path)
+                        
+                        # Calculate new size (max 2048px on longest side)
+                        max_size = 2048
+                        ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                        if ratio < 1:
+                            new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                            pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                            
+                            # Re-encode
+                            from io import BytesIO
+                            buffered = BytesIO()
+                            pil_image.save(buffered, format="PNG", optimize=True)
+                            img_data = buffered.getvalue()
+                            self._log(f"{prefix} ✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
+                    
+                    # Encode to base64
+                    img_base64 = base64.b64encode(img_data).decode('utf-8')
+                    
+                    # Build the message with image and text location info
+                    location_description = ""
+                    if region:
+                        x, y, w, h = region.bounding_box
+                        # Describe where on the page this text is located
+                        page_width = open_image(image_path).width
+                        page_height = open_image(image_path).height
+                        
+                        # Determine position
+                        h_pos = "left" if x < page_width/3 else "center" if x < 2*page_width/3 else "right"
+                        v_pos = "top" if y < page_height/3 else "middle" if y < 2*page_height/3 else "bottom"
+                        
+                        location_description = f"\n\nThe text to translate is located in the {v_pos}-{h_pos} area of the page, "
+                        location_description += f"at coordinates ({x}, {y}) with size {w}x{h} pixels."
+                    
+                    # Add image and text to translate
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{self._detect_image_mime(img_data)};base64,{img_base64}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": f"Looking at this full manga page, translate the following text: '{text}'{location_description}"
+                            }
+                        ]
+                    })
+                    
+                    self._log(f"{prefix} ✅ Added full page image as visual context")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
+                    self._log(f"   Error type: {type(e).__name__}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "warning")
+                    # Fall back to text-only translation
+                    messages.append({"role": "user", "content": text})
+            elif image_path and not self.visual_context_enabled:
+                # Visual context disabled - text-only mode
+                self._log(f"{prefix} 📝 Text-only mode (visual context disabled)")
+                messages.append({"role": "user", "content": text})
+            else:
+                # No image path provided - text-only translation
+                messages.append({"role": "user", "content": text})
+            
+            # Check input token limit
+            text_tokens = 0
+            image_tokens = 0
+            assistant_tokens = 0
+
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, str):
+                    # Simple text message
+                    tokens_here = len(content) // 4
+                    text_tokens += tokens_here
+                    if msg.get("role") == "assistant":
+                        assistant_tokens += tokens_here
+                elif isinstance(content, list):
+                    # Message with mixed content (text + image)
+                    for content_part in content:
+                        if content_part.get("type") == "text":
+                            part_text = content_part.get("text", "")
+                            tokens_here = len(part_text) // 4
+                            text_tokens += tokens_here
+                            if msg.get("role") == "assistant":
+                                assistant_tokens += tokens_here
+                        elif content_part.get("type") == "image_url":
+                            # Only count image tokens if visual context is enabled
+                            if self.visual_context_enabled:
+                                image_tokens += 258
+
+            estimated_tokens = text_tokens + image_tokens
+
+            # Check token limit only if it's enabled
+            if self.input_token_limit is None:
+                self._log(f"{prefix} 📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
+            else:
+                self._log(f"{prefix} 📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
+                
+                if estimated_tokens > self.input_token_limit:
+                    self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
+                    # Keep system prompt, image, and current text only
+                    if image_path:
+                        messages = [messages[0], messages[-1]]  
+                    else:
+                        messages = [messages[0], {"role": "user", "content": text}]
+                    # Recalculate tokens after trimming (no assistant memory in trimmed mode)
+                    text_tokens = len(messages[0]["content"]) // 4
+                    if isinstance(messages[-1].get("content"), str):
+                        text_tokens += len(messages[-1]["content"]) // 4
+                    else:
+                        text_tokens += len(messages[-1]["content"][0]["text"]) // 4
+                    assistant_tokens = 0
+                    estimated_tokens = text_tokens + image_tokens
+                    self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
+
+            # Log combined prompt summary similar to main translator
+            try:
+                budget_str = "unlimited" if self.input_token_limit is None else f"{self.input_token_limit:,}"
+                non_assistant_tokens = estimated_tokens - assistant_tokens
+                if assistant_tokens > 0:
+                    self._log(
+                        f"{prefix} 💬 Combined prompt: {estimated_tokens} tokens "
+                        f"(system + user: {non_assistant_tokens}, assistant/memory: {assistant_tokens}) / {budget_str}",
+                        "debug" if getattr(self, "concise_logs", False) else "info",
+                    )
+                else:
+                    self._log(
+                        f"{prefix} 💬 Combined prompt: {estimated_tokens} tokens "
+                        f"(system + user) / {budget_str}",
+                        "debug" if getattr(self, "concise_logs", False) else "info",
+                    )
+            except Exception:
+                # Never let logging break translation
+                pass
+            
+            # If graceful stop is active, do NOT start a new API call.
+            # (Let any already in-flight call finish elsewhere; this prevents endless cancelled attempts.)
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                self._log(f"{prefix} ⏹️ Graceful stop active - skipping new API call", "warning")
+                return ""
+
+            start_time = time.time()
+            api_time = 0  # Initialize to avoid NameError
+            raw_obj = None  # Initialize outside try block for history usage
+            
+            try:
+                response, finish_reason, raw_obj = send_with_interrupt(
+                    messages=messages,
+                    client=self.client,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    stop_check_fn=self._check_stop
+                )
+                
+                # Check if we captured thought signatures
+                if raw_obj:
+                    self._log("🧠 Captured thought signature for history", "debug")
+                
+                api_time = time.time() - start_time
+                self._log(f"{prefix} ✅ API responded in {api_time:.2f} seconds")
+
+                # Normalize response to plain text (handle tuples and bytes)
+                if hasattr(response, 'content'):
+                    response_text = response.content
+                else:
+                    response_text = response
+
+                # Handle tuple response like (text, 'stop') from some clients
+                if isinstance(response_text, tuple):
+                    response_text = response_text[0]
+
+                # Decode bytes/bytearray
+                if isinstance(response_text, (bytes, bytearray)):
+                    try:
+                        response_text = response_text.decode('utf-8', errors='replace')
+                    except Exception:
+                        response_text = str(response_text)
+
+                # Ensure string
+                if not isinstance(response_text, str):
+                    response_text = str(response_text)
+
+                response_text = response_text.strip()
+
+                from unified_api_client import UnifiedClient
+                if (UnifiedClient._is_failed_finish_reason(finish_reason)
+                        or UnifiedClient._is_api_error_placeholder(response_text)):
+                    self._log(f"❌ API translation failed (finish_reason: {finish_reason}); leaving region blank", "error")
+                    return ""
+
+                # If it's a stringified tuple like "('text', 'stop')", extract the first element
+                if response_text.startswith("('") or response_text.startswith('("'):
+                    import ast, re
+                    try:
+                        parsed_tuple = ast.literal_eval(response_text)
+                        if isinstance(parsed_tuple, tuple) and parsed_tuple:
+                            response_text = str(parsed_tuple[0])
+                            self._log("📦 Extracted response from tuple literal", "debug")
+                    except Exception:
+                        match = re.match(r"^\('(.+?)',\s*'.*'\)$", response_text, re.DOTALL)
+                        if match:
+                            tmp = match.group(1)
+                            tmp = tmp.replace('\\n', '\n').replace("\\'", "'").replace('\\\"', '"').replace('\\\\', '\\')
+                            response_text = tmp
+                            self._log("📦 Extracted response using regex from tuple literal", "debug")
+
+                self._log(f"{prefix} 📥 Received response ({len(response_text)} chars)")
+                
+            except Exception as api_error:
+                api_time = time.time() - start_time
+
+                # If graceful stop prevented starting a call, treat as a clean stop (no retries/log spam).
+                try:
+                    from unified_api_client import UnifiedClientError
+                    if isinstance(api_error, UnifiedClientError) and getattr(api_error, 'error_type', None) == 'cancelled':
+                        if 'graceful stop' in str(api_error).lower() or os.environ.get('GRACEFUL_STOP') == '1':
+                            self._log(f"{prefix} ⏹️ Graceful stop active - not starting new API call", "warning")
+                            return ""
+                except Exception:
+                    pass
+
+                error_str = str(api_error).lower()
+                error_type = type(api_error).__name__
+                
+                # Check for specific error types
+                if "429" in error_str or "rate limit" in error_str:
+                    self._log(f"⚠️ RATE LIMIT ERROR (429) after {api_time:.2f}s", "error")
+                    self._log(f"   The API rate limit has been exceeded", "error")
+                    self._log(f"   Please wait before retrying or reduce request frequency", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Rate limit exceeded (429): {str(api_error)}")
+                    
+                elif "401" in error_str or "unauthorized" in error_str:
+                    self._log(f"❌ AUTHENTICATION ERROR (401) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid API key or authentication failed", "error")
+                    self._log(f"   Please check your API key in settings", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Authentication failed (401): {str(api_error)}")
+                    
+                elif "403" in error_str or "forbidden" in error_str:
+                    self._log(f"❌ FORBIDDEN ERROR (403) after {api_time:.2f}s", "error")
+                    self._log(f"   Access denied - check API permissions", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Access forbidden (403): {str(api_error)}")
+                    
+                elif "400" in error_str or "bad request" in error_str:
+                    self._log(f"❌ BAD REQUEST ERROR (400) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid request format or parameters", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Bad request (400): {str(api_error)}")
+                    
+                elif "timeout" in error_str:
+                    self._log(f"⏱️ TIMEOUT ERROR after {api_time:.2f}s", "error")
+                    self._log(f"   API request timed out", "error")
+                    self._log(f"   Consider increasing timeout or retry", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Request timeout: {str(api_error)}")
+                    
+                else:
+                    # Generic API error
+                    self._log(f"❌ API ERROR ({error_type}) after {api_time:.2f}s", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    self._log(f"   Full traceback:", "error")
+                    self._log(traceback.format_exc(), "error")
+                    raise
+            
+            
+
+            # Initialize translated with extracted response text to avoid UnboundLocalError
+            if response_text is None:
+                translated = ""
+            elif isinstance(response_text, str):
+                translated = response_text
+            elif isinstance(response_text, (bytes, bytearray)):
+                try:
+                    translated = response_text.decode('utf-8', errors='replace')
+                except Exception:
+                    translated = str(response_text)
+            else:
+                translated = str(response_text)
+
+            # ADD THIS DEBUG CODE:
+            self._log(f"🔍 RAW API RESPONSE DEBUG:", "debug")
+            self._log(f"  Type: {type(translated)}", "debug")
+            #self._log(f"  Raw content length: {len(translated)}", "debug")
+            #self._log(f"  First 200 chars: {translated[:200]}", "debug")
+            #self._log(f"  Last 200 chars: {translated[-200:]}", "debug")
+
+            # Check if both Japanese and English are present
+            has_japanese = any('\u3040' <= c <= '\u9fff' or '\uac00' <= c <= '\ud7af' for c in translated)
+            has_english = any('a' <= c.lower() <= 'z' for c in translated)
+
+            if has_japanese and has_english:
+                self._log(f"  ⚠️ WARNING: Response contains BOTH Japanese AND English!", "warning")
+                self._log(f"  This might be causing the duplicate text issue", "warning")
+
+            # Check if response looks like JSON (contains both { and } and : characters)
+            if '{' in translated and '}' in translated and ':' in translated:
+                try:
+                    # It might be JSON, try to fix and parse it
+                    fixed_json = self._fix_json_response(translated)
+                    import json
+                    parsed = json.loads(fixed_json)
+                    
+                    # If it's a dict with a single translation, extract it
+                    if isinstance(parsed, dict) and len(parsed) == 1:
+                        translated = list(parsed.values())[0]
+                        translated = self._clean_translation_text(translated)
+                        self._log("📦 Extracted translation from JSON response", "debug")
+                except:
+                    # Not JSON or failed to parse, use as-is
+                    pass
+            
+            self._log(f"{prefix} 🔍 Raw response type: {type(translated)}")
+            self._log(f"{prefix} 🔍 Raw response content: '{translated[:5000]}...'")
+            
+            # Check if the response looks like a Python literal (tuple/string representation)
+            if translated.startswith("('") or translated.startswith('("') or translated.startswith("('''"):
+                self._log(f"⚠️ Detected Python literal in response, attempting to extract actual text", "warning")
+                original = translated
+                try:
+                    # Try to evaluate it as a Python literal
+                    import ast
+                    evaluated = ast.literal_eval(translated)
+                    self._log(f"📦 Evaluated type: {type(evaluated)}")
+                    
+                    if isinstance(evaluated, tuple):
+                        # Take the first element of the tuple
+                        translated = str(evaluated[0])
+                        self._log(f"📦 Extracted from tuple: '{translated[:50]}...'")
+                    elif isinstance(evaluated, str):
+                        translated = evaluated
+                        self._log(f"📦 Extracted string: '{translated[:50]}...'")
+                    else:
+                        self._log(f"⚠️ Unexpected type after eval: {type(evaluated)}", "warning")
+                        
+                except Exception as e:
+                    self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
+                    self._log(f"⚠️ Original content: {original[:200]}", "warning")
+                    
+                    # Try multiple levels of unescaping
+                    temp = translated
+                    for i in range(5):  # Try up to 5 levels of unescaping
+                        if temp.startswith("('") or temp.startswith('("'):
+                            # Try regex as fallback
+                            import re
+                            match = re.search(r"^\(['\"](.+)['\"]\)$", temp, re.DOTALL)
+                            if match:
+                                temp = match.group(1)
+                                self._log(f"📦 Regex extracted (level {i+1}): '{temp[:50]}...'")
+                            else:
+                                break
+                        else:
+                            break
+                    translated = temp
+
+            # Additional check for escaped content
+            #if '\\\\' in translated or '\\n' in translated or "\\'" in translated or '\\"' in translated:
+            #    self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
+            #    try:
+            #        before = translated
+            #        
+            #        # Handle quotes and apostrophes
+            #        translated = translated.replace("\\'", "'")
+            #        translated = translated.replace('\\"', '"')
+            #        translated = translated.replace("\\`", "`")
+                    
+                    # DON'T UNESCAPE NEWLINES BEFORE JSON PARSING!
+                    # translated = translated.replace('\\n', '\n')  # COMMENT THIS OUT
+                    
+            #        translated = translated.replace('\\\\', '\\')
+            #        translated = translated.replace('\\/', '/')
+                    # translated = translated.replace('\\t', '\t')  # COMMENT THIS OUT TOO
+                    # translated = translated.replace('\\r', '\r')  # AND THIS
+                    
+            #        self._log(f"📦 Unescaped safely: '{before[:50]}...' -> '{translated[:50]}...'")
+            #    except Exception as e:
+            #        self._log(f"⚠️ Failed to unescape: {e}", "warning")
+            
+            # Clean up unwanted trailing apostrophes/quotes
+            import re
+            response_text = translated
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
+            translated = response_text
+            translated = self._clean_translation_text(translated)
+            if UnifiedClient._is_api_error_placeholder(translated):
+                self._log("❌ API returned a failure placeholder; leaving region blank", "error")
+                return ""
+            
+            # Apply glossary if available
+            if hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                glossary_count = len(self.main_gui.manual_glossary)
+                self._log(f"📚 Applying glossary with {glossary_count} entries")
+                
+                replacements = 0
+                for entry in self.main_gui.manual_glossary:
+                    if 'source' in entry and 'target' in entry:
+                        if entry['source'] in translated:
+                            translated = translated.replace(entry['source'], entry['target'])
+                            replacements += 1
+                
+                if replacements > 0:
+                    self._log(f"   ✏️ Made {replacements} glossary replacements")
+            
+            translated = self._clean_translation_text(translated)
+            
+            # Store in history if HistoryManager is available
+            if self.history_manager and self.contextual_enabled:
+                # Thread-safe history update (prevents race conditions if used in batch mode)
+                # Microsecond lock to prevent race conditions when appending to history
+                import time
+                time.sleep(0.000001)
+                with self._contextual_lock:
+                    with self.history_manager.lock:
+                        try:
+                            # Build structured payload so we can reconstruct image context later
+                            user_payload: Any = text
+                            assistant_payload: Any = translated
+
+                            if image_path and self.visual_context_enabled:
+                                bbox = None
+                                try:
+                                    if region and hasattr(region, "bounding_box") and region.bounding_box:
+                                        bbox = [int(v) for v in region.bounding_box]
+                                except Exception:
+                                    bbox = None
+
+                                user_payload = {
+                                    "type": "manga_exchange",
+                                    "version": 1,
+                                    "text": text,
+                                    "image_path": image_path,
+                                    "region_bbox": bbox,
+                                }
+                                assistant_payload = {
+                                    "type": "manga_exchange",
+                                    "version": 1,
+                                    "translated_text": translated,
+                                    "image_path": image_path,
+                                    "region_bbox": bbox,
+                                }
+
+                            # Append to history with proper limit handling
+                            self.history_manager.append_to_history(
+                                user_content=user_payload,
+                                assistant_content=assistant_payload,
+                                hist_limit=self.translation_history_limit,
+                                reset_on_limit=not self.rolling_history_enabled,
+                                rolling_window=self.rolling_history_enabled,
+                                raw_assistant_object=raw_obj  # Now properly scoped from outside try block
+                            )
+                            
+                            # Check if we're about to hit the limit
+                            if self.history_manager.will_reset_on_next_append(
+                                self.translation_history_limit, 
+                                self.rolling_history_enabled,
+                            ):
+                                mode = "roll over" if self.rolling_history_enabled else "reset"
+                                self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})")
+                            
+                        except Exception as e:
+                            self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
+            
+            # Also store in legacy context for compatibility
+            self.translation_context.append({
+                "original": text,
+                "translated": translated
+            })
+            
+            return translated
+            
+        except Exception as e:
+            self._log(f"❌ Translation error: {str(e)}", "error")
+            self._log(f"   Error type: {type(e).__name__}", "error")
+            import traceback
+            self._log(f"   Traceback: {traceback.format_exc()}", "error")
+            return ""
+
+    def translate_full_page_context(self, regions: List[TextRegion], image_path: str, _in_fallback=False) -> Dict[str, str]:
+        """Translate all text regions with full page context in a single request
+        
+        Args:
+            regions: List of text regions to translate
+            image_path: Path to the manga page image
+            _in_fallback: Internal flag to prevent infinite recursion during fallback attempts
+        """
+        try:
+            import time
+            import traceback
+            import json
+            
+            # Initialize response_text at the start
+            response_text = ""
+            
+            self._log(f"\n📄 Full page context translation of {len(regions)} text regions")
+            
+            # Get system prompt from GUI profile - Support both Tkinter and PySide6
+            try:
+                if hasattr(self.main_gui.profile_var, 'get'):
+                    profile_name = self.main_gui.profile_var.get()
+                else:
+                    profile_name = self.main_gui.profile_var
+            except Exception:
+                profile_name = 'Default'
+            
+            # Ensure visual_context_enabled exists (temporary fix)
+            if not hasattr(self, 'visual_context_enabled'):
+                self.visual_context_enabled = self.main_gui.config.get('manga_visual_context_enabled', True)
+            
+            # Try to get the prompt from prompt_profiles dictionary (for all profiles including custom ones)
+            system_prompt = ''
+            if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
+                system_prompt = self.main_gui.prompt_profiles[profile_name]
+                # Replace {target_lang} placeholder with actual target language
+                target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+                if "{target_lang}" in system_prompt:
+                    system_prompt = system_prompt.replace("{target_lang}", target_lang)
+                self._log(f"📋 Using profile: {profile_name}")
+            else:
+                # Fallback to check if it's stored as a direct attribute (legacy support)
+                system_prompt = getattr(self.main_gui, profile_name.replace(' ', '_'), '')
+                if system_prompt:
+                    # Replace {target_lang} placeholder with actual target language
+                    target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+                    if "{target_lang}" in system_prompt:
+                        system_prompt = system_prompt.replace("{target_lang}", target_lang)
+                    self._log(f"📋 Using profile (legacy): {profile_name}")
+                else:
+                    self._log(f"⚠️ Profile '{profile_name}' not found, using empty prompt", "warning")
+            
+            # Combine with full page context instructions
+            if system_prompt:
+                system_prompt = f"{system_prompt}\n\n{self.full_page_context_prompt}"
+            else:
+                system_prompt = self.full_page_context_prompt
+            glossary_source_text = "\n".join(str(region.text or '') for region in regions if str(region.text or '').strip())
+            system_prompt = self._append_manga_glossary_to_system_prompt(
+                system_prompt,
+                source_text=glossary_source_text,
+                image_path=image_path,
+            )
+            
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # CHECK 2: Before adding context
+            if self._check_stop():
+                self._log("⏹️ Translation stopped during context preparation", "warning")
+                return {}
+            
+            # Add contextual translations if enabled
+            if self.contextual_enabled and self.history_manager:
+                history_context = self._get_translation_history_context()
+                if history_context:
+                    self._log(
+                        f"🔗 Adding contextual memory from previous translations "
+                        f"(limit: {self.translation_history_limit})"
+                    )
+                    messages.extend(history_context)
+            
+            # Prepare text segments with indices
+            all_texts = {}
+            text_list = []
+            for i, region in enumerate(regions):
+                # Use index-based key to handle duplicate texts
+                # CRITICAL: Normalize whitespace and newlines for consistent key matching
+                # The API might normalize "\n\n" to spaces, so we need to do the same
+                normalized_text = ' '.join(region.text.split())
+                key = f"[{i}] {normalized_text}"
+                all_texts[key] = region.text
+                text_list.append(f"[{i}] {region.text}")  # Send original with newlines to API
+                
+            # CHECK 3: Before image processing
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before image processing", "warning")
+                return {}
+            
+            # Create the full context message text
+            context_text = "\n".join(text_list)
+            
+            # Log text content info
+            total_chars = sum(len(region.text) for region in regions)
+            self._log(f"📝 Text content: {len(regions)} regions, {total_chars} total characters")
+            
+            # Process image if visual context is enabled
+            if self.visual_context_enabled:
+                try:
+                    import base64
+                    from PIL import Image as PILImage
+                    
+                    self._log(f"📷 Adding full page visual context for translation")
+                    
+                    # Read and optionally encode the image for manga requests
+                    img_data = self._prepare_manga_image_request_bytes(image_path, "full-page visual context")
+                    
+                    # Check image size
+                    img_size_mb = len(img_data) / (1024 * 1024)
+                    self._log(f"📊 Image size: {img_size_mb:.2f} MB")
+                    
+                    # Get image dimensions
+                    pil_image = open_image(image_path)
+                    self._log(f"   Image dimensions: {pil_image.width}x{pil_image.height}")
+                    
+                    # CHECK 4: Before resizing (which can take time)
+                    if self._check_stop():
+                        self._log("⏹️ Translation stopped during image preparation", "warning")
+                        return {}
+                    
+                    # Resize if needed
+                    if img_size_mb > 10:
+                        self._log(f"📉 Resizing large image for API limits...")
+                        max_size = 2048
+                        ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                        if ratio < 1:
+                            new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                            pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                            from io import BytesIO
+                            buffered = BytesIO()
+                            pil_image.save(buffered, format="PNG", optimize=True)
+                            img_data = buffered.getvalue()
+                            self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
+                    
+                    # Convert to base64
+                    img_b64 = base64.b64encode(img_data).decode('utf-8')
+                    
+                    # Create message with both text and image
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": context_text},
+                            {"type": "image_url", "image_url": {"url": f"data:{self._detect_image_mime(img_data)};base64,{img_b64}"}}
+                        ]
+                    })
+                    
+                    self._log(f"✅ Added full page image as visual context")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
+                    self._log(f"   Error type: {type(e).__name__}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "warning")
+                    self._log(f"   Falling back to text-only translation", "warning")
+                    
+                    # Fall back to text-only translation
+                    messages.append({"role": "user", "content": context_text})
+            else:
+                # Visual context disabled - send text only
+                self._log(f"📝 Text-only mode (visual context disabled for non-vision models)")
+                messages.append({"role": "user", "content": context_text})
+            
+            # CHECK 5: Before API call
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before API call", "warning")
+                return {}
+            
+            # Store original model for fallback
+            original_model = self.client.model if hasattr(self.client, 'model') else None
+            
+            # Check input token limit
+            text_tokens = 0
+            image_tokens = 0
+
+            for msg in messages:
+                if isinstance(msg.get("content"), str):
+                    # Simple text message
+                    text_tokens += len(msg["content"]) // 4
+                elif isinstance(msg.get("content"), list):
+                    # Message with mixed content (text + image)
+                    for content_part in msg["content"]:
+                        if content_part.get("type") == "text":
+                            text_tokens += len(content_part.get("text", "")) // 4
+                        elif content_part.get("type") == "image_url":
+                            # Only count image tokens if visual context is enabled
+                            if self.visual_context_enabled:
+                                image_tokens += 258
+
+            estimated_tokens = text_tokens + image_tokens
+
+            # Check token limit only if it's enabled
+            if self.input_token_limit is None:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
+            else:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
+                
+                if estimated_tokens > self.input_token_limit:
+                    self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
+                    # Keep system prompt and current message only
+                    messages = [messages[0], messages[-1]]  
+                    # Recalculate tokens
+                    text_tokens = len(messages[0]["content"]) // 4
+                    if isinstance(messages[-1]["content"], str):
+                        text_tokens += len(messages[-1]["content"]) // 4
+                    else:
+                        for content_part in messages[-1]["content"]:
+                            if content_part.get("type") == "text":
+                                text_tokens += len(content_part.get("text", "")) // 4
+                    estimated_tokens = text_tokens + image_tokens
+                    self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
+            
+            # Log combined prompt summary similar to single-region translation
+            try:
+                budget_str = "unlimited" if self.input_token_limit is None else f"{self.input_token_limit:,}"
+                assistant_tokens = 0
+                for msg in messages:
+                    role = msg.get("role")
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        tokens_here = len(content) // 4
+                        if role == "assistant":
+                            assistant_tokens += tokens_here
+                    elif isinstance(content, list):
+                        for content_part in content:
+                            if content_part.get("type") == "text":
+                                part_text = content_part.get("text", "")
+                                tokens_here = len(part_text) // 4
+                                if role == "assistant":
+                                    assistant_tokens += tokens_here
+                non_assistant_tokens = estimated_tokens - assistant_tokens
+                if assistant_tokens > 0:
+                    self._log(
+                        f"💬 Combined prompt: {estimated_tokens} tokens "
+                        f"(system + user: {non_assistant_tokens}, assistant/memory: {assistant_tokens}) / {budget_str}",
+                        "debug" if getattr(self, "concise_logs", False) else "info",
+                    )
+                else:
+                    self._log(
+                        f"💬 Combined prompt: {estimated_tokens} tokens "
+                        f"(system + user) / {budget_str}",
+                        "debug" if getattr(self, "concise_logs", False) else "info",
+                    )
+            except Exception:
+                # Never let logging break translation
+                pass
+
+            # Make API call using the client's send method (matching translate_text)
+            self._log(f"🌐 Sending full page context to API...")
+            self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")
+            self._log(f"   Temperature: {self.temperature}")
+            self._log(f"   Max Output Tokens: {self.max_tokens}")
+
+            # If graceful stop is active, do NOT start a new API call.
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                self._log("⏹️ Graceful stop active - skipping new full-page API call", "warning")
+                return {}
+            
+            start_time = time.time()
+            api_time = 0  # Initialize to avoid NameError
+            
+            try:
+                response, finish_reason, raw_obj = send_with_interrupt(
+                    messages=messages,
+                    client=self.client,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    stop_check_fn=self._check_stop
+                )
+                        
+                api_time = time.time() - start_time
+
+                # Extract content from response
+                if hasattr(response, 'content'):
+                    response_text = response.content
+                    # Check if it's a tuple representation
+                    if isinstance(response_text, tuple):
+                        response_text = response_text[0]  # Get first element of tuple
+                    response_text = response_text.strip()
+                elif hasattr(response, 'text'):
+                    # Gemini responses have .text attribute
+                    response_text = response.text.strip()
+                elif hasattr(response, 'candidates') and response.candidates:
+                    # Handle Gemini GenerateContentResponse structure
+                    try:
+                        response_text = response.candidates[0].content.parts[0].text.strip()
+                    except (IndexError, AttributeError):
+                        response_text = str(response).strip()
+                else:
+                    # If response is a string or other format
+                    response_text = str(response).strip()
+                    
+                    # Check if it's a stringified tuple
+                    if response_text.startswith("('") or response_text.startswith('("'):
+                        # It's a tuple converted to string, extract the JSON part
+                        import ast
+                        try:
+                            parsed_tuple = ast.literal_eval(response_text)
+                            if isinstance(parsed_tuple, tuple):
+                                response_text = parsed_tuple[0]  # Get first element
+                                self._log("📦 Extracted response from tuple format", "debug")
+                        except:
+                            # If literal_eval fails, try regex
+                            import re
+                            match = re.match(r"^\('(.+)', '.*'\)$", response_text, re.DOTALL)
+                            if match:
+                                response_text = match.group(1)
+                                # Unescape the string
+                                response_text = response_text.replace('\\n', '\n')
+                                response_text = response_text.replace("\\'", "'")
+                                response_text = response_text.replace('\\"', '"')
+                                response_text = response_text.replace('\\\\', '\\')
+                                self._log("📦 Extracted response using regex from tuple string", "debug")
+
+                from unified_api_client import UnifiedClient
+                if (UnifiedClient._is_failed_finish_reason(finish_reason)
+                        or UnifiedClient._is_api_error_placeholder(response_text)):
+                    self._log(f"❌ Full page API translation failed (finish_reason: {finish_reason}); leaving regions blank", "error")
+                    return {}
+                
+                # CHECK 6: Immediately after API response
+                if self._check_stop():
+                    self._log(f"⏹️ Translation stopped after API call ({api_time:.2f}s)", "warning")
+                    return {}
+                
+                self._log(f"✅ API responded in {api_time:.2f} seconds")
+                self._log(f"📥 Received response ({len(response_text)} chars)")
+                
+            except Exception as api_error:
+                api_time = time.time() - start_time
+
+                # If graceful stop prevented starting a call, treat as a clean stop.
+                try:
+                    from unified_api_client import UnifiedClientError
+                    if isinstance(api_error, UnifiedClientError) and getattr(api_error, 'error_type', None) == 'cancelled':
+                        if 'graceful stop' in str(api_error).lower() or os.environ.get('GRACEFUL_STOP') == '1':
+                            self._log("⏹️ Graceful stop active - not starting new API call", "warning")
+                            return {}
+                except Exception:
+                    pass
+                
+                # CHECK 7: After API error
+                if self._check_stop():
+                    self._log(f"⏹️ Translation stopped during API error handling", "warning")
+                    return {}
+                
+                error_str = str(api_error).lower()
+                error_type = type(api_error).__name__
+                
+                # Check for specific error types
+                if "429" in error_str or "rate limit" in error_str:
+                    self._log(f"⚠️ RATE LIMIT ERROR (429) after {api_time:.2f}s", "error")
+                    self._log(f"   The API rate limit has been exceeded", "error")
+                    self._log(f"   Please wait before retrying or reduce request frequency", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Rate limit exceeded (429): {str(api_error)}")
+                    
+                elif "401" in error_str or "unauthorized" in error_str:
+                    self._log(f"❌ AUTHENTICATION ERROR (401) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid API key or authentication failed", "error")
+                    self._log(f"   Please check your API key in settings", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Authentication failed (401): {str(api_error)}")
+                    
+                elif "403" in error_str or "forbidden" in error_str:
+                    self._log(f"❌ FORBIDDEN ERROR (403) after {api_time:.2f}s", "error")
+                    self._log(f"   Access denied - check API permissions", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Access forbidden (403): {str(api_error)}")
+                    
+                elif "400" in error_str or "bad request" in error_str:
+                    self._log(f"❌ BAD REQUEST ERROR (400) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid request format or parameters", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Bad request (400): {str(api_error)}")
+                    
+                elif "timeout" in error_str:
+                    self._log(f"⏱️ TIMEOUT ERROR after {api_time:.2f}s", "error")
+                    self._log(f"   API request timed out", "error")
+                    self._log(f"   Consider increasing timeout or retry", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Request timeout: {str(api_error)}")
+                    
+                else:
+                    # Generic API error
+                    self._log(f"❌ API ERROR ({error_type}) after {api_time:.2f}s", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    self._log(f"   Full traceback:", "error")
+                    self._log(traceback.format_exc(), "error")
+                    raise
+            
+            # CHECK 8: Before parsing response
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before parsing response", "warning")
+                return {}
+            
+            # Check if we got a response
+            if not response_text:
+                self._log("❌ Empty response from API", "error")
+                return {}
+            
+            self._log(f"🔍 Raw response type: {type(response_text)}")
+            self._log(f"🔍 Raw response preview: '{response_text[:]}...'")
+            
+            # Clean up response_text (handle Python literals, escapes, etc.)
+            if response_text.startswith("('") or response_text.startswith('("') or response_text.startswith("('''"):
+                self._log(f"⚠️ Detected Python literal in response, attempting to extract actual text", "warning")
+                try:
+                    import ast
+                    evaluated = ast.literal_eval(response_text)
+                    if isinstance(evaluated, tuple):
+                        response_text = str(evaluated[0])
+                    elif isinstance(evaluated, str):
+                        response_text = evaluated
+                except Exception as e:
+                    self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
+            
+            # Handle escaped content
+            #if '\\\\' in response_text or '\\n' in response_text or "\\'" in response_text or '\\"' in response_text:
+            #    self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
+            #    response_text = response_text.replace("\\'", "'")
+            #    response_text = response_text.replace('\\"', '"')
+            #    response_text = response_text.replace('\\n', '\n')
+            #    response_text = response_text.replace('\\\\', '\\')
+            #    response_text = response_text.replace('\\/', '/')
+            #    response_text = response_text.replace('\\t', '\t')
+            #    response_text = response_text.replace('\\r', '\r')
+            
+            # Clean up quotes
+            import re
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)
+            
+            # Try to parse as JSON
+            translations = {}
+            try:
+                # Strip markdown blocks more aggressively
+                import re
+                import json
+                
+                # CRITICAL: Strip markdown code blocks FIRST, before attempting JSON extraction
+                cleaned = response_text
+                
+                # Remove markdown code blocks (handles ```json, ``json, ```, ``, etc.)
+                if '```' in cleaned or '``' in cleaned:
+                    patterns = [
+                        r'```json\s*\n?(.*?)```',
+                        r'``json\s*\n?(.*?)``',
+                        r'```\s*\n?(.*?)```',
+                        r'``\s*\n?(.*?)``'
+                    ]
+                    
+                    for pattern in patterns:
+                        match = re.search(pattern, cleaned, re.DOTALL)
+                        if match:
+                            cleaned = match.group(1).strip()
+                            self._log(f"🔧 Stripped markdown wrapper using pattern: {pattern[:20]}...")
+                            break
+                
+                # Method 1: Try to parse the cleaned text directly
+                try:
+                    translations = json.loads(cleaned)
+                    self._log(f"✅ Successfully parsed {len(translations)} translations (direct parse)")
+                except json.JSONDecodeError:
+                    # Method 2: Extract JSON object if direct parse failed
+                    json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                    if json_match:
+                        json_text = json_match.group(0)
+                        try:
+                            translations = json.loads(json_text)
+                            self._log(f"✅ Successfully parsed {len(translations)} translations (regex extraction)")
+                        except json.JSONDecodeError:
+                            # Try to fix the extracted JSON
+                            json_text = self._fix_json_response(json_text)
+                            translations = json.loads(json_text)
+                            self._log(f"✅ Successfully parsed {len(translations)} translations (after fix)")
+                    else:
+                        # No JSON object found
+                        raise json.JSONDecodeError("No JSON object found", cleaned, 0)
+                
+                # Handle different response formats
+                if isinstance(translations, list):
+                    # Array of translations only - map by position
+                    temp = {}
+                    for i, region in enumerate(regions):
+                        if i < len(translations):
+                            temp[region.text] = translations[i]
+                    translations = temp
+                
+                self._log(f"📊 Total translations: {len(translations)}")
+                
+            except Exception as e:
+                #self._log(f"❌ Failed to parse JSON: {str(e)}", "error")
+                #self._log(f"Response preview: {response_text[:5000]}...", "warning")
+                
+                # CRITICAL: Check if this is a refusal message BEFORE regex fallback
+                # OpenAI and other APIs refuse certain content with text responses instead of JSON
+                # ONLY check if response looks like plain text refusal (not malformed JSON with translations)
+                import re
+                response_lower = response_text.lower()
+                
+                # Quick check: if response starts with refusal keywords, it's definitely a refusal
+                # Be more precise to avoid false positives on manga dialogue
+                refusal_starts = [
+                    'i cannot assist', "i can't assist", 'i apologize, but i cannot',
+                    'as an ai', 'as a language model', "i'm sorry, but i can't assist"
+                ]
+                if any(response_lower.strip().startswith(start) for start in refusal_starts):
+                    # Very likely a refusal - raise immediately
+                    from unified_api_client import UnifiedClientError
+                    raise UnifiedClientError(
+                        f"Content refused by API",
+                        error_type="prohibited_content",
+                        details={"refusal_message": response_text[:500]}
+                    )
+                
+                # Skip refusal check if response contains valid-looking JSON structure with translations
+                # (indicates malformed JSON that should go to regex fallback, not a refusal)
+                has_json_structure = (
+                    (response_text.strip().startswith('{') and ':' in response_text and '"' in response_text) or
+                    (response_text.strip().startswith('[') and ':' in response_text and '"' in response_text)
+                )
+                
+                # Also check if response contains short translations (not refusal paragraphs)
+                # Refusals are typically long paragraphs, translations are short
+                avg_value_length = 0
+                if has_json_structure:
+                    # Quick estimate: count chars between quotes
+                    import re
+                    values = re.findall(r'"([^"]{1,200})"\s*[,}]', response_text)
+                    if values:
+                        avg_value_length = sum(len(v) for v in values) / len(values)
+                
+                # If looks like JSON with short values, skip refusal check (go to regex fallback)
+                if has_json_structure and avg_value_length > 0 and avg_value_length < 150:
+                    self._log(f"🔍 Detected malformed JSON with translations (avg len: {avg_value_length:.0f}), trying regex fallback", "debug")
+                    # Skip refusal detection, go straight to regex fallback
+                    pass
+                else:
+                    # Check for refusal patterns (only for responses > 10 chars)
+                    # Manga text is typically short, refusals are longer explanations
+                    # Refusal patterns - both simple strings and regex patterns
+                    # Must be strict to avoid false positives on valid translations
+                    refusal_patterns = [
+                        "i cannot assist",
+                        "i can't assist",
+                        "i'm not able to assist",
+                        "i cannot help",
+                        "i can't help",
+                        "i'm unable to help",
+                        "i'm afraid i cannot help with that",
+                        "designed to ensure appropriate use",
+                        "as an ai",
+                        "as a language model",
+                        "as an ai language model",
+                        r"sorry.{0,10}i can't (assist|help|translate)",  # OpenAI specific
+                        "i'm unable to translate",
+                        "i am unable to translate",
+                        "i apologize, but i cannot",
+                        "i'm sorry, but i cannot",
+                        "i'm sorry, but i can't assist",
+                        "i'm sorry, but i cannot assist",
+                        "i don't feel comfortable",
+                        "against my programming",
+                        "against my guidelines",
+                        r"against.{0,20}(content )?policy",  # "against policy" or "against content policy"
+                        "violates content policy",
+                        "violates.*policy",
+                        "i'm not programmed to",
+                        "cannot provide that kind",
+                        "unable to provide that",
+                        r"(can't|cannot).{0,30}(sexual|explicit|inappropriate)",  # "can't translate sexual"
+                        "appears to sexualize",
+                        "prohibited content",
+                        "content blocked",
+                        "i cannot assist with this request",
+                        "that's not within my capabilities to appropriately assist with",
+                        "is there something different i can help you with",
+                        "careful ethical considerations",
+                        "i could help you with a different question or task",
+                        "what other topics or questions can i help you explore",
+                        "i cannot and will not translate",
+                        "i cannot translate this content",
+                        "i can't translate this content",
+                    ]
+                    
+                    # Check both simple string matching and regex patterns
+                    # Only check if response is longer than typical manga text (> 10 chars)
+                    is_refusal = False
+                    if len(response_text) > 10:
+                        for pattern in refusal_patterns:
+                            if '.*' in pattern or r'.{' in pattern:
+                                # It's a regex pattern
+                                if re.search(pattern, response_lower):
+                                    is_refusal = True
+                                    break
+                            else:
+                                # Simple string match
+                                if pattern in response_lower:
+                                    is_refusal = True
+                                    break
+                    
+                    if is_refusal:
+                        # Raise UnifiedClientError with prohibited_content type
+                        # Fallback mechanism will handle this automatically
+                        from unified_api_client import UnifiedClientError
+                        raise UnifiedClientError(
+                            f"Content refused by API",
+                            error_type="prohibited_content",
+                            details={"refusal_message": response_text[:500]}
+                        )
+                
+                # Fallback: try regex extraction (handles both quoted and unquoted keys)
+                try:
+                    import re
+                    translations = {}
+                    
+                    # Try 1: Standard quoted keys and values
+                    pattern1 = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+                    matches = re.findall(pattern1, response_text)
+                    
+                    if matches:
+                        for key, value in matches:
+                            value = value.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+                            translations[key] = value
+                        self._log(f"✅ Recovered {len(translations)} translations using regex (quoted keys)")
+                    else:
+                        # Try 2: Unquoted keys (for invalid JSON like: key: "value")
+                        pattern2 = r'([^\s:{}]+)\s*:\s*([^\n}]+)'
+                        matches = re.findall(pattern2, response_text)
+                        
+                        for key, value in matches:
+                            # Clean up key and value
+                            key = key.strip()
+                            value = value.strip().rstrip(',')
+                            # Remove quotes from value if present
+                            if value.startswith('"') and value.endswith('"'):
+                                value = value[1:-1]
+                            elif value.startswith("'") and value.endswith("'"):
+                                value = value[1:-1]
+                            translations[key] = value
+                        
+                        if translations:
+                            self._log(f"✅ Recovered {len(translations)} translations using regex (unquoted keys)")
+                    
+                    if not translations:
+                        self._log("❌ All parsing attempts failed", "error")
+                        return {}
+                except Exception as e:
+                    self._log(f"❌ Failed to recover JSON: {e}", "error")
+                    return {}
+            
+            # Map translations back to regions
+            result = {}
+            all_originals = []
+            all_translations = []
+
+            # Extract translation values in order
+            translation_values = list(translations.values()) if translations else []
+
+            # DEBUG: Log what we extracted
+            self._log(f"📊 Extracted {len(translation_values)} translation values", "debug")
+            for i, val in enumerate(translation_values[:1000]):  # First 1000 for debugging
+                # Safely handle None values
+                val_str = str(val) if val is not None else ""
+                self._log(f"  Translation {i}: '{val_str[:1000]}...'", "debug")
+
+            # Clean all translation values to remove quotes
+            # CRITICAL: Also clean the keys in the dictionary to maintain correct mapping
+            # CRITICAL FIX: Always keep the key even if value becomes empty after cleaning
+            # This prevents misalignment between detected regions and API translations
+            cleaned_translations = {}
+            for key, value in translations.items():
+                cleaned_key = key
+                cleaned_value = self._clean_translation_text(value)
+                # ALWAYS add the key to maintain alignment, even if value is empty
+                cleaned_translations[cleaned_key] = cleaned_value
+                if not cleaned_value:
+                    self._log(f"🔍 Keeping empty translation to maintain alignment: '{key}' → '' (original: '{value}')", "debug")
+            
+            # Replace original dict with cleaned version
+            translations = cleaned_translations
+            translation_values = list(translations.values()) if translations else []
+
+            self._log(f"🔍 DEBUG: translation_values after cleaning:", "debug")
+            for i, val in enumerate(translation_values):
+                self._log(f"  [{i}]: {repr(val)}", "debug")
+            
+            # CRITICAL: Check if translation values are actually refusal messages
+            # API sometimes returns valid JSON where each "translation" is a refusal
+            # Only check translations > 10 chars (manga text is typically very short)
+            if translation_values:
+                # Check first few translations for refusal patterns
+                import re
+                refusal_patterns = [
+                    "i cannot assist",
+                    "i can't assist",
+                    "i'm not able to assist",
+                    "i cannot help",
+                    "i can't help",
+                    "i'm unable to help",
+                    "as an ai",
+                    "as a language model",
+                    "as an ai language model",
+                    r"sorry.{0,5}i can't (assist|help)",
+                    "i apologize, but i cannot",
+                    "i'm sorry, but i cannot assist",
+                    "i don't feel comfortable",
+                    "against my programming",
+                    "against my guidelines",
+                    "violates content policy",
+                    "i'm not programmed to",
+                    "sexually explicit",
+                    "content policy",
+                    "prohibited content",
+                    "i cannot assist with this request",
+                    "that's not within my capabilities to appropriately assist with",
+                    "is there something different i can help you with",
+                    "careful ethical considerations",
+                    "i could help you with a different question or task",
+                    "what other topics or questions can i help you explore",
+                    "i cannot and will not translate",
+                    "i cannot translate this content",
+                    "i can't translate this content",
+                ]
+                
+                # Sample first 3 translations (or all if fewer)
+                sample_size = min(3, len(translation_values))
+                refusal_count = 0
+                
+                for sample_val in translation_values[:sample_size]:
+                    if sample_val and len(sample_val) > 10:  # Only check if longer than typical manga text
+                        val_lower = sample_val.lower()
+                        for pattern in refusal_patterns:
+                            if '.*' in pattern or r'.{' in pattern:
+                                if re.search(pattern, val_lower):
+                                    refusal_count += 1
+                                    break
+                            else:
+                                if pattern in val_lower:
+                                    refusal_count += 1
+                                    break
+                
+                # If most translations are refusals, treat as refusal
+                if refusal_count >= sample_size * 0.5:  # 50% threshold
+                    # Raise UnifiedClientError with prohibited_content type
+                    # Fallback mechanism will handle this automatically
+                    from unified_api_client import UnifiedClientError
+                    raise UnifiedClientError(
+                        f"Content refused by API",
+                        error_type="prohibited_content",
+                        details={"refusal_message": translation_values[0][:500]}
+                    )
+
+            # OPTIMIZED: Key-based mapping with pre-computed lookups
+            self._log(f"📋 Mapping {len(translations)} translations to {len(regions)} regions")
+            
+            # DEBUG: Log all translation keys for inspection
+            if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                self._log(f"🔍 Available translation keys:", "debug")
+                for key in list(translations.keys())[:20]:  # Show first 20
+                    self._log(f"   '{key}'", "debug")
+            
+            # OPTIMIZATION: Pre-compute all possible keys and their region indices
+            region_key_map = {}  # key -> region_index mapping
+            normalized_texts = []  # Pre-compute normalized versions
+            
+            for i, region in enumerate(regions):
+                # Pre-normalize text once
+                normalized_text = ' '.join(region.text.split())
+                normalized_texts.append(normalized_text)
+                
+                # Create all possible key variations
+                # Indexed keys (highest priority)
+                region_key_map[f"[{i}] {region.text}"] = i
+                region_key_map[f"[{i}] {normalized_text}"] = i
+                # Direct keys (backward compatibility)
+                region_key_map[region.text] = i
+                region_key_map[normalized_text] = i
+            
+            # OPTIMIZATION: Pre-compile glossary replacements if present
+            glossary_replacements = []
+            if hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                for entry in self.main_gui.manual_glossary:
+                    if 'source' in entry and 'target' in entry and entry['source']:
+                        glossary_replacements.append((entry['source'], entry['target']))
+            
+            # OPTIMIZATION: Single pass through translations to map to regions.
+            # Priority order for each translation key:
+            #   1) Exact match in region_key_map (region.text / normalized / f"[i] ...").
+            #   2) `[N]` index prefix — robust fallback when the API collapses or
+            #      alters whitespace/newlines inside the key (Gemini/Vertex often
+            #      drop newlines between Japanese characters when emitting JSON
+            #      keys). The `[N]` prefix is authoritative for ordering.
+            import re as _re_map
+            from unified_api_client import UnifiedClient
+            _index_prefix_re = _re_map.compile(r'^\s*\[(\d+)\]\s*')
+
+            def _apply_translation(region_idx: int, translated_text: str, match_kind: str) -> None:
+                region = regions[region_idx]
+                # Apply glossary replacements efficiently
+                text = '' if UnifiedClient._is_api_error_placeholder(translated_text) else translated_text
+                if text and glossary_replacements:
+                    for source, target in glossary_replacements:
+                        if source in text:
+                            text = text.replace(source, target)
+                # Assign translation
+                result[region.text] = text
+                region.translated_text = text
+                matched_regions.add(region_idx)
+                if text:
+                    all_originals.append(f"[{region_idx+1}] {region.text}")
+                    all_translations.append(f"[{region_idx+1}] {text}")
+                if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                    self._log(
+                        f"  ✅ Matched ({match_kind}): '{region.text[:30]}...' → '{text[:30]}...'",
+                        "debug",
+                    )
+
+            matched_regions = set()  # Track which regions got translations
+            index_prefix_fallbacks = 0
+            for key, translated_text in translations.items():
+                region_idx = None
+                match_kind = None
+                if key in region_key_map:
+                    region_idx = region_key_map[key]
+                    match_kind = "exact"
+                else:
+                    # Fallback: parse `[N]` prefix directly from the key
+                    m = _index_prefix_re.match(key)
+                    if m:
+                        idx = int(m.group(1))
+                        if 0 <= idx < len(regions):
+                            region_idx = idx
+                            match_kind = "index-prefix"
+                            index_prefix_fallbacks += 1
+                if region_idx is None or region_idx in matched_regions:
+                    continue
+                _apply_translation(region_idx, translated_text, match_kind)
+
+            if index_prefix_fallbacks:
+                self._log(
+                    f"  ℹ️ Mapped {index_prefix_fallbacks} translation(s) via [N] index prefix "
+                    f"(API normalized text keys)",
+                    "info",
+                )
+
+            # OPTIMIZATION: Handle unmatched regions (position-based fallback).
+            # Trigger when counts align OR when the API consistently used [N]
+            # prefixes — in that case the order is trustworthy even if counts
+            # don't line up exactly.
+            translations_had_index_prefix = any(
+                isinstance(k, str) and _index_prefix_re.match(k) for k in translations.keys()
+            )
+            if len(matched_regions) < len(regions) and (
+                len(translation_values) == len(regions) or translations_had_index_prefix
+            ):
+                for i, region in enumerate(regions):
+                    if i in matched_regions or i >= len(translation_values):
+                        continue
+                    translated_text = translation_values[i]
+                    if UnifiedClient._is_api_error_placeholder(translated_text):
+                        translated_text = ''
+                    if translated_text and glossary_replacements:
+                        for source, target in glossary_replacements:
+                            if source in translated_text:
+                                translated_text = translated_text.replace(source, target)
+                    result[region.text] = translated_text
+                    region.translated_text = translated_text
+                    matched_regions.add(i)
+                    if translated_text:
+                        all_originals.append(f"[{i+1}] {region.text}")
+                        all_translations.append(f"[{i+1}] {translated_text}")
+                    self._log(f"  ⚠️ Using position-based fallback for region {i}", "debug")
+
+            # Report summary so partial successes are visible
+            if matched_regions:
+                self._log(
+                    f"  📊 Translation mapping: {len(matched_regions)}/{len(regions)} regions matched",
+                    "info",
+                )
+            else:
+                self._log(
+                    f"  ⚠️ Translation mapping: 0/{len(regions)} regions matched — no usable keys in response",
+                    "warning",
+                )
+            
+            # Check for stop signal
+            if self._check_stop():
+                self._log(f"⏹️ Translation stopped during mapping", "warning")
+                return result
+            
+            # Save history if enabled
+            if self.history_manager and self.contextual_enabled and all_originals:
+                try:
+                    combined_original = "\n".join(all_originals)
+                    combined_translation = "\n".join(all_translations)
+                    
+                    # Build structured payload so we can reconstruct page-level image context
+                    user_payload: Any = combined_original
+                    assistant_payload: Any = combined_translation
+
+                    if image_path and self.visual_context_enabled:
+                        user_payload = {
+                            "type": "manga_page",
+                            "version": 1,
+                            "texts": all_originals,
+                            "image_path": image_path,
+                        }
+                        assistant_payload = {
+                            "type": "manga_page",
+                            "version": 1,
+                            "translations": all_translations,
+                            "image_path": image_path,
+                        }
+                    
+                    self.history_manager.append_to_history(
+                        user_content=user_payload,
+                        assistant_content=assistant_payload,
+                        hist_limit=self.translation_history_limit,
+                        reset_on_limit=not self.rolling_history_enabled,
+                        rolling_window=self.rolling_history_enabled,
+                        raw_assistant_object=raw_obj if 'raw_obj' in locals() else None
+                    )
+                    
+                    self._log(f"📚 Saved {len(all_originals)} translations as 1 combined history entry", "success")
+                except Exception as e:
+                    self._log(f"⚠️ Failed to save page to history: {str(e)}", "warning")
+            
+            return result
+            
+        except Exception as e:
+            if self._check_stop():
+                self._log("⏹️ Translation stopped due to user request", "warning")
+                return {}
+            
+            # Check if this is a prohibited_content error
+            from unified_api_client import UnifiedClientError
+            if isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "prohibited_content":
+                # Check if USE_FALLBACK_KEYS is enabled and we're not already in a fallback attempt
+                use_fallback = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                
+                if use_fallback and not _in_fallback:
+                    self._log(f"⛔ Content refused by primary model, trying fallback keys...", "warning")
+                    
+                    # Store original credentials to restore after fallback attempts
+                    original_api_key = self.client.api_key
+                    original_model = self.client.model
+                    
+                    # Try to get fallback keys from environment
+                    try:
+                        fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
+                        fallback_keys = json.loads(fallback_keys_json) if fallback_keys_json != '[]' else []
+                        
+                        if fallback_keys:
+                            for idx, fallback in enumerate(fallback_keys, 1):
+                                if self._check_stop():
+                                    self._log("⏹️ Translation stopped during fallback", "warning")
+                                    return {}
+                                
+                                fallback_model = fallback.get('model')
+                                fallback_key = fallback.get('api_key')
+                                
+                                if not fallback_model or not fallback_key:
+                                    continue
+                                
+                                self._log(f"🔄 Trying fallback {idx}/{len(fallback_keys)}: {fallback_model}", "info")
+                                
+                                try:
+                                    # Temporarily switch to fallback model
+                                    old_key = self.client.api_key
+                                    old_model = self.client.model
+                                    
+                                    self.client.api_key = fallback_key
+                                    self.client.model = fallback_model
+                                    
+                                    # Re-setup client with new credentials
+                                    if hasattr(self.client, '_setup_client'):
+                                        self.client._setup_client()
+                                    
+                                    # Retry the translation with fallback model (mark as in_fallback to prevent recursion)
+                                    return self.translate_full_page_context(regions, image_path, _in_fallback=True)
+                                    
+                                except UnifiedClientError as fallback_err:
+                                    if getattr(fallback_err, "error_type", None) == "prohibited_content":
+                                        self._log(f"  ⛔ Fallback {idx} also refused", "warning")
+                                        # Restore original credentials and try next fallback
+                                        self.client.api_key = old_key
+                                        self.client.model = old_model
+                                        if hasattr(self.client, '_setup_client'):
+                                            self.client._setup_client()
+                                        continue
+                                    else:
+                                        # Other error, restore and raise
+                                        self.client.api_key = old_key
+                                        self.client.model = old_model
+                                        if hasattr(self.client, '_setup_client'):
+                                            self.client._setup_client()
+                                        raise
+                                except Exception as fallback_err:
+                                    self._log(f"  ❌ Fallback {idx} error: {str(fallback_err)[:100]}", "error")
+                                    # Restore original credentials and try next fallback
+                                    self.client.api_key = old_key
+                                    self.client.model = old_model
+                                    if hasattr(self.client, '_setup_client'):
+                                        self.client._setup_client()
+                                    continue
+                            
+                            self._log(f"❌ All fallback keys refused content", "error")
+                        else:
+                            self._log(f"⚠️ No fallback keys configured", "warning")
+                    except Exception as fallback_error:
+                        self._log(f"❌ Error processing fallback keys: {str(fallback_error)}", "error")
+                    finally:
+                        # Always restore original credentials after fallback attempts
+                        try:
+                            self.client.api_key = original_api_key
+                            self.client.model = original_model
+                            if hasattr(self.client, '_setup_client'):
+                                self.client._setup_client()
+                        except Exception:
+                            pass  # Ignore errors during credential restoration
+                
+                # If we get here, all fallbacks failed or weren't configured
+                self._log(f"❌ Content refused by API", "error")
+                return {}
+                
+            self._log(f"❌ Full page context translation error: {str(e)}", "error")
+            self._log(traceback.format_exc(), "error")
+            return {}
+
+    def _fix_json_response(self, response_text: str) -> str:
+        import re
+        import json
+        
+        # Debug: Show what we received
+        self._log(f"DEBUG: Original length: {len(response_text)}", "debug")
+        self._log(f"DEBUG: First 50 chars: [{response_text[:50]}]", "debug")
+        
+        cleaned = response_text
+        if "```json" in cleaned:
+            match = re.search(r'```json\s*(.*?)```', cleaned, re.DOTALL)
+            if match:
+                cleaned = match.group(1).strip()
+                self._log(f"DEBUG: Extracted {len(cleaned)} chars from markdown", "debug")
+            else:
+                self._log("DEBUG: Regex didn't match!", "warning")
+        
+        # Try to parse
+        try:
+            result = json.loads(cleaned)
+            self._log(f"✅ Parsed JSON with {len(result)} entries", "info")
+            return cleaned
+        except json.JSONDecodeError as e:
+            self._log(f"⚠️ JSON invalid: {str(e)}", "warning")
+            self._log(f"DEBUG: Cleaned text starts with: [{cleaned[:20]}]", "debug")
+            return cleaned
+
+    def _clean_translation_text(self, text: str) -> str:
+        """Remove unnecessary quotation marks, dots, and invalid characters from translated text"""
+        if not text:
+            return text
+        
+        # Log what we're cleaning
+        original = text
+        
+        # First, fix encoding issues
+        text = self._fix_encoding_issues(text)
+        
+        # Normalize width/compatibility (e.g., fullwidth → ASCII, circled numbers → digits)
+        text = self._normalize_unicode_width(text)
+        
+        # Remove Unicode replacement characters and invalid symbols
+        text = self._sanitize_unicode_characters(text)
+        
+        # Remove leading and trailing whitespace
+        text = text.strip()
+        
+        # CRITICAL: If the text is ONLY punctuation (dots, ellipsis, exclamations, etc.),
+        # don't clean it at all - these are valid sound effects/reactions in manga
+        # This includes: . ! ? … ~ ♡ ♥ ★ ☆ · • ・ and whitespace
+        # Also preserve sequences like '. . .' or '...' with or without spaces
+        import re
+        if re.match(r'^[\\.!?…~♡♥★☆·•・、。，！？\\s]+$', text):
+            self._log(f"🎯 Preserving punctuation-only text: '{text}'", "debug")
+            return text
+        
+        # Remove quotes from start/end but PRESERVE CJK quotation marks
+        # CJK quotation marks (「」『』【】《》〈〉) are now rendered with Meiryo font
+        # Only strip Western quotes that don't render well
+        while len(text) > 0:
+            old_len = len(text)
+            
+            # Remove ONLY Western-style quotes from start/end
+            # Preserve CJK quotation marks for proper Meiryo rendering
+            text = text.lstrip('"\'`‘’“”')
+            text = text.rstrip('"\'`‘’“”')
+            
+            # If nothing changed, we're done
+            if len(text) == old_len:
+                break
+        
+        # Final strip
+        text = text.strip()
+        
+        # Log if we made changes
+        if text != original:
+            self._log(f"🧹 Cleaned text: '{original}' → '{text}'", "debug")
+        
+        return text
+    
+    def _sanitize_unicode_characters(self, text: str) -> str:
+        """Remove invalid Unicode characters and replacement characters.
+        UPDATED: Now preserves symbols that can be rendered with Meiryo mixed font.
+        Only removes truly invalid characters and box-drawing that cause rendering issues.
+        """
+        if not text:
+            return text
+        
+        import re
+        import unicodedata
+        original = text
+        
+        # Remove Unicode replacement character (�) - truly invalid
+        text = text.replace('\ufffd', '')  # Unicode replacement character
+        
+        # IMPORTANT: DO NOT remove geometric symbols that Meiryo can render!
+        # The old code removed ALL symbols in \u25A0-\u25FF range.
+        # Now we only remove specific problematic box-drawing characters.
+        
+        # Only remove box-drawing characters that cause actual rendering problems
+        # These are the box-drawing and block elements ranges (NOT symbols)
+        text = re.sub(r'[\u2500-\u257F]', '', text)  # Box Drawing range only
+        text = re.sub(r'[\u2580-\u259F]', '', text)  # Block Elements range only
+        
+        # DO NOT remove \u25A0-\u25FF anymore - those are geometric shapes Meiryo can render!
+        # This includes: ■ □ ▲ △ ▼ ▽ ○ ● etc.
+        
+        # IMPORTANT: DO NOT REMOVE VALID CJK CHARACTERS!
+        # With Meiryo mixed font, all these characters render correctly:
+        # - Katakana: ロ (RO), カ (KA), etc.
+        # - Hangul: ㅁ (MIEUM), ㄱ (GIYEOK), etc.
+        # - Common Kanji: 口 (mouth), 日 (sun/day), 田 (field), 回 (return), etc.
+        # 
+        # Only remove the Unicode replacement character if it somehow got through
+        # All other CJK characters should be preserved for proper Meiryo rendering
+        
+        # If line is mostly ASCII, strip any remaining single CJK ideographs that stand alone
+        # BUT: Preserve CJK punctuation marks (U+3000-U+303F) as they're valid in mixed content
+        try:
+            ascii_count = sum(1 for ch in text if ord(ch) < 128)
+            ratio = ascii_count / max(1, len(text))
+            if ratio >= 0.8:
+                # Only remove CJK ideographs, NOT punctuation
+                # Exclude U+3000-U+303F (CJK Symbols and Punctuation) from removal
+                text = re.sub(r'(?:(?<=\\s)|^)[\\u3040-\\u30FF\\u3400-\\u9FFF\\uFF00-\\uFFEF](?=(?:\\s)|$)', '', text)
+        except Exception:
+            pass
+        
+        # Remove invisible and zero-width characters
+        text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u205f-\u206f\ufeff]', '', text)
+        
+        # Remove remaining control characters (except common ones like newline, tab)
+        text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', '', text)
+        
+        # Remove any remaining characters that can't be properly encoded
+        try:
+            text = text.encode('utf-8', errors='ignore').decode('utf-8')
+        except UnicodeError:
+            pass
+        
+        # Log what we removed (only if changes were made)
+        if text != original and not getattr(self, 'concise_logs', False):
+            try:
+                # Show what was removed
+                removed = set(original) - set(text)
+                if removed:
+                    removed_list = sorted(removed, key=lambda x: ord(x))
+                    removed_with_codes = [f'{c}(U+{ord(c):04X})' for c in removed_list[:5]]  # Show first 5
+                    if len(removed_list) > 5:
+                        removed_with_codes.append('...')
+                    self._log(f"🔧 Sanitized: Removed {len(removed)} chars: {' '.join(removed_with_codes)}", "debug")
+            except Exception:
+                pass
+        
+        return text
+    
+    def _normalize_unicode_width(self, text: str) -> str:
+        """Normalize Unicode to NFKC to 'unsquare' fullwidth/stylized forms while preserving CJK text"""
+        if not text:
+            return text
+        try:
+            import unicodedata
+            original = text
+            # NFKC folds compatibility characters (fullwidth forms, circled digits, etc.) to standard forms
+            text = unicodedata.normalize('NFKC', text)
+            if text != original:
+                try:
+                    self._log(f"🔤 Normalized width/compat: '{original[:30]}...' → '{text[:30]}...'", "debug")
+                except Exception:
+                    pass
+            return text
+        except Exception:
+            return text
+    
+    def _fix_encoding_issues(self, text: str) -> str:
+        """Fix common encoding issues in text, especially for Korean"""
+        if not text:
+            return text
+        
+        # Check for mojibake indicators (UTF-8 misinterpreted as Latin-1)
+        mojibake_indicators = ['ë', 'ì', 'ê°', 'ã', 'Ã', 'â', 'ä', 'ð', 'í', 'ë­', 'ì´']
+        
+        if any(indicator in text for indicator in mojibake_indicators):
+            self._log("🔧 Detected mojibake encoding issue, attempting fixes...", "debug")
+            
+            # Try multiple encoding fixes
+            encodings_to_try = [
+                ('latin-1', 'utf-8'),
+                ('windows-1252', 'utf-8'),
+                ('iso-8859-1', 'utf-8'),
+                ('cp1252', 'utf-8')
+            ]
+            
+            for from_enc, to_enc in encodings_to_try:
+                try:
+                    fixed = text.encode(from_enc, errors='ignore').decode(to_enc, errors='ignore')
+                    
+                    # Check if the fix actually improved things
+                    # Should have Korean characters (Hangul range) or be cleaner
+                    if any('\uAC00' <= c <= '\uD7AF' for c in fixed) or fixed.count('�') < text.count('�'):
+                        self._log(f"✅ Fixed encoding using {from_enc} -> {to_enc}", "debug")
+                        return fixed
+                except:
+                    continue
+        
+        # Clean up any remaining control characters and replacement characters
+        import re
+        text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', text)
+        
+        # Additional cleanup for common encoding artifacts
+        # Remove sequences that commonly appear from encoding errors
+        text = re.sub(r'\ufffd+', '', text)  # Remove multiple replacement characters
+        
+        # UPDATED: DO NOT remove geometric shapes - Meiryo can render them!
+        # Old line removed: text = re.sub(r'[\u25a0-\u25ff]+', '', text)
+        
+        # Clean up double spaces and normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text
+                
+    def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
+        """Create mask with comprehensive per-text-type dilation settings"""
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        
+        regions_masked = 0
+        regions_skipped = 0
+        
+        self._log(f"🎭 Creating text mask for {len(regions)} regions", "info")
+        
+        # Log detailed state of each region (only when verbose debug is enabled)
+        if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False):
+            self._log("\n📋 REGION STATES BEFORE MASKING:", "debug")
+            for idx, region in enumerate(regions):
+                self._log(f"\nRegion {idx + 1}:", "debug")
+                self._log(f"   • Text preview: '{region.text[:30]}...'", "debug")
+                self._log(f"   • Region type: {getattr(region, 'region_type', 'unset')}", "debug")
+                self._log(f"   • Bubble type: {getattr(region, 'bubble_type', 'unset')}", "debug")
+                self._log(f"   • Should inpaint: {getattr(region, 'should_inpaint', 'unset')}", "debug")
+                self._log(f"   • Has vertices: {bool(getattr(region, 'vertices', None))}", "debug")
+                self._log(f"   • Has bubble_bounds: {hasattr(region, 'bubble_bounds')}", "debug")
+                if hasattr(region, 'bubble_bounds'):
+                    self._log(f"   • Bubble bounds: {region.bubble_bounds}", "debug")
+
+        # Get manga settings
+        manga_settings = self.main_gui.config.get('manga_settings', {})
+        
+        # Get dilation settings
+        base_dilation_size = manga_settings.get('mask_dilation', 15)
+        
+        # If Auto Iterations is enabled, auto-set dilation by OCR provider and RT-DETR guide status
+        auto_iterations = manga_settings.get('auto_iterations', True)
+        if auto_iterations:
+            try:
+                ocr_settings = manga_settings.get('ocr', {})
+                use_rtdetr_guide = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+                bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
+
+                # Determine dilation settings based on OCR provider and RT-DETR status
+                ocr_provider = getattr(self, 'ocr_provider', '').lower()
+                if ocr_provider in ('azure', 'google'):
+                    if bubble_detection_enabled and use_rtdetr_guide:
+                        # Use different dilation for bubbles vs free text
+                        base_dilation_size = {
+                            'text_bubble': 0,    # No dilation - RT-DETR gives accurate bounds
+                            'empty_bubble': 0,   # No dilation - RT-DETR gives accurate bounds
+                            'free_text': 15,     # Use standard dilation for free text
+                            'default': 15        # Fallback dilation if type unknown
+                        }
+                        self._log(f"📏 Mixed dilation mode (RT-DETR guided):", "info")
+                        self._log(f"   • Bubbles: 0px (using RT-DETR bounds)", "info")
+                        self._log(f"   • Free text: 15px (standard dilation)", "info")
+                    else:
+                        # Standard dilation when RT-DETR guide is off - fine-tune by provider
+                        if ocr_provider == 'azure':
+                            base_dilation_size = 5
+                            self._log(f"📏 Auto dilation by provider (Azure, no RT-DETR): {base_dilation_size}px", "info")
+                        else:
+                            base_dilation_size = 15
+                            self._log(f"📏 Auto dilation by provider (Google, no RT-DETR): {base_dilation_size}px", "info")
+                else:
+                    # Default for other providers
+                    base_dilation_size = 0
+                    self._log(f"📏 Auto dilation by provider ({ocr_provider}): {base_dilation_size}px", "info")
+            except Exception:
+                pass
+        
+        # Auto iterations: decide by image color vs B&W
+        # When enabled, also use 5x5 kernel (comic-translate approach)
+        auto_iterations = manga_settings.get('auto_iterations', True)
+        kernel_size = 5  # Default kernel size
+        
+        # INPAINTER ITERATIONS: Set based on model type when auto_iterations is enabled
+        inpainter_iterations = 1  # Default single pass
+        if auto_iterations:
+            try:
+                # Check inpainting method
+                inpaint_method = manga_settings.get('inpainting', {}).get('method', 'local')
+                if inpaint_method in ('local', 'hybrid'):
+                    local_method = manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                    
+                    # MAT uses 0 iterations (None = default single pass behavior)
+                    # Other models work fine with single pass
+                    if local_method == 'mat':
+                        inpainter_iterations = 0
+                        self._log(f"🔁 Auto iterations for MAT: disabled (single pass only)", "info")
+                    else:
+                        inpainter_iterations = 1
+                        self._log(f"🔁 Auto iterations for {local_method.upper()}: {inpainter_iterations} pass", "debug")
+            except Exception:
+                inpainter_iterations = 1
+        else:
+            # Manual mode: respect user-configured iterations if available
+            inpainter_iterations = manga_settings.get('inpainting', {}).get('iterations', 1)
+        
+        # Store for use in inpaint_regions
+        self._current_inpainter_iterations = inpainter_iterations
+        
+        if auto_iterations:
+            try:
+                # Use 5x5 kernel when auto mode is enabled (comic-translate standard)
+                kernel_size = 5
+                
+                # SPECIAL HANDLING FOR MAT: Use minimal mask dilation
+                # MAT works best with tight, accurate masks - too much dilation causes artifacts
+                inpaint_method = manga_settings.get('inpainting', {}).get('method', 'local')
+                local_method = manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                if inpaint_method in ('local', 'hybrid') and local_method == 'mat':
+                    # MAT: Use minimal dilation (0 iterations) for best quality
+                    text_bubble_iterations = 0
+                    empty_bubble_iterations = 0
+                    free_text_iterations = 0
+                    self._log(f"📏 Auto mode (MAT): kernel={kernel_size}x{kernel_size}px, all=0 (minimal dilation for MAT)", "info")
+                else:
+                    # Other models: Use B&W vs Color heuristic
+                    # Heuristic: consider image B&W if RGB channels are near-equal
+                    if len(image.shape) < 3 or image.shape[2] == 1:
+                        is_bw = True
+                    else:
+                        # Compute mean absolute differences between channels
+                        ch0 = image[:, :, 0].astype(np.int16)
+                        ch1 = image[:, :, 1].astype(np.int16)
+                        ch2 = image[:, :, 2].astype(np.int16)
+                        diff01 = np.mean(np.abs(ch0 - ch1))
+                        diff12 = np.mean(np.abs(ch1 - ch2))
+                        diff02 = np.mean(np.abs(ch0 - ch2))
+                        # If channels are essentially the same, treat as B&W
+                        is_bw = max(diff01, diff12, diff02) < 2.0
+                    if is_bw:
+                        text_bubble_iterations = 2
+                        empty_bubble_iterations = 2
+                        free_text_iterations = 0
+                        self._log(f"📏 Auto mode (B&W): kernel={kernel_size}x{kernel_size}px, text=2, empty=2, free=0", "info")
+                    else:
+                        text_bubble_iterations = 4
+                        empty_bubble_iterations = 4
+                        free_text_iterations = 4
+                        self._log(f"📏 Auto mode (Color): kernel={kernel_size}x{kernel_size}px, all=4", "info")
+            except Exception:
+                # Fallback to configured behavior on any error
+                auto_iterations = False
+        
+        if not auto_iterations:
+            # Check if using uniform iterations for all text types
+            use_all_iterations = manga_settings.get('use_all_iterations', False)
+            
+            if use_all_iterations:
+                # Use the same iteration count for all text types
+                all_iterations = manga_settings.get('all_iterations', 2)
+                text_bubble_iterations = all_iterations
+                empty_bubble_iterations = all_iterations
+                free_text_iterations = all_iterations
+                self._log(f"📏 Using uniform iterations: {all_iterations} for all text types", "info")
+            else:
+                # Use individual iteration settings
+                text_bubble_iterations = manga_settings.get('text_bubble_dilation_iterations',
+                                                           manga_settings.get('bubble_dilation_iterations', 2))
+                empty_bubble_iterations = manga_settings.get('empty_bubble_dilation_iterations', 3)
+                free_text_iterations = manga_settings.get('free_text_dilation_iterations', 0)
+                self._log(f"📏 Using individual iterations - Text bubbles: {text_bubble_iterations}, "
+                         f"Empty bubbles: {empty_bubble_iterations}, Free text: {free_text_iterations}", "info")
+        
+        # Create separate masks for different text types
+        text_bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        empty_bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        free_text_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        
+        text_bubble_count = 0
+        empty_bubble_count = 0
+        free_text_count = 0
+        
+        for i, region in enumerate(regions):
+            if not _region_has_ocr_text(region):
+                regions_skipped += 1
+                self._log(f"   Region {i+1}: SKIPPED (no OCR text)", "debug")
+                continue
+
+            # CHECK: Should this region be inpainted?
+            if getattr(self, 'free_text_only_bg_opacity', False) and self._is_free_text_region(region):
+                region.should_inpaint = False
+            if not getattr(region, 'should_inpaint', True):
+                # Skip this region - it shouldn't be inpainted
+                regions_skipped += 1
+                self._log(f"   Region {i+1}: SKIPPED (filtered by settings)", "debug")
+                continue
+            
+            regions_masked += 1
+            
+            # Determine text type
+            text_type = 'free_text'  # default
+            
+            # Check if region has bubble_type attribute (from bubble detection)
+            if hasattr(region, 'bubble_type'):
+                # RT-DETR classifications
+                if region.bubble_type == 'empty_bubble':
+                    text_type = 'empty_bubble'
+                elif region.bubble_type == 'text_bubble':
+                    text_type = 'text_bubble'
+                else:  # 'free_text' or others
+                    text_type = 'free_text'
+            else:
+                # Fallback: use simple heuristics if no bubble detection
+                x, y, w, h = region.bounding_box
+                x, y, w, h = int(x), int(y), int(w), int(h)
+                aspect_ratio = w / h if h > 0 else 1
+                
+                # Check if region has text
+                has_text = hasattr(region, 'text') and region.text and len(region.text.strip()) > 0
+                
+                # Heuristic: bubbles tend to be more square-ish or tall
+                # Free text tends to be wide and short
+                if aspect_ratio < 2.5 and w > 50 and h > 50:
+                    if has_text:
+                        text_type = 'text_bubble'
+                    else:
+                        # Could be empty bubble if it's round/oval shaped
+                        text_type = 'empty_bubble'
+                else:
+                    text_type = 'free_text'
+            
+            # Select appropriate mask and increment counter
+            if text_type == 'text_bubble':
+                target_mask = text_bubble_mask
+                text_bubble_count += 1
+                mask_type = "TEXT BUBBLE"
+            elif text_type == 'empty_bubble':
+                target_mask = empty_bubble_mask
+                empty_bubble_count += 1
+                mask_type = "EMPTY BUBBLE"
+            else:
+                target_mask = free_text_mask
+                free_text_count += 1
+                mask_type = "FREE TEXT"
+            
+            # Check if this is a merged region with original regions
+            if hasattr(region, 'original_regions') and region.original_regions:
+                # Use original regions for precise masking
+                self._log(f"   Region {i+1} ({mask_type}): Using {len(region.original_regions)} original regions", "debug")
+                
+                for orig_region in region.original_regions:
+                    if hasattr(orig_region, 'vertices') and orig_region.vertices:
+                        pts = np.array(orig_region.vertices, np.int32)
+                        pts = pts.reshape((-1, 1, 2))
+                        cv2.fillPoly(target_mask, [pts], 255)
+                    else:
+                        x, y, w, h = orig_region.bounding_box
+                        x, y, w, h = int(x), int(y), int(w), int(h)
+                        cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
+            else:
+                # Normal region
+                if hasattr(region, 'vertices') and region.vertices and len(region.vertices) <= 8:
+                    pts = np.array(region.vertices, np.int32)
+                    pts = pts.reshape((-1, 1, 2))
+                    cv2.fillPoly(target_mask, [pts], 255)
+                    self._log(f"   Region {i+1} ({mask_type}): Using polygon", "debug")
+                else:
+                    x, y, w, h = region.bounding_box
+                    x, y, w, h = int(x), int(y), int(w), int(h)
+                    cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
+                    self._log(f"   Region {i+1} ({mask_type}): Using bounding box", "debug")
+        
+        self._log(f"📊 Mask breakdown: {text_bubble_count} text bubbles, {empty_bubble_count} empty bubbles, "
+                 f"{free_text_count} free text regions, {regions_skipped} skipped", "info")
+        
+        # Apply different dilation settings to each mask type
+        # Use kernel_size for the structuring element (5x5 in auto mode, comic-translate approach)
+        # Base dilation is applied first if > 0, then iterations with kernel
+        
+        # Helper to get dilation size for region type
+        def get_dilation_for_type(region_type):
+            if isinstance(base_dilation_size, dict):
+                return base_dilation_size.get(region_type, base_dilation_size['default'])
+            return base_dilation_size
+        
+        # Get dilation sizes for each type
+        text_bubble_dilation = get_dilation_for_type('text_bubble')
+        empty_bubble_dilation = get_dilation_for_type('empty_bubble')
+        free_text_dilation = get_dilation_for_type('free_text')
+        
+        # First apply base dilation if needed (simple pixel expansion)
+        if any(x > 0 for x in [text_bubble_dilation, empty_bubble_dilation, free_text_dilation]):
+            # Apply different kernels for each type
+            if text_bubble_count > 0 and text_bubble_dilation > 0:
+                text_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (text_bubble_dilation, text_bubble_dilation))
+                text_bubble_mask = cv2.dilate(text_bubble_mask, text_kernel, iterations=1)
+            if empty_bubble_count > 0 and empty_bubble_dilation > 0:
+                empty_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (empty_bubble_dilation, empty_bubble_dilation))
+                empty_bubble_mask = cv2.dilate(empty_bubble_mask, empty_kernel, iterations=1)
+            if free_text_count > 0 and free_text_dilation > 0:
+                free_text_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (free_text_dilation, free_text_dilation))
+                free_text_mask = cv2.dilate(free_text_mask, free_text_kernel, iterations=1)
+            self._log("📏 Applied base dilation per type (bubbles/free text)", "info")
+        
+        # Then apply iterations with kernel_size (default 5x5)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        
+        # Apply dilation to text bubble mask
+        if text_bubble_count > 0 and text_bubble_iterations > 0:
+            self._log(f"📏 Applying text bubble dilation: {kernel_size}x{kernel_size} kernel, {text_bubble_iterations} iterations", "info")
+            text_bubble_mask = cv2.dilate(text_bubble_mask, kernel, iterations=text_bubble_iterations)
+        
+        # Apply dilation to empty bubble mask
+        if empty_bubble_count > 0 and empty_bubble_iterations > 0:
+            self._log(f"📏 Applying empty bubble dilation: {kernel_size}x{kernel_size} kernel, {empty_bubble_iterations} iterations", "info")
+            empty_bubble_mask = cv2.dilate(empty_bubble_mask, kernel, iterations=empty_bubble_iterations)
+        
+        # Apply dilation to free text mask
+        if free_text_count > 0 and free_text_iterations > 0:
+            self._log(f"📏 Applying free text dilation: {kernel_size}x{kernel_size} kernel, {free_text_iterations} iterations", "info")
+            free_text_mask = cv2.dilate(free_text_mask, kernel, iterations=free_text_iterations)
+        elif free_text_count > 0 and free_text_iterations == 0:
+            self._log(f"📏 No iteration dilation for free text (perfect for clean B&W)", "info")
+        
+        # Combine all masks
+        mask = cv2.bitwise_or(text_bubble_mask, empty_bubble_mask)
+        mask = cv2.bitwise_or(mask, free_text_mask)
+        
+        coverage_percent = (np.sum(mask > 0) / mask.size) * 100
+        self._log(f"📊 Final mask coverage: {coverage_percent:.1f}% of image", "info")
+        
+        return mask
+
+    def _apply_custom_image_edit_request_config(self, inpainter):
+        """Scope custom-image-edit prompt/language to the manga inpainter request object."""
+        try:
+            if inpainter is None or not hasattr(inpainter, 'config') or not isinstance(inpainter.config, dict):
+                return
+            cfg = getattr(self.main_gui, 'config', {}) if hasattr(self, 'main_gui') else {}
+            system_prompt = ''
+            user_prompt = ''
+            if isinstance(cfg, dict):
+                system_prompt = cfg.get('custom_image_edit_system_prompt', '') or cfg.get('custom_image_edit_prompt', '')
+                user_prompt = cfg.get('custom_image_edit_user_prompt', '')
+                inpainter.config['manga_settings'] = cfg.get('manga_settings') or getattr(self, 'manga_settings', {})
+                inpainter.config['manga_batch_image_requests_enabled'] = cfg.get('manga_batch_image_requests_enabled', True)
+                inpainter.config['manga_batch_image_requests_size'] = cfg.get('manga_batch_image_requests_size', 5)
+                live_batch_size = getattr(self.main_gui, 'batch_size_var', cfg.get('batch_size', 1))
+                inpainter.config['batch_size'] = live_batch_size.get() if hasattr(live_batch_size, 'get') else live_batch_size
+                inpainter.config['use_inpainter_keys'] = bool(cfg.get('use_inpainter_keys', False))
+                inpainter.config['inpainter_keys'] = cfg.get('inpainter_keys', []) or []
+                inpainter.config['force_key_rotation'] = cfg.get('force_key_rotation', True)
+                inpainter.config['rotation_frequency'] = cfg.get('rotation_frequency', 1)
+            if not system_prompt and hasattr(self, 'main_gui'):
+                system_prompt = (
+                    getattr(self.main_gui, 'custom_image_edit_system_prompt_var', '')
+                    or getattr(self.main_gui, 'custom_image_edit_prompt_var', '')
+                )
+            if not user_prompt and hasattr(self, 'main_gui'):
+                user_prompt = getattr(self.main_gui, 'custom_image_edit_user_prompt_var', '')
+            if system_prompt:
+                inpainter.config['custom_image_edit_system_prompt'] = system_prompt
+                inpainter.config['custom_image_edit_prompt'] = system_prompt
+            inpainter.config['custom_image_edit_user_prompt'] = user_prompt or ''
+            if isinstance(cfg, dict):
+                _fp_raw = cfg.get('custom_image_edit_full_page_output', 10)
+                if isinstance(_fp_raw, bool):
+                    _fp_raw = 100 if _fp_raw else 0
+                else:
+                    try:
+                        _fp_raw = int(_fp_raw)
+                    except (ValueError, TypeError):
+                        _fp_raw = 10
+                inpainter.config['custom_image_edit_full_page_output'] = max(0, min(100, _fp_raw))
+            if hasattr(self, 'main_gui'):
+                _fp_raw = getattr(
+                    self.main_gui,
+                    'custom_image_edit_full_page_output_var',
+                    inpainter.config.get('custom_image_edit_full_page_output', 10)
+                )
+                if isinstance(_fp_raw, bool):
+                    _fp_raw = 100 if _fp_raw else 0
+                else:
+                    try:
+                        _fp_raw = int(_fp_raw)
+                    except (ValueError, TypeError):
+                        _fp_raw = 10
+                inpainter.config['custom_image_edit_full_page_output'] = max(0, min(100, _fp_raw))
+            if hasattr(self, 'main_gui'):
+                endpoint = ''
+                use_custom_openai = False
+                if isinstance(cfg, dict):
+                    use_custom_openai = bool(cfg.get('use_custom_openai_endpoint', False))
+                    endpoint = cfg.get('openai_base_url', '') if use_custom_openai else ''
+                use_custom_openai = bool(getattr(self.main_gui, 'use_custom_openai_endpoint_var', use_custom_openai))
+                if use_custom_openai and not endpoint:
+                    endpoint = getattr(self.main_gui, 'openai_base_url_var', '') or ''
+                inpainter.config['custom_image_edit_default_endpoint'] = endpoint
+                inpainter.config['openai_base_url'] = endpoint
+                inpainter.config['use_custom_openai_endpoint'] = use_custom_openai
+                model_name = getattr(self.main_gui, 'model_var', '') or (cfg.get('model', '') if isinstance(cfg, dict) else '')
+                if model_name:
+                    inpainter.config['custom_image_edit_model'] = model_name
+                    inpainter.config['model'] = model_name
+            try:
+                if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry:
+                    api_key = self.main_gui.api_key_entry.text().strip()
+                    if api_key:
+                        inpainter.config['api_key'] = api_key
+            except Exception:
+                pass
+            target_lang = 'English'
+            if isinstance(cfg, dict):
+                target_lang = cfg.get('output_language') or cfg.get('glossary_target_language') or target_lang
+            target_lang = os.environ.get('OUTPUT_LANGUAGE') or os.environ.get('GLOSSARY_TARGET_LANGUAGE') or target_lang
+            inpainter.config['output_language'] = target_lang
+            inpainter.config['glossary_target_language'] = cfg.get('glossary_target_language', target_lang) if isinstance(cfg, dict) else target_lang
+        except Exception:
+            pass
+
+    def _custom_image_edit_endpoint_from_gui(self):
+        try:
+            endpoint = ''
+            if hasattr(self, 'main_gui'):
+                override_enabled = True
+                if getattr(self.main_gui, 'config', None):
+                    override_enabled = bool(self.main_gui.config.get('use_custom_image_edit_endpoint', False))
+                override_enabled = bool(getattr(self.main_gui, 'use_custom_image_edit_endpoint_var', override_enabled))
+                if not override_enabled:
+                    return ''
+                endpoint = str(getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or '').strip()
+                if not endpoint and getattr(self.main_gui, 'config', None):
+                    endpoint = str(self.main_gui.config.get('custom_image_edit_endpoint', '') or '').strip()
+            return endpoint
+        except Exception:
+            return ''
+
+    def _custom_image_edit_pool_path(self, model_path: str = ''):
+        """Return (request path, pool key path) for endpoint-backed image edit."""
+        endpoint = self._custom_image_edit_endpoint_from_gui()
+        request_path = endpoint or str(model_path or '').strip()
+        key_path = request_path or '__default_image_edit_endpoint__'
+        return request_path, key_path
+
+    def _get_or_init_shared_local_inpainter(self, local_method: str, model_path: str, force_reload: bool = False):
+        """Return a shared LocalInpainter for (local_method, model_path) with minimal locking.
+        If another thread is loading the same model, wait on its event instead of competing.
+        Set force_reload=True only when the method or model_path actually changed.
+        
+        If spare instances are available in the pool, check one out for use.
+        The instance will stay assigned to this translator until cleanup.
+        """
+        from local_inpainter import LocalInpainter
+        
+        # Normalize model path to avoid cache misses due to path differences
+        # (e.g., ~/.cache/inpainting/anime-manga-big-lama.pt vs models/anime-manga-big-lama.pt)
+        custom_image_edit_load_path = None
+        if str(local_method or '').lower() == 'custom-image-edit':
+            custom_image_edit_load_path, model_path = self._custom_image_edit_pool_path(model_path)
+        if model_path and str(local_method or '').lower() != 'custom-image-edit':
+            try:
+                # Resolve to absolute path and normalize
+                model_path = os.path.abspath(os.path.normpath(model_path))
+            except Exception:
+                pass  # Keep original path if normalization fails
+        
+        key = (local_method, model_path or '')
+
+        if str(local_method or '').lower() == 'custom-image-edit':
+            endpoint_enabled = True
+            if hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
+                endpoint_enabled = bool(self.main_gui.config.get('use_custom_image_edit_endpoint', False))
+            if False and not endpoint_enabled:
+                self._log("⚠️ Custom Image Edit Endpoint is disabled", "warning")
+                return None
+            if not model_path:
+                self._log("⚠️ Custom Image Edit Endpoint URL is missing", "warning")
+                return None
+            with MangaTranslator._inpaint_pool_lock:
+                rec = MangaTranslator._inpaint_pool.get(key)
+                if not rec:
+                    rec = {'spares': [], 'checked_out': [], 'loaded': True}
+                    MangaTranslator._inpaint_pool[key] = rec
+                spares = rec.setdefault('spares', [])
+                checked_out = rec.setdefault('checked_out', [])
+                for spare in spares:
+                    if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                        self._apply_custom_image_edit_request_config(spare)
+                        checked_out.append(spare)
+                        self._checked_out_inpainter = spare
+                        self._inpainter_pool_key = key
+                        self._log("OK Checked out custom image edit endpoint inpainter", "info")
+                        return spare
+                inp = LocalInpainter(enable_worker_process=False)
+                self._apply_custom_image_edit_request_config(inp)
+                inp.load_model('custom-image-edit', custom_image_edit_load_path or '', force_reload=force_reload)
+                if not getattr(inp, 'model_loaded', False):
+                    self._log("Warning: Custom image edit endpoint fake load failed", "warning")
+                    return None
+                spares.append(inp)
+                checked_out.append(inp)
+                self._checked_out_inpainter = inp
+                self._inpainter_pool_key = key
+                self._log("OK Custom image edit endpoint inpainter registered", "info")
+                return inp
+        
+        # Debug: Log pool key and current pool state for troubleshooting
+        try:
+            self._log(f"🔑 Inpainter pool key: method={local_method}, path={os.path.basename(model_path) if model_path else 'None'}", "debug")
+            # Show what's currently in the pool
+            with MangaTranslator._inpaint_pool_lock:
+                pool_keys = list(MangaTranslator._inpaint_pool.keys())
+                if pool_keys:
+                    self._log(f"📋 Pool contains {len(pool_keys)} key(s):", "debug")
+                    for pk_method, pk_path in pool_keys:
+                        pk_rec = MangaTranslator._inpaint_pool.get((pk_method, pk_path))
+                        spares_count = len(pk_rec.get('spares', [])) if pk_rec else 0
+                        loaded = pk_rec.get('loaded', False) if pk_rec else False
+                        self._log(f"   - {pk_method}, {os.path.basename(pk_path) if pk_path else 'None'}: {spares_count} spares, loaded={loaded}", "debug")
+                else:
+                    self._log(f"📋 Pool is empty", "debug")
+        except Exception as e:
+            self._log(f"   Debug logging error: {e}", "debug")
+        
+        # Helper to reconcile worker state with current settings
+        def _reconcile_worker(inp):
+            try:
+                disable_worker = bool(self.manga_settings.get('inpainting', {}).get('disable_worker_process', False))
+            except Exception:
+                disable_worker = False
+            try:
+                if inp and disable_worker and getattr(inp, '_mp_enabled', False):
+                    # Stop any existing worker to prevent extra RAM usage
+                    if hasattr(inp, '_stop_worker'):
+                        inp._stop_worker()
+            except Exception:
+                pass
+            return inp
+        
+        # Try to check out a spare instance from the preload pool
+        with MangaTranslator._inpaint_pool_lock:
+            rec = MangaTranslator._inpaint_pool.get(key)
+            # DEBUG: Log current pool state at checkout time
+            if rec:
+                spares_count = len(rec.get('spares', []))
+                checked_out_count = len(rec.get('checked_out', []))
+                print(f"[CHECKOUT] Found pool record with {spares_count} spares, {checked_out_count} checked out")
+                self._log(f"🔍 CHECKOUT DEBUG: Found pool record with {spares_count} spares, {checked_out_count} checked out", "info")
+            else:
+                print(f"[CHECKOUT] No pool record found for key")
+                self._log(f"🔍 CHECKOUT DEBUG: No pool record found for key", "info")
+            
+            if rec and rec.get('spares'):
+                spares = rec.get('spares') or []
+                # Initialize checked_out list if it doesn't exist
+                if 'checked_out' not in rec:
+                    rec['checked_out'] = []
+                checked_out = rec['checked_out']
+                
+                # Ensure any existing spares have their workers stopped if disabled now
+                try:
+                    for _sp in list(spares):
+                        _reconcile_worker(_sp)
+                except Exception:
+                    pass
+                
+                # Look for an available spare (not checked out)
+                for spare in spares:
+                    if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                        # Mark as checked out
+                        checked_out.append(spare)
+                        available = len(spares) - len(checked_out)
+                        self._log(f"🧰 Checked out spare inpainter ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                        # Store reference for later return
+                        self._checked_out_inpainter = spare
+                        self._inpainter_pool_key = key
+                        return _reconcile_worker(spare)
+                
+                # No available spares - all are checked out
+                # DO NOT create temporary instances that load models - they cause memory leaks
+                if spares:
+                    self._log(f"⚠️ All {len(spares)} spare inpainters are checked out!", "warning")
+                    self._log(f"🚨 MEMORY LEAK PREVENTION: Refusing to create temporary inpainter instance", "warning")
+                    self._log(f"💡 Solution: Increase preload count or reduce parallel translation threads", "info")
+                    return None
+        
+        # No pool record exists - this should only happen on first use before preload
+        # DO NOT create temporary instances - they cause memory leaks
+        self._log(f"⚠️ No inpainter pool found for {local_method} - pool not initialized!", "warning")
+        self._log(f"🚨 MEMORY LEAK PREVENTION: Refusing to create temporary inpainter instance", "warning")
+        self._log(f"💡 Solution: Preload inpainters before translation or increase preload count", "info")
+        return None
+
+    @classmethod
+    def _count_preloaded_inpainters(cls) -> int:
+        try:
+            with cls._inpaint_pool_lock:
+                total = 0
+                for rec in cls._inpaint_pool.values():
+                    try:
+                        total += len(rec.get('spares') or [])
+                    except Exception:
+                        pass
+                return total
+        except Exception:
+            return 0
+
+    def preload_local_inpainters(self, local_method: str, model_path: str, count: int) -> int:
+        """Preload N local inpainting instances sequentially into the shared pool for parallel panel translation.
+        Returns the number of instances successfully preloaded.
+
+        Defense in depth: if Skip Inpainter is on (either self.skip_inpainting
+        or config['manga_skip_inpainting']), short-circuit immediately.
+        """
+        if getattr(self, 'skip_inpainting', False) or (
+            hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None)
+            and bool(self.main_gui.config.get('manga_skip_inpainting', False))
+        ):
+            self._log("🚫 Skip Inpainter enabled — preload_local_inpainters() short-circuited", "debug")
+            return 0
+        try:
+            from local_inpainter import LocalInpainter
+        except Exception:
+            self._log("❌ Local inpainter module not available for preloading", "error")
+            return 0
+
+        # Prefer LIVE dropdown selection over stale inputs
+        try:
+            live_method = self._get_live_local_inpaint_method()
+            if live_method:
+                local_method = live_method
+                # Refresh model_path to match live method
+                if hasattr(self, 'main_gui'):
+                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') or \
+                                 self.main_gui.config.get(f'{local_method}_model_path', '')
+        except Exception:
+            pass
+        
+        # Guard: ignore JSON credential paths
+        try:
+            if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                model_path = ''
+        except Exception:
+            pass
+        
+        is_custom_image_edit = str(local_method or '').lower() == 'custom-image-edit'
+
+        # Normalize model path to match _get_or_init_shared_local_inpainter
+        if model_path and not is_custom_image_edit:
+            try:
+                model_path = os.path.abspath(os.path.normpath(model_path))
+            except Exception:
+                pass
+        if is_custom_image_edit:
+            custom_image_edit_load_path, model_path = self._custom_image_edit_pool_path(model_path)
+            key = (local_method, model_path or '')
+            with MangaTranslator._inpaint_pool_lock:
+                rec = MangaTranslator._inpaint_pool.get(key)
+                if not rec:
+                    rec = {'spares': [], 'checked_out': [], 'loaded': True}
+                    MangaTranslator._inpaint_pool[key] = rec
+                spares = rec.setdefault('spares', [])
+                while len(spares) < max(1, int(count)):
+                    inp = LocalInpainter(enable_worker_process=False)
+                    self._apply_custom_image_edit_request_config(inp)
+                    if inp.load_model('custom-image-edit', custom_image_edit_load_path or '', force_reload=False) and getattr(inp, 'model_loaded', False):
+                        spares.append(inp)
+                    else:
+                        break
+                rec['loaded'] = True
+                created = len(spares)
+            self._log(f"OK Registered {created} custom image edit endpoint inpainter(s)", "info")
+            return created
+        
+        key = (local_method, model_path or '')
+        created = 0
+        
+        # CRITICAL: Clean up pool entries that don't match current GUI settings FIRST
+        # This MUST happen BEFORE checking desired count to ensure stale models are removed
+        # even if the new model already has instances in the pool
+        with MangaTranslator._inpaint_pool_lock:
+            # Get currently selected settings from GUI
+            current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+            current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+            if current_model_path and not is_custom_image_edit:
+                try:
+                    current_model_path = os.path.abspath(os.path.normpath(current_model_path))
+                except Exception:
+                    pass
+            current_key = (current_method, current_model_path or '')
+            
+            # Find and clean up all pool entries that DON'T match current settings
+            keys_to_remove = []
+            for pool_key, pool_rec in list(MangaTranslator._inpaint_pool.items()):
+                if pool_key != current_key:  # Not the currently selected model
+                    # Only clean up if nothing is checked out (safe to remove)
+                    checked_out_count = len(pool_rec.get('checked_out', []))
+                    spares_count = len(pool_rec.get('spares', []))
+                    
+                    if checked_out_count == 0 and spares_count > 0:
+                        self._log(f"🧹 Removing {spares_count} unused model(s) that don't match current selection: {pool_key[0]}", "info")
+                        # Unload all spares
+                        for spare in pool_rec.get('spares', []):
+                            try:
+                                if hasattr(spare, 'unload'):
+                                    spare.unload()
+                            except Exception:
+                                pass
+                        keys_to_remove.append(pool_key)
+            
+            # Remove cleaned up entries from pool
+            for old_key in keys_to_remove:
+                MangaTranslator._inpaint_pool.pop(old_key, None)
+            
+            # Now ensure the current pool record exists
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if not rec:
+                rec = {'spares': [], 'checked_out': []}
+                MangaTranslator._inpaint_pool[key] = rec
+                self._log(f"🔍 PRELOAD DEBUG: Created new pool record for current selection, spares=[], checked_out=[]", "info")
+            else:
+                current_spares_count = len(rec.get('spares', []))
+                current_checked_out_count = len(rec.get('checked_out', []))
+                self._log(f"🔍 PRELOAD DEBUG: Existing pool record found for current selection: {current_spares_count} spares, {current_checked_out_count} checked out", "info")
+            
+            if 'spares' not in rec or rec['spares'] is None:
+                rec['spares'] = []
+            if 'checked_out' not in rec:
+                rec['checked_out'] = []
+            spares = rec.get('spares')
+        # Prepare tiling settings
+        tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
+        desired = max(0, int(count) - len(spares))
+        if desired <= 0:
+            # Already have enough spares - return count to indicate success
+            self._log(f"✅ Already have {len(spares)} spare(s) for {local_method}", "info")
+            return len(spares)
+        ctx = " for parallel panels" if int(count) > 1 else ""
+        self._log(f"🧰 Preloading {desired} local inpainting instance(s){ctx}", "info")
+        # Get worker process setting from config
+        disable_worker = False
+        try:
+            disable_worker = bool(
+                self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
+            )
+        except Exception:
+            pass
+        for i in range(desired):
+            try:
+                inp = LocalInpainter(enable_worker_process=not disable_worker)
+                inp.tiling_enabled = tiling_settings.get('enabled', False)
+                inp.tile_size = tiling_settings.get('tile_size', 512)
+                inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                # Resolve model path if needed
+                resolved = model_path
+                if is_custom_image_edit:
+                    resolved = resolved or getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
+                elif not resolved or not os.path.exists(resolved):
+                    try:
+                        resolved = inp.download_jit_model(local_method)
+                    except Exception as e:
+                        self._log(f"⚠️ Preload JIT download failed: {e}", "warning")
+                        resolved = None
+                if resolved and (is_custom_image_edit or os.path.exists(resolved)):
+                    try:
+                        ok = inp.load_model_with_retry(local_method, resolved, force_reload=False)
+                        # CRITICAL: Verify model_loaded attribute after load
+                        model_actually_loaded = ok and getattr(inp, 'model_loaded', False)
+                        if not model_actually_loaded:
+                            # Debug why model wasn't loaded
+                            self._log(f"🔍 Preload check: load_model_with_retry={ok}, model_loaded={getattr(inp, 'model_loaded', 'ATTR_MISSING')}", "debug")
+                            if hasattr(inp, 'session'):
+                                self._log(f"   Inpainter has session: {inp.session is not None}", "debug")
+                            if hasattr(inp, 'onnx_session'):
+                                self._log(f"   Inpainter has onnx_session: {inp.onnx_session is not None}", "debug")
+                        
+                        if model_actually_loaded:
+                            with MangaTranslator._inpaint_pool_lock:
+                                # CRITICAL: Verify this model still matches current GUI selection before adding to pool
+                                # This prevents race condition where user switches models while preload is running
+                                # Read directly from UI instance if available (more reliable than manga_settings)
+                                # Prefer LIVE dropdown value from MangaIntegration (manga_translator tab)
+                                current_method = local_method  # Default to the method we're preloading
+                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
+                                    try:
+                                        mg = self.main_gui.manga_translator
+                                        # Prefer combo text if available (most live)
+                                        if hasattr(mg, 'local_model_combo'):
+                                            current_method = mg.local_model_combo.currentText()
+                                        else:
+                                            current_method = mg.local_model_type_value
+                                    except Exception:
+                                        current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
+                                else:
+                                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
+                                
+                                current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                                if current_model_path and not is_custom_image_edit:
+                                    try:
+                                        current_model_path = os.path.abspath(os.path.normpath(current_model_path))
+                                    except Exception:
+                                        pass
+                                current_key = (current_method, current_model_path or '')
+                                
+                                # Only add to pool if this is still the currently selected model
+                                if key != current_key:
+                                    self._log(f"🚫 Skipping preload: model changed during preload (was {key[0]}, now {current_key[0]})", "warning")
+                                    # Unload this instance since it's no longer needed
+                                    try:
+                                        if hasattr(inp, 'unload'):
+                                            inp.unload()
+                                    except Exception:
+                                        pass
+                                    continue  # Skip adding to pool
+                                
+                                rec = MangaTranslator._inpaint_pool.get(key)
+                                if not rec:
+                                    # Pool record doesn't exist - create it
+                                    rec = {'spares': [], 'checked_out': []}
+                                    MangaTranslator._inpaint_pool[key] = rec
+                                # Ensure spares list exists
+                                if 'spares' not in rec or rec['spares'] is None:
+                                    rec['spares'] = []
+                                if 'checked_out' not in rec:
+                                    rec['checked_out'] = []
+                                # Append to existing spares list (don't replace the record!)
+                                rec['spares'].append(inp)
+                            created += 1
+                            self._log(f"✅ Preloaded spare {created}: model_loaded={getattr(inp, 'model_loaded', False)}", "debug")
+                        else:
+                            if ok:
+                                self._log(f"⚠️ Preload: load_model_with_retry returned True but model_loaded is False or missing", "warning")
+                            else:
+                                self._log(f"⚠️ Preload: load_model_with_retry returned False for {local_method} model at {resolved}", "warning")
+                    except Exception as load_err:
+                        self._log(f"❌ Preload: Exception during load_model_with_retry: {load_err}", "error")
+                        import traceback
+                        self._log(f"Traceback: {traceback.format_exc()}", "debug")
+                else:
+                    self._log("⚠️ Preload skipped: no model path available", "warning")
+            except Exception as e:
+                self._log(f"⚠️ Preload error: {e}", "warning")
+        self._log(f"✅ Preloaded {created} local inpainting instance(s)", "info")
+        return created
+
+    def preload_local_inpainters_concurrent(self, local_method: str, model_path: str, count: int, max_parallel: int = None) -> int:
+        """Preload N local inpainting instances concurrently into the shared pool.
+        Honors advanced toggles for panel/region parallelism to pick a reasonable parallelism.
+        Returns number of instances successfully preloaded.
+
+        Defense in depth: if Skip Inpainter is on (either self.skip_inpainting
+        or config['manga_skip_inpainting']), short-circuit immediately.
+        """
+        if getattr(self, 'skip_inpainting', False) or (
+            hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None)
+            and bool(self.main_gui.config.get('manga_skip_inpainting', False))
+        ):
+            self._log("🚫 Skip Inpainter enabled — preload_local_inpainters_concurrent() short-circuited", "debug")
+            return 0
+        try:
+            from local_inpainter import LocalInpainter
+        except Exception:
+            self._log("❌ Local inpainter module not available for preloading", "error")
+            return 0
+        
+        # Prefer LIVE dropdown selection over stale inputs
+        try:
+            live_method = self._get_live_local_inpaint_method()
+            if live_method:
+                local_method = live_method
+                # Refresh model_path to match live method
+                if hasattr(self, 'main_gui'):
+                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') or \
+                                 self.main_gui.config.get(f'{local_method}_model_path', '')
+        except Exception:
+            pass
+        
+        # Guard: ignore JSON credential paths
+        try:
+            if isinstance(model_path, str) and model_path.lower().endswith('.json'):
+                model_path = ''
+        except Exception:
+            pass
+        
+        is_custom_image_edit = str(local_method or '').lower() == 'custom-image-edit'
+
+        # CRITICAL: Normalize model path to match _get_or_init_shared_local_inpainter and sequential preload
+        if model_path and not is_custom_image_edit:
+            try:
+                model_path = os.path.abspath(os.path.normpath(model_path))
+            except Exception:
+                pass
+        if is_custom_image_edit:
+            custom_image_edit_load_path, model_path = self._custom_image_edit_pool_path(model_path)
+            key = (local_method or 'custom-image-edit', model_path or '')
+            with MangaTranslator._inpaint_pool_lock:
+                rec = MangaTranslator._inpaint_pool.get(key)
+                if not rec:
+                    rec = {'spares': [], 'checked_out': [], 'loaded': True}
+                    MangaTranslator._inpaint_pool[key] = rec
+                spares = rec.setdefault('spares', [])
+                target_count = max(1, int(count))
+                while len(spares) < target_count:
+                    inp = LocalInpainter(enable_worker_process=False)
+                    self._apply_custom_image_edit_request_config(inp)
+                    if inp.load_model('custom-image-edit', custom_image_edit_load_path or '', force_reload=False) and getattr(inp, 'model_loaded', False):
+                        spares.append(inp)
+                    else:
+                        break
+                rec['loaded'] = True
+                created = len(spares)
+            self._log(f"OK Registered {created} custom image edit endpoint inpainter(s)", "info")
+            return created
+        
+        key = (local_method or 'anime', model_path or '')
+        
+        # CRITICAL: Clean up pool entries that don't match current GUI settings FIRST
+        # This MUST happen BEFORE checking desired count to ensure stale models are removed
+        with MangaTranslator._inpaint_pool_lock:
+            # Get currently selected settings from GUI - read directly from UI if available
+            # Prefer LIVE dropdown value from MangaIntegration (manga_translator tab)
+            current_method = local_method  # Default to the method we're preloading
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
+                try:
+                    mg = self.main_gui.manga_translator
+                    if hasattr(mg, 'local_model_combo'):
+                        current_method = mg.local_model_combo.currentText()
+                    else:
+                        current_method = mg.local_model_type_value
+                except Exception:
+                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
+            else:
+                current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
+            
+            current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+            if current_model_path and not is_custom_image_edit:
+                try:
+                    current_model_path = os.path.abspath(os.path.normpath(current_model_path))
+                except Exception:
+                    pass
+            current_key = (current_method, current_model_path or '')
+            
+            # Find and clean up all pool entries that DON'T match current settings
+            keys_to_remove = []
+            for pool_key, pool_rec in list(MangaTranslator._inpaint_pool.items()):
+                if pool_key != current_key:  # Not the currently selected model
+                    # Only clean up if nothing is checked out (safe to remove)
+                    checked_out_count = len(pool_rec.get('checked_out', []))
+                    spares_count = len(pool_rec.get('spares', []))
+                    
+                    if checked_out_count == 0 and spares_count > 0:
+                        self._log(f"🧹 Removing {spares_count} unused model(s) that don't match current selection: {pool_key[0]}", "info")
+                        # Unload all spares
+                        for spare in pool_rec.get('spares', []):
+                            try:
+                                if hasattr(spare, 'unload'):
+                                    spare.unload()
+                            except Exception:
+                                pass
+                        keys_to_remove.append(pool_key)
+            
+            # Remove cleaned up entries from pool
+            for old_key in keys_to_remove:
+                MangaTranslator._inpaint_pool.pop(old_key, None)
+            
+            # Now get or create the pool record for current selection
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if not rec:
+                rec = {'spares': [], 'checked_out': []}
+                MangaTranslator._inpaint_pool[key] = rec
+            spares = (rec.get('spares') or [])
+            
+        desired = max(0, int(count) - len(spares))
+        if desired <= 0:
+            # Already have enough spares - return count to indicate success
+            self._log(f"✅ Already have {len(spares)} spare(s) for {local_method}", "info")
+            return len(spares)
+        # Determine max_parallel from advanced settings if not provided
+        if max_parallel is None:
+            adv = {}
+            try:
+                adv = self.main_gui.config.get('manga_settings', {}).get('advanced', {}) if hasattr(self, 'main_gui') else {}
+            except Exception:
+                adv = {}
+            if adv.get('parallel_panel_translation', False):
+                try:
+                    max_parallel = max(1, int(adv.get('panel_max_workers', 2)))
+                except Exception:
+                    max_parallel = 2
+            elif adv.get('parallel_processing', False):
+                try:
+                    max_parallel = max(1, int(adv.get('max_workers', 4)))
+                except Exception:
+                    max_parallel = 2
+            else:
+                # Even without parallel processing enabled, use 2 workers for preload
+                # This makes preload 2x faster with no downside (models load independently)
+                max_parallel = 2
+        max_parallel = max(2, min(int(max_parallel), int(desired)))  # Minimum 2 for concurrent preload
+        ctx = " for parallel panels" if int(count) > 1 else ""
+        self._log(f"🧰 Preloading {desired} local inpainting instance(s){ctx} (parallel={max_parallel})", "info")
+        # Resolve model path once
+        resolved_path = model_path
+        if is_custom_image_edit:
+            resolved_path = resolved_path or getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
+        elif not resolved_path or not os.path.exists(resolved_path):
+            try:
+                # Get worker process setting from config
+                disable_worker = False
+                try:
+                    disable_worker = bool(
+                        self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
+                    )
+                except Exception:
+                    pass
+                probe_inp = LocalInpainter(enable_worker_process=not disable_worker)
+                resolved_path = probe_inp.download_jit_model(local_method)
+            except Exception as e:
+                self._log(f"⚠️ JIT download failed for concurrent preload: {e}", "warning")
+                resolved_path = None
+        tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
+        # Get worker process setting from config
+        disable_worker = False
+        try:
+            disable_worker = bool(
+                self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
+            )
+        except Exception:
+            pass
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        created = 0
+        def _one():
+            try:
+                inp = LocalInpainter(enable_worker_process=not disable_worker)
+                inp.tiling_enabled = tiling_settings.get('enabled', False)
+                inp.tile_size = tiling_settings.get('tile_size', 512)
+                inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                if resolved_path and (is_custom_image_edit or os.path.exists(resolved_path)):
+                    ok = inp.load_model_with_retry(local_method, resolved_path, force_reload=False)
+                    # CRITICAL: Verify model_loaded attribute
+                    model_actually_loaded = ok and getattr(inp, 'model_loaded', False)
+                    if model_actually_loaded:
+                        with MangaTranslator._inpaint_pool_lock:
+                            # CRITICAL: Verify this model still matches current GUI selection before adding to pool
+                            # This prevents race condition where user switches models while preload is running
+                            # Read directly from UI instance if available (more reliable than manga_settings)
+                            try:
+                                # Prefer LIVE dropdown value from MangaIntegration (manga_translator tab)
+                                current_method = local_method  # Default to the method we're preloading
+                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
+                                    try:
+                                        mg = self.main_gui.manga_translator
+                                        if hasattr(mg, 'local_model_combo'):
+                                            current_method = mg.local_model_combo.currentText()
+                                        else:
+                                            current_method = mg.local_model_type_value
+                                    except Exception:
+                                        current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
+                                else:
+                                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime_onnx')
+                                
+                                current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                                if current_model_path and not is_custom_image_edit:
+                                    try:
+                                        current_model_path = os.path.abspath(os.path.normpath(current_model_path))
+                                    except Exception:
+                                        pass
+                                current_key = (current_method, current_model_path or '')
+                                
+                                # Only add to pool if this is still the currently selected model
+                                if key != current_key:
+                                    self._log(f"🚫 Skipping concurrent preload: model changed during preload (was {key[0]}, now {current_key[0]})", "warning")
+                                    # Unload this instance since it's no longer needed
+                                    try:
+                                        if hasattr(inp, 'unload'):
+                                            inp.unload()
+                                    except Exception:
+                                        pass
+                                    return False  # Don't count as success
+                            except Exception:
+                                pass  # If check fails, allow adding to pool (better than losing the instance)
+                            
+                            rec2 = MangaTranslator._inpaint_pool.get(key)
+                            if not rec2:
+                                # Pool record doesn't exist - create it
+                                rec2 = {'spares': [], 'checked_out': []}
+                                MangaTranslator._inpaint_pool[key] = rec2
+                            # Ensure spares list exists
+                            if 'spares' not in rec2 or rec2['spares'] is None:
+                                rec2['spares'] = []
+                            if 'checked_out' not in rec2:
+                                rec2['checked_out'] = []
+                            # Append to existing spares list (don't replace the record!)
+                            rec2['spares'].append(inp)
+                        return True
+                    else:
+                        # Log why it failed for debugging
+                        try:
+                            self._log(f"🔍 Concurrent preload check: load_model_with_retry={ok}, model_loaded={getattr(inp, 'model_loaded', 'ATTR_MISSING')}", "debug")
+                        except:
+                            pass
+            except Exception as e:
+                self._log(f"⚠️ Concurrent preload error: {e}", "warning")
+            return False
+        with ThreadPoolExecutor(max_workers=max_parallel) as ex:
+            futs = [ex.submit(_one) for _ in range(desired)]
+            for f in as_completed(futs):
+                try:
+                    if f.result():
+                        created += 1
+                except Exception:
+                    pass
+        if created > 0:
+            self._log(f"✅ Preloaded {created} local inpainting instance(s)", "info")
+        else:
+            self._log("Failed to preload local inpainting model; no usable instances were created", "error")
+        return created
+
+    @classmethod
+    def _count_preloaded_detectors(cls) -> int:
+        try:
+            with cls._detector_pool_lock:
+                return sum(len((rec or {}).get('spares') or []) for rec in cls._detector_pool.values())
+        except Exception:
+            return 0
+
+    @classmethod
+    def get_preload_counters(cls) -> Dict[str, int]:
+        """Return current counters for preloaded instances (for diagnostics/logging).
+        Returns both total spares and checked-out counts for accurate tracking.
+        """
+        try:
+            with cls._inpaint_pool_lock:
+                inpaint_spares = sum(len((rec or {}).get('spares') or []) for rec in cls._inpaint_pool.values())
+                inpaint_checked_out = sum(len((rec or {}).get('checked_out') or []) for rec in cls._inpaint_pool.values())
+                inpaint_available = inpaint_spares - inpaint_checked_out
+                inpaint_keys = len(cls._inpaint_pool)
+            with cls._detector_pool_lock:
+                detector_spares = sum(len((rec or {}).get('spares') or []) for rec in cls._detector_pool.values())
+                detector_checked_out = sum(len((rec or {}).get('checked_out') or []) for rec in cls._detector_pool.values())
+                detector_available = detector_spares - detector_checked_out
+                detector_keys = len(cls._detector_pool)
+            return {
+                'inpaint_spares': inpaint_spares,
+                'inpaint_checked_out': inpaint_checked_out,
+                'inpaint_available': inpaint_available,
+                'inpaint_keys': inpaint_keys,
+                'detector_spares': detector_spares,
+                'detector_checked_out': detector_checked_out,
+                'detector_available': detector_available,
+                'detector_keys': detector_keys,
+            }
+        except Exception:
+            return {
+                'inpaint_spares': 0, 'inpaint_checked_out': 0, 'inpaint_available': 0, 'inpaint_keys': 0,
+                'detector_spares': 0, 'detector_checked_out': 0, 'detector_available': 0, 'detector_keys': 0
+            }
+
+    def preload_bubble_detectors(self, ocr_settings: Dict[str, Any], count: int) -> int:
+        """Preload N bubble detector instances (non-singleton) for panel parallelism.
+        Only applies when not using singleton models.
+        """
+        try:
+            from bubble_detector import BubbleDetector
+        except Exception:
+            self._log("❌ BubbleDetector module not available for preloading", "error")
+            return 0
+        # Skip if singleton mode
+        if getattr(self, 'use_singleton_models', False):
+            return 0
+        det_type = (ocr_settings or {}).get('detector_type', 'rtdetr_onnx')
+        model_id = (ocr_settings or {}).get('rtdetr_model_url') or (ocr_settings or {}).get('bubble_model_path') or ''
+        # Sanitize model_id based on detector type to avoid unrelated files (e.g., glossary JSON)
+        try:
+            import os
+            if det_type in ('rtdetr', 'rtdetr_onnx'):
+                # RT-DETR expects a HF repo id, not a local JSON file
+                if model_id and (model_id.lower().endswith('.json') or os.path.isfile(model_id)):
+                    self._log(f"⚠️ Ignoring invalid RT-DETR model id (looks like a local file): {model_id}", "warning")
+                    model_id = ''
+                if not model_id:
+                    model_id = 'ogkalu/comic-text-and-bubble-detector'
+            elif det_type in ('yolo', 'custom'):
+                # YOLO/custom expect local model files (.pt/.onnx/.torchscript/.safetensors)
+                if model_id and model_id.lower().endswith('.json'):
+                    self._log(f"⚠️ Ignoring invalid YOLO/custom model path (JSON): {model_id}", "warning")
+                    model_id = ''
+        except Exception:
+            pass
+        key = self._detector_pool_key(det_type, model_id, ocr_settings or {})
+        created = 0
+        
+        # CRITICAL: Clean up pool entries that don't match current GUI settings
+        # This ensures models are unloaded when user changes the detector dropdown
+        with MangaTranslator._detector_pool_lock:
+            # Current selection key
+            current_key = key
+            
+            # Find and clean up all pool entries that DON'T match current settings
+            keys_to_remove = []
+            for pool_key, pool_rec in list(MangaTranslator._detector_pool.items()):
+                if pool_key != current_key:  # Not the currently selected detector
+                    # Only clean up if nothing is checked out (safe to remove)
+                    checked_out_count = len(pool_rec.get('checked_out', []))
+                    spares_count = len(pool_rec.get('spares', []))
+                    
+                    if checked_out_count == 0 and spares_count > 0:
+                        self._log(f"🧹 Removing {spares_count} unused detector(s) that don't match current selection: {pool_key[0]}", "info")
+                        # Unload all spares
+                        for spare in pool_rec.get('spares', []):
+                            try:
+                                if hasattr(spare, 'unload'):
+                                    spare.unload(release_shared=True)  # Release shared RT-DETR models too
+                            except Exception:
+                                pass
+                        keys_to_remove.append(pool_key)
+            
+            # Remove cleaned up entries from pool
+            for old_key in keys_to_remove:
+                MangaTranslator._detector_pool.pop(old_key, None)
+            
+            # Now ensure the current pool record exists
+            rec = MangaTranslator._detector_pool.get(key)
+            if not rec:
+                rec = {'spares': []}
+                MangaTranslator._detector_pool[key] = rec
+            spares = rec.get('spares')
+            if spares is None:
+                spares = []
+                rec['spares'] = spares
+        desired = max(0, int(count) - len(spares))
+        if desired <= 0:
+            return 0
+        self._log(f"🪧 Preloading {desired} bubble detector instance(s) [{det_type}]", "info")
+        for i in range(desired):
+            try:
+                bd = BubbleDetector()
+                ok = False
+                
+                # CRITICAL: For RT-DETR (PyTorch), check if already loaded globally
+                # PyO3 modules can only be initialized once per process
+                if det_type == 'rtdetr':
+                    from bubble_detector import BubbleDetector as BD_Class
+                    
+                    # Check BOTH class flag AND actual model existence
+                    is_already_loaded = (
+                        BD_Class._rtdetr_loaded and 
+                        BD_Class._rtdetr_shared_model is not None and
+                        BD_Class._rtdetr_shared_processor is not None
+                    )
+                    
+                    if is_already_loaded:
+                        # Already loaded globally - just attach to existing instance
+                        bd.rtdetr_model = BD_Class._rtdetr_shared_model
+                        bd.rtdetr_processor = BD_Class._rtdetr_shared_processor
+                        bd.rtdetr_loaded = True
+                        ok = True
+                        self._log("✅ RT-DETR already loaded globally - reusing shared instance", "info")
+                    else:
+                        # First load - this will initialize globally
+                        # But wrap in try/catch for PyO3 errors
+                        try:
+                            ok = bool(bd.load_rtdetr_model(model_id=model_id))
+                        except Exception as load_err:
+                            error_str = str(load_err)
+                            if 'PyO3' in error_str and 'may only be initialized once' in error_str:
+                                self._log("⚠️ RT-DETR cannot be loaded - PyO3 already initialized. Using ONNX instead is recommended.", "warning")
+                                ok = False
+                            else:
+                                raise
+                elif det_type == 'rtdetr_onnx':
+                    ok = bool(bd.load_rtdetr_onnx_model(
+                        model_id=model_id,
+                        onnx_filename=self._get_rtdetr_onnx_filename(ocr_settings or {})
+                    ))
+                elif det_type == 'yolo':
+                    if model_id:
+                        ok = bool(bd.load_model(model_id))
+                else:
+                    # auto: prefer RT-DETR
+                    from bubble_detector import BubbleDetector as BD_Class
+                    
+                    # Check BOTH class flag AND actual model existence
+                    is_already_loaded = (
+                        BD_Class._rtdetr_loaded and 
+                        BD_Class._rtdetr_shared_model is not None and
+                        BD_Class._rtdetr_shared_processor is not None
+                    )
+                    
+                    if is_already_loaded:
+                        # Already loaded globally
+                        bd.rtdetr_model = BD_Class._rtdetr_shared_model
+                        bd.rtdetr_processor = BD_Class._rtdetr_shared_processor
+                        bd.rtdetr_loaded = True
+                        ok = True
+                        self._log("✅ RT-DETR already loaded globally - reusing shared instance", "info")
+                    else:
+                        # Try to load, but catch PyO3 errors gracefully
+                        try:
+                            ok = bool(bd.load_rtdetr_model(model_id=model_id))
+                        except Exception as load_err:
+                            error_str = str(load_err)
+                            if 'PyO3' in error_str and 'may only be initialized once' in error_str:
+                                self._log("⚠️ RT-DETR cannot be loaded - PyO3 already initialized. Using ONNX instead is recommended.", "warning")
+                                ok = False
+                            else:
+                                raise
+                
+                if ok:
+                    with MangaTranslator._detector_pool_lock:
+                        rec = MangaTranslator._detector_pool.get(key) or {'spares': []}
+                        if 'spares' not in rec or rec['spares'] is None:
+                            rec['spares'] = []
+                        rec['spares'].append(bd)
+                        MangaTranslator._detector_pool[key] = rec
+                    created += 1
+            except Exception as e:
+                self._log(f"⚠️ Bubble detector preload error: {e}", "warning")
+        self._log(f"✅ Preloaded {created} bubble detector instance(s)", "info")
+        return created
+
+    def _initialize_local_inpainter(self):
+        """Initialize local inpainting if configured.
+
+        Short-circuits immediately when the Skip Inpainter toggle is on so the
+        caller doesn't block on the inpaint-pool polling loop.
+        """
+        # Defense in depth: if skip_inpainting is on, don't touch the pool.
+        if getattr(self, 'skip_inpainting', False):
+            self._log("🚫 Skip Inpainter enabled — _initialize_local_inpainter() short-circuited", "debug")
+            return False
+        try:
+            from local_inpainter import LocalInpainter, HybridInpainter, AnimeMangaInpaintModel
+            
+            # LOAD THE SETTINGS FROM CONFIG FIRST
+            # The dialog saves it as 'manga_local_inpaint_model' at root level
+            saved_local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')
+            if saved_local_method == 'qwen_image_edit':
+                saved_local_method = 'custom-image-edit'
+                self.main_gui.config['manga_local_inpaint_model'] = saved_local_method
+                if (
+                    self.main_gui.config.get('manga_qwen_image_edit_model_path')
+                    and not self.main_gui.config.get('manga_custom-image-edit_model_path')
+                ):
+                    endpoint = self.main_gui.config.get('custom_image_edit_endpoint', '')
+                    if endpoint:
+                        self.main_gui.config['manga_custom-image-edit_model_path'] = endpoint
+            saved_inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
+            
+            # MIGRATION: Ensure manga_ prefixed model path keys exist for ONNX methods
+            # This fixes compatibility where model paths were saved without manga_ prefix
+            for method_variant in ['anime', 'anime_onnx', 'lama', 'lama_onnx', 'aot', 'aot_onnx', 'custom-image-edit']:
+                non_prefixed_key = f'{method_variant}_model_path'
+                prefixed_key = f'manga_{method_variant}_model_path'
+                # If we have the non-prefixed but not the prefixed, migrate it
+                if non_prefixed_key in self.main_gui.config and prefixed_key not in self.main_gui.config:
+                    self.main_gui.config[prefixed_key] = self.main_gui.config[non_prefixed_key]
+                    self._log(f"🔄 Migrated model path config: {non_prefixed_key} → {prefixed_key}", "debug")
+            
+            # Update manga_settings with the saved values
+            # ALWAYS use the top-level saved config to ensure correct model is loaded
+            if 'inpainting' not in self.manga_settings:
+                self.manga_settings['inpainting'] = {}
+            
+            # Always override with saved values from top-level config
+            # This ensures the user's model selection in the settings dialog is respected
+            self.manga_settings['inpainting']['method'] = saved_inpaint_method
+            self.manga_settings['inpainting']['local_method'] = saved_local_method
+            
+            # Now get the values (they'll be correct now)
+            inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
+            
+            if inpaint_method == 'local':
+                # This will now get the correct saved value
+                local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                
+                # Model path is saved with manga_ prefix - try both key formats for compatibility
+                model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                if not model_path:
+                    # Fallback to non-prefixed key (older format)
+                    model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
+                is_custom_image_edit = str(local_method or '').lower() == 'custom-image-edit'
+                if is_custom_image_edit:
+                    model_path = self._custom_image_edit_endpoint_from_gui() or model_path
+                
+                self._log(f"Using local method: {local_method} (loaded from config)", "info")
+                if is_custom_image_edit:
+                    inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path)
+                    if inp_shared and getattr(inp_shared, 'model_loaded', False):
+                        self.local_inpainter = inp_shared
+                        self._last_local_method = local_method
+                        self._last_local_model_path = model_path
+                        self._log("OK Using custom image edit endpoint inpainter", "info")
+                        return True
+                    self._log("⚠️ Custom image edit endpoint inpainter is not ready", "warning")
+                    return False
+                
+                # CRITICAL FIX: Wait for any ongoing preload to complete
+                # This prevents "create on demand" when models are still loading
+                if hasattr(self, '_inpaint_preload_event') and self._inpaint_preload_event and not self._inpaint_preload_event.is_set():
+                    self._log("⏳ Waiting for inpainter preload to complete...", "info")
+                    # Wait with generous timeout
+                    waited = self._inpaint_preload_event.wait(timeout=120)  # 2 minutes
+                    if waited:
+                        self._log("✅ Preload completed", "info")
+                    else:
+                        self._log("⚠️ Preload timeout - proceeding anyway", "warning")
+                
+                # CRITICAL FIX: Poll pool with timeout to wait for models loading from GUI
+                # Don't immediately fall back to "create on demand"
+                key = (local_method, os.path.abspath(os.path.normpath(model_path)) if model_path else '')
+                inp_shared = None
+                poll_timeout = 120  # 2 minutes max wait
+                poll_interval = 0.5  # Check every 500ms
+                import time
+                start_time = time.time()
+                
+                while time.time() - start_time < poll_timeout:
+                    with MangaTranslator._inpaint_pool_lock:
+                        rec = MangaTranslator._inpaint_pool.get(key)
+                        if rec and rec.get('spares'):
+                            spares = rec.get('spares', [])
+                            available_count = len([s for s in spares if s and getattr(s, 'model_loaded', False)])
+                            if available_count > 0:
+                                self._log(f"✅ Inpainter pool ready: {available_count} instance(s) available", "info")
+                                # Don't checkout - leave it in pool for actual inpainting calls
+                                inp_shared = spares[0]  # Just for reference, not checkout
+                                break
+                    
+                    # No models yet - wait a bit and retry
+                    if inp_shared is None:
+                        elapsed = time.time() - start_time
+                        if elapsed < 2:  # Only log if we've been waiting a bit
+                            pass  # Silent for first 2 seconds
+                        elif elapsed < poll_timeout:
+                            if int(elapsed) % 5 == 0:  # Log every 5 seconds
+                                self._log(f"⏳ Still waiting for inpainter pool... ({int(elapsed)}s)", "info")
+                        time.sleep(poll_interval)
+                
+                # After polling, check final state and RETRY loading if needed
+                if inp_shared is None:
+                    self._log(f"⚠️ No inpainter pool found after {poll_timeout}s - attempting to preload...", "warning")
+                    
+                    # RETRY LOGIC: Use preload_local_inpainters to properly add to pool
+                    max_load_retries = 3
+                    for load_attempt in range(max_load_retries):
+                        try:
+                            self._log(f"🔄 Inpainter preload attempt {load_attempt + 1}/{max_load_retries}...", "info")
+                            
+                            # Use preload function which properly initializes and adds to pool
+                            preloaded = self.preload_local_inpainters(local_method, model_path, count=1)
+                            
+                            if preloaded > 0:
+                                self._log(f"✅ Preloaded {preloaded} inpainter(s) on attempt {load_attempt + 1}", "info")
+                                # Now try to get from the pool
+                                retry_inp = self._get_or_init_shared_local_inpainter(local_method, model_path)
+                                if retry_inp and getattr(retry_inp, 'model_loaded', False):
+                                    self._log(f"✅ Inpainter checked out from pool successfully", "info")
+                                    inp_shared = retry_inp
+                                    break
+                                elif retry_inp:
+                                    # Inpainter exists but model not loaded - try loading manually
+                                    self._log(f"⏳ Inpainter checked out but model not loaded - trying manual load...", "info")
+                                    if model_path and os.path.exists(model_path):
+                                        try:
+                                            if hasattr(retry_inp, 'load_model_with_retry'):
+                                                loaded = retry_inp.load_model_with_retry(local_method, model_path, force_reload=True)
+                                            else:
+                                                loaded = retry_inp.load_model(local_method, model_path, force_reload=True)
+                                            if loaded and getattr(retry_inp, 'model_loaded', False):
+                                                self._log(f"✅ Model loaded manually on attempt {load_attempt + 1}", "info")
+                                                inp_shared = retry_inp
+                                                break
+                                        except Exception as load_err:
+                                            self._log(f"⚠️ Manual load error: {load_err}", "warning")
+                            else:
+                                self._log(f"⚠️ Preload returned 0 on attempt {load_attempt + 1}", "warning")
+                            
+                            # Wait before retry
+                            if load_attempt < max_load_retries - 1:
+                                self._log(f"⏳ Waiting 2s before retry...", "info")
+                                time.sleep(2)
+                                
+                        except Exception as e:
+                            self._log(f"⚠️ Load attempt {load_attempt + 1} failed: {e}", "warning")
+                            import traceback
+                            self._log(f"   Traceback: {traceback.format_exc()}", "debug")
+                            if load_attempt < max_load_retries - 1:
+                                time.sleep(2)
+                    
+                    if inp_shared is None:
+                        self._log(f"⚠️ All {max_load_retries} preload attempts failed - will create on demand", "warning")
+                
+                # Initialize need_reload flag
+                need_reload = False
+                
+                # Only track changes AFTER getting the shared instance
+                # This prevents spurious reloads on first initialization
+                if not hasattr(self, '_last_local_method'):
+                    self._last_local_method = local_method
+                    self._last_local_model_path = model_path
+                else:
+                    # Check if settings actually changed and we need to force reload
+                    need_reload = False
+                    if self._last_local_method != local_method:
+                        self._log(f"🔄 Local method changed from {self._last_local_method} to {local_method}", "info")
+                        need_reload = True
+                        # If method changed, we need a different model - get it with force_reload
+                        inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=True)
+                    elif self._last_local_model_path != model_path:
+                        self._log(f"🔄 Model path changed", "info")
+                        if self._last_local_model_path:
+                            self._log(f"   Old: {os.path.basename(self._last_local_model_path)}", "debug")
+                        if model_path:
+                            self._log(f"   New: {os.path.basename(model_path)}", "debug")
+                        need_reload = True
+                        # If path changed, reload the model
+                        inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=True)
+                    
+                    # Update tracking only if changes were made
+                    if need_reload:
+                        self._last_local_method = local_method
+                        self._last_local_model_path = model_path
+                if inp_shared is not None:
+                    self.local_inpainter = inp_shared
+                    if getattr(self.local_inpainter, 'model_loaded', False):
+                        self._log(f"✅ Using shared {local_method.upper()} inpainting model", "info")
+                        return True
+                    else:
+                        self._log(f"⚠️ Shared inpainter created but model not loaded", "warning")
+                        self._log(f"🔄 Attempting to retry model loading...", "info")
+                        
+                        # Retry loading the model
+                        if model_path and os.path.exists(model_path):
+                            self._log(f"📦 Model path: {model_path}", "info")
+                            self._log(f"📋 Method: {local_method}", "info")
+                            try:
+                                loaded_ok = inp_shared.load_model_with_retry(local_method, model_path, force_reload=True)
+                                if loaded_ok and getattr(inp_shared, 'model_loaded', False):
+                                    self._log(f"✅ Model loaded successfully on retry", "info")
+                                    return True
+                                else:
+                                    self._log(f"❌ Model still not loaded after retry", "error")
+                                    # Check if model file exists and is valid
+                                    try:
+                                        size_mb = os.path.getsize(model_path) / (1024 * 1024)
+                                        self._log(f"📊 Model file size: {size_mb:.2f} MB", "info")
+                                        if size_mb < 1:
+                                            self._log(f"⚠️ Model file seems too small (< 1 MB) - may be corrupted", "warning")
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                self._log(f"❌ Retry load failed: {e}", "error")
+                                import traceback
+                                self._log(traceback.format_exc(), "debug")
+                        elif not model_path:
+                            self._log(f"❌ No model path provided", "error")
+                        elif not os.path.exists(model_path):
+                            self._log(f"❌ Model path does not exist: {model_path}", "error")
+                            self._log(f"📥 Tip: Try downloading the model from the Manga Settings dialog", "info")
+                        
+                        # If retry failed, fall through to fallback logic below
+                
+                # Fall back to instance-level init only if shared init completely failed
+                self._log("⚠️ Shared inpainter init failed, falling back to instance creation", "warning")
+                try:
+                    from local_inpainter import LocalInpainter
+                    
+                    # Create local inpainter instance
+                    self.local_inpainter = LocalInpainter()
+                    tiling_settings = self.manga_settings.get('tiling', {})
+                    self.local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
+                    self.local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
+                    self.local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                    self._log(f"✅ Set tiling: enabled={self.local_inpainter.tiling_enabled}, size={self.local_inpainter.tile_size}, overlap={self.local_inpainter.tile_overlap}", "info")
+                    
+                    # If no model path or doesn't exist, try to find or download one
+                    if not model_path or not os.path.exists(model_path):
+                        self._log(f"⚠️ Model path not found: {model_path}", "warning")
+                        self._log("📥 Attempting to download JIT model...", "info")
+                        self._downloading_model = True
+                        try:
+                            def progress_callback(percent, downloaded_mb, total_mb, speed_mb):
+                                if hasattr(self, 'update_queue'):
+                                    try:
+                                        self.update_queue.put(('progress', percent))
+                                        # Update both queue and GUI labels
+                                        self.update_queue.put(('model_file_status', 'Downloading...'))
+                                        self.update_queue.put(('status', f'Downloading {downloaded_mb:.1f} MB / {total_mb:.1f} MB @ {speed_mb:.1f} MB/s'))
+                                        # Also check if we have GUI labels to update directly
+                                        if hasattr(self.main_gui, 'manga_translator'):
+                                            manga_gui = self.main_gui.manga_translator
+                                            if hasattr(manga_gui, 'local_model_entry'):
+                                                manga_gui.local_model_entry.setText('Downloading...')
+                                            if hasattr(manga_gui, 'local_model_status_label'):
+                                                manga_gui.local_model_status_label.setText('Downloading...')
+                                    except Exception:
+                                        pass
+                            downloaded_path = self.local_inpainter.download_jit_model(local_method, progress_callback=progress_callback)
+                        except Exception as e:
+                            self._log(f"⚠️ JIT download failed: {e}", "warning")
+                            downloaded_path = None
+                        self._downloading_model = False
+                        if downloaded_path:
+                            model_path = downloaded_path
+                            self._log(f"✅ Downloaded JIT model to: {model_path}")
+                        else:
+                            self._log("⚠️ JIT model download did not return a path", "warning")
+                    
+                    # Load model with retry to avoid transient file/JSON issues under parallel init
+                    loaded_ok = False
+                    if model_path and os.path.exists(model_path):
+                        for attempt in range(2):
+                            try:
+                                self._log(f"📥 Loading {local_method} model... (attempt {attempt+1})", "info")
+                                if self.local_inpainter.load_model(local_method, model_path, force_reload=need_reload):
+                                    loaded_ok = True
+                                    break
+                            except Exception as e:
+                                self._log(f"⚠️ Load attempt {attempt+1} failed: {e}", "warning")
+                                time.sleep(0.5)
+                        if loaded_ok:
+                            self._log(f"✅ Local inpainter loaded with {local_method.upper()} (fallback instance)")
+                        else:
+                            self._log(f"⚠️ Failed to load model, but inpainter is ready", "warning")
+                    else:
+                        self._log(f"⚠️ No model available, but inpainter is initialized", "warning")
+                    
+                    return True
+                    
+                except Exception as e:
+                    self._log(f"❌ Local inpainter module not available: {e}", "error")
+                    return False
+            
+            elif inpaint_method == 'hybrid':
+                # Track hybrid settings changes
+                if not hasattr(self, '_last_hybrid_config'):
+                    self._last_hybrid_config = None
+                    
+                    # Set tiling from tiling section
+                    tiling_settings = self.manga_settings.get('tiling', {})
+                    self.local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
+                    self.local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
+                    self.local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                    
+                    self._log(f"✅ Set tiling: enabled={self.local_inpainter.tiling_enabled}, size={self.local_inpainter.tile_size}, overlap={self.local_inpainter.tile_overlap}", "info")
+                        
+                current_hybrid_config = self.manga_settings.get('inpainting', {}).get('hybrid_methods', [])
+                
+                # Check if hybrid config changed
+                need_reload = self._last_hybrid_config != current_hybrid_config
+                if need_reload:
+                    self._log("🔄 Hybrid configuration changed, reloading...", "info")
+                    self.hybrid_inpainter = None  # Clear old instance
+                
+                self._last_hybrid_config = current_hybrid_config.copy() if current_hybrid_config else []
+                
+                if self.hybrid_inpainter is None:
+                    self.hybrid_inpainter = HybridInpainter()
+                    # REMOVED: No longer override tiling settings for HybridInpainter
+                
+                # Load multiple methods
+                methods = self.manga_settings.get('inpainting', {}).get('hybrid_methods', [])
+                loaded = 0
+                
+                for method_config in methods:
+                    method = method_config.get('method')
+                    model_path = method_config.get('model_path')
+                    
+                    if method and model_path:
+                        if self.hybrid_inpainter.add_method(method, method, model_path):
+                            loaded += 1
+                            self._log(f"✅ Added {method.upper()} to hybrid inpainter")
+                
+                if loaded > 0:
+                    self._log(f"✅ Hybrid inpainter ready with {loaded} methods")
+                else:
+                    self._log("⚠️ Hybrid inpainter initialized but no methods loaded", "warning")
+                
+                return True
+            
+            return False
+            
+        except ImportError:
+            self._log("❌ Local inpainter module not available", "error")
+            return False
+        except Exception as e:
+            self._log(f"❌ Error initializing inpainter: {e}", "error")
+            return False
+
+
+    def inpaint_regions(self, image: np.ndarray, mask: np.ndarray, inpainter=None) -> np.ndarray:
+        """Inpaint using configured method (cloud, local, or hybrid)
+        
+        Args:
+            image: The image to inpaint
+            mask: The mask indicating regions to inpaint
+            inpainter: Optional pre-checked-out inpainter instance to reuse (avoids pool exhaustion)
+        """
+        if mask is None or not np.any(mask):
+            self._log("   ⏭️ No OCR text in inpaint mask; skipping inpainting", "info")
+            return image.copy()
+
+        # Primary source of truth is the runtime flags set by the UI.
+        if getattr(self, 'skip_inpainting', False):
+            self._log("   ⏭️ Skipping inpainting (preserving original art)", "info")
+            return image.copy()
+        
+        # Cloud mode explicitly selected in UI
+        if getattr(self, 'use_cloud_inpainting', False):
+            return self._cloud_inpaint(image, mask)
+        
+        # Hybrid mode if UI requested it (fallback to settings key if present)
+        mode = getattr(self, 'inpaint_mode', None) or self.manga_settings.get('inpainting', {}).get('method')
+        if mode == 'hybrid' and hasattr(self, 'hybrid_inpainter'):
+            self._log("   🔄 Using hybrid ensemble inpainting", "info")
+            return self.hybrid_inpainter.inpaint_ensemble(image, mask)
+        
+        # If a background preload is running, wait until it's finished before inpainting
+        try:
+            if hasattr(self, '_inpaint_preload_event') and self._inpaint_preload_event and not self._inpaint_preload_event.is_set():
+                self._log("   ⏳ Waiting for local inpainting models to finish preloading...", "info")
+                # Wait with a generous timeout, but proceed afterward regardless
+                self._inpaint_preload_event.wait(timeout=300)
+        except Exception:
+            pass
+        
+        # Default to local inpainting
+        local_method = self._get_live_local_inpaint_method()
+        model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+        if not model_path:
+            # Fallback to non-prefixed key (older format)
+            model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
+        
+        # Get iterations setting (from auto_iterations logic or config)
+        iterations = getattr(self, '_current_inpainter_iterations', 1)
+        disable_performance_mode = str(local_method or '').lower() != 'custom-image-edit' and bool(
+            getattr(getattr(self, 'main_gui', None), 'manga_disable_inpaint_performance_mode_var', False)
+            or getattr(getattr(self, 'main_gui', None), 'config', {}).get('manga_disable_inpaint_performance_mode', False)
+            or self.manga_settings.get('inpainting', {}).get('disable_performance_mode', False)
+        )
+        inpaint_kwargs = {'iterations': iterations}
+        if disable_performance_mode:
+            inpaint_kwargs.update({'_skip_hd': True, '_skip_tiling': True})
+
+        def _mark_disable_performance(inp_obj):
+            try:
+                if inp_obj is not None and hasattr(inp_obj, 'config') and isinstance(inp_obj.config, dict):
+                    inp_obj.config['manga_disable_inpaint_performance_mode'] = disable_performance_mode
+            except Exception:
+                pass
+            return inp_obj
+
+        def _run_inpaint(inp_obj):
+            if (str(local_method or '').lower() != 'custom-image-edit'
+                    or not hasattr(inp_obj, 'set_log_callback')):
+                return inp_obj.inpaint(image, mask, **inpaint_kwargs)
+            self._apply_custom_image_edit_request_config(inp_obj)
+            previous_callback = getattr(inp_obj, 'log_callback', None)
+            inp_obj.set_log_callback(self._log)
+            try:
+                return inp_obj.inpaint(image, mask, **inpaint_kwargs)
+            finally:
+                inp_obj.set_log_callback(previous_callback)
+        
+        # Use provided inpainter if available, otherwise get from thread-local pool
+        if inpainter is not None:
+            inp = _mark_disable_performance(inpainter)
+            self._log("   🎨 Using pre-checked-out inpainter instance (avoiding pool contention)", "info")
+        else:
+            inp = _mark_disable_performance(self._get_thread_local_inpainter(local_method, model_path))
+        if inp and getattr(inp, 'model_loaded', False):
+            self._log("   🧽 Using local inpainting", "info")
+            # Only use lock if enabled (singleton mode or non-parallel translation)
+            lock = getattr(self, '_inpaint_lock', None)
+            if lock:
+                with lock:
+                    return _run_inpaint(inp)
+            else:
+                return _run_inpaint(inp)
+        else:
+            # Conservative fallback: try shared instance only; do not attempt risky reloads that can corrupt output
+            try:
+                shared_inp = _mark_disable_performance(self._get_or_init_shared_local_inpainter(local_method, model_path))
+                if shared_inp and getattr(shared_inp, 'model_loaded', False):
+                    self._log("   ✅ Using shared inpainting instance", "info")
+                    # Always use lock for shared instances to prevent RAM spikes
+                    lock = getattr(self, '_inpaint_lock', None)
+                    if lock:
+                        with lock:
+                            return _run_inpaint(shared_inp)
+                    else:
+                        return _run_inpaint(shared_inp)
+            except Exception:
+                pass
+            
+            # POLLING RETRY LOGIC: Wait for an instance to become available instead of creating new ones
+            self._log("   ⚠️ Local inpainting model not loaded; polling pool for available instance...", "warning")
+            
+            import time
+            max_poll_time = 30  # Poll for up to 30 seconds
+            poll_interval = 0.5  # Check every 0.5 seconds
+            poll_start = time.time()
+            
+            while time.time() - poll_start < max_poll_time:
+                try:
+                    # Check stop flag
+                    if self._check_stop():
+                        self._log("   ⏹️ Translation stopped while polling for inpainter", "warning")
+                        break
+                    
+                    # Try to get an instance from the pool (with internal polling)
+                    retry_inp = _mark_disable_performance(self._get_thread_local_inpainter(local_method, model_path))
+                    
+                    if retry_inp and getattr(retry_inp, 'model_loaded', False):
+                        elapsed = time.time() - poll_start
+                        self._log(f"   ✅ Inpainter became available after {elapsed:.1f}s polling", "info")
+                        lock = getattr(self, '_inpaint_lock', None)
+                        if lock:
+                            with lock:
+                                return _run_inpaint(retry_inp)
+                        else:
+                            return _run_inpaint(retry_inp)
+                    
+                    # Log progress periodically
+                    elapsed = time.time() - poll_start
+                    if int(elapsed) % 5 == 0 and elapsed > 0:  # Log every 5 seconds
+                        self._log(f"   ⏳ Still polling for inpainter... ({int(elapsed)}s)", "info")
+                    
+                    # Wait before next poll
+                    time.sleep(poll_interval)
+                    
+                except Exception as poll_err:
+                    self._log(f"   ⚠️ Polling error: {poll_err}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "debug")
+                    time.sleep(poll_interval)
+            
+            # All retries exhausted - provide detailed diagnostic information
+            self._log("   ❌ All retry attempts exhausted. Diagnostics:", "error")
+            self._log(f"      Method: {local_method}", "error")
+            if model_path:
+                self._log(f"      Model path: {model_path}", "error")
+                if os.path.exists(model_path):
+                    try:
+                        size_mb = os.path.getsize(model_path) / (1024 * 1024)
+                        self._log(f"      File size: {size_mb:.2f} MB", "error")
+                        if size_mb < 1:
+                            self._log(f"      ⚠️ File may be corrupted (too small)", "error")
+                    except Exception:
+                        self._log(f"      ⚠️ Cannot read model file", "error")
+                else:
+                    self._log(f"      ⚠️ Model file does not exist", "error")
+            else:
+                self._log(f"      ⚠️ No model path configured", "error")
+            
+            self._log("   💡 Suggestion: Check Manga Settings and download the model if needed", "error")
+            self._log("   ⚠️ Returning original image without inpainting", "warning")
+            return image.copy()
+            
+    def _cloud_inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+            """Use Replicate API for inpainting"""
+            try:
+                import requests
+                import base64
+                from io import BytesIO
+                from PIL import Image as PILImage
+                import cv2
+                
+                self._log("   ☁️ Cloud inpainting via Replicate API", "info")
+                
+                # Convert to PIL
+                image_pil = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                mask_pil = PILImage.fromarray(mask).convert('L')
+                
+                # Convert to base64
+                img_buffer = BytesIO()
+                image_pil.save(img_buffer, format='PNG')
+                img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
+                
+                mask_buffer = BytesIO()
+                mask_pil.save(mask_buffer, format='PNG')
+                mask_base64 = base64.b64encode(mask_buffer.getvalue()).decode()
+                
+                # Get cloud settings
+                cloud_settings = self.main_gui.config.get('manga_settings', {})
+                model_type = cloud_settings.get('cloud_inpaint_model', 'ideogram-v2')
+                timeout = cloud_settings.get('cloud_timeout', 60)
+                
+                # Determine model identifier based on model type
+                if model_type == 'ideogram-v2':
+                    model = 'ideogram-ai/ideogram-v2'
+                    self._log(f"   Using Ideogram V2 inpainting model", "info")
+                elif model_type == 'sd-inpainting':
+                    model = 'stability-ai/stable-diffusion-inpainting'
+                    self._log(f"   Using Stable Diffusion inpainting model", "info")
+                elif model_type == 'flux-inpainting':
+                    model = 'zsxkib/flux-dev-inpainting'
+                    self._log(f"   Using FLUX inpainting model", "info")
+                elif model_type == 'custom':
+                    model = cloud_settings.get('cloud_custom_version', '')
+                    if not model:
+                        raise Exception("No custom model identifier specified")
+                    self._log(f"   Using custom model: {model}", "info")
+                else:
+                    # Default to Ideogram V2
+                    model = 'ideogram-ai/ideogram-v2'
+                    self._log(f"   Using default Ideogram V2 model", "info")
+                
+                # Build input data based on model type
+                input_data = {
+                    'image': f'data:image/png;base64,{img_base64}',
+                    'mask': f'data:image/png;base64,{mask_base64}'
+                }
+                
+                # Add prompt settings for models that support them
+                if model_type in ['ideogram-v2', 'sd-inpainting', 'flux-inpainting', 'custom']:
+                    prompt = cloud_settings.get('cloud_inpaint_prompt', 'clean background, smooth surface')
+                    input_data['prompt'] = prompt
+                    self._log(f"   Prompt: {prompt}", "info")
+                    
+                    # SD-specific parameters
+                    if model_type == 'sd-inpainting':
+                        negative_prompt = cloud_settings.get('cloud_negative_prompt', 'text, writing, letters')
+                        input_data['negative_prompt'] = negative_prompt
+                        input_data['num_inference_steps'] = cloud_settings.get('cloud_inference_steps', 20)
+                        self._log(f"   Negative prompt: {negative_prompt}", "info")
+                
+                # Get the latest version of the model
+                headers = {
+                    'Authorization': f'Token {self.replicate_api_key}',
+                    'Content-Type': 'application/json'
+                }
+                
+                # First, get the latest version of the model
+                model_response = requests.get(
+                    f'https://api.replicate.com/v1/models/{model}',
+                    headers=headers
+                )
+                
+                if model_response.status_code != 200:
+                    # If model lookup fails, try direct prediction with model identifier
+                    self._log(f"   Model lookup returned {model_response.status_code}, trying direct prediction", "warning")
+                    version = None
+                else:
+                    model_info = model_response.json()
+                    version = model_info.get('latest_version', {}).get('id')
+                    if not version:
+                        raise Exception(f"Could not get version for model {model}")
+                
+                # Create prediction
+                prediction_data = {
+                    'input': input_data
+                }
+                
+                if version:
+                    prediction_data['version'] = version
+                else:
+                    # For custom models, try extracting version from model string
+                    if ':' in model:
+                        # Format: owner/model:version
+                        model_name, version_id = model.split(':', 1)
+                        prediction_data['version'] = version_id
+                    else:
+                        raise Exception(f"Could not determine version for model {model}. Try using format: owner/model:version")
+                
+                response = requests.post(
+                    'https://api.replicate.com/v1/predictions',
+                    headers=headers,
+                    json=prediction_data
+                )
+                
+                if response.status_code != 201:
+                    raise Exception(f"API error: {response.text}")
+                    
+                # Get prediction URL
+                prediction = response.json()
+                prediction_url = prediction.get('urls', {}).get('get') or prediction.get('id')
+                
+                if not prediction_url:
+                    raise Exception("No prediction URL returned")
+                
+                # If we only got an ID, construct the URL
+                if not prediction_url.startswith('http'):
+                    prediction_url = f'https://api.replicate.com/v1/predictions/{prediction_url}'
+                
+                # Poll for result with configured timeout
+                import time
+                for i in range(timeout):
+                    response = requests.get(prediction_url, headers=headers)
+                    result = response.json()
+                    
+                    # Log progress every 5 seconds
+                    if i % 5 == 0 and i > 0:
+                        self._log(f"   ⏳ Still processing... ({i}s elapsed)", "info")
+                    
+                    if result['status'] == 'succeeded':
+                        # Download result image (handle both single URL and list)
+                        output = result.get('output')
+                        if not output:
+                            raise Exception("No output returned from model")
+                        
+                        if isinstance(output, list):
+                            output_url = output[0] if output else None
+                        else:
+                            output_url = output
+                        
+                        if not output_url:
+                            raise Exception("No output URL in result")
+                            
+                        img_response = requests.get(output_url)
+                        
+                        # Convert back to numpy
+                        result_pil = open_image(BytesIO(img_response.content))
+                        result_rgb = np.array(result_pil)
+                        result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+                        
+                        self._log("   ✅ Cloud inpainting completed", "success")
+                        return result_bgr
+                        
+                    elif result['status'] == 'failed':
+                        error_msg = result.get('error', 'Unknown error')
+                        # Check for common errors
+                        if 'version' in error_msg.lower():
+                            error_msg += f" (Try using the model identifier '{model}' in the custom field)"
+                        raise Exception(f"Inpainting failed: {error_msg}")
+                        
+                    time.sleep(1)
+                    
+                raise Exception(f"Timeout waiting for inpainting (>{timeout}s)")
+                
+            except Exception as e:
+                self._log(f"   ❌ Cloud inpainting failed: {str(e)}", "error")
+                return image.copy()         
+            
+
+    def _regions_overlap(self, region1: TextRegion, region2: TextRegion) -> bool:
+        """Check if two regions overlap"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Check if rectangles overlap
+        if (x1 + w1 < x2 or x2 + w2 < x1 or 
+            y1 + h1 < y2 or y2 + h2 < y1):
+            return False
+        
+        return True
+
+    def _calculate_overlap_area(self, region1: TextRegion, region2: TextRegion) -> float:
+        """Calculate the area of overlap between two regions"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Calculate intersection
+        x_left = max(x1, x2)
+        y_top = max(y1, y2)
+        x_right = min(x1 + w1, x2 + w2)
+        y_bottom = min(y1 + h1, y2 + h2)
+        
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+        
+        return (x_right - x_left) * (y_bottom - y_top)
+
+    def _adjust_overlapping_regions(self, regions: List[TextRegion], image_width: int, image_height: int) -> List[TextRegion]:
+        """Adjust positions of overlapping regions to prevent overlap while preserving text mapping"""
+        if len(regions) <= 1:
+            return regions
+        
+        # Create a copy of regions with preserved indices
+        adjusted_regions = []
+        for idx, region in enumerate(regions):
+            # Create a new TextRegion with copied values
+            adjusted_region = TextRegion(
+                text=region.text,
+                vertices=list(region.vertices),
+                bounding_box=list(region.bounding_box),
+                confidence=region.confidence,
+                region_type=region.region_type
+            )
+            if hasattr(region, 'translated_text'):
+                adjusted_region.translated_text = region.translated_text
+            
+            # IMPORTANT: Preserve original index to maintain text mapping
+            adjusted_region.original_index = idx
+            adjusted_region.original_bbox = tuple(region.bounding_box)  # Store original position
+            
+            adjusted_regions.append(adjusted_region)
+        
+        # DON'T SORT - This breaks the text-to-region mapping!
+        # Process in original order to maintain associations
+        
+        # Track which regions have been moved to avoid cascade effects
+        moved_regions = set()
+        
+        # Adjust overlapping regions
+        for i in range(len(adjusted_regions)):
+            if i in moved_regions:
+                continue  # Skip if already moved
+                
+            for j in range(i + 1, len(adjusted_regions)):
+                if j in moved_regions:
+                    continue  # Skip if already moved
+                    
+                region1 = adjusted_regions[i]
+                region2 = adjusted_regions[j]
+                
+                if self._regions_overlap(region1, region2):
+                    x1, y1, w1, h1 = region1.bounding_box
+                    x2, y2, w2, h2 = region2.bounding_box
+                    
+                    # Calculate centers using ORIGINAL positions for better logic
+                    orig_x1, orig_y1, _, _ = region1.original_bbox
+                    orig_x2, orig_y2, _, _ = region2.original_bbox
+                    
+                    # Determine which region to move based on original positions
+                    # Move the one that's naturally "later" in reading order
+                    if orig_y2 > orig_y1 + h1/2:  # region2 is below
+                        # Move region2 down slightly
+                        min_gap = 10
+                        new_y2 = y1 + h1 + min_gap
+                        if new_y2 + h2 <= image_height:
+                            region2.bounding_box = (x2, new_y2, w2, h2)
+                            moved_regions.add(j)
+                            self._log(f"  📍 Adjusted region {j} down (preserving order)", "debug")
+                    elif orig_y1 > orig_y2 + h2/2:  # region1 is below
+                        # Move region1 down slightly
+                        min_gap = 10
+                        new_y1 = y2 + h2 + min_gap
+                        if new_y1 + h1 <= image_height:
+                            region1.bounding_box = (x1, new_y1, w1, h1)
+                            moved_regions.add(i)
+                            self._log(f"  📍 Adjusted region {i} down (preserving order)", "debug")
+                    elif orig_x2 > orig_x1 + w1/2:  # region2 is to the right
+                        # Move region2 right slightly
+                        min_gap = 10
+                        new_x2 = x1 + w1 + min_gap
+                        if new_x2 + w2 <= image_width:
+                            region2.bounding_box = (new_x2, y2, w2, h2)
+                            moved_regions.add(j)
+                            self._log(f"  📍 Adjusted region {j} right (preserving order)", "debug")
+                    else:
+                        # Minimal adjustment - just separate them slightly
+                        # without changing their relative order
+                        min_gap = 5
+                        if y2 >= y1:  # region2 is lower or same level
+                            new_y2 = y2 + min_gap
+                            if new_y2 + h2 <= image_height:
+                                region2.bounding_box = (x2, new_y2, w2, h2)
+                                moved_regions.add(j)
+                        else:  # region1 is lower
+                            new_y1 = y1 + min_gap
+                            if new_y1 + h1 <= image_height:
+                                region1.bounding_box = (x1, new_y1, w1, h1)
+                                moved_regions.add(i)
+        
+        # IMPORTANT: Return in ORIGINAL order to preserve text mapping
+        # Sort by original_index to restore the original order
+        adjusted_regions.sort(key=lambda r: r.original_index)
+        
+        return adjusted_regions
+
+    # Symbol/Unicode mixed font fallback (Meiryo) — primary font remains unchanged
+    def _get_emote_fallback_font(self, font_size: int):
+        """Return a Meiryo Bold fallback font if available (preferred), else Meiryo.
+        Does not change the primary font; used for symbols, special characters, 
+        and invalid unicode that don't render well in the primary font.
+        """
+        try:
+            from PIL import ImageFont as _ImageFont
+            import os as _os
+            # Prefer Meiryo Bold TTC first; try common face indices, then regular Meiryo
+            candidates = [
+                ("C:/Windows/Fonts/meiryob.ttc", [0,1,2,3]),  # Meiryo Bold (and variants) TTC
+                ("C:/Windows/Fonts/meiryo.ttc",  [1,0,2,3]),  # Try bold-ish index first if present
+            ]
+            for path, idxs in candidates:
+                if _os.path.exists(path):
+                    for idx in idxs:
+                        try:
+                            return _ImageFont.truetype(path, font_size, index=idx)
+                        except Exception:
+                            continue
+            return None
+        except Exception:
+            return None
+    
+    def _is_truly_custom_font(self) -> bool:
+        """Check if the selected font is a truly custom font (outside authorized locations).
+        
+        Authorized font locations:
+        1. Default font path (Comic Sans MS Bold, Arial, etc.)
+        2. Windows system fonts directory (C:/Windows/Fonts)
+        3. Project fonts directory (./fonts)
+        4. Saved custom fonts in config
+        
+        Only fonts outside these locations are considered 'truly custom' and will
+        have Meiryo font mixing disabled.
+        
+        Returns:
+            True if font is truly custom (should disable mixing)
+            False if font is from authorized location (should allow mixing)
+        """
+        # If no font is selected or it's the default, allow mixing
+        if not self.selected_font_style:
+            return False
+        
+        # If it's the default font, allow mixing
+        if self.selected_font_style == self.font_path:
+            return False
+        
+        import os
+        
+        # Normalize paths for comparison (handle different path separators)
+        selected_path = os.path.normpath(self.selected_font_style).lower()
+        
+        # Check 1: Is it from Windows/Fonts directory?
+        windows_fonts_dir = os.path.normpath("C:/Windows/Fonts").lower()
+        if selected_path.startswith(windows_fonts_dir):
+            return False  # Authorized - allow mixing
+        
+        # Check 2: Is it from the project fonts directory?
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_fonts_dir = os.path.normpath(os.path.join(script_dir, "fonts")).lower()
+            if selected_path.startswith(project_fonts_dir):
+                return False  # Authorized - allow mixing
+        except Exception:
+            pass
+        
+        # Check 3: Is it in the saved custom fonts from config?
+        try:
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+                custom_fonts = self.main_gui.config.get('custom_fonts', [])
+                for custom_font in custom_fonts:
+                    if 'path' in custom_font:
+                        saved_path = os.path.normpath(custom_font['path']).lower()
+                        if selected_path == saved_path:
+                            return False  # Authorized - allow mixing
+        except Exception:
+            pass
+        
+        # If we got here, the font is from an unknown location
+        # This is a truly custom font - disable mixing
+        return True
+
+    def _is_emote_char(self, ch: str) -> bool:
+        """Check if character should use Meiryo font (symbols + CJK + invalid unicode).
+        Now uses a broader detection approach for all symbols, CJK characters, and special characters.
+        """
+        import unicodedata
+        
+        # Try to get the character's unicode category
+        try:
+            category = unicodedata.category(ch)
+        except (ValueError, TypeError):
+            # Invalid unicode - use Meiryo
+            return True
+        
+        # Check if character is in CJK Unicode ranges
+        # These characters render better with Japanese fonts like Meiryo
+        code_point = ord(ch)
+        
+        # CJK Unicode ranges (Japanese, Korean, Chinese):
+        # === Japanese ===
+        # U+3000-U+303F: CJK Symbols and Punctuation (includes 　, 、, 。, ・)
+        # U+3040-U+309F: Hiragana (あいうえお)
+        # U+30A0-U+30FF: Katakana (アイウエオ, includes ・)
+        # 
+        # === Korean ===
+        # U+1100-U+11FF: Hangul Jamo (initial/medial/final consonants and vowels)
+        # U+3130-U+318F: Hangul Compatibility Jamo (ㄱ, ㄴ, ㅁ, etc.)
+        # U+A960-U+A97F: Hangul Jamo Extended-A
+        # U+AC00-U+D7AF: Hangul Syllables (완성형 한글 - precomposed syllables)
+        # U+D7B0-U+D7FF: Hangul Jamo Extended-B
+        # 
+        # === Chinese (Simplified & Traditional) ===
+        # U+2E80-U+2EFF: CJK Radicals Supplement
+        # U+2F00-U+2FDF: Kangxi Radicals
+        # U+3400-U+4DBF: CJK Unified Ideographs Extension A
+        # U+4E00-U+9FFF: CJK Unified Ideographs (main block - most common Chinese characters)
+        # U+F900-U+FAFF: CJK Compatibility Ideographs
+        # U+20000-U+2A6DF: CJK Extension B (rare characters)
+        # U+2A700-U+2B73F: CJK Extension C
+        # U+2B740-U+2B81F: CJK Extension D
+        # U+2B820-U+2CEAF: CJK Extension E
+        # U+2CEB0-U+2EBEF: CJK Extension F
+        # 
+        # === Common ===
+        # U+FF00-U+FFEF: Halfwidth and Fullwidth Forms
+        if (0x2E80 <= code_point <= 0x2EFF or   # CJK Radicals Supplement
+            0x2F00 <= code_point <= 0x2FDF or   # Kangxi Radicals
+            0x3000 <= code_point <= 0x303F or   # CJK Symbols and Punctuation
+            0x3040 <= code_point <= 0x309F or   # Hiragana
+            0x30A0 <= code_point <= 0x30FF or   # Katakana
+            0x3130 <= code_point <= 0x318F or   # Hangul Compatibility Jamo
+            0x3400 <= code_point <= 0x4DBF or   # CJK Extension A
+            0x4E00 <= code_point <= 0x9FFF or   # CJK Unified Ideographs
+            0xA960 <= code_point <= 0xA97F or   # Hangul Jamo Extended-A
+            0xAC00 <= code_point <= 0xD7AF or   # Hangul Syllables
+            0xD7B0 <= code_point <= 0xD7FF or   # Hangul Jamo Extended-B
+            0xF900 <= code_point <= 0xFAFF or   # CJK Compatibility
+            0xFF00 <= code_point <= 0xFFEF or   # Fullwidth Forms
+            0x1100 <= code_point <= 0x11FF or   # Hangul Jamo
+            0x20000 <= code_point <= 0x2A6DF or # CJK Extension B
+            0x2A700 <= code_point <= 0x2B73F or # CJK Extension C
+            0x2B740 <= code_point <= 0x2B81F or # CJK Extension D
+            0x2B820 <= code_point <= 0x2CEAF or # CJK Extension E
+            0x2CEB0 <= code_point <= 0x2EBEF):  # CJK Extension F
+            return True
+        
+        # Symbol categories that should use Meiryo:
+        # So = Other Symbol (includes ♥, ★, ✓, etc.)
+        # Sm = Math Symbol  
+        # Sc = Currency Symbol
+        # Sk = Modifier Symbol
+        # Ps/Pe/Pi/Pf = Special punctuation that might not render well
+        symbol_categories = {'So', 'Sm', 'Sc', 'Sk'}
+        
+        if category in symbol_categories:
+            return True
+        
+        # Additionally, explicit whitelist for specific symbols that might be miscategorized
+        # or for symbols we definitely want in Meiryo
+        # Note: CJK characters are already covered by the range check above
+        EXPLICIT_SYMBOLS = set([
+            '\\u2661', # ♡ White Heart Suit
+            '\\u2665', # ♥ Black Heart Suit
+            '\\u2764', # ❤ Heavy Black Heart
+            '\\u2605', # ★ Black Star
+            '\\u2606', # ☆ White Star
+            '\\u266A', # ♪ Eighth Note
+            '\\u266B', # ♫ Beamed Eighth Notes
+            '\\u203B', # ※ Reference Mark
+            '\u2713', # ✓ Check Mark
+            '\u2714', # ✔ Heavy Check Mark
+            '\u2715', # ✕ Multiplication X
+            '\u2716', # ✖ Heavy Multiplication X
+            '\u2717', # ✗ Ballot X
+            '\u2718', # ✘ Heavy Ballot X
+            '\u2022', # • Bullet
+            '\u25CF', # ● Black Circle
+            '\u25CB', # ○ White Circle
+            '\u25A0', # ■ Black Square
+            '\u25A1', # □ White Square
+            '\u25B2', # ▲ Black Up-Pointing Triangle
+            '\u25B3', # △ White Up-Pointing Triangle
+            '\u25BC', # ▼ Black Down-Pointing Triangle
+            '\u25BD', # ▽ White Down-Pointing Triangle
+            '\u2190', # ← Leftwards Arrow
+            '\u2191', # ↑ Upwards Arrow
+            '\u2192', # → Rightwards Arrow
+            '\u2193', # ↓ Downwards Arrow
+            '\u21D2', # ⇒ Rightwards Double Arrow
+            '\u21D4', # ⇔ Left Right Double Arrow
+            '\u2026', # … Horizontal Ellipsis (sometimes renders poorly)
+            '\u3000', # 　Japanese Full-Width Space (sometimes needs special handling)
+        ])
+        
+        return ch in EXPLICIT_SYMBOLS
+
+    def _line_width_emote_mixed(self, draw, text: str, primary_font, emote_font) -> int:
+        if not emote_font:
+            bbox = draw.textbbox((0, 0), text, font=primary_font)
+            return (bbox[2] - bbox[0])
+        w = 0
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            # Treat VS16/VS15 as zero-width modifiers
+            if ch in ('\ufe0f', '\ufe0e'):
+                i += 1
+                continue
+            f = emote_font if self._is_emote_char(ch) else primary_font
+            try:
+                bbox = draw.textbbox((0, 0), ch, font=f)
+                w += (bbox[2] - bbox[0])
+            except Exception:
+                w += max(1, int(getattr(primary_font, 'size', 12) * 0.6))
+            i += 1
+        return w
+
+    def _draw_text_line_emote_mixed(self, draw, line: str, x: int, y: int, primary_font, emote_font,
+                                    fill_rgba, outline_rgba, outline_width: int,
+                                    shadow_enabled: bool, shadow_color_rgba, shadow_off):
+        cur_x = x
+        i = 0
+        
+        # Debug: Track which characters use Meiryo font
+        if emote_font and not getattr(self, 'concise_logs', False):
+            meiryo_chars = [ch for ch in line if self._is_emote_char(ch)]
+            if meiryo_chars:
+                meiryo_str = ''.join(meiryo_chars)
+                meiryo_codes = ', '.join([f'{ch}(U+{ord(ch):04X})' for ch in meiryo_chars[:5]])
+                if len(meiryo_chars) > 5:
+                    meiryo_codes += '...'
+                self._log(f"  🔤 Mixed font: '{meiryo_str}' using Meiryo [{meiryo_codes}]", "debug")
+        
+        while i < len(line):
+            ch = line[i]
+            if ch in ('\ufe0f', '\ufe0e'):
+                i += 1
+                continue
+            f = emote_font if (emote_font and self._is_emote_char(ch)) else primary_font
+            # measure
+            try:
+                bbox = draw.textbbox((0, 0), ch, font=f)
+                cw = bbox[2] - bbox[0]
+            except Exception:
+                cw = max(1, int(getattr(primary_font, 'size', 12) * 0.6))
+            # shadow
+            if shadow_enabled:
+                sx, sy = shadow_off
+                draw.text((cur_x + sx, y + sy), ch, font=f, fill=shadow_color_rgba)
+            # OPTIMIZED: Use stroke parameter for outline (10x faster)
+            try:
+                draw.text(
+                    (cur_x, y), ch, font=f,
+                    fill=fill_rgba,
+                    stroke_width=outline_width if outline_width > 0 else 0,
+                    stroke_fill=outline_rgba if outline_width > 0 else None
+                )
+            except TypeError:
+                # Fallback for older PIL versions
+                if outline_width > 0:
+                    for dx in range(-outline_width, outline_width + 1):
+                        for dy in range(-outline_width, outline_width + 1):
+                            if dx == 0 and dy == 0:
+                                continue
+                            draw.text((cur_x + dx, y + dy), ch, font=f, fill=outline_rgba)
+                draw.text((cur_x, y), ch, font=f, fill=fill_rgba)
+            cur_x += cw
+            i += 1
+
+    
+    def render_translated_text(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
+        """Enhanced text rendering with customizable backgrounds and styles"""
+        # OPTIMIZATION: Reduce logging overhead - only log summary
+        if not getattr(self, 'concise_logs', True):  # Default to concise
+            self._log(f"\n🎨 Starting ENHANCED text rendering with custom settings:", "info")
+            self._log(f"  ✅ Using ENHANCED renderer (not the simple version)", "info")
+            self._log(f"  Background: {self.text_bg_style} @ {int(self.text_bg_opacity/255*100)}% opacity", "info")
+            self._log(f"  Text color: RGB{self.text_color}", "info")
+            self._log(f"  Shadow: {'Enabled' if self.shadow_enabled else 'Disabled'}", "info")
+            self._log(f"  Font: {os.path.basename(self.selected_font_style) if self.selected_font_style else 'Default'}", "info")
+            if self.force_caps_lock:  
+                self._log(f"  Force Caps Lock: ENABLED", "info")
+        else:
+            self._log(f"🎨 Rendering {len(regions)} regions...", "info")
+        
+        # Convert to PIL for text rendering
+        import cv2
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(image_rgb)
+        
+        # Get image dimensions for boundary checking
+        image_height, image_width = image.shape[:2]
+        
+        # OPTIMIZATION: Cache mask creation result
+        if not hasattr(self, '_cached_mask') or not hasattr(self, '_cached_mask_regions'):
+            self._cached_mask = None
+            self._cached_mask_regions = None
+        
+        # Check if we can reuse cached mask
+        regions_hash = hash(tuple((r.bounding_box, r.text) for r in regions))
+        if self._cached_mask_regions == regions_hash:
+            text_mask = self._cached_mask
+            use_mask_for_rendering = text_mask is not None
+        else:
+            # Create text mask to get accurate render boundaries
+            try:
+                text_mask = self.create_text_mask(image, regions)
+                use_mask_for_rendering = True
+                self._cached_mask = text_mask
+                self._cached_mask_regions = regions_hash
+                if not getattr(self, 'concise_logs', True):
+                    self._log(f"  🎭 Created text mask for accurate render boundaries", "info")
+            except Exception as e:
+                text_mask = None
+                use_mask_for_rendering = False
+                self._cached_mask = None
+                self._cached_mask_regions = regions_hash
+                if not getattr(self, 'concise_logs', True):
+                    self._log(f"  ⚠️ Failed to create mask, using polygon bounds: {e}", "warning")
+        
+        # Only adjust overlapping regions if constraining to bubbles
+        if self.constrain_to_bubble:
+            adjusted_regions = self._adjust_overlapping_regions(regions, image_width, image_height)
+        else:
+            # Skip adjustment when not constraining (allows overflow)
+            adjusted_regions = regions
+            self._log("  📝 Using original regions (overflow allowed)", "info")
+        
+        # Check if any regions still overlap after adjustment (shouldn't happen, but let's verify)
+        has_overlaps = False
+        for i, region1 in enumerate(adjusted_regions):
+            for region2 in adjusted_regions[i+1:]:
+                if self._regions_overlap(region1, region2):
+                    has_overlaps = True
+                    # Only log overlap warnings in debug/verbose mode
+                    if not getattr(self, 'concise_logs', False):
+                        self._log("  ⚠️ Regions still overlap after adjustment", "warning")
+                    break
+            if has_overlaps:
+                break
+        
+        # Handle transparency settings based on overlaps
+        if has_overlaps and self.text_bg_opacity < 255 and self.text_bg_opacity > 0:
+            # Only log overlap warnings in debug/verbose mode
+            if not getattr(self, 'concise_logs', False):
+                self._log("  ⚠️ Overlapping regions detected with partial transparency", "warning")
+                self._log("  ℹ️ Rendering with requested transparency level", "info")
+        
+        region_count = 0
+        
+        # Decide rendering path based on transparency needs
+        # For full transparency (opacity = 0) or no overlaps, use RGBA rendering
+        # For overlaps with partial transparency, we still use RGBA to honor user settings
+        use_rgba_rendering = True  # Always use RGBA for consistent transparency support
+        
+        if use_rgba_rendering:
+            # Transparency-enabled rendering path
+            pil_image = pil_image.convert('RGBA')
+
+            # Decide parallel rendering from advanced settings
+            try:
+                adv = getattr(self, 'manga_settings', {}).get('advanced', {}) if hasattr(self, 'manga_settings') else {}
+            except Exception:
+                adv = {}
+            render_parallel = bool(adv.get('render_parallel', True))
+            max_workers = None
+            try:
+                max_workers = int(adv.get('max_workers', 4))
+            except Exception:
+                max_workers = 4
+
+            # OPTIMIZATION: Pre-compute shared values outside the render function
+            is_using_custom_font = self._is_truly_custom_font()
+            outline_width_factor = self.outline_width_factor
+            
+            def _render_one(region, idx):
+                # Build a separate overlay for this region
+                from PIL import Image as _PIL
+                overlay = _PIL.new('RGBA', pil_image.size, (0,0,0,0))
+                draw = ImageDraw.Draw(overlay)
+                # Work on local copy of text for caps lock
+                tr_text = region.translated_text or ''
+                if self.force_caps_lock:
+                    tr_text = tr_text.upper()
+                
+                # Get original bounding box
+                x, y, w, h = region.bounding_box
+                
+                # OPTIMIZATION: Cache safe area calculations per region
+                # Check if we've already calculated safe area for this region
+                region_id = id(region)  # Use object ID as cache key
+                if not hasattr(region, '_cached_safe_area'):
+                    # CRITICAL: Always prefer mask bounds when available (most accurate)
+                    # Mask bounds are especially important for Azure/Google without RT-DETR,
+                    # where OCR polygons are unreliable.
+                    if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                        # Bypass safe area completely
+                        render_x, render_y, render_w, render_h = region.bounding_box
+                    elif use_mask_for_rendering and text_mask is not None:
+                        # Use mask bounds directly - most accurate method
+                        safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
+                            region, 
+                            use_mask_bounds=True, 
+                            full_mask=text_mask
+                        )
+                        render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                    elif hasattr(region, 'vertices') and region.vertices:
+                        if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                            render_x, render_y, render_w, render_h = region.bounding_box
+                        else:
+                            # Fallback: use polygon-based safe area (for RT-DETR regions)
+                            safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
+                            render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                    else:
+                        # Last resort: use simple bounding box
+                        render_x, render_y, render_w, render_h = x, y, w, h
+                    # Cache the result
+                    region._cached_safe_area = (render_x, render_y, render_w, render_h)
+                else:
+                    # Use cached value
+                    render_x, render_y, render_w, render_h = region._cached_safe_area
+                
+                # Fit text - use render dimensions for proper sizing
+                # CONSISTENCY FIX: Always use the same text fitting logic regardless of source
+                # This ensures "Translate" button and "Start Translation" button produce identical results
+                
+                # Debug: Log settings to verify consistency
+                if not getattr(self, '_logged_wrap_settings', False):
+                    self._log(f"  📝 Text wrap settings: strict={self.strict_text_wrapping}, constrain={self.constrain_to_bubble}", "debug")
+                    self._logged_wrap_settings = True
+                
+                if self.custom_font_size:
+                    # Custom font size mode: use greedy_word_wrap from _pil_word_wrap
+                    font_size = self.custom_font_size
+                    font = self._get_font(font_size)
+                    wrapped_text, _ = self._pil_word_wrap(
+                        text=tr_text,
+                        font_path=self.selected_font_style or self.font_path,
+                        roi_width=render_w,
+                        roi_height=render_h,
+                        init_font_size=self.custom_font_size,
+                        min_font_size=self.custom_font_size,
+                        draw=draw
+                    )
+                    lines = wrapped_text.split('\n')
+                else:
+                    # Normal mode: use _fit_text_to_region for optimal sizing
+                    # Pass use_as_is=True since render dimensions are already safe area
+                    font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True)
+                # Fonts
+                font = self._get_font(font_size)
+                # Mixed font fallback if available (Meiryo for symbols/CJK)
+                # EXCLUDED for custom fonts outside predefined authorized locations
+                # Authorized locations: Windows/Fonts, project fonts dir, saved custom fonts in config
+                is_using_custom_font = self._is_truly_custom_font()
+                emote_font = None if is_using_custom_font else self._get_emote_fallback_font(font_size)
+                # Layout - use render dimensions (safe area if available)
+                # CRITICAL: Use actual text bbox height for accurate positioning
+                line_height = font_size * 1.2
+                
+                # Calculate actual total height using text bbox for first line as reference
+                if lines:
+                    sample_bbox = draw.textbbox((0, 0), lines[0] if lines[0] else "Ay", font=font)
+                    actual_line_height = sample_bbox[3] - sample_bbox[1]
+                    # Use the larger of: computed line_height or actual_line_height
+                    line_height = max(line_height, actual_line_height * 1.1)
+                
+                total_height = len(lines) * line_height
+                
+                # Ensure text doesn't overflow vertically - constrain start_y
+                ideal_start_y = render_y + (render_h - total_height) // 2
+                # Make sure text starts within render area and doesn't extend past bottom
+                max_start_y = render_y + render_h - total_height
+                start_y = max(render_y, min(ideal_start_y, max_start_y))
+                
+                # OPTIMIZATION: Skip debug logging in production (major performance gain)
+                # Debug logging for vertical constraint
+                if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                    end_y = start_y + total_height
+                    render_end_y = render_y + render_h
+                    overflow = max(0, end_y - render_end_y)
+                    if overflow > 0:
+                        self._log(f"  ⚠️ Text would overflow by {overflow}px, constrained to render area", "debug")
+                    self._log(f"  📏 Render area: y={render_y}-{render_end_y} (h={render_h}), Text: y={start_y}-{end_y} (h={total_height:.0f})", "debug")
+                # BG - use render dimensions
+                draw_bg = self.text_bg_opacity > 0
+                try:
+                    if draw_bg and getattr(self, 'free_text_only_bg_opacity', False):
+                        draw_bg = self._is_free_text_region(region)
+                except Exception:
+                    pass
+                if draw_bg:
+                    self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, font_size, start_y, emote_font)
+                # Get image dimensions for bounds checking
+                img_width, img_height = overlay.size
+                
+                # Text - use render dimensions for centering
+                for i, line in enumerate(lines):
+                    if emote_font is not None:
+                        text_width = self._line_width_emote_mixed(draw, line, font, emote_font)
+                    else:
+                        tb = draw.textbbox((0,0), line, font=font)
+                        text_width = tb[2]-tb[0]
+                    tx = render_x + (render_w - text_width)//2
+                    ty = start_y + i*line_height
+                    
+                    # CLIPPING: Ensure text stays within image bounds
+                    # Add small padding to account for outline width
+                    ow = max(1, font_size // self.outline_width_factor)
+                    padding = ow + 2
+                    
+                    # Horizontal bounds check
+                    if tx - padding < 0:
+                        tx = padding
+                    elif tx + text_width + padding > img_width:
+                        tx = img_width - text_width - padding
+                    
+                    # Vertical bounds check
+                    if ty - padding < 0:
+                        ty = padding
+                    elif ty + line_height + padding > img_height:
+                        ty = img_height - line_height - padding
+                    
+                    # Ensure final position is valid
+                    tx = max(0, min(tx, img_width - 1))
+                    ty = max(0, min(ty, img_height - 1))
+                    if emote_font is not None:
+                        self._draw_text_line_emote_mixed(draw, line, tx, ty, font, emote_font,
+                                                         self.text_color + (255,), self.outline_color + (255,), ow,
+                                                         self.shadow_enabled,
+                                                         self.shadow_color + (255,) if isinstance(self.shadow_color, tuple) and len(self.shadow_color)==3 else (0,0,0,255),
+                                                         (self.shadow_offset_x, self.shadow_offset_y))
+                    else:
+                        if self.shadow_enabled:
+                            self._draw_text_shadow(draw, tx, ty, line, font)
+                        # OPTIMIZED: Use PIL's built-in stroke parameter (10x faster than nested loop)
+                        # This replaces the O(n²) nested loop with a single draw call
+                        try:
+                            draw.text(
+                                (tx, ty), line, font=font,
+                                fill=self.text_color + (255,),
+                                stroke_width=ow,
+                                stroke_fill=self.outline_color + (255,)
+                            )
+                        except TypeError:
+                            # Fallback for older PIL versions without stroke support
+                            for dx in range(-ow, ow+1):
+                                for dy in range(-ow, ow+1):
+                                    if dx!=0 or dy!=0:
+                                        draw.text((tx+dx, ty+dy), line, font=font, fill=self.outline_color + (255,))
+                            draw.text((tx, ty), line, font=font, fill=self.text_color + (255,))
+                return overlay
+
+            overlays = []
+            if render_parallel and len(adjusted_regions) > 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                
+                workers = max(1, min(max_workers, len(adjusted_regions)))
+                self._log(f"  🚀 PARALLEL RENDERING: {workers} threads for {len(adjusted_regions)} regions", "info")
+                
+                try:
+                    with ThreadPoolExecutor(max_workers=workers) as ex:
+                        # Submit all tasks using _render_one (threads can access closures)
+                        fut_to_idx = {}
+                        for i, r in enumerate(adjusted_regions):
+                            if r.translated_text:
+                                fut = ex.submit(_render_one, r, i)
+                                fut_to_idx[fut] = i
+                        
+                        # Collect results
+                        temp = {}
+                        for fut in as_completed(fut_to_idx):
+                            i = fut_to_idx[fut]
+                            try:
+                                temp[i] = fut.result()
+                            except Exception as e:
+                                self._log(f"  ⚠️ Region {i} render failed: {e}", "warning")
+                                import traceback
+                                self._log(traceback.format_exc(), "debug")
+                                temp[i] = None
+                        
+                        # Fill in None for regions without text
+                        overlays = [temp.get(i) for i in range(len(adjusted_regions))]
+                        self._log(f"  ✅ Parallel render complete: {len([o for o in overlays if o])} overlays", "info")
+                except Exception as pool_err:
+                    self._log(f"  ⚠️ ThreadPool failed, falling back to sequential: {pool_err}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "debug")
+                    # Fallback to sequential
+                    overlays = []
+                    for i, r in enumerate(adjusted_regions):
+                        if not r.translated_text:
+                            overlays.append(None)
+                            continue
+                        overlays.append(_render_one(r, i))
+            else:
+                for i, r in enumerate(adjusted_regions):
+                    if not r.translated_text:
+                        overlays.append(None)
+                        continue
+                    overlays.append(_render_one(r, i))
+
+            # Composite overlays
+            # PIL's alpha_composite is already highly optimized in C
+            for ov in overlays:
+                if ov is not None:
+                    pil_image = Image.alpha_composite(pil_image, ov)
+                    region_count += 1
+
+            # Convert back to RGB
+            pil_image = pil_image.convert('RGB')
+        
+        else:
+            # This path is now deprecated but kept for backwards compatibility
+            # Direct rendering without transparency layers
+            draw = ImageDraw.Draw(pil_image)
+            
+            for region in adjusted_regions:
+                if not region.translated_text:
+                    continue
+                    
+                self._log(f"DEBUG: Rendering - Original: '{region.text[:30]}...' -> Translated: '{region.translated_text[:30]}...'", "debug")
+
+                
+                # APPLY CAPS LOCK TRANSFORMATION HERE
+                if self.force_caps_lock:
+                    region.translated_text = region.translated_text.upper()
+                
+                region_count += 1
+                self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
+                
+                # Get original bounding box
+                x, y, w, h = region.bounding_box
+                
+                # CRITICAL: Always prefer mask bounds when available (most accurate)
+                # Mask bounds are especially important for Azure/Google without RT-DETR,
+                # where OCR polygons are unreliable.
+                if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                    # Bypass safe area completely
+                    render_x, render_y, render_w, render_h = x, y, w, h
+                elif use_mask_for_rendering and text_mask is not None:
+                    # Use mask bounds directly - most accurate method
+                    safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
+                        region,
+                        use_mask_bounds=True,
+                        full_mask=text_mask
+                    )
+                    render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                elif hasattr(region, 'vertices') and region.vertices:
+                    if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                        render_x, render_y, render_w, render_h = x, y, w, h
+                    else:
+                        # Fallback: use polygon-based safe area (for RT-DETR regions)
+                        safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
+                        render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                else:
+                    # Last resort: use simple bounding box
+                    render_x, render_y, render_w, render_h = x, y, w, h
+                
+                # Find optimal font size - use render dimensions for proper sizing
+                if self.custom_font_size:
+                    # Use custom font size but STILL validate and wrap properly using _pil_word_wrap
+                    font_path = self.selected_font_style or self.font_path
+                    wrapped_text, _ = self._pil_word_wrap(
+                        text=region.translated_text,
+                        font_path=font_path,
+                        roi_width=render_w,
+                        roi_height=render_h,
+                        init_font_size=self.custom_font_size,
+                        min_font_size=self.custom_font_size,  # Force this size
+                        draw=draw
+                    )
+                    font_size = self.custom_font_size
+                    lines = wrapped_text.split('\n') if wrapped_text else [region.translated_text]
+                else:
+                    # Pass use_as_is=True since render dimensions are already safe area
+                    font_size, lines = self._fit_text_to_region(
+                        region.translated_text, render_w, render_h, draw, region, use_as_is=True
+                    )
+                
+                # Load font
+                font = self._get_font(font_size)
+                
+                # Calculate text layout - use render dimensions
+                # CRITICAL: Use actual text bbox height for accurate positioning
+                line_height = font_size * 1.2
+                
+                # Calculate actual total height using text bbox for first line as reference
+                if lines:
+                    sample_bbox = draw.textbbox((0, 0), lines[0] if lines[0] else "Ay", font=font)
+                    actual_line_height = sample_bbox[3] - sample_bbox[1]
+                    # Use the larger of: computed line_height or actual_line_height
+                    line_height = max(line_height, actual_line_height * 1.1)
+                
+                # Mixed font fallback if available (Meiryo for symbols/CJK)
+                # EXCLUDED for custom fonts outside predefined authorized locations
+                # Authorized locations: Windows/Fonts, project fonts dir, saved custom fonts in config
+                is_using_custom_font = self._is_truly_custom_font()
+                emote_font = None if is_using_custom_font else self._get_emote_fallback_font(font_size)
+                
+                # Calculate total height
+                total_height = len(lines) * line_height
+                
+                # Ensure text doesn't overflow vertically - constrain start_y
+                ideal_start_y = render_y + (render_h - total_height) // 2
+                # Make sure text starts within render area and doesn't extend past bottom
+                max_start_y = render_y + render_h - total_height
+                start_y = max(render_y, min(ideal_start_y, max_start_y))
+                
+                # Draw opaque background (optionally only for free text) - use render dimensions
+                draw_bg = self.text_bg_opacity > 0
+                try:
+                    if draw_bg and getattr(self, 'free_text_only_bg_opacity', False):
+                        draw_bg = self._is_free_text_region(region)
+                except Exception:
+                    pass
+                if draw_bg:
+                    self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, 
+                                             font_size, start_y)
+                
+                # Get image dimensions for bounds checking
+                img_width, img_height = pil_image.size
+                
+                # Draw text - use render dimensions
+                for i, line in enumerate(lines):
+                    # Mixed fallback not supported in legacy path; keep primary measurement
+                    text_bbox = draw.textbbox((0, 0), line, font=font)
+                    text_width = text_bbox[2] - text_bbox[0]
+                    
+                    text_x = render_x + (render_w - text_width) // 2
+                    text_y = start_y + i * line_height
+                    
+                    # CLIPPING: Ensure text stays within image bounds
+                    outline_width = max(1, font_size // self.outline_width_factor)
+                    padding = outline_width + 2
+                    
+                    # Horizontal bounds check
+                    if text_x - padding < 0:
+                        text_x = padding
+                    elif text_x + text_width + padding > img_width:
+                        text_x = img_width - text_width - padding
+                    
+                    # Vertical bounds check
+                    if text_y - padding < 0:
+                        text_y = padding
+                    elif text_y + line_height + padding > img_height:
+                        text_y = img_height - line_height - padding
+                    
+                    # Ensure final position is valid
+                    text_x = max(0, min(text_x, img_width - 1))
+                    text_y = max(0, min(text_y, img_height - 1))
+                    
+                    if self.shadow_enabled:
+                        self._draw_text_shadow(draw, text_x, text_y, line, font)
+                    
+                    # OPTIMIZED: Use PIL's built-in stroke parameter (10x faster)
+                    try:
+                        draw.text(
+                            (text_x, text_y), line, font=font,
+                            fill=self.text_color,
+                            stroke_width=outline_width,
+                            stroke_fill=self.outline_color
+                        )
+                    except TypeError:
+                        # Fallback for older PIL versions
+                        for dx in range(-outline_width, outline_width + 1):
+                            for dy in range(-outline_width, outline_width + 1):
+                                if dx != 0 or dy != 0:
+                                    draw.text((text_x + dx, text_y + dy), line, 
+                                            font=font, fill=self.outline_color)
+                        draw.text((text_x, text_y), line, font=font, fill=self.text_color)
+        
+        # Convert back to numpy array
+        result_rgb = np.array(pil_image)
+        result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+        
+        # OPTIMIZATION: Only log if not in concise mode
+        if not getattr(self, 'concise_logs', True):
+            self._log(f"✅ ENHANCED text rendering complete - rendered {region_count} regions", "info")
+        else:
+            self._log(f"✅ Rendered {region_count} regions", "info")
+        return result
+    
+    def _is_free_text_region(self, region) -> bool:
+        """Determine if the region is free text (not a bubble).
+        Priority order:
+        1) Explicit flags from detector: region.region_type / region.bubble_type
+        2) Fallback geometry heuristic
+        """
+        try:
+            # 1) Prefer explicit flags when available (RT-DETR sets both in our pipeline)
+            if hasattr(region, 'region_type') and isinstance(region.region_type, str):
+                if region.region_type.lower() == 'free_text' or region.region_type.lower() == 'free-text' or region.region_type.lower() == 'free text':
+                    return True
+            if hasattr(region, 'bubble_type') and isinstance(region.bubble_type, str):
+                if region.bubble_type.lower() == 'free_text' or region.bubble_type.lower() == 'free-text' or region.bubble_type.lower() == 'free text':
+                    return True
+            
+            # 2) Fallback heuristic when labels are missing
+            x, y, w, h = region.bounding_box
+            w, h = int(w), int(h)
+            if h <= 0:
+                return True
+            aspect = w / max(1, h)
+            # Wider, shorter regions are often free text
+            return aspect >= 2.5 or h < 50
+        except Exception:
+            return False
+
+    def _draw_text_background(self, draw: ImageDraw, x: int, y: int, w: int, h: int,
+                            lines: List[str], font: ImageFont, font_size: int, 
+                            start_y: int, emote_font: ImageFont = None):
+        """Draw background behind text with selected style.
+        If emote_font is provided, measure lines with emote-only mixing.
+        """
+        # Early return if opacity is 0 (fully transparent)
+        if self.text_bg_opacity == 0:
+            return
+        
+        # Calculate actual text bounds
+        line_height = font_size * 1.2
+        max_width = 0
+        
+        for line in lines:
+            if emote_font is not None:
+                line_width = self._line_width_emote_mixed(draw, line, font, emote_font)
+            else:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_width = bbox[2] - bbox[0]
+            max_width = max(max_width, line_width)
+        
+        # Apply size reduction
+        padding = int(font_size * 0.3)
+        bg_width = int((max_width + padding * 2) * self.text_bg_reduction)
+        bg_height = int((len(lines) * line_height + padding * 2) * self.text_bg_reduction)
+        
+        # Center background
+        bg_x = x + (w - bg_width) // 2
+        bg_y = int(start_y - padding)
+        
+        # Create semi-transparent color
+        bg_color = (255, 255, 255, self.text_bg_opacity)
+        
+        if self.text_bg_style == 'box':
+            # Rounded rectangle
+            radius = min(20, bg_width // 10, bg_height // 10)
+            self._draw_rounded_rectangle(draw, bg_x, bg_y, bg_x + bg_width, 
+                                       bg_y + bg_height, radius, bg_color)
+            
+        elif self.text_bg_style == 'circle':
+            # Ellipse that encompasses the text
+            center_x = bg_x + bg_width // 2
+            center_y = bg_y + bg_height // 2
+            # Make it slightly wider to look more natural
+            ellipse_width = int(bg_width * 1.2)
+            ellipse_height = bg_height
+            
+            draw.ellipse([center_x - ellipse_width // 2, center_y - ellipse_height // 2,
+                         center_x + ellipse_width // 2, center_y + ellipse_height // 2],
+                        fill=bg_color)
+            
+        elif self.text_bg_style == 'wrap':
+            # Individual background for each line
+            for i, line in enumerate(lines):
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_width = bbox[2] - bbox[0]
+                
+                line_bg_width = int((line_width + padding) * self.text_bg_reduction)
+                line_bg_x = x + (w - line_bg_width) // 2
+                line_bg_y = int(start_y + i * line_height - padding // 2)
+                line_bg_height = int(line_height + padding // 2)
+                
+                # Draw rounded rectangle for each line
+                radius = min(10, line_bg_width // 10, line_bg_height // 10)
+                self._draw_rounded_rectangle(draw, line_bg_x, line_bg_y, 
+                                           line_bg_x + line_bg_width,
+                                           line_bg_y + line_bg_height, radius, bg_color)
+    
+    def _draw_text_shadow(self, draw: ImageDraw, x: int, y: int, text: str, font: ImageFont):
+        """Draw text shadow with optional blur effect"""
+        if self.shadow_blur == 0:
+            # Simple sharp shadow
+            shadow_x = x + self.shadow_offset_x
+            shadow_y = y + self.shadow_offset_y
+            draw.text((shadow_x, shadow_y), text, font=font, fill=self.shadow_color)
+        else:
+            # Blurred shadow (simulated with multiple layers)
+            blur_range = self.shadow_blur
+            opacity_step = 80 // (blur_range + 1)  # Distribute opacity across blur layers
+            
+            for blur_offset in range(blur_range, 0, -1):
+                layer_opacity = opacity_step * (blur_range - blur_offset + 1)
+                shadow_color_with_opacity = self.shadow_color + (layer_opacity,)
+                
+                # Draw shadow at multiple positions for blur effect
+                for dx in range(-blur_offset, blur_offset + 1):
+                    for dy in range(-blur_offset, blur_offset + 1):
+                        if dx*dx + dy*dy <= blur_offset*blur_offset:  # Circular blur
+                            shadow_x = x + self.shadow_offset_x + dx
+                            shadow_y = y + self.shadow_offset_y + dy
+                            draw.text((shadow_x, shadow_y), text, font=font, 
+                                    fill=shadow_color_with_opacity)
+    
+    def _draw_rounded_rectangle(self, draw: ImageDraw, x1: int, y1: int, 
+                               x2: int, y2: int, radius: int, fill):
+        """Draw a rounded rectangle"""
+        # Draw the main rectangle
+        draw.rectangle([x1 + radius, y1, x2 - radius, y2], fill=fill)
+        draw.rectangle([x1, y1 + radius, x2, y2 - radius], fill=fill)
+        
+        # Draw the corners
+        draw.pieslice([x1, y1, x1 + 2 * radius, y1 + 2 * radius], 180, 270, fill=fill)
+        draw.pieslice([x2 - 2 * radius, y1, x2, y1 + 2 * radius], 270, 360, fill=fill)
+        draw.pieslice([x1, y2 - 2 * radius, x1 + 2 * radius, y2], 90, 180, fill=fill)
+        draw.pieslice([x2 - 2 * radius, y2 - 2 * radius, x2, y2], 0, 90, fill=fill)
+    
+    def _get_font(self, font_size: int) -> ImageFont:
+        """Get font with specified size, using selected style if available"""
+        font_path = self.selected_font_style or self.font_path
+        
+        if font_path:
+            try:
+                return ImageFont.truetype(font_path, font_size)
+            except:
+                pass
+        
+        return ImageFont.load_default()
+     
+    def _pil_word_wrap(self, text: str, font_path: str, roi_width: int, roi_height: int,
+                       init_font_size: int, min_font_size: int, draw: ImageDraw) -> Tuple[str, int]:
+        """Binary search for perfect-fit font sizing.
+        
+        When strict_text_wrapping is disabled:
+        - Binary searches for MAXIMUM font size that fits within bounds
+        - For narrow bubbles (aspect > 2):
+          * 'compact': strict fitting, all words must fit within bounds
+          * 'balanced': median-based sizing, allows up to 20% of words to overflow
+          * 'readable': ignores width entirely, only validates height (maximum font)
+        - For normal bubbles: greedy word wrapping for natural grouping, validates height
+        
+        When strict_text_wrapping is enabled:
+        - Falls back to original column-based algorithm (legacy behavior)
+        """
+        from hyphen_textwrap import wrap as hyphen_wrap
+        import statistics
+        
+        mutable_message = text
+        font_size = init_font_size
+        
+        def get_median_word_width(txt, font, use_strict=False):
+            """Calculate median word width to avoid outlier-based sizing.
+            
+            Args:
+                txt: Text to analyze
+                font: Font to measure with
+                use_strict: If False (default), uses 75th percentile instead of true median
+                           This is more conservative and handles distributions with many outliers
+            """
+            words = txt.split()
+            if not words:
+                return 0
+            
+            # Measure width of each word
+            word_widths = []
+            for word in words:
+                bbox = draw.textbbox((0, 0), word, font=font)
+                word_widths.append(bbox[2] - bbox[0])
+            
+            # Use 75th percentile by default (or median if strict=True)
+            # 75th percentile is more forgiving with outliers than median
+            if use_strict:
+                return statistics.median(word_widths)
+            else:
+                # 75th percentile
+                sorted_widths = sorted(word_widths)
+                idx = int(len(sorted_widths) * 0.75)
+                return sorted_widths[min(idx, len(sorted_widths) - 1)]
+        
+        def greedy_word_wrap(txt, font, max_width):
+            """Greedily pack words into lines to maximize font size.
+            
+            This creates natural groupings like:
+            - 'Like This.'
+            - 'I Can\'t Even'
+            - 'Nap Peacefully~'
+            
+            Instead of one word per line.
+            """
+            words = txt.split()
+            if not words:
+                return txt
+            
+            lines = []
+            current_line = []
+            
+            for word in words:
+                # Try adding this word to current line
+                test_line = current_line + [word]
+                test_text = ' '.join(test_line)
+                bbox = draw.textbbox((0, 0), test_text, font=font)
+                line_width = bbox[2] - bbox[0]
+                
+                if line_width <= max_width:
+                    # Word fits, add it
+                    current_line.append(word)
+                else:
+                    # Word doesn't fit
+                    if current_line:
+                        # Save current line and start new one
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        # Single word too long - add it anyway if not strict mode
+                        if not self.strict_text_wrapping:
+                            current_line = [word]
+                        else:
+                            # In strict mode, try to break it
+                            lines.append(word)
+            
+            # Add last line
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            return '\n'.join(lines)
+        
+        def wrap_narrow_bubble_with_shortword_merge(txt, font, max_width, allow_overflow=False):
+            """For narrow bubbles: start with one word per line, then merge short words with neighbors.
+            
+            Example:
+            Input: "LIKE THIS. I CAN'T EVEN TAKE A PEACEFUL NAP~"
+            Start: ["LIKE", "THIS.", "I", "CAN'T", "EVEN", "TAKE", "A", "PEACEFUL", "NAP~"]
+            Merge "I" with "CAN'T" -> ["LIKE", "THIS.", "I CAN'T", "EVEN", "TAKE", "A", "PEACEFUL", "NAP~"]
+            Merge "A" with "PEACEFUL" -> ["LIKE", "THIS.", "I CAN'T", "EVEN", "TAKE A", "PEACEFUL", "NAP~"]
+            Result:
+            LIKE
+            THIS.
+            I CAN'T
+            EVEN
+            TAKE A
+            PEACEFUL
+            NAP~
+            """
+            words = txt.split()
+            if not words:
+                return txt
+            
+            def twidth(s: str) -> int:
+                bb = draw.textbbox((0, 0), s if s else "A", font=font)
+                return bb[2] - bb[0]
+            
+            def is_short(w: str) -> bool:
+                return len(w.strip('.,!?~;:"\'')) <= 2
+            
+            # Step 1: Start with one word per line
+            lines = [[word] for word in words]
+            
+            # Step 2: First pass - merge consecutive short words together
+            i = 0
+            while i < len(lines):
+                if not lines[i]:
+                    i += 1
+                    continue
+                word = lines[i][0]
+                
+                # If this is a short word AND next is also a short word, merge them
+                if is_short(word) and i + 1 < len(lines) and lines[i + 1]:
+                    next_word = lines[i + 1][0]
+                    if is_short(next_word):
+                        test = f"{word} {next_word}"
+                        test_width = twidth(test)
+                       # print(f"[DEBUG] Merging consecutive short words: '{word}' + '{next_word}' = '{test}', width={test_width}, max={max_width}")
+                        if allow_overflow or test_width <= max_width:
+                            lines[i] = [test]
+                            lines.pop(i + 1)
+                            print(f"[DEBUG]   -> MERGED consecutive shorts")
+                            # Don't increment i, check if we can merge more
+                            continue
+                
+                i += 1
+            
+            # Step 3: Second pass - merge remaining orphaned short words with neighbors
+            # Only merge SINGLE short words, not pairs that were already merged in step 2
+            i = 0
+            while i < len(lines):
+                if not lines[i]:
+                    i += 1
+                    continue
+                    
+                word = lines[i][0]
+                
+                # Check if this is a SINGLE short word (not already merged with another)
+                words_in_line = word.split()
+                if len(words_in_line) == 1 and is_short(word):
+                    merged = False
+                    
+                    # DEBUG
+                    #print(f"[DEBUG] Processing short word: '{word}' at line {i}, allow_overflow={allow_overflow}")
+                    
+                    # Try to merge with PREVIOUS word first (keep short word with word above it)
+                    # BUT: Don't merge if previous word ends in sentence-ending punctuation
+                    if i > 0 and lines[i - 1]:
+                        prev_word = lines[i - 1][0]
+                        # Check if previous word ends in sentence-ending punctuation
+                        ends_in_punctuation = prev_word.rstrip().endswith(('.', '!', '?', '~'))
+                        test = f"{prev_word} {word}"
+                        test_width = twidth(test)
+                       # print(f"[DEBUG]   Prev word: '{prev_word}', ends_punct={ends_in_punctuation}, test='{test}', width={test_width}, max={max_width}")
+                        if not ends_in_punctuation and (allow_overflow or test_width <= max_width):
+                            # Merge with previous
+                            #print(f"[DEBUG]   -> MERGED with previous")
+                            lines[i - 1] = [test]
+                            lines.pop(i)
+                            # Don't increment i since we removed current
+                            merged = True
+                            continue
+                    
+                    # If couldn't merge with previous, try with NEXT
+                    if not merged and i + 1 < len(lines) and lines[i + 1]:
+                        next_word = lines[i + 1][0]
+                        test = f"{word} {next_word}"
+                        test_width = twidth(test)
+                       # print(f"[DEBUG]   Next word: '{next_word}', test='{test}', width={test_width}, max={max_width}")
+                        if allow_overflow or test_width <= max_width:
+                            # Merge with next
+                            #print(f"[DEBUG]   -> MERGED with next")
+                            lines[i] = [test]
+                            lines.pop(i + 1)
+                            merged = True
+                        else:
+                            #print(f"[DEBUG]   -> NOT MERGED (too wide)")
+                            pass
+                    else:
+                        #print(f"[DEBUG]   No next word to merge with")
+                        pass
+                
+                i += 1
+            
+            # Convert back to string
+            return '\n'.join([line[0] for line in lines if line])
+        
+        def eval_metrics(txt, font, apply_qt_overhead=False):
+            """Calculate width/height of multiline text.
+            
+            CRITICAL: Must match the rendering logic exactly to prevent overflow.
+            Rendering uses font_size * 1.2 as line_height, so we must do the same here.
+            
+            apply_qt_overhead: If True, add 40% to width to account for Qt rendering overhead
+            """
+            lines = txt.split('\n')
+            if not lines:
+                return (0, 0)
+            
+            max_width = 0
+            
+            for line in lines:
+                bbox = draw.textbbox((0, 0), line if line else "A", font=font)
+                line_width = bbox[2] - bbox[0]
+                max_width = max(max_width, line_width)
+            
+            # Qt renders text wider than PIL measures - add overhead in compact mode
+            if apply_qt_overhead:
+                max_width = int(max_width * 1.4)
+            
+            # Calculate height using same logic as rendering:
+            # line_height = max(font.size * 1.2, actual_bbox_height * 1.1)
+            # Extract font size from the font object
+            current_font_size = getattr(font, 'size', init_font_size)
+            sample_bbox = draw.textbbox((0, 0), lines[0] if lines[0] else "Ay", font=font)
+            actual_line_height = sample_bbox[3] - sample_bbox[1]
+            line_height = max(current_font_size * 1.2, actual_line_height * 1.1)
+            total_height = len(lines) * line_height
+            
+            return (max_width, total_height)
+        
+        # Get initial font
+        try:
+            if font_path:
+                font = ImageFont.truetype(font_path, font_size)
+            else:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        
+        # BINARY SEARCH FOR PERFECT FIT: When strict mode disabled
+        if not self.strict_text_wrapping:
+            # Check if this is a narrow vertical bubble
+            aspect_ratio = roi_height / max(roi_width, 1)
+            is_narrow = aspect_ratio > 2.0
+            
+            # Check auto_fit_style setting
+            auto_fit_style = 'balanced'  # default
+            try:
+                manga_settings = self.main_gui.config.get('manga_settings', {})
+                rendering = manga_settings.get('rendering', {})
+                auto_fit_style = rendering.get('auto_fit_style', 'balanced').lower()
+            except Exception:
+                pass
+            
+            # For narrow bubbles: calculate median font size based on all words
+            # This ignores outliers like "PEACEFULLY~" and sizes for typical words
+            # DISABLED when auto_fit_style is 'compact' - uses strict fitting instead
+            if is_narrow and auto_fit_style != 'compact':
+                words = text.split()
+                word_font_sizes = []
+                
+                for word in words:
+                    # What font size would make this word use 90% of width?
+                    bbox = draw.textbbox((0, 0), word, font=font)
+                    word_width_at_init = bbox[2] - bbox[0]
+                    
+                    if word_width_at_init > 0:
+                        # Scale to 95% of roi_width (more aggressive)
+                        ideal_size = int(init_font_size * (roi_width * 0.95) / word_width_at_init)
+                        word_font_sizes.append(ideal_size)
+                
+                # Use 50th percentile (true median) - ignore outliers completely
+                if word_font_sizes:
+                    sorted_sizes = sorted(word_font_sizes)
+                    median_idx = len(sorted_sizes) // 2
+                    median_font_size = sorted_sizes[median_idx]
+                    
+                    # Binary search configuration based on auto_fit_style
+                    low = min_font_size
+                    high = max(init_font_size, median_font_size)
+                    best_font_size = min_font_size
+                    
+                    # In readable/balanced modes: allow overflow for short word merging
+                    # This prevents orphaned short words even in very narrow bubbles
+                    allow_overflow = (auto_fit_style in ['readable', 'balanced'])
+                    merge_width = roi_width
+                    
+                    best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
+                    
+                    while low <= high:
+                        mid = (low + high) // 2
+                        
+                        # Load font at this size
+                        try:
+                            test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                        except Exception:
+                            test_font = ImageFont.load_default()
+                        
+                        # Wrap: one word per line, merge short words
+                        wrapped = wrap_narrow_bubble_with_shortword_merge(text, test_font, merge_width, allow_overflow)
+                        
+                        # Measure height and width
+                        width, height = eval_metrics(wrapped, test_font)
+                        
+                        # Validation based on auto_fit_style
+                        if auto_fit_style == 'readable':
+                            # Readable mode: IGNORE width validation entirely, only check height
+                            fits = height <= roi_height
+                        else:
+                            # Balanced mode: allow some width overflow (55%) for outlier words, but not unlimited
+                            fits = height <= roi_height and width <= roi_width * 1.55
+                        
+                        if fits:
+                            # Fits, try larger
+                            best_font_size = mid
+                            best_wrapped = wrapped
+                            low = mid + 1
+                        else:
+                            # Too large, try smaller
+                            high = mid - 1
+                    
+                    # Ensure minimum font size is always respected
+                    return best_wrapped, max(int(best_font_size), min_font_size)
+                else:
+                    # Fallback
+                    allow_overflow = (auto_fit_style in ['readable', 'balanced'])
+                    merge_width = roi_width
+                    wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
+                    # Ensure we respect minimum font size
+                    return wrapped, max(min_font_size, init_font_size)
+            
+            # For narrow bubbles with compact mode: strict fitting (no overflow allowed)
+            if is_narrow and auto_fit_style == 'compact':
+                words = text.split()
+                
+                high = init_font_size
+                low = min_font_size
+                best_font_size = min_font_size
+                best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width, allow_overflow=False)
+                
+                while low <= high:
+                    mid = (low + high) // 2
+                    
+                    # Load font at this size
+                    try:
+                        test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                    except Exception:
+                        test_font = ImageFont.load_default()
+                    
+                    # Wrap: one word per line, merge short words (strict width in compact mode)
+                    wrapped = wrap_narrow_bubble_with_shortword_merge(text, test_font, roi_width, allow_overflow=False)
+                    
+                    # Measure both width and height - STRICT (no overflow)
+                    # Apply Qt rendering overhead (40% wider) to match actual rendering
+                    width, height = eval_metrics(wrapped, test_font, apply_qt_overhead=True)
+                    
+                    #print(f"[COMPACT DEBUG] font_size={mid}, width={width:.1f} (with Qt overhead), roi_width={roi_width}, height={height:.1f}, roi_height={roi_height}")
+                    #print(f"[COMPACT DEBUG] wrapped text:\n{wrapped}\n")
+                    
+                    # Compact mode: STRICT - no overflow allowed
+                    if width <= roi_width and height <= roi_height:
+                        # Fits within 90%, try larger
+                        best_font_size = mid
+                        best_wrapped = wrapped
+                        low = mid + 1
+                        #print(f"[COMPACT DEBUG] -> FITS, trying larger")
+                    else:
+                        # Too large, try smaller
+                        high = mid - 1
+                        #print(f"[COMPACT DEBUG] -> TOO LARGE, trying smaller")
+                
+                # Ensure minimum font size is always respected
+                return best_wrapped, max(int(best_font_size), min_font_size)
+            
+            # For normal bubbles: original greedy wrapping logic
+            high = init_font_size
+            low = min_font_size
+            best_font_size = min_font_size
+            best_wrapped = text
+            
+            while low <= high:
+                mid = (low + high) // 2
+                
+                # Load font at this size
+                try:
+                    test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                except Exception:
+                    test_font = ImageFont.load_default()
+                
+                # Normal: greedy word wrapping with short-word protection
+                wrapped = greedy_word_wrap(text, test_font, roi_width)
+                # Post-process to merge orphaned short words
+                lines = wrapped.split('\n')
+                merged_lines = []
+                i = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+                    words_in_line = line.split()
+                    # If line is a single short word (1-2 letters) and there's a next line
+                    if len(words_in_line) == 1 and len(words_in_line[0].strip('.,!?~;:"\'')) <= 2 and i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        # Try to merge with next line
+                        test_merged = f"{line} {next_line}"
+                        bbox = draw.textbbox((0, 0), test_merged, font=test_font)
+                        if bbox[2] - bbox[0] <= roi_width:
+                            merged_lines.append(test_merged)
+                            i += 2  # Skip next line since we merged it
+                            continue
+                    merged_lines.append(line)
+                    i += 1
+                wrapped = '\n'.join(merged_lines)
+                
+                # Measure the wrapped text
+                width, height = eval_metrics(wrapped, test_font)
+                
+                # Normal: only check height (width is already generous)
+                if height <= roi_height:
+                    # This font size works, try larger
+                    best_font_size = mid
+                    best_wrapped = wrapped
+                    low = mid + 1
+                else:
+                    # Too large, try smaller
+                    high = mid - 1
+            
+            # Ensure minimum font size is always respected
+            return best_wrapped, max(int(best_font_size), min_font_size)
+        
+        # STRICT MODE: Original algorithm (unused code below, kept for fallback)
+        if False:
+            # Calculate what font size would make the median word fit comfortably
+            # We want median word to take ~70% of width, leaving room for longer words
+            median_width = get_median_word_width(text, font)
+            if median_width > 0:
+                # Calculate ideal font size based on median
+                target_median_ratio = 0.70  # Median word should use 70% of width
+                ideal_font_size = int(font_size * (roi_width * target_median_ratio) / median_width)
+                
+                # Clamp to reasonable range
+                ideal_font_size = max(min_font_size, min(init_font_size, ideal_font_size))
+                
+                # Only apply if it's a significant improvement (>10% larger)
+                if ideal_font_size > font_size * 1.1:
+                    font_size = ideal_font_size
+                    try:
+                        if font_path:
+                            font = ImageFont.truetype(font_path, font_size)
+                        else:
+                            font = ImageFont.load_default()
+                    except Exception:
+                        font = ImageFont.load_default()
+                    
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"  📊 Median-based sizing: {init_font_size} → {font_size} (median_width={median_width:.0f}, roi_width={roi_width})", "debug")
+        
+        # Top-down algorithm: start with large font, shrink until it fits
+        while font_size > min_font_size:
+            try:
+                if font_path:
+                    font = ImageFont.truetype(font_path, font_size)
+                else:
+                    font = ImageFont.load_default()
+            except Exception:
+                font = ImageFont.load_default()
+            
+            width, height = eval_metrics(mutable_message, font)
+            
+            if height > roi_height:
+                # Text is too tall, reduce font size
+                font_size -= 0.75
+                mutable_message = text  # Restore original text
+            elif width > roi_width:
+                # Text is too wide, try word-based greedy wrapping
+                wrapped = greedy_word_wrap(text, font, roi_width)
+                wrapped_width, wrapped_height = eval_metrics(wrapped, font)
+                
+                if wrapped_width <= roi_width and wrapped_height <= roi_height:
+                    # Wrapped text fits!
+                    mutable_message = wrapped
+                else:
+                    # Wrapped text still doesn't fit, reduce font size
+                    font_size -= 0.75
+                    mutable_message = text  # Restore original text
+            else:
+                # Text fits!
+                break
+        
+        # If we hit minimum font size, do final optimization
+        if font_size <= min_font_size:
+            font_size = min_font_size
+            
+            try:
+                if font_path:
+                    font = ImageFont.truetype(font_path, font_size)
+                else:
+                    font = ImageFont.load_default()
+            except Exception:
+                font = ImageFont.load_default()
+            
+            # Use greedy word wrap for best fit at minimum font size
+            mutable_message = greedy_word_wrap(text, font, roi_width)
+        
+        # Ensure minimum font size is always respected
+        return mutable_message, max(int(font_size), min_font_size)
+    
+    def get_mask_bounds(self, region: TextRegion, full_mask: np.ndarray) -> Tuple[int, int, int, int]:
+        """Extract the actual mask boundaries for a region.
+        
+        For non-Azure/Google OCR providers (manga-ocr, etc.), use RT-DETR bubble_bounds directly.
+        For Azure/Google, extract from the mask overlap to handle full-page OCR.
+        """
+        # PRIORITY 1: For manga-ocr and other RT-DETR-guided OCR providers, use bubble_bounds directly
+        # These providers already OCR within RT-DETR bubbles, so bubble_bounds IS the correct render area
+        is_azure_google = getattr(self, 'ocr_provider', '').lower() in ('azure', 'google')
+        if not is_azure_google and hasattr(region, 'bubble_bounds') and region.bubble_bounds:
+            # Use the RT-DETR bubble bounds directly - this is the full bubble area
+            bx, by, bw, bh = region.bubble_bounds
+            if not getattr(self, 'concise_logs', False):
+                self._log(f"  ✅ Using RT-DETR bubble_bounds for mask: {int(bw)}×{int(bh)} at ({int(bx)}, {int(by)})", "debug")
+            return int(bx), int(by), int(bw), int(bh)
+        elif not is_azure_google:
+            # Debug: Why are we not using bubble_bounds?
+            if not getattr(self, 'concise_logs', False):
+                has_attr = hasattr(region, 'bubble_bounds')
+                is_none = getattr(region, 'bubble_bounds', None) is None if has_attr else True
+                #self._log(f"  ⚠️ manga-ocr but NO bubble_bounds (has_attr={has_attr}, is_none={is_none})", "warning")
+        
+        # PRIORITY 2: For Azure/Google or when bubble_bounds not available, extract from mask
+        if full_mask is not None:
+            try:
+                import cv2
+                import numpy as np
+                
+                # Create a blank mask for this region
+                region_mask = np.zeros(full_mask.shape, dtype=np.uint8)
+                
+                # Fill the region's area in the mask
+                if hasattr(region, 'vertices') and region.vertices:
+                    vertices_np = np.array(region.vertices, dtype=np.int32)
+                    cv2.fillPoly(region_mask, [vertices_np], 255)
+                else:
+                    x, y, w, h = region.bounding_box
+                    cv2.rectangle(region_mask, (int(x), int(y)), (int(x+w), int(y+h)), 255, -1)
+                
+                # Find where this region overlaps with the full mask
+                overlap = cv2.bitwise_and(region_mask, full_mask)
+                
+                # Get bounding box of the overlap
+                contours, _ = cv2.findContours(overlap, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    # Get the largest contour (should be the main text region)
+                    largest_contour = max(contours, key=cv2.contourArea)
+                    x, y, w, h = cv2.boundingRect(largest_contour)
+                    
+                    if w > 0 and h > 0:
+                        return x, y, w, h
+            except Exception as e:
+                if not getattr(self, 'concise_logs', False):
+                    self._log(f"  ⚠️ Failed to extract mask bounds: {e}, falling back", "debug")
+        
+        # Fallback to original bounding box
+        x, y, w, h = region.bounding_box
+        return int(x), int(y), int(w), int(h)
+    
+    def get_safe_text_area(self, region: TextRegion, use_mask_bounds: bool = False, full_mask: np.ndarray = None) -> Tuple[int, int, int, int]:
+        """Get safe text area with algorithm-aware shrink strategy.
+        
+        Respects font_algorithm and auto_fit_style settings:
+        - conservative: Comic-translate's 15% shrink (85% usable)
+        - smart: Adaptive 10-20% shrink based on bubble shape
+        - aggressive: Minimal 5% shrink (95% usable)
+        
+        Also applies OCR-specific adjustments for Azure/Google without RT-DETR guidance.
+        
+        Args:
+            region: The text region to calculate safe area for
+            use_mask_bounds: If True, use actual mask boundaries instead of shrinking from polygon
+            full_mask: The complete mask image (required if use_mask_bounds=True)
+        """
+        # Get font sizing settings from config
+        try:
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            font_sizing = manga_settings.get('font_sizing', {})
+            rendering = manga_settings.get('rendering', {})
+            
+            font_algorithm = font_sizing.get('algorithm', 'smart')
+            auto_fit_style = rendering.get('auto_fit_style', 'compact')
+            
+            # Check if using Azure/Google without RT-DETR guidance
+            ocr_settings = manga_settings.get('ocr', {})
+            use_rtdetr_guide = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+            is_azure_google = getattr(self, 'ocr_provider', '').lower() in ('azure', 'google')
+            needs_aggressive = is_azure_google and not use_rtdetr_guide
+        except Exception:
+            font_algorithm = 'smart'
+            auto_fit_style = 'balanced'
+            needs_aggressive = False
+        
+        # Base margin factor by algorithm
+        if font_algorithm == 'conservative':
+            # Comic-translate default: 15% shrink = 85% usable
+            base_margin = 0.85
+        elif font_algorithm == 'aggressive':
+            # Aggressive: 5% shrink = 95% usable
+            base_margin = 0.95
+        else:  # 'smart'
+            # Smart: adaptive based on auto_fit_style
+            if auto_fit_style == 'compact':
+                base_margin = 0.82  # 18% shrink - tight fit
+            elif auto_fit_style == 'readable':
+                base_margin = 0.92  # 8% shrink - loose fit
+            else:  # 'balanced'
+                base_margin = 0.87  # 13% shrink - balanced
+        
+        # SPECIAL CASE: Azure/Google without RT-DETR guidance
+        # Their OCR is too conservative, so we need more aggressive sizing
+        if needs_aggressive:
+            # Boost margin by 5-8% to compensate for conservative OCR bounds
+            base_margin = min(0.98, base_margin + 0.08)
+            self._log(f"  🎯 Azure/Google non-RT-DETR mode: Using aggressive {int(base_margin*100)}% margin", "debug")
+        
+        # DISABLE SAFE AREA entirely if requested
+        try:
+            if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                x, y, w, h = region.bounding_box
+                return int(x), int(y), int(w), int(h)
+        except Exception:
+            pass
+
+        # OPTION 1: Use mask boundaries directly (most accurate)
+        if use_mask_bounds and full_mask is not None:
+            mask_x, mask_y, mask_w, mask_h = self.get_mask_bounds(region, full_mask)
+            # Start from mask bounds
+            safe_x, safe_y, safe_w, safe_h = mask_x, mask_y, mask_w, mask_h
+            # Apply adjustable scale around center if requested
+            try:
+                scale = float(getattr(self, 'safe_area_scale', 1.0))
+                if scale != 1.0:
+                    cx = safe_x + safe_w / 2.0
+                    cy = safe_y + safe_h / 2.0
+                    new_w = max(1, int(round(safe_w * scale)))
+                    new_h = max(1, int(round(safe_h * scale)))
+                    safe_x = int(round(cx - new_w / 2.0))
+                    safe_y = int(round(cy - new_h / 2.0))
+                    safe_w = new_w
+                    safe_h = new_h
+            except Exception:
+                pass
+            
+            if not getattr(self, 'concise_logs', False):
+                self._log(f"  📐 Using FULL mask bounds: {mask_w}×{mask_h} (100% utilization)", "debug")
+                self._log(f"     Mask position: ({mask_x}, {mask_y})", "debug")
+                if hasattr(region, 'bounding_box'):
+                    orig_x, orig_y, orig_w, orig_h = region.bounding_box
+                    self._log(f"     Original bbox: {orig_w}×{orig_h} at ({orig_x}, {orig_y})", "debug")
+            return safe_x, safe_y, safe_w, safe_h
+        
+        # OPTION 2: Handle regions without vertices (simple bounding box)
+        if not hasattr(region, 'vertices') or not region.vertices:
+            x, y, w, h = region.bounding_box
+            safe_width = int(w * base_margin)
+            safe_height = int(h * base_margin)
+            safe_x = x + (w - safe_width) // 2
+            safe_y = y + (h - safe_height) // 2
+            return safe_x, safe_y, safe_width, safe_height
+        
+        # Calculate convexity for shape-aware adjustment (only for 'smart' algorithm)
+        margin_factor = base_margin
+        if font_algorithm == 'smart':
+            try:
+                # Convert vertices to numpy array with correct dtype
+                vertices = np.array(region.vertices, dtype=np.int32)
+                hull = cv2.convexHull(vertices)
+                hull_area = cv2.contourArea(hull)
+                poly_area = cv2.contourArea(vertices)
+                
+                if poly_area > 0:
+                    convexity = hull_area / poly_area
+                else:
+                    convexity = 1.0
+                
+                # Adjust margin based on bubble shape
+                if convexity < 0.85:  # Speech bubble with tail
+                    # More aggressive shrink for tailed bubbles (avoid the tail)
+                    margin_factor = base_margin - 0.10
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"  Speech bubble with tail: {int(margin_factor*100)}% usable area", "debug")
+                elif convexity > 0.98:  # Rectangular/square
+                    # Less shrink for rectangular regions
+                    margin_factor = base_margin + 0.05
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"  Rectangular region: {int(margin_factor*100)}% usable area", "debug")
+                else:  # Regular oval bubble
+                    # Use base margin
+                    margin_factor = base_margin
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"  Regular bubble: {int(margin_factor*100)}% usable area", "debug")
+                
+                # Clamp margin factor
+                margin_factor = max(0.70, min(0.98, margin_factor))
+            except Exception:
+                margin_factor = base_margin
+        
+        # Apply user scale to margin factor
+        try:
+            user_scale = float(getattr(self, 'safe_area_scale', 1.0))
+            margin_factor = max(0.5, min(1.0, margin_factor * user_scale))
+        except Exception:
+            pass
+
+        # Convert vertices to numpy array for boundingRect
+        vertices_np = np.array(region.vertices, dtype=np.int32)
+        x, y, w, h = cv2.boundingRect(vertices_np)
+        
+        safe_width = int(w * margin_factor)
+        safe_height = int(h * margin_factor)
+        safe_x = x + (w - safe_width) // 2
+        safe_y = y + (h - safe_height) // 2
+        
+        return safe_x, safe_y, safe_width, safe_height
+    
+    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None, use_as_is: bool = False) -> Tuple[int, List[str]]:
+        """Find optimal font size using comic-translate's pil_word_wrap algorithm with algorithm-aware adjustments
+        
+        Args:
+            text: Text to fit
+            max_width: Maximum width available
+            max_height: Maximum height available  
+            draw: PIL ImageDraw object
+            region: Optional TextRegion for safe area calculation
+            use_as_is: If True, use max_width/max_height directly without further shrinking
+        """
+        
+        # Get font sizing settings
+        try:
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            font_sizing = manga_settings.get('font_sizing', {})
+            font_algorithm = font_sizing.get('algorithm', 'smart')
+            prefer_larger = font_sizing.get('prefer_larger', True)
+        except Exception:
+            font_algorithm = 'smart'
+            prefer_larger = True
+        
+        # Get usable area
+        if use_as_is:
+            # Dimensions are already safe area - use them directly (no double shrinking)
+            usable_width = max_width
+            usable_height = max_height
+        elif region and hasattr(region, 'vertices') and region.vertices:
+            # Calculate safe area from region
+            safe_x, safe_y, safe_width, safe_height = self.get_safe_text_area(region)
+            usable_width = safe_width
+            usable_height = safe_height
+        else:
+            # Fallback: use algorithm-aware margin
+            if font_algorithm == 'conservative':
+                margin = 0.85  # Comic-translate default
+            elif font_algorithm == 'aggressive':
+                margin = 0.95
+            else:  # smart
+                margin = 0.87
+            usable_width = int(max_width * margin)
+            usable_height = int(max_height * margin)
+        
+        # Font size limits (GUI settings with algorithm adjustments)
+        min_font_size = max(10, self.min_readable_size)
+        
+        # Adjust initial font size based on algorithm and prefer_larger
+        base_init = min(40, self.max_font_size_limit)
+        if font_algorithm == 'aggressive' and prefer_larger:
+            # Start higher for aggressive mode
+            init_font_size = min(int(base_init * 1.2), self.max_font_size_limit)
+        elif font_algorithm == 'conservative':
+            # Start lower for conservative mode
+            init_font_size = int(base_init * 0.9)
+        else:
+            init_font_size = base_init
+        
+        # Use comic-translate's pil_word_wrap algorithm
+        wrapped_text, final_font_size = self._pil_word_wrap(
+            text=text,
+            font_path=self.selected_font_style or self.font_path,
+            roi_width=usable_width,
+            roi_height=usable_height,
+            init_font_size=init_font_size,
+            min_font_size=min_font_size,
+            draw=draw
+        )
+        
+        # Convert wrapped text to lines
+        lines = wrapped_text.split('\n') if wrapped_text else [text]
+        
+        # Log font algorithm used (debug)
+        if not getattr(self, 'concise_logs', False):
+            self._log(f"  Font algorithm: {font_algorithm}, init_size: {init_font_size}, final_size: {final_font_size}", "debug")
+        
+        # Apply multiplier if in multiplier mode
+        if self.font_size_mode == 'multiplier':
+            target_size = int(final_font_size * self.font_size_multiplier)
+            
+            # Check if multiplied size still fits (if constrained)
+            if self.constrain_to_bubble:
+                # Re-wrap at target size to check fit
+                test_wrapped, _ = self._pil_word_wrap(
+                    text=text,
+                    font_path=self.selected_font_style or self.font_path,
+                    roi_width=usable_width,
+                    roi_height=usable_height,
+                    init_font_size=target_size,
+                    min_font_size=target_size,  # Force this size
+                    draw=draw
+                )
+                test_lines = test_wrapped.split('\n') if test_wrapped else [text]
+                test_height = len(test_lines) * target_size * 1.2
+                
+                if test_height <= usable_height:
+                    final_font_size = target_size
+                    lines = test_lines
+                else:
+                    self._log(f"  Multiplier {self.font_size_multiplier}x would exceed bubble", "debug")
+            else:
+                # Not constrained, use multiplied size
+                final_font_size = target_size
+                lines = wrapped_text.split('\n') if wrapped_text else [text]
+        
+        self._log(f"  Font sizing: text_len={len(text)}, size={final_font_size}, lines={len(lines)}", "debug")
+        
+        return final_font_size, lines
+
+    def _fit_text_simple_topdown(self, text: str, usable_width: int, usable_height: int, 
+                                 draw: ImageDraw, min_size: int, max_size: int) -> Tuple[int, List[str]]:
+        """Simple top-down approach - start large and shrink only if needed"""
+        # Start from a reasonable large size
+        start_size = int(max_size * 0.8)
+        
+        for font_size in range(start_size, min_size - 1, -2):  # Step by 2 for speed
+            font = self._get_font(font_size)
+            lines = self._wrap_text(text, font, usable_width, draw)
+            
+            line_height = font_size * 1.2  # Tighter for overlaps
+            total_height = len(lines) * line_height
+            
+            if total_height <= usable_height:
+                return font_size, lines
+        
+        # If nothing fits, use minimum
+        font = self._get_font(min_size)
+        lines = self._wrap_text(text, font, usable_width, draw)
+        return min_size, lines
+
+    def _check_potential_overlap(self, region: TextRegion) -> bool:
+        """Check if this region might overlap with others based on position"""
+        if not region or not hasattr(region, 'bounding_box'):
+            return False
+        
+        x, y, w, h = region.bounding_box
+        
+        # Simple heuristic: small regions or regions at edges might overlap
+        # You can make this smarter based on your needs
+        if w < 100 or h < 50:  # Small bubbles often overlap
+            return True
+        
+        # Add more overlap detection logic here if needed
+        # For now, default to no overlap for larger bubbles
+        return False
+    
+    def _wrap_text(self, text: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
+        """Wrap text to fit within max_width with optional strict wrapping"""
+        # Handle empty text
+        if not text.strip():
+            return []
+        
+        # Only enforce width check if constrain_to_bubble is enabled
+        if self.constrain_to_bubble and max_width <= 0:
+            self._log(f"  ⚠️ Invalid max_width: {max_width}, using fallback", "warning")
+            return [text[:20] + "..."] if len(text) > 20 else [text]
+        
+        words = text.split()
+        lines = []
+        current_line = []
+        
+        for word in words:
+            # Check if word alone is too long
+            word_bbox = draw.textbbox((0, 0), word, font=font)
+            word_width = word_bbox[2] - word_bbox[0]
+            
+            if word_width > max_width and len(word) > 1:
+                # Word is too long for the bubble
+                if current_line:
+                    # Save current line first
+                    lines.append(' '.join(current_line))
+                    current_line = []
+                
+                if self.strict_text_wrapping:
+                    # STRICT MODE: Force break the word to fit within bubble
+                    # This is the original behavior that ensures text stays within bounds
+                    broken_parts = self._force_break_word(word, font, max_width, draw)
+                    lines.extend(broken_parts)
+                else:
+                    # RELAXED MODE: Keep word whole (may exceed bubble)
+                    lines.append(word)
+                    # self._log(f"  ⚠️ Word '{word}' exceeds bubble width, keeping whole", "warning")
+            else:
+                # Normal word processing
+                if current_line:
+                    test_line = ' '.join(current_line + [word])
+                else:
+                    test_line = word
+                
+                text_bbox = draw.textbbox((0, 0), test_line, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                
+                if text_width <= max_width:
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        # Single word that fits
+                        lines.append(word)
+        
+        if current_line:
+            lines.append(' '.join(current_line))
+        
+        return lines
+
+    # Keep the existing _force_break_word method as is (the complete version from earlier):
+    def _force_break_word(self, word: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
+        """Force break a word that's too long to fit"""
+        lines = []
+        
+        # Binary search to find how many characters fit
+        low = 1
+        high = len(word)
+        chars_that_fit = 1
+        
+        while low <= high:
+            mid = (low + high) // 2
+            test_text = word[:mid]
+            bbox = draw.textbbox((0, 0), test_text, font=font)
+            width = bbox[2] - bbox[0]
+            
+            if width <= max_width:
+                chars_that_fit = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+        
+        # Break the word into pieces
+        remaining = word
+        while remaining:
+            if len(remaining) <= chars_that_fit:
+                # Last piece
+                lines.append(remaining)
+                break
+            else:
+                # Find the best break point
+                break_at = chars_that_fit
+                
+                # Try to break at a more natural point if possible
+                # Look for vowel-consonant boundaries for better hyphenation
+                for i in range(min(chars_that_fit, len(remaining) - 1), max(1, chars_that_fit - 5), -1):
+                    if i < len(remaining) - 1:
+                        current_char = remaining[i].lower()
+                        next_char = remaining[i + 1].lower()
+                        
+                        # Good hyphenation points:
+                        # - Between consonant and vowel
+                        # - After prefix (un-, re-, pre-, etc.)
+                        # - Before suffix (-ing, -ed, -er, etc.)
+                        if (current_char in 'bcdfghjklmnpqrstvwxyz' and next_char in 'aeiou') or \
+                           (current_char in 'aeiou' and next_char in 'bcdfghjklmnpqrstvwxyz'):
+                            break_at = i + 1
+                            break
+                
+                # Add hyphen if we're breaking in the middle of a word
+                if break_at < len(remaining):
+                    # Check if adding hyphen still fits
+                    test_with_hyphen = remaining[:break_at] + '-'
+                    bbox = draw.textbbox((0, 0), test_with_hyphen, font=font)
+                    width = bbox[2] - bbox[0]
+                    
+                    if width <= max_width:
+                        lines.append(remaining[:break_at] + '-')
+                    else:
+                        # Hyphen doesn't fit, break without it
+                        lines.append(remaining[:break_at])
+                else:
+                    lines.append(remaining[:break_at])
+                
+                remaining = remaining[break_at:]
+        
+        return lines
+    
+    def _estimate_font_size_for_region(self, region: TextRegion) -> int:
+        """Estimate the likely font size for a text region based on its dimensions and text content"""
+        x, y, w, h = region.bounding_box
+        text_length = len(region.text.strip())
+        
+        if text_length == 0:
+            return self.max_font_size // 2  # Default middle size
+        
+        # Calculate area per character
+        area = w * h
+        area_per_char = area / text_length
+        
+        # Estimate font size based on area per character
+        # These ratios are approximate and based on typical manga text
+        if area_per_char > 800:
+            estimated_size = int(self.max_font_size * 0.8)
+        elif area_per_char > 400:
+            estimated_size = int(self.max_font_size * 0.6)
+        elif area_per_char > 200:
+            estimated_size = int(self.max_font_size * 0.4)
+        elif area_per_char > 100:
+            estimated_size = int(self.max_font_size * 0.3)
+        else:
+            estimated_size = int(self.max_font_size * 0.2)
+        
+        # Clamp to reasonable bounds
+        return max(self.min_font_size, min(estimated_size, self.max_font_size))
+
+
+    def _split_bubble_if_needed(self, bubble_regions: List[TextRegion]) -> List[List[TextRegion]]:
+        """Split a detected bubble if it actually contains multiple separate speech bubbles
+        
+        This happens when RT-DETR detects one large bounding box over vertically or
+        horizontally stacked speech bubbles. We detect this by checking if text regions
+        within the bubble have LARGE gaps between them.
+        
+        For manga-ocr and other non-Google/Azure OCR providers, RT-DETR detection is trusted
+        completely and splitting is disabled.
+        
+        Returns:
+            List of region groups - each group represents a separate bubble
+        """
+        # For manga-ocr and other providers that use RT-DETR regions directly, trust RT-DETR
+        # Splitting is only needed for Google/Azure which do full-page OCR
+        if hasattr(self, 'ocr_provider') and self.ocr_provider not in ('google'):
+            return [bubble_regions]  # Trust RT-DETR completely for these providers
+        
+        if len(bubble_regions) <= 1:
+            return [bubble_regions]  # Single region, no splitting needed
+        
+        # Sort regions by position (top-to-bottom, left-to-right)
+        sorted_regions = sorted(bubble_regions, key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+        
+        # Group regions that should be together
+        groups = [[sorted_regions[0]]]
+        
+        for i in range(1, len(sorted_regions)):
+            current_region = sorted_regions[i]
+            cx, cy, cw, ch = current_region.bounding_box
+            placed = False
+            
+            # Try to place in an existing group
+            for group in groups:
+                # Check if current region should be in this group
+                # We look at the closest region in the group
+                min_gap = float('inf')
+                min_vertical_gap = float('inf')
+                min_horizontal_gap = float('inf')
+                closest_region = None
+                
+                for group_region in group:
+                    gx, gy, gw, gh = group_region.bounding_box
+                    
+                    # Calculate gap between regions
+                    horizontal_gap = 0
+                    if gx + gw < cx:
+                        horizontal_gap = cx - (gx + gw)
+                    elif cx + cw < gx:
+                        horizontal_gap = gx - (cx + cw)
+                    
+                    vertical_gap = 0
+                    if gy + gh < cy:
+                        vertical_gap = cy - (gy + gh)
+                    elif cy + ch < gy:
+                        vertical_gap = gy - (cy + ch)
+                    
+                    # Use Euclidean distance as overall gap measure
+                    gap = (horizontal_gap ** 2 + vertical_gap ** 2) ** 0.5
+                    
+                    if gap < min_gap:
+                        min_gap = gap
+                        closest_region = group_region
+                        # Store individual gaps for aggressive vertical splitting
+                        min_vertical_gap = vertical_gap
+                        min_horizontal_gap = horizontal_gap
+                
+                # AGGRESSIVE SPLIT for MANGA: Check for large vertical gaps first
+                # Manga often has vertically stacked speech bubbles that RT-DETR detects as one
+                if closest_region and min_vertical_gap > 50:
+                    # Large vertical gap (>50px) - likely separate bubbles stacked vertically
+                    # Check if there's NO vertical overlap (completely separate)
+                    gx, gy, gw, gh = closest_region.bounding_box
+                    vertical_overlap = min(gy + gh, cy + ch) - max(gy, cy)
+                    
+                    if vertical_overlap <= 0:
+                        # No vertical overlap at all - definitely separate bubbles
+                        # Create new group (don't merge)
+                        pass  # Will create new group below
+                    else:
+                        # Some overlap despite gap - check other criteria
+                        horizontal_overlap = min(gx + gw, cx + cw) - max(gx, cx)
+                        min_width = min(gw, cw)
+                        min_height = min(gh, ch)
+                        
+                        # Only merge if there's very strong overlap (>75%)
+                        if (horizontal_overlap > min_width * 0.75 or 
+                            vertical_overlap > min_height * 0.75):
+                            group.append(current_region)
+                            placed = True
+                            break
+                # BALANCED SPLIT CRITERIA:
+                # Split if gap is > 21px unless there's strong overlap (>62%)
+                elif closest_region and min_gap < 15:  # Within 21px - likely same bubble
+                    group.append(current_region)
+                    placed = True
+                    break
+                elif closest_region:
+                    # Check if they have significant overlap despite the gap
+                    gx, gy, gw, gh = closest_region.bounding_box
+                    
+                    horizontal_overlap = min(gx + gw, cx + cw) - max(gx, cx)
+                    vertical_overlap = min(gy + gh, cy + ch) - max(gy, cy)
+                    
+                    min_width = min(gw, cw)
+                    min_height = min(gh, ch)
+                    
+                    # If they have strong overlap (>62%) in either direction, keep together
+                    if (horizontal_overlap > min_width * 0.62 or 
+                        vertical_overlap > min_height * 0.62):
+                        group.append(current_region)
+                        placed = True
+                        break
+            
+            # If not placed in any existing group, create a new group
+            if not placed:
+                groups.append([current_region])
+        
+        # Log if we split the bubble
+        if len(groups) > 1:
+            self._log(f"      🔪 SPLIT: Detected bubble actually contains {len(groups)} separate bubbles", "warning")
+            for idx, group in enumerate(groups):
+                group_texts = [r.text[:15] + '...' for r in group]
+                self._log(f"         Sub-bubble {idx + 1}: {len(group)} regions - {group_texts}", "info")
+        
+        return groups
+
+    def _likely_different_bubbles(self, region1: TextRegion, region2: TextRegion) -> bool:
+        """Detect if regions are likely in different speech bubbles based on spatial patterns"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Calculate gaps and positions
+        horizontal_gap = 0
+        if x1 + w1 < x2:
+            horizontal_gap = x2 - (x1 + w1)
+        elif x2 + w2 < x1:
+            horizontal_gap = x1 - (x2 + w2)
+        
+        vertical_gap = 0
+        if y1 + h1 < y2:
+            vertical_gap = y2 - (y1 + h1)
+        elif y2 + h2 < y1:
+            vertical_gap = y1 - (y2 + h2)
+        
+        # Calculate relative positions
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        center_y1 = y1 + h1 / 2
+        center_y2 = y2 + h2 / 2
+        
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        avg_width = (w1 + w2) / 2
+        
+        # FIRST CHECK: Very small gaps always indicate same bubble
+        if horizontal_gap < 15 and vertical_gap < 15:
+            return False  # Definitely same bubble
+        
+        # STRICTER CHECK: For regions that are horizontally far apart
+        # Even if they pass the gap threshold, check if they're likely different bubbles
+        if horizontal_gap > 40:  # Significant horizontal gap
+            # Unless they're VERY well aligned vertically, they're different bubbles
+            vertical_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+            min_height = min(h1, h2)
+            
+            if vertical_overlap < min_height * 0.8:  # Need 80% overlap to be same bubble
+                return True
+        
+        # SPECIFIC FIX: Check for multi-line text pattern
+        # If regions are well-aligned horizontally, they're likely in the same bubble
+        if horizontal_center_diff < avg_width * 0.35:  # Relaxed from 0.2 to 0.35
+            # Additional checks for multi-line text:
+            # 1. Similar widths (common in speech bubbles)
+            width_ratio = max(w1, w2) / min(w1, w2) if min(w1, w2) > 0 else 999
+            
+            # 2. Reasonable vertical spacing (not too far apart)
+            avg_height = (h1 + h2) / 2
+            
+            if width_ratio < 2.0 and vertical_gap < avg_height * 1.5:
+                # This is very likely multi-line text in the same bubble
+                return False
+        
+        # Pattern 1: Side-by-side bubbles (common in manga)
+        # Characteristics: Significant horizontal gap, similar vertical position
+        if horizontal_gap > 50:  # Increased from 25 to avoid false positives
+            vertical_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+            min_height = min(h1, h2)
+            
+            # If they have good vertical overlap, they're likely side-by-side bubbles
+            if vertical_overlap > min_height * 0.5:
+                return True
+        
+        # Pattern 2: Stacked bubbles
+        # Characteristics: Significant vertical gap, similar horizontal position
+        # CRITICAL: Lower threshold to catch vertically stacked bubbles in manga
+        if vertical_gap > 15:  # Reduced from 25 to catch closer stacked bubbles
+            horizontal_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
+            min_width = min(w1, w2)
+            
+            # If they have good horizontal overlap, they're likely stacked bubbles
+            if horizontal_overlap > min_width * 0.5:
+                return True
+        
+        # Pattern 3: Diagonal arrangement (different speakers)
+        # If regions are separated both horizontally and vertically
+        if horizontal_gap > 20 and vertical_gap > 20:
+            return True
+        
+        # Pattern 4: Large gap relative to region size
+        avg_height = (h1 + h2) / 2
+        
+        if horizontal_gap > avg_width * 0.6 or vertical_gap > avg_height * 0.6:
+            return True
+        
+        return False
+
+    def _regions_should_merge(self, region1: TextRegion, region2: TextRegion, threshold: int = 50) -> bool:
+        """Determine if two regions should be merged - with bubble detection"""
+        
+        # First check if they're close enough spatially
+        if not self._regions_are_nearby(region1, region2, threshold):
+            return False
+        
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # ONLY apply special handling if regions are from Azure
+        if hasattr(region1, 'from_azure') and region1.from_azure:
+            # Azure lines are typically small - be more lenient
+            avg_height = (h1 + h2) / 2
+            if avg_height < 50:  # Likely single lines
+                self._log(f"   Azure lines detected, using lenient merge criteria", "info")
+                
+                center_x1 = x1 + w1 / 2
+                center_x2 = x2 + w2 / 2
+                horizontal_center_diff = abs(center_x1 - center_x2)
+                avg_width = (w1 + w2) / 2
+                
+                # If horizontally aligned and nearby, merge them
+                if horizontal_center_diff < avg_width * 0.7:
+                    return True
+        
+        # GOOGLE LOGIC - unchanged from your original
+        # SPECIAL CASE: If one region is very small, bypass strict checks
+        area1 = w1 * h1
+        area2 = w2 * h2
+        if area1 < 500 or area2 < 500:
+            self._log(f"   Small text region (area: {min(area1, area2)}), bypassing strict alignment checks", "info")
+            return True
+        
+        # Calculate actual gaps between regions
+        horizontal_gap = 0
+        if x1 + w1 < x2:
+            horizontal_gap = x2 - (x1 + w1)
+        elif x2 + w2 < x1:
+            horizontal_gap = x1 - (x2 + w2)
+        
+        vertical_gap = 0
+        if y1 + h1 < y2:
+            vertical_gap = y2 - (y1 + h1)
+        elif y2 + h2 < y1:
+            vertical_gap = y1 - (y2 + h2)
+        
+        # Calculate centers for alignment checks
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        center_y1 = y1 + h1 / 2
+        center_y2 = y2 + h2 / 2
+        
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        vertical_center_diff = abs(center_y1 - center_y2)
+        
+        avg_width = (w1 + w2) / 2
+        avg_height = (h1 + h2) / 2
+        
+        # Determine text orientation and layout
+        is_horizontal_text = horizontal_gap > vertical_gap or (horizontal_center_diff < avg_width * 0.5)
+        is_vertical_text = vertical_gap > horizontal_gap or (vertical_center_diff < avg_height * 0.5)
+        
+        # PRELIMINARY CHECK: If regions overlap or are extremely close, merge them
+        # This handles text that's clearly in the same bubble
+        
+        # Check for overlap
+        overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+        overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+        has_overlap = overlap_x > 0 and overlap_y > 0
+        
+        if has_overlap:
+            self._log(f"   Regions overlap - definitely same bubble, merging", "info")
+            return True
+        
+        # If gaps are tiny (< 10 pixels), merge regardless of other factors
+        if horizontal_gap < 10 and vertical_gap < 10:
+            self._log(f"   Very small gaps ({horizontal_gap}, {vertical_gap}) - merging", "info")
+            return True
+        
+        # BUBBLE BOUNDARY CHECK: Use spatial patterns to detect different bubbles
+        # But be less aggressive if gaps are small
+        # CRITICAL: Reduced threshold to allow bubble boundary detection for stacked bubbles
+        if horizontal_gap < 12 and vertical_gap < 12:
+            # Very close regions are almost certainly in the same bubble
+            self._log(f"   Regions very close, skipping bubble boundary check", "info")
+        elif self._likely_different_bubbles(region1, region2):
+            self._log(f"   Regions likely in different speech bubbles", "info")
+            return False
+        
+        # CHECK 1: For well-aligned text with small gaps, merge immediately
+        # This catches multi-line text in the same bubble
+        if is_horizontal_text and vertical_center_diff < avg_height * 0.4:
+            # Horizontal text that's well-aligned vertically
+            if horizontal_gap <= threshold and vertical_gap <= threshold * 0.5:
+                self._log(f"   Well-aligned horizontal text with acceptable gaps, merging", "info")
+                return True
+        
+        if is_vertical_text and horizontal_center_diff < avg_width * 0.4:
+            # Vertical text that's well-aligned horizontally
+            if vertical_gap <= threshold and horizontal_gap <= threshold * 0.5:
+                self._log(f"   Well-aligned vertical text with acceptable gaps, merging", "info")
+                return True
+        
+        # ADDITIONAL CHECK: Multi-line text in speech bubbles
+        # Even if not perfectly aligned, check for typical multi-line patterns
+        if horizontal_center_diff < avg_width * 0.5 and vertical_gap <= threshold:
+            # Lines that are reasonably centered and within threshold should merge
+            self._log(f"   Multi-line text pattern detected, merging", "info")
+            return True
+        
+        # CHECK 2: Check alignment quality
+        # Poor alignment often indicates different bubbles
+        if is_horizontal_text:
+            # For horizontal text, check vertical alignment
+            if vertical_center_diff > avg_height * 0.6:
+                self._log(f"   Poor vertical alignment for horizontal text", "info")
+                return False
+        elif is_vertical_text:
+            # For vertical text, check horizontal alignment
+            if horizontal_center_diff > avg_width * 0.6:
+                self._log(f"   Poor horizontal alignment for vertical text", "info")
+                return False
+        
+        # CHECK 3: Font size check (but be reasonable)
+        font_size1 = self._estimate_font_size_for_region(region1)
+        font_size2 = self._estimate_font_size_for_region(region2)
+        size_ratio = max(font_size1, font_size2) / max(min(font_size1, font_size2), 1)
+        
+        # Allow some variation for emphasis or stylistic choices
+        if size_ratio > 2.0:
+            self._log(f"   Font sizes too different ({font_size1} vs {font_size2})", "info")
+            return False
+        
+        # CHECK 4: Final sanity check on merged area
+        merged_width = max(x1 + w1, x2 + w2) - min(x1, x2)
+        merged_height = max(y1 + h1, y2 + h2) - min(y1, y2)
+        merged_area = merged_width * merged_height
+        combined_area = (w1 * h1) + (w2 * h2)
+        
+        # If merged area is way larger than combined areas, they're probably far apart
+        if merged_area > combined_area * 2.5:
+            self._log(f"   Merged area indicates regions are too far apart", "info")
+            return False
+        
+        # If we get here, apply standard threshold checks
+        if horizontal_gap <= threshold and vertical_gap <= threshold:
+            self._log(f"   Standard threshold check passed, merging", "info")
+            return True
+        
+        self._log(f"   No merge conditions met", "info")
+        return False
+
+    def _merge_nearby_regions(self, regions: List[TextRegion], threshold: int = 50) -> List[TextRegion]:
+        """Merge text regions that are likely part of the same speech bubble - with debug logging"""
+        if len(regions) <= 1:
+            return regions
+        
+        self._log(f"\n=== MERGE DEBUG: Starting merge analysis ===", "info")
+        self._log(f"  Total regions: {len(regions)}", "info")
+        self._log(f"  Threshold: {threshold}px", "info")
+        
+        # First, let's log what regions we have
+        for i, region in enumerate(regions):
+            x, y, w, h = region.bounding_box
+            self._log(f"  Region {i}: pos({x},{y}) size({w}x{h}) text='{region.text[:20]}...'", "info")
+        
+        # Sort regions by area (largest first) to handle contained regions properly
+        sorted_indices = sorted(range(len(regions)), 
+                              key=lambda i: regions[i].bounding_box[2] * regions[i].bounding_box[3], 
+                              reverse=True)
+        
+        merged = []
+        used = set()
+        
+        # Process each region in order of size (largest first)
+        for idx in sorted_indices:
+            i = idx
+            if i in used:
+                continue
+            
+            region1 = regions[i]
+            
+            # Start with this region
+            merged_text = region1.text
+            merged_vertices = list(region1.vertices) if hasattr(region1, 'vertices') else []
+            regions_merged = [i]  # Track which regions were merged
+            
+            self._log(f"\n  Checking region {i} for merges:", "info")
+            
+            # Check against all other unused regions
+            for j in range(len(regions)):
+                if j == i or j in used:
+                    continue
+                
+                region2 = regions[j]
+                self._log(f"    Testing merge with region {j}:", "info")
+                
+                # Check if region2 is contained within region1
+                x1, y1, w1, h1 = region1.bounding_box
+                x2, y2, w2, h2 = region2.bounding_box
+                
+                # Check if region2 is fully contained within region1
+                if (x2 >= x1 and y2 >= y1 and 
+                    x2 + w2 <= x1 + w1 and y2 + h2 <= y1 + h1):
+                    self._log(f"      ✓ Region {j} is INSIDE region {i} - merging!", "success")
+                    merged_text += " " + region2.text
+                    if hasattr(region2, 'vertices'):
+                        merged_vertices.extend(region2.vertices)
+                    used.add(j)
+                    regions_merged.append(j)
+                    continue
+                
+                # Check if region1 is contained within region2 (shouldn't happen due to sorting, but be safe)
+                if (x1 >= x2 and y1 >= y2 and 
+                    x1 + w1 <= x2 + w2 and y1 + h1 <= y2 + h2):
+                    self._log(f"      ✓ Region {i} is INSIDE region {j} - merging!", "success")
+                    merged_text += " " + region2.text
+                    if hasattr(region2, 'vertices'):
+                        merged_vertices.extend(region2.vertices)
+                    used.add(j)
+                    regions_merged.append(j)
+                    # Update region1's bounding box to the larger region
+                    region1 = TextRegion(
+                        text=merged_text,
+                        vertices=merged_vertices,
+                        bounding_box=region2.bounding_box,
+                        confidence=region1.confidence,
+                        region_type='temp_merge'
+                    )
+                    continue
+                
+                # FIX: Always check proximity against ORIGINAL regions, not the expanded one
+                # This prevents cascade merging across bubble boundaries
+                if self._regions_are_nearby(regions[i], region2, threshold):  # Use regions[i] not region1
+                    #self._log(f"      ✓ Regions are nearby", "info")
+                    
+                    # Then check if they should merge (also use original region)
+                    if self._regions_should_merge(regions[i], region2, threshold):  # Use regions[i] not region1
+                        #self._log(f"      ✓ Regions should merge!", "success")
+                        
+                        # Actually perform the merge
+                        merged_text += " " + region2.text
+                        if hasattr(region2, 'vertices'):
+                            merged_vertices.extend(region2.vertices)
+                        used.add(j)
+                        regions_merged.append(j)
+                        
+                        # DON'T update region1 for proximity checks - keep using original regions
+                    else:
+                        self._log(f"      ✗ Regions should not merge", "warning")
+                else:
+                    self._log(f"      ✗ Regions not nearby", "warning")
+            
+            # Log if we merged multiple regions
+            if len(regions_merged) > 1:
+                self._log(f"  ✅ MERGED regions {regions_merged} into one bubble", "success")
+            else:
+                self._log(f"  ℹ️ Region {i} not merged with any other", "info")
+            
+            # Create final merged region with all the merged vertices
+            if merged_vertices:
+                xs = [v[0] for v in merged_vertices]
+                ys = [v[1] for v in merged_vertices]
+            else:
+                # Fallback: calculate from all merged regions
+                all_xs = []
+                all_ys = []
+                for idx in regions_merged:
+                    x, y, w, h = regions[idx].bounding_box
+                    all_xs.extend([x, x + w])
+                    all_ys.extend([y, y + h])
+                xs = all_xs
+                ys = all_ys
+            
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            merged_bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
+            
+            merged_region = TextRegion(
+                text=merged_text,
+                vertices=merged_vertices,
+                bounding_box=merged_bbox,
+                confidence=regions[i].confidence,
+                region_type='merged_text_block' if len(regions_merged) > 1 else regions[i].region_type
+            )
+            
+            # Copy over any additional attributes
+            if hasattr(regions[i], 'translated_text'):
+                merged_region.translated_text = regions[i].translated_text
+            
+            merged.append(merged_region)
+            used.add(i)
+        
+        self._log(f"\n=== MERGE DEBUG: Complete ===", "info")
+        self._log(f"  Final region count: {len(merged)} (was {len(regions)})", "info")
+        
+        # Verify the merge worked
+        if len(merged) == len(regions):
+            self._log(f"  ⚠️ WARNING: No regions were actually merged!", "warning")
+        
+        return merged
+    
+    def _regions_are_nearby(self, region1: TextRegion, region2: TextRegion, threshold: int = 50) -> bool:
+        """Check if two regions are close enough to be in the same bubble - WITH DEBUG"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        #self._log(f"\n    === NEARBY CHECK DEBUG ===", "info")
+        #self._log(f"    Region 1: pos({x1},{y1}) size({w1}x{h1})", "info")
+        #self._log(f"    Region 2: pos({x2},{y2}) size({w2}x{h2})", "info")
+        #self._log(f"    Threshold: {threshold}", "info")
+        
+        # Calculate gaps between closest edges
+        horizontal_gap = 0
+        if x1 + w1 < x2:  # region1 is to the left
+            horizontal_gap = x2 - (x1 + w1)
+        elif x2 + w2 < x1:  # region2 is to the left
+            horizontal_gap = x1 - (x2 + w2)
+        
+        vertical_gap = 0
+        if y1 + h1 < y2:  # region1 is above
+            vertical_gap = y2 - (y1 + h1)
+        elif y2 + h2 < y1:  # region2 is above
+            vertical_gap = y1 - (y2 + h2)
+        
+        #self._log(f"    Horizontal gap: {horizontal_gap}", "info")
+        #self._log(f"    Vertical gap: {vertical_gap}", "info")
+        
+        # Detect if regions are likely vertical text based on aspect ratio
+        aspect1 = w1 / max(h1, 1)
+        aspect2 = w2 / max(h2, 1)
+        
+        # More permissive vertical text detection
+        # Vertical text typically has aspect ratio < 1.0 (taller than wide)
+        is_vertical_text = (aspect1 < 1.0 and aspect2 < 1.0) or (aspect1 < 0.5 or aspect2 < 0.5)
+        
+        # Also check if text is arranged vertically (one above the other with minimal horizontal offset)
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        avg_width = (w1 + w2) / 2
+        
+        # If regions are vertically stacked with aligned centers, treat as vertical text
+        is_vertically_stacked = (horizontal_center_diff < avg_width * 1.5) and (vertical_gap >= 0)
+        
+        #self._log(f"    Is vertical text: {is_vertical_text}", "info")
+        #self._log(f"    Is vertically stacked: {is_vertically_stacked}", "info")
+        #self._log(f"    Horizontal center diff: {horizontal_center_diff:.1f}", "info")
+        
+        # SIMPLE APPROACH: Just check if gaps are within threshold
+        # Don't overthink it
+        if horizontal_gap <= threshold and vertical_gap <= threshold:
+            #self._log(f"    ✅ NEARBY: Both gaps within threshold", "success")
+            return True
+        
+        # SPECIAL CASE: Vertically stacked text with good alignment
+        # This is specifically for multi-line text in bubbles
+        if horizontal_center_diff < avg_width * 0.8 and vertical_gap <= threshold * 1.5:
+            #self._log(f"    ✅ NEARBY: Vertically aligned text in same bubble", "success")
+            return True
+        
+        # If one gap is small and the other is slightly over, still consider nearby
+        if (horizontal_gap <= threshold * 0.5 and vertical_gap <= threshold * 1.5) or \
+           (vertical_gap <= threshold * 0.5 and horizontal_gap <= threshold * 1.5):
+            #self._log(f"    ✅ NEARBY: One small gap, other slightly over", "success")
+            return True
+        
+        # Special case: Wide bubbles with text on sides
+        # If regions are at nearly the same vertical position, they might be in a wide bubble
+        if abs(y1 - y2) < 10:  # Nearly same vertical position
+            # Check if this could be a wide bubble spanning both regions
+            if horizontal_gap <= threshold * 3:  # Allow up to 3x threshold for wide bubbles
+                #self._log(f"    ✅ NEARBY: Same vertical level, possibly wide bubble", "success")
+                return True
+        
+        #self._log(f"    ❌ NOT NEARBY: Gaps exceed threshold", "warning")
+        return False
+    
+    def _find_font(self) -> str:
+        """Find a suitable font for text rendering"""
+        font_candidates = [
+            "C:/Windows/Fonts/comicbd.ttf",  # Comic Sans MS Bold as first choice
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/calibri.ttf", 
+            "C:/Windows/Fonts/tahoma.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        ]
+        
+        for font_path in font_candidates:
+            if os.path.exists(font_path):
+                return font_path
+        
+        return None  # Will use default font
+
+    def _get_live_local_inpaint_method(self) -> str:
+        """Return the live local inpaint method from MangaIntegration dropdown if available."""
+        # Prefer the live MangaIntegration GUI (dropdown)
+        try:
+            mg = getattr(self, 'main_gui', None) and getattr(self.main_gui, 'manga_translator', None)
+            if mg is not None:
+                try:
+                    if hasattr(mg, 'local_model_combo'):
+                        val = mg.local_model_combo.currentText()
+                        if val:
+                            return val
+                    if hasattr(mg, 'local_model_type_value'):
+                        val = mg.local_model_type_value
+                        if val:
+                            return val
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Fall back to top-level config (more up-to-date than nested inpainting)
+        try:
+            val = self.main_gui.config.get('manga_local_inpaint_model', '')
+            if val:
+                return val
+        except Exception:
+            pass
+        # Final fallback to nested settings (stale-safe default)
+        try:
+            return (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime_onnx')
+        except Exception:
+            return 'anime_onnx'
+    
+    def _get_thread_bubble_detector(self):
+        """Get or initialize bubble detector using pool system.
+        Will check out a preloaded detector if available for current settings.
+        Polls and waits if all instances are checked out.
+        """
+        # Use thread-local instance with pool checkout
+        if not hasattr(self, '_thread_local') or getattr(self, '_thread_local', None) is None:
+            self._thread_local = threading.local()
+        det_type, model_id, key = self._current_detector_selection()
+        if (
+            hasattr(self._thread_local, 'bubble_detector')
+            and self._thread_local.bubble_detector is not None
+            and getattr(self, '_bubble_detector_pool_key', None) != key
+        ):
+            self._log(f"Bubble detector selection changed from {getattr(self, '_bubble_detector_pool_key', None)} to {key}; returning old detector", "info")
+            self._return_bubble_detector_to_pool()
+        if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
+            from bubble_detector import BubbleDetector
+            import time
+            
+            # Polling parameters
+            max_wait_time = 60  # Maximum 60 seconds
+            poll_interval = 0.5  # Check every 0.5 seconds
+            elapsed = 0
+            wait_logged = False
+            
+            # Try to check out a preloaded spare for the current detector settings
+            while elapsed < max_wait_time:
+                try:
+                    # Check stop flag during wait
+                    if self._check_stop():
+                        self._log("⏹️ Translation stopped while waiting for bubble detector", "warning")
+                        return None
+                    
+                    with MangaTranslator._detector_pool_lock:
+                        rec = MangaTranslator._detector_pool.get(key)
+                        if elapsed == 0:
+                            # Show all keys in pool for comparison
+                            all_keys = list(MangaTranslator._detector_pool.keys())
+                            self._log(f"📊 Detector pool has {len(all_keys)} key(s) total", "info")
+                            for pk in all_keys:
+                                self._log(f"   Pool key: {pk}", "info")
+                            self._log(f"📊 Lookup for key {key}: found={rec is not None}", "info")
+                            if rec:
+                                self._log(f"   Spares: {len(rec.get('spares', []))}, Checked out: {len(rec.get('checked_out', []))}", "info")
+                            else:
+                                self._log("⚠️ DETECTOR KEY MISMATCH - requested key not in pool!", "warning")
+                        if rec is None:
+                            for old_key, old_rec in list(MangaTranslator._detector_pool.items()):
+                                if old_key == key:
+                                    continue
+                                old_checked = (old_rec or {}).get('checked_out') or []
+                                if old_checked:
+                                    continue
+                                for old_spare in (old_rec or {}).get('spares') or []:
+                                    try:
+                                        if hasattr(old_spare, 'unload'):
+                                            old_spare.unload(release_shared=True)
+                                    except Exception:
+                                        pass
+                                MangaTranslator._detector_pool.pop(old_key, None)
+                                self._log(f"Unloaded stale bubble detector pool entry {old_key}", "info")
+                            bd = BubbleDetector()
+                            if hasattr(bd, 'set_stop_flag') and hasattr(self, 'stop_flag'):
+                                try:
+                                    bd.set_stop_flag(self.stop_flag)
+                                except Exception:
+                                    pass
+                            rec = {'spares': [bd], 'checked_out': [bd]}
+                            MangaTranslator._detector_pool[key] = rec
+                            self._thread_local.bubble_detector = bd
+                            self._checked_out_bubble_detector = bd
+                            self._bubble_detector_pool_key = key
+                            self._log(f"Created new bubble detector pool entry for {key}", "info")
+                            return bd
+
+                        if rec and isinstance(rec, dict):
+                            spares = rec.get('spares') or []
+                            # Initialize checked_out list if it doesn't exist
+                            if 'checked_out' not in rec:
+                                rec['checked_out'] = []
+                            checked_out = rec['checked_out']
+
+                            if not spares and not checked_out:
+                                bd = BubbleDetector()
+                                if hasattr(bd, 'set_stop_flag') and hasattr(self, 'stop_flag'):
+                                    try:
+                                        bd.set_stop_flag(self.stop_flag)
+                                    except Exception:
+                                        pass
+                                rec['spares'] = [bd]
+                                rec['checked_out'] = [bd]
+                                self._thread_local.bubble_detector = bd
+                                self._checked_out_bubble_detector = bd
+                                self._bubble_detector_pool_key = key
+                                self._log(f"Created bubble detector instance for empty pool entry {key}", "info")
+                                return bd
+                             
+                            # Look for an available spare (not checked out)
+                            if spares:
+                                for spare in spares:
+                                    if spare not in checked_out and spare:
+                                        # Check out this spare instance
+                                        checked_out.append(spare)
+                                        self._thread_local.bubble_detector = spare
+                                        # Store references for later return
+                                        self._checked_out_bubble_detector = spare
+                                        self._bubble_detector_pool_key = key
+                                        
+                                        # CRITICAL: Reset stop flags on the checked-out detector
+                                        # This ensures the instance is ready for new work after a previous stop
+                                        try:
+                                            if hasattr(spare, 'reset_stop_flags'):
+                                                spare.reset_stop_flags()
+                                            elif hasattr(spare, '_stopped'):
+                                                spare._stopped = False
+                                            # Also set the new stop flag
+                                            if hasattr(spare, 'set_stop_flag') and hasattr(self, 'stop_flag'):
+                                                spare.set_stop_flag(self.stop_flag)
+                                        except Exception:
+                                            pass
+                                        
+                                        available = len(spares) - len(checked_out)
+                                        if elapsed > 0:
+                                            self._log(f"🤖 Checked out bubble detector after {elapsed:.1f}s wait ({len(checked_out)}/{len(spares)} in use)", "info")
+                                        else:
+                                            self._log(f"🤖 Checked out bubble detector from pool ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                                        return self._thread_local.bubble_detector
+                except Exception:
+                    pass
+                
+                # No instance available yet - wait and retry
+                if elapsed == 0 and not wait_logged:
+                    self._log(f"⏳ All bubble detector instances in use - waiting up to {max_wait_time}s (poll {poll_interval}s)...", "info")
+                    wait_logged = True
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+            
+            # Timeout - no instance became available
+            self._log(f"⚠️ Timeout waiting for bubble detector after {elapsed:.1f}s (max {max_wait_time}s)", "warning")
+            self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
+            return None
+        return self._thread_local.bubble_detector
+    
+    def _get_thread_local_inpainter(self, local_method: str, model_path: str):
+        """Get or create a LocalInpainter using pool system.
+        Loads the requested model if needed.
+        """
+        import os
+        import time
+        
+        # Always prefer the LIVE dropdown selection over stale inputs
+        try:
+            live_method = self._get_live_local_inpaint_method()
+            if live_method and live_method != local_method:
+                self._log(f"🔄 Overriding inpainter method from {local_method} to live selection {live_method}", "info")
+                local_method = live_method
+                # Refresh model_path to match the live method
+                try:
+                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else model_path
+                    if not model_path:
+                        model_path = self.main_gui.config.get(f'{local_method}_model_path', '') if hasattr(self, 'main_gui') else model_path
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
+        # Log raw inputs for .exe debugging
+        self._log(f"🔍 Inpainter checkout - raw inputs: method={local_method}, path={model_path}", "info")
+        
+        # Normalize the model path to ensure key consistency
+        original_path = model_path
+        custom_image_edit_load_path = None
+        if str(local_method or '').lower() == 'custom-image-edit':
+            custom_image_edit_load_path, model_path = self._custom_image_edit_pool_path(model_path)
+        if model_path and str(local_method or '').lower() != 'custom-image-edit':
+            try:
+                model_path = os.path.abspath(os.path.normpath(model_path))
+                if original_path != model_path:
+                    self._log(f"🔍 Path normalized: {original_path} -> {model_path}", "info")
+            except Exception as e:
+                self._log(f"⚠️ Path normalization failed: {e}", "warning")
+                pass
+        
+        key = (local_method or 'anime', model_path or '')
+        self._log(f"🔑 Checkout request for key: {key}", "info")
+        
+        # OPTIMIZATION: Check if we already have this exact instance checked out
+        # This prevents re-checking out the same instance multiple times per panel
+        if hasattr(self, '_checked_out_inpainter') and hasattr(self, '_inpainter_pool_key'):
+            if self._inpainter_pool_key == key and self._checked_out_inpainter is not None:
+                # Already have this exact model checked out - reuse it!
+                return self._checked_out_inpainter
+        
+        # Use thread-local instance with pool checkout
+        # Ensure thread-local storage exists and has a dict
+        tl = getattr(self, '_thread_local', None)
+        if tl is None:
+            self._thread_local = threading.local()
+            tl = self._thread_local
+        if not hasattr(tl, 'local_inpainters') or getattr(tl, 'local_inpainters', None) is None:
+            tl.local_inpainters = {}
+        
+        # Check thread-local cache first
+        if key in tl.local_inpainters and tl.local_inpainters[key] is not None:
+            # Already cached in this thread - return it
+            if str(local_method or '').lower() == 'custom-image-edit':
+                self._apply_custom_image_edit_request_config(tl.local_inpainters[key])
+            return tl.local_inpainters[key]
+
+        if str(local_method or '').lower() == 'custom-image-edit':
+            inp = self._get_or_init_shared_local_inpainter(local_method, custom_image_edit_load_path or '')
+            if inp is not None:
+                tl.local_inpainters[key] = inp
+                return inp
+            return None
+        
+        # Not cached - try to check out from pool with polling
+        # Use RETRY_TIMEOUT and CHUNK_TIMEOUT settings from Other Settings
+        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
+        max_wait_time = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else 1800
+        
+        poll_interval = 0.5  # Check every 0.5 seconds
+        total_attempts = 2
+        
+        def _checkout_with_poll(max_wait: int, attempt_idx: int):
+            elapsed = 0.0
+            wait_logged = False
+            while elapsed < max_wait:
+                # Check stop flag during wait
+                if self._check_stop():
+                    self._log("⏹️ Translation stopped while waiting for inpainter", "warning")
+                    return None
+                
+                try:
+                    with MangaTranslator._inpaint_pool_lock:
+                        rec = MangaTranslator._inpaint_pool.get(key)
+                        if elapsed == 0:
+                            # Show all keys in pool for comparison
+                            all_keys = list(MangaTranslator._inpaint_pool.keys())
+                            self._log(f"📊 Pool has {len(all_keys)} key(s) total", "info")
+                            for pk in all_keys:
+                                self._log(f"   Pool key: {pk}", "info")
+                            self._log(f"📊 Lookup for key {key}: found={rec is not None}", "info")
+                            if rec:
+                                self._log(f"   Spares: {len(rec.get('spares', []))}, Checked out: {len(rec.get('checked_out', []))}", "info")
+                            else:
+                                self._log(f"⚠️ KEY MISMATCH - requested key not in pool!", "warning")
+                        if rec and isinstance(rec, dict):
+                            spares = rec.get('spares') or []
+                            # Initialize checked_out list if it doesn't exist
+                            if 'checked_out' not in rec:
+                                rec['checked_out'] = []
+                            checked_out = rec['checked_out']
+                            
+                            # Look for an available spare (not already checked out)
+                            if spares:
+                                # Debug first attempt only
+                                if elapsed == 0:
+                                    for idx, spare in enumerate(spares):
+                                        is_checked_out = spare in checked_out
+                                        is_none = spare is None
+                                        has_model_loaded = getattr(spare, 'model_loaded', False)
+                                        self._log(f"🔍 Inpainter spare[{idx}]: checked_out={is_checked_out}, is_none={is_none}, model_loaded={has_model_loaded}", "info")
+                                
+                                for spare in spares:
+                                    if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                                        if str(local_method or '').lower() == 'custom-image-edit':
+                                            self._apply_custom_image_edit_request_config(spare)
+                                        # Mark as checked out (don't remove from spares!)
+                                        checked_out.append(spare)
+                                        tl.local_inpainters[key] = spare
+                                        # Store reference for later return
+                                        self._checked_out_inpainter = spare
+                                        self._inpainter_pool_key = key
+                                        
+                                        # CRITICAL: Reset stop flags on the checked-out inpainter
+                                        # This ensures the instance is ready for new work after a previous stop
+                                        try:
+                                            if hasattr(spare, 'reset_stop_flags'):
+                                                spare.reset_stop_flags()
+                                            elif hasattr(spare, '_stopped'):
+                                                spare._stopped = False
+                                            # Also set the new stop flag
+                                            if hasattr(spare, 'set_stop_flag') and hasattr(self, 'stop_flag'):
+                                                spare.set_stop_flag(self.stop_flag)
+                                        except Exception:
+                                            pass
+                                        
+                                        available = len(spares) - len(checked_out)
+                                        if elapsed > 0:
+                                            self._log(f"🎨 Checked out inpainter after {elapsed:.1f}s wait (attempt {attempt_idx}/{total_attempts}, {len(checked_out)}/{len(spares)} in use)", "info")
+                                        else:
+                                            self._log(f"🎨 Using preloaded local inpainting instance (attempt {attempt_idx}/{total_attempts}, {len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                                        return tl.local_inpainters[key]
+                except Exception as e:
+                    if elapsed == 0:
+                        self._log(f"⚠️ Inpainter checkout error on attempt {attempt_idx}/{total_attempts}: {e}", "warning")
+                
+                # No instance available yet - wait and retry
+                if elapsed == 0 and not wait_logged:
+                    retry_flag = "on" if retry_timeout_enabled else "off"
+                    self._log(f"⏳ All inpainter instances in use - waiting up to {max_wait}s (attempt {attempt_idx}/{total_attempts}, poll {poll_interval}s, retry_timeout {retry_flag})...", "info")
+                    wait_logged = True
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+            
+            # Timeout - no instance became available
+            self._log(f"⚠️ Timeout waiting for inpainter after {max_wait}s (attempt {attempt_idx}/{total_attempts})", "warning")
+            return None
+        
+        inp = _checkout_with_poll(max_wait_time, 1)
+        if inp is not None:
+            return inp
+        if self._check_stop():
+            return None
+        if total_attempts > 1:
+            self._log(f"🔁 Retrying inpainter checkout for another {max_wait_time}s (attempt 2/{total_attempts}, total {max_wait_time * total_attempts}s)", "info")
+            inp = _checkout_with_poll(max_wait_time, 2)
+            if inp is not None:
+                return inp
+        
+        self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
+        return None
+    
+    def translate_regions(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
+        """Translate all text regions with API delay"""
+        self._log(f"\n📝 Translating {len(regions)} text regions...")
+        
+        try:
+            self._current_page_source_text = "\n".join(
+                str(region.text or '') for region in regions if str(region.text or '').strip()
+            )
+            self._current_page_source_image_path = image_path
+        except Exception:
+            self._current_page_source_text = ""
+
+        # Check stop before even starting
+        if self._check_stop():
+            self._log(f"\n⏹️ Translation stopped before processing any regions", "warning")
+            return regions
+        
+        # Check if parallel processing OR batch translation is enabled
+        # Check instance attribute first, then fall back to manga_settings
+        parallel_enabled = getattr(self, 'parallel_processing', False) or self.manga_settings.get('advanced', {}).get('parallel_processing', False)
+        batch_enabled = getattr(self, 'batch_mode', False)
+        # Check instance attribute first for max_workers, then fall back to manga_settings
+        max_workers = getattr(self, 'max_workers', None) or self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        
+        # Batch translation (parallel API calls) should work independently of parallel processing
+        if batch_enabled:
+            max_workers = getattr(self, 'batch_size', max_workers)
+            mode_label = getattr(self, 'batching_mode', 'direct')
+            self._log(f"📦 Using BATCH TRANSLATION ({mode_label}) with {max_workers} concurrent API calls")
+            return self._translate_regions_parallel(regions, image_path, max_workers)
+        elif parallel_enabled and len(regions) > 1:
+            self._log(f"🚀 Using PARALLEL processing with {max_workers} workers")
+            return self._translate_regions_parallel(regions, image_path, max_workers)
+        else:
+            # SEQUENTIAL CODE
+            for i, region in enumerate(regions):
+                # During graceful stop, do not start additional API calls.
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    self._log(f"\n⏹️ Graceful stop active - stopping before region {i+1}/{len(regions)}", "warning")
+                    break
+                if self._check_stop():
+                    self._log(f"\n⏹️ Translation stopped by user after {i}/{len(regions)} regions", "warning")
+                    break            
+                if region.text.strip():
+                    self._log(f"\n[{i+1}/{len(regions)}] Original: {region.text}")
+                    
+                    # Get context for translation
+                    context = self.translation_context[-5:] if self.contextual_enabled else None
+                    
+                    # Translate with image context
+                    translated = self.translate_text(
+                        region.text, 
+                        context,
+                        image_path=image_path,
+                        region=region
+                    )
+                    region.translated_text = translated
+                    
+                    self._log(f"Translated: {translated}")
+                    
+                    # SAVE TO HISTORY HERE
+                    # NOTE: History is now appended inside translate_text() so that
+                    # we can capture image_path and region metadata. Avoid
+                    # double-appending here.
+                    
+                    # Apply API delay
+                    if i < len(regions) - 1:  # Don't delay after last translation
+                        self._log(f"⏳ Waiting {self.api_delay}s before next translation...")
+                        # Check stop flag every 0.1 seconds during delay
+                        for _ in range(int(self.api_delay * 10)):
+                            if self._check_stop():
+                                self._log(f"\n⏹️ Translation stopped during delay", "warning")
+                                return regions
+                            time.sleep(0.1)
+            
+            return regions
+
+    #  parallel processing:
+
+    def _wait_for_api_slot(self, min_interval=None, jitter_max=0.25):
+        """Global, thread-safe front-edge rate limiter for API calls.
+        Ensures parallel requests are spaced out before dispatch, avoiding tail latency.
+        """
+        import time
+        import random
+        import threading
+
+        if min_interval is None:
+            try:
+                min_interval = float(getattr(self, "api_delay", 0.0))
+            except Exception:
+                min_interval = 0.0
+        if min_interval < 0:
+            min_interval = 0.0
+
+        # Lazy init shared state
+        if not hasattr(self, "_api_rl_lock"):
+            self._api_rl_lock = threading.Lock()
+            self._api_next_allowed = 0.0  # monotonic seconds
+
+        while True:
+            # During graceful stop, do not wait for / schedule new API calls.
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                return
+            now = time.monotonic()
+            with self._api_rl_lock:
+                # If we're allowed now, book the next slot and proceed
+                if now >= self._api_next_allowed:
+                    jitter = random.uniform(0.0, max(jitter_max, 0.0)) if jitter_max else 0.0
+                    self._api_next_allowed = now + min_interval + jitter
+                    return
+
+                # Otherwise compute wait time (don’t hold the lock while sleeping)
+                wait = self._api_next_allowed - now
+
+            # Sleep outside the lock in short increments so stop flags can be honored
+            if wait > 0:
+                try:
+                    if self._check_stop():
+                        return
+                except Exception:
+                    pass
+                time.sleep(min(wait, 0.05))
+
+    def _translate_regions_parallel(self, regions: List[TextRegion], image_path: str, max_workers: int = None) -> List[TextRegion]:
+        """Translate regions using parallel processing"""
+        # Get max_workers from settings if not provided
+        if max_workers is None:
+            max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        
+        # Override with API batch size when batch mode is enabled — these are API calls.
+        try:
+            if getattr(self, 'batch_mode', False):
+                bs = int(getattr(self, 'batch_size', 0) or int(os.getenv('BATCH_SIZE', '0')))
+                if bs and bs > 0:
+                    # Apply batching mode semantics (lightweight):
+                    mode = getattr(self, 'batching_mode', 'direct')
+                    group = max(1, int(getattr(self, 'batch_group_size', 3) or 3))
+                    if mode == 'conservative':
+                        max_workers = bs * group
+                    else:
+                        max_workers = bs
+        except Exception:
+            pass
+        # Bound to number of regions
+        max_workers = max(1, min(max_workers, len(regions)))
+        
+        # Thread-safe storage for results
+        results_lock = threading.Lock()
+        translated_regions = {}
+        failed_indices = []
+        
+        # Filter out empty regions
+        valid_regions = [(i, region) for i, region in enumerate(regions) if region.text.strip()]
+        
+        if not valid_regions:
+            return regions
+        
+        # Create a thread pool
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all translation tasks
+            future_to_data = {}
+            
+            for i, region in valid_regions:
+                # Check for stop signal before submitting
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    self._log(f"\n⏹️ Graceful stop active - not submitting additional regions", "warning")
+                    break
+                if self._check_stop():
+                    self._log(f"\n⏹️ Translation stopped before submitting region {i+1}", "warning")
+                    break
+                
+                # Submit translation task
+                future = executor.submit(
+                    self._translate_single_region_parallel, 
+                    region, 
+                    i, 
+                    len(valid_regions),
+                    image_path
+                )
+                future_to_data[future] = (i, region)
+            
+            # Process completed translations
+            completed = 0
+            for future in as_completed(future_to_data):
+                i, region = future_to_data[future]
+                
+                # Check for stop signal
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    self._log(f"\n⏹️ Graceful stop active - cancelling remaining region tasks", "warning")
+                    for f in future_to_data:
+                        f.cancel()
+                    break
+                if self._check_stop():
+                    self._log(f"\n⏹️ Translation stopped at {completed}/{len(valid_regions)} completed", "warning")
+                    # Cancel remaining futures
+                    for f in future_to_data:
+                        f.cancel()
+                    break
+                
+                try:
+                    translated_text = future.result()
+                    if translated_text:
+                        with results_lock:
+                            translated_regions[i] = translated_text
+                        completed += 1
+                        self._log(f"✅ [{completed}/{len(valid_regions)}] Completed region {i+1}")
+                    else:
+                        with results_lock:
+                            failed_indices.append(i)
+                        self._log(f"❌ [{completed}/{len(valid_regions)}] Failed region {i+1}", "error")
+                
+                except Exception as e:
+                    with results_lock:
+                        failed_indices.append(i)
+                    self._log(f"❌ Error in region {i+1}: {str(e)}", "error")
+        
+        # Apply translations back to regions
+        for i, region in enumerate(regions):
+            if i in translated_regions:
+                region.translated_text = translated_regions[i]
+        
+        # Report summary
+        success_count = len(translated_regions)
+        fail_count = len(failed_indices)
+        self._log(f"\n📊 Parallel translation complete: {success_count} succeeded, {fail_count} failed")
+        
+        return regions
+
+    def reset_for_new_image(self):
+        """Reset internal state for processing a new image"""
+        # ============================================================
+        # CRITICAL: COMPREHENSIVE CACHE CLEARING FOR NEW IMAGE
+        # This ensures NO text data leaks between images
+        # ============================================================
+        
+        # Clear any cached detection results
+        if hasattr(self, 'last_detection_results'):
+            del self.last_detection_results
+        
+        # FORCE clear OCR ROI cache (main text contamination source)
+        # THREAD-SAFE: Use lock for parallel panel translation
+        if hasattr(self, 'ocr_roi_cache'):
+            with self._cache_lock:
+                self.ocr_roi_cache.clear()
+        self._current_image_hash = None
+        
+        # Clear OCR manager and ALL provider caches
+        if hasattr(self, 'ocr_manager') and self.ocr_manager:
+            if hasattr(self.ocr_manager, 'last_results'):
+                self.ocr_manager.last_results = None
+            if hasattr(self.ocr_manager, 'cache'):
+                self.ocr_manager.cache.clear()
+            # Clear ALL provider-level caches
+            if hasattr(self.ocr_manager, 'providers'):
+                for provider_name, provider in self.ocr_manager.providers.items():
+                    if hasattr(provider, 'last_results'):
+                        provider.last_results = None
+                    if hasattr(provider, 'cache'):
+                        provider.cache.clear()
+        
+        # Clear bubble detector cache
+        if hasattr(self, 'bubble_detector') and self.bubble_detector:
+            if hasattr(self.bubble_detector, 'last_detections'):
+                self.bubble_detector.last_detections = None
+            if hasattr(self.bubble_detector, 'cache'):
+                self.bubble_detector.cache.clear()
+        
+        # Don't clear translation context if using rolling history
+        if not self.rolling_history_enabled:
+            self.translation_context = []
+        
+        # Clear any cached regions
+        if hasattr(self, '_cached_regions'):
+            del self._cached_regions
+        
+        self._log("🔄 Reset translator state for new image (ALL text caches cleared)", "debug")
+
+    def _translate_single_region_parallel(self, region: TextRegion, index: int, total: int, image_path: str) -> Optional[str]:
+        """Translate a single region for parallel processing"""
+        try:
+            thread_name = threading.current_thread().name
+            self._log(f"\n[{thread_name}] [{index+1}/{total}] Original: {region.text}")
+            
+            # Note: Context is not used in parallel mode to avoid race conditions
+            # Pass None for context to maintain compatibility with your translate_text method
+            # Front-edge rate limiting across threads
+            self._wait_for_api_slot()
+
+            translated = self.translate_text(
+                region.text,
+                None,  # No context in parallel mode
+                image_path=image_path,
+                region=region
+            )
+            
+            if translated:
+                self._log(f"[{thread_name}] Translated: {translated}")
+                return translated
+            else:
+                self._log(f"[{thread_name}] Translation failed", "error")
+                return None
+                
+        except Exception as e:
+            self._log(f"[{thread_name}] Error: {str(e)}", "error")
+            return None
+
+
+    def _is_bubble_detector_loaded(self, ocr_settings: Dict[str, Any]) -> Tuple[bool, str]:
+        """Check if the configured bubble detector's model is already loaded.
+        Returns (loaded, detector_type). Safe: does not trigger a load.
+        """
+        try:
+            bd = self._get_thread_bubble_detector()
+        except Exception:
+            return False, ocr_settings.get('detector_type', 'rtdetr_onnx')
+        det = ocr_settings.get('detector_type', 'rtdetr_onnx')
+        try:
+            if det == 'rtdetr_onnx':
+                return bool(getattr(bd, 'rtdetr_onnx_loaded', False)), det
+            elif det == 'rtdetr':
+                return bool(getattr(bd, 'rtdetr_loaded', False)), det
+            elif det == 'yolo':
+                return bool(getattr(bd, 'model_loaded', False)), det
+            else:
+                # Auto or unknown – consider any ready model as loaded
+                ready = bool(getattr(bd, 'rtdetr_loaded', False) or getattr(bd, 'rtdetr_onnx_loaded', False) or getattr(bd, 'model_loaded', False))
+                return ready, det
+        except Exception:
+            return False, det
+
+    def _is_local_inpainter_loaded(self) -> Tuple[bool, Optional[str]]:
+        """Check if a local inpainter model is already loaded for current settings.
+        Returns (loaded, local_method) or (False, None).
+        This respects UI flags: skip_inpainting / use_cloud_inpainting.
+        """
+        try:
+            # If skipping or using cloud, this does not apply
+            if getattr(self, 'skip_inpainting', False) or getattr(self, 'use_cloud_inpainting', False):
+                return False, None
+        except Exception:
+            pass
+        local_method = self._get_live_local_inpaint_method()
+        try:
+            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+        except Exception:
+            model_path = ''
+        # Thread-local/pooled path
+        inp = getattr(self, 'local_inpainter', None)
+        if inp is not None and getattr(inp, 'model_loaded', False):
+            return True, local_method
+        try:
+            key = (local_method, model_path or '')
+            rec = MangaTranslator._inpaint_pool.get(key)
+            # Check if any spare in the preload pool is model_loaded
+            if rec:
+                for spare in rec.get('spares') or []:
+                    if getattr(spare, 'model_loaded', False):
+                        return True, local_method
+        except Exception:
+            pass
+        return False, local_method
+
+    def _log_model_status(self):
+        """Emit concise status lines for already-loaded heavy models to avoid confusing 'loading' logs."""
+        try:
+            ocr_settings = self.manga_settings.get('ocr', {}) if hasattr(self, 'manga_settings') else {}
+            if ocr_settings.get('bubble_detection_enabled', True):
+                loaded, det = self._is_bubble_detector_loaded(ocr_settings)
+                if loaded:
+                    self._log("🤖 Bubble detector ready", "info")
+        except Exception:
+            pass
+        # Skip inpainting status logging for rendering-only instances (created with skip_inpainter_init=True)
+        if not getattr(self, '_skip_inpainter_init', False):
+            try:
+                loaded, local_method = self._is_local_inpainter_loaded()
+                if loaded and local_method:
+                    self._log("🎨 Local inpainter ready", "info")
+            except Exception:
+                pass
+
+    def process_image(self, image_path: str, output_path: Optional[str] = None, 
+                     batch_index: int = None, batch_total: int = None,
+                     ocr_only: bool = False,
+                     precomputed_regions: Optional[List[TextRegion]] = None) -> Dict[str, Any]:
+        """Process a single manga image through the full pipeline.
+
+        The manga glossary workflow uses ``ocr_only`` to collect all page text
+        first, then passes ``precomputed_regions`` back for the final
+        translation/render pass so OCR is not repeated.
+        """
+        # Defensive imports at function start to prevent UnboundLocalError
+        import os
+        import time
+        import traceback
+        
+        # Re-hijack print to ensure manga logs go to manga GUI
+        # This is needed because print may have been restored after previous translation
+        try:
+            import builtins
+            import sys
+            # Re-register this translator's callback if needed
+            if not hasattr(builtins, '_manga_log_callbacks'):
+                builtins._manga_log_callbacks = {}
+            if self.log_callback:
+                builtins._manga_log_callbacks[id(self)] = self.log_callback
+                # Re-apply the custom print if needed (never on mobile: _manga_print_hijack_enabled)
+                if _manga_print_hijack_enabled() and (not hasattr(builtins.print, '__name__') or builtins.print.__name__ != 'manga_print'):
+                    # Print was restored, need to re-hijack
+                    if hasattr(MangaTranslator, '_original_print_backup'):
+                        # Get the manga_print function from module initialization
+                        # We'll recreate it here to be safe
+                        def manga_print(*args, **kwargs):
+                            """Custom print that redirects to manga log callback (thread-safe)"""
+                            message = ' '.join(str(arg) for arg in args)
+                            callback_found = False
+                            if hasattr(builtins, '_manga_log_callbacks'):
+                                for translator_id, callback in reversed(list(builtins._manga_log_callbacks.items())):
+                                    if callback:
+                                        try:
+                                            level = 'info'
+                                            if '❌' in message or 'ERROR' in message or 'Error' in message:
+                                                level = 'error'
+                                            elif '⚠️' in message or 'WARNING' in message or 'Warning' in message:
+                                                level = 'warning'
+                                            elif '🔍' in message or 'DEBUG' in message:
+                                                level = 'debug'
+                                            elif '✅' in message or '🔑' in message or '📤' in message:
+                                                level = 'info'
+                                            message = message.replace('[DEBUG] ', '')
+                                            callback(message, level)
+                                            callback_found = True
+                                            break
+                                        except Exception:
+                                            continue
+                            if not callback_found:
+                                try:
+                                    if hasattr(MangaTranslator, '_original_print_backup'):
+                                        MangaTranslator._original_print_backup(*args, **kwargs)
+                                    else:
+                                        import sys
+                                        sys.__stdout__.write(str(message) + '\n')
+                                except Exception:
+                                    pass
+                        builtins.print = manga_print
+                        # Also re-inject into unified_api_client
+                        try:
+                            import unified_api_client
+                            uc_module = sys.modules.get('unified_api_client')
+                            if uc_module:
+                                uc_module.__dict__['print'] = manga_print
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        
+        # Ensure local references exist for cleanup in finally
+        image = None
+        inpainted = None
+        final_image = None
+        mask = None
+        mask_viz = None
+        pil_image = None
+        heatmap = None
+        
+        # CRITICAL: Clear stale checkout references from any previous (possibly interrupted) translation
+        # This ensures we properly check out fresh instances from the pool
+        try:
+            self._clear_checkout_references()
+        except Exception:
+            pass
+
+        # Set batch tracking if provided
+        if batch_index is not None and batch_total is not None:
+            self.batch_current = batch_index
+            self.batch_size = batch_total
+            self.batch_mode = True
+        # If graceful stop was requested before this image, abort immediately
+        try:
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                self.set_global_cancellation(True)
+                result = {
+                    'success': False,
+                    'input_path': image_path,
+                    'output_path': output_path,
+                    'regions': [],
+                    'errors': [],
+                    'interrupted': True,
+                    'format_info': {}
+                }
+                self._log("⏹️ Graceful stop active - skipping image", "warning")
+                return result
+        except Exception:
+            pass
+        
+        # Simplified header for batch mode
+        if not self.batch_mode:
+            self._log(f"\n{'='*60}")
+            self._log(f"📷 STARTING MANGA TRANSLATION PIPELINE")
+            self._log(f"📁 Input: {image_path}")
+            self._log(f"📁 Output: {output_path or 'Auto-generated'}")
+            self._log(f"{'='*60}\n")
+        else:
+            self._log(f"\n[{batch_index}/{batch_total}] Processing: {os.path.basename(image_path)}")
+        
+        # Before heavy work, report model status to avoid confusing 'loading' logs later
+        try:
+            self._log_model_status()
+        except Exception:
+            pass
+        
+        result = {
+            'success': False,
+            'input_path': image_path,
+            'output_path': output_path,
+            'regions': [],
+            'errors': [],
+            'interrupted': False,
+            'format_info': {}
+        }
+        
+        try:
+            # Owner-approved decoder hardening (2026-10-08): a page must hold PNG, JPEG, WEBP, BMP
+            # or GIF bytes (safe_image's OpenCV allowlist). Anything else is refused here, before
+            # OCR, any decoder or the "no text found" copy of the page.
+            refusal = cv2_refusal(image_path)
+            if refusal:
+                error_msg = f"Not a supported image: {os.path.basename(image_path)} ({refusal})"
+                self._log(f"❌ {error_msg}", "error")
+                result['errors'].append(error_msg)
+                return result
+
+            # RAM cap gating before heavy processing
+            try:
+                self._block_if_over_cap("processing image")
+            except Exception:
+                pass
+
+            # Determine the output directory from output_path
+            if output_path:
+                output_dir = os.path.dirname(output_path)
+            else:
+                # Check for output directory override from environment
+                override_dir = os.environ.get('OUTPUT_DIRECTORY')
+                if override_dir:
+                    # Use override directory
+                    output_dir = os.path.join(override_dir, "translated_images")
+                else:
+                    # If no output path specified, use default relative to input
+                    output_dir = os.path.join(os.path.dirname(image_path), "translated_images")
+            
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Initialize HistoryManager with the output directory
+            if self.contextual_enabled and not self.history_manager_initialized:
+                # Only initialize if we're in a new output directory
+                if output_dir != getattr(self, 'history_output_dir', None):
+                    try:
+                        self.history_manager = HistoryManager(output_dir)
+                        self.history_manager_initialized = True
+                        self.history_output_dir = output_dir
+                        self._log(f"📚 Initialized HistoryManager in output directory: {output_dir}")
+                    except Exception as e:
+                        self._log(f"⚠️ Failed to initialize history manager: {str(e)}", "warning")
+                        self.history_manager = None
+            
+            # Check for stop signal
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation stopped before processing", "warning")
+                return result
+            
+            # Format detection if enabled. Webtoon chunk processing currently
+            # owns its full translate/render path, so skip that shortcut for
+            # OCR-only and precomputed-region glossary passes.
+            used_precomputed_regions = precomputed_regions is not None
+            used_imported_regions = bool(
+                used_precomputed_regions
+                and any(
+                    getattr(region, '_imported_ocr_session', False)
+                    for region in (precomputed_regions or [])
+                )
+            )
+            if not used_precomputed_regions:
+                resolver = getattr(self, 'ocr_import_resolver', None)
+                if callable(resolver):
+                    try:
+                        imported_regions = resolver(image_path)
+                    except Exception as import_error:
+                        imported_regions = None
+                        self._log(f"WARNING: Imported OCR could not be resolved: {import_error}", "warning")
+                    if imported_regions is not None:
+                        precomputed_regions = imported_regions
+                        used_precomputed_regions = True
+                        used_imported_regions = True
+            if self.manga_settings.get('advanced', {}).get('format_detection', False):
+                self._log("🔍 Analyzing image format...")
+                img = open_image(image_path)
+                width, height = img.size
+                aspect_ratio = height / width
+                
+                # Detect format type
+                format_info = {
+                    'width': width,
+                    'height': height,
+                    'aspect_ratio': aspect_ratio,
+                    'is_webtoon': aspect_ratio > 3.0,
+                    'is_spread': width > height * 1.3,
+                    'format': 'unknown'
+                }
+                
+                if format_info['is_webtoon']:
+                    format_info['format'] = 'webtoon'
+                    self._log("📱 Detected WEBTOON format - vertical scroll manga")
+                elif format_info['is_spread']:
+                    format_info['format'] = 'spread'
+                    self._log("📖 Detected SPREAD format - two-page layout")
+                else:
+                    format_info['format'] = 'single_page'
+                    self._log("📄 Detected SINGLE PAGE format")
+                
+                result['format_info'] = format_info
+                
+                # Handle webtoon mode if detected and enabled
+                webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')
+                if (not ocr_only and not used_precomputed_regions and
+                        format_info['is_webtoon'] and webtoon_mode != 'disabled'):
+                    if webtoon_mode == 'auto' or webtoon_mode == 'force':
+                        self._log("🔄 Webtoon mode active - will process in chunks for better OCR")
+                        # Process webtoon in chunks. This specialized path returns
+                        # before the normal OCR callback below, so persist its
+                        # combined region data here.
+                        webtoon_result = self._process_webtoon_chunks(image_path, output_path, result)
+                        export_callback = getattr(self, 'ocr_export_callback', None)
+                        if callable(export_callback):
+                            try:
+                                export_callback(image_path, webtoon_result.get('regions', []))
+                            except Exception as export_error:
+                                self._log(f"WARNING: Could not save OCR text: {export_error}", "warning")
+                        return webtoon_result
+            
+            # Step 1: Detect text regions using OCR, reuse an explicit prior
+            # pass, or resolve regions from a user-imported OCR document.
+            if used_precomputed_regions:
+                self._log(f"📍 [STEP 1] Reusing precomputed OCR regions")
+                regions = _prepare_precomputed_regions(
+                    precomputed_regions or [],
+                    preserve_translations=used_imported_regions,
+                )
+            else:
+                self._log(f"📍 [STEP 1] Text Detection Phase")
+                regions = self.detect_text_regions(image_path)
+
+            # Save OCR as soon as it exists, before translation/inpainting can
+            # fail. The GUI integration attaches this callback per run.
+            export_callback = getattr(self, 'ocr_export_callback', None)
+            if callable(export_callback):
+                try:
+                    export_callback(image_path, regions or [])
+                except Exception as export_error:
+                    self._log(f"WARNING: Could not save OCR text: {export_error}", "warning")
+            
+            if not regions:
+                error_msg = "No text regions detected by Cloud Vision"
+                self._log(f"⚠️ {error_msg}", "warning")
+                result['errors'].append(error_msg)
+                if ocr_only:
+                    result['success'] = True
+                    result['ocr_only'] = True
+                    result['_region_objects'] = []
+                    return result
+                # Still save the original image as "translated" if no text found
+                if output_path:
+                    import shutil
+                    shutil.copy2(image_path, output_path)
+                    result['output_path'] = output_path
+                result['success'] = True
+                return result
+            
+            self._log(f"\n✅ Detection complete: {len(regions)} regions found")
+            
+            # OPTIMIZATION: Return bubble detector to pool immediately after detection
+            # This frees the model for reuse by other images in batch mode
+            if not used_precomputed_regions:
+                try:
+                    self._return_bubble_detector_to_pool()
+                    self._log("🔄 Returned detector to pool (available for next image)", "debug")
+                except Exception as e:
+                    self._log(f"⚠️ Failed to return detector to pool: {e}", "debug")
+            
+            # Save debug outputs only if 'Save intermediate images' is enabled
+            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                self._save_debug_image(image_path, regions, debug_base_dir=output_dir)
+
+            if ocr_only:
+                result['regions'] = [r.to_dict() for r in regions]
+                result['_region_objects'] = regions
+                result['ocr_only'] = True
+                result['success'] = True
+                self._log(f"✅ OCR-only pass complete: {len(regions)} regions captured")
+                return result
+            
+            # Step 2: Translation Phase (inpainting may already be running from detection)
+            self._log(f"\n📍 [STEP 2] Translation Phase")
+            
+            # Load image once (used by inpainting task); keep PIL fallback for Unicode paths
+            import cv2
+            self._log(f"🖼️ Loading image with OpenCV...")
+            try:
+                image = cv2_imread(image_path)
+                if image is None:
+                    self._log(f"   Using PIL to handle Unicode path...", "info")
+                    from PIL import Image as PILImage
+                    import numpy as np
+                    pil_image = open_page_image(image_path)
+                    image_rgb = np.array(pil_image)
+                    image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+                    self._log(f"   ✅ Successfully loaded with PIL", "info")
+            except Exception as e:
+                error_msg = f"Failed to load image: {image_path} - {str(e)}"
+                self._log(f"❌ {error_msg}", "error")
+                result['errors'].append(error_msg)
+                return result
+            
+            self._log(f"   Image dimensions: {image.shape[1]}x{image.shape[0]}")
+            
+            # Save intermediate original image if enabled
+            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                self._save_intermediate_image(image_path, image, "original", debug_base_dir=output_dir)
+            
+            # Check if we should continue before kicking off tasks
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation stopped before concurrent phase", "warning")
+                return result
+            
+            # Helper tasks
+            def _task_translate():
+                try:
+                    regions_to_translate = _regions_requiring_translation(
+                        regions,
+                        reuse_existing=used_imported_regions,
+                    )
+                    reused_count = len(regions) - len(regions_to_translate)
+                    if reused_count:
+                        self._log(
+                            f"📥 Reusing {reused_count}/{len(regions)} translated regions from imported OCR session",
+                            "info",
+                        )
+                    if not regions_to_translate:
+                        self._log("✅ Imported page already contains all translations; skipping translation API", "success")
+                        return True
+
+                    if self.full_page_context_enabled:
+                        # Full page context translation mode
+                        self._log(f"\n📄 Using FULL PAGE CONTEXT mode")
+                        self._log("   This mode sends all text together for more consistent translations", "info")
+                        if self._check_stop():
+                            return False
+                        translations = self.translate_full_page_context(regions_to_translate, image_path)
+                        if translations:
+                            translated_count = sum(1 for r in regions_to_translate if getattr(r, 'translated_text', None) and r.translated_text and r.translated_text != r.text)
+                            self._log(f"\n📊 Full page context translation complete: {translated_count}/{len(regions_to_translate)} pending regions translated")
+                            return True
+                        else:
+                            self._log("❌ Full page context translation failed", "error")
+                            result['errors'].append("Full page context translation failed")
+                            return False
+                    else:
+                        # Individual translation mode with parallel processing support
+                        self._log(f"\n📝 Using INDIVIDUAL translation mode")
+                        if self.manga_settings.get('advanced', {}).get('parallel_processing', False):
+                            self._log("⚡ Parallel processing ENABLED")
+                            _ = self._translate_regions_parallel(regions_to_translate, image_path)
+                        else:
+                            _ = self.translate_regions(regions_to_translate, image_path)
+                        return True
+                except Exception as te:
+                    error_msg = f"Translation task error: {type(te).__name__}: {str(te)}"
+                    self._log(f"❌ {error_msg}", "error")
+                    self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
+                    result['errors'].append(error_msg)
+                    return False
+            
+            def _save_cleaned_image_if_changed(cleaned_img, label: str):
+                try:
+                    if cleaned_img is None or not isinstance(cleaned_img, np.ndarray):
+                        return None
+                    if cleaned_img.shape == image.shape and np.array_equal(cleaned_img, image):
+                        self._log(f"WARNING: Inpainting returned the original image unchanged; not saving {label} cleaned image", "warning")
+                        if output_path:
+                            base, ext = os.path.splitext(output_path)
+                        else:
+                            base, ext = os.path.splitext(image_path)
+                        stale_path = f"{base}_cleaned{ext}"
+                        try:
+                            if os.path.exists(stale_path):
+                                os.remove(stale_path)
+                        except Exception:
+                            pass
+                        return None
+
+                    if output_path:
+                        base, ext = os.path.splitext(output_path)
+                    else:
+                        base, ext = os.path.splitext(image_path)
+                    cleaned_path = f"{base}_cleaned{ext}"
+
+                    cleaned_dir = os.path.dirname(cleaned_path)
+                    if cleaned_dir:
+                        os.makedirs(cleaned_dir, exist_ok=True)
+
+                    ext_lower = ext.lower()
+                    if ext_lower == '.png':
+                        cv2.imwrite(cleaned_path, cleaned_img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+                    elif ext_lower in ['.jpg', '.jpeg']:
+                        cv2.imwrite(cleaned_path, cleaned_img, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                    elif ext_lower == '.webp':
+                        cv2.imwrite(cleaned_path, cleaned_img, [cv2.IMWRITE_WEBP_QUALITY, 100])
+                    else:
+                        cv2.imwrite(cleaned_path, cleaned_img)
+
+                    self._log(f"Saved cleaned image ({label}): {os.path.basename(cleaned_path)}", "info")
+                    return cleaned_path
+                except Exception as e:
+                    self._log(f"WARNING: Failed to save {label} cleaned image: {e}", "warning")
+                    return None
+
+            def _task_inpaint():
+                try:
+                    # If force stop is active (not graceful), skip all inpainting work
+                    # Graceful stop should let inpainting finish since it's concurrent
+                    try:
+                        if self._check_stop() and os.environ.get('GRACEFUL_STOP') != '1':
+                            self._log("⏹️ Force stop active - skipping inpainting task", "warning")
+                            return image.copy()
+                    except Exception:
+                        pass
+                    # CRITICAL: Re-check the skip flag from config at runtime (don't use cached value)
+                    # This ensures toggle changes are respected even after MangaTranslator initialization
+                    skip_flag = False
+                    try:
+                        # Priority 1: Check environment variable (set by toggle)
+                        env_skip = os.environ.get('MANGA_SKIP_INPAINTING', '').strip()
+                        if env_skip in ('1', 'true', 'True', 'TRUE'):
+                            skip_flag = True
+                        elif env_skip in ('0', 'false', 'False', 'FALSE'):
+                            skip_flag = False
+                        else:
+                            # Priority 2: Check config
+                            skip_flag = self.main_gui.config.get('manga_skip_inpainting', False)
+                    except Exception:
+                        # Fallback to cached value
+                        skip_flag = getattr(self, 'skip_inpainting', False)
+                    
+                    if skip_flag:
+                        self._log(f"🎨 Skipping inpainting (preserving original art)", "info")
+                        return image.copy()
+                    
+                    self._log(f"🎭 Creating text mask...")
+                    try:
+                        self._block_if_over_cap("mask creation")
+                    except Exception:
+                        pass
+                    mask_local = self.create_text_mask(image, regions)
+                    if not np.any(mask_local):
+                        self._log("⏭️ No OCR-confirmed text to inpaint; preserving original image", "info")
+                        _save_cleaned_image_if_changed(image, "thread")
+                        return image.copy()
+                    
+                    # Save mask and overlay only if 'Save intermediate images' is enabled
+                    if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                        try:
+                            debug_dir = os.path.join(output_dir, 'debug')
+                            os.makedirs(debug_dir, exist_ok=True)
+                            base_name = os.path.splitext(os.path.basename(image_path))[0]
+                            mask_path = os.path.join(debug_dir, f"{base_name}_mask.png")
+                            cv2.imwrite(mask_path, mask_local)
+                            mask_percentage = ((mask_local > 0).sum() / mask_local.size) * 100
+                            self._log(f"   🎭 DEBUG: Saved mask to {mask_path}", "info")
+                            self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
+                            
+                            # Save mask overlay visualization
+                            mask_viz_local = image.copy()
+                            mask_viz_local[mask_local > 0] = [0, 0, 255]
+                            viz_path = os.path.join(debug_dir, f"{base_name}_mask_overlay.png")
+                            cv2.imwrite(viz_path, mask_viz_local)
+                            self._log(f"   🎭 DEBUG: Saved mask overlay to {viz_path}", "info")
+                        except Exception as e:
+                            self._log(f"   ❌ Failed to save mask debug: {str(e)}", "error")
+                            
+                        # Also save intermediate copies
+                        try:
+                            self._save_intermediate_image(image_path, mask_local, "mask", debug_base_dir=output_dir)
+                        except Exception:
+                            pass
+                    
+                    self._log(f"🎨 Inpainting to remove original text")
+                    try:
+                        self._block_if_over_cap("inpainting")
+                    except Exception:
+                        pass
+                    # Offload inpainting to subprocess if configured and pool is available
+                    try:
+                        offload = self.manga_settings.get('advanced', {}).get('inpaint_in_subprocess', True)
+                    except Exception:
+                        offload = True
+                    if bool(
+                        getattr(getattr(self, 'main_gui', None), 'manga_disable_inpaint_performance_mode_var', False)
+                        or getattr(getattr(self, 'main_gui', None), 'config', {}).get('manga_disable_inpaint_performance_mode', False)
+                    ):
+                        offload = False
+                    if offload and hasattr(self, '_inpaint_proc_pool') and self._inpaint_proc_pool is not None:
+                        try:
+                            from local_inpainter import proc_inpaint
+                            fut = self._inpaint_proc_pool.submit(proc_inpaint, image, mask_local, 'normal')
+                            inpainted_local = fut.result()
+                        except Exception as _pe:
+                            self._log(f"⚠️ Subprocess inpaint failed, falling back to in-process: {_pe}", "warning")
+                            inpainted_local = self.inpaint_regions(image, mask_local)
+                    else:
+                        inpainted_local = self.inpaint_regions(image, mask_local)
+                    
+                    if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                        try:
+                            self._save_intermediate_image(image_path, inpainted_local, "inpainted", debug_base_dir=output_dir)
+                        except Exception:
+                            pass
+                    
+                    # Save cleaned image immediately after inpainting, unless the backend returned a no-op.
+                    _save_cleaned_image_if_changed(inpainted_local, "thread")
+                    
+                    return inpainted_local
+                except Exception as ie:
+                    self._log(f"❌ Inpainting task error: {type(ie).__name__}: {ie}", "error")
+                    self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
+                    return image.copy()
+            
+            # Gate on advanced setting (default enabled)
+            adv = self.manga_settings.get('advanced', {})
+            run_concurrent = adv.get('concurrent_inpaint_translate', True)
+            
+            if run_concurrent:
+                self._log("🔀 Running translation and inpainting concurrently", "info")
+                # OPTIMIZATION: Use shorter timeout and immediate cleanup
+                from concurrent.futures import as_completed, Future as FutureType
+                import concurrent
+                import numpy as np
+                with ThreadPoolExecutor(max_workers=2) as _executor:
+                    fut_translate = _executor.submit(_task_translate)
+                    fut_inpaint = _executor.submit(_task_inpaint)
+                    
+                    # Wait for both to complete
+                    translate_ok = False
+                    inpainted = None
+                    
+                    # Get results with timing
+                    # Use RETRY_TIMEOUT and CHUNK_TIMEOUT settings from Other Settings
+                    retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
+                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else 1800
+                    
+                    try:
+                        translate_ok = fut_translate.result(timeout=chunk_timeout)
+                        self._log("✅ Translation task completed", "info")
+                    except Exception as e:
+                        error_msg = f"Translation failed: {type(e).__name__}: {str(e)}"
+                        self._log(f"⚠️ {error_msg}", "warning")
+                        self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
+                        result['errors'].append(error_msg)
+                        translate_ok = False
+                    
+                    try:
+                        # Use same timeout settings for inpainting
+                        # Get the result from fut_inpaint
+                        fut_inpaint_result = fut_inpaint.result(timeout=chunk_timeout)
+                        
+                        # Check what we got back
+                        if isinstance(fut_inpaint_result, concurrent.futures.Future):
+                            # It's an early inpainting future, get its result
+                            # Use interruptible wait with stop flag checks
+                            inpaint_wait_start = time.time()
+                            inpainted = None
+                            max_wait = 300  # 5 minutes total
+                            poll_interval = 2.0  # Check stop flag every 2 seconds
+                            
+                            self._log(f"⏳ Waiting for early inpainting to complete...", "info")
+                            wait_log_interval = 5  # Log status every 5 seconds
+                            last_wait_log = 0
+                            
+                            while inpainted is None:
+                                elapsed = time.time() - inpaint_wait_start
+                                
+                                # Periodic status log
+                                if elapsed - last_wait_log >= wait_log_interval:
+                                    self._log(f"⏳ Still waiting for early inpainting... ({elapsed:.0f}s elapsed)", "info")
+                                    last_wait_log = elapsed
+                                
+                                if elapsed >= max_wait:
+                                    self._log(f"⚠️ Early inpainting timed out after {max_wait}s", "warning")
+                                    inpainted = image.copy()  # Fallback to original
+                                    break
+                                
+                                # Check stop flag during wait — only interrupt on FORCE stop
+                                # Graceful stop should let early inpainting finish
+                                is_force_stop = (self._check_stop() or self.is_globally_cancelled()) and os.environ.get('GRACEFUL_STOP') != '1'
+                                if is_force_stop:
+                                    self._log("⏹️ Early inpainting interrupted by force stop", "warning")
+                                    # Cancel the future if possible
+                                    try:
+                                        fut_inpaint_result.cancel()
+                                    except Exception:
+                                        pass
+                                    inpainted = image.copy()  # Fallback to original
+                                    break
+                                
+                                # Try to get result with short timeout
+                                try:
+                                    inpainted = fut_inpaint_result.result(timeout=poll_interval)
+                                except concurrent.futures.TimeoutError:
+                                    # Not done yet, continue waiting
+                                    continue
+                                except concurrent.futures.CancelledError:
+                                    self._log("⏹️ Early inpainting was cancelled", "warning")
+                                    inpainted = image.copy()  # Fallback to original
+                                    break
+                                except Exception as poll_err:
+                                    self._log(f"⚠️ Early inpainting error: {poll_err}", "warning")
+                                    inpainted = image.copy()  # Fallback to original
+                                    break
+                            
+                            inpaint_wait_time = time.time() - inpaint_wait_start
+                            
+                            # Calculate total inpainting time from when it started early
+                            # Check both existence AND non-None value to avoid TypeError
+                            if hasattr(self, '_inpainting_start_time') and self._inpainting_start_time is not None:
+                                total_inpaint_time = time.time() - self._inpainting_start_time
+                                if inpaint_wait_time < 0.1:
+                                    self._log(f"✅ Early inpainting ALREADY COMPLETE! (ran for {total_inpaint_time:.1f}s during OCR/translation)", "info")
+                                else:
+                                    self._log(f"✅ Early inpainting finished (total: {total_inpaint_time:.1f}s, additional wait: {inpaint_wait_time:.1f}s)", "info") 
+                            else:
+                                if inpaint_wait_time < 0.1:
+                                    self._log(f"✅ Early inpainting already done!", "info")
+                                else:
+                                    self._log(f"✅ Early inpainting completed (waited {inpaint_wait_time:.1f}s)", "info")
+                            
+                            # Save cleaned image after early inpainting completes, unless the backend returned a no-op.
+                            _save_cleaned_image_if_changed(inpainted, "early inpainting")
+                        elif isinstance(fut_inpaint_result, np.ndarray):
+                            # It's the actual image array (early inpainting didn't run, but inpainting task finished)
+                            self._log("✅ Inpainting completed (direct path)", "info")
+                            inpainted = fut_inpaint_result
+                            
+                            # Save cleaned image for direct path too, unless the backend returned a no-op.
+                            _save_cleaned_image_if_changed(inpainted, "direct path")
+                        else:
+                            # Unexpected type
+                            self._log(f"⚠️ Unexpected inpainting result type: {type(fut_inpaint_result)}", "warning")
+                            inpainted = image.copy()
+                    except Exception as e:
+                        self._log(f"⚠️ Inpainting failed: {type(e).__name__}: {e}", "warning")
+                        self._log(f"   Traceback:\n{traceback.format_exc()}", "error")
+                        inpainted = image.copy()
+                    finally:
+                        # Clean up early inpainting resources
+                        if hasattr(self, '_inpainting_future'):
+                            self._inpainting_future = None
+                        if hasattr(self, '_inpainting_start_time'):
+                            delattr(self, '_inpainting_start_time')
+                        if hasattr(self, '_inpainting_executor'):
+                            try:
+                                self._inpainting_executor.shutdown(wait=False)
+                            except:
+                                pass
+                            self._inpainting_executor = None
+                
+                # CRITICAL: Exit context manager immediately to avoid cleanup delay
+                # ThreadPoolExecutor shutdown can take 1-3 seconds
+            else:
+                self._log("↪️ Concurrent mode disabled — running sequentially", "info")
+                translate_ok = _task_translate()
+                inpainted = _task_inpaint()
+
+            # Refresh the automatic OCR/session export after translation has
+            # populated region.translated_text. The earlier callback deliberately
+            # saves OCR immediately so it survives later pipeline failures.
+            if callable(export_callback):
+                try:
+                    export_callback(image_path, regions or [])
+                except Exception as export_error:
+                    self._log(f"WARNING: Could not save translated OCR session: {export_error}", "warning")
+            
+            # OPTIMIZATION: Return inpainter to pool immediately after inpainting completes
+            # This frees the model for reuse by other images in batch mode
+            try:
+                self._return_inpainter_to_pool()
+                self._log("🔄 Returned inpainter to pool (available for next image)", "debug")
+            except Exception as e:
+                self._log(f"⚠️ Failed to return inpainter to pool: {e}", "debug")
+            
+            # After concurrent phase, validate translation
+            # OPTIMIZATION: Skip slow to_dict() conversion unless actually interrupted
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation cancelled before rendering", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+            
+            if not any(getattr(region, 'translated_text', None) for region in regions):
+                result['interrupted'] = True
+                self._log("⏹️ No regions were translated - translation was interrupted", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+            
+            # Cleaned image already saved during inpainting (both early and normal paths)
+            # Just set the path for the result
+            if output_path:
+                base, ext = os.path.splitext(output_path)
+            else:
+                base, ext = os.path.splitext(image_path)
+            cleaned_image_path = f"{base}_cleaned{ext}"
+            
+            # Verify it was saved (should always exist now that both paths save it)
+            if not os.path.exists(cleaned_image_path):
+                self._log(f"⚠️ Cleaned image not found at expected path", "warning")
+                cleaned_image_path = None
+            
+            # AGGRESSIVE stop check before rendering (ignores graceful stop)
+            # Rendering is fast so we can safely skip it when stop is requested
+            if self.is_globally_cancelled() or (hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set()):
+                result['interrupted'] = True
+                self._log("⏹️ Translation stopped before rendering", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+            
+            # Render translated text
+            self._log(f"✍️ Rendering translated text...")
+            # OPTIMIZATION: Skip verbose logging during rendering
+            final_image = self.render_translated_text(inpainted, regions)
+            
+            # Final stop check before saving (aggressive - ignores graceful stop)
+            if self.is_globally_cancelled() or (hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set()):
+                result['interrupted'] = True
+                self._log("⏹️ Translation stopped before saving", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+            
+            # Save output
+            try:
+                if not output_path:
+                    base, ext = os.path.splitext(image_path)
+                    output_path = f"{base}_translated{ext}"
+                
+                success = cv2.imwrite(output_path, final_image)
+                
+                if not success:
+                    self._log(f"   Using PIL to save with Unicode path...", "info")
+                    from PIL import Image as PILImage
+                    
+                    rgb_image = cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB)
+                    pil_image = PILImage.fromarray(rgb_image)
+                    pil_image.save(output_path)
+                    self._log(f"   ✅ Successfully saved with PIL", "info")
+                
+                result['output_path'] = output_path
+                self._log(f"\n💾 Saved output to: {output_path}")
+                
+                # Also include cleaned image path if it was created
+                if cleaned_image_path:
+                    result['cleaned_image_path'] = cleaned_image_path
+                
+            except Exception as e:
+                error_msg = f"Failed to save output image: {str(e)}"
+                self._log(f"❌ {error_msg}", "error")
+                result['errors'].append(error_msg)
+                result['success'] = False
+                return result
+            
+            # Update result
+            result['regions'] = [r.to_dict() for r in regions]
+            # Persist once more from the finalized result representation. This
+            # guarantees the automatic session JSON contains translated_text
+            # even if renderer work or an earlier worker callback raced with the
+            # post-translation save above.
+            if callable(export_callback):
+                try:
+                    export_callback(image_path, result['regions'])
+                except Exception as export_error:
+                    self._log(f"WARNING: Could not finalize translated OCR session: {export_error}", "warning")
+            if not result.get('interrupted', False):
+                result['success'] = True
+                self._log(f"\n✅ TRANSLATION PIPELINE COMPLETE", "success")
+            else:
+                self._log(f"\n⚠️ TRANSLATION INTERRUPTED - Partial output saved", "warning")
+            
+            self._log(f"{'='*60}\n")
+            
+        except Exception as e:
+            error_msg = f"Error processing image: {str(e)}\n{traceback.format_exc()}"
+            self._log(f"\n❌ PIPELINE ERROR:", "error")
+            self._log(f"   {str(e)}", "error")
+            self._log(f"   Type: {type(e).__name__}", "error")
+            self._log(traceback.format_exc(), "error")
+            result['errors'].append(error_msg)
+        finally:
+            # Per-image memory cleanup to reduce RAM growth across pages
+            try:
+                # Return checked-out instances to pool ASAP for reuse
+                try:
+                    self._return_inpainter_to_pool()
+                except Exception:
+                    pass
+                try:
+                    self._return_bubble_detector_to_pool()
+                except Exception:
+                    pass
+                
+                # Clear self-held large attributes
+                try:
+                    self.current_image = None
+                    self.current_mask = None
+                    self.final_image = None
+                    self.text_regions = []
+                    self.translated_regions = []
+                except Exception:
+                    pass
+
+                # Clear local large objects if present
+                locs = locals()
+                for name in [
+                    'image', 'inpainted', 'final_image', 'mask', 'mask_viz', 'pil_image', 'heatmap'
+                ]:
+                    try:
+                        if name in locs:
+                            # Explicitly delete reference from locals
+                            del locs[name]
+                    except Exception:
+                        pass
+
+                # Reset caches for the next image (non-destructive to loaded models)
+                try:
+                    self.reset_for_new_image()
+                except Exception:
+                    pass
+
+                # Encourage release of native resources
+                try:
+                    import cv2 as _cv2
+                    try:
+                        _cv2.destroyAllWindows()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                # Free CUDA memory if torch is available
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
+                # Release thread-local heavy objects to curb RAM growth across runs
+                try:
+                    self._cleanup_thread_locals()
+                except Exception:
+                    pass
+
+                # Deep cleanup control - respects user settings and parallel processing
+                try:
+                    # Check if auto cleanup is enabled in settings
+                    auto_cleanup_enabled = False  # Default disabled by default
+                    try:
+                        if hasattr(self, 'manga_settings'):
+                            auto_cleanup_enabled = self.manga_settings.get('advanced', {}).get('auto_cleanup_models', False)
+                    except Exception:
+                        pass
+                    
+                    if not auto_cleanup_enabled:
+                        # User has disabled automatic cleanup
+                        self._log("🔑 Auto cleanup disabled - models will remain in RAM", "debug")
+                    else:
+                        # Determine if we should cleanup now
+                        should_cleanup_now = True
+                        
+                        # Check if we're in batch mode
+                        is_last_in_batch = False
+                        try:
+                            if getattr(self, 'batch_mode', False):
+                                bc = getattr(self, 'batch_current', None)
+                                bt = getattr(self, 'batch_size', None)
+                                if bc is not None and bt is not None:
+                                    is_last_in_batch = (bc >= bt)
+                                    # In batch mode, only cleanup at the end
+                                    should_cleanup_now = is_last_in_batch
+                        except Exception:
+                            pass
+                        
+                        # For parallel panel translation, cleanup is handled differently
+                        # (it's handled in manga_integration.py after all panels complete)
+                        is_parallel_panel = False
+                        try:
+                            if hasattr(self, 'manga_settings'):
+                                is_parallel_panel = self.manga_settings.get('advanced', {}).get('parallel_panel_translation', False)
+                        except Exception:
+                            pass
+                        
+                        if is_parallel_panel:
+                            # Don't cleanup here - let manga_integration handle it after all panels
+                            self._log("🎯 Deferring cleanup until all parallel panels complete", "debug")
+                            should_cleanup_now = False
+                        
+                        if should_cleanup_now:
+                            # Perform the cleanup
+                            self._deep_cleanup_models()
+                            
+                            # Also clear HF cache for RT-DETR (best-effort)
+                            if is_last_in_batch or not getattr(self, 'batch_mode', False):
+                                try:
+                                    self._clear_hf_cache()
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+                # Force a garbage collection cycle
+                try:
+                    import gc
+                    gc.collect()
+                except Exception:
+                    pass
+
+                # Aggressively trim process working set (Windows) or libc heap (Linux)
+                try:
+                    self._trim_working_set()
+                except Exception:
+                    pass
+            except Exception:
+                # Never let cleanup fail the pipeline
+                pass
+        
+        return result
+
+    def reset_history_manager(self):
+        """Reset history manager for new translation batch"""
+        self.history_manager = None
+        self.history_manager_initialized = False
+        self.history_output_dir = None
+        self.translation_context = []
+        self._log("📚 Reset history manager for new batch", "debug")
+    
+    def cleanup_all_models(self):
+        """Public method to force cleanup of all models - call this after translation!
+        This ensures all models (YOLO, RT-DETR, inpainters, OCR) are unloaded from RAM.
+        """
+        self._log("🧹 Forcing cleanup of all models to free RAM...", "info")
+        
+        # Call the comprehensive cleanup
+        self._deep_cleanup_models()
+        
+        # Also cleanup thread locals
+        try:
+            self._cleanup_thread_locals()
+        except Exception:
+            pass
+        
+        # Clear HF cache
+        try:
+            self._clear_hf_cache()
+        except Exception:
+            pass
+        
+        # Trim working set
+        try:
+            self._trim_working_set()
+        except Exception:
+            pass
+        
+        self._log("✅ All models cleaned up - RAM freed!", "info")
+    
+    def clear_internal_state(self):
+        """Clear all internal state and cached data to free memory.
+        This is called when the translator instance is being reset.
+        Ensures OCR manager, inpainters, and bubble detector are also cleaned.
+        """
+        try:
+            # Clear image data
+            self.current_image = None
+            self.current_mask = None
+            self.final_image = None
+            
+            # Clear text regions
+            if hasattr(self, 'text_regions'):
+                self.text_regions = []
+            if hasattr(self, 'translated_regions'):
+                self.translated_regions = []
+            
+            # Clear ALL caches (including text caches)
+            # THREAD-SAFE: Use lock for parallel panel translation
+            if hasattr(self, 'cache'):
+                self.cache.clear()
+            if hasattr(self, 'ocr_roi_cache'):
+                with self._cache_lock:
+                    self.ocr_roi_cache.clear()
+            self._current_image_hash = None
+            
+            # Clear history and context
+            if hasattr(self, 'translation_context'):
+                self.translation_context = []
+            if hasattr(self, 'history_manager'):
+                self.history_manager = None
+            self.history_manager_initialized = False
+            self.history_output_dir = None
+            
+            # IMPORTANT: Properly unload OCR manager
+            if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                try:
+                    ocr = self.ocr_manager
+                    if hasattr(ocr, 'providers'):
+                        for provider_name, provider in ocr.providers.items():
+                            # Clear all model references
+                            if hasattr(provider, 'model'):
+                                provider.model = None
+                            if hasattr(provider, 'processor'):
+                                provider.processor = None
+                            if hasattr(provider, 'tokenizer'):
+                                provider.tokenizer = None
+                            if hasattr(provider, 'reader'):
+                                provider.reader = None
+                            if hasattr(provider, 'client'):
+                                provider.client = None
+                            if hasattr(provider, 'is_loaded'):
+                                provider.is_loaded = False
+                        ocr.providers.clear()
+                    self.ocr_manager = None
+                    self._log("   ✓ OCR manager cleared", "debug")
+                except Exception as e:
+                    self._log(f"   Warning: OCR cleanup failed: {e}", "debug")
+            
+            # IMPORTANT: Handle local inpainter cleanup carefully
+            # DO NOT unload if it's a shared/checked-out instance from the pool
+            if hasattr(self, 'local_inpainter') and self.local_inpainter:
+                try:
+                    # Only unload if this is NOT a checked-out or shared instance
+                    is_from_pool = hasattr(self, '_checked_out_inpainter') or hasattr(self, '_inpainter_pool_key')
+                    if not is_from_pool and hasattr(self.local_inpainter, 'unload'):
+                        self.local_inpainter.unload()
+                        self._log("   ✓ Local inpainter unloaded", "debug")
+                    else:
+                        self._log("   ✓ Local inpainter reference cleared (pool instance preserved)", "debug")
+                    self.local_inpainter = None
+                except Exception as e:
+                    self._log(f"   Warning: Inpainter cleanup failed: {e}", "debug")
+            
+            # Also clear hybrid and generic inpainter references
+            if hasattr(self, 'hybrid_inpainter'):
+                if self.hybrid_inpainter and hasattr(self.hybrid_inpainter, 'unload'):
+                    try:
+                        self.hybrid_inpainter.unload()
+                    except Exception:
+                        pass
+                self.hybrid_inpainter = None
+            
+            if hasattr(self, 'inpainter'):
+                if self.inpainter and hasattr(self.inpainter, 'unload'):
+                    try:
+                        self.inpainter.unload()
+                    except Exception:
+                        pass
+                self.inpainter = None
+            
+            # IMPORTANT: Handle bubble detector cleanup carefully
+            # DO NOT unload if it's from a preloaded pool
+            if hasattr(self, 'bubble_detector') and self.bubble_detector:
+                try:
+                    # Check if it's from thread-local which might have gotten it from the pool
+                    is_from_pool = hasattr(self, '_thread_local') and hasattr(self._thread_local, 'bubble_detector')
+                    
+                    if not is_from_pool:
+                        if hasattr(self.bubble_detector, 'unload'):
+                            self.bubble_detector.unload(release_shared=True)
+                        self._log("   ✓ Bubble detector unloaded", "debug")
+                    else:
+                        self._log("   ✓ Bubble detector reference cleared (pool instance preserved)", "debug")
+                    # In all cases, clear our instance reference
+                    self.bubble_detector = None
+                except Exception as e:
+                    self._log(f"   Warning: Bubble detector cleanup failed: {e}", "debug")
+            
+            # Clear any file handles or temp data
+            if hasattr(self, '_thread_local'):
+                try:
+                    self._cleanup_thread_locals()
+                except Exception:
+                    pass
+            
+            # Clear processing flags
+            self.is_processing = False
+            self.cancel_requested = False
+            
+            # Restore print to original (delegates to restore_print method)
+            self.restore_print()
+            
+            self._log("🧹 Internal state and all components cleared", "debug")
+            
+        except Exception as e:
+            self._log(f"⚠️ Warning: Failed to clear internal state: {e}", "warning")
+    
+    def _process_webtoon_chunks(self, image_path: str, output_path: str, result: Dict) -> Dict:
+        """Process webtoon in chunks for better OCR"""
+        import cv2
+        import numpy as np
+        from PIL import Image as PILImage
+        
+        try:
+            self._log("📱 Processing webtoon in chunks for better OCR", "info")
+            
+            # Load the image
+            image = cv2_imread(image_path)
+            if image is None:
+                pil_image = open_page_image(image_path)
+                image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            
+            height, width = image.shape[:2]
+            
+            # Get chunk settings from config
+            chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)
+            chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)
+            
+            self._log(f"   Image dimensions: {width}x{height}", "info")
+            self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")
+            
+            # Calculate number of chunks needed
+            effective_chunk_height = chunk_height - chunk_overlap
+            num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)
+            
+            self._log(f"   Will process in {num_chunks} chunks", "info")
+            
+            # Process each chunk
+            all_regions = []
+            chunk_offsets = []
+            
+            for i in range(num_chunks):
+                # Calculate chunk boundaries
+                start_y = i * effective_chunk_height
+                end_y = min(start_y + chunk_height, height)
+                
+                # Make sure we don't miss the bottom part
+                if i == num_chunks - 1:
+                    end_y = height
+                
+                self._log(f"\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")
+                
+                # Extract chunk
+                chunk = image[start_y:end_y, 0:width]
+                
+                # Save chunk temporarily for OCR
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    chunk_path = tmp.name
+                    cv2.imwrite(chunk_path, chunk)
+                
+                try:
+                    # Detect text in this chunk
+                    chunk_regions = self.detect_text_regions(chunk_path)
+                    
+                    # Adjust region coordinates to full image space
+                    for region in chunk_regions:
+                        # Adjust bounding box
+                        x, y, w, h = region.bounding_box
+                        region.bounding_box = (x, y + start_y, w, h)
+                        
+                        # Adjust vertices if present
+                        if hasattr(region, 'vertices') and region.vertices:
+                            adjusted_vertices = []
+                            for vx, vy in region.vertices:
+                                adjusted_vertices.append((vx, vy + start_y))
+                            region.vertices = adjusted_vertices
+                        
+                        # Mark which chunk this came from (for deduplication)
+                        region.chunk_index = i
+                        region.chunk_y_range = (start_y, end_y)
+                    
+                    all_regions.extend(chunk_regions)
+                    chunk_offsets.append(start_y)
+                    
+                    self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")
+                    
+                finally:
+                    # Clean up temp file
+                    import os
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
+            
+            # Remove duplicate regions from overlapping areas
+            self._log(f"\n   🔍 Deduplicating regions from overlaps...", "info")
+            unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)
+            
+            self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")
+            
+            if not unique_regions:
+                self._log("⚠️ No text regions detected in webtoon", "warning")
+                result['errors'].append("No text regions detected")
+                return result
+            
+            # Now process the regions as normal
+            self._log(f"\n📍 Translating {len(unique_regions)} unique regions", "info")
+            
+            # Translate regions
+            if self.full_page_context_enabled:
+                translations = self.translate_full_page_context(unique_regions, image_path)
+                for region in unique_regions:
+                    if region.text in translations:
+                        region.translated_text = translations[region.text]
+            else:
+                unique_regions = self.translate_regions(unique_regions, image_path)
+            
+            # Create mask and inpaint
+            self._log(f"\n🎨 Creating mask and inpainting...", "info")
+            mask = self.create_text_mask(image, unique_regions)
+            
+            if self.skip_inpainting:
+                inpainted = image.copy()
+            else:
+                inpainted = self.inpaint_regions(image, mask)
+            
+            # Render translated text
+            self._log(f"✍️ Rendering translated text...", "info")
+            final_image = self.render_translated_text(inpainted, unique_regions)
+            
+            # Save output
+            if not output_path:
+                base, ext = os.path.splitext(image_path)
+                output_path = f"{base}_translated{ext}"
+            
+            cv2.imwrite(output_path, final_image)
+            
+            result['output_path'] = output_path
+            result['regions'] = [r.to_dict() for r in unique_regions]
+            result['success'] = True
+            result['format_info']['chunks_processed'] = num_chunks
+            
+            self._log(f"\n✅ Webtoon processing complete: {output_path}", "success")
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error processing webtoon chunks: {str(e)}"
+            self._log(f"❌ {error_msg}", "error")
+            result['errors'].append(error_msg)
+            return result
+
+    def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:
+        """Remove duplicate regions from overlapping chunk areas"""
+        if not regions:
+            return regions
+        
+        # Sort regions by y position
+        regions.sort(key=lambda r: r.bounding_box[1])
+        
+        unique_regions = []
+        used_indices = set()
+        
+        for i, region1 in enumerate(regions):
+            if i in used_indices:
+                continue
+            
+            # Check if this region is in an overlap zone
+            x1, y1, w1, h1 = region1.bounding_box
+            chunk_idx = region1.chunk_index if hasattr(region1, 'chunk_index') else 0
+            chunk_y_start, chunk_y_end = region1.chunk_y_range if hasattr(region1, 'chunk_y_range') else (0, float('inf'))
+            
+            # Check if region is near chunk boundary (in overlap zone)
+            in_overlap_zone = (y1 < chunk_y_start + overlap_height) and chunk_idx > 0
+            
+            if in_overlap_zone:
+                # Look for duplicate in previous chunk's regions
+                found_duplicate = False
+                
+                for j, region2 in enumerate(regions):
+                    if j >= i or j in used_indices:
+                        continue
+                    
+                    if hasattr(region2, 'chunk_index') and region2.chunk_index == chunk_idx - 1:
+                        x2, y2, w2, h2 = region2.bounding_box
+                        
+                        # Check if regions are the same (similar position and size)
+                        if (abs(x1 - x2) < 20 and 
+                            abs(y1 - y2) < 20 and 
+                            abs(w1 - w2) < 20 and 
+                            abs(h1 - h2) < 20):
+                            
+                            # Check text similarity
+                            if region1.text == region2.text:
+                                # This is a duplicate
+                                found_duplicate = True
+                                used_indices.add(i)
+                                self._log(f"   Removed duplicate: '{region1.text[:30]}...'", "debug")
+                                break
+                
+                if not found_duplicate:
+                    unique_regions.append(region1)
+                    used_indices.add(i)
+            else:
+                # Not in overlap zone, keep it
+                unique_regions.append(region1)
+                used_indices.add(i)
+        
+        return unique_regions
+
+    def _save_intermediate_image(self, original_path: str, image, stage: str, debug_base_dir: str = None):
+        """Save intermediate processing stages under translated_images/debug or provided base dir"""
+        if debug_base_dir is None:
+            translated_dir = os.path.join(os.path.dirname(original_path), 'translated_images')
+            debug_dir = os.path.join(translated_dir, 'debug')
+        else:
+            debug_dir = os.path.join(debug_base_dir, 'debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        base_name = os.path.splitext(os.path.basename(original_path))[0]
+        output_path = os.path.join(debug_dir, f"{base_name}_{stage}.png")
+        
+        cv2.imwrite(output_path, image)
+        self._log(f"   💾 Saved {stage} image: {output_path}")

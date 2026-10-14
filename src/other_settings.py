@@ -1,0 +1,15619 @@
+"""Other Settings Dialog Methods for Glossarion
+
+This module contains all the methods related to the "Other Settings" dialog.
+These methods are dynamically injected into the TranslatorGUI class.
+"""
+
+# Standard library imports
+import os
+import json
+import re
+import sys
+from glossary_matching import is_entry_type_token
+import platform
+import tempfile
+import multiprocessing
+import html as _html
+
+# PySide6 imports (fully migrated from Tkinter)
+from PySide6.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTextEdit,
+    QGroupBox,
+    QMessageBox,
+    QScrollArea,
+    QWidget,
+    QGridLayout,
+    QFrame,
+    QCheckBox,
+    QComboBox,
+    QLineEdit,
+    QSizePolicy,
+)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QFontMetrics, QIntValidator
+from PySide6.QtCore import QObject, Signal
+from translation_artifacts import (
+    load_translation_artifact_progress,
+    translation_artifact_path,
+    translation_artifacts_are_recycled_linked,
+    update_translation_artifact_progress,
+)
+from epub_package import find_epub_opf_member, find_opf_path
+# U7: GUI-free cores of the output-folder tools (Load Font, Validate EPUB Structure,
+# Delete Header Files / Delete TOC.txt); the mobile Converter / Headers screens run them too.
+from output_tools_core import (
+    ARTIFACT_DELETE_TEXTS,
+    artifact_delete_result,
+    delete_planned_artifact_caches,
+    import_custom_fonts,
+    plan_artifact_cache_delete,
+    validate_epub_outputs,
+)
+from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+
+
+DEEPSEEK_V4_EFFORT_OPTIONS = ("none", "low", "high", "max")
+
+
+def _wrapped_tooltip_html(text, width=430):
+    """Return escaped, width-bounded rich text for a wrapping Qt tooltip."""
+    safe_text = _html.escape(str(text or "")).replace("\n", "<br>")
+    return (
+        "<qt><p style='white-space: normal; margin: 0; "
+        f"width: {max(200, int(width))}px;'>{safe_text}</p></qt>"
+    )
+
+
+def _get_app_dir() -> str:
+    """Return the application's base directory (Windows-safe)."""
+    if platform.system() == 'Windows':
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
+
+def _get_disabled_halgakos_icon_path(icon_path: str) -> str:
+    """Create a dimmed combobox arrow icon for disabled combo boxes."""
+    if not icon_path:
+        return icon_path
+    source_path = icon_path.replace('/', os.sep)
+    if not os.path.exists(source_path):
+        return icon_path.replace('\\', '/')
+
+    disabled_path = os.path.join(tempfile.gettempdir(), "Glossarion_Halgakos_combo_disabled.png")
+    try:
+        if os.path.exists(disabled_path) and os.path.getmtime(disabled_path) >= os.path.getmtime(source_path):
+            return disabled_path.replace('\\', '/')
+
+        pixmap = QPixmap(source_path)
+        if pixmap.isNull():
+            return icon_path.replace('\\', '/')
+
+        disabled = QPixmap(pixmap.size())
+        disabled.fill(Qt.transparent)
+        painter = QPainter(disabled)
+        painter.setOpacity(0.28)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        disabled.save(disabled_path, "PNG")
+        return disabled_path.replace('\\', '/')
+    except Exception:
+        return icon_path.replace('\\', '/')
+
+
+class ConnTestBridge(QObject):
+    finished = Signal(list)
+
+
+def _create_preview_pool_button(gui, pool_name: str, text: str, tooltip: str = None, parent=None):
+    """Create a shared one-pool key manager preview button."""
+    from multi_api_key_manager import create_preview_pool_button
+    pool_parent = parent or getattr(gui, '_other_settings_dialog', None) or getattr(gui, 'master', None)
+    return create_preview_pool_button(pool_parent, gui, pool_name, text, tooltip)
+
+
+# Import dependencies for RotatableLabel
+from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QTransform
+
+class RotatableLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rotation = 0
+        self._original_pixmap = None
+    
+    def set_rotation(self, angle):
+        self._rotation = angle
+        if self._original_pixmap:
+            transform = QTransform()
+            transform.rotate(angle)
+            rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+            self.setPixmap(rotated)
+    
+    def get_rotation(self):
+        return self._rotation
+    
+    rotation = Property(float, get_rotation, set_rotation)
+    
+    def set_original_pixmap(self, pixmap):
+        self._original_pixmap = pixmap
+        self.setPixmap(pixmap)
+
+# Local imports - these will be available through the TranslatorGUI instance
+# WindowManager and UIHelper removed - not needed in PySide6
+from translator_gui import CONFIG_FILE
+from ai_hunter_enhanced import AIHunterConfigGUI
+# Bring in backup management methods
+from config_backup import (
+    _backup_config_file,
+    _restore_config_from_backup,
+    _create_manual_config_backup,
+    _open_backup_folder,
+    _manual_restore_config,
+)
+
+
+# Output-file naming (retain source extension) and the Library registry lookups
+# it uses live in output_naming (GUI-free, shared with mobile); re-exported here.
+from output_naming import (
+    _library_origins_raw_sources_for_stem,
+    _library_raw_inputs_for_stem,
+    _rename_output_files_for_retain,
+)
+
+
+# Moved to the shared GUI-free owner_state module (U2); re-exported for existing callers.
+from owner_state import initialize_extraction_variables  # noqa: E402,F401
+
+# Prompt profile semantics shared with the mobile app (U4); the profile handlers below
+# are thin wrappers that keep the Qt message boxes, combobox and editor work.
+import prompt_profiles  # noqa: E402
+# Thinking lock and output-mode rules shared with the mobile app (U4).
+import settings_rules  # noqa: E402
+
+def setup_other_settings_methods(gui_instance):
+    """Inject all other settings methods into the GUI instance"""
+    import types
+    import sys
+    
+    # CRITICAL: Initialize extraction variables FIRST before any profile selection happens
+    initialize_extraction_variables(gui_instance)
+    
+    # Get this module
+    current_module = sys.modules[__name__]
+    
+    # List of all method names to bind
+    methods_to_bind = [
+        # Core profile methods (needed at GUI init)
+        'on_profile_select', 'save_profile', 'delete_profile', 'save_profiles',
+        'import_profiles', 'export_profiles',
+        # Other settings methods
+        'configure_rolling_summary_prompts', 'toggle_thinking_budget', 
+        'toggle_gpt_reasoning_controls', 'toggle_anthropic_thinking_controls',
+        '_sync_thoughts_lock_state',
+        'open_other_settings',
+        'open_multi_api_key_manager', 'show_ai_hunter_settings',
+        'delete_translated_headers_file', 'delete_toc_txt_file', 'run_standalone_translate_headers', 'validate_epub_structure_gui',
+        'show_header_help_dialog',
+        'on_extraction_method_change', 'on_extraction_mode_change',
+        # Toggle methods
+        'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_ai_hunter',
+        'toggle_custom_endpoint_ui', 'toggle_more_endpoints', 'toggle_anthropic_endpoint',
+        '_toggle_multi_key_setting', '_toggle_http_tuning_controls',
+        '_toggle_anti_duplicate_controls', 'toggle_image_translation_section',
+        'toggle_anti_duplicate_section',
+        # Provider autocomplete methods
+        '_setup_provider_combobox_bindings', '_on_provider_combo_keyrelease',
+        '_commit_provider_autocomplete', '_scroll_provider_list_to_value',
+        '_validate_provider_selection',
+        # Section creation methods
+        '_create_context_management_section', '_create_response_handling_section',
+        '_create_prompt_management_section', '_create_processing_options_section',
+        '_create_image_translation_section', '_create_anti_duplicate_section',
+        '_create_custom_api_endpoints_section', '_create_debug_controls_section',
+        '_create_output_settings_section', '_create_danger_zone_section',
+        # Helper methods
+        '_create_multi_key_row', '_create_manual_config_backup', '_manual_restore_config',
+        '_open_backup_folder', '_backup_config_file', '_restore_config_from_backup',
+        '_check_azure_endpoint', '_update_azure_api_version_env',
+        '_reset_anti_duplicate_defaults', '_get_ai_hunter_status_text',
+        'create_ai_hunter_section', 'test_api_connections',
+        '_update_multi_key_status_label',
+        # Prompt configuration dialogs
+        'configure_translation_chunk_prompt', 'configure_image_chunk_prompt', 'configure_vision_ocr_prompt',
+        'configure_image_only_title_tag_prompt',
+        'configure_image_compression',
+        # Helper methods for styling
+        '_create_styled_checkbox', '_disable_combobox_mousewheel', '_disable_spinbox_mousewheel',
+        '_add_combobox_arrow',
+        # Output mode
+        '_set_output_mode', '_enforce_image_output_dependency'
+    ]
+    
+    # Bind each method to the GUI instance
+    for method_name in methods_to_bind:
+        if hasattr(current_module, method_name):
+            method = getattr(current_module, method_name)
+            if callable(method):
+                setattr(gui_instance, method_name, types.MethodType(method, gui_instance))
+
+
+def _center_messagebox_buttons(
+    msg_box,
+    *,
+    min_button_width=None,
+    min_button_height=None,
+):
+    """Center message-box buttons and optionally enlarge their click targets."""
+    from PySide6.QtWidgets import QDialogButtonBox
+    button_box = msg_box.findChild(QDialogButtonBox)
+    if button_box:
+        button_box.setCenterButtons(True)
+        for button in button_box.buttons():
+            if min_button_width is not None:
+                button.setMinimumWidth(min_button_width)
+            if min_button_height is not None:
+                button.setMinimumHeight(min_button_height)
+
+def _create_styled_checkbox(self, text):
+    """Create a checkbox with proper checkmark using text overlay - from manga integration"""
+    from PySide6.QtWidgets import QCheckBox, QLabel
+    from PySide6.QtCore import Qt, QTimer
+    
+    checkbox = QCheckBox(text)
+    # Don't set inline stylesheet - use the global stylesheet from container
+    
+    # Create checkmark overlay
+    checkmark = QLabel("✓", checkbox)
+    checkmark.setStyleSheet("""
+        QLabel {
+            color: white;
+            background: transparent;
+            font-weight: bold;
+            font-size: 11px;
+        }
+    """)
+    checkmark.setAlignment(Qt.AlignCenter)
+    checkmark.hide()
+    checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+    
+    def position_checkmark():
+        try:
+            # Check if checkmark still exists and is valid
+            if checkmark and not checkmark.isHidden() or True:  # Always try to set geometry
+                checkmark.setGeometry(2, 1, 14, 14)
+        except RuntimeError:
+            # Widget was already deleted
+            pass
+    
+    def update_checkmark():
+        try:
+            # Check if both widgets still exist
+            if checkbox and checkmark:
+                if checkbox.isChecked():
+                    position_checkmark()
+                    checkmark.show()
+                    checkmark.raise_()
+                    checkmark.update()
+                else:
+                    checkmark.hide()
+        except RuntimeError:
+            # Widget was already deleted
+            pass
+
+    try:
+        checkbox._checkmark_label = checkmark
+        checkbox._position_checkmark = position_checkmark
+        checkbox._update_checkmark = update_checkmark
+    except Exception:
+        pass
+    
+    checkbox.stateChanged.connect(update_checkmark)
+    
+    # Use try-except to handle case where widgets are deleted before timer fires
+    def safe_init():
+        try:
+            position_checkmark()
+            update_checkmark()
+        except RuntimeError:
+            pass
+    
+    QTimer.singleShot(0, safe_init)
+    
+    return checkbox
+
+def discover_glossary_entry_types(self):
+    """Entry types present in the glossary attached to the selected EPUB.
+
+    Falls back to the stock type list when no glossary can be found. Shared by
+    every "pick entry types" dialog (Emergency Glossary Compliance, Strict
+    Precise Matching) so they always offer the same list.
+    """
+    discovered_types = set()
+    try:
+        output_dir = os.environ.get('OUTPUT_DIR', '')
+        if not output_dir:
+            # Try to derive from selected EPUB
+            override = os.environ.get('OUTPUT_DIRECTORY', '')
+            epub_path = os.environ.get('EPUB_PATH', '')
+            if not epub_path and hasattr(self, 'selected_files') and self.selected_files:
+                for f in self.selected_files:
+                    if str(f).lower().endswith('.epub'):
+                        epub_path = str(f)
+                        break
+            if epub_path:
+                base_name = os.path.splitext(os.path.basename(epub_path))[0]
+                if override:
+                    output_dir = os.path.join(override, base_name)
+                else:
+                    output_dir = base_name
+
+        if output_dir and os.path.isdir(output_dir):
+            from TransateKRtoEN import find_glossary_file
+            gpath = find_glossary_file(output_dir)
+            if gpath and os.path.exists(gpath):
+                with open(gpath, 'r', encoding='utf-8') as gf:
+                    content = gf.read()
+                # Parse types from all formats
+                import re as _re
+                # Token-efficient: === TYPE === (keep as-is, e.g. "characters", "terms")
+                # (.+?) rather than (\w+): a type may be two words or hyphenated.
+                for m in _re.finditer(r'^===\s*(.+?)\s*===\s*$', content, _re.MULTILINE):
+                    discovered_types.add(m.group(1).strip().lower())
+                # CSV: type{sep}raw_name,...
+                _GSEP = '\x1F'
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if not line or line.startswith('=') or line.startswith('*') or line.startswith('Glossary'):
+                        continue
+                    # Detect separator for this line
+                    if _GSEP in line:
+                        parts = line.split(_GSEP)
+                    elif ',' in line:
+                        parts = line.split(',')
+                    else:
+                        continue
+                    if len(parts) >= 3 and parts[0].strip().lower() != 'type' and is_entry_type_token(parts[0]):
+                        discovered_types.add(parts[0].strip().lower())
+    except Exception:
+        pass
+
+    # Fallback defaults
+    if not discovered_types:
+        discovered_types = {'character', 'terms', 'locations', 'abilities', 'items', 'organizations', 'titles', 'book'}
+
+    # Sort: character first, then alphabetical
+    return sorted(discovered_types, key=lambda t: (0 if t.rstrip('s') == 'character' else 1, t))
+
+
+def open_glossary_entry_types_dialog(self, parent, title, prompt, current_types):
+    """Checkbox dialog for picking glossary entry types.
+
+    Returns the selected list on Save and None on Cancel. ``self`` is the
+    main GUI (for the styled checkboxes and the glossary lookup).
+    """
+    try:
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QWidget
+
+        dlg = QDialog(parent)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumSize(350, 300)
+        dlg_layout = QVBoxLayout(dlg)
+
+        dlg_layout.addWidget(QLabel(prompt))
+
+        type_list = discover_glossary_entry_types(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        # A saved "terms" still ticks a glossary that spells it "term".
+        current_custom = set()
+        for saved in current_types or []:
+            saved = str(saved).strip().lower()
+            current_custom.update((saved, saved[:-1] if saved.endswith('s') else saved + 's'))
+        type_checkboxes = {}
+        for entry_type in type_list:
+            cb = self._create_styled_checkbox(entry_type.capitalize())
+            cb.setChecked(entry_type in current_custom)
+            scroll_layout.addWidget(cb)
+            type_checkboxes[entry_type] = cb
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        dlg_layout.addWidget(scroll)
+
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 16px;")
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 6px 16px;")
+        btn_row.addStretch()
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(cancel_btn)
+        dlg_layout.addLayout(btn_row)
+
+        result = {}
+
+        def _save_custom():
+            result['selected'] = [t for t, cb in type_checkboxes.items() if cb.isChecked()]
+            dlg.accept()
+        save_btn.clicked.connect(_save_custom)
+        cancel_btn.clicked.connect(dlg.reject)
+        dlg.exec()
+        return result.get('selected')
+    except Exception as e:
+        print(f"Error opening glossary entry types dialog: {e}")
+        return None
+
+
+def _disable_combobox_mousewheel(self, combobox):
+    """Disable mousewheel scrolling on a combobox (PySide6)"""
+    combobox.wheelEvent = lambda event: None
+
+def _disable_spinbox_mousewheel(self, spinbox):
+    """Disable mousewheel scrolling on a spinbox (PySide6)"""
+    spinbox.wheelEvent = lambda event: None
+
+def _add_combobox_arrow(self, combobox):
+    """Use the shared Halgakos combobox arrow styling."""
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if not os.path.exists(icon_path):
+        return
+
+    disabled_icon_path = _get_disabled_halgakos_icon_path(icon_path)
+    icon_path = icon_path.replace('\\', '/')
+    existing_style = combobox.styleSheet() or ""
+    combobox.setStyleSheet(existing_style + f"""
+        QComboBox {{
+            padding-right: 4px;
+        }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 18px;
+            border-left: 1px solid #4a5568;
+        }}
+        QComboBox::down-arrow {{
+            image: url({icon_path});
+            width: 16px;
+            height: 16px;
+            border: none;
+        }}
+        QComboBox::down-arrow:disabled {{
+            image: url({disabled_icon_path});
+            width: 16px;
+            height: 16px;
+            border: none;
+        }}
+        QComboBox::down-arrow:on {{
+            top: 1px;
+        }}
+    """)
+    combobox._custom_arrow_label = None
+
+_THINKING_COMBO_STYLE = """
+    QComboBox:disabled {
+        color: #808080;
+        background-color: #242424;
+        border: 1px solid #3a4555;
+    }
+    QComboBox::drop-down:disabled {
+        border-left: 1px solid #3a4555;
+    }
+    QComboBox::down-arrow {
+        image: none;
+        width: 12px;
+        height: 12px;
+        border: none;
+    }
+"""
+
+_THINKING_ENTRY_STYLE = """
+    QLineEdit:disabled {
+        color: #808080;
+        background-color: #242424;
+        border: 1px solid #3a4555;
+    }
+"""
+
+
+def _set_thinking_widget_enabled(widget, enabled: bool):
+    widget.setEnabled(enabled)
+    arrow = getattr(widget, '_custom_arrow_label', None)
+    if arrow is not None:
+        arrow.setStyleSheet(f"""
+            QLabel {{
+                color: {'white' if enabled else '#808080'};
+                background: transparent;
+                font-size: 10pt;
+                border: none;
+            }}
+        """)
+
+
+class HeaderTranslationHelpDialog(QDialog):
+    """Dialog to display detailed information about header translation functionality"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Header Translation - Help")
+        self.setup_ui()
+        
+        # Set icon if available
+        icon_path = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+    
+    def setup_ui(self):
+        """Set up the dialog UI using ratios for sizing"""
+        # Use ratios for dialog size based on screen resolution
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().availableGeometry()
+        width = int(screen.width() * 0.4)  # 40% of screen width
+        height = int(screen.height() * 0.6)  # 60% of screen height
+        self.resize(width, height)
+        
+        # Center the dialog
+        self.move(
+            screen.x() + (screen.width() - width) // 2,
+            screen.y() + (screen.height() - height) // 2
+        )
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            int(width * 0.03),  # 3% of dialog width
+            int(height * 0.02),  # 2% of dialog height
+            int(width * 0.03),  # 3% of dialog width
+            int(height * 0.02)   # 2% of dialog height
+        )
+        layout.setSpacing(int(height * 0.02))  # 2% of dialog height
+        
+        # Title
+        title_label = QLabel("Chapter Header Translation - Detailed Guide")
+        title_label.setStyleSheet(f"""
+            QLabel {{
+                font-weight: bold;
+                font-size: {int(height * 0.025)}pt;
+                color: #6c7b7f;
+                padding-bottom: {int(height * 0.015)}px;
+            }}
+        """)
+        layout.addWidget(title_label)
+        
+        # Scrollable content area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Content widget
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(
+            int(width * 0.02),  # 2% margins
+            int(height * 0.01), 
+            int(width * 0.02), 
+            int(height * 0.01)
+        )
+        content_layout.setSpacing(int(height * 0.015))  # 1.5% spacing
+        
+        # Create sections with detailed explanations (metadata_defaults.HEADER_HELP_SECTIONS, U9)
+        from metadata_defaults import HEADER_HELP_SECTIONS
+        sections = HEADER_HELP_SECTIONS
+        
+        font_size = max(9, int(height * 0.018))  # Scale font with dialog size, minimum 9pt
+        
+        for section in sections:
+            # Section title
+            section_title = QLabel(section["title"])
+            section_title.setStyleSheet(f"""
+                QLabel {{
+                    font-weight: bold;
+                    font-size: {font_size + 1}pt;
+                    color: #7f8c8d;
+                    padding-top: {int(height * 0.01)}px;
+                    padding-bottom: {int(height * 0.005)}px;
+                }}
+            """)
+            content_layout.addWidget(section_title)
+            
+            # Section content
+            section_text = "\n".join(section["content"])
+            section_label = QLabel(section_text)
+            section_label.setStyleSheet(f"""
+                QLabel {{
+                    font-size: {font_size}pt;
+                    color: #95a5a6;
+                    line-height: 1.4;
+                    padding-left: {int(width * 0.02)}px;
+                    padding-bottom: {int(height * 0.01)}px;
+                }}
+            """)
+            section_label.setWordWrap(True)
+            content_layout.addWidget(section_label)
+        
+        scroll_area.setWidget(content_widget)
+        layout.addWidget(scroll_area)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(int(height * 0.05))  # 5% of dialog height
+        close_btn.clicked.connect(self.accept)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #3498db;
+                color: white;
+                padding: {int(height * 0.01)}px {int(width * 0.03)}px;
+                border-radius: {int(height * 0.01)}px;
+                font-weight: bold;
+                font-size: {font_size}pt;
+            }}
+            QPushButton:hover {{
+                background-color: #2980b9;
+            }}
+            QPushButton:pressed {{
+                background-color: #21618c;
+            }}
+        """)
+        
+        # Button layout
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(close_btn)
+        button_layout.addStretch()
+        
+        layout.addLayout(button_layout)
+
+
+def show_header_help_dialog(self):
+    """Show the header translation help dialog"""
+    # Use the current GUI instance as parent, fallback to None if needed
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = HeaderTranslationHelpDialog(parent)
+    dialog.exec()
+
+def configure_rolling_summary_prompts(self):
+    """Configure rolling summary prompts (PySide6)"""
+    from PySide6.QtGui import QIcon
+
+    # Reuse existing dialog if it exists
+    if hasattr(self, '_rolling_summary_dialog') and self._rolling_summary_dialog is not None:
+        try:
+            # Refresh content from current state
+            if hasattr(self, 'summary_system_text'):
+                self.summary_system_text.setPlainText(getattr(self, 'rolling_summary_system_prompt', ''))
+            if hasattr(self, 'summary_user_text'):
+                self.summary_user_text.setPlainText(getattr(self, 'rolling_summary_user_prompt', ''))
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._rolling_summary_dialog, duration=220)
+            except Exception:
+                self._rolling_summary_dialog.show()
+            self._rolling_summary_dialog.raise_()
+            self._rolling_summary_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._rolling_summary_dialog = None
+
+    # Create a non-modal dialog, child of other_settings so it stays on top
+    from PySide6.QtWidgets import QApplication
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Configure Memory System Prompts")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    # Use screen ratios for sizing
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.42)  # 42% of screen width
+    height = int(screen.height() * 0.75)  # 75% of screen height
+    dialog.resize(width, height)
+
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+
+    # Hide on close instead of destroying
+    def _hide_on_close(event):
+        event.ignore()
+        dialog.hide()
+    dialog.closeEvent = _hide_on_close
+
+    # Keep a reference so it isn't garbage-collected
+    self._rolling_summary_dialog = dialog
+
+    layout = QVBoxLayout(dialog)
+
+    # Title and description
+    title_lbl = QLabel("Memory System Configuration")
+    title_lbl.setStyleSheet("font-size: 16px; font-weight: bold;")
+    layout.addWidget(title_lbl)
+
+    desc_lbl = QLabel("Configure how the AI creates and maintains translation memory/context summaries.")
+    desc_lbl.setStyleSheet("color: gray;")
+    layout.addWidget(desc_lbl)
+
+    # System Prompt group
+    sys_group = QGroupBox("System Prompt (Role Definition)")
+    sys_v = QVBoxLayout(sys_group)
+
+    sys_help = QLabel("Defines the AI's role and behavior when creating summaries")
+    sys_help.setStyleSheet("color: #1f6feb;")
+    sys_v.addWidget(sys_help)
+
+    self.summary_system_text = QTextEdit()
+    self.summary_system_text.setAcceptRichText(False)
+    self.summary_system_text.setPlainText(getattr(self, 'rolling_summary_system_prompt', ''))
+    sys_v.addWidget(self.summary_system_text)
+
+    layout.addWidget(sys_group)
+
+    # User Prompt group
+    user_group = QGroupBox("User Prompt Template")
+    user_v = QVBoxLayout(user_group)
+
+    user_help = QLabel("Template for summary requests. Use {translations} for content placeholder")
+    user_help.setStyleSheet("color: #1f6feb;")
+    user_v.addWidget(user_help)
+
+    self.summary_user_text = QTextEdit()
+    self.summary_user_text.setAcceptRichText(False)
+    self.summary_user_text.setPlainText(getattr(self, 'rolling_summary_user_prompt', ''))
+    user_v.addWidget(self.summary_user_text)
+
+    layout.addWidget(user_group)
+
+    # Buttons row
+    btn_row = QHBoxLayout()
+
+    def _save_prompts():
+        self.rolling_summary_system_prompt = self.summary_system_text.toPlainText().strip()
+        self.rolling_summary_user_prompt = self.summary_user_text.toPlainText().strip()
+
+        self.config['rolling_summary_system_prompt'] = self.rolling_summary_system_prompt
+        self.config['rolling_summary_user_prompt'] = self.rolling_summary_user_prompt
+
+        os.environ['ROLLING_SUMMARY_SYSTEM_PROMPT'] = self.rolling_summary_system_prompt
+        os.environ['ROLLING_SUMMARY_USER_PROMPT'] = self.rolling_summary_user_prompt
+
+        QMessageBox.information(dialog, "Success", "Memory prompts saved!")
+        dialog.hide()
+
+    def _reset_prompts():
+        res = QMessageBox.question(
+            dialog,
+            "Reset Prompts",
+            "Reset memory prompts to defaults?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if res == QMessageBox.Yes:
+            self.summary_system_text.setPlainText(getattr(self, 'default_rolling_summary_system_prompt', ''))
+            self.summary_user_text.setPlainText(getattr(self, 'default_rolling_summary_user_prompt', ''))
+
+    save_btn = QPushButton("Save")
+    save_btn.clicked.connect(_save_prompts)
+    btn_row.addWidget(save_btn)
+
+    reset_btn = QPushButton("Reset to Defaults")
+    reset_btn.clicked.connect(_reset_prompts)
+    btn_row.addWidget(reset_btn)
+
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dialog.hide)
+    btn_row.addWidget(cancel_btn)
+
+    layout.addLayout(btn_row)
+
+    # Show non-modally with smooth fade animation (no flash)
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
+def toggle_thinking_budget(self):
+    """Enable/disable thinking budget entry and labels based on checkbox state (PySide6 version)"""
+    try:
+        enabled = bool(self.enable_gemini_thinking_var)
+        
+        if hasattr(self, 'thinking_budget_entry'):
+            _set_thinking_widget_enabled(self.thinking_budget_entry, enabled)
+            
+        if hasattr(self, 'thinking_budget_label'):
+            self.thinking_budget_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.thinking_budget_label.setStyleSheet(f"color: {color};")
+            
+        if hasattr(self, 'thinking_tokens_label'):
+            self.thinking_tokens_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.thinking_tokens_label.setStyleSheet(f"color: {color};")
+            
+        if hasattr(self, 'thinking_level_combo'):
+            _set_thinking_widget_enabled(self.thinking_level_combo, enabled)
+            
+        if hasattr(self, 'thinking_level_label'):
+            self.thinking_level_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.thinking_level_label.setStyleSheet(f"color: {color};")
+            
+        # Description label
+        if hasattr(self, 'gemini_desc_label'):
+            self.gemini_desc_label.setEnabled(enabled)
+            color = "gray" if enabled else "#606060"
+            self.gemini_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
+    except Exception:
+        pass
+
+def _sync_thoughts_lock_state(self, stream_thinking_on):
+    """Lock/unlock the 'Enable thoughts' toggle based on stream thinking state.
+
+    When stream thinking is ON the thoughts toggle is force-checked, styled
+    purple (#b388ff) with a 🔒 prefix, and made non-interactive — matching
+    the auto-glossary lock pattern in GlossaryManager_GUI.
+    """
+    try:
+        cb = self.enable_thoughts_checkbox
+        if stream_thinking_on:
+            # Force-check and lock
+            cb.blockSignals(True)
+            cb.setChecked(True)
+            cb.blockSignals(False)
+            # Manually show the ✓ overlay since stateChanged didn't fire
+            from PySide6.QtWidgets import QLabel
+            for child in cb.findChildren(QLabel):
+                if child.text() == "✓":
+                    child.setGeometry(2, 1, 14, 14)
+                    child.show()
+                    break
+            # Sync var + env + config (settings_rules.thoughts_lock_state: forced on)
+            enabled, env_value, _locked = settings_rules.thoughts_lock_state(stream_thinking_on)
+            self.enable_thoughts_var = enabled
+            self.config['enable_thoughts'] = enabled
+            os.environ['ENABLE_THOUGHTS'] = env_value
+            # Purple lock styling — include full indicator overrides so the
+            # parent container's QCheckBox::indicator styles are not lost
+            if not hasattr(cb, '_original_text'):
+                cb._original_text = cb.text()
+            if not cb.text().startswith('🔒'):
+                cb.setText(f"🔒 {cb._original_text}")
+            cb.setEnabled(False)
+            cb.setStyleSheet("""
+                QCheckBox { color: #b388ff; }
+                QCheckBox::indicator {
+                    width: 14px; height: 14px;
+                    border: 1px solid #b388ff;
+                    border-radius: 2px;
+                    background-color: #b388ff;
+                }
+                QCheckBox::indicator:disabled {
+                    background-color: #b388ff;
+                    border-color: #b388ff;
+                }
+            """)
+            cb._mode_locked = True
+        else:
+            # Unlock — restore original text and interactivity
+            if getattr(cb, '_mode_locked', False):
+                if hasattr(cb, '_original_text'):
+                    cb.setText(cb._original_text)
+                cb.setEnabled(True)
+                # Clear inline stylesheet so parent container styles take over
+                cb.setStyleSheet("")
+                # Force Qt to re-read the parent stylesheet
+                cb.style().unpolish(cb)
+                cb.style().polish(cb)
+                cb.update()
+                cb._mode_locked = False
+            # Also uncheck thoughts when stream thinking is turned off
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+            # Manually hide the ✓ overlay since stateChanged didn't fire
+            from PySide6.QtWidgets import QLabel
+            for child in cb.findChildren(QLabel):
+                if child.text() == "✓":
+                    child.hide()
+                    break
+            # settings_rules.thoughts_lock_state: released and unchecked
+            enabled, env_value, _locked = settings_rules.thoughts_lock_state(stream_thinking_on)
+            self.enable_thoughts_var = enabled
+            self.config['enable_thoughts'] = enabled
+            os.environ['ENABLE_THOUGHTS'] = env_value
+    except Exception:
+        pass
+
+def toggle_anthropic_thinking_controls(self):
+    """Enable/disable Anthropic thinking controls based on checkbox state"""
+    try:
+        enabled = bool(getattr(self, 'enable_anthropic_thinking_var', False))
+        
+        if hasattr(self, 'anthropic_budget_label'):
+            self.anthropic_budget_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.anthropic_budget_label.setStyleSheet(f"color: {color};")
+        if hasattr(self, 'anthropic_budget_entry'):
+            _set_thinking_widget_enabled(self.anthropic_budget_entry, enabled and not getattr(self, 'anthropic_force_adaptive_var', False))
+        if hasattr(self, 'anthropic_budget_tokens_label'):
+            self.anthropic_budget_tokens_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.anthropic_budget_tokens_label.setStyleSheet(f"color: {color};")
+        if hasattr(self, 'anthropic_force_adaptive_cb'):
+            self.anthropic_force_adaptive_cb.setEnabled(enabled)
+        if hasattr(self, 'anthropic_effort_label'):
+            self.anthropic_effort_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.anthropic_effort_label.setStyleSheet(f"color: {color};")
+        if hasattr(self, 'anthropic_effort_combo'):
+            _set_thinking_widget_enabled(self.anthropic_effort_combo, enabled)
+        if hasattr(self, 'anthropic_desc_label'):
+            self.anthropic_desc_label.setEnabled(enabled)
+            color = "gray" if enabled else "#606060"
+            self.anthropic_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
+    except Exception:
+        pass
+
+def toggle_gpt_reasoning_controls(self):
+    """Enable/disable GPT reasoning controls and labels based on toggle state (PySide6 version)"""
+    try:
+        enabled = bool(self.enable_gpt_thinking_var)
+        budget_enabled = enabled and bool(getattr(self, 'openrouter_use_reasoning_tokens_var', False))
+
+        if hasattr(self, 'openrouter_use_reasoning_tokens_cb'):
+            self.openrouter_use_reasoning_tokens_cb.setEnabled(enabled)
+        
+        # Tokens entry and label
+        if hasattr(self, 'gpt_reasoning_tokens_entry'):
+            _set_thinking_widget_enabled(self.gpt_reasoning_tokens_entry, budget_enabled)
+        if hasattr(self, 'gpt_reasoning_tokens_label'):
+            self.gpt_reasoning_tokens_label.setEnabled(budget_enabled)
+            color = "white" if budget_enabled else "#808080"
+            self.gpt_reasoning_tokens_label.setStyleSheet(f"color: {color};")
+            
+        # Effort combo and label
+        if hasattr(self, 'gpt_effort_combo'):
+            _set_thinking_widget_enabled(self.gpt_effort_combo, enabled)
+        if hasattr(self, 'gpt_effort_label'):
+            self.gpt_effort_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.gpt_effort_label.setStyleSheet(f"color: {color};")
+
+        # GPT tokens label
+        if hasattr(self, 'gpt_tokens_label'):
+            self.gpt_tokens_label.setEnabled(budget_enabled)
+            color = "white" if budget_enabled else "#808080"
+            self.gpt_tokens_label.setStyleSheet(f"color: {color};")
+            
+        # Description label
+        if hasattr(self, 'gpt_desc_label'):
+            self.gpt_desc_label.setEnabled(enabled)
+            color = "gray" if enabled else "#606060"
+            self.gpt_desc_label.setStyleSheet(f"color: {color}; font-size: 9pt;")
+    except Exception:
+        pass
+
+
+def _apply_gpt_thinking_toggle(self, checked) -> bool:
+    """Apply the GPT/OpenRouter thinking toggle to UI, config, and live requests."""
+    enabled = bool(checked)
+    self.enable_gpt_thinking_var = enabled
+    try:
+        self.config['enable_gpt_thinking'] = enabled
+    except Exception:
+        pass
+    os.environ['ENABLE_GPT_THINKING'] = '1' if enabled else '0'
+    os.environ['GPT_REASONING_TOKENS'] = (
+        str(getattr(self, 'gpt_reasoning_tokens_var', '') or '') if enabled else ''
+    )
+    os.environ['OPENROUTER_USE_REASONING_TOKENS'] = (
+        '1' if getattr(self, 'openrouter_use_reasoning_tokens_var', False) else '0'
+    )
+    try:
+        self.toggle_gpt_reasoning_controls()
+    except Exception:
+        pass
+    return enabled
+
+
+def open_other_settings(self, *args, show=True):
+    """Open the Other Settings dialog (PySide6)"""
+    from PySide6.QtGui import QIcon, QKeyEvent
+    from PySide6.QtCore import Qt, QTimer, QEventLoop
+    from PySide6.QtWidgets import QApplication
+
+    def _prewarm_dialog_offscreen(dialog):
+        def _center_dialog():
+            try:
+                screen = dialog.screen() or QApplication.primaryScreen()
+                if screen is None:
+                    return
+                geo = screen.availableGeometry()
+                dialog.move(
+                    geo.x() + max(0, (geo.width() - dialog.width()) // 2),
+                    geo.y() + max(0, (geo.height() - dialog.height()) // 2),
+                )
+            except Exception:
+                pass
+        app = QApplication.instance()
+        was_visible = dialog.isVisible()
+        old_opacity = dialog.windowOpacity()
+        try:
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            if not was_visible:
+                dialog.setWindowOpacity(0.0)
+                dialog.move(-20000, -20000)
+                dialog.show()
+                dialog._fade_native_window_seen = True
+                dialog.raise_()
+            try:
+                dialog.ensurePolished()
+                layout = dialog.layout()
+                if layout is not None:
+                    layout.activate()
+            except Exception:
+                pass
+            if app is not None:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            if not was_visible:
+                dialog.hide()
+                _center_dialog()
+                dialog.setWindowOpacity(old_opacity)
+        except Exception:
+            try:
+                if not was_visible:
+                    dialog.hide()
+                    _center_dialog()
+                    dialog.setWindowOpacity(old_opacity)
+            except Exception:
+                pass
+
+    def _fit_other_settings_dialog(dialog):
+        try:
+            container = getattr(self, '_other_settings_content_container', None)
+            if container is None:
+                return
+            screen = QApplication.primaryScreen().availableGeometry()
+            needed_width = container.sizeHint().width() + 40
+            max_width = int(screen.width() * 0.92)
+            target_width = min(max(dialog.width(), needed_width), max_width)
+            if target_width > dialog.width():
+                dialog.resize(target_width, dialog.height())
+                dialog_x = screen.x() + (screen.width() - dialog.width()) // 2
+                dialog_y = screen.y() + (screen.height() - dialog.height()) // 2
+                dialog.move(dialog_x, dialog_y)
+        except Exception:
+            pass
+    
+    # If dialog already exists, just show and focus it to preserve exact state
+    try:
+        if hasattr(self, "_other_settings_dialog") and self._other_settings_dialog is not None:
+            if not show:
+                _prewarm_dialog_offscreen(self._other_settings_dialog)
+                return
+            self._other_settings_dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            # Show with fade animation
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._other_settings_dialog, duration=220)
+            except Exception:
+                try:
+                    self._other_settings_dialog.setWindowOpacity(1.0)
+                except Exception:
+                    pass
+                self._other_settings_dialog.show()
+            # Bring to front and focus
+            try:
+                self._other_settings_dialog.raise_()
+                self._other_settings_dialog.activateWindow()
+            except Exception:
+                pass
+            QTimer.singleShot(0, lambda: _fit_other_settings_dialog(self._other_settings_dialog))
+            QTimer.singleShot(120, lambda: _fit_other_settings_dialog(self._other_settings_dialog))
+            return
+    except Exception:
+        # If the old reference is invalid, recreate below
+        self._other_settings_dialog = None
+    
+    # Create dialog with proper window attributes
+    # Pass self as parent so it stays in front of main GUI but allows other dialogs on top
+    dialog = QDialog(self)
+    dialog.setWindowTitle("Other Settings")
+    
+    # Do not delete widgets on close; we'll hide instead to retain exact state
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    
+    # Set window flags
+    dialog.setWindowFlags(
+        Qt.WindowType.Window |
+        Qt.WindowType.WindowSystemMenuHint |
+        Qt.WindowType.WindowMinimizeButtonHint |
+        Qt.WindowType.WindowMaximizeButtonHint |
+        Qt.WindowType.WindowCloseButtonHint
+    )
+    
+    # CRITICAL: Position dialog way off-screen during construction to prevent flash
+    # We'll move it to proper position before showing
+    dialog.move(-10000, -10000)
+    
+    # CRITICAL: Remove size constraints that prevent maximize
+    dialog.setSizeGripEnabled(False)
+    
+    # Set icon with absolute path
+    try:
+        import sys
+        base_dir = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base_dir, 'Halgakos.ico')
+        dialog.setWindowIcon(QIcon(icon_path))
+    except Exception:
+        pass
+    
+    # Set initial size based on screen ratio
+    try:
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().availableGeometry()
+        # Use 60% of screen width and 80% of screen height
+        width = int(screen.width() * 0.48)
+        height = int(screen.height() * 0.95)
+        dialog.resize(width, height)
+    except Exception:
+        dialog.resize(950, 850)  # Fallback
+    first_paint_done = False
+
+    def pump_other_settings_open():
+        """Let the visible Other Settings dialog paint while sections build."""
+        nonlocal first_paint_done
+        if not show:
+            return
+        try:
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            if not first_paint_done:
+                try:
+                    screen = QApplication.primaryScreen().availableGeometry()
+                    dialog.move(
+                        screen.x() + (screen.width() - dialog.width()) // 2,
+                        screen.y() + (screen.height() - dialog.height()) // 2,
+                    )
+                except Exception:
+                    pass
+                dialog.setWindowOpacity(1.0)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                first_paint_done = True
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except Exception:
+            pass
+    
+    # Store original size for restoring after fullscreen
+    original_geometry = None
+    
+    # Add F11 fullscreen toggle with stay on top for buttons visibility
+    def toggle_fullscreen():
+        nonlocal original_geometry
+        if dialog.isFullScreen():
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+            dialog.showNormal()
+            # Restore original size
+            if original_geometry:
+                dialog.setGeometry(original_geometry)
+        else:
+            # Save current geometry before fullscreen
+            original_geometry = dialog.geometry()
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            dialog.showFullScreen()
+    
+    # Override key press event for F11
+    original_keyPressEvent = dialog.keyPressEvent
+    def custom_keyPressEvent(event: QKeyEvent):
+        if event.key() == Qt.Key_F11:
+            toggle_fullscreen()
+        else:
+            original_keyPressEvent(event)
+    dialog.keyPressEvent = custom_keyPressEvent
+    
+    main_layout = QVBoxLayout(dialog)
+    main_layout.setContentsMargins(5, 5, 5, 5)  # Set uniform margins
+    main_layout.setSpacing(8)  # Set spacing between widgets
+    combo_arrow_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico').replace('\\', '/')
+    combo_disabled_arrow_path = _get_disabled_halgakos_icon_path(combo_arrow_path)
+
+    # Explicit dark theme for the dialog — on macOS, child dialogs with
+    # Qt.WindowType.Window don't inherit the parent's stylesheet reliably.
+    dialog.setStyleSheet("""
+        QDialog, QWidget {
+            background-color: #1e1e1e;
+            color: white;
+        }
+        QLabel {
+            color: white;
+            background-color: transparent;
+        }
+        QGroupBox {
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 4px;
+            margin-top: 8px;
+            padding-top: 12px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+            color: #5a9fd4;
+        }
+        QLineEdit, QTextEdit, QSpinBox {
+            background-color: #2d2d2d;
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 4px;
+        }
+        QLineEdit:focus, QTextEdit:focus, QSpinBox:focus {
+            border-color: #5a9fd4;
+        }
+        QLineEdit:disabled, QTextEdit:disabled, QSpinBox:disabled {
+            background-color: #242424;
+            color: #777777;
+            border: 1px solid #3a4555;
+        }
+        QPushButton {
+            background-color: #3d3d3d;
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 5px 10px;
+        }
+        QPushButton:hover {
+            background-color: #4d4d4d;
+            border-color: #5a9fd4;
+        }
+        QComboBox {
+            background-color: #2d2d2d;
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 4px;
+        }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 18px;
+            border-left: 1px solid #4a5568;
+        }
+        QComboBox::down-arrow {
+            image: url('""" + combo_arrow_path + """');
+            width: 16px;
+            height: 16px;
+            border: none;
+        }
+        QComboBox::down-arrow:disabled {
+            image: url('""" + combo_disabled_arrow_path + """');
+            width: 16px;
+            height: 16px;
+            border: none;
+        }
+        QComboBox::down-arrow:on {
+            top: 1px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #2d2d2d;
+            color: white;
+            selection-background-color: #5a9fd4;
+        }
+        QScrollArea {
+            background-color: #1e1e1e;
+            border: none;
+        }
+        QFrame {
+            background-color: transparent;
+        }
+    """)
+
+    # Set up icon path
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+    disabled_icon_path = _get_disabled_halgakos_icon_path(icon_path)
+
+    # Apply global stylesheet for blue checkboxes (from manga integration)
+    # Back to regular string concatenation which was working before
+    checkbox_radio_style = """
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 18px;
+            border-left: 1px solid #4a5568;
+        }
+        QComboBox::down-arrow {
+            image: url(""" + icon_path.replace('\\', '/') + """);
+            width: 16px;
+            height: 16px;
+            border: none;
+        }
+        QComboBox::down-arrow:disabled {
+            image: url(""" + disabled_icon_path + """);
+            width: 16px;
+            height: 16px;
+            border: none;
+        }
+        QComboBox::down-arrow:on {
+            top: 1px;
+        }
+        QCheckBox {
+            color: white;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #5a9fd4;
+            border-radius: 2px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #5a9fd4;
+            border-color: #5a9fd4;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QCheckBox:disabled {
+            color: #666666;
+        }
+        QCheckBox::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+        QRadioButton {
+            color: white;
+            spacing: 5px;
+        }
+        QRadioButton::indicator {
+            width: 13px;
+            height: 13px;
+            border: 2px solid #5a9fd4;
+            border-radius: 7px;
+            background-color: #2d2d2d;
+        }
+        QRadioButton::indicator:checked {
+            background-color: #5a9fd4;
+            border: 2px solid #5a9fd4;
+        }
+        QRadioButton::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QRadioButton:disabled {
+            color: #666666;
+        }
+        QRadioButton::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+    """
+    
+    # Scrollable area with a 2-column grid
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    container = QWidget()
+    self._other_settings_content_container = container
+    container.setStyleSheet(checkbox_radio_style)  # Apply global stylesheet
+    grid = QGridLayout(container)
+    grid.setColumnStretch(0, 1)
+    grid.setColumnStretch(1, 1)
+    grid.setHorizontalSpacing(6)  # Compact horizontal spacing between columns
+    grid.setVerticalSpacing(2)  # Minimal vertical spacing between sections
+    grid.setContentsMargins(4, 4, 4, 4)  # Minimal grid margins
+
+    # Build sections (converted sections will populate the Qt layout)
+    self._create_context_management_section(container)
+    scroll.setWidget(container)
+    scroll.setWidgetResizable(True)
+    main_layout.addWidget(scroll, 1)
+    pump_other_settings_open()
+    remaining_section_builders = [
+        ("response_handling", lambda: self._create_response_handling_section(container)),
+        ("prompt_management", lambda: self._create_prompt_management_section(container)),
+        ("processing_options", lambda: self._create_processing_options_section(container)),
+        ("image_translation", lambda: self._create_image_translation_section(container)),
+        ("anti_duplicate", lambda: self._create_anti_duplicate_section(container)),
+        ("custom_api_endpoints", lambda: self._create_custom_api_endpoints_section(container)),
+        ("debug_controls", lambda: self._create_debug_controls_section(container)),
+        ("output_settings", lambda: self._create_output_settings_section(container)),
+        ("danger_zone", lambda: self._create_danger_zone_section(container)),
+    ]
+
+    def _build_remaining_other_settings_sections(index=0):
+        if index >= len(remaining_section_builders):
+            try:
+                self._other_settings_sections_pending = 0
+            except Exception:
+                pass
+            QTimer.singleShot(0, lambda: _fit_other_settings_dialog(dialog))
+            QTimer.singleShot(120, lambda: _fit_other_settings_dialog(dialog))
+            return
+        key, builder = remaining_section_builders[index]
+        try:
+            builder()
+        except Exception as e:
+            try:
+                print(f"⚠️ Other Settings section build failed ({key}): {e}")
+            except Exception:
+                pass
+        pump_other_settings_open()
+        QTimer.singleShot(0, lambda: _build_remaining_other_settings_sections(index + 1))
+
+    try:
+        self._other_settings_sections_pending = len(remaining_section_builders)
+    except Exception:
+        pass
+
+    # Buttons row (Save and Close) - always visible at bottom
+    btns = QHBoxLayout()
+    btns.setContentsMargins(5, 10, 5, 10)  # Add padding around buttons
+
+    def _save_and_close():
+        try:
+            # Mirror legacy behavior: persist some toggles on close
+            if hasattr(self, 'retain_source_extension_var'):
+                try:
+                    self.config['retain_source_extension'] = self.retain_source_extension_var
+                    os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var else '0'
+                except Exception:
+                    pass
+            if hasattr(self, 'download_remote_image_urls_var'):
+                try:
+                    self.config['download_remote_image_urls'] = bool(
+                        self.download_remote_image_urls_var
+                    )
+                    os.environ['DOWNLOAD_REMOTE_IMAGE_URLS'] = (
+                        '1' if self.download_remote_image_urls_var else '0'
+                    )
+                except Exception:
+                    pass
+            if hasattr(self, 'remote_image_download_workers_var'):
+                try:
+                    workers = max(1, min(
+                        32, int(self.remote_image_download_workers_var)
+                    ))
+                    self.remote_image_download_workers_var = workers
+                    self.config['remote_image_download_workers'] = workers
+                    os.environ['REMOTE_IMAGE_DOWNLOAD_WORKERS'] = str(workers)
+                except Exception:
+                    pass
+            if hasattr(self, 'remote_image_download_interval_var'):
+                try:
+                    interval = max(0.0, min(
+                        60.0, float(self.remote_image_download_interval_var)
+                    ))
+                    self.remote_image_download_interval_var = interval
+                    self.config['remote_image_download_interval'] = interval
+                    os.environ['REMOTE_IMAGE_DOWNLOAD_INTERVAL'] = f"{interval:g}"
+                except Exception:
+                    pass
+            self.save_config(show_message=False)
+            # CRITICAL: Reinitialize environment variables after saving
+            # This ensures TRANSLATE_SPECIAL_FILES and other settings take effect immediately
+            if hasattr(self, 'initialize_environment_variables'):
+                self.initialize_environment_variables()
+                self.append_log("✅ Settings saved and environment variables updated")
+        except Exception as e:
+            self.append_log(f"⚠️ Error saving settings: {e}")
+        dialog.hide()
+
+    save_btn = QPushButton("💾 Save Settings")
+    save_btn.clicked.connect(_save_and_close)
+    save_btn.setMinimumHeight(35)
+    save_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #28a745; "
+        "  color: white; "
+        "  padding: 8px 20px; "
+        "  font-size: 11pt; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "} "
+        "QPushButton:hover { background-color: #218838; }"
+    )
+    btns.addWidget(save_btn)
+
+    close_btn = QPushButton("❌ Close")
+    close_btn.clicked.connect(dialog.close)
+    close_btn.setMinimumHeight(35)
+    close_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #6c757d; "
+        "  color: white; "
+        "  padding: 8px 20px; "
+        "  font-size: 11pt; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "} "
+        "QPushButton:hover { background-color: #5a6268; }"
+    )
+    btns.addWidget(close_btn)
+
+    main_layout.addLayout(btns)
+
+    # Intercept window close: hide instead of destroy to preserve state
+    def _handle_close(event):
+        try:
+            event.ignore()
+            dialog.hide()
+        except Exception:
+            # Best-effort: still hide on any error
+            try:
+                event.ignore()
+            except Exception:
+                pass
+            dialog.hide()
+    dialog.closeEvent = _handle_close
+
+    # Store reference for later closing
+    self._other_settings_dialog = dialog
+    
+    # Move dialog to center of screen (was off-screen during construction)
+    try:
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog_x = screen.x() + (screen.width() - dialog.width()) // 2
+        dialog_y = screen.y() + (screen.height() - dialog.height()) // 2
+        dialog.move(dialog_x, dialog_y)
+    except Exception:
+        pass
+
+    if not show:
+        for _idx in range(len(remaining_section_builders)):
+            try:
+                remaining_section_builders[_idx][1]()
+            except Exception:
+                pass
+        try:
+            self._other_settings_sections_pending = 0
+        except Exception:
+            pass
+        _prewarm_dialog_offscreen(dialog)
+        return
+    dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+
+    if dialog.isVisible():
+        try:
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception:
+            pass
+        QTimer.singleShot(0, lambda: _fit_other_settings_dialog(dialog))
+        QTimer.singleShot(120, lambda: _fit_other_settings_dialog(dialog))
+        QTimer.singleShot(0, _build_remaining_other_settings_sections)
+        return
+    
+    # Show with smooth fade animation (no flash of generic window)
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+    
+    # Auto-fit width to content after showing. Hidden prewarm cannot produce
+    # reliable size hints, so run this only on visible opens/reopens.
+    QTimer.singleShot(0, lambda: _fit_other_settings_dialog(dialog))
+    QTimer.singleShot(120, lambda: _fit_other_settings_dialog(dialog))
+    QTimer.singleShot(0, _build_remaining_other_settings_sections)
+
+def _create_output_settings_section(self, parent):
+    """Create output settings section (PDF generation + Image Compression)"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QWidget, QFrame, QSpinBox
+    from PySide6.QtCore import Qt
+    
+    grid = parent.layout() if hasattr(parent, 'layout') else None
+    
+    section_box = QGroupBox("Output Settings")
+    section_box.setStyleSheet("""
+        QLabel:disabled { color: rgba(255,255,255,0.25); }
+        QSpinBox:disabled { color: rgba(255,255,255,0.25); background-color: rgba(255,255,255,0.05); }
+        QComboBox:disabled { color: rgba(255,255,255,0.25); background-color: rgba(255,255,255,0.05); }
+        QCheckBox:disabled { color: rgba(255,255,255,0.25); }
+    """)
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)
+    section_v.setSpacing(4)
+
+    # ── PDF Settings ──────────────────────────────────────────
+    pdf_title = QLabel("PDF Settings")
+    pdf_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(pdf_title)
+    
+    pdf_desc = QLabel("Generate a PDF from the output folder after EPUB conversion")
+    pdf_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    section_v.addWidget(pdf_desc)
+    
+    # Enable PDF Output
+    if not hasattr(self, 'enable_pdf_output_var'):
+        self.enable_pdf_output_var = self.config.get('enable_pdf_output', False)
+    
+    pdf_enable_cb = self._create_styled_checkbox("Enable PDF Output")
+    pdf_enable_cb.setToolTip(
+        "Adds an extra step after EPUB conversion to create a PDF\n"
+        "from the output folder, retaining all images."
+    )
+    try:
+        pdf_enable_cb.setChecked(bool(self.enable_pdf_output_var))
+    except Exception:
+        pass
+    
+    # Collect controls to enable/disable with the master toggle
+    pdf_controls = []
+    
+    def _on_pdf_enable_toggle(checked):
+        try:
+            self.enable_pdf_output_var = bool(checked)
+            self.config['enable_pdf_output'] = self.enable_pdf_output_var
+            os.environ['ENABLE_PDF_OUTPUT'] = '1' if checked else '0'
+            for ctrl in pdf_controls:
+                ctrl.setEnabled(checked)
+            # Respect child checkbox states when re-enabling
+            if checked:
+                toc_on = toc_cb.isChecked()
+                for ctrl in toc_sub_controls:
+                    ctrl.setEnabled(toc_on)
+                page_on = page_num_cb.isChecked()
+                for ctrl in page_num_sub_controls:
+                    ctrl.setEnabled(page_on)
+        except Exception:
+            pass
+    pdf_enable_cb.toggled.connect(_on_pdf_enable_toggle)
+    section_v.addWidget(pdf_enable_cb)
+
+    # Rapid workspace compiler (default). This keeps the legacy sequential
+    # renderer available for documents or systems that dislike parallel layout.
+    rapid_compiler_cb = self._create_styled_checkbox(
+        "Use Rapid Workspace Compiler"
+    )
+    rapid_compiler_cb.setContentsMargins(20, 0, 0, 0)
+    rapid_compiler_cb.setToolTip(
+        "Uses the rapid workspace compiler for generated PDF output (default).\n"
+        "Bookmark/HTML sections are balanced across the PDF extraction CPU workers,\n"
+        "rendered in isolated processes, then merged in bookmark order.\n"
+        "If a parallel job fails, that PDF automatically falls back to the\n"
+        "standard sequential compiler. Turn this off to always use the legacy path."
+    )
+    try:
+        rapid_compiler_cb.setChecked(
+            self.config.get('pdf_use_rapid_workspace_compiler', True)
+        )
+    except Exception:
+        rapid_compiler_cb.setChecked(True)
+
+    def _on_rapid_compiler_toggle(checked):
+        try:
+            self.config['pdf_use_rapid_workspace_compiler'] = bool(checked)
+            os.environ['PDF_USE_RAPID_WORKSPACE_COMPILER'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    rapid_compiler_cb.toggled.connect(_on_rapid_compiler_toggle)
+    section_v.addWidget(rapid_compiler_cb)
+    pdf_controls.append(rapid_compiler_cb)
+    os.environ['PDF_USE_RAPID_WORKSPACE_COMPILER'] = (
+        '1'
+        if self.config.get('pdf_use_rapid_workspace_compiler', True)
+        else '0'
+    )
+    
+    # Generate Table of Contents
+    if not hasattr(self, 'pdf_generate_toc_var'):
+        self.pdf_generate_toc_var = self.config.get('pdf_generate_toc', False)
+    
+    toc_cb = self._create_styled_checkbox("Generate Table of Contents")
+    toc_cb.setToolTip("Creates a table of contents page after the cover page in the PDF")
+    try:
+        toc_cb.setChecked(bool(self.pdf_generate_toc_var))
+    except Exception:
+        pass
+    
+    # Sub-controls that depend on TOC being enabled
+    toc_sub_controls = []
+    
+    def _on_toc_toggle(checked):
+        try:
+            self.pdf_generate_toc_var = bool(checked)
+            self.config['pdf_generate_toc'] = self.pdf_generate_toc_var
+            os.environ['PDF_GENERATE_TOC'] = '1' if checked else '0'
+            for ctrl in toc_sub_controls:
+                ctrl.setEnabled(checked)
+        except Exception:
+            pass
+    toc_cb.toggled.connect(_on_toc_toggle)
+    toc_cb.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(toc_cb)
+    pdf_controls.append(toc_cb)
+    
+    # Include Page Numbers in TOC
+    if not hasattr(self, 'pdf_toc_page_numbers_var'):
+        self.pdf_toc_page_numbers_var = self.config.get('pdf_toc_page_numbers', True)
+    
+    toc_numbers_cb = self._create_styled_checkbox("Include Page Numbers in TOC")
+    toc_numbers_cb.setToolTip("Show page numbers next to each entry in the table of contents")
+    try:
+        toc_numbers_cb.setChecked(bool(self.pdf_toc_page_numbers_var))
+    except Exception:
+        pass
+    def _on_toc_numbers_toggle(checked):
+        try:
+            self.pdf_toc_page_numbers_var = bool(checked)
+            self.config['pdf_toc_page_numbers'] = self.pdf_toc_page_numbers_var
+            os.environ['PDF_TOC_PAGE_NUMBERS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    toc_numbers_cb.toggled.connect(_on_toc_numbers_toggle)
+    toc_numbers_cb.setContentsMargins(40, 0, 0, 0)
+    section_v.addWidget(toc_numbers_cb)
+    pdf_controls.append(toc_numbers_cb)
+    toc_sub_controls.append(toc_numbers_cb)
+    
+    # Separator
+    sep_pdf1 = QFrame()
+    sep_pdf1.setFrameShape(QFrame.HLine)
+    sep_pdf1.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_pdf1)
+    
+    # Page Numbers
+    if not hasattr(self, 'pdf_page_numbers_var'):
+        self.pdf_page_numbers_var = self.config.get('pdf_page_numbers', True)
+    
+    page_num_cb = self._create_styled_checkbox("Page Numbers")
+    page_num_cb.setToolTip("Adds a semi-transparent page number footer to each page")
+    try:
+        page_num_cb.setChecked(bool(self.pdf_page_numbers_var))
+    except Exception:
+        pass
+    
+    page_num_sub_controls = []
+    
+    def _on_page_num_toggle(checked):
+        try:
+            self.pdf_page_numbers_var = bool(checked)
+            self.config['pdf_page_numbers'] = self.pdf_page_numbers_var
+            os.environ['PDF_PAGE_NUMBERS'] = '1' if checked else '0'
+            for ctrl in page_num_sub_controls:
+                ctrl.setEnabled(checked)
+        except Exception:
+            pass
+    page_num_cb.toggled.connect(_on_page_num_toggle)
+    section_v.addWidget(page_num_cb)
+    pdf_controls.append(page_num_cb)
+    
+    # Alignment row
+    if not hasattr(self, 'pdf_page_number_alignment_var'):
+        self.pdf_page_number_alignment_var = self.config.get('pdf_page_number_alignment', 'center')
+    
+    alignment_row = QWidget()
+    alignment_h = QHBoxLayout(alignment_row)
+    alignment_h.setContentsMargins(40, 2, 0, 0)
+    
+    alignment_label = QLabel("Alignment:")
+    alignment_h.addWidget(alignment_label)
+    page_num_sub_controls.append(alignment_label)
+    
+    alignment_combo = QComboBox()
+    alignment_combo.addItems(["left", "center", "right"])
+    alignment_combo.setFixedWidth(100)
+    alignment_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(alignment_combo)
+    self._disable_combobox_mousewheel(alignment_combo)
+    try:
+        idx = alignment_combo.findText(self.pdf_page_number_alignment_var)
+        if idx >= 0:
+            alignment_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_alignment_changed(text):
+        try:
+            self.pdf_page_number_alignment_var = text
+            self.config['pdf_page_number_alignment'] = text
+            os.environ['PDF_PAGE_NUMBER_ALIGNMENT'] = text
+        except Exception:
+            pass
+    alignment_combo.currentTextChanged.connect(_on_alignment_changed)
+    alignment_h.addWidget(alignment_combo)
+    page_num_sub_controls.append(alignment_combo)
+    
+    alignment_h.addStretch()
+    section_v.addWidget(alignment_row)
+    pdf_controls.append(alignment_row)
+    
+    page_num_desc = QLabel("Page numbers appear as semi-transparent footer text")
+    page_num_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    page_num_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(page_num_desc)
+    
+    # Separator before render batch size
+    sep_batch = QFrame()
+    sep_batch.setFrameShape(QFrame.HLine)
+    sep_batch.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_batch)
+    pdf_controls.append(sep_batch)
+    
+    # Render Batch Size
+    batch_row = QWidget()
+    batch_h = QHBoxLayout(batch_row)
+    batch_h.setContentsMargins(20, 2, 0, 0)
+    
+    batch_label = QLabel("Render Batch Size:")
+    batch_h.addWidget(batch_label)
+    pdf_controls.append(batch_label)
+    
+    batch_combo = QComboBox()
+    batch_combo.setEditable(True)
+    batch_combo.addItems(["25", "50", "100", "150", "200"])
+    batch_combo.setCurrentText(str(self.config.get('pdf_render_batch_size', 50)))
+    batch_combo.setFixedWidth(80)
+    batch_combo.setToolTip(
+        "Number of chapters rendered per batch during PDF generation.\n"
+        "Smaller = faster per batch but more overhead.\n"
+        "Larger = slower per batch but fewer batches.\n"
+        "50 is recommended for most documents."
+    )
+    batch_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(batch_combo)
+    self._disable_combobox_mousewheel(batch_combo)
+    def _on_batch_size_changed(text):
+        try:
+            val = int(text)
+            self.config['pdf_render_batch_size'] = val
+            os.environ['PDF_RENDER_BATCH_SIZE'] = str(val)
+        except (ValueError, TypeError):
+            pass
+    batch_combo.currentTextChanged.connect(_on_batch_size_changed)
+    batch_h.addWidget(batch_combo)
+    pdf_controls.append(batch_combo)
+    
+    batch_h.addStretch()
+    section_v.addWidget(batch_row)
+    pdf_controls.append(batch_row)
+    
+    os.environ['PDF_RENDER_BATCH_SIZE'] = str(self.config.get('pdf_render_batch_size', 50))
+    
+    # Fast Rendering toggle
+    fast_render_cb = self._create_styled_checkbox("Fast Rendering")
+    fast_render_cb.setToolTip(
+        "Converts images to faster-decoding formats before PDF rendering.\n"
+        "Only affects PDF output — WeasyPrint decodes webp very slowly.\n\n"
+        "• If compression is enabled: ALL images → JPEG (uses quality setting)\n"
+        "• If compression is disabled: webp → PNG (lossless), other formats untouched\n\n"
+        "Note: When compression is enabled without Fast Rendering,\n"
+        "images are converted to WebP instead of JPEG."
+    )
+    fast_render_cb.setContentsMargins(20, 0, 0, 0)
+    try:
+        fast_render_cb.setChecked(self.config.get('pdf_fast_rendering', True))
+    except Exception:
+        pass
+    def _on_fast_render_toggle(checked):
+        try:
+            self.config['pdf_fast_rendering'] = bool(checked)
+            os.environ['PDF_FAST_RENDERING'] = '1' if checked else '0'
+        except Exception:
+            pass
+    fast_render_cb.toggled.connect(_on_fast_render_toggle)
+    section_v.addWidget(fast_render_cb)
+    pdf_controls.append(fast_render_cb)
+    
+    os.environ['PDF_FAST_RENDERING'] = '1' if self.config.get('pdf_fast_rendering', True) else '0'
+    
+    # ── Quality Settings ──────────────────────────────────────
+    sep_quality = QFrame()
+    sep_quality.setFrameShape(QFrame.HLine)
+    sep_quality.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_quality)
+    
+    quality_title = QLabel("Quality Settings")
+    quality_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(quality_title)
+    
+    # Enable Image Compression
+    if not hasattr(self, 'enable_image_compression_var'):
+        self.enable_image_compression_var = self.config.get('enable_image_compression', False)
+    
+    compress_cb = self._create_styled_checkbox("Enable Image Compression")
+    compress_cb.setToolTip(
+        "Compresses images and converts them to .webp for smaller file size.\n"
+        "• Applies during both EPUB and PDF generation"
+    )
+    try:
+        compress_cb.setChecked(bool(self.enable_image_compression_var))
+    except Exception:
+        pass
+    
+    compress_sub_controls = []
+    
+    def _on_compress_toggle(checked):
+        try:
+            self.enable_image_compression_var = bool(checked)
+            self.config['enable_image_compression'] = self.enable_image_compression_var
+            os.environ['ENABLE_IMAGE_COMPRESSION'] = '1' if checked else '0'
+            for ctrl in compress_sub_controls:
+                ctrl.setEnabled(checked)
+        except Exception:
+            pass
+    compress_cb.toggled.connect(_on_compress_toggle)
+    section_v.addWidget(compress_cb)
+    
+    # Quality percentage row
+    quality_row = QWidget()
+    quality_h = QHBoxLayout(quality_row)
+    quality_h.setContentsMargins(20, 2, 0, 0)
+    
+    quality_label = QLabel("Quality:")
+    quality_h.addWidget(quality_label)
+    compress_sub_controls.append(quality_label)
+    
+    quality_spin = QComboBox()
+    quality_spin.setEditable(True)
+    quality_spin.addItems(["10", "20", "30", "40", "50", "60", "70", "80", "90", "100"])
+    quality_spin.setCurrentText(str(self.config.get('image_compression_quality', 80)))
+    quality_spin.setFixedWidth(80)
+    quality_spin.setToolTip("Compression quality (1-100). Lower = smaller file, higher = better quality")
+    quality_spin.setStyleSheet("""
+        QComboBox {
+            font-size: 9pt;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(quality_spin)
+    self._disable_combobox_mousewheel(quality_spin)
+    def _on_quality_changed(text):
+        try:
+            value = int(text)
+            value = max(1, min(100, value))
+            self.config['image_compression_quality'] = value
+            os.environ['IMAGE_COMPRESSION_QUALITY'] = str(value)
+        except (ValueError, TypeError):
+            pass
+    quality_spin.currentTextChanged.connect(_on_quality_changed)
+    quality_h.addWidget(quality_spin)
+    compress_sub_controls.append(quality_spin)
+    
+    quality_range_label = QLabel("1 – 100")
+    quality_range_label.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 9pt;")
+    quality_h.addWidget(quality_range_label)
+    compress_sub_controls.append(quality_range_label)
+    
+    quality_h.addStretch()
+    section_v.addWidget(quality_row)
+    
+    # Exclude Cover Page Compression
+    exclude_cover_cb = self._create_styled_checkbox("Exclude Cover Page Compression")
+    exclude_cover_cb.setContentsMargins(20, 0, 0, 0)
+    exclude_cover_cb.setToolTip("Skip compression for the cover page image")
+    try:
+        exclude_cover_cb.setChecked(self.config.get('exclude_cover_compression', True))
+    except Exception:
+        exclude_cover_cb.setChecked(True)
+    def _on_exclude_cover_toggle(checked):
+        try:
+            self.config['exclude_cover_compression'] = bool(checked)
+            os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if checked else '0'
+        except Exception:
+            pass
+    exclude_cover_cb.toggled.connect(_on_exclude_cover_toggle)
+    section_v.addWidget(exclude_cover_cb)
+    compress_sub_controls.append(exclude_cover_cb)
+    
+    # Exclude GIF Compression
+    exclude_gif_cb = self._create_styled_checkbox("Exclude .gif Compression")
+    exclude_gif_cb.setContentsMargins(20, 0, 0, 0)
+    exclude_gif_cb.setToolTip("Skip compression for GIF images entirely")
+    try:
+        exclude_gif_cb.setChecked(self.config.get('exclude_gif_compression', True))
+    except Exception:
+        exclude_gif_cb.setChecked(True)
+    def _on_exclude_gif_toggle(checked):
+        try:
+            self.config['exclude_gif_compression'] = bool(checked)
+            os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if checked else '0'
+        except Exception:
+            pass
+    exclude_gif_cb.toggled.connect(_on_exclude_gif_toggle)
+    section_v.addWidget(exclude_gif_cb)
+    compress_sub_controls.append(exclude_gif_cb)
+    
+    
+    # Set initial env vars for compression sub-settings
+    os.environ['IMAGE_COMPRESSION_QUALITY'] = str(quality_spin.currentText())
+    os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if exclude_cover_cb.isChecked() else '0'
+    os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if exclude_gif_cb.isChecked() else '0'
+
+
+    
+    # Apply initial enabled state for compression sub-controls
+    initial_compress = compress_cb.isChecked()
+    for ctrl in compress_sub_controls:
+        ctrl.setEnabled(initial_compress)
+    
+    
+    # Apply initial enabled state for PDF sub-controls
+    initial_pdf = pdf_enable_cb.isChecked()
+    for ctrl in pdf_controls:
+        ctrl.setEnabled(initial_pdf)
+    
+    initial_toc = toc_cb.isChecked() and initial_pdf
+    for ctrl in toc_sub_controls:
+        ctrl.setEnabled(initial_toc)
+    
+    initial_page_num = page_num_cb.isChecked() and initial_pdf
+    for ctrl in page_num_sub_controls:
+        ctrl.setEnabled(initial_page_num)
+    
+    # Place in grid spanning both columns
+    if isinstance(grid, QGridLayout):
+        row = grid.rowCount()
+        grid.addWidget(section_box, row, 0, 1, 2)
+    else:
+        if hasattr(parent, 'layout') and parent.layout():
+            parent.layout().addWidget(section_box)
+        else:
+            section_box.setParent(parent)
+
+def _create_danger_zone_section(self, parent):
+    """Create danger zone section (Reset to Defaults)"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QPushButton, QMessageBox, QLabel, QFrame
+    from PySide6.QtCore import Qt
+    
+    # Check if parent is a grid layout (standard case) or just a widget
+    grid = parent.layout() if hasattr(parent, 'layout') else None
+    
+    section_box = QGroupBox("Danger Zone")
+    section_box.setStyleSheet("""
+        QGroupBox {
+            border: 1px solid #dc3545;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-weight: bold;
+            color: #ff6b6b;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px;
+        }
+    """)
+    
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(15, 15, 15, 15)
+    section_v.setSpacing(10)
+    
+    warning_lbl = QLabel("Reset all settings to default values. API keys and profiles will be preserved.")
+    warning_lbl.setStyleSheet("color: #ffa5a5; font-size: 10pt;")
+    warning_lbl.setWordWrap(True)
+    section_v.addWidget(warning_lbl)
+    
+    def _reset_config_to_defaults():
+        try:
+            # Preservation logic: the shared config_store.reset_preserved_keys (API keys and
+            # key pools, their toggles, credentials, model, prompt profiles, QA exclusions)
+            from config_store import RESET_PRESERVED_TEXT, reset_preserved_keys
+            current_config = self.config
+            keys_to_preserve = reset_preserved_keys(current_config)
+
+            # Show warning dialog
+            msg = QMessageBox(getattr(self, '_other_settings_dialog', self))
+            msg.setWindowTitle("Reset to Defaults")
+            msg.setText("Are you sure you want to reset ALL settings to default values?")
+            msg.setInformativeText(
+                "This will restart the application.\n\n"
+                + RESET_PRESERVED_TEXT
+            )
+            msg.setIcon(QMessageBox.Warning)
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg.setDefaultButton(QMessageBox.No)
+            
+            # Apply styling to buttons
+            msg.setStyleSheet("""
+                QMessageBox {
+                    background-color: #2b2b2b;
+                    color: white;
+                }
+                QLabel {
+                    color: white;
+                }
+                QPushButton {
+                    min-width: 80px;
+                    padding: 5px 15px;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton[text="&Yes"] {
+                    background-color: #dc3545;
+                    color: white;
+                    border: 1px solid #c82333;
+                }
+                QPushButton[text="&Yes"]:hover {
+                    background-color: #c82333;
+                }
+                QPushButton[text="&No"] {
+                    background-color: #6c757d;
+                    color: white;
+                    border: 1px solid #5a6268;
+                }
+                QPushButton[text="&No"]:hover {
+                    background-color: #5a6268;
+                }
+            """)
+            
+            # Center buttons
+            _center_messagebox_buttons(msg)
+            
+            if msg.exec() == QMessageBox.Yes:
+                # Delete config.json
+                config_path = os.path.join(_get_app_dir(), CONFIG_FILE)
+                if os.path.exists(config_path):
+                    try:
+                        # Write temporary config with just the preserved keys
+                        # This effectively resets everything else since the app will fill in defaults
+                        with open(config_path, 'w', encoding='utf-8') as f:
+                            json.dump(keys_to_preserve, f, indent=2, ensure_ascii=False)
+                            
+                        # Restart
+                        import sys
+                        import subprocess
+                        # Close the dialog first
+                        if hasattr(self, '_other_settings_dialog') and self._other_settings_dialog:
+                            self._other_settings_dialog.close()
+                            
+                        # Launch new instance
+                        subprocess.Popen([sys.executable] + sys.argv)
+                        # Exit current instance
+                        sys.exit(0)
+                    except Exception as e:
+                        QMessageBox.critical(None, "Error", f"Failed to reset config: {e}")
+        except Exception as e:
+            print(f"Error resetting config: {e}")
+            import traceback
+            traceback.print_exc()
+
+    reset_btn = QPushButton("⚠️ Reset Settings to Defaults")
+    reset_btn.clicked.connect(_reset_config_to_defaults)
+    reset_btn.setMinimumHeight(35)
+    reset_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #dc3545; "
+        "  color: white; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "  font-size: 11pt; "
+        "} "
+        "QPushButton:hover { background-color: #c82333; }"
+    )
+    section_v.addWidget(reset_btn)
+    
+    # Place at the bottom, spanning both columns if in a grid
+    if isinstance(grid, QGridLayout):
+        # Find next available row (though we can just append to end)
+        row = grid.rowCount()
+        grid.addWidget(section_box, row, 0, 1, 2)  # Span 2 columns
+    else:
+        # Fallback
+        if hasattr(parent, 'layout') and parent.layout():
+            parent.layout().addWidget(section_box)
+        else:
+            section_box.setParent(parent)
+
+def _create_context_management_section(self, parent):
+    """Create context management section (PySide6)"""
+    # Expect parent to have a QGridLayout
+    grid = parent.layout() if hasattr(parent, 'layout') else None
+    if not isinstance(grid, QGridLayout):
+        # If no grid yet, create one so we can place the section
+        grid = QGridLayout(parent)
+        parent.setLayout(grid)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+    section_box = QGroupBox("Context Management & Memory")
+    # No max width - let it expand in fullscreen
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
+
+    # Include previous source text toggle (controls whether source-side history is reused)
+    include_source_cb = self._create_styled_checkbox("Include previous source text in history/memory (Not Recommended)")
+    include_source_cb.setToolTip("Adds the raw source text to the summary request.\nThis is not recommended because the translated text is already included.\nEnabling this will negatively affect token effeciency.")
+    try:
+        include_source_cb.setChecked(bool(self.include_source_in_history_var))
+    except Exception:
+        pass
+    def _on_include_source_toggled(checked):
+        try:
+            self.include_source_in_history_var = bool(checked)
+        except Exception:
+            pass
+    include_source_cb.toggled.connect(_on_include_source_toggled)
+    section_v.addWidget(include_source_cb)
+
+    # Rolling summary on/off and mode are controlled by the main Context Mode combo.
+
+    rolling_controls = []
+    
+    rolling_header = QLabel("Rolling Summary Settings")
+    rolling_header.setStyleSheet("font-weight: bold; color: #e0e0e0;")
+    section_v.addWidget(rolling_header)
+
+    # Description
+    desc = QLabel("Used when Context Mode is Rolling Summary (Replace) or Rolling Summary (Append)")
+    desc.setStyleSheet("color: gray; font-size: 9pt;")
+    desc.setContentsMargins(0, 0, 0, 4)
+    section_v.addWidget(desc)
+
+    # Settings container - compact row
+    settings_w = QWidget()
+    settings_row = QHBoxLayout(settings_w)
+    settings_row.setContentsMargins(0, 2, 0, 4)
+    settings_row.setSpacing(8)
+
+    # Role and summary token cap
+    role_lbl = QLabel("Role: ")
+    settings_row.addWidget(role_lbl)
+    rolling_controls.append(role_lbl)
+    role_combo = QComboBox()
+    # Controls how the rolling-summary GENERATION request is built (summary API call).
+    # NOTE: The rolling summary is always injected into translation as an assistant message.
+    #
+    # user   -> send user prompt only (configured summary user prompt + translated text)
+    # system -> send system prompt + user message containing ONLY the translated text
+    # both   -> send both system + user (legacy/current behavior)
+    role_combo.addItems(["user", "system", "both"])
+    role_combo.setFixedWidth(90)
+    # Add custom styling with unicode arrow
+    role_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(role_combo)
+    self._disable_combobox_mousewheel(role_combo)
+    try:
+        current_role = str(getattr(self, 'summary_role_var', 'system') or 'system').strip().lower()
+        idx = role_combo.findText(current_role)
+        if idx >= 0:
+            role_combo.setCurrentIndex(idx)
+        else:
+            role_combo.setCurrentIndex(0)
+    except Exception:
+        pass
+    def _on_role_changed(text):
+        try:
+            self.summary_role_var = str(text).strip().lower()
+        except Exception:
+            pass
+    role_combo.currentTextChanged.connect(_on_role_changed)
+    settings_row.addWidget(role_combo)
+    rolling_controls.append(role_combo)
+    
+    max_tokens_lbl = QLabel(" Max tokens: ")
+    settings_row.addWidget(max_tokens_lbl)
+    rolling_controls.append(max_tokens_lbl)
+    max_tokens_edit = QLineEdit()
+    max_tokens_edit.setFixedWidth(80)
+    try:
+        max_tokens_edit.setText(str(self.rolling_summary_max_tokens_var))
+    except Exception:
+        pass
+    def _on_max_tokens_changed(text):
+        try:
+            self.rolling_summary_max_tokens_var = text
+        except Exception:
+            pass
+    max_tokens_edit.textChanged.connect(_on_max_tokens_changed)
+    settings_row.addWidget(max_tokens_edit)
+    rolling_controls.append(max_tokens_edit)
+    settings_row.addStretch(1)
+
+    section_v.addWidget(settings_w)
+    
+    # Configure prompts button
+    cfg_btn = QPushButton("⚙️ Configure Memory Prompts")
+    cfg_btn.setMinimumHeight(28)
+    cfg_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #17a2b8; "
+        "  color: white; "
+        "  padding: 5px 12px; "
+        "  font-size: 10pt; "
+        "  font-weight: bold; "
+        "  border-radius: 3px; "
+        "} "
+        "QPushButton:hover { background-color: #138496; } "
+        "QPushButton:disabled { "
+        "  background-color: #6c757d; "
+        "  color: #adb5bd; "
+        "}"
+    )
+    cfg_btn.clicked.connect(self.configure_rolling_summary_prompts)
+    section_v.addWidget(cfg_btn)
+    rolling_controls.append(cfg_btn)
+
+    rolling_keys_btn = _create_preview_pool_button(
+        self,
+        'rolling_summary',
+        "RS Keys",
+        "Open the Multi API Key Manager focused on the Rolling Summary key pool.",
+        section_box,
+    )
+    rolling_keys_btn.setMinimumHeight(28)
+    section_v.addWidget(rolling_keys_btn)
+    rolling_controls.append(rolling_keys_btn)
+
+    # Separator
+    sep1 = QFrame()
+    sep1.setFrameShape(QFrame.HLine)
+    sep1.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep1)
+
+    # Memory mode info
+    info = QLabel(
+        "💡 Memory Mode:\n• Append: Keeps adding summaries (longer context)\n• Replace: Only keeps latest summary (concise)"
+    )
+    info.setStyleSheet("color: #666;")
+    section_v.addWidget(info)
+
+    # Separator
+    sep2 = QFrame()
+    sep2.setFrameShape(QFrame.HLine)
+    sep2.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep2)
+
+    # Application Updates
+    section_v.addWidget(QLabel("Application Updates:"))
+    updates_row = QWidget()
+    updates_h = QHBoxLayout(updates_row)
+    updates_h.setContentsMargins(0, 0, 0, 0)
+
+    btn_check_updates = QPushButton("🔄 Check for Updates")
+    btn_check_updates.clicked.connect(lambda: self.check_for_updates_manual())
+    btn_check_updates.setStyleSheet(
+        "QPushButton { background-color: #17a2b8; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; }"
+    )
+    updates_h.addWidget(btn_check_updates)
+
+    auto_cb = self._create_styled_checkbox("Check on startup")
+    try:
+        auto_cb.setChecked(bool(self.auto_update_check_var))
+    except Exception:
+        pass
+    def _on_auto_update(checked):
+        try:
+            self.auto_update_check_var = bool(checked)
+        except Exception:
+            pass
+    auto_cb.toggled.connect(_on_auto_update)
+    updates_h.addSpacing(10)
+    updates_h.addWidget(auto_cb)
+
+    section_v.addWidget(updates_row)
+
+    updates_desc = QLabel("Check GitHub for new Glossarion releases\nand download updates")
+    updates_desc.setStyleSheet("color: gray;")
+    section_v.addWidget(updates_desc)
+
+    # Separator
+    sep3 = QFrame()
+    sep3.setFrameShape(QFrame.HLine)
+    sep3.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep3)
+
+    # Config Backup Management
+    section_v.addWidget(QLabel("Config Backup Management:"))
+
+    backup_row = QWidget()
+    backup_h = QHBoxLayout(backup_row)
+    backup_h.setContentsMargins(0, 0, 0, 0)
+
+    btn_backup = QPushButton("💾 Create Backup")
+    btn_backup.clicked.connect(lambda: self._create_manual_config_backup())
+    btn_backup.setStyleSheet(
+        "QPushButton { background-color: #28a745; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #218838; }"
+    )
+    backup_h.addWidget(btn_backup)
+
+    btn_restore = QPushButton("↶ Restore Backup")
+    btn_restore.clicked.connect(lambda: self._manual_restore_config())
+    btn_restore.setStyleSheet(
+        "QPushButton { background-color: #ffc107; color: black; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #e0a800; }"
+    )
+    backup_h.addWidget(btn_restore)
+
+    section_v.addWidget(backup_row)
+
+    backup_desc = QLabel("Automatic backups are created before each config save.")
+    backup_desc.setStyleSheet("color: gray;")
+    section_v.addWidget(backup_desc)
+
+    # Output Folder Override - NEW
+    section_v.addWidget(QLabel("Default Output Folder Override:"))
+    output_dir_row = QWidget()
+    output_dir_h = QHBoxLayout(output_dir_row)
+    output_dir_h.setContentsMargins(0, 0, 0, 0)
+    
+    self.output_dir_entry = QLineEdit()
+    self.output_dir_entry.setPlaceholderText("Leave empty for default (relative to source file)")
+    # Load current value
+    current_output_dir = self.config.get('output_directory', os.environ.get('OUTPUT_DIRECTORY', ''))
+    
+    def _on_output_dir_changed(text):
+        try:
+            text = text.strip()
+            self.config['output_directory'] = text
+            if text:
+                resolved = os.path.abspath(text)
+                os.environ['OUTPUT_DIRECTORY'] = resolved
+                os.environ['OUTPUT_DIR'] = resolved
+            else:
+                # Remove both names so runtime fallback checks cannot see a stale override.
+                os.environ.pop('OUTPUT_DIRECTORY', None)
+                os.environ.pop('OUTPUT_DIR', None)
+        except Exception:
+            pass
+            
+    self.output_dir_entry.textChanged.connect(_on_output_dir_changed)
+    self.output_dir_entry.setText(current_output_dir)
+    _on_output_dir_changed(current_output_dir)
+    output_dir_h.addWidget(self.output_dir_entry)
+    
+    def _browse_output_dir():
+        from PySide6.QtWidgets import QFileDialog
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if dir_path:
+            self.output_dir_entry.setText(dir_path)
+            
+    browse_btn = QPushButton("📂")
+    browse_btn.setToolTip("Browse for folder")
+    browse_btn.clicked.connect(_browse_output_dir)
+    browse_btn.setFixedWidth(40)
+    output_dir_h.addWidget(browse_btn)
+    
+    section_v.addWidget(output_dir_row)
+
+    # ── Auto DPI Scale ──
+    section_v.addSpacing(6)
+    if not hasattr(self, 'auto_dpi_scale_var'):
+        self.auto_dpi_scale_var = self.config.get('auto_dpi_scale', True)
+    if not hasattr(self, 'gui_font_scale_var'):
+        self.gui_font_scale_var = self.config.get('gui_font_scale', 1.0)
+
+    auto_dpi_cb = self._create_styled_checkbox("Auto DPI Scale")
+    auto_dpi_cb.setToolTip(
+        "Automatically choose GUI scale factor based on your monitor resolution.\n"
+        "When enabled, the manual scale factor below is ignored.\n"
+        "⚠️ Requires restart to take effect."
+    )
+    try:
+        auto_dpi_cb.setChecked(bool(self.auto_dpi_scale_var))
+    except Exception:
+        pass
+
+    # ── GUI Scale Factor ──
+    scale_row = QWidget()
+    scale_h = QHBoxLayout(scale_row)
+    scale_h.setContentsMargins(0, 0, 0, 0)
+    scale_h.setSpacing(6)
+    scale_label = QLabel("🔍 GUI Scale Factor:")
+    scale_h.addWidget(scale_label)
+
+    from PySide6.QtWidgets import QDoubleSpinBox
+    scale_spin = QDoubleSpinBox()
+    scale_spin.setRange(0.50, 3.00)
+    scale_spin.setSingleStep(0.05)
+    scale_spin.setDecimals(2)
+    scale_spin.setFixedWidth(80)
+    # Mousewheel lock
+    scale_spin.setFocusPolicy(Qt.StrongFocus)
+    scale_spin.wheelEvent = lambda e: e.ignore()
+    try:
+        scale_spin.setValue(float(getattr(self, 'gui_scale_factor_var', 1.0)))
+    except Exception:
+        scale_spin.setValue(1.0)
+    def _on_scale_changed(val):
+        try:
+            self.gui_scale_factor_var = val
+            # Save immediately so dpi_setup reads the new value on next launch
+            try:
+                self.config['gui_scale_factor'] = val
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    scale_spin.valueChanged.connect(_on_scale_changed)
+    scale_h.addWidget(scale_spin)
+    scale_h.addStretch()
+
+    # GUI Font Scale
+    font_scale_row = QWidget()
+    font_scale_h = QHBoxLayout(font_scale_row)
+    font_scale_h.setContentsMargins(0, 0, 0, 0)
+    font_scale_h.setSpacing(6)
+    font_scale_label = QLabel("GUI Font Scale:")
+    font_scale_h.addWidget(font_scale_label)
+
+    font_scale_spin = QDoubleSpinBox()
+    font_scale_spin.setRange(0.50, 1.50)
+    font_scale_spin.setSingleStep(0.05)
+    font_scale_spin.setDecimals(2)
+    font_scale_spin.setFixedWidth(80)
+    font_scale_spin.setFocusPolicy(Qt.StrongFocus)
+    font_scale_spin.wheelEvent = lambda e: e.ignore()
+    try:
+        font_scale_spin.setValue(float(getattr(self, 'gui_font_scale_var', 1.0)))
+    except Exception:
+        font_scale_spin.setValue(1.0)
+
+    def _on_font_scale_changed(val):
+        try:
+            self.gui_font_scale_var = val
+            try:
+                self.config['gui_font_scale'] = val
+                self.save_config(show_message=False)
+                try:
+                    import dpi_setup
+                    from PySide6.QtWidgets import QApplication
+                    dpi_setup.apply_font_scale(QApplication.instance())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    font_scale_spin.valueChanged.connect(_on_font_scale_changed)
+    font_scale_h.addWidget(font_scale_spin)
+    font_scale_h.addStretch()
+
+    # Disabled styling for scale controls
+    _scale_label_enabled_style = ""
+    _scale_label_disabled_style = "color: #808080;"
+    _scale_spin_disabled_style = "color: #808080; background-color: rgba(255,255,255,0.05);"
+
+    def _apply_scale_disabled_styling(disabled):
+        """Apply or remove disabled visual styling on the scale label and spinbox."""
+        if disabled:
+            scale_label.setStyleSheet(_scale_label_disabled_style)
+            scale_spin.setStyleSheet(_scale_spin_disabled_style)
+        else:
+            scale_label.setStyleSheet(_scale_label_enabled_style)
+            scale_spin.setStyleSheet("")
+
+    # Wire auto DPI toggle to enable/disable scale controls
+    scale_controls = [scale_label, scale_spin]
+    def _on_auto_dpi_toggled(checked):
+        try:
+            self.auto_dpi_scale_var = bool(checked)
+            self.config['auto_dpi_scale'] = self.auto_dpi_scale_var
+            for ctrl in scale_controls:
+                ctrl.setEnabled(not checked)
+            _apply_scale_disabled_styling(checked)
+            # When auto is enabled, show the auto-detected value in the spinbox
+            if checked:
+                try:
+                    from dpi_setup import _get_default_scale_for_resolution
+                    auto_val = _get_default_scale_for_resolution()
+                    scale_spin.blockSignals(True)
+                    scale_spin.setValue(auto_val)
+                    scale_spin.blockSignals(False)
+                except Exception:
+                    pass
+            # Save immediately so dpi_setup reads the new value on next launch
+            try:
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    auto_dpi_cb.toggled.connect(_on_auto_dpi_toggled)
+    section_v.addWidget(auto_dpi_cb)
+    section_v.addWidget(scale_row)
+    section_v.addWidget(font_scale_row)
+
+    # Apply initial enabled state and styling
+    initial_auto = auto_dpi_cb.isChecked()
+    for ctrl in scale_controls:
+        ctrl.setEnabled(not initial_auto)
+    _apply_scale_disabled_styling(initial_auto)
+    # Show auto-detected value when initially in auto mode
+    if initial_auto:
+        try:
+            from dpi_setup import _get_default_scale_for_resolution
+            auto_val = _get_default_scale_for_resolution()
+            scale_spin.blockSignals(True)
+            scale_spin.setValue(auto_val)
+            scale_spin.blockSignals(False)
+        except Exception:
+            pass
+
+    scale_desc = QLabel(
+        "Controls the overall GUI size (Range: 1.0 - 3.0).\n"
+        "Lower values = smaller UI, higher values = larger UI.\n"
+        "⚠️ Requires restart to take effect."
+    )
+    scale_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    scale_desc.setContentsMargins(0, 0, 0, 0)
+    section_v.addWidget(scale_desc)
+
+    # Halgakos icon at bottom (150x150 HiDPI)
+    _icon_label = QLabel()
+    _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(_icon_path):
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtWidgets import QApplication
+        _pixmap = QPixmap(_icon_path)
+        if not _pixmap.isNull():
+            _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+            _target = int(130 * _dpr)
+            _scaled = _pixmap.scaled(_target, _target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _scaled.setDevicePixelRatio(_dpr)
+            _icon_label.setPixmap(_scaled)
+            _icon_label.setFixedSize(130, 130)
+            _icon_label.setAlignment(Qt.AlignCenter)
+            section_v.addWidget(_icon_label)
+
+    # Place the section at row 0, column 1 to match the original grid
+    try:
+        grid.addWidget(section_box, 0, 1)
+    except Exception:
+        # Fallback: just stack
+        section_box.setParent(parent)
+
+def _create_response_handling_section(self, parent):
+    """Create response handling section with AI Hunter additions (PySide6)"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QLineEdit, QPushButton, QWidget, QRadioButton, QButtonGroup, QDoubleSpinBox
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPalette
+    
+    section_box = QGroupBox("Response Handling & Retry Logic")
+    # No max width - let it expand in fullscreen
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
+    
+    # Real-time Translation (Streaming)
+    streaming_title = QLabel("Real-time Translation (Streaming)")
+    streaming_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(streaming_title)
+
+    # Streaming toggle
+    if not hasattr(self, 'enable_streaming_var'):
+        self.enable_streaming_var = bool(self.config.get('enable_streaming', str(os.environ.get('ENABLE_STREAMING', '0')) == '1'))
+    self.enable_streaming_checkbox = self._create_styled_checkbox("Enable streaming responses (OpenAI-compatible)")
+    self.enable_streaming_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Streams tokens as they are generated to reduce time-to-first-byte. "
+        "Some official providers (e.g., Google Gemini) may truncate streams without raising an error—disable streaming if you see incomplete outputs."
+        "</p></qt>"
+    )
+    try:
+        self.enable_streaming_checkbox.setChecked(bool(self.enable_streaming_var))
+    except Exception:
+        pass
+
+    # Allow streaming logs during batch mode
+    if not hasattr(self, 'allow_batch_stream_logs_var'):
+        self.allow_batch_stream_logs_var = bool(
+            self.config.get(
+                'allow_batch_stream_logs',
+                str(os.environ.get('ALLOW_BATCH_STREAM_LOGS', '0')) == '1'
+            )
+        )
+    # Ensure config mirrors the loaded state so it can be saved even if dialog isn't reopened
+    try:
+        self.config['allow_batch_stream_logs'] = bool(self.allow_batch_stream_logs_var)
+    except Exception:
+        pass
+    self.allow_batch_stream_logs_checkbox = self._create_styled_checkbox(
+        "Allow streaming logs during batch mode"
+    )
+    self.allow_batch_stream_logs_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Show streaming token logs even while batch translation is running. "
+        "Default is off to reduce log noise.</p></qt>"
+    )
+    try:
+        self.allow_batch_stream_logs_checkbox.setChecked(bool(self.allow_batch_stream_logs_var))
+    except Exception:
+        pass
+    def _on_allow_batch_stream_logs_toggle(checked):
+        try:
+            self.allow_batch_stream_logs_var = bool(checked)
+            # Persist immediately to config so it survives session without requiring another dialog open
+            self.config['allow_batch_stream_logs'] = self.allow_batch_stream_logs_var
+            os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.allow_batch_stream_logs_checkbox.toggled.connect(_on_allow_batch_stream_logs_toggle)
+
+    # Stream thinking/reasoning logs toggle
+    if not hasattr(self, 'stream_thinking_logs_var'):
+        self.stream_thinking_logs_var = bool(
+            self.config.get(
+                'stream_thinking_logs',
+                str(os.environ.get('STREAM_THINKING_LOGS', '0')) == '1'
+            )
+        )
+    try:
+        self.config['stream_thinking_logs'] = bool(self.stream_thinking_logs_var)
+    except Exception:
+        pass
+    self.stream_thinking_logs_checkbox = self._create_styled_checkbox(
+        "Stream thinking/reasoning logs"
+    )
+    self.stream_thinking_logs_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Show 🧠 thinking logs in real-time when models use reasoning/thinking. "
+        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGrok, AuthGem, and OCZ (ocz/). "
+        "Arena, Antigravity and OcAgy include thinking whenever their forced live stream is visible. "
+        "AuthGrok reasoning summaries always stream outside batch mode; this setting still applies to AuthGrok during batch mode. "
+        "For other providers, disable this to suppress thinking output and show only final text.</p></qt>"
+    )
+    try:
+        self.stream_thinking_logs_checkbox.setChecked(bool(self.stream_thinking_logs_var))
+    except Exception:
+        pass
+    def _on_stream_thinking_logs_toggle(checked):
+        try:
+            self.stream_thinking_logs_var = bool(checked)
+            self.config['stream_thinking_logs'] = self.stream_thinking_logs_var
+            os.environ['STREAM_THINKING_LOGS'] = '1' if checked else '0'
+            # Force-enable and lock the thoughts toggle when stream thinking is ON
+            if hasattr(self, 'enable_thoughts_checkbox'):
+                self._sync_thoughts_lock_state(checked)
+        except Exception:
+            pass
+    self.stream_thinking_logs_checkbox.toggled.connect(_on_stream_thinking_logs_toggle)
+
+    def _on_streaming_toggle(checked):
+        try:
+            self.enable_streaming_var = bool(checked)
+            # Keep environment in sync immediately
+            os.environ['ENABLE_STREAMING'] = '1' if checked else '0'
+            # Enable/disable logs toggle based on streaming state
+            self.allow_batch_stream_logs_checkbox.setEnabled(checked)
+            # Force style update to ensure visual state (color) updates immediately
+            self.allow_batch_stream_logs_checkbox.style().unpolish(self.allow_batch_stream_logs_checkbox)
+            self.allow_batch_stream_logs_checkbox.style().polish(self.allow_batch_stream_logs_checkbox)
+        except Exception:
+            pass
+    self.enable_streaming_checkbox.toggled.connect(_on_streaming_toggle)
+    
+    # Initialize state (scheduled to run after widget construction)
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, lambda: _on_streaming_toggle(self.enable_streaming_checkbox.isChecked()))
+
+    section_v.addWidget(self.enable_streaming_checkbox)
+    streaming_warn = QLabel(settings_rules.STREAMING_TRUNCATION_WARNING)
+    streaming_warn.setStyleSheet("color: #f59e0b; font-size: 9pt;")
+    streaming_warn.setContentsMargins(20, 0, 0, 4)
+    section_v.addWidget(streaming_warn)
+    section_v.addWidget(self.stream_thinking_logs_checkbox)
+    section_v.addWidget(self.allow_batch_stream_logs_checkbox)
+
+    # Forced-stream OAuth providers batch stream log toggle
+    section_v.addSpacing(6)
+    if not hasattr(self, 'allow_authgpt_batch_stream_logs_var'):
+        self.allow_authgpt_batch_stream_logs_var = bool(
+            self.config.get(
+                'allow_authgpt_batch_stream_logs',
+                str(os.environ.get('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '0')) == '1'
+            )
+        )
+    try:
+        self.config['allow_authgpt_batch_stream_logs'] = bool(self.allow_authgpt_batch_stream_logs_var)
+    except Exception:
+        pass
+    self.allow_authgpt_batch_stream_logs_checkbox = self._create_styled_checkbox(
+        "Allow forced-stream batch log (AuthGPT / AuthGrok / AuthGem / AuthCD / AuthZA / Arena / Antigravity / OcAgy)"
+    )
+    self.allow_authgpt_batch_stream_logs_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "AuthGPT (authgpt/), AuthGrok (authgrok/), AuthGem (authgem/), AuthCD (authcd/), "
+        "AuthZA (authza/), Antigravity (antigravity/), and OcAgy (ocagy/) always stream internally. "
+        "During batch translation this can flood the log. Enable this to see streaming "
+        "tokens and reasoning in the log during batch mode. Off by default.</p></qt>"
+    )
+    try:
+        self.allow_authgpt_batch_stream_logs_checkbox.setChecked(bool(self.allow_authgpt_batch_stream_logs_var))
+    except Exception:
+        pass
+    def _on_allow_authgpt_batch_stream_logs_toggle(checked):
+        try:
+            self.allow_authgpt_batch_stream_logs_var = bool(checked)
+            self.config['allow_authgpt_batch_stream_logs'] = self.allow_authgpt_batch_stream_logs_var
+            os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.allow_authgpt_batch_stream_logs_checkbox.toggled.connect(_on_allow_authgpt_batch_stream_logs_toggle)
+    section_v.addWidget(self.allow_authgpt_batch_stream_logs_checkbox)
+
+    authgpt_note = QLabel(
+        settings_rules.FORCED_STREAM_NOTE
+    )
+    authgpt_note.setStyleSheet("color: #6b7280; font-size: 9pt; font-style: italic;")
+    authgpt_note.setWordWrap(True)
+    authgpt_note.setContentsMargins(20, 0, 0, 4)
+    section_v.addWidget(authgpt_note)
+
+    # Separator
+    sep_stream = QFrame()
+    sep_stream.setFrameShape(QFrame.HLine)
+    sep_stream.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_stream)
+
+    # GPT-5/OpenAI Reasoning Toggle
+    gpt5_title = QLabel("GPT-5 / OpenRouter / NIM / OpenCode Thinking")
+    gpt5_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(gpt5_title)
+    
+    gpt_row1 = QWidget()
+    gpt_h1 = QHBoxLayout(gpt_row1)
+    gpt_h1.setContentsMargins(20, 5, 0, 0)
+    
+    gpt_enable_cb = self._create_styled_checkbox("Enable GPT / OR / NIM / OC Thinking")
+    try:
+        gpt_enable_cb.setChecked(bool(self.enable_gpt_thinking_var))
+    except Exception:
+        pass
+    def _on_gpt_thinking_toggle(checked):
+        try:
+            _apply_gpt_thinking_toggle(self, checked)
+        except Exception:
+            pass
+    gpt_enable_cb.toggled.connect(_on_gpt_thinking_toggle)
+    gpt_h1.addWidget(gpt_enable_cb)
+    
+    gpt_h1.addSpacing(20)
+    self.gpt_effort_label = QLabel("Effort:")
+    gpt_h1.addWidget(self.gpt_effort_label)
+    self.gpt_effort_combo = QComboBox()
+    # GPT thinking effort includes "none" (disable) through "max".
+    self.gpt_effort_combo.addItems(["none", "low", "medium", "high", "xhigh", "max"])
+    self.gpt_effort_combo.setFixedWidth(80)
+    self.gpt_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
+    self._add_combobox_arrow(self.gpt_effort_combo)
+    self._disable_combobox_mousewheel(self.gpt_effort_combo)
+    try:
+        effort_val = self.gpt_effort_var
+        idx = self.gpt_effort_combo.findText(effort_val)
+        if idx >= 0:
+            self.gpt_effort_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_effort_changed(text):
+        try:
+            self.gpt_effort_var = text
+        except Exception:
+            pass
+    self.gpt_effort_combo.currentTextChanged.connect(_on_effort_changed)
+    gpt_h1.addWidget(self.gpt_effort_combo)
+    gpt_h1.addStretch()
+    section_v.addWidget(gpt_row1)
+    
+    # Second row for an optional OpenRouter token budget override
+    gpt_row2 = QWidget()
+    gpt_h2 = QHBoxLayout(gpt_row2)
+    gpt_h2.setContentsMargins(40, 5, 0, 0)
+    self.openrouter_use_reasoning_tokens_cb = self._create_styled_checkbox("Use OR token budget instead of Effort")
+    self.openrouter_use_reasoning_tokens_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Sends reasoning.max_tokens instead of reasoning.effort. OpenRouter may translate "
+            "the budget into an effort level for models without a direct reasoning token limit."
+        )
+    )
+    self.openrouter_use_reasoning_tokens_cb.setChecked(
+        bool(getattr(self, 'openrouter_use_reasoning_tokens_var', False))
+    )
+    def _on_or_budget_toggle(checked):
+        self.openrouter_use_reasoning_tokens_var = bool(checked)
+        self.config['openrouter_use_reasoning_tokens'] = bool(checked)
+        os.environ['OPENROUTER_USE_REASONING_TOKENS'] = '1' if checked else '0'
+        self.toggle_gpt_reasoning_controls()
+    self.openrouter_use_reasoning_tokens_cb.toggled.connect(_on_or_budget_toggle)
+    gpt_h2.addWidget(self.openrouter_use_reasoning_tokens_cb)
+    gpt_h2.addSpacing(12)
+    self.gpt_reasoning_tokens_label = QLabel("OR Thinking Tokens:")
+    gpt_h2.addWidget(self.gpt_reasoning_tokens_label)
+    self.gpt_reasoning_tokens_entry = QLineEdit()
+    self.gpt_reasoning_tokens_entry.setFixedWidth(70)
+    self.gpt_reasoning_tokens_entry.setStyleSheet(_THINKING_ENTRY_STYLE)
+    try:
+        self.gpt_reasoning_tokens_entry.setText(str(self.gpt_reasoning_tokens_var))
+    except Exception:
+        pass
+    def _on_gpt_tokens_changed(text):
+        try:
+            self.gpt_reasoning_tokens_var = text
+        except Exception:
+            pass
+    self.gpt_reasoning_tokens_entry.textChanged.connect(_on_gpt_tokens_changed)
+    gpt_h2.addWidget(self.gpt_reasoning_tokens_entry)
+    self.gpt_tokens_label = QLabel("tokens")
+    gpt_h2.addWidget(self.gpt_tokens_label)
+    gpt_h2.addStretch()
+    section_v.addWidget(gpt_row2)
+
+    gpt_row3 = QWidget()
+    gpt_h3 = QHBoxLayout(gpt_row3)
+    gpt_h3.setContentsMargins(40, 2, 0, 0)
+    if not hasattr(self, 'pass_thinking_all_openai_var'):
+        self.pass_thinking_all_openai_var = bool(self.config.get('pass_thinking_all_openai', False))
+    self.pass_thinking_all_openai_cb = self._create_styled_checkbox(
+        "⚠️ Force reasoning parameters on unknown routes"
+    )
+    self.pass_thinking_all_openai_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Pass the selected reasoning_effort to OpenAI-compatible routes without dedicated "
+            "reasoning handling, including custom model routes. Sends none when thinking is off. "
+            "Unsupported APIs may reject it."
+        )
+    )
+    try:
+        self.pass_thinking_all_openai_cb.setChecked(bool(self.pass_thinking_all_openai_var))
+    except Exception:
+        pass
+    def _on_pass_thinking_all_openai_toggle(checked):
+        try:
+            self.pass_thinking_all_openai_var = bool(checked)
+            self.config['pass_thinking_all_openai'] = self.pass_thinking_all_openai_var
+            os.environ['PASS_THINKING_TO_OPENAI_COMPATIBLE'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.pass_thinking_all_openai_cb.toggled.connect(_on_pass_thinking_all_openai_toggle)
+    gpt_h3.addWidget(self.pass_thinking_all_openai_cb)
+    gpt_h3.addStretch()
+    section_v.addWidget(gpt_row3)
+    
+    # Store reference to description label for enable/disable
+    self.gpt_desc_label = QLabel("Controls reasoning for GPT-5, OpenRouter, OpenCode, NIM/AuthND, DeepSeek V4, and NanoGPT.\nOpenRouter uses Effort for reasoning models; its optional token budget replaces Effort when selected.\nDeepSeek V4: xhigh→max. NanoGPT Chat Completions uses Effort, not Tokens.")
+    self.gpt_desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+    self.gpt_desc_label.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(self.gpt_desc_label)
+    
+    # Initialize enabled state for GPT controls
+    self.toggle_gpt_reasoning_controls()
+    
+    # Shared service tier for OpenAI, native Gemini, NanoGPT, and OpenRouter.
+    service_tier_title = QLabel("Service Tier")
+    service_tier_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(service_tier_title)
+    if not hasattr(self, 'gemini_service_tier_var'):
+        self.gemini_service_tier_var = str(self.config.get('gemini_service_tier', 'off') or 'off').lower()
+    tier_row = QWidget()
+    tier_h = QHBoxLayout(tier_row)
+    tier_h.setContentsMargins(20, 2, 0, 0)
+    tier_h.addWidget(QLabel("OpenAI / Gemini / OpenRouter service tier:"))
+    self.gemini_service_tier_combo = QComboBox()
+    self.gemini_service_tier_combo.addItems(["off", "standard", "flex", "fast", "priority"])
+    self.gemini_service_tier_combo.setFixedWidth(100)
+    self.gemini_service_tier_combo.setStyleSheet(_THINKING_COMBO_STYLE)
+    self._add_combobox_arrow(self.gemini_service_tier_combo)
+    self._disable_combobox_mousewheel(self.gemini_service_tier_combo)
+    self.gemini_service_tier_combo.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Also sends the selected service tier to OpenAI/Gemini models through NanoGPT and OpenRouter.<br>"
+        "<b>off</b>: do not send service_tier.<br>"
+        "<b>standard</b>: explicitly request the base tier (sent as default to OpenAI/NanoGPT).<br>"
+        "<b>flex</b>: lower-cost, variable-capacity processing where supported.<br>"
+        "<b>fast</b>: higher-priority processing where supported.<br>"
+        "<b>priority</b>: legacy name for fast on OpenAI routes.<br>"
+        "Availability and pricing depend on the model and provider. "
+        "OpenRouter may use its standard tier when a model has no Flex endpoint."
+        "</p></qt>"
+    )
+    tier_idx = self.gemini_service_tier_combo.findText(self.gemini_service_tier_var)
+    self.gemini_service_tier_combo.setCurrentIndex(tier_idx if tier_idx >= 0 else 0)
+    def _on_service_tier_changed(value):
+        self.gemini_service_tier_var = value
+        self.config['gemini_service_tier'] = value
+        os.environ['GEMINI_SERVICE_TIER'] = value
+    self.gemini_service_tier_combo.currentTextChanged.connect(_on_service_tier_changed)
+    tier_h.addWidget(self.gemini_service_tier_combo)
+    tier_h.addStretch()
+    section_v.addWidget(tier_row)
+    if not hasattr(self, 'force_service_tier_unknown_routes_var'):
+        self.force_service_tier_unknown_routes_var = bool(
+            self.config.get('force_service_tier_unknown_routes', False)
+        )
+    tier_force_row = QWidget()
+    tier_force_h = QHBoxLayout(tier_force_row)
+    tier_force_h.setContentsMargins(40, 2, 0, 0)
+    self.force_service_tier_unknown_routes_cb = self._create_styled_checkbox(
+        "⚠️ Force service tier on unknown routes"
+    )
+    self.force_service_tier_unknown_routes_cb.setChecked(
+        bool(self.force_service_tier_unknown_routes_var)
+    )
+    self.force_service_tier_unknown_routes_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Pass the selected service tier to other OpenAI-compatible providers and to "
+            "NanoGPT/OpenRouter models outside the known OpenAI and Gemini families. "
+            "The API may reject unsupported tiers. Per-key custom parameters take precedence."
+        )
+    )
+    def _on_force_service_tier_unknown_routes(checked):
+        self.force_service_tier_unknown_routes_var = bool(checked)
+        self.config['force_service_tier_unknown_routes'] = bool(checked)
+        os.environ['FORCE_SERVICE_TIER_UNKNOWN_ROUTES'] = '1' if checked else '0'
+    self.force_service_tier_unknown_routes_cb.toggled.connect(_on_force_service_tier_unknown_routes)
+    tier_force_h.addWidget(self.force_service_tier_unknown_routes_cb)
+    tier_force_h.addStretch()
+    section_v.addWidget(tier_force_row)
+    tier_note = QLabel("Also sent to OpenAI/Gemini models through NanoGPT and OpenRouter where supported.")
+    tier_note.setStyleSheet("color: gray; font-size: 9pt;")
+    tier_note.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(tier_note)
+
+    # Gemini Thinking Mode
+    gemini_title = QLabel("Gemini Thinking Mode")
+    gemini_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(gemini_title)
+    thinking_row_top = QWidget()
+    thinking_h_top = QHBoxLayout(thinking_row_top)
+    thinking_h_top.setContentsMargins(20, 5, 0, 0)
+    
+    gemini_thinking_cb = self._create_styled_checkbox("Enable Gemini Thinking")
+    try:
+        gemini_thinking_cb.setChecked(bool(self.enable_gemini_thinking_var))
+    except Exception:
+        pass
+    def _on_gemini_thinking_toggle(checked):
+        try:
+            self.enable_gemini_thinking_var = bool(checked)
+            self.toggle_thinking_budget()
+        except Exception:
+            pass
+    gemini_thinking_cb.toggled.connect(_on_gemini_thinking_toggle)
+    thinking_h_top.addWidget(gemini_thinking_cb)
+    
+    thinking_h_top.addSpacing(20)
+    self.thinking_budget_label = QLabel("Budget:")
+    thinking_h_top.addWidget(self.thinking_budget_label)
+    self.thinking_budget_entry = QLineEdit()
+    self.thinking_budget_entry.setFixedWidth(70)
+    self.thinking_budget_entry.setStyleSheet(_THINKING_ENTRY_STYLE)
+    try:
+        self.thinking_budget_entry.setText(str(self.thinking_budget_var))
+    except Exception:
+        pass
+    def _on_budget_changed(text):
+        try:
+            self.thinking_budget_var = text
+        except Exception:
+            pass
+    self.thinking_budget_entry.textChanged.connect(_on_budget_changed)
+    thinking_h_top.addWidget(self.thinking_budget_entry)
+    self.thinking_tokens_label = QLabel("tokens")
+    thinking_h_top.addWidget(self.thinking_tokens_label)
+    thinking_h_top.addStretch()
+    section_v.addWidget(thinking_row_top)
+
+    # Second row for Gemini 3 thinking level
+    thinking_row_level = QWidget()
+    thinking_h_level = QHBoxLayout(thinking_row_level)
+    thinking_h_level.setContentsMargins(40, 2, 0, 0)
+
+    self.thinking_level_label = QLabel("Level (Gemini 3):")
+    thinking_h_level.addWidget(self.thinking_level_label)
+    self.thinking_level_combo = QComboBox()
+    self.thinking_level_combo.addItems(["minimal", "low", "medium", "high"])
+    self.thinking_level_combo.setFixedWidth(80)
+    self.thinking_level_combo.setStyleSheet(_THINKING_COMBO_STYLE)
+    self._add_combobox_arrow(self.thinking_level_combo)
+    self._disable_combobox_mousewheel(self.thinking_level_combo)
+    try:
+        level_val = self.thinking_level_var
+        idx = self.thinking_level_combo.findText(level_val)
+        if idx >= 0:
+            self.thinking_level_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_level_changed(text):
+        try:
+            self.thinking_level_var = text
+            os.environ["GEMINI_THINKING_LEVEL"] = text
+        except Exception:
+            pass
+    self.thinking_level_combo.currentTextChanged.connect(_on_level_changed)
+    thinking_h_level.addWidget(self.thinking_level_combo)
+    thinking_h_level.addStretch()
+    section_v.addWidget(thinking_row_level)
+
+    # Enable thoughts toggle (disabled by default) — placed after level selector
+    if not hasattr(self, 'enable_thoughts_var'):
+        self.enable_thoughts_var = bool(
+            self.config.get(
+                'enable_thoughts',
+                str(os.environ.get('ENABLE_THOUGHTS', '1')) == '1'
+            )
+        )
+    thoughts_row = QWidget()
+    thoughts_h = QHBoxLayout(thoughts_row)
+    thoughts_h.setContentsMargins(20, 2, 0, 0)
+    enable_thoughts_cb = self._create_styled_checkbox("Enable thoughts (include model reasoning metadata)")
+    self.enable_thoughts_checkbox = enable_thoughts_cb  # Store ref for lock/unlock
+    enable_thoughts_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Adds model reasoning thoughts metadata to responses when supported. "
+        "</p></qt>"
+    )
+    try:
+        enable_thoughts_cb.setChecked(bool(self.enable_thoughts_var))
+    except Exception:
+        enable_thoughts_cb.setChecked(False)
+    def _on_enable_thoughts_toggle(checked):
+        try:
+            # Ignore user unchecks while locked by stream thinking
+            if getattr(enable_thoughts_cb, '_mode_locked', False) and not checked:
+                enable_thoughts_cb.blockSignals(True)
+                enable_thoughts_cb.setChecked(True)
+                enable_thoughts_cb.blockSignals(False)
+                return
+            self.enable_thoughts_var = bool(checked)
+            self.config['enable_thoughts'] = self.enable_thoughts_var
+            os.environ['ENABLE_THOUGHTS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    enable_thoughts_cb.toggled.connect(_on_enable_thoughts_toggle)
+    thoughts_h.addWidget(enable_thoughts_cb)
+    thoughts_h.addStretch()
+    section_v.addWidget(thoughts_row)
+
+    # Apply initial lock state if stream thinking is already enabled
+    if getattr(self, 'stream_thinking_logs_var', False):
+        self._sync_thoughts_lock_state(True)
+    
+    # Store reference to description label for enable/disable
+    self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3 and later).\nBudget: 0 = disabled, 512-24576 = limited, -1 = dynamic.\nLevel: minimal/low/medium/high — Gemini 3 Flash supports minimal\nGemini 3.0 Pro (gemini-3-pro-*) does not support medium; Gemini 3.1 Pro supports medium.")
+    self.gemini_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+    self.gemini_desc_label.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(self.gemini_desc_label)
+    
+    # Initialize enabled state for Gemini controls
+    self.toggle_thinking_budget()
+
+    # DeepSeek Thinking Mode
+    deepseek_title = QLabel("DeepSeek Thinking Mode")
+    deepseek_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(deepseek_title)
+
+    deepseek_row = QWidget()
+    deepseek_h = QHBoxLayout(deepseek_row)
+    deepseek_h.setContentsMargins(20, 5, 0, 0)
+
+    deepseek_cb = self._create_styled_checkbox("Enable DeepSeek and Chutes Thinking")
+    try:
+        deepseek_cb.setChecked(bool(getattr(self, 'enable_deepseek_thinking_var', True)))
+    except Exception:
+        deepseek_cb.setChecked(True)
+
+    deepseek_h.addWidget(deepseek_cb)
+    deepseek_h.addSpacing(20)
+
+    # Effort label + combo (V4 models only, but harmless to send for others)
+    self.deepseek_effort_label = QLabel("Effort (V4):")
+    deepseek_h.addWidget(self.deepseek_effort_label)
+    self.deepseek_effort_combo = QComboBox()
+    self.deepseek_effort_combo.addItems(list(DEEPSEEK_V4_EFFORT_OPTIONS))
+    self.deepseek_effort_combo.setFixedWidth(80)
+    self.deepseek_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
+    self._add_combobox_arrow(self.deepseek_effort_combo)
+    self._disable_combobox_mousewheel(self.deepseek_effort_combo)
+    try:
+        _ds_effort_val = getattr(self, 'deepseek_effort_var', os.environ.get('DEEPSEEK_EFFORT', 'high'))
+        _ds_idx = self.deepseek_effort_combo.findText(_ds_effort_val)
+        if _ds_idx >= 0:
+            self.deepseek_effort_combo.setCurrentIndex(_ds_idx)
+    except Exception:
+        pass
+
+    def _on_deepseek_effort_changed(text):
+        try:
+            self.deepseek_effort_var = text
+            os.environ['DEEPSEEK_EFFORT'] = text
+        except Exception:
+            pass
+    self.deepseek_effort_combo.currentTextChanged.connect(_on_deepseek_effort_changed)
+    deepseek_h.addWidget(self.deepseek_effort_combo)
+
+    deepseek_h.addSpacing(20)
+    deepseek_responses_cb = self._create_styled_checkbox("Use Responses API format")
+    deepseek_responses_cb.setToolTip(
+        "Switches the DeepSeek endpoint and request format.\n\n"
+        "Off — Chat Completions API\n"
+        "POST /v1/chat/completions\n"
+        '{"messages":[...],"thinking":{"type":"enabled"},"reasoning_effort":"low"}\n\n'
+        "On — Responses API\n"
+        "POST /v1/responses\n"
+        '{"input":[...],"reasoning":{"effort":"low"}}'
+    )
+    try:
+        deepseek_responses_cb.setChecked(bool(getattr(self, 'deepseek_use_responses_api_var', False)))
+    except Exception:
+        deepseek_responses_cb.setChecked(False)
+
+    def _on_deepseek_responses_toggle(checked):
+        try:
+            self.deepseek_use_responses_api_var = bool(checked)
+            os.environ['DEEPSEEK_USE_RESPONSES_API'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    deepseek_responses_cb.toggled.connect(_on_deepseek_responses_toggle)
+    deepseek_h.addWidget(deepseek_responses_cb)
+    deepseek_h.addStretch()
+    section_v.addWidget(deepseek_row)
+
+    def _on_deepseek_thinking_toggle(checked):
+        try:
+            self.enable_deepseek_thinking_var = bool(checked)
+            os.environ['ENABLE_DEEPSEEK_THINKING'] = '1' if self.enable_deepseek_thinking_var else '0'
+            # Enable/disable the effort combo with the toggle
+            _color = "" if checked else "color: #808080;"
+            self.deepseek_effort_label.setEnabled(checked)
+            self.deepseek_effort_label.setStyleSheet(_color)
+            _set_thinking_widget_enabled(self.deepseek_effort_combo, checked)
+        except Exception:
+            pass
+
+    deepseek_cb.toggled.connect(_on_deepseek_thinking_toggle)
+
+    # Apply initial enabled state
+    _ds_initially_enabled = bool(getattr(self, 'enable_deepseek_thinking_var', True))
+    self.deepseek_effort_label.setEnabled(_ds_initially_enabled)
+    self.deepseek_effort_label.setStyleSheet("" if _ds_initially_enabled else "color: #808080;")
+    _set_thinking_widget_enabled(self.deepseek_effort_combo, _ds_initially_enabled)
+
+    deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nEffort 'none' is only supported by Responses API format and is equivalent to disabling thinking.")
+    deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    deepseek_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(deepseek_desc)
+
+
+    # Anthropic Extended Thinking
+    anthropic_title = QLabel("Anthropic Extended Thinking (Opus 4.6/4.7, Sonnet 4.6)")
+    anthropic_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(anthropic_title)
+
+    anthropic_row1 = QWidget()
+    anthropic_h1 = QHBoxLayout(anthropic_row1)
+    anthropic_h1.setContentsMargins(20, 5, 0, 0)
+
+    anthropic_enable_cb = self._create_styled_checkbox("Enable Anthropic Extended Thinking")
+    try:
+        anthropic_enable_cb.setChecked(bool(getattr(self, 'enable_anthropic_thinking_var', False)))
+    except Exception:
+        pass
+    def _on_anthropic_thinking_toggle(checked):
+        try:
+            self.enable_anthropic_thinking_var = bool(checked)
+            os.environ['ENABLE_ANTHROPIC_THINKING'] = '1' if checked else '0'
+            self.toggle_anthropic_thinking_controls()
+        except Exception:
+            pass
+    anthropic_enable_cb.toggled.connect(_on_anthropic_thinking_toggle)
+    anthropic_h1.addWidget(anthropic_enable_cb)
+
+    anthropic_h1.addSpacing(20)
+    self.anthropic_budget_label = QLabel("Budget:")
+    anthropic_h1.addWidget(self.anthropic_budget_label)
+    self.anthropic_budget_entry = QLineEdit()
+    self.anthropic_budget_entry.setFixedWidth(70)
+    self.anthropic_budget_entry.setStyleSheet(_THINKING_ENTRY_STYLE)
+    try:
+        self.anthropic_budget_entry.setText(str(getattr(self, 'anthropic_thinking_budget_var', '10000')))
+    except Exception:
+        pass
+    def _on_anthropic_budget_changed(text):
+        try:
+            val = int(text)
+            max_out = int(getattr(self, 'max_output_tokens', 65536))
+            cap = max_out - 1
+            if val > cap:
+                self.anthropic_budget_entry.blockSignals(True)
+                self.anthropic_budget_entry.setText(str(cap))
+                self.anthropic_budget_entry.blockSignals(False)
+                self.anthropic_thinking_budget_var = str(cap)
+            else:
+                self.anthropic_thinking_budget_var = text
+        except (ValueError, TypeError):
+            self.anthropic_thinking_budget_var = text
+        except Exception:
+            pass
+    self.anthropic_budget_entry.textChanged.connect(_on_anthropic_budget_changed)
+    anthropic_h1.addWidget(self.anthropic_budget_entry)
+    self.anthropic_budget_tokens_label = QLabel("tokens")
+    anthropic_h1.addWidget(self.anthropic_budget_tokens_label)
+    anthropic_h1.addStretch()
+    section_v.addWidget(anthropic_row1)
+
+    # Second row: Force adaptive + Effort
+    anthropic_row2 = QWidget()
+    anthropic_h2 = QHBoxLayout(anthropic_row2)
+    anthropic_h2.setContentsMargins(40, 2, 0, 0)
+
+    self.anthropic_force_adaptive_cb = self._create_styled_checkbox("Force Adaptive Thinking")
+    self.anthropic_force_adaptive_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Forces adaptive thinking on all Claude models. "
+        "Not all models support adaptive thinking — enabling this on unsupported models will cause API errors. "
+        "Opus 4.6 always uses adaptive automatically."
+        "</p></qt>"
+    )
+    try:
+        self.anthropic_force_adaptive_cb.setChecked(bool(getattr(self, 'anthropic_force_adaptive_var', False)))
+    except Exception:
+        pass
+    def _on_anthropic_force_adaptive_toggle(checked):
+        try:
+            self.anthropic_force_adaptive_var = bool(checked)
+            os.environ['ANTHROPIC_FORCE_ADAPTIVE'] = '1' if checked else '0'
+            # Disable budget entry when adaptive is forced (no budget_tokens needed)
+            if hasattr(self, 'anthropic_budget_entry'):
+                _set_thinking_widget_enabled(self.anthropic_budget_entry, not checked and bool(getattr(self, 'enable_anthropic_thinking_var', False)))
+        except Exception:
+            pass
+    self.anthropic_force_adaptive_cb.toggled.connect(_on_anthropic_force_adaptive_toggle)
+    anthropic_h2.addWidget(self.anthropic_force_adaptive_cb)
+
+    anthropic_h2.addSpacing(20)
+    self.anthropic_effort_label = QLabel("Effort:")
+    anthropic_h2.addWidget(self.anthropic_effort_label)
+    self.anthropic_effort_combo = QComboBox()
+    self.anthropic_effort_combo.addItems(["low", "medium", "high", "xhigh", "max"])
+    self.anthropic_effort_combo.setFixedWidth(80)
+    self.anthropic_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
+    self._add_combobox_arrow(self.anthropic_effort_combo)
+    self._disable_combobox_mousewheel(self.anthropic_effort_combo)
+    try:
+        effort_val = getattr(self, 'anthropic_effort_var', 'medium')
+        idx = self.anthropic_effort_combo.findText(effort_val)
+        if idx >= 0:
+            self.anthropic_effort_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_anthropic_effort_changed(text):
+        try:
+            self.anthropic_effort_var = text
+            os.environ['ANTHROPIC_EFFORT'] = text
+        except Exception:
+            pass
+    self.anthropic_effort_combo.currentTextChanged.connect(_on_anthropic_effort_changed)
+    anthropic_h2.addWidget(self.anthropic_effort_combo)
+    anthropic_h2.addStretch()
+    section_v.addWidget(anthropic_row2)
+
+    self.anthropic_desc_label = QLabel("Extended thinking for Claude models. Budget sets thinking token limit.\nAdaptive thinking uses effort level instead of fixed budget.\nOpus 4.6/4.7 and Sonnet 4.6 always use adaptive; other models use budget.\nEffort (low/medium/high/xhigh/max) — Opus 4.7 supports all five levels.")
+    self.anthropic_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+    self.anthropic_desc_label.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(self.anthropic_desc_label)
+
+    # Initialize enabled state for Anthropic controls
+    self.toggle_anthropic_thinking_controls()
+
+    # NIM/AuthND runtime settings
+    nim_title = QLabel("NIM / AuthND Token Helpers")
+    nim_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(nim_title)
+
+    authnd_desc = QLabel("Controls the browser token flow used by authnd/ and Gemini Free browser helpers.")
+    authnd_desc.setWordWrap(True)
+    authnd_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    authnd_desc.setContentsMargins(12, 0, 0, 4)
+    section_v.addWidget(authnd_desc)
+
+    def _authnd_int_setting(config_key, env_key, default, minimum=1):
+        try:
+            value = self.config.get(config_key, os.environ.get(env_key, default))
+            return max(int(minimum), int(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _authnd_auto_limits():
+        try:
+            cores = multiprocessing.cpu_count()
+        except Exception:
+            cores = os.cpu_count() or 1
+        cores = max(1, int(cores or 1))
+        token_limit = min(4, max(1, cores // 2))
+        subprocess_limit = min(8, max(token_limit, cores))
+        return token_limit, subprocess_limit, cores
+
+    def _make_authnd_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, caution_threshold, warning_threshold, tooltip, minimum=1):
+        current_value = _authnd_int_setting(config_key, env_key, default, minimum)
+        setattr(self, attr_name, current_value)
+        self.config[config_key] = current_value
+        os.environ[env_key] = str(current_value)
+
+        control = QWidget()
+        control_h = QHBoxLayout(control)
+        control_h.setContentsMargins(0, 0, 0, 0)
+        control_h.setSpacing(8)
+
+        label = QLabel(label_text)
+        label.setToolTip(tooltip)
+        control_h.addWidget(label)
+
+        spin = QDoubleSpinBox()
+        spin.setObjectName(spin_attr)
+        spin.setRange(minimum, maximum)
+        spin.setSingleStep(1)
+        spin.setDecimals(0)
+        spin.setValue(current_value)
+        spin.setFixedSize(90, 26)
+        spin.setFocusPolicy(Qt.StrongFocus)
+        value_alignment = Qt.AlignHCenter | Qt.AlignVCenter
+        spin.setAlignment(value_alignment)
+        spin.lineEdit().setAlignment(value_alignment)
+        spin.lineEdit().setTextMargins(0, 0, 0, 1)
+        spin.setToolTip(tooltip)
+        try:
+            self._disable_spinbox_mousewheel(spin)
+        except Exception:
+            pass
+
+        def _set_authnd_spin_text_color(color_hex):
+            try:
+                color = QColor(color_hex)
+                disabled_color = QColor("#777777")
+                for widget in (spin, spin.lineEdit()):
+                    palette = widget.palette()
+                    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+                        palette.setColor(group, QPalette.ColorRole.Text, color)
+                        palette.setColor(group, QPalette.ColorRole.WindowText, color)
+                        palette.setColor(group, QPalette.ColorRole.ButtonText, color)
+                        palette.setColor(group, QPalette.ColorRole.HighlightedText, color)
+                    for group in (QPalette.ColorGroup.Disabled,):
+                        palette.setColor(group, QPalette.ColorRole.Text, disabled_color)
+                        palette.setColor(group, QPalette.ColorRole.WindowText, disabled_color)
+                        palette.setColor(group, QPalette.ColorRole.ButtonText, disabled_color)
+                        palette.setColor(group, QPalette.ColorRole.HighlightedText, disabled_color)
+                    widget.setPalette(palette)
+                spin.setStyleSheet(
+                    f"QDoubleSpinBox {{ color: {color_hex}; selection-color: {color_hex}; }}"
+                    "QDoubleSpinBox:disabled { color: #777777; selection-color: #777777; }"
+                )
+                spin.lineEdit().setStyleSheet(
+                    f"QLineEdit {{ color: {color_hex}; selection-color: {color_hex}; }}"
+                    "QLineEdit:disabled { color: #777777; selection-color: #777777; }"
+                )
+                label.setStyleSheet(f"color: {color_hex};" if spin.isEnabled() else "color: #777777;")
+            except Exception:
+                pass
+
+        def _sync_authnd_spin_warning(value):
+            try:
+                numeric_value = int(value)
+                if numeric_value > warning_threshold:
+                    color = "#ff4d4d"
+                elif numeric_value > caution_threshold:
+                    color = "#facc15"
+                else:
+                    color = "#ffffff"
+                _set_authnd_spin_text_color(color)
+            except Exception:
+                pass
+
+        def _on_authnd_spin_changed(value):
+            try:
+                value = max(int(minimum), int(value))
+                setattr(self, attr_name, value)
+                self.config[config_key] = value
+                os.environ[env_key] = str(value)
+                _sync_authnd_spin_warning(value)
+            except Exception:
+                pass
+
+        spin.valueChanged.connect(_on_authnd_spin_changed)
+        setattr(self, f"{spin_attr}_label", label)
+        setattr(self, f"{spin_attr}_sync_warning", _sync_authnd_spin_warning)
+        setattr(self, spin_attr, spin)
+        _sync_authnd_spin_warning(current_value)
+
+        control_h.addWidget(spin)
+        return control
+
+    authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
+    authnd_auto_token_limit, authnd_auto_subprocess_limit, authnd_auto_cores = _authnd_auto_limits()
+    setattr(self, 'authnd_token_concurrency_auto_var', authnd_auto_enabled)
+    os.environ['AUTHND_TOKEN_CONCURRENCY_AUTO'] = '1' if authnd_auto_enabled else '0'
+
+    authnd_auto_row = QWidget()
+    authnd_auto_h = QHBoxLayout(authnd_auto_row)
+    authnd_auto_h.setContentsMargins(16, 2, 0, 0)
+    authnd_auto_h.setSpacing(8)
+    authnd_auto_cb = self._create_styled_checkbox("Auto token helper limits")
+    authnd_auto_cb.setChecked(authnd_auto_enabled)
+    authnd_auto_cb.setToolTip(
+        "Automatically set AuthND token helper limits from CPU cores "
+        "(token flows capped at 4, helper subprocesses capped at 8)."
+    )
+    authnd_auto_hint = QLabel(
+        f"{authnd_auto_cores} CPU cores -> {authnd_auto_token_limit}/{authnd_auto_subprocess_limit}"
+    )
+    authnd_auto_hint.setStyleSheet("color: gray; font-size: 9pt;")
+    authnd_auto_h.addWidget(authnd_auto_cb)
+    authnd_auto_h.addWidget(authnd_auto_hint)
+    authnd_auto_h.addStretch()
+    section_v.addWidget(authnd_auto_row)
+    self.authnd_token_concurrency_auto_checkbox = authnd_auto_cb
+
+    authnd_limits_row = QWidget()
+    authnd_limits_h = QHBoxLayout(authnd_limits_row)
+    authnd_limits_h.setContentsMargins(16, 2, 0, 8)
+    authnd_limits_h.setSpacing(18)
+    authnd_limits_h.addWidget(_make_authnd_spin_control(
+        "Token concurrency:",
+        "authnd_token_concurrency_var",
+        "authnd_token_concurrency_spin",
+        "authnd_token_concurrency",
+        "AUTHND_TOKEN_CONCURRENCY",
+        1,
+        64,
+        4,
+        7,
+        "Maximum simultaneous AuthND browser token mint flows.",
+    ))
+    authnd_limits_h.addWidget(_make_authnd_spin_control(
+        "Token subprocess limit:",
+        "authnd_token_subprocess_concurrency_var",
+        "authnd_token_subprocess_concurrency_spin",
+        "authnd_token_subprocess_concurrency",
+        "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY",
+        1,
+        128,
+        8,
+        14,
+        "Maximum helper child processes AuthND may launch for token minting.",
+    ))
+    authnd_limits_h.addStretch()
+    section_v.addWidget(authnd_limits_row)
+
+    authnd_timeout_row = QWidget()
+    authnd_timeout_h = QHBoxLayout(authnd_timeout_row)
+    authnd_timeout_h.setContentsMargins(16, 0, 0, 8)
+    authnd_timeout_h.setSpacing(8)
+    authnd_timeout_h.addWidget(_make_authnd_spin_control(
+        "AuthND token timeout (s):",
+        "authnd_token_timeout_var",
+        "authnd_token_timeout_spin",
+        "authnd_token_timeout",
+        "AUTHND_TOKEN_TIMEOUT",
+        180,
+        600,
+        600,
+        600,
+        "Maximum seconds for one AuthND browser helper to load the NVIDIA page and acquire an hCaptcha token.",
+        minimum=30,
+    ))
+    authnd_timeout_h.addSpacing(18)
+    authnd_timeout_h.addWidget(_make_authnd_spin_control(
+        "Dispatch order timeout (s):",
+        "dispatch_order_timeout_var",
+        "dispatch_order_timeout_spin",
+        "dispatch_order_timeout",
+        "ORDERED_BATCH_DISPATCH_TIMEOUT",
+        3,
+        120,
+        10,
+        30,
+        (
+            "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+            "Maximum seconds a ready batch request waits for an earlier spine "
+            "item before it is released. Affects all providers' batched "
+            "translation and glossary-extraction requests, not only AuthND. "
+            "Set to 0 for no waiting."
+            "</p></qt>"
+        ),
+        minimum=0,
+    ))
+    authnd_timeout_h.addStretch()
+    section_v.addWidget(authnd_timeout_row)
+
+    def _apply_authnd_auto_state(enabled=None):
+        try:
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+            enabled = bool(authnd_auto_cb.isChecked()) if enabled is None else bool(enabled)
+            self.authnd_token_concurrency_auto_var = enabled
+            self.config['authnd_token_concurrency_auto'] = enabled
+            os.environ['AUTHND_TOKEN_CONCURRENCY_AUTO'] = '1' if enabled else '0'
+            for spin in (
+                getattr(self, 'authnd_token_concurrency_spin', None),
+                getattr(self, 'authnd_token_subprocess_concurrency_spin', None),
+            ):
+                if spin is not None:
+                    spin.setEnabled(not enabled)
+                    spin.setGraphicsEffect(None)
+                    if enabled:
+                        disabled_effect = QGraphicsOpacityEffect(spin)
+                        disabled_effect.setOpacity(0.48)
+                        spin.setGraphicsEffect(disabled_effect)
+            for label in (
+                getattr(self, 'authnd_token_concurrency_spin_label', None),
+                getattr(self, 'authnd_token_subprocess_concurrency_spin_label', None),
+            ):
+                if label is not None:
+                    label.setEnabled(not enabled)
+                    label.setStyleSheet("color: #777777;" if enabled else "color: #ffffff;")
+            for spin in (
+                getattr(self, 'authnd_token_concurrency_spin', None),
+                getattr(self, 'authnd_token_subprocess_concurrency_spin', None),
+            ):
+                if spin is not None:
+                    sync_warning = getattr(self, f"{spin.objectName()}_sync_warning", None)
+                    if callable(sync_warning):
+                        sync_warning(spin.value())
+            if enabled:
+                token_limit, subprocess_limit, cores = _authnd_auto_limits()
+                authnd_auto_hint.setText(f"{cores} CPU cores -> {token_limit}/{subprocess_limit}")
+                self.authnd_token_concurrency_var = token_limit
+                self.authnd_token_subprocess_concurrency_var = subprocess_limit
+                self.config['authnd_token_concurrency'] = token_limit
+                self.config['authnd_token_subprocess_concurrency'] = subprocess_limit
+                os.environ['AUTHND_TOKEN_CONCURRENCY'] = str(token_limit)
+                os.environ['AUTHND_TOKEN_SUBPROCESS_CONCURRENCY'] = str(subprocess_limit)
+                try:
+                    self.authnd_token_concurrency_spin.blockSignals(True)
+                    self.authnd_token_concurrency_spin.setValue(token_limit)
+                    self.authnd_token_concurrency_spin.blockSignals(False)
+                    self.authnd_token_subprocess_concurrency_spin.blockSignals(True)
+                    self.authnd_token_subprocess_concurrency_spin.setValue(subprocess_limit)
+                    self.authnd_token_subprocess_concurrency_spin.blockSignals(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    authnd_auto_cb.toggled.connect(_apply_authnd_auto_state)
+    _apply_authnd_auto_state(authnd_auto_enabled)
+
+    tor_title = QLabel("search/opera and ocz/ TOR Proxy Rotation")
+    tor_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    tor_title.setContentsMargins(12, 8, 0, 0)
+    section_v.addWidget(tor_title)
+    tor_description = QLabel("Use Tor with a new proxy port and circuit identity for each request.")
+    tor_description.setWordWrap(True)
+    tor_description.setStyleSheet("color: gray; font-size: 9pt;")
+    tor_description.setContentsMargins(20, 0, 0, 2)
+    section_v.addWidget(tor_description)
+    tor_row = QWidget()
+    tor_layout = QHBoxLayout(tor_row)
+    tor_layout.setContentsMargins(16, 2, 0, 4)
+    self.tor_proxy_enabled_checkbox = self._create_styled_checkbox("Enable TOR proxy rotation")
+    tor_enabled = str(self.config.get('tor_proxy_enabled', False)).strip().lower() in ('1', 'true', 'yes', 'on')
+    self.tor_proxy_enabled_var = tor_enabled
+    self.tor_proxy_enabled_checkbox.setChecked(tor_enabled)
+    self.tor_proxy_enabled_checkbox.setToolTip(_wrapped_tooltip_html(
+        "Applies to search/opera, search/opera-think, and ocz/. Tor is installed automatically if needed. "
+        "Parallel requests use separate ports and circuit identities. Disabled by default."))
+    os.environ['GLOSSARION_TOR_ENABLED'] = '1' if tor_enabled else '0'
+
+    def _set_tor_enabled(checked):
+        self.tor_proxy_enabled_var = bool(checked)
+        self.config['tor_proxy_enabled'] = bool(checked)
+        os.environ['GLOSSARION_TOR_ENABLED'] = '1' if checked else '0'
+
+    self.tor_proxy_enabled_checkbox.toggled.connect(_set_tor_enabled)
+    tor_layout.addWidget(self.tor_proxy_enabled_checkbox)
+    tor_layout.addStretch()
+    section_v.addWidget(tor_row)
+
+    gemini_chunk_title = QLabel("Gemini Free Browser Chunking")
+    gemini_chunk_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    gemini_chunk_title.setContentsMargins(12, 8, 0, 0)
+    section_v.addWidget(gemini_chunk_title)
+
+    gemini_chunk_desc = QLabel("Controls the browser adaptive split settings used by search/gemini.")
+    gemini_chunk_desc.setWordWrap(True)
+    gemini_chunk_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    gemini_chunk_desc.setContentsMargins(20, 0, 0, 2)
+    section_v.addWidget(gemini_chunk_desc)
+
+    def _gemini_bool_value(value, default):
+        if value is None:
+            return bool(default)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    def _gemini_bool_setting(config_key, env_key, default):
+        return _gemini_bool_value(self.config.get(config_key, os.environ.get(env_key, default)), default)
+
+    def _gemini_number_setting(config_key, env_key, default, minimum, maximum, decimals=0):
+        try:
+            raw_value = self.config.get(config_key, os.environ.get(env_key, default))
+            numeric_value = float(raw_value)
+            numeric_value = max(float(minimum), min(float(maximum), numeric_value))
+            return int(numeric_value) if int(decimals) <= 0 else numeric_value
+        except (TypeError, ValueError):
+            return default
+
+    def _gemini_choice_setting(config_key, env_key, default, allowed):
+        value = str(self.config.get(config_key, os.environ.get(env_key, default)) or default).strip().lower()
+        return value if value in allowed else default
+
+    def _gemini_env_number(value, decimals=0):
+        try:
+            return str(int(float(value))) if int(decimals) <= 0 else f"{float(value):g}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    gemini_chunk_label_texts = (
+        "Prompt target chars:",
+        "Safety chars:",
+        "Concurrency override:",
+        "Timeout (s):",
+        "HTML splitter:",
+        "URL limit chars:",
+        "Min body chars:",
+        "Start delay (s):",
+        "Payload:",
+        "Balancer:",
+    )
+    gemini_chunk_metrics = QFontMetrics(QLabel().font())
+    gemini_chunk_label_width = max(gemini_chunk_metrics.horizontalAdvance(text) for text in gemini_chunk_label_texts) + 6
+    gemini_chunk_input_width = 112
+    gemini_chunk_control_width = gemini_chunk_label_width + 4 + gemini_chunk_input_width
+
+    def _make_gemini_checkbox(label_text, attr_name, checkbox_attr, config_key, env_key, default, tooltip):
+        current_value = _gemini_bool_setting(config_key, env_key, default)
+        setattr(self, attr_name, current_value)
+        self.config[config_key] = current_value
+        os.environ[env_key] = "1" if current_value else "0"
+
+        checkbox = self._create_styled_checkbox(label_text)
+        checkbox.setChecked(current_value)
+        checkbox.setToolTip(tooltip)
+        setattr(self, checkbox_attr, checkbox)
+
+        def _on_gemini_checkbox_toggled(checked):
+            value = bool(checked)
+            setattr(self, attr_name, value)
+            self.config[config_key] = value
+            os.environ[env_key] = "1" if value else "0"
+
+        checkbox.toggled.connect(_on_gemini_checkbox_toggled)
+        return checkbox
+
+    def _make_gemini_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, minimum, maximum, decimals, step, tooltip):
+        current_value = _gemini_number_setting(config_key, env_key, default, minimum, maximum, decimals)
+        setattr(self, attr_name, current_value)
+        self.config[config_key] = current_value
+        os.environ[env_key] = _gemini_env_number(current_value, decimals)
+
+        control = QWidget()
+        control.setFixedWidth(gemini_chunk_control_width)
+        control_h = QHBoxLayout(control)
+        control_h.setContentsMargins(0, 0, 0, 0)
+        control_h.setSpacing(4)
+
+        label = QLabel(label_text)
+        label.setFixedWidth(gemini_chunk_label_width)
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        label.setToolTip(tooltip)
+        label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        control_h.addWidget(label)
+
+        spin = QDoubleSpinBox()
+        spin.setObjectName(spin_attr)
+        spin.setRange(float(minimum), float(maximum))
+        spin.setSingleStep(float(step))
+        spin.setDecimals(int(decimals))
+        spin.setValue(float(current_value))
+        spin.setFixedSize(gemini_chunk_input_width, 26)
+        spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        spin.setFocusPolicy(Qt.StrongFocus)
+        value_alignment = Qt.AlignHCenter | Qt.AlignVCenter
+        spin.setAlignment(value_alignment)
+        spin.lineEdit().setAlignment(value_alignment)
+        spin.lineEdit().setTextMargins(0, 0, 0, 1)
+        spin.setToolTip(tooltip)
+        try:
+            self._disable_spinbox_mousewheel(spin)
+        except Exception:
+            pass
+
+        def _on_gemini_spin_changed(value):
+            try:
+                numeric_value = max(float(minimum), min(float(maximum), float(value)))
+                typed_value = int(numeric_value) if int(decimals) <= 0 else numeric_value
+                setattr(self, attr_name, typed_value)
+                self.config[config_key] = typed_value
+                os.environ[env_key] = _gemini_env_number(typed_value, decimals)
+            except Exception:
+                pass
+
+        spin.valueChanged.connect(_on_gemini_spin_changed)
+        setattr(self, f"{spin_attr}_label", label)
+        setattr(self, spin_attr, spin)
+        control_h.addWidget(spin)
+        control.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return control
+
+    def _make_gemini_combo_control(label_text, attr_name, combo_attr, config_key, env_key, default, choices, tooltip):
+        allowed = {str(choice).strip().lower() for choice in choices}
+        current_value = _gemini_choice_setting(config_key, env_key, default, allowed)
+        setattr(self, attr_name, current_value)
+        self.config[config_key] = current_value
+        os.environ[env_key] = current_value
+
+        control = QWidget()
+        control.setFixedWidth(gemini_chunk_control_width)
+        control_h = QHBoxLayout(control)
+        control_h.setContentsMargins(0, 0, 0, 0)
+        control_h.setSpacing(4)
+
+        label = QLabel(label_text)
+        label.setFixedWidth(gemini_chunk_label_width)
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        label.setToolTip(tooltip)
+        label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        control_h.addWidget(label)
+
+        combo = QComboBox()
+        combo.addItems([str(choice).strip().lower() for choice in choices])
+        combo.setCurrentText(current_value)
+        combo.setFixedSize(gemini_chunk_input_width, 26)
+        combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        combo.setToolTip(tooltip)
+
+        def _on_gemini_combo_changed(value):
+            selected = str(value or default).strip().lower()
+            if selected not in allowed:
+                selected = default
+            setattr(self, attr_name, selected)
+            self.config[config_key] = selected
+            os.environ[env_key] = selected
+
+        combo.currentTextChanged.connect(_on_gemini_combo_changed)
+        setattr(self, combo_attr, combo)
+        control_h.addWidget(combo)
+        control.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return control
+
+    gemini_toggles_row = QWidget()
+    gemini_toggles_h = QHBoxLayout(gemini_toggles_row)
+    gemini_toggles_h.setContentsMargins(16, 2, 0, 0)
+    gemini_toggles_h.setSpacing(10)
+    gemini_toggles_h.addWidget(_make_gemini_checkbox(
+        "Adaptive browser subchunks",
+        "gemini_free_adaptive_split_var",
+        "gemini_free_adaptive_split_checkbox",
+        "gemini_free_adaptive_split",
+        "GEMINI_FREE_ADAPTIVE_SPLIT",
+        True,
+        "Split over-budget Gemini Free browser requests into subchunks.",
+    ))
+    gemini_toggles_h.addWidget(_make_gemini_checkbox(
+        "HTML text-node transport",
+        "gemini_free_html_text_node_transport_var",
+        "gemini_free_html_text_node_transport_checkbox",
+        "gemini_free_html_text_node_transport",
+        "GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT",
+        True,
+        "Send HTML as numbered text nodes when the transported request fits in one browser call.",
+    ))
+    gemini_toggles_h.addStretch()
+    section_v.addWidget(gemini_toggles_row)
+
+    gemini_advanced_row = QWidget()
+    gemini_advanced_h = QHBoxLayout(gemini_advanced_row)
+    gemini_advanced_h.setContentsMargins(16, 0, 0, 0)
+    gemini_advanced_h.setSpacing(6)
+    gemini_advanced_button = QPushButton("Show chunk tuning")
+    gemini_advanced_button.setCheckable(True)
+    gemini_advanced_metrics = QFontMetrics(gemini_advanced_button.font())
+    gemini_advanced_width = max(
+        gemini_advanced_metrics.horizontalAdvance("Show chunk tuning"),
+        gemini_advanced_metrics.horizontalAdvance("Hide chunk tuning"),
+    ) + 44
+    gemini_advanced_button.setFixedSize(gemini_advanced_width, 34)
+    gemini_advanced_button.setToolTip("Show or hide detailed Gemini Free browser chunking controls.")
+    setattr(self, "gemini_free_chunk_tuning_button", gemini_advanced_button)
+    gemini_advanced_h.addWidget(gemini_advanced_button, 0, Qt.AlignLeft)
+    gemini_advanced_h.addStretch()
+    section_v.addWidget(gemini_advanced_row)
+
+    gemini_controls = QWidget()
+    gemini_controls.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    gemini_grid = QGridLayout(gemini_controls)
+    gemini_grid.setContentsMargins(16, 2, 0, 8)
+    gemini_grid.setHorizontalSpacing(12)
+    gemini_grid.setVerticalSpacing(6)
+    gemini_grid.setAlignment(Qt.AlignLeft)
+    gemini_grid.setColumnStretch(0, 0)
+    gemini_grid.setColumnStretch(1, 0)
+
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Prompt target chars:",
+        "gemini_free_subchunk_prompt_chars_var",
+        "gemini_free_subchunk_prompt_chars_spin",
+        "gemini_free_subchunk_prompt_chars",
+        "GEMINI_FREE_SUBCHUNK_PROMPT_CHARS",
+        7000,
+        300,
+        7000,
+        0,
+        100,
+        "Target prompt character budget before Gemini Free adaptive splitting is used. Clamped to the AI Mode browser ceiling.",
+    ), 0, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "URL limit chars:",
+        "gemini_free_subchunk_url_chars_var",
+        "gemini_free_subchunk_url_chars_spin",
+        "gemini_free_subchunk_url_chars",
+        "GEMINI_FREE_SUBCHUNK_URL_CHARS",
+        14500,
+        1000,
+        200000,
+        0,
+        100,
+        "Maximum encoded Google Search URL length for Gemini Free browser calls.",
+    ), 0, 1, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Safety chars:",
+        "gemini_free_subchunk_safety_chars_var",
+        "gemini_free_subchunk_safety_chars_spin",
+        "gemini_free_subchunk_safety_chars",
+        "GEMINI_FREE_SUBCHUNK_SAFETY_CHARS",
+        600,
+        0,
+        20000,
+        0,
+        50,
+        "Reserved character cushion subtracted from prompt and URL limits.",
+    ), 1, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Min body chars:",
+        "gemini_free_min_subchunk_body_chars_var",
+        "gemini_free_min_subchunk_body_chars_spin",
+        "gemini_free_min_subchunk_body_chars",
+        "GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS",
+        80,
+        1,
+        50000,
+        0,
+        10,
+        "Minimum body budget allowed before the splitter reports the fixed prompt is too large.",
+    ), 1, 1, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Concurrency override:",
+        "gemini_free_subchunk_concurrency_var",
+        "gemini_free_subchunk_concurrency_spin",
+        "gemini_free_subchunk_concurrency",
+        "GEMINI_FREE_SUBCHUNK_CONCURRENCY",
+        0,
+        0,
+        64,
+        0,
+        1,
+        "Maximum simultaneous Gemini Free subchunk browser helpers. 0 uses AuthND token concurrency.",
+    ), 2, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Start delay (s):",
+        "gemini_free_subchunk_start_delay_var",
+        "gemini_free_subchunk_start_delay_spin",
+        "gemini_free_subchunk_start_delay",
+        "GEMINI_FREE_SUBCHUNK_START_DELAY",
+        5.0,
+        0.0,
+        60.0,
+        1,
+        0.5,
+        "Delay between launching Gemini Free subchunk browser helpers.",
+    ), 2, 1, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Timeout (s):",
+        "gemini_free_subchunk_timeout_var",
+        "gemini_free_subchunk_timeout_spin",
+        "gemini_free_subchunk_timeout",
+        "GEMINI_FREE_SUBCHUNK_TIMEOUT",
+        0,
+        0,
+        7200,
+        0,
+        30,
+        "Per-subchunk helper timeout. 0 disables this timeout.",
+    ), 3, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_combo_control(
+        "Payload:",
+        "gemini_free_subchunk_payload_format_var",
+        "gemini_free_subchunk_payload_format_combo",
+        "gemini_free_subchunk_payload_format",
+        "GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT",
+        "auto",
+        ["auto", "html", "text"],
+        "Payload splitter mode. auto detects HTML unless html2text/enhanced mode is active.",
+    ), 3, 1, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_combo_control(
+        "HTML splitter:",
+        "gemini_free_html_splitter_var",
+        "gemini_free_html_splitter_combo",
+        "gemini_free_html_splitter",
+        "GEMINI_FREE_HTML_SPLITTER",
+        "beautifulsoup4",
+        ["beautifulsoup4", "regex"],
+        "HTML unit splitter. beautifulsoup4 respects tag boundaries; regex is the fallback splitter.",
+    ), 4, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_combo_control(
+        "Balancer:",
+        "gemini_free_subchunk_balancer_var",
+        "gemini_free_subchunk_balancer_combo",
+        "gemini_free_subchunk_balancer",
+        "GEMINI_FREE_SUBCHUNK_BALANCER",
+        "balanced",
+        ["balanced", "greedy"],
+        "balanced spreads work evenly across the planned chunks; greedy keeps the old first-fit packing.",
+    ), 4, 1, Qt.AlignLeft)
+    gemini_controls.setVisible(False)
+
+    def _toggle_gemini_chunk_tuning(checked):
+        visible = bool(checked)
+        gemini_controls.setVisible(visible)
+        gemini_advanced_button.setText("Hide chunk tuning" if visible else "Show chunk tuning")
+
+    gemini_advanced_button.toggled.connect(_toggle_gemini_chunk_tuning)
+    section_v.addWidget(gemini_controls, 0, Qt.AlignLeft)
+
+
+    # Parallel Extraction
+    try:
+        parallel_cpu_cores = multiprocessing.cpu_count()
+    except Exception:
+        parallel_cpu_cores = os.cpu_count() or 1
+    parallel_cpu_cores = max(1, int(parallel_cpu_cores or 1))
+
+    parallel_title = QLabel("Parallel Extraction")
+    parallel_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(parallel_title)
+    
+    extraction_row = QWidget()
+    extraction_h = QHBoxLayout(extraction_row)
+    extraction_h.setContentsMargins(20, 5, 0, 0)
+    
+    parallel_cb = self._create_styled_checkbox("Enable Parallel Processing")
+    try:
+        parallel_cb.setChecked(bool(self.enable_parallel_extraction_var))
+    except Exception:
+        pass
+    def _on_parallel_toggle(checked):
+        try:
+            self.enable_parallel_extraction_var = bool(checked)
+            self.toggle_extraction_workers()
+        except Exception:
+            pass
+    parallel_cb.toggled.connect(_on_parallel_toggle)
+    extraction_h.addWidget(parallel_cb)
+    
+    extraction_h.addSpacing(20)
+    self.workers_label = QLabel("Workers:")
+    extraction_h.addWidget(self.workers_label)
+    self.extraction_workers_entry = QLineEdit()
+    self.extraction_workers_entry.setFixedWidth(50)
+    self.extraction_workers_entry.setToolTip(f"Worker threads. Detected CPU cores: {parallel_cpu_cores}.")
+    try:
+        self.extraction_workers_entry.setText(str(self.extraction_workers_var))
+    except Exception:
+        pass
+    extraction_workers_normal_style = (
+        "QLineEdit { background-color: #2d2d2d; color: white; "
+        "border: 1px solid #4a5568; border-radius: 3px; padding: 4px; } "
+        "QLineEdit:focus { border-color: #5a9fd4; } "
+        "QLineEdit:disabled { background-color: #242424; color: #777777; "
+        "border: 1px solid #3a4555; }"
+    )
+    extraction_workers_warning_style = (
+        "QLineEdit { background-color: #3a171b; color: #ffb3b3; "
+        "border: 1px solid #dc3545; border-radius: 3px; padding: 4px; } "
+        "QLineEdit:focus { border: 2px solid #ff4d5e; } "
+        "QLineEdit:disabled { background-color: #242424; color: #777777; "
+        "border: 1px solid #3a4555; }"
+    )
+
+    def _update_extraction_workers_warning_style():
+        try:
+            raw_workers = self.extraction_workers_entry.text()
+            workers = int(str(raw_workers).strip())
+            enabled = bool(getattr(self, 'enable_parallel_extraction_var', False))
+            too_many = enabled and workers > parallel_cpu_cores
+        except (TypeError, ValueError):
+            enabled = bool(getattr(self, 'enable_parallel_extraction_var', False))
+            too_many = enabled
+        if too_many:
+            self.extraction_workers_entry.setStyleSheet(extraction_workers_warning_style)
+            self.extraction_workers_entry.setToolTip(
+                f"Worker threads exceed detected CPU cores ({parallel_cpu_cores})."
+            )
+        else:
+            self.extraction_workers_entry.setStyleSheet(extraction_workers_normal_style)
+            self.extraction_workers_entry.setToolTip(
+                f"Worker threads. Detected CPU cores: {parallel_cpu_cores}."
+            )
+    self._update_extraction_workers_warning_style = _update_extraction_workers_warning_style
+    def _on_workers_changed(text):
+        try:
+            self.extraction_workers_var = text
+            self._update_extraction_workers_warning_style()
+            if bool(getattr(self, 'enable_parallel_extraction_var', False)):
+                os.environ["EXTRACTION_WORKERS"] = str(text)
+                try:
+                    self._ensure_executor()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    self.extraction_workers_entry.textChanged.connect(_on_workers_changed)
+    self._update_extraction_workers_warning_style()
+    extraction_h.addWidget(self.extraction_workers_entry)
+    self.threads_label = QLabel(f"threads (CPU cores: {parallel_cpu_cores})")
+    extraction_h.addWidget(self.threads_label)
+    extraction_h.addStretch()
+    section_v.addWidget(extraction_row)
+    
+    # Store reference to description label for enable/disable
+    self.parallel_desc_label = QLabel(
+        "Speed up PDF/EPUB extraction, reader loading, reader search, and glossary editor output-file updates using multiple workers.\n"
+        f"Recommended: 4-8 workers; detected CPU cores: {parallel_cpu_cores} (set to 1 to disable)"
+    )
+    self.parallel_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+    self.parallel_desc_label.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(self.parallel_desc_label)
+    
+    # Initialize enabled state for Parallel Extraction controls
+    self.toggle_extraction_workers()
+    
+    # GUI Yield Toggle
+    gui_yield_row = QWidget()
+    gui_yield_h = QHBoxLayout(gui_yield_row)
+    gui_yield_h.setContentsMargins(20, 5, 0, 0)
+    
+    gui_yield_cb = self._create_styled_checkbox("Enable GUI Responsiveness Yield")
+    try:
+        gui_yield_cb.setChecked(bool(self.enable_gui_yield_var))
+    except Exception:
+        pass
+    def _on_gui_yield_toggle(checked):
+        try:
+            self.enable_gui_yield_var = bool(checked)
+        except Exception:
+            pass
+    gui_yield_cb.toggled.connect(_on_gui_yield_toggle)
+    gui_yield_h.addWidget(gui_yield_cb)
+    gui_yield_h.addStretch()
+    section_v.addWidget(gui_yield_row)
+    
+    gui_yield_desc = QLabel("Adds small delays during extraction to keep GUI responsive.\n⚠️ Disable for maximum extraction speed (GUI may freeze temporarily)")
+    gui_yield_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    gui_yield_desc.setContentsMargins(20, 5, 0, 10)
+    section_v.addWidget(gui_yield_desc)
+    
+    # Separator
+    sep2 = QFrame()
+    sep2.setFrameShape(QFrame.HLine)
+    sep2.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep2)
+    
+    # Multi API Key Management Section
+    multi_key_row = QWidget()
+    multi_key_h = QHBoxLayout(multi_key_row)
+    multi_key_h.setContentsMargins(0, 0, 0, 15)
+    
+    # Create status labels and store references for dynamic updates
+    self.multi_key_status_label1 = QLabel("🔑 Translation Keys (Main Pool):")
+    self.multi_key_status_label1.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    multi_key_h.addWidget(self.multi_key_status_label1)
+    
+    self.multi_key_status_label2 = QLabel()
+    multi_key_h.addWidget(self.multi_key_status_label2)
+    
+    # Update status initially
+    self._update_multi_key_status_label()
+    
+    multi_key_h.addStretch()
+    
+    section_v.addWidget(multi_key_row)
+    
+    multi_key_desc = QLabel("Manage the main translation key rotation pool. Dedicated key pools are configured independently.")
+    multi_key_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    multi_key_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(multi_key_desc)
+    
+    # Multi API Key Manager button (moved below description)
+    btn_row = QWidget()
+    btn_row_h = QHBoxLayout(btn_row)
+    btn_row_h.setContentsMargins(20, 5, 0, 10)
+    btn_multi_key = QPushButton("⚙️ Configure API Keys")
+    btn_multi_key.setMinimumWidth(160)
+    btn_multi_key.setMaximumWidth(200)
+    btn_multi_key.setMinimumHeight(28)
+    btn_multi_key.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #17a2b8; "
+        "  color: white; "
+        "  padding: 5px 12px; "
+        "  font-size: 10pt; "
+        "  font-weight: bold; "
+        "  border-radius: 3px; "
+        "} "
+        "QPushButton:hover { background-color: #138496; }"
+    )
+    btn_multi_key.clicked.connect(lambda: self.open_multi_api_key_manager())
+    btn_row_h.addWidget(btn_multi_key)
+    btn_row_h.addStretch()
+    section_v.addWidget(btn_row)
+    
+    # Separator
+    sep5 = QFrame()
+    sep5.setFrameShape(QFrame.HLine)
+    sep5.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep5)
+    
+    # Input/output token ratio for translation chunk sizing
+    compression_title = QLabel("Translation Input->Output Compression Factor")
+    compression_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(compression_title)
+    
+    # Auto Compression Factor toggle
+    auto_compression_cb = self._create_styled_checkbox("Auto Compression Factor")
+    try:
+        auto_compression_cb.setChecked(bool(self.config.get('auto_compression_factor', True)))
+    except Exception:
+        auto_compression_cb.setChecked(True)
+    
+    compression_w = QWidget()
+    compression_h = QHBoxLayout(compression_w)
+    compression_h.setContentsMargins(20, 5, 0, 0)
+    compression_label = QLabel("Input->Output compression:")
+    compression_h.addWidget(compression_label)
+    compression_edit = QLineEdit()
+    compression_edit.setFixedWidth(60)
+    try:
+        compression_edit.setText(str(self.compression_factor_var))
+    except Exception:
+        pass
+
+    compression_budget_label = QLabel()
+    compression_budget_label.setStyleSheet("color: #8fbce6; font-size: 10pt;")
+    compression_budget_label.setContentsMargins(20, 0, 0, 6)
+    compression_budget_label.setWordWrap(True)
+
+    def _update_compression_token_budget_label():
+        if hasattr(self, '_sync_chunk_size_entry'):
+            self._sync_chunk_size_entry()
+        try:
+            output_tokens = int(getattr(self, 'max_output_tokens', self.config.get('max_output_tokens', 65536)))
+        except Exception:
+            output_tokens = 65536
+
+        try:
+            raw_factor = compression_edit.text().strip()
+            if not raw_factor:
+                raw_factor = getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0))
+            compression_factor = float(raw_factor)
+        except Exception:
+            compression_budget_label.setText("Max input chunk budget: enter a valid compression factor")
+            return
+
+        safety_margin = 500
+        if compression_factor <= 0:
+            compression_budget_label.setText(
+                f"Max input chunk budget: not limited by compression factor (output limit {output_tokens:,})"
+            )
+            return
+
+        raw_budget = int((output_tokens - safety_margin) / compression_factor)
+        chunk_budget = max(1000, raw_budget)
+        minimum_note = " minimum" if raw_budget < 1000 else ""
+        compression_budget_label.setText(
+            f"Max input chunk budget = ({output_tokens:,} output - {safety_margin:,} safety) "
+            f"/ {compression_factor:g} = {chunk_budget:,} tokens{minimum_note}"
+        )
+
+    self.compression_token_budget_label = compression_budget_label
+    self._update_compression_token_budget_label = _update_compression_token_budget_label
+    
+    def _update_compression_factor():
+        """Update compression factor based on output token limit when auto is enabled"""
+        try:
+            if not auto_compression_cb.isChecked():
+                return
+            
+            # Get current output token limit
+            output_tokens = int(getattr(self, 'max_output_tokens', 65536))
+            
+            # Determine input/output factor based on token limit
+            if output_tokens < 16379:
+                factor = 1.5
+            elif output_tokens < 32769:
+                factor = 2.0
+            elif output_tokens < 65536:
+                factor = 2.5
+            else:  # 65536 or above
+                factor = 3.0
+            
+            # Update the field and variable
+            compression_edit.setText(str(factor))
+            self.compression_factor_var = str(factor)
+            _update_compression_token_budget_label()
+        except Exception as e:
+            print(f"Error updating compression factor: {e}")
+    
+    # Store the update function as an instance method so it can be called from main GUI
+    self._update_auto_compression_factor = _update_compression_factor
+    
+    def _on_compression_changed(text):
+        try:
+            self.compression_factor_var = text
+            if hasattr(self, '_remember_manual_chunk_size'):
+                self._remember_manual_chunk_size()
+            _update_compression_token_budget_label()
+        except Exception:
+            pass
+    
+    def _on_auto_compression_toggle(checked):
+        try:
+            self.config['auto_compression_factor'] = bool(checked)
+            # Enable/disable manual editing
+            manual_enabled = not checked
+            compression_edit.setEnabled(manual_enabled)
+            label_color = "#ffffff" if manual_enabled else "#777777"
+            compression_label.setStyleSheet(f"color: {label_color};")
+            compression_hint_label.setStyleSheet(f"color: {label_color};")
+            # Update factor when enabling auto
+            if checked:
+                _update_compression_factor()
+            else:
+                if hasattr(self, '_remember_manual_chunk_size'):
+                    self._remember_manual_chunk_size()
+                _update_compression_token_budget_label()
+        except Exception as e:
+            print(f"Error toggling auto compression: {e}")
+    
+    auto_compression_cb.toggled.connect(_on_auto_compression_toggle)
+    section_v.addWidget(auto_compression_cb)
+    
+    auto_compression_desc = QLabel("Automatically adjusts based on output token limit:\n<16379: 1.5 | <32769: 2.0 | <65536: 2.5 | ≥65536: 3.0")
+    auto_compression_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    auto_compression_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(auto_compression_desc)
+    
+    compression_edit.textChanged.connect(_on_compression_changed)
+    compression_h.addWidget(compression_edit)
+    compression_hint_label = QLabel("(Decrease this for larger chunks)")
+    compression_h.addWidget(compression_hint_label)
+    compression_h.addStretch()
+    section_v.addWidget(compression_w)
+    section_v.addWidget(compression_budget_label)
+    
+    # Apply initial state
+    _on_auto_compression_toggle(auto_compression_cb.isChecked())
+
+    # Let the main window's Chunk Size field drive these controls while the dialog is open
+    self._auto_compression_cb = auto_compression_cb
+    self._compression_factor_edit = compression_edit
+
+    def _on_compression_widgets_destroyed(*_args):
+        # Fall back to the main window's methods once these closures' widgets are gone
+        # (identity checks so a newer dialog's hooks are left alone)
+        if self.__dict__.get('_update_auto_compression_factor') is _update_compression_factor:
+            del self._update_auto_compression_factor
+        if self.__dict__.get('_update_compression_token_budget_label') is _update_compression_token_budget_label:
+            del self._update_compression_token_budget_label
+        if getattr(self, '_compression_factor_edit', None) is compression_edit:
+            self._auto_compression_cb = None
+            self._compression_factor_edit = None
+            self.compression_token_budget_label = None
+
+    compression_edit.destroyed.connect(_on_compression_widgets_destroyed)
+
+    compression_desc = QLabel("Expected output tokens per input token for chunk sizing")
+    compression_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    compression_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(compression_desc)
+
+    chunk_progress_cb = self._create_styled_checkbox(
+        "Resume incomplete EPUB/PDF chapters from saved chunks"
+    )
+    chunk_progress_cb.setChecked(
+        bool(
+            getattr(
+                self,
+                'enable_chunk_progress_var',
+                self.config.get('enable_chunk_progress', True),
+            )
+        )
+    )
+    chunk_progress_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "EPUB/PDF-only checkpointing for chapters split into multiple API chunks. "
+            "Each successful chunk is stored under a content-hash key in "
+            "translation_progress.json together with the split count and the initial "
+            "and API-cached input-token budget fingerprints. On retry, only matching "
+            "completed chunks are reused. Incomplete caches are invalidated when the "
+            "schema, chunk count, or either budget changes; disabling this option "
+            "removes the incomplete chunk cache and retranslates every chunk."
+        )
+    )
+    self.enable_chunk_progress_checkbox = chunk_progress_cb
+
+    def _on_chunk_progress_toggle(checked):
+        self.enable_chunk_progress_var = bool(checked)
+        self.config['enable_chunk_progress'] = bool(checked)
+
+    chunk_progress_cb.toggled.connect(_on_chunk_progress_toggle)
+    section_v.addWidget(chunk_progress_cb)
+
+    chunk_progress_desc = QLabel(
+        "Enabled by default for EPUB/PDF resume. Completed chunks are reused only while both "
+        "the original and API-cached token budgets still match."
+    )
+    chunk_progress_desc.setWordWrap(True)
+    chunk_progress_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    chunk_progress_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(chunk_progress_desc)
+    
+    # Separator
+    sep6 = QFrame()
+    sep6.setFrameShape(QFrame.HLine)
+    sep6.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep6)
+    
+    
+    # HTTP Timeouts & Connection Pooling
+    http_title = QLabel("HTTP Timeouts & Connection Pooling")
+    http_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(http_title)
+    
+    http_main = QWidget()
+    http_main_v = QVBoxLayout(http_main)
+    http_main_v.setContentsMargins(20, 5, 0, 0)
+    
+    # Master toggle to enable/disable all HTTP tuning fields
+    if not hasattr(self, 'enable_http_tuning_var'):
+        self.enable_http_tuning_var = self.config.get('enable_http_tuning', False)
+    
+    self.http_tuning_checkbox = self._create_styled_checkbox("Enable HTTP timeout/pooling overrides")
+    try:
+        self.http_tuning_checkbox.setChecked(bool(self.enable_http_tuning_var))
+    except Exception:
+        pass
+    def _on_http_tuning_toggle(checked):
+        try:
+            self.enable_http_tuning_var = bool(checked)
+            if hasattr(self, '_toggle_http_tuning_controls'):
+                self._toggle_http_tuning_controls()
+        except Exception:
+            pass
+    self.http_tuning_checkbox.toggled.connect(_on_http_tuning_toggle)
+    http_main_v.addWidget(self.http_tuning_checkbox)
+    http_main_v.addSpacing(8)
+    
+    # 2 column grid layout for more compact display
+    if not hasattr(self, 'connect_timeout_var'):
+        self.connect_timeout_var = str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10')))
+    if not hasattr(self, 'read_timeout_var'):
+        self.read_timeout_var = str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '1800'))))
+    if not hasattr(self, 'http_pool_connections_var'):
+        self.http_pool_connections_var = str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20')))
+    if not hasattr(self, 'http_pool_maxsize_var'):
+        self.http_pool_maxsize_var = str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50')))
+    
+    # Create grid for 2-column layout
+    http_grid = QWidget()
+    http_grid_layout = QGridLayout(http_grid)
+    http_grid_layout.setContentsMargins(0, 0, 0, 5)
+    http_grid_layout.setHorizontalSpacing(0)  # No spacing between label and input
+    http_grid_layout.setVerticalSpacing(5)
+    
+    # Row 0: Connect timeout and Read timeout
+    self.connect_timeout_label = QLabel("Connect timeout (s): ")
+    http_grid_layout.addWidget(self.connect_timeout_label, 0, 0, alignment=Qt.AlignRight)
+    self.connect_timeout_entry = QLineEdit()
+    self.connect_timeout_entry.setFixedWidth(70)
+    try:
+        self.connect_timeout_entry.setText(str(self.connect_timeout_var))
+    except Exception:
+        pass
+    def _on_connect_timeout_changed(text):
+        try:
+            self.connect_timeout_var = text
+        except Exception:
+            pass
+    self.connect_timeout_entry.textChanged.connect(_on_connect_timeout_changed)
+    http_grid_layout.addWidget(self.connect_timeout_entry, 0, 1, alignment=Qt.AlignLeft)
+    
+    self.read_timeout_label = QLabel(" Read timeout (s): ")
+    http_grid_layout.addWidget(self.read_timeout_label, 0, 2, alignment=Qt.AlignRight)
+    self.read_timeout_entry = QLineEdit()
+    self.read_timeout_entry.setFixedWidth(70)
+    try:
+        self.read_timeout_entry.setText(str(self.read_timeout_var))
+    except Exception:
+        pass
+    def _on_read_timeout_changed(text):
+        try:
+            self.read_timeout_var = text
+        except Exception:
+            pass
+    self.read_timeout_entry.textChanged.connect(_on_read_timeout_changed)
+    http_grid_layout.addWidget(self.read_timeout_entry, 0, 3, alignment=Qt.AlignLeft)
+    
+    # Row 1: Pool connections and Pool max size
+    self.http_pool_connections_label = QLabel("Pool connections: ")
+    http_grid_layout.addWidget(self.http_pool_connections_label, 1, 0, alignment=Qt.AlignRight)
+    self.http_pool_connections_entry = QLineEdit()
+    self.http_pool_connections_entry.setFixedWidth(70)
+    try:
+        self.http_pool_connections_entry.setText(str(self.http_pool_connections_var))
+    except Exception:
+        pass
+    def _on_pool_conn_changed(text):
+        try:
+            self.http_pool_connections_var = text
+        except Exception:
+            pass
+    self.http_pool_connections_entry.textChanged.connect(_on_pool_conn_changed)
+    http_grid_layout.addWidget(self.http_pool_connections_entry, 1, 1, alignment=Qt.AlignLeft)
+    
+    self.http_pool_maxsize_label = QLabel(" Pool max size: ")
+    http_grid_layout.addWidget(self.http_pool_maxsize_label, 1, 2, alignment=Qt.AlignRight)
+    self.http_pool_maxsize_entry = QLineEdit()
+    self.http_pool_maxsize_entry.setFixedWidth(70)
+    try:
+        self.http_pool_maxsize_entry.setText(str(self.http_pool_maxsize_var))
+    except Exception:
+        pass
+    def _on_pool_maxsize_changed(text):
+        try:
+            self.http_pool_maxsize_var = text
+        except Exception:
+            pass
+    self.http_pool_maxsize_entry.textChanged.connect(_on_pool_maxsize_changed)
+    http_grid_layout.addWidget(self.http_pool_maxsize_entry, 1, 3, alignment=Qt.AlignLeft)
+    
+    http_main_v.addWidget(http_grid)
+    
+    # Optional toggle: ignore server Retry-After header
+    if not hasattr(self, 'ignore_retry_after_var'):
+        self.ignore_retry_after_var = bool(self.config.get('ignore_retry_after', str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1'))
+    
+    self.ignore_retry_after_checkbox = self._create_styled_checkbox("Ignore server Retry-After header (use local backoff)")
+    try:
+        self.ignore_retry_after_checkbox.setChecked(bool(self.ignore_retry_after_var))
+    except Exception:
+        pass
+    def _on_ignore_retry_after_toggle(checked):
+        try:
+            self.ignore_retry_after_var = bool(checked)
+        except Exception:
+            pass
+    self.ignore_retry_after_checkbox.toggled.connect(_on_ignore_retry_after_toggle)
+    http_main_v.addWidget(self.ignore_retry_after_checkbox)
+
+    
+    section_v.addWidget(http_main)
+    
+    # Apply initial enable/disable state
+    if hasattr(self, '_toggle_http_tuning_controls'):
+        self._toggle_http_tuning_controls()
+    
+    http_desc = QLabel("Controls network behavior for connection establishment timeout, read timeout,\nHTTP connection pool sizes.")
+    http_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    http_desc.setContentsMargins(20, 2, 0, 5)
+    section_v.addWidget(http_desc)
+    
+    # Separator
+    sep8 = QFrame()
+    sep8.setFrameShape(QFrame.HLine)
+    sep8.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep8)
+    
+    # Stop Logic Behavior section
+    stop_logic_title = QLabel("Stop Logic Behavior")
+    stop_logic_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(stop_logic_title)
+    
+    # Graceful Stop toggle
+    if not hasattr(self, 'graceful_stop_var'):
+        self.graceful_stop_var = self.config.get('graceful_stop', True)
+    
+    self.graceful_stop_checkbox = self._create_styled_checkbox("Graceful Stop (wait for in-flight API calls)")
+    self.graceful_stop_checkbox.setContentsMargins(20, 5, 0, 0)
+    try:
+        self.graceful_stop_checkbox.setChecked(bool(self.graceful_stop_var))
+    except Exception:
+        pass
+    def _on_graceful_stop_toggle(checked):
+        try:
+            self.graceful_stop_var = bool(checked)
+        except Exception:
+            pass
+    self.graceful_stop_checkbox.toggled.connect(_on_graceful_stop_toggle)
+    section_v.addWidget(self.graceful_stop_checkbox)
+    
+    graceful_stop_desc = QLabel("When enabled, pressing Stop will wait for in-flight API calls to complete\ninstead of aborting them. Saves API costs since calls already made will finish.")
+    graceful_stop_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    graceful_stop_desc.setContentsMargins(40, 2, 0, 5)
+    section_v.addWidget(graceful_stop_desc)
+    
+    # Wait for Chunks toggle (child of graceful stop)
+    if not hasattr(self, 'wait_for_chunks_var'):
+        self.wait_for_chunks_var = self.config.get('wait_for_chunks', True)
+    
+    self.wait_for_chunks_checkbox = self._create_styled_checkbox("Wait for all chunks to complete")
+    self.wait_for_chunks_checkbox.setContentsMargins(40, 0, 0, 0)
+    try:
+        self.wait_for_chunks_checkbox.setChecked(bool(self.wait_for_chunks_var))
+    except Exception:
+        pass
+    def _on_wait_for_chunks_toggle(checked):
+        try:
+            self.wait_for_chunks_var = bool(checked)
+        except Exception:
+            pass
+    self.wait_for_chunks_checkbox.toggled.connect(_on_wait_for_chunks_toggle)
+    section_v.addWidget(self.wait_for_chunks_checkbox)
+    
+    wait_chunks_desc = QLabel("When enabled, graceful stop will wait for all chunks of a chapter to complete\nbefore stopping. Prevents partial chapter translations.")
+    wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    wait_chunks_desc.setContentsMargins(60, 2, 0, 5)
+    section_v.addWidget(wait_chunks_desc)
+    
+    
+    # Enable/disable based on graceful stop state
+    def _update_wait_for_chunks_state(graceful_checked):
+        self.wait_for_chunks_checkbox.setEnabled(graceful_checked)
+        wait_chunks_desc.setEnabled(graceful_checked)
+        if hasattr(self, 'save_partial_results_checkbox'):
+            self.save_partial_results_checkbox.setEnabled(graceful_checked)
+        if 'save_partial_desc' in locals():
+            save_partial_desc.setEnabled(graceful_checked)
+        if graceful_checked:
+            self.wait_for_chunks_checkbox.setStyleSheet("none")
+            self.wait_for_chunks_checkbox.setStyleSheet("")
+            self.wait_for_chunks_checkbox.style().unpolish(self.wait_for_chunks_checkbox)
+            self.wait_for_chunks_checkbox.style().polish(self.wait_for_chunks_checkbox)
+            wait_chunks_desc.setStyleSheet("color: gray; font-size: 10pt;")
+            if hasattr(self, 'save_partial_results_checkbox'):
+                self.save_partial_results_checkbox.setStyleSheet("none")
+                self.save_partial_results_checkbox.setStyleSheet("")
+                self.save_partial_results_checkbox.style().unpolish(self.save_partial_results_checkbox)
+                self.save_partial_results_checkbox.style().polish(self.save_partial_results_checkbox)
+            if 'save_partial_desc' in locals():
+                save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        else:
+            self.wait_for_chunks_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
+            wait_chunks_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+            if hasattr(self, 'save_partial_results_checkbox'):
+                self.save_partial_results_checkbox.setStyleSheet("QCheckBox { color: #606060; }")
+            if 'save_partial_desc' in locals():
+                save_partial_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+    
+    self.graceful_stop_checkbox.toggled.connect(_update_wait_for_chunks_state)
+    _update_wait_for_chunks_state(self.graceful_stop_checkbox.isChecked())
+    
+    # Separator before API Request Retries
+    sep_stop_logic = QFrame()
+    sep_stop_logic.setFrameShape(QFrame.HLine)
+    sep_stop_logic.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_stop_logic)
+    
+    # Max Retries Configuration
+    retries_title = QLabel("API Request Retries")
+    retries_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(retries_title)
+    
+    retries_w = QWidget()
+    retries_h = QHBoxLayout(retries_w)
+    retries_h.setContentsMargins(20, 5, 0, 0)
+    
+    # Create MAX_RETRIES variable if it doesn't exist
+    if not hasattr(self, 'max_retries_var'):
+        self.max_retries_var = str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7')))
+    
+    retries_h.addWidget(QLabel("Maximum retry attempts:"))
+    max_retries_edit = QLineEdit()
+    max_retries_edit.setFixedWidth(40)
+    try:
+        max_retries_edit.setText(str(self.max_retries_var))
+    except Exception:
+        pass
+    def _on_max_retries_changed(text):
+        try:
+            self.max_retries_var = text
+        except Exception:
+            pass
+    max_retries_edit.textChanged.connect(_on_max_retries_changed)
+    retries_h.addWidget(max_retries_edit)
+    retries_h.addWidget(QLabel("(default: 7)"))
+    retries_h.addStretch()
+    section_v.addWidget(retries_w)
+    
+    retries_desc = QLabel("Number of times to retry failed API requests before giving up.\nApplies to all API providers (OpenAI, Gemini, Anthropic, etc.)")
+    retries_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    retries_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(retries_desc)
+    
+    # Indefinite Rate Limit Retry toggle (default OFF)
+    indefinite_retry_cb = self._create_styled_checkbox("Indefinite Rate Limit Retry")
+    indefinite_retry_cb.setContentsMargins(20, 0, 0, 0)
+    try:
+        indefinite_retry_cb.setChecked(bool(self.indefinite_rate_limit_retry_var))
+    except Exception:
+        pass
+    def _on_indefinite_retry_toggle(checked):
+        try:
+            self.indefinite_rate_limit_retry_var = bool(checked)
+        except Exception:
+            pass
+    indefinite_retry_cb.toggled.connect(_on_indefinite_retry_toggle)
+    section_v.addWidget(indefinite_retry_cb)
+    
+    indefinite_desc = QLabel("When enabled, rate limit errors (429) will retry indefinitely with exponential backoff.\nWhen disabled, rate limits count against the maximum retry attempts above.")
+    indefinite_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    indefinite_desc.setContentsMargins(40, 2, 0, 5)
+    section_v.addWidget(indefinite_desc)
+
+    # Separator
+    sep_retry_1 = QFrame()
+    sep_retry_1.setFrameShape(QFrame.HLine)
+    sep_retry_1.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_retry_1)
+
+    # Retry Truncated
+    if not hasattr(self, 'truncation_retry_attempts_var'):
+        self.truncation_retry_attempts_var = str(self.config.get('truncation_retry_attempts', '3'))
+
+    # Char-ratio truncation (silent truncation detector)
+    if not hasattr(self, 'char_ratio_truncation_var'):
+        self.char_ratio_truncation_var = bool(self.config.get('char_ratio_truncation_enabled', False))
+    if not hasattr(self, 'char_ratio_truncation_percent_var'):
+        self.char_ratio_truncation_percent_var = str(self.config.get('char_ratio_truncation_percent', '50'))
+    if not hasattr(self, 'char_ratio_truncation_attempts_var'):
+        self.char_ratio_truncation_attempts_var = str(self.config.get('char_ratio_truncation_attempts', '1'))
+    if not hasattr(self, 'char_ratio_min_output_chars_var'):
+        self.char_ratio_min_output_chars_var = str(self.config.get('char_ratio_min_output_chars', '100'))
+
+    retry_truncated_cb = self._create_styled_checkbox("Auto-retry Truncated Responses")
+    
+    retry_frame_w = QWidget()
+    retry_frame_h = QHBoxLayout(retry_frame_w)
+    retry_frame_h.setContentsMargins(20, 5, 0, 5)
+    
+    retry_tokens_label = QLabel("Token constraint:")
+    retry_frame_h.addWidget(retry_tokens_label)
+
+    retry_tokens_edit = QLineEdit()
+    retry_tokens_edit.setFixedWidth(80)
+    try:
+        retry_tokens_edit.setText(str(self.max_retry_tokens_var))
+    except Exception:
+        pass
+    def _on_retry_tokens_changed(text):
+        try:
+            self.max_retry_tokens_var = text
+        except Exception:
+            pass
+    retry_tokens_edit.textChanged.connect(_on_retry_tokens_changed)
+    retry_frame_h.addWidget(retry_tokens_edit)
+
+    retry_attempts_label = QLabel("Truncated attempts:")
+    retry_frame_h.addWidget(retry_attempts_label)
+
+    retry_attempts_edit = QLineEdit()
+    retry_attempts_edit.setFixedWidth(50)
+    try:
+        retry_attempts_edit.setText(str(self.truncation_retry_attempts_var))
+    except Exception:
+        retry_attempts_edit.setText("3")
+    def _on_retry_attempts_changed(text):
+        try:
+            self.truncation_retry_attempts_var = text
+        except Exception:
+            pass
+    retry_attempts_edit.textChanged.connect(_on_retry_attempts_changed)
+    retry_frame_h.addWidget(retry_attempts_edit)
+    retry_frame_h.addStretch()
+    
+    retry_desc = QLabel("Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum\nSet token constraint to -1 to use the global output token limit")
+    retry_desc.setContentsMargins(20, 0, 0, 10)
+
+    retry_keys_w = QWidget()
+    retry_keys_h = QHBoxLayout(retry_keys_w)
+    retry_keys_h.setContentsMargins(20, 0, 0, 10)
+    retry_keys_h.setSpacing(8)
+    truncation_keys_btn = _create_preview_pool_button(
+        self,
+        'truncation_retry',
+        "Truncation Keys",
+        "Open the Multi API Key Manager focused on the Truncation Retry key pool.",
+        section_box,
+    )
+    retry_keys_h.addWidget(truncation_keys_btn)
+    retry_keys_h.addStretch()
+
+    # Char-ratio truncation controls (silent truncation detector)
+    char_ratio_cb = self._create_styled_checkbox("Auto-retry Silent Truncation (Char-ratio)")
+    char_ratio_cb.setContentsMargins(20, 0, 0, 0)
+    char_ratio_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Auto-retry logic for clear cases of truncation that the API does not report. "
+        "Detects silent truncation by comparing input vs output character counts. "
+        "Skipped when base64 images are present (they skew counts)."
+        "</p></qt>"
+    )
+    try:
+        char_ratio_cb.setChecked(bool(self.char_ratio_truncation_var))
+    except Exception:
+        char_ratio_cb.setChecked(True)
+
+    char_ratio_frame_w = QWidget()
+    char_ratio_frame_h = QHBoxLayout(char_ratio_frame_w)
+    char_ratio_frame_h.setContentsMargins(40, 5, 0, 0)
+
+    char_ratio_frame_w2 = QWidget()
+    char_ratio_frame_h2 = QHBoxLayout(char_ratio_frame_w2)
+    char_ratio_frame_h2.setContentsMargins(40, 0, 0, 5)
+
+    char_ratio_percent_label = QLabel("Trigger below (%):")
+    char_ratio_percent_label.setToolTip(
+        "Threshold ratio of Output/Input characters.\n"
+        "If output is less than this % of input length, it's considered truncated."
+    )
+    char_ratio_frame_h.addWidget(char_ratio_percent_label)
+
+    char_ratio_percent_edit = QLineEdit()
+    char_ratio_percent_edit.setFixedWidth(50)
+    try:
+        char_ratio_percent_edit.setText(str(self.char_ratio_truncation_percent_var))
+    except Exception:
+        char_ratio_percent_edit.setText("50")
+    def _on_char_ratio_percent_changed(text):
+        try:
+            self.char_ratio_truncation_percent_var = text
+        except Exception:
+            pass
+    char_ratio_percent_edit.textChanged.connect(_on_char_ratio_percent_changed)
+    char_ratio_frame_h.addWidget(char_ratio_percent_edit)
+
+    char_ratio_attempts_label = QLabel("Char-ratio retry attempts:")
+    char_ratio_frame_h.addWidget(char_ratio_attempts_label)
+
+    char_ratio_attempts_edit = QLineEdit()
+    char_ratio_attempts_edit.setFixedWidth(50)
+    try:
+        char_ratio_attempts_edit.setText(str(self.char_ratio_truncation_attempts_var))
+    except Exception:
+        char_ratio_attempts_edit.setText("1")
+    def _on_char_ratio_attempts_changed(text):
+        try:
+            self.char_ratio_truncation_attempts_var = text
+        except Exception:
+            pass
+    char_ratio_attempts_edit.textChanged.connect(_on_char_ratio_attempts_changed)
+    char_ratio_frame_h.addWidget(char_ratio_attempts_edit)
+    char_ratio_frame_h.addStretch()
+
+    char_ratio_min_chars_label = QLabel("Skip check if output is less than N Characters:")
+    char_ratio_min_chars_label.setToolTip(
+        "Safety threshold: if the output is extremely short (less than this value),\n"
+        "skip the ratio check to avoid false positives on short answers."
+    )
+    char_ratio_frame_h2.addWidget(char_ratio_min_chars_label)
+
+    char_ratio_min_chars_edit = QLineEdit()
+    char_ratio_min_chars_edit.setFixedWidth(60)
+    try:
+        char_ratio_min_chars_edit.setText(str(self.char_ratio_min_output_chars_var))
+    except Exception:
+        char_ratio_min_chars_edit.setText("100")
+    def _on_char_ratio_min_chars_changed(text):
+        try:
+            self.char_ratio_min_output_chars_var = text
+        except Exception:
+            pass
+    char_ratio_min_chars_edit.textChanged.connect(_on_char_ratio_min_chars_changed)
+    char_ratio_frame_h2.addWidget(char_ratio_min_chars_edit)
+
+    char_ratio_frame_h2.addStretch()
+
+    char_ratio_desc = QLabel(
+        "Auto-retry logic for clear cases of truncation that the API does not report.\n"
+        "Flags likely silent truncation when output is much shorter than input."
+    )
+    char_ratio_desc.setContentsMargins(40, 0, 0, 10)
+
+    def _on_char_ratio_toggle(checked):
+        try:
+            self.char_ratio_truncation_var = bool(checked)
+
+            main_enabled = retry_truncated_cb.isChecked()
+            effective = bool(checked) and bool(main_enabled)
+
+            # Enable/disable controls
+            char_ratio_percent_label.setEnabled(effective)
+            char_ratio_percent_edit.setEnabled(effective)
+            char_ratio_attempts_label.setEnabled(effective)
+            char_ratio_attempts_edit.setEnabled(effective)
+            char_ratio_min_chars_label.setEnabled(effective)
+            char_ratio_min_chars_edit.setEnabled(effective)
+            char_ratio_desc.setEnabled(effective)
+
+            # Update styles
+            if effective:
+                char_ratio_percent_label.setStyleSheet("color: white;")
+                char_ratio_attempts_label.setStyleSheet("color: white;")
+                char_ratio_min_chars_label.setStyleSheet("color: white;")
+                char_ratio_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                char_ratio_percent_edit.setStyleSheet("color: white;")
+                char_ratio_attempts_edit.setStyleSheet("color: white;")
+                char_ratio_min_chars_edit.setStyleSheet("color: white;")
+            else:
+                char_ratio_percent_label.setStyleSheet("color: #606060;")
+                char_ratio_attempts_label.setStyleSheet("color: #606060;")
+                char_ratio_min_chars_label.setStyleSheet("color: #606060;")
+                char_ratio_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+                char_ratio_percent_edit.setStyleSheet("color: #909090;")
+                char_ratio_attempts_edit.setStyleSheet("color: #909090;")
+                char_ratio_min_chars_edit.setStyleSheet("color: #909090;")
+        except Exception:
+            pass
+
+    char_ratio_cb.toggled.connect(_on_char_ratio_toggle)
+
+    def _on_retry_truncated_toggle(checked):
+        try:
+            self.retry_truncated_var = bool(checked)
+            
+            # Update UI state
+            retry_tokens_edit.setEnabled(checked)
+            retry_tokens_label.setEnabled(checked)
+            retry_desc.setEnabled(checked)
+            retry_attempts_edit.setEnabled(checked)
+            retry_attempts_label.setEnabled(checked)
+
+            # Char-ratio truncation controls depend on the main retry toggle
+            char_ratio_cb.setEnabled(bool(checked))
+            # Update subordinate controls without changing the user's checkbox state
+            _on_char_ratio_toggle(char_ratio_cb.isChecked())
+
+            # Update styles
+            if checked:
+                retry_tokens_label.setStyleSheet("color: white;")
+                retry_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                retry_tokens_edit.setStyleSheet("color: white;")
+                retry_attempts_label.setStyleSheet("color: white;")
+                retry_attempts_edit.setStyleSheet("color: white;")
+            else:
+                retry_tokens_label.setStyleSheet("color: #606060;")
+                retry_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+                retry_tokens_edit.setStyleSheet("color: #909090;")
+                retry_attempts_label.setStyleSheet("color: #606060;")
+                retry_attempts_edit.setStyleSheet("color: #909090;")
+        except Exception:
+            pass
+
+    try:
+        retry_truncated_cb.setChecked(bool(self.retry_truncated_var))
+    except Exception:
+        pass
+    retry_truncated_cb.toggled.connect(_on_retry_truncated_toggle)
+    
+    # Initialize UI state based on current value
+    _on_retry_truncated_toggle(retry_truncated_cb.isChecked())
+    
+    section_v.addWidget(retry_truncated_cb)
+    section_v.addWidget(retry_frame_w)
+    section_v.addWidget(retry_desc)
+    section_v.addWidget(retry_keys_w)
+    section_v.addWidget(char_ratio_cb)
+    section_v.addWidget(char_ratio_frame_w)
+    section_v.addWidget(char_ratio_frame_w2)
+    section_v.addWidget(char_ratio_desc)
+    
+    # Separator
+    sep4 = QFrame()
+    sep4.setFrameShape(QFrame.HLine)
+    sep4.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep4)
+
+    # Retry Slow
+    retry_slow_cb = self._create_styled_checkbox("Auto-retry Slow Processing (API Timeouts)")
+    retry_slow_cb.setContentsMargins(0, 15, 0, 0)
+    
+    timeout_w = QWidget()
+    timeout_h = QHBoxLayout(timeout_w)
+    timeout_h.setContentsMargins(20, 5, 0, 0)
+    
+    timeout_label_1 = QLabel("Timeout after (seconds):")
+    timeout_h.addWidget(timeout_label_1)
+    
+    timeout_edit = QLineEdit()
+    timeout_edit.setFixedWidth(60)
+    try:
+        timeout_edit.setText(str(self.chunk_timeout_var))
+    except Exception:
+        pass
+    def _on_timeout_changed(text):
+        try:
+            self.chunk_timeout_var = text
+        except Exception:
+            pass
+    timeout_edit.textChanged.connect(_on_timeout_changed)
+    timeout_h.addWidget(timeout_edit)
+    
+    timeout_attempts_label = QLabel("Timeout attempts:")
+    timeout_h.addWidget(timeout_attempts_label)
+    
+    timeout_attempts_edit = QLineEdit()
+    timeout_attempts_edit.setFixedWidth(50)
+    if not hasattr(self, 'timeout_retry_attempts_var'):
+        self.timeout_retry_attempts_var = str(self.config.get('timeout_retry_attempts', '2'))
+    try:
+        timeout_attempts_edit.setText(str(self.timeout_retry_attempts_var))
+    except Exception:
+        timeout_attempts_edit.setText("2")
+    def _on_timeout_attempts_changed(text):
+        try:
+            self.timeout_retry_attempts_var = text
+        except Exception:
+            pass
+    timeout_attempts_edit.textChanged.connect(_on_timeout_attempts_changed)
+    timeout_h.addWidget(timeout_attempts_edit)
+    
+    timeout_h.addStretch()
+    
+    timeout_desc = QLabel("Adds API timeout logic to text/image chunks that take too long")
+    timeout_desc.setContentsMargins(20, 0, 0, 5)
+    
+    def _on_retry_slow_toggle(checked):
+        try:
+            self.retry_timeout_var = bool(checked)
+            
+            # Update UI state
+            timeout_edit.setEnabled(bool(checked))
+            timeout_label_1.setEnabled(bool(checked))
+            timeout_attempts_label.setEnabled(bool(checked))
+            timeout_attempts_edit.setEnabled(bool(checked))
+            timeout_desc.setEnabled(bool(checked))
+
+            # Update styles
+            if checked:
+                timeout_label_1.setStyleSheet("color: white;")
+                timeout_attempts_label.setStyleSheet("color: white;")
+                timeout_attempts_edit.setStyleSheet("color: white;")
+                timeout_desc.setStyleSheet("color: gray; font-size: 10pt;")
+            else:
+                timeout_label_1.setStyleSheet("color: #606060;")
+                timeout_attempts_label.setStyleSheet("color: #606060;")
+                timeout_attempts_edit.setStyleSheet("color: #909090;")
+                timeout_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+        except Exception:
+            pass
+
+    try:
+        retry_slow_cb.setChecked(bool(self.retry_timeout_var))
+    except Exception:
+        pass
+    retry_slow_cb.toggled.connect(_on_retry_slow_toggle)
+    
+    # Apply initial styling
+    _on_retry_slow_toggle(retry_slow_cb.isChecked())
+    
+    section_v.addWidget(retry_slow_cb)
+    section_v.addWidget(timeout_w)
+    section_v.addWidget(timeout_desc)
+    
+    # Separator
+    sep7 = QFrame()
+    sep7.setFrameShape(QFrame.HLine)
+    sep7.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep7)
+
+    # Retry Duplicate
+    retry_duplicate_cb = self._create_styled_checkbox("Auto-retry Duplicate Content")
+    
+    duplicate_w = QWidget()
+    duplicate_h = QHBoxLayout(duplicate_w)
+    duplicate_h.setContentsMargins(20, 5, 0, 0)
+    
+    duplicate_label_1 = QLabel("Check last")
+    duplicate_h.addWidget(duplicate_label_1)
+    
+    duplicate_edit = QLineEdit()
+    duplicate_edit.setFixedWidth(40)
+    try:
+        duplicate_edit.setText(str(self.duplicate_lookback_var))
+    except Exception:
+        pass
+    def _on_duplicate_lookback_changed(text):
+        try:
+            self.duplicate_lookback_var = text
+        except Exception:
+            pass
+    duplicate_edit.textChanged.connect(_on_duplicate_lookback_changed)
+    duplicate_h.addWidget(duplicate_edit)
+    
+    duplicate_label_2 = QLabel("chapters")
+    duplicate_h.addWidget(duplicate_label_2)
+    duplicate_h.addStretch()
+    
+    duplicate_desc = QLabel("Detects when AI returns same content\nfor different chapters")
+    duplicate_desc.setContentsMargins(20, 5, 0, 10)
+
+    def _on_retry_duplicate_toggle(checked):
+        try:
+            self.retry_duplicate_var = bool(checked)
+            update_detection_visibility()
+            
+            # Update UI state
+            duplicate_edit.setEnabled(bool(checked))
+            duplicate_label_1.setEnabled(bool(checked))
+            duplicate_label_2.setEnabled(bool(checked))
+            duplicate_desc.setEnabled(bool(checked))
+            
+            # Update styles
+            if checked:
+                duplicate_label_1.setStyleSheet("color: white;")
+                duplicate_label_2.setStyleSheet("color: white;")
+                duplicate_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                duplicate_edit.setStyleSheet("")
+            else:
+                duplicate_label_1.setStyleSheet("color: #606060;")
+                duplicate_label_2.setStyleSheet("color: #606060;")
+                duplicate_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+        except Exception:
+            pass
+
+    try:
+        retry_duplicate_cb.setChecked(bool(self.retry_duplicate_var))
+    except Exception:
+        pass
+    retry_duplicate_cb.toggled.connect(_on_retry_duplicate_toggle)
+    
+    section_v.addWidget(retry_duplicate_cb)
+    section_v.addWidget(duplicate_w)
+    section_v.addWidget(duplicate_desc)
+    
+    # Container for detection-related options (to show/hide based on toggle)
+    self.detection_options_container = QWidget()
+    detection_options_v = QVBoxLayout(self.detection_options_container)
+    detection_options_v.setContentsMargins(0, 0, 0, 0)
+    
+    # Update thinking budget entry state based on initial toggle state
+    self.toggle_thinking_budget()
+    
+    # Function to show/hide detection options based on auto-retry toggle
+    def update_detection_visibility():
+        try:
+            if self.retry_duplicate_var:
+                self.detection_options_container.setVisible(True)
+            else:
+                self.detection_options_container.setVisible(False)
+        except Exception:
+            pass
+            
+    # Apply initial styling and visibility
+    _on_retry_duplicate_toggle(retry_duplicate_cb.isChecked())
+    
+    # Detection Method subsection (now inside the container)
+    method_label = QLabel("Detection Method:")
+    method_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    method_label.setContentsMargins(20, 10, 0, 5)
+    detection_options_v.addWidget(method_label)
+    
+    methods = [
+        ("basic", "Basic (Fast) - Original 85% threshold, 1000 chars"),
+        ("ai-hunter", "AI Hunter - Multi-method semantic analysis"),
+        ("cascading", "Cascading - Basic first, then AI Hunter")
+    ]
+    
+    # Container for AI Hunter config (will be shown/hidden based on selection)
+    self.ai_hunter_container = QWidget()
+    ai_hunter_v = QVBoxLayout(self.ai_hunter_container)
+    ai_hunter_v.setContentsMargins(0, 0, 0, 0)
+    
+    # Function to update AI Hunter visibility based on detection mode
+    def update_ai_hunter_visibility(*args):
+        """Update AI Hunter section visibility based on selection"""
+        # Clear existing widgets
+        while ai_hunter_v.count():
+            child = ai_hunter_v.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        # Show AI Hunter config for both ai-hunter and cascading modes
+        try:
+            if self.duplicate_detection_mode_var in ['ai-hunter', 'cascading']:
+                self.create_ai_hunter_section(self.ai_hunter_container)
+        except Exception:
+            pass
+        
+        # Update status if label exists
+        if hasattr(self, 'ai_hunter_status_label'):
+            try:
+                self.ai_hunter_status_label.setText(self._get_ai_hunter_status_text())
+            except Exception:
+                pass
+    
+    # Create radio buttons (inside detection container)
+    detection_button_group = QButtonGroup(self.detection_options_container)
+    for value, text in methods:
+        rb = QRadioButton(text)
+        rb.setContentsMargins(40, 2, 0, 2)
+        try:
+            if self.duplicate_detection_mode_var == value:
+                rb.setChecked(True)
+        except Exception:
+            pass
+        def _make_rb_callback(val):
+            def _cb(checked):
+                if checked:
+                    try:
+                        self.duplicate_detection_mode_var = val
+                        update_ai_hunter_visibility()
+                    except Exception:
+                        pass
+            return _cb
+        rb.toggled.connect(_make_rb_callback(value))
+        detection_button_group.addButton(rb)
+        detection_options_v.addWidget(rb)
+    
+    # Pack the AI Hunter container
+    detection_options_v.addWidget(self.ai_hunter_container)
+    
+    section_v.addWidget(self.detection_options_container)
+    
+    # Initial visibility updates
+    update_detection_visibility()
+    update_ai_hunter_visibility()
+
+    # Separator
+    sep_preserve = QFrame()
+    sep_preserve.setFrameShape(QFrame.HLine)
+    sep_preserve.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_preserve)
+    # Save interrupted chapters
+    if not hasattr(self, 'save_partial_results_var'):
+        self.save_partial_results_var = self.config.get('save_partial_results', True)
+    
+    self.save_partial_results_checkbox = self._create_styled_checkbox("Save interrupted chapters")
+    self.save_partial_results_checkbox.setContentsMargins(20, 5, 0, 0)
+    self.save_partial_results_checkbox.setToolTip(
+        "When enabled, chapters interrupted by graceful stop are saved\n"
+        "and marked as QA failed (PARTIAL/TRUNCATED) instead of staying pending."
+    )
+    try:
+        self.save_partial_results_checkbox.setChecked(bool(self.save_partial_results_var))
+    except Exception:
+        pass
+    def _on_save_partial_results_toggle(checked):
+        try:
+            self.save_partial_results_var = bool(checked)
+        except Exception:
+            pass
+    self.save_partial_results_checkbox.toggled.connect(_on_save_partial_results_toggle)
+    section_v.addWidget(self.save_partial_results_checkbox)
+    
+    save_partial_desc = QLabel(
+        "Saves partial output when a chapter is interrupted by graceful stop, and marks it QA failed."
+    )
+    save_partial_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    save_partial_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(save_partial_desc)
+
+    # Save blocked/prohibited responses (separate toggle)
+    if not hasattr(self, 'save_prohibited_results_var'):
+        self.save_prohibited_results_var = self.config.get('save_prohibited_results', False)
+
+    self.save_prohibited_results_checkbox = self._create_styled_checkbox("Save blocked/prohibited responses")
+    self.save_prohibited_results_checkbox.setContentsMargins(20, 0, 0, 0)
+    self.save_prohibited_results_checkbox.setToolTip(
+        "When enabled, blocked/prohibited/API-error responses are saved and marked as QA failed\n"
+        "(PROHIBITED_CONTENT or API_ERROR). With streaming enabled, text received before the\n"
+        "failure is preserved instead of an empty response."
+    )
+    try:
+        self.save_prohibited_results_checkbox.setChecked(bool(self.save_prohibited_results_var))
+    except Exception:
+        pass
+    def _on_save_prohibited_results_toggle(checked):
+        try:
+            self.save_prohibited_results_var = bool(checked)
+        except Exception:
+            pass
+    self.save_prohibited_results_checkbox.toggled.connect(_on_save_prohibited_results_toggle)
+    section_v.addWidget(self.save_prohibited_results_checkbox)
+
+    save_prohibited_desc = QLabel(
+        "Saves blocked/prohibited/API-error responses, including streamed text received before failure,\n"
+        "and marks the chapter QA failed."
+    )
+    save_prohibited_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    save_prohibited_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(save_prohibited_desc)
+
+    # Disable empty response = safety filter heuristic
+    if not hasattr(self, 'disable_empty_safety_heuristic_var'):
+        self.disable_empty_safety_heuristic_var = self.config.get('disable_empty_safety_heuristic', True)
+
+    self.disable_empty_safety_heuristic_checkbox = self._create_styled_checkbox("Disable empty response = safety filter check")
+    self.disable_empty_safety_heuristic_checkbox.setContentsMargins(20, 0, 0, 0)
+    self.disable_empty_safety_heuristic_checkbox.setToolTip(
+        "When enabled, empty API responses will NOT be automatically\n"
+        "classified as safety filter blocks (Check #4 heuristic).\n"
+        "Useful when empty responses are caused by parsing failures,\n"
+        "not actual content filtering."
+    )
+    try:
+        self.disable_empty_safety_heuristic_checkbox.setChecked(bool(self.disable_empty_safety_heuristic_var))
+    except Exception:
+        pass
+    def _on_disable_empty_safety_heuristic_toggle(checked):
+        try:
+            self.disable_empty_safety_heuristic_var = bool(checked)
+        except Exception:
+            pass
+    self.disable_empty_safety_heuristic_checkbox.toggled.connect(_on_disable_empty_safety_heuristic_toggle)
+    section_v.addWidget(self.disable_empty_safety_heuristic_checkbox)
+
+    disable_empty_safety_desc = QLabel(
+        "Stops the client from guessing that empty responses are safety-filtered.\n"
+        "Raw server responses are still dumped to Payloads/raw_safety_dumps/ for inspection."
+    )
+    disable_empty_safety_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    disable_empty_safety_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(disable_empty_safety_desc)
+
+    # Force missing finish_reason => prohibited content
+    if not hasattr(self, 'unknown_finish_as_prohibited_var'):
+        self.unknown_finish_as_prohibited_var = self.config.get(
+            'missing_finish_as_prohibited',
+            self.config.get('unknown_finish_as_prohibited', False)
+        )
+
+    self.unknown_finish_as_prohibited_checkbox = self._create_styled_checkbox("Treat missing finish reason as prohibited content")
+    self.unknown_finish_as_prohibited_checkbox.setContentsMargins(20, 0, 0, 0)
+    self.unknown_finish_as_prohibited_checkbox.setToolTip(
+        "When enabled, responses with no finish_reason are forced\n"
+        "to prohibited_content so the prohibited-content fallback path runs."
+    )
+    try:
+        self.unknown_finish_as_prohibited_checkbox.setChecked(bool(self.unknown_finish_as_prohibited_var))
+    except Exception:
+        pass
+    def _on_unknown_finish_as_prohibited_toggle(checked):
+        try:
+            self.unknown_finish_as_prohibited_var = bool(checked)
+        except Exception:
+            pass
+    self.unknown_finish_as_prohibited_checkbox.toggled.connect(_on_unknown_finish_as_prohibited_toggle)
+    section_v.addWidget(self.unknown_finish_as_prohibited_checkbox)
+
+    unknown_finish_as_prohibited_desc = QLabel(
+        "Forces missing or blank provider finish reasons into the prohibited-content retry path.\n"
+        "Explicit finish_reason='unknown' responses are not affected."
+    )
+    unknown_finish_as_prohibited_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    unknown_finish_as_prohibited_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(unknown_finish_as_prohibited_desc)
+
+    # Preserve Original Text on Failure
+    preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
+    preserve_cb.setToolTip(
+        "When enabled, failed translation responses (timeouts, rate limits, extraction failures, etc.)\n"
+        "return the original source text verbatim instead of an empty, partial, or blocked response.\n"
+        "This takes priority over the blocked/prohibited and interrupted/truncated save options."
+    )
+    try:
+        preserve_cb.setChecked(bool(self.preserve_original_text_var))
+    except Exception:
+        pass
+    def _on_preserve_toggle(checked):
+        try:
+            self.preserve_original_text_var = bool(checked)
+        except Exception:
+            pass
+    preserve_cb.toggled.connect(_on_preserve_toggle)
+    section_v.addWidget(preserve_cb)
+    
+    preserve_desc = QLabel(
+        "Return original untranslated text for every translation failure, taking priority over other failure-save options.\n"
+        "⚠️ May mix source language into translated output"
+    )
+    preserve_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    preserve_desc.setContentsMargins(20, 5, 0, 10)
+    section_v.addWidget(preserve_desc)
+
+    # Disable QA marker checks
+    disable_qa_markers_cb = self._create_styled_checkbox("Disable QA marker checks (error-keyword auto-fail)")
+    try:
+        disable_qa_markers_cb.setChecked(bool(self.disable_qa_marker_checks_var))
+    except Exception:
+        pass
+    def _on_disable_qa_markers_toggle(checked):
+        try:
+            self.disable_qa_marker_checks_var = bool(checked)
+        except Exception:
+            pass
+    disable_qa_markers_cb.toggled.connect(_on_disable_qa_markers_toggle)
+    
+    # Row: disable toggle + threshold
+    qa_marker_row = QWidget()
+    qa_marker_h = QHBoxLayout(qa_marker_row)
+    qa_marker_h.setContentsMargins(0, 0, 0, 0)
+    qa_marker_h.addWidget(disable_qa_markers_cb)
+    qa_marker_h.addSpacing(12)
+    qa_marker_h.addWidget(QLabel("Marker length limit:"))
+    qa_marker_limit_entry = QLineEdit()
+    qa_marker_limit_entry.setFixedWidth(70)
+    try:
+        qa_marker_limit_entry.setText(str(self.qa_marker_length_limit_var))
+    except Exception:
+        qa_marker_limit_entry.setText("500")
+    def _on_qa_marker_limit_changed(text):
+        try:
+            self.qa_marker_length_limit_var = text
+        except Exception:
+            pass
+    qa_marker_limit_entry.textChanged.connect(_on_qa_marker_limit_changed)
+    qa_marker_h.addWidget(qa_marker_limit_entry)
+    qa_marker_h.addWidget(QLabel("chars"))
+    qa_marker_h.addStretch()
+    section_v.addWidget(qa_marker_row)
+    
+    disable_qa_markers_desc = QLabel("When enabled, QA won't auto-fail based on error keywords (timeout, rate-limit, etc.).")
+    disable_qa_markers_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    disable_qa_markers_desc.setContentsMargins(20, 5, 0, 10)
+    section_v.addWidget(disable_qa_markers_desc)
+    
+    _refusal_disabled = self.config.get('disable_refusal_checks', True)
+    _refusal_status = "Disabled" if _refusal_disabled else "Enabled"
+    refusal_patterns_btn = QPushButton(f"🚫 Manage Refusal Patterns ({_refusal_status})")
+    self._refusal_patterns_btn_other = refusal_patterns_btn
+    refusal_patterns_btn.setFixedWidth(310)
+    refusal_patterns_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #5c2e5b;
+            color: #ffffff;
+            font-size: 10pt;
+            padding: 6px 15px;
+            border: 1px solid #42213f;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+        QPushButton:hover {
+            background-color: #733d71;
+            border-color: #5c2e5b;
+        }
+        QPushButton:pressed {
+            background-color: #3d1d3c;
+        }
+    """)
+    refusal_patterns_btn.setToolTip(
+        "Open the refusal pattern editor to add, edit, or remove\n"
+        "patterns used to detect AI refusal responses."
+    )
+    def _open_refusal_patterns():
+        try:
+            from multi_api_key_manager import RefusalPatternsDialog
+            if not hasattr(self, '_refusal_patterns_dialog') or self._refusal_patterns_dialog is None:
+                self._refusal_patterns_dialog = RefusalPatternsDialog(None, self)
+                self._refusal_patterns_dialog.setWindowModality(Qt.NonModal)
+            else:
+                try:
+                    self._refusal_patterns_dialog._reload_from_config()
+                except Exception:
+                    pass
+            self._refusal_patterns_dialog.show()
+            self._refusal_patterns_dialog.raise_()
+            self._refusal_patterns_dialog.activateWindow()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Error", f"Failed to open Refusal Patterns: {e}")
+    refusal_patterns_btn.clicked.connect(_open_refusal_patterns)
+    section_v.addWidget(refusal_patterns_btn)
+
+    # Place the section at row 1, column 0 to match the original grid
+    try:
+        grid = parent.layout()
+        if grid:
+            grid.addWidget(section_box, 1, 0)
+    except Exception:
+        # Fallback: just stack
+        section_box.setParent(parent)
+    
+            
+def open_multi_api_key_manager(self):
+    """Open the multi API key manager dialog"""
+    from PySide6.QtWidgets import QMessageBox
+    # Import here to avoid circular imports
+    try:
+        from multi_api_key_manager import MultiAPIKeyDialog
+        
+        # Use the live Other Settings dialog as the parent so the manager
+        # inherits its global stylesheet instead of creating a separate theme.
+        parent_dialog = getattr(self, '_other_settings_dialog', None)
+        if parent_dialog is None:
+            parent_dialog = self.master
+        MultiAPIKeyDialog.show_dialog(parent_dialog, self)
+        
+        # Refresh the settings display if in settings dialog
+        if hasattr(self, 'current_settings_dialog'):
+            try:
+                # Close and reopen settings to refresh (tkinter part)
+                self.current_settings_dialog.destroy()
+                self.show_settings()  # or open_other_settings()
+            except Exception:
+                pass
+            
+    except ImportError as e:
+        QMessageBox.critical(None, "Error", f"Failed to load Multi API Key Manager: {str(e)}")
+    except Exception as e:
+        QMessageBox.critical(None, "Error", f"Error opening Multi API Key Manager: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+# DEPRECATED Tkinter function - not used in PySide6 version
+# def _create_multi_key_row(self, parent):
+#     """Create a compact multi-key configuration row"""
+#     frame = tk.Frame(parent)
+#     frame.pack(fill=tk.X, pady=5)
+#     
+#     # Status indicator
+#     if self.config.get('use_multi_api_keys', False):
+#         keys = self.config.get('multi_api_keys', [])
+#         active = sum(1 for k in keys if k.get('enabled', True))
+#         
+#         # Checkbox to enable/disable
+#         tb.Checkbutton(frame, text="Multi API Key Mode", 
+#                       variable=self.use_multi_api_keys_var,
+#                       bootstyle="round-toggle",
+#                       command=self._toggle_multi_key_setting).pack(side=tk.LEFT)
+#         
+#         # Status
+#         tk.Label(frame, text=f"({active}/{len(keys)} active)", 
+#                 font=('TkDefaultFont', 10), fg='green').pack(side=tk.LEFT, padx=(5, 0))
+#     else:
+#         tb.Checkbutton(frame, text="Multi API Key Mode", 
+#                       variable=self.use_multi_api_keys_var,
+#                       bootstyle="round-toggle",
+#                       command=self._toggle_multi_key_setting).pack(side=tk.LEFT)
+#     
+#     # Configure button
+#     tb.Button(frame, text="Configure Keys...", 
+#               command=self.open_multi_api_key_manager,
+#               bootstyle="primary-outline").pack(side=tk.LEFT, padx=(20, 0))
+#     
+#     return frame
+            
+def _update_multi_key_status_label(self):
+    """Update the translation key pool status label dynamically."""
+    try:
+        if not hasattr(self, 'multi_key_status_label2'):
+            return
+        
+        if self.config.get('use_multi_api_keys', False):
+            multi_keys = self.config.get('multi_api_keys', [])
+            active_keys = sum(1 for k in multi_keys if k.get('enabled', True))
+            self.multi_key_status_label2.setText(f"ACTIVE ({active_keys}/{len(multi_keys)} keys)")
+            self.multi_key_status_label2.setStyleSheet("font-weight: bold; font-size: 11pt; color: green;")
+        else:
+            self.multi_key_status_label2.setText("DISABLED")
+            self.multi_key_status_label2.setStyleSheet("font-size: 11pt; color: gray;")
+    except Exception:
+        pass
+
+def _toggle_multi_key_setting(self):
+    """Toggle the main translation key pool from settings dialog."""
+    self.config['use_multi_api_keys'] = self.use_multi_api_keys_var
+    # Don't save immediately, let the dialog's save button handle it
+
+def toggle_image_translation_section(self):
+    """Toggle visibility of image translation content with smooth fade"""
+    try:
+        if not hasattr(self, 'image_translation_content'):
+            return
+            
+        enabled = bool(self.enable_image_translation_var)
+        
+        # Import animation components
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        
+        # Stop any existing animation
+        if hasattr(self, '_image_section_animation') and self._image_section_animation:
+            self._image_section_animation.stop()
+        
+        # Ensure widget is visible for animation
+        self.image_translation_content.setVisible(True)
+        
+        # Create or get opacity effect
+        if not hasattr(self.image_translation_content, '_opacity_effect'):
+            effect = QGraphicsOpacityEffect()
+            self.image_translation_content.setGraphicsEffect(effect)
+            self.image_translation_content._opacity_effect = effect
+        else:
+            effect = self.image_translation_content._opacity_effect
+        
+        # Create opacity animation
+        animation = QPropertyAnimation(effect, b"opacity")
+        animation.setDuration(150)  # Faster for no glitch
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        if enabled:
+            # Fade in
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+        else:
+            # Fade out
+            animation.setStartValue(1.0)
+            animation.setEndValue(0.0)
+            # Hide after fade out
+            animation.finished.connect(
+                lambda: self.image_translation_content.setVisible(False) if not enabled else None
+            )
+        
+        self._image_section_animation = animation
+        animation.start()
+        
+    except Exception:
+        # Fallback to simple show/hide if animation fails
+        try:
+            if hasattr(self, 'image_translation_content'):
+                enabled = bool(self.enable_image_translation_var)
+                self.image_translation_content.setVisible(enabled)
+        except Exception:
+            pass
+
+def toggle_extraction_workers(self):
+    """Enable/disable extraction workers entry and labels based on toggle (PySide6 version)"""
+    try:
+        enabled = bool(self.enable_parallel_extraction_var)
+        
+        # Workers entry
+        if hasattr(self, 'extraction_workers_entry'):
+            self.extraction_workers_entry.setEnabled(enabled)
+            try:
+                self._update_extraction_workers_warning_style()
+            except Exception:
+                pass
+            
+        # Workers and threads labels
+        if hasattr(self, 'workers_label'):
+            self.workers_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.workers_label.setStyleSheet(f"color: {color};")
+            
+        if hasattr(self, 'threads_label'):
+            self.threads_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.threads_label.setStyleSheet(f"color: {color};")
+            
+        # Description label
+        if hasattr(self, 'parallel_desc_label'):
+            self.parallel_desc_label.setEnabled(enabled)
+            color = "gray" if enabled else "#606060"
+            self.parallel_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
+        
+        if enabled:
+            # Set environment variable
+            os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var)
+        else:
+            # Set to 1 worker (sequential) when disabled
+            os.environ["EXTRACTION_WORKERS"] = "1"
+        
+        # Ensure executor reflects current worker setting
+        try:
+            self._ensure_executor()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+# DEPRECATED Tkinter function - not used in PySide6 version
+# def _setup_provider_combobox_bindings(self):
+#     """Setup bindings for OpenRouter provider combobox with autocomplete"""
+#     try:
+#         # Bind to key release events for live filtering and autofill
+#         self.openrouter_provider_combo.bind('<KeyRelease>', self._on_provider_combo_keyrelease)
+#         # Commit best match on Enter
+#         self.openrouter_provider_combo.bind('<Return>', self._commit_provider_autocomplete)
+#         # Also bind to FocusOut to validate selection
+#         self.openrouter_provider_combo.bind('<FocusOut>', lambda e: self._validate_provider_selection())
+#     except Exception:
+#         pass  # Silently fail if combo doesn't exist
+
+# DEPRECATED Tkinter function - not used in PySide6 version  
+# def _on_provider_combo_keyrelease(self, event=None):
+#     """Provider combobox type-to-search with autocomplete (reuses model dropdown logic)"""
+#     try:
+#         combo = self.openrouter_provider_combo
+#         typed = combo.get()
+#         prev = getattr(self, '_provider_prev_text', '')
+#         keysym = (getattr(event, 'keysym', '') or '').lower()
+# 
+#         # Navigation/commit keys: don't interfere
+#         if keysym in {'up', 'down', 'left', 'right', 'return', 'escape', 'tab'}:
+#             return
+# 
+#         # Ensure we have the full source list
+#         source = getattr(self, '_provider_all_values', [])
+#         if not source:
+#             return
+# 
+#         # Compute match set
+#         first_match = None
+#         if typed:
+#             lowered = typed.lower()
+#             # Prefix matches first
+#             pref = [v for v in source if v.lower().startswith(lowered)]
+#             # Contains matches second
+#             cont = [v for v in source if lowered in v.lower() and v not in pref]
+#             if pref:
+#                 first_match = pref[0]
+#             elif cont:
+#                 first_match = cont[0]
+# 
+#         # Decide whether to autofill
+#         grew = len(typed) > len(prev) and typed.startswith(prev)
+#         is_deletion = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
+#         try:
+#             at_end = combo.index(tk.INSERT) == len(typed)
+#         except Exception:
+#             at_end = True
+#         try:
+#             has_selection = combo.selection_present()
+#         except Exception:
+#             has_selection = False
+# 
+#         # Gentle autofill only when appending at the end
+#         do_autofill_text = first_match is not None and grew and at_end and not has_selection and not is_deletion
+# 
+#         if do_autofill_text:
+#             # Only complete if it's a true prefix match
+#             if first_match.lower().startswith(typed.lower()) and first_match != typed:
+#                 combo.set(first_match)
+#                 try:
+#                     combo.icursor(len(typed))
+#                     combo.selection_range(len(typed), len(first_match))
+#                 except Exception:
+#                     pass
+# 
+#         # If we have a match and the dropdown is open, scroll/highlight it
+#         if first_match:
+#             self._scroll_provider_list_to_value(first_match)
+# 
+#         # Remember current text for next event
+#         self._provider_prev_text = typed
+#     except Exception:
+#         pass  # Silently handle errors
+
+def _commit_provider_autocomplete(self, event=None):
+    """On Enter, commit to the best matching provider"""
+    try:
+        combo = self.openrouter_provider_combo
+        typed = combo.get()
+        source = getattr(self, '_provider_all_values', [])
+        match = None
+        if typed:
+            lowered = typed.lower()
+            pref = [v for v in source if v.lower().startswith(lowered)]
+            cont = [v for v in source if lowered in v.lower()] if not pref else []
+            match = pref[0] if pref else (cont[0] if cont else None)
+        if match and match != typed:
+            combo.set(match)
+        # Move cursor to end and clear any selection
+        try:
+            combo.icursor('end')
+            try:
+                combo.selection_clear()
+            except Exception:
+                combo.selection_range(0, 0)
+        except Exception:
+            pass
+        # Update prev text
+        self._provider_prev_text = combo.get()
+    except Exception:
+        pass
+    return "break"
+
+def _scroll_provider_list_to_value(self, value: str):
+    """If the provider combobox dropdown is open, scroll to and highlight the given value"""
+    try:
+        values = getattr(self, '_provider_all_values', [])
+        if value not in values:
+            return
+        index = values.index(value)
+        # Resolve the internal popdown listbox for this combobox
+        popdown = self.openrouter_provider_combo.tk.eval(
+            f'ttk::combobox::PopdownWindow {self.openrouter_provider_combo._w}'
+        )
+        listbox = f'{popdown}.f.l'
+        tkobj = self.openrouter_provider_combo.tk
+        # Scroll and highlight the item
+        tkobj.call(listbox, 'see', index)
+        tkobj.call(listbox, 'selection', 'clear', 0, 'end')
+        tkobj.call(listbox, 'selection', 'set', index)
+        tkobj.call(listbox, 'activate', index)
+    except Exception:
+        pass  # Dropdown may be closed or internals unavailable
+
+def _validate_provider_selection(self):
+    """Validate that the provider selection is from the list or default to Auto"""
+    try:
+        typed = self.openrouter_preferred_provider_var
+        source = getattr(self, '_provider_all_values', [])
+        if typed and typed not in source:
+            # Find closest match or default to Auto
+            lowered = typed.lower()
+            matches = [v for v in source if lowered in v.lower()]
+            if matches:
+                self.openrouter_preferred_provider_var = matches[0]
+            else:
+                self.openrouter_preferred_provider_var = 'Auto'
+    except Exception:
+        pass
+    
+def create_ai_hunter_section(self, parent_frame):
+    """Create the AI Hunter configuration section (Qt version)"""
+    from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton
+    
+    # Config row
+    config_w = QWidget()
+    config_h = QHBoxLayout(config_w)
+    config_h.setContentsMargins(20, 10, 0, 5)
+    
+    # Status label
+    self.ai_hunter_status_label = QLabel(self._get_ai_hunter_status_text())
+    self.ai_hunter_status_label.setStyleSheet("font-size: 10pt;")
+    config_h.addWidget(self.ai_hunter_status_label)
+    
+    config_h.addSpacing(10)
+    
+    # Configure button
+    config_btn = QPushButton("⚙️ Configure AI Hunter")
+    config_btn.clicked.connect(lambda: self.show_ai_hunter_settings())
+    config_h.addWidget(config_btn)
+    config_h.addStretch()
+    
+    # Add to parent layout (parent_frame should be a QVBoxLayout)
+    if hasattr(parent_frame, 'layout'):
+        # parent_frame is a QWidget, get its layout
+        layout = parent_frame.layout()
+        if layout:
+            layout.addWidget(config_w)
+    elif hasattr(parent_frame, 'addWidget'):
+        # parent_frame is a QLayout
+        parent_frame.addWidget(config_w)
+    
+    # Info text
+    info_lbl = QLabel("AI Hunter uses multiple detection methods to identify duplicate content\nwith configurable thresholds and detection modes")
+    info_lbl.setStyleSheet("color: gray; font-size: 10pt;")
+    info_lbl.setContentsMargins(20, 0, 0, 10)
+    if hasattr(parent_frame, 'layout'):
+        # parent_frame is a QWidget, get its layout
+        layout = parent_frame.layout()
+        if layout:
+            layout.addWidget(info_lbl)
+    elif hasattr(parent_frame, 'addWidget'):
+        # parent_frame is a QLayout
+        parent_frame.addWidget(info_lbl)
+
+def _get_ai_hunter_status_text(self):
+    """Get status text for AI Hunter configuration"""
+    ai_config = self.config.get('ai_hunter_config', {})
+    
+    # AI Hunter is shown when the detection mode is set to 'ai-hunter' or 'cascading'
+    if self.duplicate_detection_mode_var not in ['ai-hunter', 'cascading']:
+        return "AI Hunter: Not Selected"
+    
+    if not ai_config.get('enabled', True):
+        return "AI Hunter: Disabled in Config"
+    
+    mode_text = {
+        'single_method': 'Single Method',
+        'multi_method': 'Multi-Method',
+        'weighted_average': 'Weighted Average'
+    }
+    
+    mode = mode_text.get(ai_config.get('detection_mode', 'multi_method'), 'Unknown')
+    thresholds = ai_config.get('thresholds', {})
+    
+    if thresholds:
+        avg_threshold = sum(thresholds.values()) / len(thresholds)
+    else:
+        avg_threshold = 85
+    
+    return f"AI Hunter: {mode} mode, Avg threshold: {int(avg_threshold)}%"
+
+def show_ai_hunter_settings(self):
+    """Open AI Hunter configuration window (PySide6)"""
+    try:
+        def on_config_saved():
+            # Save the entire configuration (without showing message box)
+            self.save_config(show_message=False)
+            # Update status label if it still exists
+            if hasattr(self, 'ai_hunter_status_label'):
+                try:
+                    if not self.ai_hunter_status_label.isHidden():
+                        self.ai_hunter_status_label.setText(self._get_ai_hunter_status_text())
+                except RuntimeError:
+                    # Widget has been destroyed
+                    pass
+            if hasattr(self, 'ai_hunter_enabled_var'):
+                self.ai_hunter_enabled_var = self.config.get('ai_hunter_config', {}).get('enabled', True)
+                
+            # Sync main target language dropdown if it changed (two-way sync)
+            if 'output_language' in self.config and hasattr(self, 'update_target_language'):
+                # Call update_target_language with the new value
+                # This function handles the logic to update UI only if needed
+                self.update_target_language(self.config['output_language'])
+        
+        # Store reference to prevent garbage collection
+        self._ai_hunter_gui = AIHunterConfigGUI(None, self.config, on_config_saved)
+        self._ai_hunter_gui.show_ai_hunter_config()
+    except Exception as e:
+        print(f"Error opening AI Hunter settings: {e}")
+        import traceback
+        traceback.print_exc()
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtGui import QIcon
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Failed to open AI Hunter settings:\n{str(e)}")
+        msg_box.setIcon(QMessageBox.Critical)
+        try:
+            msg_box.setWindowIcon(QIcon("halgakos.ico"))
+        except Exception:
+            pass
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+
+def configure_image_only_title_tag_prompt(self):
+    """Configure the isolated prompt for image-only document titles."""
+    from PySide6.QtWidgets import QApplication
+
+    if (
+        hasattr(self, '_image_only_title_tag_prompt_dialog')
+        and self._image_only_title_tag_prompt_dialog is not None
+    ):
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(
+                    self._image_only_title_tag_prompt_dialog,
+                    duration=220,
+                )
+            except Exception:
+                self._image_only_title_tag_prompt_dialog.show()
+            self._image_only_title_tag_prompt_dialog.raise_()
+            self._image_only_title_tag_prompt_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._image_only_title_tag_prompt_dialog = None
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Configure Image-Only Title Prompt")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    screen = QApplication.primaryScreen().geometry()
+    dialog.resize(int(screen.width() * 0.40), int(screen.height() * 0.48))
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._image_only_title_tag_prompt_dialog = dialog
+
+    main_layout = QVBoxLayout(dialog)
+    main_layout.setContentsMargins(20, 20, 20, 20)
+
+    title = QLabel("Image-Only HTML/XHTML Title Prompt")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    main_layout.addWidget(title)
+
+    desc = QLabel(
+        "This system prompt is used only when an HTML/XHTML chapter contains "
+        "image tags but no meaningful body text and has a non-empty <title> "
+        "tag that needs translation. The request contains only that existing "
+        "<title>...</title> tag. It is never used for normal text or mixed "
+        "chapters, visible headings, metadata, OCR, image filenames, or other "
+        "translation requests."
+    )
+    desc.setStyleSheet("color: gray; font-size: 10pt;")
+    desc.setWordWrap(True)
+    main_layout.addWidget(desc)
+
+    placeholder_hint = QLabel(
+        "Available placeholder: {target_lang}. The active profile, glossary, "
+        "memory, chunk prompt, and assistant prefill are not added to this request."
+    )
+    placeholder_hint.setStyleSheet("color: #9ca3af; font-size: 9pt;")
+    placeholder_hint.setWordWrap(True)
+    main_layout.addWidget(placeholder_hint)
+    main_layout.addSpacing(10)
+
+    prompt_box = QGroupBox("Dedicated System Prompt")
+    prompt_layout = QVBoxLayout(prompt_box)
+    prompt_text = QTextEdit()
+    prompt_text.setAcceptRichText(False)
+    prompt_text.setPlainText(str(getattr(
+        self,
+        'image_only_title_tag_system_prompt',
+        self.config.get(
+            'image_only_title_tag_system_prompt',
+            DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT,
+        ),
+    ) or DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT))
+    prompt_layout.addWidget(prompt_text)
+    main_layout.addWidget(prompt_box, 1)
+
+    button_layout = QHBoxLayout()
+
+    def save_prompt():
+        configured_prompt = prompt_text.toPlainText().strip()
+        if not configured_prompt:
+            configured_prompt = DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
+            prompt_text.setPlainText(configured_prompt)
+        self.image_only_title_tag_system_prompt = configured_prompt
+        self.config['image_only_title_tag_system_prompt'] = configured_prompt
+        try:
+            import large_env
+            large_env.set_env(
+                'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT',
+                configured_prompt,
+            )
+        except Exception:
+            os.environ['IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT'] = configured_prompt
+        try:
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        QMessageBox.information(
+            dialog,
+            "Success",
+            "Image-only title prompt saved!",
+        )
+        dialog.hide()
+
+    def reset_prompt():
+        result = QMessageBox.question(
+            dialog,
+            "Reset Prompt",
+            "Reset the image-only title prompt to its default?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result == QMessageBox.Yes:
+            prompt_text.setPlainText(DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT)
+
+    save_btn = QPushButton("Save")
+    save_btn.clicked.connect(save_prompt)
+    button_layout.addWidget(save_btn)
+
+    reset_btn = QPushButton("Reset to Default")
+    reset_btn.clicked.connect(reset_prompt)
+    button_layout.addWidget(reset_btn)
+
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dialog.hide)
+    button_layout.addWidget(cancel_btn)
+    main_layout.addLayout(button_layout)
+
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
+
+def configure_translation_chunk_prompt(self):
+    """Configure the prompt template for translation chunks (PySide6)"""
+    from PySide6.QtWidgets import (
+        QButtonGroup,
+        QCheckBox,
+        QDialog,
+        QDoubleSpinBox,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QMessageBox,
+        QPushButton,
+        QRadioButton,
+        QTextEdit,
+        QVBoxLayout,
+        QWidget,
+    )
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
+
+    # Reuse existing dialog
+    if hasattr(self, '_chunk_prompt_dialog') and self._chunk_prompt_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._chunk_prompt_dialog, duration=220)
+            except Exception:
+                self._chunk_prompt_dialog.show()
+            self._chunk_prompt_dialog.raise_()
+            self._chunk_prompt_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._chunk_prompt_dialog = None
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Configure Chunk Prompt")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    # Use screen ratios for sizing
+    from PySide6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.36)  # 36% of screen width
+    height = int(screen.height() * 0.56)  # 56% of screen height
+    dialog.resize(width, height)
+
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+
+    # Hide on close
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._chunk_prompt_dialog = dialog
+    
+    main_layout = QVBoxLayout(dialog)
+    main_layout.setContentsMargins(20, 20, 20, 20)
+    
+    # Title
+    title = QLabel("Translation Chunk Prompt Template")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    main_layout.addWidget(title)
+    
+    desc = QLabel("Configure how chunks are presented to the AI when chapters are split.")
+    desc.setStyleSheet("color: gray; font-size: 10pt;")
+    main_layout.addWidget(desc)
+    main_layout.addSpacing(10)
+
+    # Enable + role controls
+    options_box = QGroupBox("Chunk Prompt Options")
+    options_box.setStyleSheet("""
+        QCheckBox {
+            color: white;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #5a9fd4;
+            border-radius: 2px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #5a9fd4;
+            border-color: #5a9fd4;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QCheckBox:disabled {
+            color: #666666;
+        }
+        QCheckBox::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+        QRadioButton {
+            color: white;
+            spacing: 5px;
+        }
+        QRadioButton::indicator {
+            width: 13px;
+            height: 13px;
+            border: 2px solid #5a9fd4;
+            border-radius: 7px;
+            background-color: #2d2d2d;
+        }
+        QRadioButton::indicator:checked {
+            background-color: #5a9fd4;
+            border: 2px solid #5a9fd4;
+        }
+        QRadioButton::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QRadioButton:disabled {
+            color: #666666;
+        }
+        QRadioButton::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+    """)
+    options_v = QVBoxLayout(options_box)
+
+    enable_cb = self._create_styled_checkbox("Enable chunk prompt")
+    enable_cb.setToolTip(
+        "Adds the chunk prompt template when a chapter is split into multiple chunks. "
+        "The selected Send as option controls whether it is sent as system, assistant, or user content."
+    )
+    enable_cb.setChecked(bool(getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False))))
+    self.enable_translation_chunk_prompt_checkbox = enable_cb
+    options_v.addWidget(enable_cb)
+
+    previous_row = QWidget()
+    previous_h = QHBoxLayout(previous_row)
+    previous_h.setContentsMargins(0, 0, 0, 0)
+    previous_h.setSpacing(8)
+
+    include_previous_cb = self._create_styled_checkbox("Include previous chunk")
+    include_previous_cb.setToolTip(
+        "Adds context from the immediately previous chunk. "
+        "Uses the last N HTML tags when tags are found; otherwise falls back to the last N non-empty lines."
+    )
+    include_previous_cb.setChecked(bool(getattr(self, 'include_previous_chunk_var', self.config.get('include_previous_chunk', False))))
+    self.include_previous_chunk_checkbox = include_previous_cb
+    previous_h.addWidget(include_previous_cb)
+    previous_h.addSpacing(8)
+    previous_limit_label = QLabel("HTML tags or lines:")
+    previous_limit_label.setToolTip(
+        "<p style='white-space:normal; width:260px;'>"
+        "The previous chunk context limit. HTML tags are preferred; plain lines are used only when no HTML tags are found."
+        "</p>"
+    )
+    previous_h.addWidget(previous_limit_label)
+
+    previous_limit_spin = QDoubleSpinBox()
+    previous_limit_spin.setRange(-1, 1000)
+    previous_limit_spin.setSingleStep(1)
+    previous_limit_spin.setDecimals(0)
+    previous_limit_spin.setToolTip(
+        "<p style='white-space:normal; width:320px;'>"
+        "How much previous chunk context to include. Uses the last N HTML tags, "
+        "or the last N non-empty lines if no HTML tags are found."
+        "</p>"
+    )
+    previous_limit_spin.setFixedWidth(80)
+    previous_limit_spin.setFocusPolicy(Qt.StrongFocus)
+    try:
+        self._disable_spinbox_mousewheel(previous_limit_spin)
+    except Exception:
+        pass
+    try:
+        previous_limit = int(getattr(self, 'previous_chunk_context_limit_var', self.config.get('previous_chunk_context_limit', 3)))
+    except Exception:
+        previous_limit = 3
+    previous_limit_spin.setValue(max(-1, previous_limit))
+    self.previous_chunk_context_limit_spin = previous_limit_spin
+    previous_h.addWidget(previous_limit_spin)
+    previous_limit_hint = QLabel("-1 = entire previous chunk")
+    previous_limit_hint.setStyleSheet("color: gray; font-size: 9pt;")
+    previous_limit_hint.setToolTip(
+        "<p style='white-space:normal; width:260px;'>"
+        "Set the limit to -1 to include the full immediately previous chunk as memory context."
+        "</p>"
+    )
+    previous_h.addWidget(previous_limit_hint)
+    previous_h.addStretch()
+    options_v.addWidget(previous_row)
+
+    role_row = QWidget()
+    role_h = QHBoxLayout(role_row)
+    role_h.setContentsMargins(0, 0, 0, 0)
+    role_h.setSpacing(14)
+    role_h.addWidget(QLabel("Send as:"))
+
+    role_group = QButtonGroup(dialog)
+    role_buttons = {}
+    dialog._translation_chunk_prompt_role_group = role_group
+    dialog._translation_chunk_prompt_role_buttons = role_buttons
+    current_role = str(
+        getattr(self, 'translation_chunk_prompt_role_var', self.config.get('translation_chunk_prompt_role', 'assistant'))
+        or 'assistant'
+    ).strip().lower()
+    if current_role not in {'system', 'assistant', 'user'}:
+        current_role = 'assistant'
+    for role, label in (
+        ('system', 'System'),
+        ('assistant', 'Assistant'),
+        ('user', 'User'),
+    ):
+        rb = QRadioButton(label)
+        rb.setChecked(role == current_role)
+        rb.toggled.connect(lambda checked, role=role: setattr(self, 'translation_chunk_prompt_role_var', role) if checked else None)
+        role_group.addButton(rb)
+        role_buttons[role] = rb
+        role_h.addWidget(rb)
+    role_h.addStretch()
+    options_v.addWidget(role_row)
+    main_layout.addWidget(options_box)
+    
+    # Instructions
+    instructions_box = QGroupBox("Available Placeholders")
+    instructions_v = QVBoxLayout(instructions_box)
+    
+    placeholders = [
+        ("{chunk_idx}", "Current chunk number (1-based)"),
+        ("{total_chunks}", "Total number of chunks"),
+    ]
+    
+    for placeholder, description in placeholders:
+        placeholder_lbl = QLabel(f"• <b>{placeholder}:</b> {description}")
+        placeholder_lbl.setStyleSheet("font-family: Courier; font-size: 10pt;")
+        instructions_v.addWidget(placeholder_lbl)
+    
+    main_layout.addWidget(instructions_box)
+    
+    # Prompt input
+    prompt_box = QGroupBox("Chunk Prompt Template")
+    prompt_v = QVBoxLayout(prompt_box)
+    
+    chunk_prompt_text = QTextEdit()
+    chunk_prompt_text.setAcceptRichText(False)
+    chunk_prompt_text.setPlainText(self.translation_chunk_prompt)
+    prompt_v.addWidget(chunk_prompt_text)
+    
+    main_layout.addWidget(prompt_box)
+    
+    # Example
+    example_box = QGroupBox("Example Output")
+    example_v = QVBoxLayout(example_box)
+    
+    example_desc = QLabel("With chunk 2 of 5, the prompt would be:")
+    example_v.addWidget(example_desc)
+    
+    example_label = QLabel()
+    example_label.setStyleSheet("color: #5a9fd4; font-family: Courier; font-size: 9pt; font-style: italic;")
+    example_label.setWordWrap(True)
+    example_v.addWidget(example_label)
+    
+    def update_example():
+        try:
+            template = chunk_prompt_text.toPlainText()
+            example = template.replace('{chunk_idx}', '2').replace('{total_chunks}', '5').replace('{chunk_html}', '')
+            if not enable_cb.isChecked():
+                example = "[Chunk prompt disabled]"
+            if include_previous_cb.isChecked():
+                previous_note = f"[Previous chunk memory included: {previous_limit_spin.value()} tag(s)/line(s)]"
+                example = f"{previous_note}\n{example}" if example else previous_note
+            display_text = example[:200] + "..." if len(example) > 200 else example
+            example_label.setText(display_text)
+        except Exception:
+            example_label.setText("[Invalid template]")
+    
+    chunk_prompt_text.textChanged.connect(update_example)
+    enable_cb.toggled.connect(lambda _checked: update_example())
+    include_previous_cb.toggled.connect(lambda _checked: update_example())
+    previous_limit_spin.valueChanged.connect(lambda _value: update_example())
+    update_example()
+    
+    main_layout.addWidget(example_box)
+    
+    # Buttons
+    button_layout = QHBoxLayout()
+    
+    def save_chunk_prompt():
+        self.translation_chunk_prompt = chunk_prompt_text.toPlainText().strip()
+        self.enable_translation_chunk_prompt_var = bool(enable_cb.isChecked())
+        self.include_previous_chunk_var = bool(include_previous_cb.isChecked())
+        self.previous_chunk_context_limit_var = int(previous_limit_spin.value())
+        selected_role = next((role for role, rb in role_buttons.items() if rb.isChecked()), 'assistant')
+        self.translation_chunk_prompt_role_var = selected_role
+        self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
+        self.config['enable_translation_chunk_prompt'] = self.enable_translation_chunk_prompt_var
+        self.config['include_previous_chunk'] = self.include_previous_chunk_var
+        self.config['previous_chunk_context_limit'] = self.previous_chunk_context_limit_var
+        self.config['translation_chunk_prompt_role'] = self.translation_chunk_prompt_role_var
+        os.environ['ENABLE_TRANSLATION_CHUNK_PROMPT'] = '1' if self.enable_translation_chunk_prompt_var else '0'
+        os.environ['INCLUDE_PREVIOUS_CHUNK'] = '1' if self.include_previous_chunk_var else '0'
+        os.environ['PREVIOUS_CHUNK_CONTEXT_LIMIT'] = str(self.previous_chunk_context_limit_var)
+        os.environ['TRANSLATION_CHUNK_PROMPT_ROLE'] = self.translation_chunk_prompt_role_var
+        os.environ['TRANSLATION_CHUNK_PROMPT'] = self.translation_chunk_prompt
+        try:
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        QMessageBox.information(dialog, "Success", "Translation chunk prompt settings saved!")
+        dialog.hide()
+    
+    def reset_chunk_prompt():
+        result = QMessageBox.question(dialog, "Reset Prompt", "Reset to default chunk prompt?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if result == QMessageBox.Yes:
+            chunk_prompt_text.setPlainText(self.default_translation_chunk_prompt)
+            enable_cb.setChecked(False)
+            include_previous_cb.setChecked(False)
+            previous_limit_spin.setValue(3)
+            role_buttons['assistant'].setChecked(True)
+            self.translation_chunk_prompt_role_var = 'assistant'
+            update_example()
+    
+    save_btn = QPushButton("Save")
+    save_btn.clicked.connect(save_chunk_prompt)
+    button_layout.addWidget(save_btn)
+    
+    reset_btn = QPushButton("Reset to Default")
+    reset_btn.clicked.connect(reset_chunk_prompt)
+    button_layout.addWidget(reset_btn)
+    
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dialog.hide)
+    button_layout.addWidget(cancel_btn)
+    
+    main_layout.addLayout(button_layout)
+    
+    # Show with fade
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
+def _open_gtool_scan_dialog(self):
+    """Dialog to configure the GTool image scan prompts."""
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QTextEdit, QHBoxLayout, QMessageBox
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
+
+    _DEFAULT_SYS = (
+        "You are an image analyst. Does this image contain readable text "
+        "(Japanese, Chinese, Korean, or any language)? Reply with only YES or NO."
+    )
+    _DEFAULT_USR = ""
+
+    # Reuse existing dialog
+    if hasattr(self, '_gtool_scan_dialog') and self._gtool_scan_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._gtool_scan_dialog, duration=220)
+            except Exception:
+                self._gtool_scan_dialog.show()
+            self._gtool_scan_dialog.raise_()
+            self._gtool_scan_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._gtool_scan_dialog = None
+
+    # Initialize vars from config if needed
+    if not hasattr(self, 'gtool_filter_user_prompt_var'):
+        self.gtool_filter_user_prompt_var = self.config.get('gtool_filter_user_prompt', _DEFAULT_SYS)
+    if not hasattr(self, 'gtool_scan_user_prompt_var'):
+        self.gtool_scan_user_prompt_var = self.config.get('gtool_scan_user_prompt', _DEFAULT_USR)
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("GTool Image Scan Prompts")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    dialog.resize(520, 450)
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._gtool_scan_dialog = dialog
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(20, 20, 20, 20)
+
+    title = QLabel("🎮 GTool Image Scan Prompts")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    layout.addWidget(title)
+
+    desc = QLabel(
+        "Configure the prompts sent with each game image to determine\n"
+        "if it contains translatable text. The AI should respond YES or NO."
+    )
+    desc.setStyleSheet("color: gray; font-size: 10pt;")
+    layout.addWidget(desc)
+    layout.addSpacing(8)
+
+    # System prompt
+    sys_label = QLabel("System Prompt:")
+    sys_label.setStyleSheet("font-size: 10pt; font-weight: bold;")
+    layout.addWidget(sys_label)
+
+    sys_edit = QTextEdit()
+    sys_edit.setPlaceholderText(_DEFAULT_SYS)
+    sys_edit.setFixedHeight(80)
+    sys_edit.setStyleSheet("font-size: 10pt; border: 1px solid #555; border-radius: 3px;")
+    sys_edit.setPlainText(self.gtool_filter_user_prompt_var)
+    layout.addWidget(sys_edit)
+
+    # User prompt
+    usr_label = QLabel("User Prompt:")
+    usr_label.setStyleSheet("font-size: 10pt; font-weight: bold;")
+    layout.addWidget(usr_label)
+
+    usr_desc = QLabel("Optional. The image is automatically attached to this message.")
+    usr_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    layout.addWidget(usr_desc)
+
+    usr_edit = QTextEdit()
+    usr_edit.setPlaceholderText("(leave empty — image is attached automatically)")
+    usr_edit.setFixedHeight(60)
+    usr_edit.setStyleSheet("font-size: 10pt; border: 1px solid #555; border-radius: 3px;")
+    usr_edit.setPlainText(self.gtool_scan_user_prompt_var)
+    layout.addWidget(usr_edit)
+
+    layout.addSpacing(10)
+
+    # Buttons: Reset | stretch | Save | Cancel
+    btn_row = QHBoxLayout()
+
+    btn_reset = QPushButton("Reset to Default")
+    btn_reset.setFixedWidth(130)
+    def _reset_prompts():
+        reply = QMessageBox.question(
+            dialog, "Reset Prompts",
+            "Reset both prompts to defaults?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            sys_edit.setPlainText(_DEFAULT_SYS)
+            usr_edit.setPlainText(_DEFAULT_USR)
+    btn_reset.clicked.connect(_reset_prompts)
+    btn_row.addWidget(btn_reset)
+
+    btn_row.addStretch()
+
+    btn_save = QPushButton("Save")
+    btn_save.setFixedWidth(80)
+    def _save_prompts():
+        self.gtool_filter_user_prompt_var = sys_edit.toPlainText()
+        self.config['gtool_filter_user_prompt'] = self.gtool_filter_user_prompt_var
+        self.gtool_scan_user_prompt_var = usr_edit.toPlainText()
+        self.config['gtool_scan_user_prompt'] = self.gtool_scan_user_prompt_var
+        dialog.hide()
+    btn_save.clicked.connect(_save_prompts)
+    btn_row.addWidget(btn_save)
+
+    btn_cancel = QPushButton("Cancel")
+    btn_cancel.setFixedWidth(80)
+    btn_cancel.clicked.connect(dialog.hide)
+    btn_row.addWidget(btn_cancel)
+
+    layout.addLayout(btn_row)
+
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
+def configure_image_chunk_prompt(self):
+    """Configure the prompt template for image chunks (PySide6)"""
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QGroupBox, QWidget, QMessageBox
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
+
+    # Reuse existing dialog
+    if hasattr(self, '_image_chunk_prompt_dialog') and self._image_chunk_prompt_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._image_chunk_prompt_dialog, duration=220)
+            except Exception:
+                self._image_chunk_prompt_dialog.show()
+            self._image_chunk_prompt_dialog.raise_()
+            self._image_chunk_prompt_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._image_chunk_prompt_dialog = None
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Configure Image Chunk Prompt")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    # Use screen ratios for sizing
+    from PySide6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.36)
+    height = int(screen.height() * 0.72)
+    dialog.resize(width, height)
+
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+
+    # Hide on close
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._image_chunk_prompt_dialog = dialog
+    
+    main_layout = QVBoxLayout(dialog)
+    main_layout.setContentsMargins(20, 20, 20, 20)
+    
+    # Title
+    title = QLabel("Image Chunk Context Template")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    main_layout.addWidget(title)
+    
+    desc = QLabel("Configure the context provided when tall images are split into chunks.")
+    desc.setStyleSheet("color: gray; font-size: 10pt;")
+    main_layout.addWidget(desc)
+    main_layout.addSpacing(10)
+    
+    # Instructions
+    instructions_box = QGroupBox("Available Placeholders")
+    instructions_v = QVBoxLayout(instructions_box)
+    
+    placeholders = [
+        ("{chunk_idx}", "Current chunk number (1-based)"),
+        ("{total_chunks}", "Total number of chunks"),
+        ("{context}", "Additional context (e.g., chapter info)"),
+        ("{chunk_count}", "Number of OCR chunks with text"),
+        ("{ocr_overlap_instruction}", "Remove OCR-only duplicated text caused by the overlapping pixels between adjacent image chunks."),
+        ("{ocr_text}", "Combined OCR text (translation prompt only)")
+    ]
+    
+    for placeholder, description in placeholders:
+        placeholder_lbl = QLabel(f"• <b>{placeholder}:</b> {description}")
+        placeholder_lbl.setStyleSheet("font-family: Courier; font-size: 10pt;")
+        instructions_v.addWidget(placeholder_lbl)
+    
+    main_layout.addWidget(instructions_box)
+    
+    # Prompt input
+    prompt_box = QGroupBox("Image Chunk Prompt Template")
+    prompt_v = QVBoxLayout(prompt_box)
+    
+    image_chunk_prompt_text = QTextEdit()
+    image_chunk_prompt_text.setAcceptRichText(False)
+    image_chunk_prompt_text.setPlainText(self.image_chunk_prompt)
+    prompt_v.addWidget(image_chunk_prompt_text)
+    
+    main_layout.addWidget(prompt_box)
+
+    combined_box = QGroupBox("Vision OCR Combined Context Prompt")
+    combined_v = QVBoxLayout(combined_box)
+
+    vision_ocr_combined_context_prompt_text = QTextEdit()
+    vision_ocr_combined_context_prompt_text.setAcceptRichText(False)
+    vision_ocr_combined_context_prompt_text.setFixedHeight(80)
+    vision_ocr_combined_context_prompt_text.setPlainText(
+        getattr(self, 'vision_ocr_combined_context_prompt', getattr(self, 'default_vision_ocr_combined_context_prompt', ''))
+    )
+    combined_v.addWidget(vision_ocr_combined_context_prompt_text)
+    main_layout.addWidget(combined_box)
+
+    translation_box = QGroupBox("Vision OCR Translation User Prompt")
+    translation_v = QVBoxLayout(translation_box)
+
+    vision_ocr_translation_user_prompt_text = QTextEdit()
+    vision_ocr_translation_user_prompt_text.setAcceptRichText(False)
+    vision_ocr_translation_user_prompt_text.setFixedHeight(130)
+    vision_ocr_translation_user_prompt_text.setPlainText(
+        getattr(self, 'vision_ocr_translation_user_prompt', getattr(self, 'default_vision_ocr_translation_user_prompt', ''))
+    )
+    translation_v.addWidget(vision_ocr_translation_user_prompt_text)
+    main_layout.addWidget(translation_box)
+    
+    # Example
+    example_box = QGroupBox("Example Output")
+    example_v = QVBoxLayout(example_box)
+    
+    example_desc = QLabel("With chunk 3 of 7 and chapter context, the prompt would be:")
+    example_v.addWidget(example_desc)
+    
+    example_label = QLabel()
+    example_label.setStyleSheet("color: #5a9fd4; font-family: Courier; font-size: 9pt; font-style: italic;")
+    example_label.setWordWrap(True)
+    example_v.addWidget(example_label)
+    
+    def update_image_example():
+        try:
+            template = image_chunk_prompt_text.toPlainText()
+            example = template.replace('{chunk_idx}', '3').replace('{total_chunks}', '7').replace('{context}', 'Chapter 5: The Great Battle')
+            combined_template = vision_ocr_combined_context_prompt_text.toPlainText()
+            combined_example = (
+                combined_template
+                .replace('{chunk_count}', '7')
+                .replace('{total_chunks}', '7')
+                .replace('{context}', 'Chapter 5: The Great Battle')
+                .replace('{ocr_overlap_instruction}', 'Remove OCR-only duplicated text caused by the overlapping pixels between adjacent image chunks.')
+            )
+            translation_template = vision_ocr_translation_user_prompt_text.toPlainText()
+            translation_example = (
+                translation_template
+                .replace('{context}', combined_example)
+                .replace('{ocr_text}', 'Sample OCR text...')
+            )
+            example_label.setText(
+                f"Chunk context:\n{example}\n\nVision OCR final user prompt:\n{translation_example}"
+            )
+        except Exception:
+            example_label.setText("[Invalid template]")
+    
+    image_chunk_prompt_text.textChanged.connect(update_image_example)
+    vision_ocr_combined_context_prompt_text.textChanged.connect(update_image_example)
+    vision_ocr_translation_user_prompt_text.textChanged.connect(update_image_example)
+    update_image_example()
+    
+    main_layout.addWidget(example_box)
+    
+    # Buttons
+    button_layout = QHBoxLayout()
+    
+    def save_image_chunk_prompt():
+        self.image_chunk_prompt = image_chunk_prompt_text.toPlainText().strip()
+        self.vision_ocr_combined_context_prompt = vision_ocr_combined_context_prompt_text.toPlainText().strip()
+        self.vision_ocr_translation_user_prompt = vision_ocr_translation_user_prompt_text.toPlainText().strip()
+        self.config['image_chunk_prompt'] = self.image_chunk_prompt
+        self.config['vision_ocr_combined_context_prompt'] = self.vision_ocr_combined_context_prompt
+        self.config['vision_ocr_translation_user_prompt'] = self.vision_ocr_translation_user_prompt
+        QMessageBox.information(dialog, "Success", "Image chunk prompts saved!")
+        dialog.hide()
+    
+    def reset_image_chunk_prompt():
+        result = QMessageBox.question(dialog, "Reset Prompt", "Reset to default image chunk prompt?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if result == QMessageBox.Yes:
+            image_chunk_prompt_text.setPlainText(self.default_image_chunk_prompt)
+            vision_ocr_combined_context_prompt_text.setPlainText(getattr(self, 'default_vision_ocr_combined_context_prompt', ''))
+            vision_ocr_translation_user_prompt_text.setPlainText(getattr(self, 'default_vision_ocr_translation_user_prompt', ''))
+            update_image_example()
+    
+    save_btn = QPushButton("Save")
+    save_btn.clicked.connect(save_image_chunk_prompt)
+    button_layout.addWidget(save_btn)
+    
+    reset_btn = QPushButton("Reset to Default")
+    reset_btn.clicked.connect(reset_image_chunk_prompt)
+    button_layout.addWidget(reset_btn)
+    
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dialog.hide)
+    button_layout.addWidget(cancel_btn)
+    
+    main_layout.addLayout(button_layout)
+    
+    # Show with fade
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
+def configure_vision_ocr_prompt(self):
+    """Configure the OCR-only prompts used by Vision output mode before translation."""
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QMessageBox, QGroupBox
+    from PySide6.QtCore import Qt
+
+    if hasattr(self, '_vision_ocr_prompt_dialog') and self._vision_ocr_prompt_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._vision_ocr_prompt_dialog, duration=220)
+            except Exception:
+                self._vision_ocr_prompt_dialog.show()
+            self._vision_ocr_prompt_dialog.raise_()
+            self._vision_ocr_prompt_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._vision_ocr_prompt_dialog = None
+
+    dialog = QDialog(self)
+    dialog.setWindowTitle("Vision OCR Prompt")
+    dialog.setModal(False)
+    dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+    dialog.resize(760, 620)
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._vision_ocr_prompt_dialog = dialog
+
+    main_layout = QVBoxLayout(dialog)
+    main_layout.setContentsMargins(20, 20, 20, 20)
+
+    title = QLabel("Vision OCR Prompt")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    main_layout.addWidget(title)
+
+    desc = QLabel("Used for the OCR pass in Vision mode. The translated pass still uses the active profile prompt.")
+    desc.setStyleSheet("color: gray; font-size: 10pt;")
+    desc.setWordWrap(True)
+    main_layout.addWidget(desc)
+    main_layout.addSpacing(10)
+
+    system_box = QGroupBox("System Prompt")
+    system_v = QVBoxLayout(system_box)
+    system_text = QTextEdit()
+    system_text.setAcceptRichText(False)
+    system_text.setPlainText(getattr(
+        self,
+        'vision_ocr_prompt',
+        self.config.get('vision_ocr_prompt', getattr(self, 'default_vision_ocr_prompt', ''))
+    ))
+    system_v.addWidget(system_text)
+    main_layout.addWidget(system_box, 2)
+
+    user_box = QGroupBox("User Prompt")
+    user_v = QVBoxLayout(user_box)
+    user_hint = QLabel("Use {context} where chapter/image context or alt text should be inserted. The default keeps it at the end.")
+    user_hint.setStyleSheet("color: gray; font-size: 9pt;")
+    user_hint.setWordWrap(True)
+    user_v.addWidget(user_hint)
+    user_text = QTextEdit()
+    user_text.setAcceptRichText(False)
+    user_text.setPlainText(getattr(
+        self,
+        'vision_ocr_user_prompt',
+        self.config.get('vision_ocr_user_prompt', getattr(self, 'default_vision_ocr_user_prompt', ''))
+    ))
+    user_v.addWidget(user_text)
+    main_layout.addWidget(user_box, 1)
+
+    button_layout = QHBoxLayout()
+
+    def save_prompt():
+        self.vision_ocr_prompt = system_text.toPlainText().strip()
+        self.vision_ocr_user_prompt = user_text.toPlainText().strip()
+        self.config['vision_ocr_prompt'] = self.vision_ocr_prompt
+        self.config['vision_ocr_user_prompt'] = self.vision_ocr_user_prompt
+        try:
+            self.save_config()
+        except Exception:
+            pass
+        QMessageBox.information(dialog, "Success", "Vision OCR prompts saved!")
+        dialog.hide()
+
+    def reset_prompt():
+        result = QMessageBox.question(dialog, "Reset Prompts", "Reset both Vision OCR prompts to their defaults?",
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if result == QMessageBox.Yes:
+            system_text.setPlainText(getattr(self, 'default_vision_ocr_prompt', ''))
+            user_text.setPlainText(getattr(self, 'default_vision_ocr_user_prompt', ''))
+
+    save_btn = QPushButton("Save")
+    save_btn.clicked.connect(save_prompt)
+    button_layout.addWidget(save_btn)
+
+    reset_btn = QPushButton("Reset to Default")
+    reset_btn.clicked.connect(reset_prompt)
+    button_layout.addWidget(reset_btn)
+
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dialog.hide)
+    button_layout.addWidget(cancel_btn)
+    main_layout.addLayout(button_layout)
+
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
+def configure_image_compression(self):
+    """Open the image compression configuration dialog (PySide6)"""
+    from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
+                                   QCheckBox, QLineEdit, QGroupBox, QRadioButton, QSlider, 
+                                   QWidget, QScrollArea, QMessageBox, QFrame)
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
+
+    # Reuse existing dialog
+    if hasattr(self, '_image_compression_dialog') and self._image_compression_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._image_compression_dialog, duration=220)
+            except Exception:
+                self._image_compression_dialog.show()
+            self._image_compression_dialog.raise_()
+            self._image_compression_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._image_compression_dialog = None
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Image Compression Settings")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    # Use screen ratios for sizing
+    from PySide6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.34)
+    height = int(screen.height() * 0.65)
+    dialog.resize(width, height)
+
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+
+    # Hide on close
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._image_compression_dialog = dialog
+    
+    # Apply global stylesheet for checkboxes and radio buttons
+    checkbox_radio_style = """
+        QCheckBox {
+            color: white;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #5a9fd4;
+            border-radius: 2px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #5a9fd4;
+            border-color: #5a9fd4;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QCheckBox:disabled {
+            color: #666666;
+        }
+        QCheckBox::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+        QRadioButton {
+            color: white;
+            spacing: 5px;
+        }
+        QRadioButton::indicator {
+            width: 13px;
+            height: 13px;
+            border: 2px solid #5a9fd4;
+            border-radius: 7px;
+            background-color: #2d2d2d;
+        }
+        QRadioButton::indicator:checked {
+            background-color: #5a9fd4;
+            border: 2px solid #5a9fd4;
+        }
+        QRadioButton::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QRadioButton:disabled {
+            color: #666666;
+        }
+        QRadioButton::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+    """
+    
+    # Scrollable area
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    
+    scroll_widget = QWidget()
+    scroll_widget.setStyleSheet(checkbox_radio_style)  # Apply stylesheet to scroll widget
+    main_layout = QVBoxLayout(scroll_widget)
+    main_layout.setContentsMargins(20, 20, 20, 20)
+    
+    # Title
+    title = QLabel("🗜️ Image Compression Settings")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    main_layout.addWidget(title)
+    main_layout.addSpacing(15)
+    
+    # Enable compression toggle
+    enable_cb = self._create_styled_checkbox("Enable Image Compression")
+    enable_cb.setChecked(self.config.get('enable_image_compression', False))
+    main_layout.addWidget(enable_cb)
+    main_layout.addSpacing(20)
+    
+    # Container for all compression options
+    compression_options = QWidget()
+    options_layout = QVBoxLayout(compression_options)
+    options_layout.setContentsMargins(0, 0, 0, 0)
+    
+    # Auto Compression Section
+    auto_box = QGroupBox("Automatic Compression")
+    auto_v = QVBoxLayout(auto_box)
+    
+    auto_compress_cb = self._create_styled_checkbox("Auto-compress to fit token limits")
+    auto_compress_cb.setChecked(self.config.get('auto_compress_enabled', True))
+    auto_v.addWidget(auto_compress_cb)
+    
+    token_w = QWidget()
+    token_h = QHBoxLayout(token_w)
+    token_h.setContentsMargins(0, 10, 0, 0)
+    token_h.addWidget(QLabel("Target tokens per image:"))
+    target_tokens_edit = QLineEdit(str(self.config.get('target_image_tokens', 1000)))
+    target_tokens_edit.setFixedWidth(80)
+    token_h.addWidget(target_tokens_edit)
+    token_h.addWidget(QLabel("(Gemini uses ~258 tokens per image)"))
+    token_h.addStretch()
+    auto_v.addWidget(token_w)
+    
+    options_layout.addWidget(auto_box)
+    
+    # Format Selection
+    format_box = QGroupBox("Output Format")
+    format_v = QVBoxLayout(format_box)
+    
+    format_group = QWidget()
+    format_buttons = []
+    
+    formats = [
+        ("Auto (Best quality/size ratio)", "auto"),
+        ("WebP (Best compression)", "webp"),
+        ("JPEG (Wide compatibility)", "jpeg"),
+        ("PNG (Lossless)", "png")
+    ]
+    
+    current_format = self.config.get('image_compression_format', 'auto')
+    for text, value in formats:
+        rb = QRadioButton(text)
+        rb.setProperty("format_value", value)
+        if value == current_format:
+            rb.setChecked(True)
+        format_buttons.append(rb)
+        format_v.addWidget(rb)
+    
+    options_layout.addWidget(format_box)
+    
+    # Quality Settings
+    quality_box = QGroupBox("Quality Settings")
+    quality_v = QVBoxLayout(quality_box)
+    
+    # WebP Quality
+    webp_w = QWidget()
+    webp_h = QHBoxLayout(webp_w)
+    webp_h.addWidget(QLabel("WebP Quality:"))
+    webp_slider = QSlider(Qt.Horizontal)
+    webp_slider.setMinimum(1)
+    webp_slider.setMaximum(100)
+    webp_slider.setValue(self.config.get('webp_quality', 85))
+    webp_slider.setFixedWidth(200)
+    webp_h.addWidget(webp_slider)
+    webp_label = QLabel(f"{webp_slider.value()}%")
+    webp_slider.valueChanged.connect(lambda v: webp_label.setText(f"{v}%"))
+    webp_h.addWidget(webp_label)
+    webp_h.addStretch()
+    quality_v.addWidget(webp_w)
+    
+    # JPEG Quality
+    jpeg_w = QWidget()
+    jpeg_h = QHBoxLayout(jpeg_w)
+    jpeg_h.addWidget(QLabel("JPEG Quality:"))
+    jpeg_slider = QSlider(Qt.Horizontal)
+    jpeg_slider.setMinimum(1)
+    jpeg_slider.setMaximum(100)
+    jpeg_slider.setValue(self.config.get('jpeg_quality', 85))
+    jpeg_slider.setFixedWidth(200)
+    jpeg_h.addWidget(jpeg_slider)
+    jpeg_label = QLabel(f"{jpeg_slider.value()}%")
+    jpeg_slider.valueChanged.connect(lambda v: jpeg_label.setText(f"{v}%"))
+    jpeg_h.addWidget(jpeg_label)
+    jpeg_h.addStretch()
+    quality_v.addWidget(jpeg_w)
+    
+    # PNG Compression
+    png_w = QWidget()
+    png_h = QHBoxLayout(png_w)
+    png_h.addWidget(QLabel("PNG Compression:"))
+    png_slider = QSlider(Qt.Horizontal)
+    png_slider.setMinimum(0)
+    png_slider.setMaximum(9)
+    png_slider.setValue(self.config.get('png_compression', 6))
+    png_slider.setFixedWidth(200)
+    png_h.addWidget(png_slider)
+    png_label = QLabel(f"Level {png_slider.value()}")
+    png_slider.valueChanged.connect(lambda v: png_label.setText(f"Level {v}"))
+    png_h.addWidget(png_label)
+    png_h.addStretch()
+    quality_v.addWidget(png_w)
+    
+    options_layout.addWidget(quality_box)
+    
+    # Resolution Limits
+    resolution_box = QGroupBox("Resolution Limits")
+    resolution_v = QVBoxLayout(resolution_box)
+    
+    max_dim_w = QWidget()
+    max_dim_h = QHBoxLayout(max_dim_w)
+    max_dim_h.addWidget(QLabel("Max dimension (px):"))
+    max_dim_edit = QLineEdit(str(self.config.get('max_image_dimension', 2048)))
+    max_dim_edit.setFixedWidth(80)
+    max_dim_h.addWidget(max_dim_edit)
+    max_dim_h.addWidget(QLabel("(Images larger than this will be resized)"))
+    max_dim_h.addStretch()
+    resolution_v.addWidget(max_dim_w)
+    
+    max_size_w = QWidget()
+    max_size_h = QHBoxLayout(max_size_w)
+    max_size_h.addWidget(QLabel("Max file size (MB):"))
+    max_size_edit = QLineEdit(str(self.config.get('max_image_size_mb', 10)))
+    max_size_edit.setFixedWidth(80)
+    max_size_h.addWidget(max_size_edit)
+    max_size_h.addWidget(QLabel("(Larger files will be compressed)"))
+    max_size_h.addStretch()
+    resolution_v.addWidget(max_size_w)
+    
+    options_layout.addWidget(resolution_box)
+    
+    # Advanced Options
+    advanced_box = QGroupBox("Advanced Options")
+    advanced_v = QVBoxLayout(advanced_box)
+    
+    preserve_transparency_cb = self._create_styled_checkbox("Preserve transparency (PNG/WebP only)")
+    preserve_transparency_cb.setChecked(self.config.get('preserve_transparency', False))
+    advanced_v.addWidget(preserve_transparency_cb)
+    
+    preserve_format_cb = self._create_styled_checkbox("Preserve original image format")
+    preserve_format_cb.setChecked(self.config.get('preserve_original_format', False))
+    advanced_v.addWidget(preserve_format_cb)
+    
+    optimize_ocr_cb = self._create_styled_checkbox("Optimize for OCR (maintain text clarity)")
+    optimize_ocr_cb.setChecked(self.config.get('optimize_for_ocr', True))
+    advanced_v.addWidget(optimize_ocr_cb)
+    
+    progressive_cb = self._create_styled_checkbox("Progressive encoding (JPEG)")
+    progressive_cb.setChecked(self.config.get('progressive_encoding', True))
+    advanced_v.addWidget(progressive_cb)
+    
+    save_compressed_cb = self._create_styled_checkbox("Save compressed images to disk")
+    save_compressed_cb.setChecked(self.config.get('save_compressed_images', False))
+    advanced_v.addWidget(save_compressed_cb)
+    
+    options_layout.addWidget(advanced_box)
+    
+    # Info
+    info = QLabel("💡 Tips:\n• WebP offers the best compression with good quality\n• Use 'Auto' format for intelligent format selection\n• Higher quality = larger file size\n• OCR optimization maintains text readability")
+    info.setStyleSheet("color: #666; font-size: 9pt;")
+    options_layout.addWidget(info)
+    
+    main_layout.addWidget(compression_options)
+    
+    # Toggle function
+    def toggle_options():
+        enabled = enable_cb.isChecked()
+        compression_options.setEnabled(enabled)
+    
+    enable_cb.toggled.connect(toggle_options)
+    toggle_options()
+    
+    scroll.setWidget(scroll_widget)
+    
+    # Main dialog layout
+    dialog_layout = QVBoxLayout(dialog)
+    dialog_layout.addWidget(scroll)
+    
+    # Buttons
+    button_layout = QHBoxLayout()
+    
+    def save_compression_settings():
+        try:
+            # Validate
+            int(target_tokens_edit.text())
+            int(max_dim_edit.text())
+            float(max_size_edit.text())
+        except ValueError:
+            QMessageBox.critical(dialog, "Invalid Input", "Please enter valid numbers for numeric fields")
+            return
+        
+        # Get selected format
+        selected_format = 'auto'
+        for rb in format_buttons:
+            if rb.isChecked():
+                selected_format = rb.property("format_value")
+                break
+        
+        # Save all settings
+        self.config['enable_image_compression'] = enable_cb.isChecked()
+        self.config['auto_compress_enabled'] = auto_compress_cb.isChecked()
+        self.config['target_image_tokens'] = int(target_tokens_edit.text())
+        self.config['image_compression_format'] = selected_format
+        self.config['webp_quality'] = webp_slider.value()
+        self.config['jpeg_quality'] = jpeg_slider.value()
+        self.config['png_compression'] = png_slider.value()
+        self.config['max_image_dimension'] = int(max_dim_edit.text())
+        self.config['max_image_size_mb'] = float(max_size_edit.text())
+        self.config['preserve_transparency'] = preserve_transparency_cb.isChecked()
+        self.config['preserve_original_format'] = preserve_format_cb.isChecked()
+        self.config['optimize_for_ocr'] = optimize_ocr_cb.isChecked()
+        self.config['progressive_encoding'] = progressive_cb.isChecked()
+        self.config['save_compressed_images'] = save_compressed_cb.isChecked()
+        
+        self.append_log("✅ Image compression settings saved")
+        dialog.hide()
+    
+    save_btn = QPushButton("💾 Save Settings")
+    save_btn.clicked.connect(save_compression_settings)
+    save_btn.setMinimumHeight(35)
+    save_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #28a745; "
+        "  color: white; "
+        "  padding: 8px 20px; "
+        "  font-size: 11pt; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "} "
+        "QPushButton:hover { background-color: #218838; }"
+    )
+    button_layout.addWidget(save_btn)
+    
+    cancel_btn = QPushButton("❌ Cancel")
+    cancel_btn.clicked.connect(dialog.hide)
+    cancel_btn.setMinimumHeight(35)
+    cancel_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #6c757d; "
+        "  color: white; "
+        "  padding: 8px 20px; "
+        "  font-size: 11pt; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "} "
+        "QPushButton:hover { background-color: #5a6268; }"
+    )
+    button_layout.addWidget(cancel_btn)
+    
+    dialog_layout.addLayout(button_layout)
+    
+    # Show with fade
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
+def toggle_ai_hunter(self):
+    """Toggle AI Hunter enabled state"""
+    if 'ai_hunter_config' not in self.config:
+        self.config['ai_hunter_config'] = {}
+    
+    self.config['ai_hunter_config']['enabled'] = self.ai_hunter_enabled_var
+    self.save_config()
+    # Note: ai_hunter_status_label is QLabel in PySide6, use setText instead of config
+    if hasattr(self.ai_hunter_status_label, 'setText'):
+        self.ai_hunter_status_label.setText(self._get_ai_hunter_status_text())
+
+def _create_prompt_management_section(self, parent):
+    """Create meta data section (formerly prompt management) - PySide6"""
+    from PySide6.QtWidgets import (
+        QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton,
+        QWidget, QLineEdit, QDoubleSpinBox,
+    )
+    from PySide6.QtCore import Qt
+    
+    section_box = QGroupBox("Meta Data")
+    # No max width - let it expand in fullscreen
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
+    
+    # Title frame with checkbox and buttons
+    title_w = QWidget()
+    title_h = QHBoxLayout(title_w)
+    title_h.setContentsMargins(0, 0, 0, 0)
+    
+    translate_title_cb = self._create_styled_checkbox("Translate Book Title / Metadata")
+    try:
+        translate_title_cb.setChecked(bool(self.translate_book_title_var))
+    except Exception:
+        pass
+        
+    # Toggle: include book title in glossary header/output
+    glossary_title_cb = self._create_styled_checkbox("Include book title at top of glossary (during generation)")
+    try:
+        # Default to False if not present in config
+        if not hasattr(self, 'include_book_title_glossary_var'):
+            self.include_book_title_glossary_var = False
+        glossary_title_cb.setChecked(bool(self.include_book_title_glossary_var))
+    except Exception:
+        glossary_title_cb.setChecked(False)
+        
+    glossary_title_cb.setToolTip(
+        "Adds the book title row while generating the glossary (before deduplication).\n"
+        "Uses translated metadata if available; skipped if metadata is missing."
+    )
+
+    # Toggle: auto-inject book title before dedup
+    auto_inject_title_cb = self._create_styled_checkbox("Auto-inject book title (loaded glossaries only, bypasses dedup)")
+    try:
+        if not hasattr(self, 'auto_inject_book_title_var'):
+            self.auto_inject_book_title_var = self.config.get('auto_inject_book_title', False)
+        auto_inject_title_cb.setChecked(bool(self.auto_inject_book_title_var))
+    except Exception:
+        auto_inject_title_cb.setChecked(False)
+
+    auto_inject_title_cb.setToolTip(
+        "When loading an existing glossary file, inject the book title row after load\n"
+        "(not part of dedup). Use only if your saved glossary lacks the title."
+    )
+    
+    def _update_glossary_title_state(checked):
+        """Update enabled state and styling of glossary toggles"""
+        try:
+            glossary_title_cb.setEnabled(checked)
+            auto_inject_title_cb.setEnabled(checked)
+            if checked:
+                # Force white color for enabled state to ensure visibility
+                glossary_title_cb.setStyleSheet("QCheckBox { color: white; }")
+                auto_inject_title_cb.setStyleSheet("QCheckBox { color: white; }")
+            else:
+                # Disabled styling (grayed out) - do NOT change checked state
+                glossary_title_cb.setStyleSheet("QCheckBox { color: #666666; }")
+                auto_inject_title_cb.setStyleSheet("QCheckBox { color: #666666; }")
+        except Exception:
+            pass
+
+    def _on_translate_title_toggle(checked):
+        try:
+            self.translate_book_title_var = bool(checked)
+            self.config['translate_book_title'] = bool(checked)
+            os.environ['TRANSLATE_BOOK_TITLE'] = '1' if checked else '0'
+            _update_glossary_title_state(checked)
+            sync_progress = getattr(self, '_sync_metadata_progress_toggle', None)
+            if callable(sync_progress):
+                sync_progress(checked)
+        except Exception:
+            pass
+            
+    translate_title_cb.setToolTip(
+        "Translate the book title and selected metadata fields\n"
+        "using your current model/profile."
+    )
+    translate_title_cb.toggled.connect(_on_translate_title_toggle)
+    title_h.addWidget(translate_title_cb)
+    
+    title_h.addSpacing(10)
+    
+    btn_configure_all = QPushButton("Configure All")
+    btn_configure_all.setFixedWidth(120)
+    btn_configure_all.clicked.connect(lambda: self.metadata_batch_ui.configure_translation_prompts())
+    title_h.addWidget(btn_configure_all)
+    
+    title_h.addSpacing(5)
+    
+    btn_custom_metadata = QPushButton("Custom Metadata")
+    btn_custom_metadata.setFixedWidth(150)
+    btn_custom_metadata.clicked.connect(lambda: self.metadata_batch_ui.configure_metadata_fields())
+    title_h.addWidget(btn_custom_metadata)
+
+    title_h.addSpacing(5)
+
+    metadata_keys_btn = _create_preview_pool_button(
+        self,
+        'metadata',
+        "Metadata Keys",
+        "Open the Multi API Key Manager focused on the Metadata key pool.",
+        section_box,
+    )
+    title_h.addWidget(metadata_keys_btn)
+    
+    title_h.addStretch()
+    section_v.addWidget(title_w)
+    
+    title_desc = QLabel("When enabled: the selected book title and metadata fields will be translated")
+    title_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    title_desc.setContentsMargins(20, 0, 0, 8)
+    section_v.addWidget(title_desc)
+
+    # Skip .txt book title translation (enabled by default)
+    if not hasattr(self, 'skip_txt_title_translation_var'):
+        self.skip_txt_title_translation_var = bool(self.config.get('skip_txt_title_translation', True))
+        if 'skip_txt_title_translation' not in self.config:
+            self.config['skip_txt_title_translation'] = True
+    skip_txt_title_cb = self._create_styled_checkbox("Skip .txt book title translation")
+    skip_txt_title_cb.setToolTip(
+        "When enabled, book title translation is skipped for .txt files.\n"
+        "Plain text files typically derive their title from the filename,\n"
+        "which doesn't need translation."
+    )
+    try:
+        skip_txt_title_cb.setChecked(bool(self.skip_txt_title_translation_var))
+    except Exception:
+        pass
+
+    def _on_skip_txt_title_toggle(checked):
+        try:
+            self.skip_txt_title_translation_var = bool(checked)
+            self.config['skip_txt_title_translation'] = bool(checked)
+            os.environ['SKIP_TXT_TITLE_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    skip_txt_title_cb.toggled.connect(_on_skip_txt_title_toggle)
+    section_v.addWidget(skip_txt_title_cb)
+
+    # Skip .pdf book title translation (enabled by default, like .txt titles); EPUB
+    # metadata and plain-text filename handling are separate.
+    if not hasattr(self, 'skip_pdf_title_translation_var'):
+        self.skip_pdf_title_translation_var = bool(
+            self.config.get('skip_pdf_title_translation', True)
+        )
+        if 'skip_pdf_title_translation' not in self.config:
+            self.config['skip_pdf_title_translation'] = True
+    skip_pdf_title_cb = self._create_styled_checkbox(
+        "Skip .pdf book title translation"
+    )
+    skip_pdf_title_cb.setToolTip(
+        "When enabled, the source PDF filename/title is kept unchanged.\n"
+        "Bookmark and HTML header translation settings remain independent."
+    )
+    try:
+        skip_pdf_title_cb.setChecked(
+            bool(self.skip_pdf_title_translation_var)
+        )
+    except Exception:
+        pass
+
+    def _on_skip_pdf_title_toggle(checked):
+        try:
+            self.skip_pdf_title_translation_var = bool(checked)
+            self.config['skip_pdf_title_translation'] = bool(checked)
+            os.environ['SKIP_PDF_TITLE_TRANSLATION'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    skip_pdf_title_cb.toggled.connect(_on_skip_pdf_title_toggle)
+    section_v.addWidget(skip_pdf_title_cb)
+
+    # Skip image title translation (manga/image output filenames)
+    if not hasattr(self, 'skip_image_title_translation_var'):
+        # Default to enabled
+        self.skip_image_title_translation_var = bool(self.config.get('skip_image_title_translation', True))
+        # Persist default if not set
+        if 'skip_image_title_translation' not in self.config:
+            self.config['skip_image_title_translation'] = True
+    skip_img_title_cb = self._create_styled_checkbox("Skip image title translation (use original filename)")
+    skip_img_title_cb.setToolTip(
+        "When enabled, image title/filename translation is skipped.\n"
+        "Translated HTML will use the original image base name."
+    )
+    try:
+        skip_img_title_cb.setChecked(bool(self.skip_image_title_translation_var))
+    except Exception:
+        pass
+
+    def _on_skip_image_title_toggle(checked):
+        try:
+            self.skip_image_title_translation_var = bool(checked)
+            self.config['skip_image_title_translation'] = bool(checked)
+            os.environ['SKIP_IMAGE_TITLE_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    skip_img_title_cb.toggled.connect(_on_skip_image_title_toggle)
+    section_v.addWidget(skip_img_title_cb)
+
+    # XHTML/HTML document title tags are translated by default. This setting
+    # is intentionally independent from book metadata and image filenames.
+    if not hasattr(self, 'skip_title_tag_translation_var'):
+        self.skip_title_tag_translation_var = bool(
+            self.config.get('skip_title_tag_translation', False)
+        )
+    if 'skip_title_tag_translation' not in self.config:
+        self.config['skip_title_tag_translation'] = False
+    self.use_title_var = not bool(self.skip_title_tag_translation_var)
+
+    skip_title_tag_cb = self._create_styled_checkbox(
+        "Skip title tag translation"
+    )
+    skip_title_tag_cb.setToolTip(
+        "When enabled, HTML/XHTML <title> tags are preserved without "
+        "translation.\nThis does not affect book metadata, visible headings, "
+        "or image filenames."
+    )
+    skip_title_tag_cb.setChecked(
+        bool(self.skip_title_tag_translation_var)
+    )
+
+    def _on_skip_title_tag_toggle(checked):
+        try:
+            skip_title = bool(checked)
+            self.skip_title_tag_translation_var = skip_title
+            self.use_title_var = not skip_title
+            self.config['skip_title_tag_translation'] = skip_title
+            # Keep the inverse legacy value for older components/config readers.
+            self.config['use_title'] = not skip_title
+            os.environ['SKIP_TITLE_TAG_TRANSLATION'] = (
+                '1' if skip_title else '0'
+            )
+            os.environ['USE_TITLE'] = '0' if skip_title else '1'
+        except Exception:
+            pass
+
+    skip_title_tag_cb.toggled.connect(_on_skip_title_tag_toggle)
+    title_tag_row = QWidget()
+    title_tag_row_h = QHBoxLayout(title_tag_row)
+    title_tag_row_h.setContentsMargins(0, 0, 0, 0)
+    title_tag_row_h.setSpacing(10)
+    skip_title_tag_cb.setSizePolicy(
+        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Fixed,
+    )
+    title_tag_row_h.addWidget(skip_title_tag_cb)
+
+    configure_title_prompt_btn = QPushButton("Configure Title Prompt")
+    configure_title_prompt_btn.setObjectName(
+        "configureImageOnlyTitlePromptButton"
+    )
+    configure_title_prompt_btn.setSizePolicy(
+        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Fixed,
+    )
+    configure_title_prompt_btn.setFixedWidth(
+        configure_title_prompt_btn.sizeHint().width() + 12
+    )
+    configure_title_prompt_btn.setToolTip(
+        "Configure the dedicated system prompt used only for a non-empty "
+        "<title> in an otherwise image-only HTML/XHTML chapter."
+    )
+    configure_title_prompt_btn.clicked.connect(
+        lambda: self.configure_image_only_title_tag_prompt()
+    )
+    title_tag_row_h.addWidget(configure_title_prompt_btn)
+    title_tag_row_h.addStretch()
+    section_v.addWidget(title_tag_row)
+    
+    def _on_glossary_title_toggle(checked):
+        try:
+            self.include_book_title_glossary_var = bool(checked)
+            # Persist immediately in config so save_config captures it
+            if hasattr(self, 'config'):
+                self.config['include_book_title_glossary'] = bool(checked)
+        except Exception:
+            pass
+    glossary_title_cb.toggled.connect(_on_glossary_title_toggle)
+    section_v.addWidget(glossary_title_cb)
+
+    def _on_auto_inject_toggle(checked):
+        try:
+            self.auto_inject_book_title_var = bool(checked)
+            if hasattr(self, 'config'):
+                self.config['auto_inject_book_title'] = bool(checked)
+        except Exception:
+            pass
+    auto_inject_title_cb.toggled.connect(_on_auto_inject_toggle)
+    section_v.addWidget(auto_inject_title_cb)
+    
+    # Initialize state based on current value
+    _update_glossary_title_state(translate_title_cb.isChecked())
+    
+    # Separator
+    sep1 = QFrame()
+    sep1.setFrameShape(QFrame.HLine)
+    sep1.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep1)
+    
+    # ── Table of Contents Translation ────────────────────────────
+    toc_struct_title = QLabel("Table of Contents Translation:")
+    toc_struct_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(toc_struct_title)
+
+    def _on_skip_dup_toc_toggle(checked):
+        try:
+            self.skip_duplicate_toc_translation_var = bool(checked)
+            self.config['skip_duplicate_toc_translation'] = self.skip_duplicate_toc_translation_var
+            os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    # Use & Translate source toc.ncx (combined toggle)
+    if not hasattr(self, 'use_toc_ncx_var'):
+        self.use_toc_ncx_var = self.config.get('use_toc_ncx', True)
+
+    # Sync translate_toc_ncx_var to match use_toc_ncx_var (they're now unified)
+    if not hasattr(self, 'translate_toc_ncx_var'):
+        self.translate_toc_ncx_var = self.use_toc_ncx_var
+    else:
+        self.translate_toc_ncx_var = self.use_toc_ncx_var
+
+    use_toc_cb = self._create_styled_checkbox(
+        "Use && Translate TOC / PDF bookmarks"
+    )
+    use_toc_cb.setToolTip(
+        "For EPUB, translate the source toc.ncx/navigation labels.\n"
+        "For PDF, translate the sidebar bookmark titles.\n"
+        "Both use the configured batches and cache results in TOC.txt."
+    )
+    try:
+        use_toc_cb.setChecked(bool(self.use_toc_ncx_var))
+    except Exception:
+        pass
+
+    # TOC batch limit definitions (moved up for toggle logic)
+    toc_batch_label = QLabel("TOC entries per batch:")
+    
+    toc_batch_entry = QLineEdit()
+    toc_batch_entry.setFixedWidth(60)
+    toc_batch_entry.setText(str(getattr(self, 'toc_ncx_per_batch_var', '-1')))
+    def _on_toc_batch_changed(text):
+        stripped = text.strip().lstrip('-')
+        if stripped.isdigit() or text.strip() in ('-', '-1', '0'):
+            self.toc_ncx_per_batch_var = text.strip()
+    toc_batch_entry.textChanged.connect(_on_toc_batch_changed)
+
+    # Skip duplicate translations
+    if not hasattr(self, 'skip_duplicate_toc_translation_var'):
+        self.skip_duplicate_toc_translation_var = self.config.get('skip_duplicate_toc_translation', False)
+
+    skip_dup_toc_cb = self._create_styled_checkbox("Skip duplicate translation")
+    skip_dup_toc_cb.setToolTip(
+        "When toc.ncx translation is enabled, identical source labels are translated once and\n"
+        "duplicates reuse the first translation. Saves tokens and API time."
+    )
+    try:
+        skip_dup_toc_cb.setChecked(bool(self.skip_duplicate_toc_translation_var))
+    except Exception:
+        pass
+
+    # Enable/disable child widgets based on master toggle
+    skip_dup_toc_cb.setEnabled(use_toc_cb.isChecked())
+    toc_batch_label.setEnabled(use_toc_cb.isChecked())
+    toc_batch_entry.setEnabled(use_toc_cb.isChecked())
+
+    def _on_use_toc_ncx_toggle(checked):
+        try:
+            self.use_toc_ncx_var = bool(checked)
+            self.config['use_toc_ncx'] = self.use_toc_ncx_var
+            os.environ['USE_TOC_NCX'] = '1' if checked else '0'
+            # Unified: translate_toc_ncx always mirrors use_toc_ncx
+            self.translate_toc_ncx_var = bool(checked)
+            self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
+            os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
+            sync_progress = getattr(
+                self, '_sync_translation_artifact_progress_toggle', None
+            )
+            if callable(sync_progress):
+                sync_progress('toc', checked)
+            # Enable/disable child widgets
+            skip_dup_toc_cb.setEnabled(bool(checked))
+            toc_batch_label.setEnabled(bool(checked))
+            toc_batch_entry.setEnabled(bool(checked))
+            # Deduplicate TOC and its child also depend on use_toc_ncx
+            dedup_toc_cb.setEnabled(bool(checked))
+            if checked:
+                dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked())
+            else:
+                dedup_toc_translated_cb.setEnabled(False)
+        except Exception as e:
+            print(f"⚠️ _on_use_toc_ncx_toggle error: {e}")
+
+    use_toc_cb.toggled.connect(_on_use_toc_ncx_toggle)
+    skip_dup_toc_cb.toggled.connect(_on_skip_dup_toc_toggle)
+
+    # ── 2-column layout ──────────────────────────────────────────
+    _toc_cols_w = QWidget()
+    _toc_cols_h = QHBoxLayout(_toc_cols_w)
+    _toc_cols_h.setContentsMargins(0, 0, 0, 0)
+    _toc_cols_h.setSpacing(8)
+
+    _toc_col_left = QWidget()
+    _toc_col_left_v = QVBoxLayout(_toc_col_left)
+    _toc_col_left_v.setContentsMargins(0, 0, 0, 0)
+    _toc_col_left_v.setSpacing(4)
+
+    _toc_col_right = QWidget()
+    _toc_col_right_v = QVBoxLayout(_toc_col_right)
+    _toc_col_right_v.setContentsMargins(0, 0, 0, 0)
+    _toc_col_right_v.setSpacing(4)
+
+    _toc_cols_h.addWidget(_toc_col_left)
+    _toc_cols_h.addWidget(_toc_col_right)
+    section_v.addWidget(_toc_cols_w)
+
+    # Left column: NCX toggle + skip dup
+    _toc_col_left_v.addWidget(use_toc_cb)
+    skip_dup_toc_cb.setContentsMargins(20, 0, 0, 0)
+    _toc_col_left_v.addWidget(skip_dup_toc_cb)
+    _toc_col_left_v.addStretch()
+
+    # Right column: Dedup + fallback
+    if not hasattr(self, 'deduplicate_toc_var'):
+        self.deduplicate_toc_var = self.config.get('deduplicate_toc', False)
+
+    dedup_toc_cb = self._create_styled_checkbox("Deduplicate TOC")
+    dedup_toc_cb.setToolTip(
+        "Skip duplicate TOC entries with the exact same title. Example: if 10 entries are named\n"
+        "\"Chapter 1: Peanuts\", only the first one is kept. No fuzzy matching."
+    )
+    try:
+        dedup_toc_cb.setChecked(bool(self.deduplicate_toc_var))
+    except Exception:
+        pass
+
+    def _on_dedup_toc_toggle(checked):
+        try:
+            self.deduplicate_toc_var = bool(checked)
+            self.config['deduplicate_toc'] = self.deduplicate_toc_var
+            os.environ['DEDUPLICATE_TOC'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    dedup_toc_cb.toggled.connect(_on_dedup_toc_toggle)
+    dedup_toc_cb.setEnabled(use_toc_cb.isChecked())
+    _toc_col_right_v.addWidget(dedup_toc_cb)
+
+    if not hasattr(self, 'deduplicate_toc_use_translated_var'):
+        self.deduplicate_toc_use_translated_var = self.config.get('deduplicate_toc_use_translated', False)
+
+    dedup_toc_translated_cb = self._create_styled_checkbox("Deduplicate using translated titles")
+    dedup_toc_translated_cb.setToolTip(
+        "When Deduplicate TOC is enabled, use translated titles for exact-match deduplication\n"
+        "instead of the raw source entries."
+    )
+    try:
+        dedup_toc_translated_cb.setChecked(bool(self.deduplicate_toc_use_translated_var))
+    except Exception:
+        pass
+
+    def _on_dedup_toc_translated_toggle(checked):
+        try:
+            self.deduplicate_toc_use_translated_var = bool(checked)
+            self.config['deduplicate_toc_use_translated'] = self.deduplicate_toc_use_translated_var
+            os.environ['DEDUPLICATE_TOC_USE_TRANSLATED'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    dedup_toc_translated_cb.toggled.connect(_on_dedup_toc_translated_toggle)
+    dedup_toc_translated_cb.setContentsMargins(20, 0, 0, 0)
+    dedup_toc_translated_cb.setEnabled(dedup_toc_cb.isChecked() and use_toc_cb.isChecked())
+    _toc_col_right_v.addWidget(dedup_toc_translated_cb)
+
+
+    def _sync_dedup_child(master_checked):
+        dedup_toc_translated_cb.setEnabled(bool(master_checked))
+    dedup_toc_cb.toggled.connect(_sync_dedup_child)
+
+    if not hasattr(self, 'use_p_tag_toc_fallback_var'):
+        self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
+
+    p_fallback_cb = self._create_styled_checkbox("Use TOC fallback titles (Legacy)")
+    p_fallback_cb.setToolTip(
+        "When enabled, the TOC may fall back to the first <p> tag and generic Chapter N titles\n"
+        "if no header tags are present. Disable to avoid any fallback titles."
+    )
+    try:
+        p_fallback_cb.setChecked(bool(self.use_p_tag_toc_fallback_var))
+    except Exception:
+        pass
+
+    def _on_p_tag_toc_fallback_toggle(checked):
+        try:
+            self.use_p_tag_toc_fallback_var = bool(checked)
+            self.config['use_p_tag_toc_fallback'] = self.use_p_tag_toc_fallback_var
+            os.environ['USE_P_TAG_TOC_FALLBACK'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    p_fallback_cb.toggled.connect(_on_p_tag_toc_fallback_toggle)
+    _toc_col_right_v.addWidget(p_fallback_cb)
+    _toc_col_right_v.addStretch()
+
+    # Delete TOC files button
+    delete_toc_btn = QPushButton("🗑️Delete TOC Files")
+    delete_toc_btn.setFixedWidth(210)
+    delete_toc_btn.clicked.connect(lambda: self.delete_toc_txt_file())
+    delete_toc_btn.setStyleSheet(
+        "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #dc3545; } "
+        "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+    )
+    _toc_icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(_toc_icon_path):
+        from PySide6.QtGui import QIcon as _QIcon
+        delete_toc_btn.setIcon(_QIcon(_toc_icon_path))
+
+    # Delete TOC files button + TOC batch limit (Horizontal layout)
+    _toc_btn_row = QWidget()
+    _toc_btn_h = QHBoxLayout(_toc_btn_row)
+    _toc_btn_h.setContentsMargins(0, 0, 0, 0)
+    
+    _toc_btn_h.addWidget(delete_toc_btn)
+    
+    _toc_btn_h.addSpacing(20)
+    _toc_btn_h.addWidget(toc_batch_label)
+    _toc_btn_h.addWidget(toc_batch_entry)
+    _toc_btn_h.addStretch()
+    
+    section_v.addWidget(_toc_btn_row)
+
+    # Separator
+    sep_toc_struct = QFrame()
+    sep_toc_struct.setFrameShape(QFrame.HLine)
+    sep_toc_struct.setFrameShadow(QFrame.Sunken)
+    sep_toc_struct.setContentsMargins(0, 0, 0, 15)
+    section_v.addWidget(sep_toc_struct)
+
+    # Batch Header Translation Section
+    header_title = QLabel("Chapter Header Translation:")
+    header_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(header_title)
+    
+    header_row1 = QWidget()
+    header_h1 = QHBoxLayout(header_row1)
+    header_h1.setContentsMargins(0, 0, 0, 0)
+    
+    # Master toggle for batch header translation
+    if not hasattr(self, 'batch_translate_headers_var'):
+        self.batch_translate_headers_var = self.config.get('batch_translate_headers', True)
+
+    batch_toggle_cb = self._create_styled_checkbox("Batch Translate Headers")
+    try:
+        batch_toggle_cb.setChecked(bool(self.batch_translate_headers_var))
+    except Exception:
+        pass
+    batch_toggle_cb.setToolTip(
+        "Translate chapter headers in batches instead of per file.\n"
+        "For PDFs, headers are the h1-h6 elements in each extracted HTML section.\n"
+        "Uses the settings below for batching and output."
+    )
+    
+    header_h1.addWidget(batch_toggle_cb)
+    header_h1.addSpacing(20)
+    headers_per_batch_label = QLabel("Headers per batch:")
+    header_h1.addWidget(headers_per_batch_label)
+    
+    batch_entry = QLineEdit()
+    batch_entry.setFixedWidth(100)
+    try:
+        batch_entry.setText(str(self.headers_per_batch_var))
+    except Exception:
+        pass
+    def _on_headers_per_batch_changed(text):
+        try:
+            stripped = text.strip().lstrip('-')
+            if stripped.isdigit() or text.strip() in ('-', '-1', '0'):
+                self.headers_per_batch_var = text.strip()
+        except Exception:
+            pass
+    batch_entry.textChanged.connect(_on_headers_per_batch_changed)
+    header_h1.addWidget(batch_entry)
+    
+    # Add help button next to batch entry
+    header_h1.addSpacing(5)
+    help_btn = QPushButton("ℹ️")
+    help_btn.setFixedSize(28, 28)
+    help_btn.clicked.connect(lambda: self.show_header_help_dialog())
+    help_btn.setStyleSheet(
+        "QPushButton { "
+        "background-color: transparent; "
+        "border: none; "
+        "font-size: 18px; "
+        "padding: 0px; "
+        "} "
+        "QPushButton:hover { "
+        "background-color: rgba(23, 162, 184, 0.2); "
+        "border-radius: 14px; "
+        "} "
+        "QPushButton:pressed { "
+        "background-color: rgba(23, 162, 184, 0.4); "
+        "border-radius: 14px; "
+        "}"
+    )
+    help_btn.setToolTip("Show detailed help for header translation options")
+    header_h1.addWidget(help_btn)
+    
+    header_h1.addStretch()
+    
+    section_v.addWidget(header_row1)
+    
+    # Options for header translation
+    update_row = QWidget()
+    update_h = QHBoxLayout(update_row)
+    update_h.setContentsMargins(20, 0, 0, 0)
+    
+    update_cb = self._create_styled_checkbox("Update headers in HTML files")
+    try:
+        update_cb.setChecked(bool(self.update_html_headers_var))
+    except Exception:
+        pass
+    def _on_update_html_toggle(checked):
+        try:
+            self.update_html_headers_var = bool(checked)
+        except Exception:
+            pass
+    update_cb.toggled.connect(_on_update_html_toggle)
+    update_cb.setToolTip(
+        "Write translated headers back into the HTML chapters.\n"
+        "Disable if you only want preview/exports."
+    )
+    update_h.addWidget(update_cb)
+    
+    update_h.addSpacing(20)
+    
+    save_cb = self._create_styled_checkbox("Save translations to .txt")
+    try:
+        save_cb.setChecked(bool(self.save_header_translations_var))
+    except Exception:
+        pass
+    def _on_save_translations_toggle(checked):
+        try:
+            self.save_header_translations_var = bool(checked)
+        except Exception:
+            pass
+    save_cb.toggled.connect(_on_save_translations_toggle)
+    save_cb.setToolTip(
+        "Export header translation mappings to translated_headers.txt\n"
+        "for auditing or reuse."
+    )
+    update_h.addWidget(save_cb)
+    update_h.addStretch()
+    
+    section_v.addWidget(update_row)
+    
+    # Additional ignore header options
+    ignore_row = QWidget()
+    ignore_h = QHBoxLayout(ignore_row)
+    ignore_h.setContentsMargins(20, 5, 0, 0)
+    
+    ignore_header_cb = self._create_styled_checkbox("Ignore header")
+    try:
+        ignore_header_cb.setChecked(bool(self.ignore_header_var))
+    except Exception:
+        pass
+    def _on_ignore_header_toggle(checked):
+        try:
+            self.ignore_header_var = bool(checked)
+        except Exception:
+            pass
+    ignore_header_cb.toggled.connect(_on_ignore_header_toggle)
+    ignore_header_cb.setToolTip(
+        "Skip translating visible header tags (h1/h2/h3) inside chapters.\n"
+        "Useful if headers are already translated."
+    )
+    ignore_h.addWidget(ignore_header_cb)
+    
+    ignore_h.addStretch()
+    section_v.addWidget(ignore_row)
+    
+    # Second ignore row for additional options
+    ignore_row2 = QWidget()
+    ignore_h2 = QHBoxLayout(ignore_row2)
+    ignore_h2.setContentsMargins(20, 5, 0, 0)
+    
+    # Remove duplicate H1-H6+P pairs
+    if not hasattr(self, 'remove_duplicate_h1_p_var'):
+        self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
+    
+    remove_dup_cb = self._create_styled_checkbox("Remove duplicate H1-H6+P pairs")
+    try:
+        remove_dup_cb.setChecked(bool(self.remove_duplicate_h1_p_var))
+    except Exception:
+        pass
+    def _on_remove_dup_toggle(checked):
+        try:
+            self.remove_duplicate_h1_p_var = bool(checked)
+            self.config['remove_duplicate_h1_p'] = bool(checked)
+        except Exception:
+            pass
+    remove_dup_cb.toggled.connect(_on_remove_dup_toggle)
+    remove_dup_cb.setToolTip(
+        "Remove paragraph tags that follow or precede H1-H6 tags with identical text.\n"
+        "Useful for novels that repeat chapter titles."
+    )
+    ignore_h2.addWidget(remove_dup_cb)
+    
+    ignore_h2.addSpacing(15)
+    
+    # Add fallback option with warning icon
+    use_fallback_cb = self._create_styled_checkbox("⚠️ Use Sorted Fallback")
+    try:
+        use_fallback_cb.setChecked(bool(getattr(self, 'use_sorted_fallback_var', False)))
+    except Exception:
+        pass
+    def _on_use_fallback_toggle(checked):
+        try:
+            self.use_sorted_fallback_var = bool(checked)
+        except Exception:
+            pass
+    use_fallback_cb.toggled.connect(_on_use_fallback_toggle)
+    use_fallback_cb.setToolTip(
+        "If standalone OPF-based matching fails, fall back to sorted index matching.\n"
+        "⚠️ Less accurate - may mismatch chapters if file order differs from OPF spine."
+    )
+    ignore_h2.addWidget(use_fallback_cb)
+    ignore_h2.addStretch()
+    
+    section_v.addWidget(ignore_row2)
+    
+    # Buttons row (below ignore options)
+    buttons_row = QWidget()
+    buttons_h = QHBoxLayout(buttons_row)
+    buttons_h.setContentsMargins(20, 5, 0, 0)
+    
+    translate_now_btn = QPushButton("Translate Headers Now")
+    translate_now_btn.setFixedWidth(210)
+    
+    # Store reference for button transformation
+    self.translate_headers_btn = translate_now_btn
+
+    # Create a rotatable label for the icon
+    from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve
+    from PySide6.QtGui import QTransform
+    
+    # Re-use the global RotatableLabel class
+    # (Removed local definition)
+    
+    # Create icon with rotation support (HiDPI-aware, smaller than 36x36)
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    translate_icon_label = RotatableLabel()
+    if os.path.exists(icon_path):
+        try:
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 12  # smaller than toolbar icons
+            dev_px = int(logical_px * max(1.0, dpr))
+            icon = QIcon(icon_path)
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            translate_icon_label.set_original_pixmap(pm)
+        except Exception:
+            pixmap = QPixmap(icon_path)
+            scaled_pixmap = pixmap.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            translate_icon_label.set_original_pixmap(scaled_pixmap)
+    
+    self.translate_headers_icon = translate_icon_label
+    
+    # Create rotation animations
+    self.translate_icon_spin_animation = QPropertyAnimation(translate_icon_label, b"rotation")
+    self.translate_icon_spin_animation.setDuration(900)  # 0.9 seconds per rotation
+    self.translate_icon_spin_animation.setStartValue(0)
+    self.translate_icon_spin_animation.setEndValue(360)
+    self.translate_icon_spin_animation.setLoopCount(-1)  # Infinite loop
+    self.translate_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
+    
+    # Create smooth stop animation
+    self.translate_icon_stop_animation = QPropertyAnimation(translate_icon_label, b"rotation")
+    self.translate_icon_stop_animation.setDuration(800)  # Deceleration time
+    self.translate_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
+    
+    def _on_translate_toggle():
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtGui import QIcon
+        
+        # Check if currently running
+        is_running = getattr(self, '_headers_translation_running', False)
+        
+        if is_running:
+            # Stop the translation
+            try:
+                # Set local stop flag
+                self._headers_stop_requested = True
+                
+                # Set stop flags on BatchHeaderTranslator if it exists
+                if hasattr(self, '_batch_header_translator'):
+                    self._batch_header_translator.set_stop_flag(True)
+                    self.append_log("✅ Stop signal sent to batch header translator")
+                
+                # Set stop flags on unified_api_client (same as main translator GUI)
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, 'set_stop_flag'):
+                        unified_api_client.set_stop_flag(True)
+                    # If there's a global client instance, stop it too
+                    if hasattr(unified_api_client, 'global_stop_flag'):
+                        unified_api_client.global_stop_flag = True
+                    # Set the _cancelled flag on the UnifiedClient class itself
+                    if hasattr(unified_api_client, 'UnifiedClient'):
+                        unified_api_client.UnifiedClient._global_cancelled = True
+                    self.append_log("✅ Stop signal sent to API client")
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not set API client stop flags: {e}")
+                
+                # Also try to stop the API client instance if it exists
+                if hasattr(self, 'api_client') and self.api_client:
+                    try:
+                        if hasattr(self.api_client, 'set_stop_flag'):
+                            self.api_client.set_stop_flag(True)
+                        if hasattr(self.api_client, '_cancelled'):
+                            self.api_client._cancelled = True
+                    except Exception:
+                        pass
+                
+                # Update button to "Stopping..." state (gray)
+                translate_now_btn.setText("⏹ Stopping...")
+                translate_now_btn.setStyleSheet(
+                    "QPushButton { background-color: #9e9e9e; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+                    "QPushButton:hover { background-color: #9e9e9e; } "
+                    "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+                )
+                
+                self.append_log("🛑 Stop requested — waiting for current operation to finish")
+                
+            except Exception as e:
+                self.append_log(f"❌ Error stopping: {e}")
+        else:
+            # Start the translation
+            # Get icon
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+            
+            # Show confirmation dialog
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setWindowTitle("Translate Headers")
+            msg_box.setText("Start standalone header translation?")
+            msg_box.setInformativeText(
+                "EPUB headers use OPF-based exact matching. PDF headers "
+                "use the extracted bookmark-section HTML files."
+            )
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg_box.setDefaultButton(QMessageBox.Yes)
+            msg_box.setWindowIcon(icon)
+            
+            # Center the buttons
+            from PySide6.QtWidgets import QDialogButtonBox
+            button_box = msg_box.findChild(QDialogButtonBox)
+            if button_box:
+                button_box.setCenterButtons(True)
+            
+            result = msg_box.exec()
+            
+            if result == QMessageBox.Yes:
+                # Don't close the dialog - keep it open so user can see spinning button and stop if needed
+                # The button will transform to show stop state
+                
+                # Run translation in background thread
+                self.run_standalone_translate_headers()
+    
+    translate_now_btn.clicked.connect(_on_translate_toggle)
+    translate_now_btn.setStyleSheet(
+        "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #28a745; } "
+        "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+    )
+    # Set icon from the rotatable label
+    if translate_icon_label._original_pixmap:
+        translate_now_btn.setIcon(QIcon(translate_icon_label._original_pixmap))
+    buttons_h.addWidget(translate_now_btn)
+    
+    buttons_h.addSpacing(10)
+    
+    delete_btn = QPushButton("🗑️Delete Header Files")
+    delete_btn.setFixedWidth(210)
+    delete_btn.clicked.connect(lambda: self.delete_translated_headers_file())
+    delete_btn.setStyleSheet(
+        "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #dc3545; } "
+        "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+    )
+    # Set icon
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(icon_path):
+        delete_btn.setIcon(QIcon(icon_path))
+    buttons_h.addWidget(delete_btn)
+
+
+    buttons_h.addStretch()
+    
+    section_v.addWidget(buttons_row)
+    
+    # Description for the buttons
+    button_desc = QLabel(
+        "Standalone mode: EPUB uses OPF mapping; PDF uses extracted h1-h6 headers."
+    )
+    button_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    button_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(button_desc)
+    
+    # Toggle function for enabling/disabling controls
+    def _toggle_header_controls(checked):
+        try:
+            previous = bool(self.batch_translate_headers_var)
+            self.batch_translate_headers_var = bool(checked)
+            self.config['batch_translate_headers'] = bool(checked)
+            os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if checked else '0'
+            if previous != bool(checked):
+                sync_progress = getattr(
+                    self,
+                    '_sync_translation_artifact_progress_toggle',
+                    None,
+                )
+                if callable(sync_progress):
+                    sync_progress('headers', checked)
+        except Exception:
+            pass
+        headers_per_batch_label.setEnabled(checked)
+        batch_entry.setEnabled(checked)
+        update_cb.setEnabled(checked)
+        save_cb.setEnabled(checked)
+        ignore_header_cb.setEnabled(checked)
+        use_fallback_cb.setEnabled(checked)
+        translate_now_btn.setEnabled(checked)
+    
+    batch_toggle_cb.toggled.connect(_toggle_header_controls)
+    
+    # Initialize disabled state
+    try:
+        _toggle_header_controls(bool(self.batch_translate_headers_var))
+    except Exception:
+        _toggle_header_controls(False)
+    
+    
+    # Separator
+    sep2 = QFrame()
+    sep2.setFrameShape(QFrame.HLine)
+    sep2.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep2)
+
+    # Shared retry limit for status-marked failures in both translation caches.
+    try:
+        _retry_attempts = int(
+            getattr(
+                self,
+                'failed_translation_retry_attempts_var',
+                self.config.get('failed_translation_retry_attempts', 3),
+            )
+        )
+    except (TypeError, ValueError):
+        _retry_attempts = 3
+    self.failed_translation_retry_attempts_var = min(
+        20, max(0, _retry_attempts)
+    )
+    self.config['failed_translation_retry_attempts'] = (
+        self.failed_translation_retry_attempts_var
+    )
+    os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(
+        self.failed_translation_retry_attempts_var
+    )
+
+    retry_row = QWidget()
+    retry_h = QHBoxLayout(retry_row)
+    retry_h.setContentsMargins(0, 0, 0, 0)
+    retry_label = QLabel("Failed-entry retry attempts (TOC + headers):")
+    retry_entry = QLineEdit()
+    retry_entry.setFixedWidth(60)
+    retry_entry.setValidator(QIntValidator(0, 20, retry_entry))
+    retry_entry.setText(str(self.failed_translation_retry_attempts_var))
+    retry_entry.setToolTip(
+        "Maximum API retry attempts for entries still marked failed after TOC.txt or\n"
+        "translated_headers.txt is generated or loaded. Retries stop early when all\n"
+        "entries succeed. Set to 0 to disable failed-entry API retries."
+    )
+
+    def _on_failed_translation_retry_attempts_changed(text):
+        if not text.strip().isdigit():
+            return
+        value = min(20, max(0, int(text.strip())))
+        self.failed_translation_retry_attempts_var = value
+        self.config['failed_translation_retry_attempts'] = value
+        os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(value)
+
+    retry_entry.textChanged.connect(
+        _on_failed_translation_retry_attempts_changed
+    )
+    retry_h.addWidget(retry_label)
+    retry_h.addWidget(retry_entry)
+    retry_h.addStretch()
+    section_v.addWidget(retry_row)
+    
+    # EPUB Utilities
+    epub_title = QLabel("EPUB Utilities:")
+    epub_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    epub_title.setContentsMargins(0, 0, 0, 5)
+    section_v.addWidget(epub_title)
+    
+    validate_row = QHBoxLayout()
+    validate_row.setContentsMargins(0, 0, 0, 8)
+    validate_row.setSpacing(8)
+    btn_validate = QPushButton("🔍 Validate EPUB Structure")
+    btn_validate.setFixedWidth(250)
+    btn_validate.clicked.connect(lambda: self.validate_epub_structure_gui())
+    btn_validate.setStyleSheet(
+        "QPushButton { background-color: #6f42c1; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #5a32a3; }"
+    )
+    validate_row.addWidget(btn_validate)
+    self._validate_btn = btn_validate
+    self._validate_status = QLabel("")
+    self._validate_status.setStyleSheet("color: gray; font-size: 10pt;")
+    validate_row.addWidget(self._validate_status)
+    validate_row.addStretch()
+    section_v.addLayout(validate_row)
+    
+    # NCX-only navigation toggle
+    ncx_cb = self._create_styled_checkbox("Use NCX-only Navigation (Compatibility Mode)")
+    try:
+        ncx_cb.setChecked(bool(self.force_ncx_only_var))
+    except Exception:
+        pass
+    def _on_ncx_toggle(checked):
+        try:
+            self.force_ncx_only_var = bool(checked)
+            self.config['force_ncx_only'] = bool(checked)
+            os.environ['FORCE_NCX_ONLY'] = '1' if checked else '0'
+        except Exception:
+            pass
+    ncx_cb.toggled.connect(_on_ncx_toggle)
+    ncx_cb.setContentsMargins(0, 5, 0, 5)
+    ncx_cb.setToolTip(
+        "Force NCX-only navigation in the output EPUB (no modern nav file).\n"
+        "Use for older readers that choke on EPUB3 navigation documents."
+    )
+    section_v.addWidget(ncx_cb)
+
+    # EPUB Layout Mode dropdown (Auto / EPUB2 / EPUB3)
+    if not hasattr(self, 'epub_layout_mode_var'):
+        # Backward compat: migrate old bool 'legacy_structure' → string mode
+        # Only migrate if the NEW key doesn't exist yet in config
+        if 'epub_layout_mode' not in self.config:
+            old_legacy = self.config.get('legacy_structure', None)
+            if old_legacy is True:
+                self.epub_layout_mode_var = 'epub2'
+            else:
+                self.epub_layout_mode_var = 'auto'
+            self.config['epub_layout_mode'] = self.epub_layout_mode_var
+            # Remove old key so it never overrides again
+            self.config.pop('legacy_structure', None)
+        else:
+            self.epub_layout_mode_var = self.config.get('epub_layout_mode', 'auto')
+
+    layout_row = QWidget()
+    layout_h = QHBoxLayout(layout_row)
+    layout_h.setContentsMargins(0, 5, 0, 5)
+    layout_h.setSpacing(8)
+
+    layout_label = QLabel("EPUB Layout:")
+    layout_label.setStyleSheet("font-weight: bold;")
+    layout_h.addWidget(layout_label)
+
+    layout_combo = QComboBox()
+    layout_combo.addItems(["Auto", "EPUB2", "EPUB3"])
+    layout_combo.setFixedWidth(120)
+    layout_combo.wheelEvent = lambda event: None
+    layout_combo.setToolTip(
+        "Controls the internal folder structure of the compiled EPUB:\n\n"
+        "• Auto — Detect the layout from the source EPUB and preserve it.\n"
+        "  If the source uses OEBPS/Text/, the output will too.\n\n"
+        "• EPUB2 — Force a legacy EPUB2-style structure (OEBPS/Text/).\n"
+        "  Chapter files are placed under OEBPS/Text/ for compatibility\n"
+        "  with older e-readers.\n\n"
+        "• EPUB3 — Force a modern flat OEBPS/ structure.\n"
+        "  Chapter files sit directly inside OEBPS/.\n\n"
+        "Default: Auto (falls back to EPUB3 if detection fails)."
+    )
+
+    # Set current selection from saved config
+    _mode_map = {'auto': 0, 'epub2': 1, 'epub3': 2}
+    try:
+        layout_combo.setCurrentIndex(_mode_map.get(self.epub_layout_mode_var, 0))
+    except Exception:
+        layout_combo.setCurrentIndex(0)  # Default to Auto
+
+    def _on_layout_mode_changed(index):
+        try:
+            modes = ['auto', 'epub2', 'epub3']
+            mode = modes[index]
+            self.epub_layout_mode_var = mode
+            self.config['epub_layout_mode'] = mode
+            # Set env var for epub_converter.py
+            # 'auto' → let the compiler detect, 'epub2' → force legacy, 'epub3' → force modern
+            os.environ['EPUB_LAYOUT_MODE'] = mode
+            # Backward compat: also set the old env var
+            os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if mode == 'epub2' else '0'
+        except Exception:
+            pass
+
+    layout_combo.currentIndexChanged.connect(_on_layout_mode_changed)
+    layout_h.addWidget(layout_combo)
+    layout_h.addStretch()
+    section_v.addWidget(layout_row)
+
+    # CSS Attachment toggle
+    css_cb = self._create_styled_checkbox("Attach CSS to Chapters (May fix or cause styling issues)")
+    try:
+        css_cb.setChecked(bool(self.attach_css_to_chapters_var))
+    except Exception:
+        pass
+    css_cb.setToolTip(
+        "Reattach the original EPUB's CSS to each chapter when rebuilding.\n"
+        "If you click 'Load CSS…', the selected file overrides the original CSS."
+    )
+
+    # Ensure we have a variable to store the override CSS path
+    if not hasattr(self, 'epub_css_override_path_var'):
+        self.epub_css_override_path_var = self.config.get('epub_css_override_path', '')
+
+    def _on_css_toggle(checked):
+        try:
+            self.attach_css_to_chapters_var = bool(checked)
+            self.config['attach_css_to_chapters'] = bool(checked)
+            os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    css_cb.toggled.connect(_on_css_toggle)
+
+    from PySide6.QtWidgets import QFileDialog, QHBoxLayout
+
+    css_row = QWidget()
+    css_row_h = QHBoxLayout(css_row)
+    css_row_h.setContentsMargins(0, 5, 0, 5)
+    css_row_h.setSpacing(8)
+
+    css_row_h.addWidget(css_cb)
+
+    load_css_btn = QPushButton("Load CSS…")
+    load_css_btn.setToolTip("Select a CSS file to use for all chapters (overrides original EPUB CSS)")
+    load_css_btn.setMinimumWidth(90)
+    load_css_btn.setStyleSheet(
+        "QPushButton { background-color: #17a2b8; color: white; padding: 4px 10px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; }"
+    )
+    css_row_h.addWidget(load_css_btn)
+
+    clear_css_btn = QPushButton("Clear")
+    clear_css_btn.setToolTip("Remove CSS override and use original EPUB CSS again")
+    clear_css_btn.setMinimumWidth(60)
+    clear_css_btn.setStyleSheet(
+        "QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #5a6268; }"
+    )
+    css_row_h.addWidget(clear_css_btn)
+
+    import os as _os
+
+    css_status_label = QLabel()
+    css_status_label.setStyleSheet("color: #28a745; font-size: 11pt; font-weight: bold;")
+    css_status_label.hide()
+    css_row_h.addWidget(css_status_label)
+
+    css_path_label = QLabel()
+    css_path_label.setStyleSheet("color: gray; font-size: 9pt;")
+    if getattr(self, 'epub_css_override_path_var', ''):
+        css_path_label.setText(_os.path.basename(self.epub_css_override_path_var))
+        css_status_label.setText("✓")
+        css_status_label.show()
+    css_row_h.addWidget(css_path_label)
+
+    css_row_h.addStretch()
+    section_v.addWidget(css_row)
+
+    def _on_load_css_clicked():
+        try:
+            start_dir = _os.path.dirname(self.epub_css_override_path_var) if getattr(self, 'epub_css_override_path_var', '') else _os.getcwd()
+            file_name, _ = QFileDialog.getOpenFileName(parent, "Select CSS file", start_dir, "CSS Files (*.css);;All Files (*.*)")
+            if file_name:
+                self.epub_css_override_path_var = file_name
+                self.config['epub_css_override_path'] = file_name
+                os.environ['EPUB_CSS_OVERRIDE_PATH'] = file_name
+                css_path_label.setText(_os.path.basename(file_name))
+                css_status_label.setText("✓")
+                css_status_label.show()
+                # If user explicitly loads CSS, ensure attachment is enabled
+                if not css_cb.isChecked():
+                    css_cb.setChecked(True)
+                # Also copy the CSS into the working directory's css/ folder
+                # so the reader's "Embedded CSS" mode and future compilations
+                # pick it up immediately.
+                try:
+                    import shutil
+                    # The extraction folder sits next to this script, named
+                    # after the EPUB basename (no extension).
+                    _epub = (getattr(self, 'config', {}).get('last_epub_path', '')
+                             or _os.environ.get('EPUB_PATH', ''))
+                    if _epub:
+                        _base = _os.path.splitext(_os.path.basename(_epub))[0]
+                        _script_dir = _os.path.dirname(_os.path.abspath(__file__))
+                        _candidate = _os.path.join(_script_dir, _base)
+                        if _os.path.isdir(_candidate):
+                            css_dir = _os.path.join(_candidate, 'css')
+                            _os.makedirs(css_dir, exist_ok=True)
+                            # Remove old CSS files
+                            for old in _os.listdir(css_dir):
+                                if old.lower().endswith('.css'):
+                                    try:
+                                        _os.remove(_os.path.join(css_dir, old))
+                                    except OSError:
+                                        pass
+                            # Copy override with its original filename
+                            shutil.copy2(file_name,
+                                         _os.path.join(css_dir, _os.path.basename(file_name)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_clear_css_clicked():
+        try:
+            self.epub_css_override_path_var = ''
+            self.config['epub_css_override_path'] = ''
+            os.environ.pop('EPUB_CSS_OVERRIDE_PATH', None)
+            css_path_label.setText('')
+            css_status_label.hide()
+        except Exception:
+            pass
+
+    load_css_btn.clicked.connect(_on_load_css_clicked)
+    clear_css_btn.clicked.connect(_on_clear_css_clicked)
+
+    # ── Font Loading row (below CSS row) ──
+    font_row = QWidget()
+    font_row_h = QHBoxLayout(font_row)
+    font_row_h.setContentsMargins(0, 0, 0, 5)
+    font_row_h.setSpacing(8)
+
+    font_label = QLabel("Custom Fonts:")
+    font_label.setStyleSheet("font-weight: bold;")
+    font_row_h.addWidget(font_label)
+
+    load_font_btn = QPushButton("Load Font…")
+    load_font_btn.setToolTip(
+        "Select .ttf / .otf / .woff font files to bundle into EPUBs.\n"
+        "Fonts are stored globally and automatically copied into each\n"
+        "workspace's fonts/ directory at compile time."
+    )
+    load_font_btn.setMinimumWidth(100)
+    load_font_btn.setStyleSheet(
+        "QPushButton { background-color: #17a2b8; color: white; padding: 4px 10px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; }"
+    )
+    font_row_h.addWidget(load_font_btn)
+
+
+
+    font_status_label = QLabel()
+    font_status_label.setStyleSheet("color: #28a745; font-size: 11pt; font-weight: bold;")
+    font_status_label.hide()
+    font_row_h.addWidget(font_status_label)
+
+    font_count_label = QLabel()
+    font_count_label.setStyleSheet("color: gray; font-size: 9pt;")
+    font_row_h.addWidget(font_count_label)
+
+    font_row_h.addStretch()
+    section_v.addWidget(font_row)
+
+    _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
+
+    def _get_global_fonts_dir():
+        """Return the global custom_fonts/ directory alongside the app.
+
+        Uses the same ``_get_app_dir()`` root that Payloads/ and logs/
+        use — safe on both Windows and macOS (lowercase, no spaces).
+        """
+        try:
+            from translator_gui import _get_app_dir
+            return _os.path.join(_get_app_dir(), 'custom_fonts')
+        except Exception:
+            # Fallback: next to this script
+            return _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'custom_fonts')
+
+    def _refresh_font_label():
+        """Update the font count label from the global custom_fonts/ directory."""
+        gdir = _get_global_fonts_dir()
+        if gdir and _os.path.isdir(gdir):
+            count = sum(1 for f in _os.listdir(gdir)
+                        if _os.path.splitext(f)[1].lower() in _FONT_EXTS)
+            if count:
+                font_count_label.setText(f"{count} font{'s' if count != 1 else ''} loaded")
+                font_status_label.setText("✓")
+                font_status_label.show()
+                return
+        font_count_label.setText("")
+        font_status_label.hide()
+
+    _refresh_font_label()
+
+    def _on_load_font_clicked():
+        try:
+            gdir = _get_global_fonts_dir()
+            _os.makedirs(gdir, exist_ok=True)
+            files, _ = QFileDialog.getOpenFileNames(
+                parent, "Select Font Files or ZIP Archives",
+                gdir if _os.path.isdir(gdir) else _os.getcwd(),
+                "Fonts & Archives (*.ttf *.otf *.woff *.woff2 *.zip);;Font Files (*.ttf *.otf *.woff *.woff2);;ZIP Archives (*.zip);;All Files (*.*)"
+            )
+            if files:
+                # Font files and the fonts inside ZIPs (output_tools_core, shared with mobile)
+                copied = import_custom_fonts(files, gdir, _FONT_EXTS)
+                _refresh_font_label()
+                if copied:
+                    load_font_btn.setText(f"✅ {copied} loaded")
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(2500, lambda: load_font_btn.setText("Load Font…"))
+        except Exception:
+            pass
+
+    load_font_btn.clicked.connect(_on_load_font_clicked)
+    
+    # HTML serialization method toggle
+    html_method_cb = self._create_styled_checkbox("Use HTML Method for EPUB (Better for preserving whitespaces)")
+    try:
+        html_method_cb.setChecked(bool(self.epub_use_html_method_var))
+    except Exception:
+        pass
+    def _on_html_method_toggle(checked):
+        try:
+            self.epub_use_html_method_var = bool(checked)
+            self.config['epub_use_html_method'] = bool(checked)
+            os.environ['EPUB_USE_HTML_METHOD'] = '1' if checked else '0'
+        except Exception:
+            pass
+    html_method_cb.toggled.connect(_on_html_method_toggle)
+    html_method_cb.setContentsMargins(0, 5, 0, 5)
+    html_method_cb.setToolTip(
+        "Serialize using HTML path instead of strict XHTML/XML.\n"
+        "Preserves whitespace/layout better; may be slightly slower."
+    )
+    section_v.addWidget(html_method_cb)
+    
+    # Output file naming
+    retain_cb = self._create_styled_checkbox("Retain source extension (no 'response_' prefix)")
+    try:
+        retain_cb.setChecked(bool(self.retain_source_extension_var))
+    except Exception:
+        pass
+    def _on_retain_toggle(checked):
+        try:
+            self.retain_source_extension_var = bool(checked)
+            self.config['retain_source_extension'] = bool(checked)
+            os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if checked else '0'
+        except Exception:
+            pass
+    retain_cb.toggled.connect(_on_retain_toggle)
+    retain_cb.setToolTip(
+        "Keep the original chapter filename/extension instead of adding 'response_' and replacing the extension with '.html'.\n"
+        "Requires an OPF package in the output folder; does nothing otherwise."
+    )
+
+    rename_btn = QPushButton("Rename Files")
+    rename_btn.setToolTip("Rename existing output files to match the current naming convention.\nOnly available when no translation is running.")
+    rename_btn.setMinimumWidth(100)
+    rename_btn.setStyleSheet(
+        "QPushButton { background-color: #17a2b8; color: white; padding: 4px 10px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; } "
+        "QPushButton:disabled { background-color: #555; color: #999; }"
+    )
+
+    # Check if translation is running and disable accordingly
+    def _update_rename_btn_state():
+        try:
+            btn_text = self.run_button_text.text() if hasattr(self, 'run_button_text') else 'Run Translation'
+            rename_btn.setEnabled(btn_text == 'Run Translation')
+        except Exception:
+            rename_btn.setEnabled(True)
+
+    _update_rename_btn_state()
+
+    # Poll the run button state periodically
+    from PySide6.QtCore import QTimer
+    rename_timer = QTimer()
+    rename_timer.timeout.connect(_update_rename_btn_state)
+    rename_timer.start(1000)
+    rename_btn._keep_timer = rename_timer  # prevent GC
+
+    def _on_rename_clicked():
+        import winsound
+        try:
+            result = _rename_output_files_for_retain(self, bool(retain_cb.isChecked()))
+            if result and result[0] == 'renamed':
+                rename_btn.setText(f"✅ {result[1]} files renamed")
+                winsound.MessageBeep(winsound.MB_OK)
+            elif result and result[0] == 'no_opf':
+                rename_btn.setText("📁 No OPF package found")
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            else:
+                rename_btn.setText("📄 No files to rename")
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
+            rename_btn.setText("⚠️ Rename failed")
+            try:
+                winsound.MessageBeep(winsound.MB_ICONHAND)
+            except Exception:
+                pass
+        # Revert button text after 3 seconds
+        QTimer.singleShot(3000, lambda: rename_btn.setText("Rename Files"))
+
+    rename_btn.clicked.connect(_on_rename_clicked)
+
+    from PySide6.QtWidgets import QHBoxLayout as _RetainHBox
+    retain_row = QWidget()
+    retain_row_h = _RetainHBox(retain_row)
+    retain_row_h.setContentsMargins(0, 5, 0, 5)
+    retain_row_h.setSpacing(8)
+    retain_row_h.addWidget(retain_cb)
+    retain_row_h.addWidget(rename_btn)
+    retain_row_h.addStretch()
+    section_v.addWidget(retain_row)
+
+    # Remote image localization
+    download_remote_images_cb = self._create_styled_checkbox(
+        "Download remote image URLs"
+    )
+    try:
+        download_remote_images_cb.setChecked(bool(
+            self.download_remote_image_urls_var
+        ))
+    except Exception:
+        download_remote_images_cb.setChecked(bool(
+            self.config.get('download_remote_image_urls', False)
+        ))
+
+    def _on_download_remote_images_toggle(checked):
+        try:
+            enabled = bool(checked)
+            self.download_remote_image_urls_var = enabled
+            self.config['download_remote_image_urls'] = enabled
+            os.environ['DOWNLOAD_REMOTE_IMAGE_URLS'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
+    download_remote_images_cb.setContentsMargins(0, 5, 0, 5)
+    download_remote_images_cb.setToolTip(
+        "Download HTTP/HTTPS image URLs referenced by EPUB chapters and "
+        "convert them to local PNG resources before image rename/mapping."
+    )
+
+    # Use the same native widget class as Interval so both controls inherit
+    # identical platform styling and arrow buttons. Zero decimals keeps the
+    # thread value strictly integer-valued.
+    remote_image_workers_spin = QDoubleSpinBox()
+    remote_image_workers_spin.setRange(1, 32)
+    remote_image_workers_spin.setDecimals(0)
+    remote_image_workers_spin.setSingleStep(1)
+    remote_image_workers_spin.setFixedWidth(86)
+    remote_image_workers_spin.setKeyboardTracking(False)
+    try:
+        remote_image_workers_spin.setValue(max(1, min(
+            32, int(self.remote_image_download_workers_var)
+        )))
+    except Exception:
+        remote_image_workers_spin.setValue(max(1, min(
+            32, int(self.config.get('remote_image_download_workers', 4))
+        )))
+    remote_image_workers_spin.setToolTip(
+        "Maximum number of remote image transfers that may be in flight."
+    )
+
+    remote_image_interval_spin = QDoubleSpinBox()
+    remote_image_interval_spin.setRange(0.0, 60.0)
+    remote_image_interval_spin.setDecimals(2)
+    remote_image_interval_spin.setSingleStep(0.10)
+    remote_image_interval_spin.setSuffix(" s")
+    remote_image_interval_spin.setFixedWidth(86)
+    remote_image_interval_spin.setKeyboardTracking(False)
+    try:
+        remote_image_interval_spin.setValue(max(0.0, min(
+            60.0, float(self.remote_image_download_interval_var)
+        )))
+    except Exception:
+        remote_image_interval_spin.setValue(max(0.0, min(
+            60.0, float(self.config.get('remote_image_download_interval', 0.5))
+        )))
+    remote_image_interval_spin.setToolTip(
+        "Minimum global delay between consecutive HTTP/HTTPS request starts. "
+        "Use 0 to disable pacing."
+    )
+
+    # Prevent accidental value changes while scrolling the settings page. An
+    # ignored wheel event continues to the surrounding scroll area.
+    remote_image_workers_spin.setFocusPolicy(Qt.StrongFocus)
+    remote_image_interval_spin.setFocusPolicy(Qt.StrongFocus)
+    remote_image_workers_spin.wheelEvent = lambda event: event.ignore()
+    remote_image_interval_spin.wheelEvent = lambda event: event.ignore()
+
+    def _on_remote_image_workers_changed(value):
+        workers = max(1, min(32, int(round(value))))
+        self.remote_image_download_workers_var = workers
+        self.config['remote_image_download_workers'] = workers
+        os.environ['REMOTE_IMAGE_DOWNLOAD_WORKERS'] = str(workers)
+
+    def _on_remote_image_interval_changed(value):
+        interval = max(0.0, min(60.0, float(value)))
+        self.remote_image_download_interval_var = interval
+        self.config['remote_image_download_interval'] = interval
+        os.environ['REMOTE_IMAGE_DOWNLOAD_INTERVAL'] = f"{interval:g}"
+
+    remote_image_workers_spin.valueChanged.connect(
+        _on_remote_image_workers_changed
+    )
+    remote_image_interval_spin.valueChanged.connect(
+        _on_remote_image_interval_changed
+    )
+
+    def _sync_remote_image_controls(enabled):
+        _on_download_remote_images_toggle(enabled)
+        remote_image_workers_spin.setEnabled(bool(enabled))
+        remote_image_interval_spin.setEnabled(bool(enabled))
+
+    download_remote_images_cb.toggled.connect(
+        _sync_remote_image_controls
+    )
+    remote_image_workers_spin.setEnabled(download_remote_images_cb.isChecked())
+    remote_image_interval_spin.setEnabled(download_remote_images_cb.isChecked())
+
+    remote_images_row = QWidget()
+    remote_images_row_h = QHBoxLayout(remote_images_row)
+    remote_images_row_h.setContentsMargins(0, 5, 0, 5)
+    remote_images_row_h.setSpacing(8)
+    remote_images_row_h.addWidget(download_remote_images_cb)
+    remote_images_row_h.addSpacing(8)
+    remote_images_row_h.addWidget(QLabel("Threads:"))
+    remote_images_row_h.addWidget(remote_image_workers_spin)
+    remote_images_row_h.addSpacing(6)
+    remote_images_row_h.addWidget(QLabel("Interval:"))
+    remote_images_row_h.addWidget(remote_image_interval_spin)
+    remote_images_row_h.addStretch()
+    section_v.addWidget(remote_images_row)
+    
+    # Place the section at row 0, column 0 to match the original grid
+    try:
+        grid = parent.layout()
+        if grid:
+            grid.addWidget(section_box, 0, 0)
+    except Exception:
+        # Fallback: just stack
+        section_box.setParent(parent)
+
+def _create_processing_options_section(self, parent):
+    """Create processing options section - PySide6"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton, QWidget, QLineEdit, QComboBox, QRadioButton, QButtonGroup
+    from PySide6.QtCore import Qt
+    
+    section_box = QGroupBox("Processing Options")
+    # No max width - let it expand in fullscreen
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
+    
+    # Create two-column layout
+    columns_container = QWidget()
+    columns_h = QHBoxLayout(columns_container)
+    columns_h.setContentsMargins(0, 0, 0, 15)
+    columns_h.setSpacing(20)
+    
+    # Left column - Checkboxes
+    left_column = QWidget()
+    left_v = QVBoxLayout(left_column)
+    left_v.setContentsMargins(0, 0, 0, 0)
+    
+    # Emergency Paragraph Restoration
+    emergency_cb = self._create_styled_checkbox("Emergency Paragraph Restoration")
+    try:
+        emergency_cb.setChecked(bool(self.emergency_restore_var))
+    except Exception:
+        pass
+    def _on_emergency_toggle(checked):
+        try:
+            self.emergency_restore_var = bool(checked)
+        except Exception:
+            pass
+    emergency_cb.toggled.connect(_on_emergency_toggle)
+    emergency_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(emergency_cb)
+    
+    emergency_desc = QLabel("Fixes AI responses that lose paragraph\nstructure (wall of text)")
+    emergency_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    emergency_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(emergency_desc)
+    
+    # Emergency Image Restoration (Add below Paragraph Restoration)
+    img_restore_cb = self._create_styled_checkbox("Emergency Image Restoration")
+    try:
+        # Default to False if not present (disabled by default)
+        if not hasattr(self, 'emergency_image_restore_var'):
+            self.emergency_image_restore_var = False
+        img_restore_cb.setChecked(bool(self.emergency_image_restore_var))
+    except Exception:
+        pass
+    def _on_img_restore_toggle(checked):
+        try:
+            self.emergency_image_restore_var = bool(checked)
+        except Exception:
+            pass
+    img_restore_cb.toggled.connect(_on_img_restore_toggle)
+    img_restore_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(img_restore_cb)
+    
+    img_restore_desc = QLabel("Restores &lt;img&gt;, SVG, &lt;object&gt;, &lt;video&gt;, CSS url() tags<br>if missing in translation (uses rename map)")
+    img_restore_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    img_restore_desc.setContentsMargins(20, 0, 0, 5)
+    img_restore_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(img_restore_desc)
+    
+    # Emergency Glossary Compliance
+    glossary_compliance_cb = self._create_styled_checkbox("Emergency Glossary Compliance")
+    glossary_compliance_cb.setToolTip(
+        "<b>Emergency Glossary Compliance</b><br><br>"
+        "Pre-edits the source chapter text with the active glossary\u2019s "
+        "raw \u2192 translated replacements <i>before</i> sending it to the "
+        "translation API, helping character / term / location names "
+        "stay consistent when the model ignores the glossary "
+        "prompt.<br><br>"
+        "<b>Mode</b> controls which entry types are substituted:<br>"
+        "\u00b7 <b>Characters</b> \u2014 only character-name entries "
+        "(safest; minimal chance of mangling unrelated text).<br>"
+        "\u00b7 <b>All</b> \u2014 every entry in the glossary "
+        "(terms, locations, abilities, items, organizations, titles, "
+        "books\u2026). Maximum coverage, higher risk of over-substitution "
+        "in ambiguous phrases.<br>"
+        "\u00b7 <b>Custom</b> \u2014 pick specific entry types via the "
+        "Configure\u2026 dialog (the list is populated from the glossary "
+        "file currently attached to the selected EPUB).<br><br>"
+        "Minimum raw entry length skips shorter glossary keys. A value of "
+        "0 includes all lengths; it cannot resolve ambiguous longer matches.<br><br>"
+        "Substitutions happen in-memory; the original source file on "
+        "disk is never modified. Turn this OFF for prose where "
+        "aggressive name-replacement would corrupt wordplay, "
+        "honorifics, or puns."
+    )
+    try:
+        if not hasattr(self, 'emergency_glossary_compliance_var'):
+            self.emergency_glossary_compliance_var = self.config.get('emergency_glossary_compliance', False)
+        glossary_compliance_cb.setChecked(bool(self.emergency_glossary_compliance_var))
+    except Exception:
+        pass
+    
+    # Row for dropdown + configure button
+    glossary_compliance_row = QWidget()
+    glossary_compliance_row_layout = QHBoxLayout(glossary_compliance_row)
+    glossary_compliance_row_layout.setContentsMargins(20, 0, 0, 0)
+    glossary_compliance_row_layout.setSpacing(8)
+    
+    glossary_compliance_mode_combo = QComboBox()
+    glossary_compliance_mode_combo.addItems(["Characters", "All", "Custom"])
+    glossary_compliance_mode_combo.setFixedWidth(140)
+    try:
+        if not hasattr(self, 'emergency_glossary_compliance_mode_var'):
+            self.emergency_glossary_compliance_mode_var = self.config.get('emergency_glossary_compliance_mode', 'characters')
+        mode_map = {'characters': 0, 'all': 1, 'custom': 2}
+        glossary_compliance_mode_combo.setCurrentIndex(mode_map.get(str(self.emergency_glossary_compliance_mode_var).lower(), 0))
+    except Exception:
+        pass
+    self._disable_combobox_mousewheel(glossary_compliance_mode_combo)
+    glossary_compliance_row_layout.addWidget(glossary_compliance_mode_combo)
+    
+    glossary_compliance_configure_btn = QPushButton("Configure…")
+    glossary_compliance_configure_btn.setFixedWidth(100)
+    glossary_compliance_configure_btn.setStyleSheet("background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;")
+    glossary_compliance_configure_btn.setVisible(glossary_compliance_mode_combo.currentIndex() == 2)
+    glossary_compliance_row_layout.addWidget(glossary_compliance_configure_btn)
+    glossary_compliance_row_layout.addStretch()
+
+    # A length floor avoids forcing short glossary keys into unrelated words.
+    glossary_min_chars_row = QWidget()
+    glossary_min_chars_layout = QHBoxLayout(glossary_min_chars_row)
+    glossary_min_chars_layout.setContentsMargins(20, 0, 0, 0)
+    glossary_min_chars_layout.setSpacing(8)
+    glossary_min_chars_layout.addWidget(QLabel("Minimum raw entry length:"))
+    from PySide6.QtWidgets import QSlider
+    glossary_min_chars_slider = QSlider(Qt.Horizontal)
+    glossary_min_chars_slider.setRange(0, 10)
+    glossary_min_chars_slider.setSingleStep(1)
+    glossary_min_chars_slider.setPageStep(1)
+    glossary_min_chars_slider.setTickPosition(QSlider.TicksBelow)
+    glossary_min_chars_slider.setTickInterval(1)
+    glossary_min_chars_slider.setFixedWidth(180)
+    glossary_min_chars_slider.wheelEvent = lambda event: event.ignore()
+    try:
+        current_min_chars = max(0, min(10, int(getattr(self, 'emergency_glossary_compliance_min_chars_var', 3))))
+    except (TypeError, ValueError):
+        current_min_chars = 3
+    self.emergency_glossary_compliance_min_chars_var = current_min_chars
+    glossary_min_chars_slider.setValue(current_min_chars)
+    glossary_min_chars_layout.addWidget(glossary_min_chars_slider)
+    glossary_min_chars_value = QLabel()
+    glossary_min_chars_value.setMinimumWidth(110)
+    glossary_min_chars_layout.addWidget(glossary_min_chars_value)
+    glossary_min_chars_layout.addStretch()
+
+    def _on_glossary_min_chars_change(value):
+        self.emergency_glossary_compliance_min_chars_var = value
+        glossary_min_chars_value.setText("0 (no minimum)" if value == 0 else f"{value} characters")
+
+    glossary_min_chars_slider.valueChanged.connect(_on_glossary_min_chars_change)
+    _on_glossary_min_chars_change(current_min_chars)
+
+    glossary_min_chars_desc = QLabel("Skips shorter glossary keys during pre-editing; longer matches can still be ambiguous.")
+    glossary_min_chars_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    glossary_min_chars_desc.setContentsMargins(20, 0, 0, 5)
+
+    glossary_compliance_desc = QLabel("Pre-edits source text with glossary entries (raw→translated)<br>before sending to AI to improve name consistency")
+    glossary_compliance_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    glossary_compliance_desc.setContentsMargins(20, 0, 0, 5)
+    glossary_compliance_desc.setTextFormat(Qt.RichText)
+    
+    # Initialize custom types list
+    if not hasattr(self, 'emergency_glossary_compliance_custom_types_var'):
+        self.emergency_glossary_compliance_custom_types_var = self.config.get('emergency_glossary_compliance_custom_types', [])
+    
+    def _on_glossary_compliance_toggle(checked):
+        try:
+            self.emergency_glossary_compliance_var = bool(checked)
+            glossary_compliance_row.setVisible(checked)
+            glossary_min_chars_row.setVisible(checked)
+            glossary_min_chars_desc.setVisible(checked)
+            glossary_compliance_desc.setVisible(checked)
+        except Exception:
+            pass
+    glossary_compliance_cb.toggled.connect(_on_glossary_compliance_toggle)
+    
+    def _on_glossary_compliance_mode_change(index):
+        try:
+            mode_list = ['characters', 'all', 'custom']
+            self.emergency_glossary_compliance_mode_var = mode_list[index]
+            glossary_compliance_configure_btn.setVisible(index == 2)
+        except Exception:
+            pass
+    glossary_compliance_mode_combo.currentIndexChanged.connect(_on_glossary_compliance_mode_change)
+    
+    def _open_glossary_compliance_custom_dialog():
+        """Open dialog to select custom entry types for glossary compliance"""
+        selected = open_glossary_entry_types_dialog(
+            self,
+            self._other_settings_dialog if hasattr(self, '_other_settings_dialog') else self,
+            "Custom Glossary Compliance Types",
+            "Select which entry types to pre-edit:",
+            self.emergency_glossary_compliance_custom_types_var,
+        )
+        if selected is not None:
+            self.emergency_glossary_compliance_custom_types_var = selected
+
+    glossary_compliance_configure_btn.clicked.connect(_open_glossary_compliance_custom_dialog)
+    
+    # Initial visibility
+    is_enabled = glossary_compliance_cb.isChecked()
+    glossary_compliance_row.setVisible(is_enabled)
+    glossary_min_chars_row.setVisible(is_enabled)
+    glossary_min_chars_desc.setVisible(is_enabled)
+    glossary_compliance_desc.setVisible(is_enabled)
+    
+    glossary_compliance_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(glossary_compliance_cb)
+    left_v.addWidget(glossary_compliance_row)
+    left_v.addWidget(glossary_min_chars_row)
+    left_v.addWidget(glossary_min_chars_desc)
+    left_v.addWidget(glossary_compliance_desc)
+    
+    # Enable Decimal Chapter Detection
+    decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")
+    try:
+        decimal_cb.setChecked(bool(self.enable_decimal_chapters_var))
+    except Exception:
+        pass
+    def _on_decimal_toggle(checked):
+        try:
+            self.enable_decimal_chapters_var = bool(checked)
+        except Exception:
+            pass
+    decimal_cb.toggled.connect(_on_decimal_toggle)
+    decimal_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(decimal_cb)
+    
+    decimal_desc = QLabel("Detect chapters like 1.1, 1.2 in EPUB files\n(Text files always use decimal chapters when split)")
+    decimal_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    decimal_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(decimal_desc)
+    
+    # Fix Empty Attribute Tags (EPUB)
+    empty_attr_epub_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (EPUB) - LLM Token Fix")
+    try:
+        # Default to config value (fallback False)
+        if not hasattr(self, 'fix_empty_attr_tags_epub_var'):
+            self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
+        empty_attr_epub_cb.setChecked(bool(self.fix_empty_attr_tags_epub_var))
+    except Exception:
+        pass
+    def _on_empty_attr_epub_toggle(checked):
+        try:
+            self.fix_empty_attr_tags_epub_var = bool(checked)
+            self.config['fix_empty_attr_tags_epub'] = self.fix_empty_attr_tags_epub_var
+            os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if checked else '0'
+        except Exception:
+            pass
+    empty_attr_epub_cb.toggled.connect(_on_empty_attr_epub_toggle)
+    empty_attr_epub_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(empty_attr_epub_cb)
+    
+    empty_attr_epub_desc = QLabel("During EPUB conversion, converts hallucinated empty-attribute tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt;<br>to visible text &lt;tag attr&gt;.")
+    empty_attr_epub_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    empty_attr_epub_desc.setContentsMargins(20, 0, 0, 5)
+    empty_attr_epub_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(empty_attr_epub_desc)
+
+    # Fix Empty Attribute Tags (Extraction) - shared BeautifulSoup/html2text LLM token fix
+    empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
+    try:
+        if not hasattr(self, 'fix_empty_attr_tags_extract_var'):
+            self.fix_empty_attr_tags_extract_var = bool(
+                self.config.get('fix_empty_attr_tags_extract', False)
+                or self.config.get('fix_empty_attr_tags_bs', False)
+            )
+        self.fix_empty_attr_tags_bs_var = bool(self.fix_empty_attr_tags_extract_var)
+        self.config['fix_empty_attr_tags_extract'] = bool(self.fix_empty_attr_tags_extract_var)
+        empty_attr_extract_cb.setChecked(bool(self.fix_empty_attr_tags_extract_var))
+    except Exception:
+        pass
+    def _on_empty_attr_extract_toggle(checked):
+        try:
+            self.fix_empty_attr_tags_extract_var = bool(checked)
+            self.fix_empty_attr_tags_bs_var = bool(checked)
+            self.config['fix_empty_attr_tags_extract'] = self.fix_empty_attr_tags_extract_var
+            os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if checked else '0'
+            os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    empty_attr_extract_cb.toggled.connect(_on_empty_attr_extract_toggle)
+    empty_attr_extract_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(empty_attr_extract_cb)
+
+    empty_attr_extract_desc = QLabel("During extraction cleanup, converts hallucinated empty-attribute tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt;<br>to visible text &lt;tag attr&gt;.")
+    empty_attr_extract_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    empty_attr_extract_desc.setContentsMargins(20, 0, 0, 5)
+    empty_attr_extract_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(empty_attr_extract_desc)
+
+    # Fix stray p&gt; text artifacts (EPUB)
+    stray_p_gt_epub_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (EPUB) - Gemma Token Fix by TK")
+    try:
+        if not hasattr(self, 'fix_stray_p_gt_epub_var'):
+            self.fix_stray_p_gt_epub_var = self.config.get('fix_stray_p_gt_epub', False)
+        stray_p_gt_epub_cb.setChecked(bool(self.fix_stray_p_gt_epub_var))
+    except Exception:
+        pass
+    def _on_stray_p_gt_epub_toggle(checked):
+        try:
+            self.fix_stray_p_gt_epub_var = bool(checked)
+            self.config['fix_stray_p_gt_epub'] = self.fix_stray_p_gt_epub_var
+            os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if checked else '0'
+        except Exception:
+            pass
+    stray_p_gt_epub_cb.toggled.connect(_on_stray_p_gt_epub_toggle)
+    stray_p_gt_epub_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(stray_p_gt_epub_cb)
+
+    stray_p_gt_epub_desc = QLabel("Removes stray paragraph-tag crumbs like p&gt; before EPUB compile.")
+    stray_p_gt_epub_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    stray_p_gt_epub_desc.setContentsMargins(20, 0, 0, 5)
+    stray_p_gt_epub_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(stray_p_gt_epub_desc)
+
+    # Number Spacing Tokenization Fix
+    number_spacing_row = QHBoxLayout()
+    number_spacing_row.setContentsMargins(0, 2, 0, 0)
+    number_spacing_label = QLabel("Number Spacing Tokenization Fix")
+    class _NoWheelCombo(QComboBox):
+        def wheelEvent(self, e): e.ignore()
+    number_spacing_combo = _NoWheelCombo()
+    number_spacing_combo.addItems(["Off", "On — Standard", "On — Standard + Caps"])
+    number_spacing_combo.setFixedWidth(180)
+    try:
+        if not hasattr(self, 'number_spacing_token_fix_var'):
+            raw = self.config.get('number_spacing_token_fix', '0')
+            if isinstance(raw, bool):
+                raw = '1' if raw else '0'
+            self.number_spacing_token_fix_var = str(raw)
+        number_spacing_combo.setCurrentIndex({'0': 0, '1': 1, '2': 2}.get(str(self.number_spacing_token_fix_var), 0))
+    except Exception:
+        pass
+    def _on_number_spacing_changed(idx):
+        try:
+            val = str(idx)
+            self.number_spacing_token_fix_var = val
+            self.config['number_spacing_token_fix'] = val
+            os.environ['NUMBER_SPACING_TOKEN_FIX'] = val
+        except Exception:
+            pass
+    number_spacing_combo.currentIndexChanged.connect(_on_number_spacing_changed)
+    number_spacing_row.addWidget(number_spacing_label)
+    number_spacing_row.addSpacing(8)
+    number_spacing_row.addWidget(number_spacing_combo)
+    number_spacing_row.addStretch()
+    left_v.addLayout(number_spacing_row)
+
+    number_spacing_desc = QLabel("Adds spaces between letters and numbers to fix tokenizer bugs in some local LLMs.\nStandard: mixed-case words only.  Standard + Caps: also matches ALL-CAPS acronyms.")
+    number_spacing_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    number_spacing_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(number_spacing_desc)
+
+    # Output SDLXLIFF sidecar files for HTML translations
+    output_sdlxliff_cb = self._create_styled_checkbox("Output SDLXLIFF")
+    try:
+        if not hasattr(self, 'output_sdlxliff_var'):
+            self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
+        output_sdlxliff_cb.setChecked(bool(self.output_sdlxliff_var))
+    except Exception:
+        pass
+    def _on_output_sdlxliff_toggle(checked):
+        try:
+            self.output_sdlxliff_var = bool(checked)
+            self.config['output_sdlxliff'] = self.output_sdlxliff_var
+            os.environ['OUTPUT_SDLXLIFF'] = '1' if checked else '0'
+        except Exception:
+            pass
+    output_sdlxliff_cb.toggled.connect(_on_output_sdlxliff_toggle)
+    output_sdlxliff_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(output_sdlxliff_cb)
+
+    output_sdlxliff_desc = QLabel("Writes an SDLXLIFF review sidecar for each HTML output.")
+    output_sdlxliff_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    output_sdlxliff_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(output_sdlxliff_desc)
+
+    # ---- Output MD / Output TXT sidecar files for HTML translations ----
+    # Each writes a MD/ or TXT/ subfolder next to where the SDLXLIFF folder is
+    # created. The "Generate" button next to each toggle retroactively builds
+    # the MD/TXT for the currently selected input files from their HTML outputs
+    # (re-run through the html2text extractor so the valid HTML tag list is
+    # always applied). Generation runs on a background thread + thread pool so
+    # the GUI never lags.
+    def _start_retro_md_txt_gen(kind, button, default_text):
+        import threading
+        from PySide6.QtCore import QObject, Signal, QTimer
+
+        if getattr(self, '_md_txt_retro_running', False):
+            return
+
+        files = list(getattr(self, 'selected_files', None) or [])
+        if not files:
+            try:
+                _p = self.entry_epub.text().strip() if hasattr(self, 'entry_epub') else ''
+            except Exception:
+                _p = ''
+            if _p and _p.lower() != 'no file selected' and os.path.isfile(_p):
+                files = [_p]
+        if not files:
+            button.setText("⚠️ No input files")
+            QTimer.singleShot(2500, lambda: button.setText(default_text))
+            try:
+                self.append_log("⚠️ MD/TXT generation: no input files selected.")
+            except Exception:
+                pass
+            return
+
+        class _RetroGenSignals(QObject):
+            done = Signal(int, int)
+
+        sig = _RetroGenSignals()
+        self._md_txt_retro_running = True
+        button.setEnabled(False)
+        button.setText("⏳ Generating…")
+
+        def _finish(ok, fail):
+            self._md_txt_retro_running = False
+            button.setEnabled(True)
+            button.setText(f"✅ {ok} done" if not fail else f"✅ {ok} / ⚠️ {fail}")
+            QTimer.singleShot(4000, lambda: button.setText(default_text))
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK if not fail else winsound.MB_ICONEXCLAMATION)
+            except Exception:
+                pass
+
+        sig.done.connect(_finish)
+        button._retro_sig = sig  # keep a reference alive
+
+        def _worker():
+            ok = fail = 0
+            try:
+                from md_txt_sidecar_writer import generate_md_txt_for_output_dir
+                seen = set()
+                for f in files:
+                    if not f or f == '__generative_mode__':
+                        continue
+                    try:
+                        out_dir = self._resolve_translation_output_dir(f)
+                    except Exception:
+                        out_dir = None
+                    if not out_dir:
+                        continue
+                    key = os.path.abspath(out_dir)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        self.append_log(f"📝 [{kind.upper()}] {out_dir}")
+                    except Exception:
+                        pass
+                    r_ok, r_fail, _r_total = generate_md_txt_for_output_dir(
+                        out_dir,
+                        do_md=(kind == 'md'),
+                        do_txt=(kind == 'txt'),
+                        max_workers=4,
+                        log=getattr(self, 'append_log', None),
+                        should_stop=lambda: bool(getattr(self, 'stop_requested', False)),
+                    )
+                    ok += r_ok
+                    fail += r_fail
+                try:
+                    self.append_log(
+                        f"✅ [{kind.upper()}] Generation complete: {ok} file(s)"
+                        + (f", {fail} failed" if fail else "")
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    self.append_log(f"⚠️ [{kind.upper()}] Generation error: {e}")
+                except Exception:
+                    pass
+            finally:
+                try:
+                    sig.done.emit(ok, fail)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    _retro_btn_style = (
+        "QPushButton { background-color: #17a2b8; color: white; padding: 3px 10px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; } "
+        "QPushButton:disabled { background-color: #555; color: #999; }"
+    )
+
+    # Output MD
+    output_md_cb = self._create_styled_checkbox("Output MD")
+    try:
+        if not hasattr(self, 'output_md_var'):
+            self.output_md_var = self.config.get('output_md', False)
+        output_md_cb.setChecked(bool(self.output_md_var))
+    except Exception:
+        pass
+    def _on_output_md_toggle(checked):
+        try:
+            self.output_md_var = bool(checked)
+            self.config['output_md'] = self.output_md_var
+            os.environ['OUTPUT_MD'] = '1' if checked else '0'
+        except Exception:
+            pass
+    output_md_cb.toggled.connect(_on_output_md_toggle)
+    output_md_cb.setContentsMargins(0, 2, 0, 0)
+
+    md_gen_btn = QPushButton("Generate MD")
+    md_gen_btn.setToolTip("Generate .md files for the currently selected input file(s) from their HTML outputs.\nRe-runs the html2text extraction so the valid HTML tag list is applied.")
+    md_gen_btn.setMinimumWidth(110)
+    md_gen_btn.setStyleSheet(_retro_btn_style)
+    md_gen_btn.clicked.connect(lambda: _start_retro_md_txt_gen('md', md_gen_btn, "Generate MD"))
+
+    md_row = QWidget()
+    md_row_h = QHBoxLayout(md_row)
+    md_row_h.setContentsMargins(0, 2, 0, 0)
+    md_row_h.addWidget(output_md_cb)
+    md_row_h.addStretch()
+    md_row_h.addWidget(md_gen_btn)
+    left_v.addWidget(md_row)
+
+    output_md_desc = QLabel("Writes a MD/ subfolder with a .md (html2text/markdown) copy of each HTML output.")
+    output_md_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    output_md_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(output_md_desc)
+
+    # Output TXT
+    output_txt_cb = self._create_styled_checkbox("Output TXT")
+    try:
+        if not hasattr(self, 'output_txt_var'):
+            self.output_txt_var = self.config.get('output_txt', False)
+        output_txt_cb.setChecked(bool(self.output_txt_var))
+    except Exception:
+        pass
+    def _on_output_txt_toggle(checked):
+        try:
+            self.output_txt_var = bool(checked)
+            self.config['output_txt'] = self.output_txt_var
+            os.environ['OUTPUT_TXT'] = '1' if checked else '0'
+        except Exception:
+            pass
+    output_txt_cb.toggled.connect(_on_output_txt_toggle)
+    output_txt_cb.setContentsMargins(0, 2, 0, 0)
+
+    txt_gen_btn = QPushButton("Generate TXT")
+    txt_gen_btn.setToolTip("Generate .txt files for the currently selected input file(s) from their HTML outputs.\nRe-runs the html2text extraction so the valid HTML tag list is applied.")
+    txt_gen_btn.setMinimumWidth(110)
+    txt_gen_btn.setStyleSheet(_retro_btn_style)
+    txt_gen_btn.clicked.connect(lambda: _start_retro_md_txt_gen('txt', txt_gen_btn, "Generate TXT"))
+
+    txt_row = QWidget()
+    txt_row_h = QHBoxLayout(txt_row)
+    txt_row_h.setContentsMargins(0, 2, 0, 0)
+    txt_row_h.addWidget(output_txt_cb)
+    txt_row_h.addStretch()
+    txt_row_h.addWidget(txt_gen_btn)
+    left_v.addWidget(txt_row)
+
+    output_txt_desc = QLabel("Writes a TXT/ subfolder with a .txt (html2text) copy of each HTML output.")
+    output_txt_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    output_txt_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(output_txt_desc)
+
+    # Skip Thinking for Lightweight Tasks
+    skip_thinking_title = QLabel("Skip Thinking for Lightweight Tasks")
+    skip_thinking_title.setStyleSheet("font-weight: bold; font-size: 11pt; margin-top: 8px;")
+    left_v.addWidget(skip_thinking_title)
+
+    skip_title_cb = self._create_styled_checkbox("Skip Book Title Thinking")
+    try:
+        skip_title_cb.setChecked(bool(getattr(self, 'skip_book_title_thinking_var', True)))
+    except Exception:
+        skip_title_cb.setChecked(True)
+    def _on_skip_title_toggle(checked):
+        try:
+            self.skip_book_title_thinking_var = bool(checked)
+            os.environ['SKIP_BOOK_TITLE_THINKING'] = '1' if checked else '0'
+        except Exception:
+            pass
+    skip_title_cb.toggled.connect(_on_skip_title_toggle)
+    skip_title_cb.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(skip_title_cb)
+
+    skip_metadata_cb = self._create_styled_checkbox("Skip Metadata Thinking")
+    try:
+        skip_metadata_cb.setChecked(bool(getattr(self, 'skip_metadata_thinking_var', True)))
+    except Exception:
+        skip_metadata_cb.setChecked(True)
+    def _on_skip_metadata_toggle(checked):
+        try:
+            self.skip_metadata_thinking_var = bool(checked)
+            os.environ['SKIP_METADATA_THINKING'] = '1' if checked else '0'
+        except Exception:
+            pass
+    skip_metadata_cb.toggled.connect(_on_skip_metadata_toggle)
+    skip_metadata_cb.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(skip_metadata_cb)
+
+    skip_toc_cb = self._create_styled_checkbox("Skip TOC/Header Thinking")
+    try:
+        skip_toc_cb.setChecked(bool(getattr(self, 'skip_toc_thinking_var', False)))
+    except Exception:
+        skip_toc_cb.setChecked(False)
+    def _on_skip_toc_toggle(checked):
+        try:
+            self.skip_toc_thinking_var = bool(checked)
+            os.environ['SKIP_TOC_THINKING'] = '1' if checked else '0'
+        except Exception:
+            pass
+    skip_toc_cb.toggled.connect(_on_skip_toc_toggle)
+    skip_toc_cb.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(skip_toc_cb)
+
+    skip_desc = QLabel("Reduces thinking for lightweight tasks.\nDisables DeepSeek R1 and Anthropic extended thinking.")
+    skip_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    skip_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(skip_desc)
+
+    # "Lightweight Thinking" slider
+    think_slider_title = QLabel("Lightweight Thinking")
+    think_slider_title.setStyleSheet("font-weight: bold; font-size: 10pt; margin-top: 4px;")
+    think_slider_title.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(think_slider_title)
+
+    think_slider_h = QHBoxLayout()
+    think_slider_h.setContentsMargins(20, 0, 0, 0)
+
+    from PySide6.QtWidgets import QSlider
+    think_slider = QSlider(Qt.Horizontal)
+    think_slider.setMinimum(1)
+    think_slider.setMaximum(5)
+    think_slider.setTickPosition(QSlider.TicksBelow)
+    think_slider.setTickInterval(1)
+    think_slider.setSingleStep(1)
+    think_slider.setPageStep(1)
+    think_slider.setFixedWidth(180)
+    # Keep wheel scrolling available to the surrounding settings pane without
+    # letting an incidental pointer hover change the configured thinking level.
+    think_slider.wheelEvent = lambda event: event.ignore()
+
+    gemini_levels = {1: 'Minimal', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'High'}
+    gpt_levels = {1: 'None', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'xHigh'}
+
+    current_val = int(getattr(self, 'lightweight_thinking_level_var', 1))
+    think_slider.setValue(current_val)
+
+    think_label = QLabel(f"{current_val} — Gemini: {gemini_levels[current_val]}, GPT: {gpt_levels[current_val]}")
+    think_label.setStyleSheet("color: #9ca3af; font-size: 9pt;")
+
+    def _update_slider_state():
+        any_checked = skip_title_cb.isChecked() or skip_metadata_cb.isChecked() or skip_toc_cb.isChecked()
+        think_slider.setEnabled(any_checked)
+        think_slider_title.setEnabled(any_checked)
+        think_label.setEnabled(any_checked)
+        if any_checked:
+            think_slider_title.setStyleSheet("font-weight: bold; font-size: 10pt; margin-top: 4px;")
+            think_label.setStyleSheet("color: #9ca3af; font-size: 9pt;")
+        else:
+            think_slider_title.setStyleSheet("font-weight: bold; font-size: 10pt; margin-top: 4px; color: #555;")
+            think_label.setStyleSheet("color: #555; font-size: 9pt;")
+
+    # Connect all 3 checkboxes to update slider state
+    skip_title_cb.toggled.connect(lambda _: _update_slider_state())
+    skip_metadata_cb.toggled.connect(lambda _: _update_slider_state())
+    skip_toc_cb.toggled.connect(lambda _: _update_slider_state())
+    _update_slider_state()  # Set initial state
+
+    def _on_think_slider_changed(val):
+        try:
+            self.lightweight_thinking_level_var = val
+            think_label.setText(f"{val} — Gemini: {gemini_levels[val]}, GPT: {gpt_levels[val]}")
+            os.environ['LIGHTWEIGHT_THINKING_LEVEL'] = str(val)
+        except Exception:
+            pass
+    think_slider.valueChanged.connect(_on_think_slider_changed)
+
+    think_slider.setToolTip(
+        "Controls thinking intensity for lightweight tasks (title, metadata, TOC).\n\n"
+        "Gemini levels:  1=Minimal  2=Low  3=Medium  4=High  5=High\n"
+        "GPT levels:       1=None     2=Low  3=Medium  4=High  5=xHigh\n\n"
+        "Lower = faster & cheaper. Higher = better quality."
+    )
+
+    think_slider_h.addWidget(think_slider)
+    think_slider_h.addWidget(think_label)
+    think_slider_h.addStretch()
+    left_v.addLayout(think_slider_h)
+
+    left_v.addStretch()
+    columns_h.addWidget(left_column)
+    
+    # Right column - Button and Reinforce field
+    right_column = QWidget()
+    right_v = QVBoxLayout(right_column)
+    right_v.setContentsMargins(0, 0, 0, 0)
+    
+    # Translation Chunk Prompt button (renamed)
+    btn_chunk_prompt = QPushButton("⚙️ Configure Chunk Prompt")
+    btn_chunk_prompt.setFixedWidth(180)
+    btn_chunk_prompt.clicked.connect(lambda: self.configure_translation_chunk_prompt())
+    right_v.addWidget(btn_chunk_prompt)
+    
+    chunk_prompt_desc = QLabel("Split chapter context")
+    chunk_prompt_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    chunk_prompt_desc.setContentsMargins(0, 0, 0, 15)
+    right_v.addWidget(chunk_prompt_desc)
+    
+
+    
+    # Break Split Count option
+    break_split_w = QWidget()
+    break_split_h = QHBoxLayout(break_split_w)
+    break_split_h.setContentsMargins(0, 5, 0, 0)
+    break_split_h.addWidget(QLabel("Break Split Count:"))
+    break_split_edit = QLineEdit()
+    break_split_edit.setFixedWidth(60)
+    try:
+        break_split_edit.setText(str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '')
+    except Exception:
+        pass
+    def _on_break_split_changed(text):
+        try:
+            self.break_split_count_var = text
+        except Exception:
+            pass
+    break_split_edit.textChanged.connect(_on_break_split_changed)
+    break_split_h.addWidget(break_split_edit)
+    break_split_h.addStretch()
+    right_v.addWidget(break_split_w)
+    
+    break_split_desc = QLabel("Split chunks after N elements\n(Leave empty for token-only splitting)")
+    break_split_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    break_split_desc.setContentsMargins(0, 0, 0, 5)
+    right_v.addWidget(break_split_desc)
+    
+    right_v.addStretch()
+    columns_h.addWidget(right_column)
+    
+    section_v.addWidget(columns_container)
+    
+    # === CHAPTER EXTRACTION SETTINGS ===
+    extraction_box = QGroupBox("Chapter Extraction Settings")
+    extraction_v = QVBoxLayout(extraction_box)
+    
+    # Initialize variables if not exists
+    if not hasattr(self, 'text_extraction_method_var'):
+        if self.config.get('extraction_mode') == 'enhanced':
+            self.text_extraction_method_var = 'enhanced'
+            self.file_filtering_level_var = self.config.get('enhanced_filtering', 'smart')
+        else:
+            self.text_extraction_method_var = 'standard'
+            self.file_filtering_level_var = self.config.get('extraction_mode', 'smart')
+    
+    if not hasattr(self, 'enhanced_preserve_structure_var'):
+        self.enhanced_preserve_structure_var = self.config.get('enhanced_preserve_structure', True)
+    
+    if not hasattr(self, 'enhanced_single_line_break_var'):
+        self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
+
+    if not hasattr(self, 'convert_br_to_paragraphs_var'):
+        self.convert_br_to_paragraphs_var = self.config.get(
+            'convert_br_to_paragraphs', True
+        )
+
+    if not hasattr(self, 'html2text_escape_snob_var'):
+        self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', False)
+
+    if not hasattr(self, 'preserve_asterisk_separator_lines_var'):
+        self.preserve_asterisk_separator_lines_var = self.config.get(
+            'preserve_asterisk_separator_lines', True
+        )
+    
+    if not hasattr(self, 'use_markdown2_converter_var'):
+        self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
+
+    if not hasattr(self, 'allow_ai_markdown_headers_var'):
+        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', False)
+    
+    # Text Extraction Method
+    method_title = QLabel("Text Extraction Method:")
+    method_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    method_title.setContentsMargins(0, 0, 0, 5)
+    extraction_v.addWidget(method_title)
+    
+    extraction_method_group = QButtonGroup(extraction_box)
+    
+    # Standard extraction
+    standard_rb = QRadioButton("Standard (BeautifulSoup)")
+    standard_rb.setToolTip("It retains all html tags and is best for format preservation, but is very token inefficient.")
+    try:
+        if self.text_extraction_method_var == "standard":
+            standard_rb.setChecked(True)
+    except Exception:
+        pass
+    def _on_standard_selected(checked):
+        if checked:
+            try:
+                self.text_extraction_method_var = "standard"
+                self.on_extraction_method_change()
+            except Exception:
+                pass
+    standard_rb.toggled.connect(_on_standard_selected)
+    extraction_method_group.addButton(standard_rb)
+    standard_rb.setContentsMargins(0, 2, 0, 0)
+    extraction_v.addWidget(standard_rb)
+    
+    standard_desc = QLabel("Traditional HTML parsing - Best for format preservation")
+    standard_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    standard_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(standard_desc)
+    
+    # BeautifulSoup options (shown when standard is selected)
+    self.bs_options_frame = QWidget()
+    bs_opts_v = QVBoxLayout(self.bs_options_frame)
+    bs_opts_v.setContentsMargins(20, 5, 0, 0)
+    
+    # Fix stray p&gt; text artifacts (BeautifulSoup)
+    stray_p_gt_bs_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (BeautifulSoup) - Gemma Token Fix by TK")
+    try:
+        if not hasattr(self, 'fix_stray_p_gt_bs_var'):
+            self.fix_stray_p_gt_bs_var = self.config.get('fix_stray_p_gt_bs', False)
+        stray_p_gt_bs_cb.setChecked(bool(self.fix_stray_p_gt_bs_var))
+    except Exception:
+        pass
+    def _on_stray_p_gt_bs_toggle(checked):
+        try:
+            self.fix_stray_p_gt_bs_var = bool(checked)
+            self.config['fix_stray_p_gt_bs'] = self.fix_stray_p_gt_bs_var
+            os.environ['FIX_STRAY_P_GT_BS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    stray_p_gt_bs_cb.toggled.connect(_on_stray_p_gt_bs_toggle)
+    stray_p_gt_bs_cb.setContentsMargins(0, 2, 0, 0)
+    bs_opts_v.addWidget(stray_p_gt_bs_cb)
+
+    stray_p_gt_bs_desc = QLabel("Removes stray paragraph-tag crumbs like p&gt; from BeautifulSoup/Standard output.")
+    stray_p_gt_bs_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    stray_p_gt_bs_desc.setContentsMargins(20, 0, 0, 3)
+    stray_p_gt_bs_desc.setTextFormat(Qt.RichText)
+    bs_opts_v.addWidget(stray_p_gt_bs_desc)
+
+    # Halgakos icon for BeautifulSoup mode
+    halgakos_label = QLabel()
+    _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(_icon_path):
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtWidgets import QApplication
+        _pixmap = QPixmap(_icon_path)
+        if not _pixmap.isNull():
+            _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+            _target = int(150 * _dpr)
+            _scaled = _pixmap.scaled(_target, _target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _scaled.setDevicePixelRatio(_dpr)
+            halgakos_label.setPixmap(_scaled)
+            halgakos_label.setFixedSize(150, 150)
+            halgakos_label.setAlignment(Qt.AlignCenter)
+    bs_opts_v.addWidget(halgakos_label)
+    
+    extraction_v.addWidget(self.bs_options_frame)
+    
+    # Set initial visibility based on current extraction method
+    _bs_visible = getattr(self, 'text_extraction_method_var', 'standard') == 'standard'
+    self.bs_options_frame.setVisible(_bs_visible)
+    
+    # Enhanced extraction
+    enhanced_rb = QRadioButton("🚀 Enhanced (html2text)")
+    enhanced_rb.setToolTip("It strips out all html tags, and adds new html tags at the end.\nThis results in a cleaner output and is more token efficient, but sacrifices format preservation.")
+    try:
+        if self.text_extraction_method_var == "enhanced":
+            enhanced_rb.setChecked(True)
+    except Exception:
+        pass
+    def _on_enhanced_selected(checked):
+        if checked:
+            try:
+                self.text_extraction_method_var = "enhanced"
+                self.on_extraction_method_change()
+            except Exception:
+                pass
+    enhanced_rb.toggled.connect(_on_enhanced_selected)
+    extraction_method_group.addButton(enhanced_rb)
+    enhanced_rb.setContentsMargins(0, 2, 0, 0)
+    extraction_v.addWidget(enhanced_rb)
+    
+    enhanced_desc = QLabel("Superior token effeciency, cleaner text extraction")
+    enhanced_desc.setStyleSheet("color: darkgreen; font-size: 9pt;")
+    enhanced_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(enhanced_desc)
+    
+    # Enhanced options (shown when enhanced is selected)
+    self.enhanced_options_frame = QWidget()
+    enhanced_opts_v = QVBoxLayout(self.enhanced_options_frame)
+    enhanced_opts_v.setContentsMargins(20, 5, 0, 0)
+    
+    preserve_cb = self._create_styled_checkbox("Preserve Markdown Structure")
+    preserve_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Keeps markdown-style elements (headers, bold, lists) when using html2text so the model retains formatting cues."
+        "</p></qt>"
+    )
+    try:
+        preserve_cb.setChecked(bool(self.enhanced_preserve_structure_var))
+    except Exception:
+        pass
+    def _on_preserve_toggle(checked):
+        try:
+            self.enhanced_preserve_structure_var = bool(checked)
+        except Exception:
+            pass
+    preserve_cb.toggled.connect(_on_preserve_toggle)
+    preserve_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(preserve_cb)
+    
+    preserve_desc = QLabel("Keep formatting (bold, headers, lists) for better AI context")
+    preserve_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    preserve_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(preserve_desc)
+
+    # Skip markdown -> HTML tag conversion
+    skip_md2html_cb = self._create_styled_checkbox("SKIP markdown -> html tag conversion")
+    skip_md2html_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Skip the markdown→HTML tag converter. The safety passes still run "
+        "(invalid angle-bracket escaping, html2text strip, image/ruby restore), "
+        "but markdown (#, **, lists, &gt; quotes) is left as-is instead of being "
+        "turned into &lt;h1&gt;/&lt;strong&gt;/&lt;li&gt; tags."
+        "</p></qt>"
+    )
+    try:
+        if not hasattr(self, 'skip_markdown_to_html_var'):
+            self.skip_markdown_to_html_var = self.config.get('skip_markdown_to_html', False)
+        skip_md2html_cb.setChecked(bool(self.skip_markdown_to_html_var))
+    except Exception:
+        pass
+    def _on_skip_md2html_toggle(checked):
+        try:
+            self.skip_markdown_to_html_var = bool(checked)
+            self.config['skip_markdown_to_html'] = self.skip_markdown_to_html_var
+            os.environ['SKIP_MARKDOWN_TO_HTML'] = '1' if checked else '0'
+        except Exception:
+            pass
+    skip_md2html_cb.toggled.connect(_on_skip_md2html_toggle)
+    skip_md2html_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(skip_md2html_cb)
+
+    skip_md2html_desc = QLabel("Leave markdown as-is (don't convert # / ** / lists into HTML tags)")
+    skip_md2html_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    skip_md2html_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(skip_md2html_desc)
+
+    allow_ai_md_headers_cb = self._create_styled_checkbox("Allow AI-created Markdown headers")
+    try:
+        allow_ai_md_headers_cb.setChecked(bool(self.allow_ai_markdown_headers_var))
+    except Exception:
+        pass
+    def _on_allow_ai_md_headers_toggle(checked):
+        try:
+            self.allow_ai_markdown_headers_var = bool(checked)
+            self.config['allow_ai_markdown_headers'] = bool(checked)
+        except Exception:
+            pass
+    allow_ai_md_headers_cb.toggled.connect(_on_allow_ai_md_headers_toggle)
+    allow_ai_md_headers_cb.setToolTip(
+        "Allow Markdown headings returned by the AI to become HTML heading tags,\n"
+        "even when those headings did not come from source h1-h6 tags.\n"
+        "Leave off to only restore headings that existed as source HTML headers."
+    )
+    allow_ai_md_headers_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(allow_ai_md_headers_cb)
+
+    allow_ai_md_headers_desc = QLabel("Convert AI-added # headings to HTML headers")
+    allow_ai_md_headers_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    allow_ai_md_headers_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(allow_ai_md_headers_desc)
+    
+    # Single line break option
+    single_break_cb = self._create_styled_checkbox("Enable Single Line Break")
+    single_break_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Use single newlines instead of double when converting with html2text. "
+        "Helps reduce blank-line spacing."
+        "</p></qt>"
+    )
+    try:
+        single_break_cb.setChecked(bool(self.enhanced_single_line_break_var))
+    except Exception:
+        pass
+    def _on_single_break_toggle(checked):
+        try:
+            self.enhanced_single_line_break_var = bool(checked)
+            self.config['enhanced_single_line_break'] = self.enhanced_single_line_break_var
+            os.environ['ENHANCED_SINGLE_LINE_BREAK'] = '1' if checked else '0'
+        except Exception:
+            pass
+    single_break_cb.toggled.connect(_on_single_break_toggle)
+    single_break_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(single_break_cb)
+    
+    single_break_desc = QLabel("Use single newlines instead of double (helps reduce blank-line spacing)")
+    single_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    single_break_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(single_break_desc)
+
+    convert_br_cb = self._create_styled_checkbox(
+        "Convert <br> tags to <p> paragraphs"
+    )
+    convert_br_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When enabled, &lt;p&gt;First&lt;br/&gt;Second&lt;/p&gt; becomes "
+        "&lt;p&gt;First&lt;/p&gt;&lt;p&gt;Second&lt;/p&gt;. When disabled, the "
+        "&lt;br/&gt; remains inside its original paragraph. Applies to both "
+        "Markdown converters."
+        "</p></qt>"
+    )
+    try:
+        convert_br_cb.setChecked(bool(self.convert_br_to_paragraphs_var))
+    except Exception:
+        pass
+
+    def _on_convert_br_toggle(checked):
+        try:
+            self.convert_br_to_paragraphs_var = bool(checked)
+            self.config['convert_br_to_paragraphs'] = bool(checked)
+            os.environ['CONVERT_BR_TO_PARAGRAPHS'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    convert_br_cb.toggled.connect(_on_convert_br_toggle)
+    convert_br_cb.setContentsMargins(0, 2, 0, 0)
+
+    def _start_manual_br_conversion(button, default_text):
+        """Apply the BR-to-paragraph transform to selected outputs now."""
+        import threading
+        from datetime import datetime
+        from PySide6.QtCore import QObject, Signal, QTimer
+
+        if getattr(self, '_manual_br_conversion_running', False):
+            return
+
+        files = list(getattr(self, 'selected_files', None) or [])
+        if not files:
+            try:
+                selected_path = (
+                    self.entry_epub.text().strip()
+                    if hasattr(self, 'entry_epub') else ''
+                )
+            except Exception:
+                selected_path = ''
+            if (
+                selected_path
+                and selected_path.lower() != 'no file selected'
+                and os.path.isfile(selected_path)
+            ):
+                files = [selected_path]
+
+        # Keep the on-screen order while avoiding duplicate input entries.
+        unique_files = []
+        seen_files = set()
+        for selected_file in files:
+            if not selected_file or selected_file == '__generative_mode__':
+                continue
+            key = os.path.normcase(os.path.abspath(str(selected_file)))
+            if key in seen_files:
+                continue
+            seen_files.add(key)
+            unique_files.append(str(selected_file))
+        files = unique_files
+
+        if not files:
+            button.setText("⚠️ No input files")
+            QTimer.singleShot(2500, lambda: button.setText(default_text))
+            try:
+                self.append_log(
+                    "⚠️ Manual BR→P conversion: no input files selected."
+                )
+            except Exception:
+                pass
+            return
+
+        warning = QMessageBox(
+            getattr(self, '_other_settings_dialog', None) or button.window()
+        )
+        warning.setIcon(QMessageBox.Warning)
+        warning.setTextFormat(Qt.PlainText)
+        warning.setWindowTitle("Confirm Manual BR→P Conversion")
+        warning.setText(
+            f"Modify existing HTML outputs for {len(files)} selected input "
+            f"file(s)?"
+        )
+        warning.setInformativeText(
+            "This immediately replaces <br> boundaries inside paragraphs "
+            "with separate <p> paragraphs in each selected input's output "
+            "folder.\n\n"
+            "Example:\n"
+            "<p>First<br/>Second</p>  →  "
+            "<p>First</p><p>Second</p>\n\n"
+            "It runs even when the checkbox is off and does not create an "
+            "automatic backup. Detailed logs will be written to each output "
+            "folder's logs subfolder."
+        )
+        warning.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        warning.setDefaultButton(QMessageBox.Cancel)
+        _center_messagebox_buttons(
+            warning,
+            min_button_width=150,
+            min_button_height=48,
+        )
+        if warning.exec() != QMessageBox.Yes:
+            return
+
+        class _ManualBrSignals(QObject):
+            done = Signal(int, int)
+
+        signals = _ManualBrSignals()
+        self._manual_br_conversion_running = True
+        button.setEnabled(False)
+        button.setText("⏳ Converting…")
+
+        def _finish(ok_count, fail_count):
+            self._manual_br_conversion_running = False
+            button.setEnabled(True)
+            if fail_count:
+                button.setText(f"✅ {ok_count} / ⚠️ {fail_count}")
+            else:
+                button.setText(f"✅ {ok_count} done")
+            QTimer.singleShot(4000, lambda: button.setText(default_text))
+            try:
+                import winsound
+                sound = (
+                    winsound.MB_ICONEXCLAMATION
+                    if fail_count else winsound.MB_OK
+                )
+                winsound.MessageBeep(sound)
+            except Exception:
+                pass
+
+        signals.done.connect(_finish)
+        button._manual_br_signals = signals  # Keep Qt signals alive.
+
+        def _safe_log_stem(input_path):
+            stem = os.path.splitext(os.path.basename(input_path))[0]
+            stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', stem)
+            return stem.strip(' .') or 'input'
+
+        def _write_full_log(input_path, output_dir, audit, reused=False):
+            logs_dir = os.path.join(output_dir, 'logs')
+            os.makedirs(logs_dir, exist_ok=True)
+            log_path = os.path.join(
+                logs_dir,
+                f"{_safe_log_stem(input_path)}_br_conversion_log.txt",
+            )
+            lines = [
+                "Glossarion manual BR-to-paragraph conversion",
+                f"Timestamp: {datetime.now().astimezone().isoformat(timespec='seconds')}",
+                f"Input file: {os.path.abspath(input_path)}",
+                f"Output folder: {output_dir}",
+                "Action: replace <br> boundaries inside <p> elements with sibling <p> elements",
+                f"Reused scan result for duplicate output folder: {'yes' if reused else 'no'}",
+                "",
+                (
+                    f"Summary: {audit['scanned']} scanned; "
+                    f"{audit['changed']} converted; "
+                    f"{audit['unchanged']} unchanged; "
+                    f"{audit['failed']} failed"
+                ),
+                "",
+                "Files:",
+            ]
+            if not audit['files']:
+                lines.append("[NONE] No root-level HTML output files found.")
+            for record in audit['files']:
+                relative_path = os.path.relpath(record['path'], output_dir)
+                detail = (
+                    f"<br> {record['breaks_before']} -> "
+                    f"{record['breaks_after']}"
+                )
+                if record['status'] == 'failed':
+                    detail += f"; error: {record.get('error', 'unknown error')}"
+                lines.append(
+                    f"[{record['status'].upper()}] {relative_path} | {detail}"
+                )
+            with open(log_path, 'w', encoding='utf-8', newline='') as handle:
+                handle.write('\n'.join(lines) + '\n')
+            return os.path.abspath(log_path)
+
+        def _worker():
+            ok_inputs = 0
+            failed_inputs = 0
+            audit_cache = {}
+            try:
+                from html_output_utils import convert_br_in_output_folder
+
+                for input_path in files:
+                    input_name = os.path.basename(input_path)
+                    try:
+                        output_dir = os.path.abspath(
+                            self._resolve_translation_output_dir(input_path)
+                        )
+                        cache_key = os.path.normcase(output_dir)
+                        reused = cache_key in audit_cache
+                        if reused:
+                            audit = audit_cache[cache_key]
+                        else:
+                            audit = convert_br_in_output_folder(output_dir)
+                            audit_cache[cache_key] = audit
+                        log_path = _write_full_log(
+                            input_path, output_dir, audit, reused=reused
+                        )
+                        failed = int(audit['failed'])
+                        if failed:
+                            failed_inputs += 1
+                            icon = '⚠️'
+                        else:
+                            ok_inputs += 1
+                            icon = '✅'
+                        self.append_log(
+                            f"{icon} [BR→P] {input_name}: "
+                            f"{audit['changed']} updated, "
+                            f"{audit['unchanged']} unchanged, "
+                            f"{failed} failed ({audit['scanned']} scanned) | "
+                            f"Full log: {log_path}"
+                        )
+                    except Exception as exc:
+                        failed_inputs += 1
+                        try:
+                            self.append_log(
+                                f"⚠️ [BR→P] {input_name}: {exc} | "
+                                "Full log not written."
+                            )
+                        except Exception:
+                            pass
+            finally:
+                try:
+                    signals.done.emit(ok_inputs, failed_inputs)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    manual_br_button_text = "Apply to Existing Outputs"
+    manual_br_button = QPushButton(manual_br_button_text)
+    manual_br_button.setMinimumWidth(175)
+    manual_br_button.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Manually apply BR-to-paragraph conversion to root HTML files in "
+        "the currently selected inputs' output folders. Confirmation is "
+        "required before any file is changed."
+        "</p></qt>"
+    )
+    manual_br_button.setStyleSheet(
+        "QPushButton { background-color: #b45309; color: white; "
+        "padding: 3px 10px; border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #92400e; } "
+        "QPushButton:disabled { background-color: #555; color: #999; }"
+    )
+    manual_br_button.clicked.connect(
+        lambda: _start_manual_br_conversion(
+            manual_br_button, manual_br_button_text
+        )
+    )
+
+    convert_br_row = QWidget()
+    convert_br_row_h = QHBoxLayout(convert_br_row)
+    convert_br_row_h.setContentsMargins(0, 2, 0, 0)
+    convert_br_row_h.setSpacing(10)
+    convert_br_row_h.addWidget(convert_br_cb)
+    convert_br_row_h.addWidget(manual_br_button)
+    convert_br_row_h.addStretch()
+    enhanced_opts_v.addWidget(convert_br_row)
+
+    convert_br_desc = QLabel(
+        "On: replace <br> boundaries with separate <p>...</p> paragraphs.\n"
+        "Off: keep <br> tags inside their original paragraphs."
+    )
+    convert_br_desc.setTextFormat(Qt.PlainText)
+    convert_br_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    convert_br_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(convert_br_desc)
+
+    # Escape snob option
+    escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")
+    escape_snob_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When on, html2text escapes Markdown specials like (), [], * "
+        "Enable to avoid accidental formatting; disable for plainer text output."
+        "</p></qt>"
+    )
+    try:
+        escape_snob_cb.setChecked(bool(self.html2text_escape_snob_var))
+    except Exception:
+        pass
+    def _on_escape_snob_toggle(checked):
+        try:
+            self.html2text_escape_snob_var = bool(checked)
+            self.config['html2text_escape_snob'] = self.html2text_escape_snob_var
+            os.environ['HTML2TEXT_ESCAPE_SNOB'] = '1' if checked else '0'
+        except Exception:
+            pass
+    escape_snob_cb.toggled.connect(_on_escape_snob_toggle)
+    escape_snob_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(escape_snob_cb)
+
+    escape_snob_desc = QLabel("When on, html2text escapes (), [], *, _ etc. Turn off for plainer text.")
+    escape_snob_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    escape_snob_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(escape_snob_desc)
+
+    preserve_asterisk_cb = self._create_styled_checkbox(
+        "Keep asterisk-only lines as text (prevent <hr>)"
+    )
+    preserve_asterisk_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When enabled, standalone lines containing three or more consecutive "
+        "asterisks—such as *****—remain literal text instead of becoming an "
+        "HTML &lt;hr&gt; element. Applies to both Markdown converters."
+        "</p></qt>"
+    )
+    try:
+        preserve_asterisk_cb.setChecked(
+            bool(self.preserve_asterisk_separator_lines_var)
+        )
+    except Exception:
+        pass
+
+    def _on_preserve_asterisk_separator_toggle(checked):
+        try:
+            self.preserve_asterisk_separator_lines_var = bool(checked)
+            self.config['preserve_asterisk_separator_lines'] = bool(checked)
+            os.environ['PRESERVE_ASTERISK_SEPARATOR_LINES'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    preserve_asterisk_cb.toggled.connect(
+        _on_preserve_asterisk_separator_toggle
+    )
+    preserve_asterisk_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(preserve_asterisk_cb)
+
+    preserve_asterisk_desc = QLabel(
+        "On: standalone *** / ***** lines remain text.\n"
+        "Off: Markdown may convert those lines into <hr> elements."
+    )
+    preserve_asterisk_desc.setTextFormat(Qt.PlainText)
+    preserve_asterisk_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    preserve_asterisk_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(preserve_asterisk_desc)
+    
+    # Markdown2 converter option
+    markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter (Legacy)")
+    try:
+        markdown2_cb.setChecked(bool(self.use_markdown2_converter_var))
+    except Exception:
+        pass
+    def _on_markdown2_toggle(checked):
+        try:
+            self.use_markdown2_converter_var = bool(checked)
+        except Exception:
+            pass
+    markdown2_cb.toggled.connect(_on_markdown2_toggle)
+    markdown2_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(markdown2_cb)
+    
+    markdown2_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When enabled, uses the markdown2 library for conversion.<br>"
+        "When disabled, falls back to the standard markdown library."
+        "</p></qt>"
+    )
+    markdown2_desc = QLabel("Use markdown2 library instead of markdown (may escape brackets)")
+    markdown2_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    markdown2_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(markdown2_desc)
+    
+    extraction_v.addWidget(self.enhanced_options_frame)
+    
+    # Separator
+    sep_extract1 = QFrame()
+    sep_extract1.setFrameShape(QFrame.HLine)
+    sep_extract1.setFrameShadow(QFrame.Sunken)
+    extraction_v.addWidget(sep_extract1)
+    
+    # EPUB File Filtering Level
+    filter_title = QLabel("EPUB File Filtering Level:")
+    filter_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    filter_title.setContentsMargins(0, 0, 0, 5)
+    extraction_v.addWidget(filter_title)
+    
+    filtering_group = QButtonGroup(extraction_box)
+    
+    # Smart filtering
+    smart_rb = QRadioButton("Smart (Aggressive Filtering)")
+    try:
+        if self.file_filtering_level_var == "smart":
+            smart_rb.setChecked(True)
+    except Exception:
+        pass
+    def _on_smart_selected(checked):
+        if checked:
+            try:
+                self.file_filtering_level_var = "smart"
+            except Exception:
+                pass
+    smart_rb.toggled.connect(_on_smart_selected)
+    filtering_group.addButton(smart_rb)
+    smart_rb.setContentsMargins(0, 2, 0, 0)
+    extraction_v.addWidget(smart_rb)
+    
+    smart_desc = QLabel("Uses heuristics to detect content chapters\nBest for clean EPUBs with clear chapter structure")
+    smart_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    smart_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(smart_desc)
+    
+    # Comprehensive filtering
+    comprehensive_rb = QRadioButton("Comprehensive (Moderate Filtering)")
+    try:
+        if self.file_filtering_level_var == "comprehensive":
+            comprehensive_rb.setChecked(True)
+    except Exception:
+        pass
+    def _on_comprehensive_selected(checked):
+        if checked:
+            try:
+                self.file_filtering_level_var = "comprehensive"
+            except Exception:
+                pass
+    comprehensive_rb.toggled.connect(_on_comprehensive_selected)
+    filtering_group.addButton(comprehensive_rb)
+    comprehensive_rb.setContentsMargins(0, 2, 0, 0)
+    extraction_v.addWidget(comprehensive_rb)
+    
+    comprehensive_desc = QLabel("Extracts all HTML files with sequential numbering\nGood when Smart mode misses chapters")
+    comprehensive_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    comprehensive_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(comprehensive_desc)
+    
+    # Full extraction
+    full_rb = QRadioButton("No Filtering")
+    try:
+        if self.file_filtering_level_var == "full":
+            full_rb.setChecked(True)
+    except Exception:
+        pass
+    def _on_full_selected(checked):
+        if checked:
+            try:
+                self.file_filtering_level_var = "full"
+            except Exception:
+                pass
+    full_rb.toggled.connect(_on_full_selected)
+    filtering_group.addButton(full_rb)
+    full_rb.setContentsMargins(0, 2, 0, 0)
+    extraction_v.addWidget(full_rb)
+    
+    full_desc = QLabel("Extracts ALL HTML/XHTML including headers and metadata\nUse when other modes skip important content")
+    full_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    full_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(full_desc)
+    
+    # Force BeautifulSoup for Traditional APIs
+    if not hasattr(self, 'force_bs_for_traditional_var'):
+        self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
+    force_bs_cb = self._create_styled_checkbox("Force BeautifulSoup for DeepL / Google Translate / Google Free")
+    try:
+        force_bs_cb.setChecked(bool(self.force_bs_for_traditional_var))
+    except Exception:
+        pass
+    def _on_force_bs_toggle(checked):
+        try:
+            self.force_bs_for_traditional_var = bool(checked)
+        except Exception:
+            pass
+    force_bs_cb.toggled.connect(_on_force_bs_toggle)
+    force_bs_cb.setContentsMargins(0, 0, 0, 5)
+    extraction_v.addWidget(force_bs_cb)
+    
+    force_bs_desc = QLabel("Overrides HTML2Text.")
+    force_bs_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    force_bs_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(force_bs_desc)
+    
+    # Separator
+    sep_extract2 = QFrame()
+    sep_extract2.setFrameShape(QFrame.HLine)
+    sep_extract2.setFrameShadow(QFrame.Sunken)
+    extraction_v.addWidget(sep_extract2)
+    
+    # Disable Section Merging (renamed from Chapter Merging)
+    if not hasattr(self, 'disable_chapter_merging_var'):
+        self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', True)
+    
+    disable_merging_cb = self._create_styled_checkbox("Disable Section Merging")
+    try:
+        disable_merging_cb.setChecked(bool(self.disable_chapter_merging_var))
+    except Exception:
+        pass
+    def _on_disable_merging_toggle(checked):
+        try:
+            self.disable_chapter_merging_var = bool(checked)
+        except Exception:
+            pass
+    disable_merging_cb.toggled.connect(_on_disable_merging_toggle)
+    disable_merging_cb.setContentsMargins(0, 2, 0, 0)
+    extraction_v.addWidget(disable_merging_cb)
+    
+    disable_merging_desc = QLabel("Disable automatic merging of Section/Chapter pairs.\nEach file will be treated as a separate section.")
+    disable_merging_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    disable_merging_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(disable_merging_desc)
+    
+    # Request Merging (combine multiple chapters into single API request)
+    if not hasattr(self, 'request_merging_enabled_var'):
+        self.request_merging_enabled_var = self.config.get('request_merging_enabled', False)
+    if not hasattr(self, 'request_merge_count_var'):
+        self.request_merge_count_var = str(self.config.get('request_merge_count', 3))
+    
+    request_merge_cb = self._create_styled_checkbox("Request Merging")
+    try:
+        request_merge_cb.setChecked(bool(self.request_merging_enabled_var))
+    except Exception:
+        pass
+    
+    # Container for merge count setting
+    merge_count_widgets = []
+    
+    def _on_request_merge_toggle(checked):
+        try:
+            self.request_merging_enabled_var = bool(checked)
+            # Enable/disable the merge count field
+            for widget in merge_count_widgets:
+                widget.setEnabled(checked)
+        except Exception:
+            pass
+    request_merge_cb.toggled.connect(_on_request_merge_toggle)
+    request_merge_cb.setContentsMargins(0, 2, 0, 0)
+    # extraction_v.addWidget(request_merge_cb) # Moved to custom layout below
+    
+    # Create row for toggle and label
+    req_merge_row = QWidget()
+    req_merge_h = QHBoxLayout(req_merge_row)
+    req_merge_h.setContentsMargins(0, 2, 0, 0)
+    req_merge_h.addWidget(request_merge_cb)
+    
+    # Add placeholder label that can be double-clicked to copy
+    placeholder_label = QLabel("{split_marker_instruction}")
+    
+    # Define styles
+    base_style = """
+        QLabel {
+            color: #17a2b8; 
+            font-family: Consolas, monospace;
+            padding: 2px 5px;
+            background-color: #2d2d2d;
+            border-radius: 3px;
+            border: 1px solid #4a5568;
+        }
+        QLabel:hover {
+            background-color: #3d3d3d;
+            border-color: #5a9fd4;
+        }
+    """
+    
+    pressed_style = """
+        QLabel {
+            color: #ffffff; 
+            font-family: Consolas, monospace;
+            padding: 2px 5px;
+            background-color: #4a5568;
+            border-radius: 3px;
+            border: 1px solid #5a9fd4;
+        }
+    """
+    
+    copied_style = """
+        QLabel {
+            color: #28a745; 
+            font-family: Consolas, monospace;
+            padding: 2px 5px;
+            background-color: #2d2d2d;
+            border-radius: 3px;
+            border: 1px solid #28a745;
+            font-weight: bold;
+        }
+    """
+    
+    placeholder_label.setStyleSheet(base_style)
+    placeholder_label.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 42em; margin: 0;'>"
+        "Click to copy.<br>"
+        "Paste this into your system prompt to inject instructions for preserving split markers.<br><br>"
+        "<b>When Request Merging is enabled, this expands to:</b><br>"
+        "<i>- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' "
+        "(Example: &lt;h1 id=\"split-1\"&gt;SPLIT MARKER: Do Not Remove This Tag&lt;/h1&gt;), "
+        "you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.</i><br><br>"
+        "When Request Merging is disabled, this placeholder is silently removed."
+        "</p></qt>"
+    )
+    placeholder_label.setCursor(Qt.PointingHandCursor)
+    
+    # Store state
+    placeholder_label._is_copied = False
+    
+    def reset_label_state():
+        placeholder_label.setStyleSheet(base_style)
+        placeholder_label.setText("{split_marker_instruction}")
+        placeholder_label._is_copied = False
+
+    # Handle mouse events for interaction
+    def on_press(event):
+        if event.button() == Qt.LeftButton:
+            if not placeholder_label._is_copied:
+                placeholder_label.setStyleSheet(pressed_style)
+                
+    def on_release(event):
+        if event.button() == Qt.LeftButton:
+            # Check if release is inside the widget
+            if placeholder_label.rect().contains(event.pos()):
+                from PySide6.QtWidgets import QApplication
+                from PySide6.QtCore import QTimer
+                clipboard = QApplication.clipboard()
+                clipboard.setText("{split_marker_instruction}")
+                
+                # Visual feedback
+                placeholder_label.setStyleSheet(copied_style)
+                placeholder_label.setText("Copied!")
+                placeholder_label._is_copied = True
+                
+                # Reset after 1 second (standard feedback duration)
+                QTimer.singleShot(1000, reset_label_state)
+            else:
+                # Dragged out, cancel press
+                if not placeholder_label._is_copied:
+                    placeholder_label.setStyleSheet(base_style)
+            
+    placeholder_label.mousePressEvent = on_press
+    placeholder_label.mouseReleaseEvent = on_release
+    # Remove double click handler to prevent conflict/confusion
+    placeholder_label.mouseDoubleClickEvent = lambda e: None
+    
+    req_merge_h.addWidget(placeholder_label)
+    req_merge_h.addStretch()
+    
+    extraction_v.addWidget(req_merge_row)
+    
+    # Row for merge count setting
+    merge_count_row = QWidget()
+    merge_count_h = QHBoxLayout(merge_count_row)
+    merge_count_h.setContentsMargins(20, 2, 0, 0)
+    
+    merge_count_label = QLabel("Chapters per request:")
+    merge_count_h.addWidget(merge_count_label)
+    merge_count_widgets.append(merge_count_label)
+    
+    merge_count_edit = QLineEdit()
+    merge_count_edit.setFixedWidth(50)
+    try:
+        merge_count_edit.setText(str(self.request_merge_count_var))
+    except Exception:
+        merge_count_edit.setText("3")
+    def _on_merge_count_changed(text):
+        try:
+            self.request_merge_count_var = text
+        except Exception:
+            pass
+    merge_count_edit.textChanged.connect(_on_merge_count_changed)
+    merge_count_h.addWidget(merge_count_edit)
+    merge_count_widgets.append(merge_count_edit)
+    
+    default_merge_label = QLabel("(default: 3)")
+    merge_count_h.addWidget(default_merge_label)
+    merge_count_widgets.append(default_merge_label)
+    merge_count_h.addStretch()
+    extraction_v.addWidget(merge_count_row)
+    
+    # Set initial enabled state
+    for widget in merge_count_widgets:
+        widget.setEnabled(bool(self.request_merging_enabled_var))
+    
+    request_merge_desc = QLabel("Combine multiple chapters into a single translation request.\nReduces API overhead and may improve context consistency.\n⚠️ EPUB and PDF files only - does NOT work with .txt, .csv, .json, or .md files.")
+    request_merge_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    request_merge_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(request_merge_desc)
+    
+    # Split the Merge (split merged output back into individual files by headers)
+    if not hasattr(self, 'split_the_merge_var'):
+        self.split_the_merge_var = self.config.get('split_the_merge', True)
+    
+    split_merge_cb = self._create_styled_checkbox("Split the Merge")
+    try:
+        split_merge_cb.setChecked(bool(self.split_the_merge_var))
+    except Exception:
+        pass
+    
+    # Track widgets that depend on request merging being enabled
+    split_merge_widgets = [split_merge_cb]
+    
+    def _on_split_merge_toggle(checked):
+        try:
+            self.split_the_merge_var = bool(checked)
+        except Exception:
+            pass
+    split_merge_cb.toggled.connect(_on_split_merge_toggle)
+    split_merge_cb.setContentsMargins(20, 2, 0, 0)  # Indented to show it's a sub-option
+    extraction_v.addWidget(split_merge_cb)
+    
+    split_merge_desc = QLabel("Split merged translation output back into separate files using invisible markers.\nEach chapter gets its own file named after the original content.opf entry.\nMarkers are automatically preserved during translation for reliable splitting.")
+    split_merge_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    split_merge_desc.setContentsMargins(40, 0, 0, 5)
+    extraction_v.addWidget(split_merge_desc)
+    split_merge_widgets.append(split_merge_desc)
+    
+    # Disable Fallback (mark as qa_failed if split fails)
+    if not hasattr(self, 'disable_merge_fallback_var'):
+        self.disable_merge_fallback_var = self.config.get('disable_merge_fallback', True)
+    
+    disable_fallback_cb = self._create_styled_checkbox("Disable Fallback")
+    try:
+        disable_fallback_cb.setChecked(bool(self.disable_merge_fallback_var))
+    except Exception:
+        pass
+    
+    def _on_disable_fallback_toggle(checked):
+        try:
+            self.disable_merge_fallback_var = bool(checked)
+        except Exception:
+            pass
+    disable_fallback_cb.toggled.connect(_on_disable_fallback_toggle)
+    disable_fallback_cb.setContentsMargins(40, 2, 0, 0)  # Double indented to show it's a sub-sub-option
+    extraction_v.addWidget(disable_fallback_cb)
+    split_merge_widgets.append(disable_fallback_cb)
+    
+    disable_fallback_desc = QLabel("Mark merged chapters as qa_failed if split fails (no fallback to merged file).\nUseful when you want to manually review failed splits.")
+    disable_fallback_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    disable_fallback_desc.setContentsMargins(60, 0, 0, 5)
+    extraction_v.addWidget(disable_fallback_desc)
+    split_merge_widgets.append(disable_fallback_desc)
+
+    # Auto-retry Split Failures
+    if not hasattr(self, 'retry_split_failed_var'):
+        self.retry_split_failed_var = self.config.get('retry_split_failed', True)
+    if not hasattr(self, 'split_failed_retry_attempts_var'):
+        self.split_failed_retry_attempts_var = str(self.config.get('split_failed_retry_attempts', '1'))
+
+    retry_split_cb = self._create_styled_checkbox("Auto-retry Split Failures")
+    try:
+        retry_split_cb.setChecked(bool(self.retry_split_failed_var))
+    except Exception:
+        pass
+    retry_split_cb.setContentsMargins(60, 2, 0, 0)
+    split_merge_widgets.append(retry_split_cb)
+
+    retry_split_row = QWidget()
+    retry_split_h = QHBoxLayout(retry_split_row)
+    retry_split_h.setContentsMargins(80, 5, 0, 0)
+
+    retry_split_label = QLabel("Attempts:")
+    retry_split_h.addWidget(retry_split_label)
+
+    retry_split_edit = QLineEdit()
+    retry_split_edit.setFixedWidth(50)
+    try:
+        retry_split_edit.setText(str(self.split_failed_retry_attempts_var))
+    except Exception:
+        retry_split_edit.setText("1")
+    def _on_retry_split_changed(text):
+        try:
+            self.split_failed_retry_attempts_var = text
+        except Exception:
+            pass
+    retry_split_edit.textChanged.connect(_on_retry_split_changed)
+    retry_split_h.addWidget(retry_split_edit)
+    retry_split_h.addStretch()
+
+    split_merge_widgets.extend([retry_split_row, retry_split_label, retry_split_edit])
+
+    def _update_retry_split_state():
+        try:
+            enabled = retry_split_cb.isChecked() and request_merge_cb.isChecked()
+            retry_split_edit.setEnabled(enabled)
+            retry_split_label.setEnabled(enabled)
+            if enabled:
+                retry_split_label.setStyleSheet("color: white;")
+                retry_split_edit.setStyleSheet("color: white;")
+            else:
+                retry_split_label.setStyleSheet("color: #606060;")
+                retry_split_edit.setStyleSheet("color: #909090;")
+        except Exception:
+            pass
+
+    def _on_retry_split_toggle(checked):
+        try:
+            self.retry_split_failed_var = bool(checked)
+            _update_retry_split_state()
+        except Exception:
+            pass
+    retry_split_cb.toggled.connect(_on_retry_split_toggle)
+    extraction_v.addWidget(retry_split_cb)
+    extraction_v.addWidget(retry_split_row)
+
+    # Keep split-retry disabled if fallback is disabled
+    def _on_disable_fallback_toggle_enhanced(checked):
+        _on_disable_fallback_toggle(checked)
+        _update_retry_split_state()
+    try:
+        disable_fallback_cb.toggled.disconnect(_on_disable_fallback_toggle)
+    except Exception:
+        pass
+    disable_fallback_cb.toggled.connect(_on_disable_fallback_toggle_enhanced)
+    _update_retry_split_state()
+    
+    # NOTE: Split markers are now ALWAYS enabled (hardcoded)
+    # They are required for split-the-merge to work, so no toggle is needed
+    # The toggle has been removed from the UI
+    
+    # Set initial enabled state for split merge (depends on request merging)
+    for widget in split_merge_widgets:
+        widget.setEnabled(bool(self.request_merging_enabled_var))
+    
+    # Update the request merge toggle to also control split merge widgets
+    original_on_request_merge_toggle = _on_request_merge_toggle
+    def _on_request_merge_toggle_with_split(checked):
+        original_on_request_merge_toggle(checked)
+        # Enable/disable split merge option (but don't change its checked state)
+        for widget in split_merge_widgets:
+            widget.setEnabled(checked)
+        # Dim/restore key labels/inputs for visual consistency
+        for lbl in (merge_count_label, default_merge_label,
+                    retry_split_label, retry_split_edit):
+            try:
+                if hasattr(lbl, "style"):
+                    lbl.style().unpolish(lbl)
+                    lbl.style().polish(lbl)
+                lbl.setStyleSheet("color: white;" if checked else "color: #606060;")
+            except Exception:
+                pass
+        _update_retry_split_state()
+    request_merge_cb.toggled.disconnect(_on_request_merge_toggle)
+    request_merge_cb.toggled.connect(_on_request_merge_toggle_with_split)
+    
+    # Initialize styling immediately (scheduled via QTimer to ensure widgets are ready)
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, lambda: _on_request_merge_toggle_with_split(request_merge_cb.isChecked()))
+    
+    _update_retry_split_state()
+    section_v.addWidget(extraction_box)
+    
+    # === SPECIAL FILES SETTINGS ===
+    # Translate special files (cover, nav, toc, etc.)
+    translate_special_cb = self._create_styled_checkbox("Translate Special Files (Skip Override)")
+    try:
+        translate_special_cb.setChecked(bool(self.translate_special_files_var))
+    except Exception:
+        pass
+    def _on_translate_special_toggle(checked):
+        try:
+            old_value = self.translate_special_files_var
+            self.translate_special_files_var = bool(checked)
+            self.config['translate_special_files'] = bool(checked)
+            os.environ['TRANSLATE_SPECIAL_FILES'] = '1' if checked else '0'
+            # Show helpful message if value changed
+            if old_value != bool(checked):
+                if checked:
+                    self.append_log("✅ Special files override ENABLED - special files will be included in extraction")
+                    self.append_log("🔄 If you already extracted an EPUB, re-translate to apply this setting")
+                else:
+                    self.append_log("❌ Special files override DISABLED - special files will be skipped (default behavior)")
+        except Exception:
+            pass
+    translate_special_cb.toggled.connect(_on_translate_special_toggle)
+    translate_special_cb.setContentsMargins(0, 2, 0, 0)
+    
+    # Row: checkbox + Edit Keywords button
+    translate_special_row = QWidget()
+    translate_special_h = QHBoxLayout(translate_special_row)
+    translate_special_h.setContentsMargins(0, 2, 0, 0)
+    translate_special_h.addWidget(translate_special_cb)
+    
+    edit_keywords_btn = QPushButton("Edit Keywords ▶")
+    edit_keywords_btn.setFixedWidth(130)
+    edit_keywords_btn.setCursor(Qt.PointingHandCursor)
+    edit_keywords_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #2d2d2d;
+            color: #17a2b8;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 3px 8px;
+            font-size: 9pt;
+        }
+        QPushButton:hover {
+            background-color: #3d3d3d;
+            border-color: #5a9fd4;
+        }
+    """)
+    translate_special_h.addWidget(edit_keywords_btn)
+    translate_special_h.addStretch()
+    section_v.addWidget(translate_special_row)
+    
+    translate_special_desc = QLabel("Forces translation of special files (cover, nav, toc, message, etc.)\ninstead of skipping them during extraction and compilation.")
+    translate_special_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    translate_special_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(translate_special_desc)
+    
+    # --- Collapsible keywords panel ---
+    _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
+    _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension, glossary_unified'
+
+    # Initialize vars from config
+    if not hasattr(self, 'special_file_keywords_var'):
+        self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
+    if not hasattr(self, 'special_file_exact_var'):
+        _saved_exact = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
+        _upgrade_exact = getattr(self, '_upgrade_special_file_exact', None)
+        self.special_file_exact_var = _upgrade_exact(_saved_exact) if callable(_upgrade_exact) else _saved_exact
+    
+    keywords_panel = QWidget()
+    keywords_panel.setVisible(False)
+    keywords_panel_v = QVBoxLayout(keywords_panel)
+    keywords_panel_v.setContentsMargins(20, 5, 10, 10)
+    
+    # Substring keywords
+    kw_substr_label = QLabel("Substring keywords (skip if filename contains any of these):")
+    kw_substr_label.setStyleSheet("color: #b0b0b0; font-size: 9pt; font-weight: bold;")
+    keywords_panel_v.addWidget(kw_substr_label)
+    
+    kw_substr_edit = QTextEdit()
+    kw_substr_edit.setPlaceholderText("e.g. title, toc, copyright, nav, ...")
+    kw_substr_edit.setText(self.special_file_keywords_var)
+    kw_substr_edit.setFixedHeight(60)
+    kw_substr_edit.setStyleSheet("""
+        QTextEdit {
+            background-color: #252530;
+            color: #d4d4d4;
+            border: 2px solid #6b7a8d;
+            border-radius: 4px;
+            padding: 4px;
+            font-family: Consolas, monospace;
+            font-size: 9pt;
+        }
+        QTextEdit:focus {
+            border: 2px solid #17a2b8;
+        }
+    """)
+    def _on_substr_keywords_changed():
+        try:
+            text = kw_substr_edit.toPlainText().strip()
+            self.special_file_keywords_var = text
+            self.config['special_file_keywords'] = text
+            os.environ['SPECIAL_FILE_KEYWORDS'] = text
+        except Exception:
+            pass
+    kw_substr_edit.textChanged.connect(_on_substr_keywords_changed)
+    # The Progress Manager's "Do not skip" context-menu action can change
+    # this setting while Other Settings is already open (or hidden for reuse).
+    # Keep a live reference so that action can update the displayed text too.
+    self._special_file_keywords_edit = kw_substr_edit
+    keywords_panel_v.addWidget(kw_substr_edit)
+    
+    kw_substr_hint = QLabel("Files whose name contains any of these words will be treated as special.")
+    kw_substr_hint.setStyleSheet("color: gray; font-size: 8pt;")
+    kw_substr_hint.setContentsMargins(0, 0, 0, 5)
+    keywords_panel_v.addWidget(kw_substr_hint)
+    
+    # Exact-match keywords
+    kw_exact_label = QLabel("Exact-match keywords (skip only if filename equals one of these):")
+    kw_exact_label.setStyleSheet("color: #b0b0b0; font-size: 9pt; font-weight: bold;")
+    keywords_panel_v.addWidget(kw_exact_label)
+    
+    kw_exact_edit = QTextEdit()
+    kw_exact_edit.setPlaceholderText("e.g. index, glossary, glossary_extension, glossary_unified")
+    kw_exact_edit.setText(self.special_file_exact_var)
+    kw_exact_edit.setFixedHeight(40)
+    kw_exact_edit.setStyleSheet("""
+        QTextEdit {
+            background-color: #252530;
+            color: #d4d4d4;
+            border: 2px solid #6b7a8d;
+            border-radius: 4px;
+            padding: 4px;
+            font-family: Consolas, monospace;
+            font-size: 9pt;
+        }
+        QTextEdit:focus {
+            border: 2px solid #17a2b8;
+        }
+    """)
+    def _on_exact_keywords_changed():
+        try:
+            text = kw_exact_edit.toPlainText().strip()
+            self.special_file_exact_var = text
+            self.config['special_file_exact'] = text
+            os.environ['SPECIAL_FILE_EXACT'] = text
+        except Exception:
+            pass
+    kw_exact_edit.textChanged.connect(_on_exact_keywords_changed)
+    self._special_file_exact_edit = kw_exact_edit
+    keywords_panel_v.addWidget(kw_exact_edit)
+    
+    kw_exact_hint = QLabel("Files whose name (without extension) exactly matches one of these will be treated as special.\nUse this for names like 'index' that shouldn't match substrings (e.g. 'reindex').")
+    kw_exact_hint.setStyleSheet("color: gray; font-size: 8pt;")
+    kw_exact_hint.setContentsMargins(0, 0, 0, 5)
+    keywords_panel_v.addWidget(kw_exact_hint)
+    
+    # Reset to defaults button
+    reset_kw_btn = QPushButton("Reset to Defaults")
+    reset_kw_btn.setFixedWidth(130)
+    reset_kw_btn.setCursor(Qt.PointingHandCursor)
+    reset_kw_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #2d2d2d;
+            color: #aaa;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 3px 8px;
+            font-size: 9pt;
+        }
+        QPushButton:hover {
+            background-color: #3d3d3d;
+            color: #fff;
+            border-color: #e2b714;
+        }
+    """)
+    def _on_reset_keywords():
+        reply = QMessageBox.question(
+            keywords_panel, "Reset Keywords",
+            "Reset special file keywords to defaults?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            kw_substr_edit.setText(_DEFAULT_SPECIAL_KEYWORDS)
+            kw_exact_edit.setText(_DEFAULT_SPECIAL_EXACT)
+    reset_kw_btn.clicked.connect(_on_reset_keywords)
+    keywords_panel_v.addWidget(reset_kw_btn)
+    
+    section_v.addWidget(keywords_panel)
+    
+    # Toggle keywords panel visibility
+    def _toggle_keywords_panel():
+        visible = not keywords_panel.isVisible()
+        keywords_panel.setVisible(visible)
+        edit_keywords_btn.setText("Edit Keywords ▼" if visible else "Edit Keywords ▶")
+    edit_keywords_btn.clicked.connect(_toggle_keywords_panel)
+    
+    # Translate All Numbered HTML Files (translation-context only)
+    if not hasattr(self, 'translate_all_numbered_html_var'):
+        self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', True)
+    
+    numbered_html_cb = self._create_styled_checkbox("Translate All Numbered HTML Files")
+    numbered_html_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Translation-stage special-file override. If an HTML/XHTML filename stem "
+            "contains at least one digit, it bypasses SPECIAL_FILE_KEYWORDS and "
+            "SPECIAL_FILE_EXACT and is submitted to the translation pipeline. The file "
+            "retains special-file/chapter-zero classification. This setting does not "
+            "change extraction membership, OPF spine order, TOC generation, or final "
+            "EPUB inclusion."
+        )
+    )
+    try:
+        numbered_html_cb.setChecked(bool(self.translate_all_numbered_html_var))
+    except Exception:
+        pass
+    def _on_numbered_html_toggle(checked):
+        try:
+            self.translate_all_numbered_html_var = bool(checked)
+            self.config['translate_all_numbered_html'] = bool(checked)
+            os.environ['TRANSLATE_ALL_NUMBERED_HTML'] = '1' if checked else '0'
+            if checked:
+                self.append_log("✅ Translate All Numbered HTML ENABLED - files with numbers in their name will be translated even if they match skip keywords")
+            else:
+                self.append_log("❌ Translate All Numbered HTML DISABLED - special file keywords apply normally")
+        except Exception:
+            pass
+    numbered_html_cb.toggled.connect(_on_numbered_html_toggle)
+    numbered_html_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(numbered_html_cb)
+    
+    numbered_html_desc = QLabel("Send any file with a number in its filename for translation,\neven if it matches a skip keyword (e.g. chapter_notice0001.xhtml).\nOnly affects the translation context — does not change extraction or compilation.")
+    numbered_html_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    numbered_html_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(numbered_html_desc)
+
+    # Protect the body of an EPUB from special-file keyword matches in glossary extraction.
+    if not hasattr(self, 'never_consider_in_between_files_as_special_var'):
+        self.never_consider_in_between_files_as_special_var = self.config.get(
+            'never_consider_in_between_files_as_special', True
+        )
+
+    in_between_files_cb = self._create_styled_checkbox(
+        "Never consider in between files as special"
+    )
+    in_between_files_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "For EPUB glossary extraction and parallel EPUB pairing, apply special-file "
+            "keywords only to files before the first non-special document or after the "
+            "last non-special document in EPUB reading order. Every document between "
+            "those boundaries is treated as ordinary, even if its filename matches "
+            "a special-file keyword. For example, if chapters 1 and 200 are ordinary, "
+            "chapters 2 through 199 are also ordinary. After the last originally "
+            "non-special document, files with a digit in their filename stem are "
+            "also ordinary. Leading files and unnumbered trailing files still use "
+            "the special-file rules. This does not change translation or compilation."
+        )
+    )
+    in_between_files_cb.setChecked(bool(self.never_consider_in_between_files_as_special_var))
+
+    def _on_in_between_files_toggle(checked):
+        self.never_consider_in_between_files_as_special_var = bool(checked)
+        self.config['never_consider_in_between_files_as_special'] = bool(checked)
+        os.environ['GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL'] = '1' if checked else '0'
+        self.save_config(show_message=False)
+
+    in_between_files_cb.toggled.connect(_on_in_between_files_toggle)
+    in_between_files_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(in_between_files_cb)
+
+    in_between_files_desc = QLabel(
+        "Only check leading and trailing files against special-file keywords.\n"
+        "Files between the first and last ordinary document are never special.\n"
+        "Numbered trailing files are also never special; leading files still get checked.\n"
+        "Applies to EPUB glossary extraction and parallel EPUB pairing."
+    )
+    in_between_files_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    in_between_files_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(in_between_files_desc)
+    
+    # Separator before gallery/cover
+    sep_special = QFrame()
+    sep_special.setFrameShape(QFrame.HLine)
+    sep_special.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_special)
+    
+    # === EPUB OUTPUT OPTIONS ===
+    # Disable Image Gallery
+    gallery_cb = self._create_styled_checkbox("Disable Image Gallery in EPUB")
+    gallery_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Controls generation of the synthetic gallery XHTML item during EPUB "
+            "compilation. When enabled, the compiler does not create or append the "
+            "gallery page to the EPUB spine and TOC. It does not remove image resources "
+            "or suppress images referenced by chapter XHTML."
+        )
+    )
+    try:
+        gallery_cb.setChecked(bool(getattr(
+            self,
+            'disable_epub_gallery_var',
+            self.config.get('disable_epub_gallery', True),
+        )))
+    except Exception:
+        pass
+    def _on_gallery_toggle(checked):
+        try:
+            self.disable_epub_gallery_var = bool(checked)
+            self.config['disable_epub_gallery'] = bool(checked)
+            os.environ['DISABLE_EPUB_GALLERY'] = '1' if checked else '0'
+        except Exception:
+            pass
+    gallery_cb.toggled.connect(_on_gallery_toggle)
+    gallery_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(gallery_cb)
+    
+    gallery_desc = QLabel("Skip creating image gallery page in EPUB")
+    gallery_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    gallery_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(gallery_desc)
+
+    # Disable Automatic Cover Creation
+    cover_cb = self._create_styled_checkbox("Disable Automatic Cover Creation")
+    cover_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Disables heuristic cover selection and synthetic cover-page generation "
+            "during EPUB compilation. An OPF-designated cover image/page and reusable "
+            "image-bearing cover XHTML remain authoritative and are preserved. Source "
+            "cover resources are not deleted."
+        )
+    )
+    try:
+        cover_cb.setChecked(bool(getattr(
+            self,
+            'disable_automatic_cover_creation_var',
+            self.config.get('disable_automatic_cover_creation', True),
+        )))
+    except Exception:
+        pass
+    def _on_cover_toggle(checked):
+        try:
+            self.disable_automatic_cover_creation_var = bool(checked)
+            self.config['disable_automatic_cover_creation'] = bool(checked)
+            os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+    cover_cb.toggled.connect(_on_cover_toggle)
+    cover_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(cover_cb)
+
+    cover_desc = QLabel("No auto-generated cover page is created.")
+    cover_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    cover_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(cover_desc)
+
+    # Skip non-spine special HTML files (legacy compiler behavior)
+    skip_non_spine_cb = self._create_styled_checkbox(
+        "Skip Non-Spine Special Files in EPUB"
+    )
+    skip_non_spine_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Restores the legacy compiler filter. When enabled, compiled HTML/XHTML "
+            "that cannot be mapped to the source OPF spine is omitted if its normalized "
+            "basename contains a configured SPECIAL_FILE_KEYWORDS token. This affects "
+            "final EPUB inclusion, including translated numbered notice/message files, "
+            "but does not delete workspace files. Disabled by default."
+        )
+    )
+    try:
+        skip_non_spine_cb.setChecked(bool(getattr(
+            self,
+            'skip_non_spine_special_files_var',
+            self.config.get('skip_non_spine_special_files', False),
+        )))
+    except Exception:
+        pass
+    def _on_skip_non_spine_toggle(checked):
+        try:
+            self.skip_non_spine_special_files_var = bool(checked)
+            self.config['skip_non_spine_special_files'] = bool(checked)
+            os.environ['SKIP_NON_SPINE_SPECIAL_FILES'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+    skip_non_spine_cb.toggled.connect(_on_skip_non_spine_toggle)
+    skip_non_spine_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(skip_non_spine_cb)
+
+    skip_non_spine_desc = QLabel(
+        "Exclude special HTML files that are absent from the source EPUB "
+        "spine. Disabled by default."
+    )
+    skip_non_spine_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    skip_non_spine_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(skip_non_spine_desc)
+
+    # Skip images that no compiled HTML file references
+    skip_unreferenced_images_cb = self._create_styled_checkbox(
+        "Skip Unreferenced Images in EPUB"
+    )
+    skip_unreferenced_images_cb.setToolTip(
+        _wrapped_tooltip_html(
+            "Filters EPUB payload and gallery image candidates against references "
+            "discovered in compiled HTML/XHTML and CSS. The scan covers src/srcset, "
+            "lazy-load attributes, SVG image/object references, CSS url(), external "
+            "stylesheets, and image rename mappings. The selected cover and protected "
+            "images are retained, and filtered files remain on disk. Disabled by "
+            "default."
+        )
+    )
+    try:
+        skip_unreferenced_images_cb.setChecked(bool(getattr(
+            self,
+            'skip_unreferenced_epub_images_var',
+            self.config.get('skip_unreferenced_epub_images', False),
+        )))
+    except Exception:
+        pass
+    def _on_skip_unreferenced_images_toggle(checked):
+        try:
+            self.skip_unreferenced_epub_images_var = bool(checked)
+            self.config['skip_unreferenced_epub_images'] = bool(checked)
+            os.environ['SKIP_UNREFERENCED_EPUB_IMAGES'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+    skip_unreferenced_images_cb.toggled.connect(
+        _on_skip_unreferenced_images_toggle
+    )
+    skip_unreferenced_images_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(skip_unreferenced_images_cb)
+
+    skip_unreferenced_images_desc = QLabel(
+        "Exclude files in the images subfolder that no compiled HTML page "
+        "references.\nThe selected cover is always kept. Disabled by default."
+    )
+    skip_unreferenced_images_desc.setStyleSheet(
+        "color: gray; font-size: 10pt;"
+    )
+    skip_unreferenced_images_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(skip_unreferenced_images_desc)
+    
+    # === PDF INPUT SETTINGS ===
+    # Separator
+    pdf_sep = QFrame()
+    pdf_sep.setFrameShape(QFrame.HLine)
+    pdf_sep.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(pdf_sep)
+    
+    # PDF input settings section title
+    pdf_title = QLabel("PDF Input Settings")
+    pdf_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    pdf_title.setContentsMargins(0, 5, 0, 5)
+    section_v.addWidget(pdf_title)
+    
+    # Initialize PDF output format variable
+    if not hasattr(self, 'pdf_output_format_var'):
+        self.pdf_output_format_var = self.config.get('pdf_output_format', 'pdf')
+    
+    # PDF Output Format toggle
+    pdf_format_row = QWidget()
+    pdf_format_h = QHBoxLayout(pdf_format_row)
+    pdf_format_h.setContentsMargins(20, 2, 0, 0)
+    
+    pdf_format_label = QLabel("Output format:")
+    pdf_format_h.addWidget(pdf_format_label)
+    
+    pdf_format_combo = QComboBox()
+    pdf_format_combo.addItems(["pdf", "epub"])
+    pdf_format_combo.setFixedWidth(100)
+    pdf_format_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(pdf_format_combo)
+    self._disable_combobox_mousewheel(pdf_format_combo)
+    try:
+        format_val = self.pdf_output_format_var
+        idx = pdf_format_combo.findText(format_val)
+        if idx >= 0:
+            pdf_format_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_pdf_format_changed(text):
+        try:
+            self.pdf_output_format_var = text
+        except Exception:
+            pass
+    pdf_format_combo.currentTextChanged.connect(_on_pdf_format_changed)
+    pdf_format_h.addWidget(pdf_format_combo)
+    pdf_format_h.addStretch()
+    section_v.addWidget(pdf_format_row)
+    
+    pdf_format_desc = QLabel("Choose whether to output PDFs as .pdf or .epub files.\nPDF: Creates combined PDF with all translated pages\nEPUB: Compiles pages into EPUB format")
+    pdf_format_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_format_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_format_desc)
+    
+    # PDF Async Page Threshold (use direct calls for small PDFs, ProcessPoolExecutor for large)
+    if not hasattr(self, 'pdf_async_page_threshold_var'):
+        self.pdf_async_page_threshold_var = str(self.config.get('pdf_async_page_threshold', '100'))
+    
+    pdf_threshold_row = QWidget()
+    pdf_threshold_h = QHBoxLayout(pdf_threshold_row)
+    pdf_threshold_h.setContentsMargins(20, 2, 0, 0)
+    
+    pdf_threshold_label = QLabel("Async page threshold:")
+    pdf_threshold_h.addWidget(pdf_threshold_label)
+    
+    pdf_threshold_edit = QLineEdit()
+    pdf_threshold_edit.setFixedWidth(60)
+    try:
+        pdf_threshold_edit.setText(str(self.pdf_async_page_threshold_var))
+    except Exception:
+        pdf_threshold_edit.setText("100")
+    def _on_pdf_threshold_changed(text):
+        try:
+            self.pdf_async_page_threshold_var = text
+        except Exception:
+            pass
+    pdf_threshold_edit.textChanged.connect(_on_pdf_threshold_changed)
+    pdf_threshold_h.addWidget(pdf_threshold_edit)
+    
+    pdf_threshold_default = QLabel("(default: 100)")
+    pdf_threshold_h.addWidget(pdf_threshold_default)
+    pdf_threshold_h.addStretch()
+    section_v.addWidget(pdf_threshold_row)
+    
+    pdf_threshold_desc = QLabel("PDFs below this page count use direct extraction (faster, instant stop).\nLarger PDFs use ProcessPoolExecutor to prevent GUI lag.")
+    pdf_threshold_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_threshold_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_threshold_desc)
+
+    # Dedicated PDF extraction worker count. This intentionally does not use
+    # the general EPUB/glossary extraction worker setting above.
+    pdf_cpu_cores = max(1, int(os.cpu_count() or 1))
+    pdf_auto_workers = max(1, pdf_cpu_cores // 2)
+    if not hasattr(self, 'pdf_extraction_workers_var'):
+        self.pdf_extraction_workers_var = str(
+            self.config.get('pdf_extraction_workers', 'auto') or 'auto'
+        )
+
+    pdf_workers_row = QWidget()
+    pdf_workers_h = QHBoxLayout(pdf_workers_row)
+    pdf_workers_h.setContentsMargins(20, 2, 0, 0)
+    pdf_workers_h.addWidget(QLabel("Extraction workers:"))
+
+    self.pdf_extraction_workers_entry = QLineEdit()
+    self.pdf_extraction_workers_entry.setFixedWidth(60)
+    self.pdf_extraction_workers_entry.setPlaceholderText("auto")
+    self.pdf_extraction_workers_entry.setText(
+        str(self.pdf_extraction_workers_var or 'auto')
+    )
+    self.pdf_extraction_workers_entry.setToolTip(
+        "Number of parallel PDF page-range workers. Enter 1 through "
+        f"{pdf_cpu_cores}, or use Auto."
+    )
+    pdf_workers_h.addWidget(self.pdf_extraction_workers_entry)
+
+    pdf_workers_auto_button = QPushButton("Auto")
+    pdf_workers_auto_button.setFixedWidth(62)
+    pdf_workers_auto_button.setToolTip(
+        f"Use half of the {pdf_cpu_cores} available CPU cores "
+        f"({pdf_auto_workers} workers)."
+    )
+    pdf_workers_h.addWidget(pdf_workers_auto_button)
+
+    pdf_workers_cpu_label = QLabel(f"CPU cores: {pdf_cpu_cores}")
+    pdf_workers_cpu_label.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_workers_h.addWidget(pdf_workers_cpu_label)
+    pdf_workers_h.addStretch()
+    section_v.addWidget(pdf_workers_row)
+
+    pdf_workers_desc = QLabel(
+        f"Auto uses half of the available CPU count ({pdf_auto_workers} workers).\n"
+        "Used by PDF input extraction and Rapid Workspace PDF compilation."
+    )
+    pdf_workers_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_workers_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_workers_desc)
+
+    def _store_pdf_workers(text):
+        raw_value = str(text or '').strip()
+        stored_value = 'auto' if raw_value.lower() in {
+            '', 'auto', 'automatic', 'default', '0'
+        } else raw_value
+        self.pdf_extraction_workers_var = stored_value
+        self.config['pdf_extraction_workers'] = stored_value
+        os.environ['PDF_EXTRACTION_WORKERS'] = stored_value
+
+        if stored_value == 'auto':
+            pdf_workers_desc.setText(
+                f"Auto uses half of the available CPU count ({pdf_auto_workers} workers).\n"
+                "Used by PDF input extraction and Rapid Workspace PDF compilation."
+            )
+            self.pdf_extraction_workers_entry.setStyleSheet("")
+            return
+        try:
+            numeric_value = int(stored_value)
+        except (TypeError, ValueError):
+            numeric_value = 0
+        if 1 <= numeric_value <= pdf_cpu_cores:
+            pdf_workers_desc.setText(
+                f"Using {numeric_value} of {pdf_cpu_cores} available CPU cores.\n"
+                "Used by PDF input extraction and Rapid Workspace PDF compilation."
+            )
+            self.pdf_extraction_workers_entry.setStyleSheet("")
+        else:
+            pdf_workers_desc.setText(
+                f"Enter 1-{pdf_cpu_cores}, or click Auto ({pdf_auto_workers} workers)."
+            )
+            self.pdf_extraction_workers_entry.setStyleSheet(
+                "QLineEdit { border: 1px solid #e0a000; }"
+            )
+
+    def _normalize_pdf_workers():
+        raw_value = self.pdf_extraction_workers_entry.text().strip().lower()
+        if raw_value in {'', 'auto', 'automatic', 'default', '0'}:
+            normalized = 'auto'
+        else:
+            try:
+                normalized = str(max(1, min(int(raw_value), pdf_cpu_cores)))
+            except (TypeError, ValueError):
+                normalized = 'auto'
+        self.pdf_extraction_workers_entry.setText(normalized)
+        _store_pdf_workers(normalized)
+
+    self.pdf_extraction_workers_entry.textChanged.connect(_store_pdf_workers)
+    self.pdf_extraction_workers_entry.editingFinished.connect(
+        _normalize_pdf_workers
+    )
+    pdf_workers_auto_button.clicked.connect(
+        lambda: self.pdf_extraction_workers_entry.setText('auto')
+    )
+    _store_pdf_workers(self.pdf_extraction_workers_entry.text())
+
+    # PDF section separation: outline/bookmarks by default, legacy pages on demand.
+    if not hasattr(self, 'pdf_use_toc_sections_var'):
+        self.pdf_use_toc_sections_var = self.config.get('pdf_use_toc_sections', True)
+
+    pdf_toc_sections_cb = self._create_styled_checkbox(
+        "Use PDF table of contents for sections"
+    )
+    pdf_toc_sections_cb.setChecked(bool(self.pdf_use_toc_sections_var))
+
+    def _on_pdf_toc_sections_toggle(checked):
+        enabled = bool(checked)
+        self.pdf_use_toc_sections_var = enabled
+        self.config['pdf_use_toc_sections'] = enabled
+        os.environ['PDF_USE_TOC_SECTIONS'] = '1' if enabled else '0'
+
+    pdf_toc_sections_cb.toggled.connect(_on_pdf_toc_sections_toggle)
+    pdf_toc_sections_cb.setContentsMargins(20, 2, 0, 0)
+    section_v.addWidget(pdf_toc_sections_cb)
+
+    pdf_toc_sections_desc = QLabel(
+        "Groups pages using the PDF sidebar outline/bookmarks (default).\n"
+        "PDFs without a usable outline automatically fall back to one entry per page.\n"
+        "Turn this off to always use the legacy page-by-page extraction.\n"
+        "Image render mode remains page-by-page so each image is translated separately."
+    )
+    pdf_toc_sections_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_toc_sections_desc.setContentsMargins(40, 0, 0, 10)
+    section_v.addWidget(pdf_toc_sections_desc)
+    
+    # Initialize PDF render mode variable
+    if not hasattr(self, 'pdf_render_mode_var'):
+        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'fast_semantic')
+    
+    # PDF Render Mode toggle
+    pdf_render_row = QWidget()
+    pdf_render_h = QHBoxLayout(pdf_render_row)
+    pdf_render_h.setContentsMargins(20, 2, 0, 0)
+    
+    pdf_render_label = QLabel("Render mode:")
+    pdf_render_h.addWidget(pdf_render_label)
+    
+    pdf_render_combo = QComboBox()
+    pdf_render_options = [
+        ("Fast Semantic", "fast_semantic"),
+        ("Fast Layout", "fast_layout"),
+        ("Legacy Layout", "legacy_layout"),
+        ("Page Images", "image"),
+        ("Fixed Layout", "absolute"),
+        ("Legacy Semantic", "semantic"),
+    ]
+    for option_label, option_value in pdf_render_options:
+        pdf_render_combo.addItem(option_label, option_value)
+    pdf_render_combo.setFixedWidth(180)
+    pdf_render_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(pdf_render_combo)
+    self._disable_combobox_mousewheel(pdf_render_combo)
+    try:
+        render_val = self.pdf_render_mode_var
+        render_lookup = {
+            "xhtml": "legacy_layout",
+            "html": "legacy_layout",
+            "legacy_xhtml": "legacy_layout",
+        }.get(str(render_val).lower(), str(render_val).lower())
+        idx = pdf_render_combo.findData(render_lookup)
+        if idx >= 0:
+            pdf_render_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_pdf_render_changed(index):
+        try:
+            selected = pdf_render_combo.itemData(index)
+            self.pdf_render_mode_var = selected or "fast_semantic"
+            self.config['pdf_render_mode'] = self.pdf_render_mode_var
+            os.environ['PDF_RENDER_MODE'] = self.pdf_render_mode_var
+        except Exception:
+            pass
+    pdf_render_combo.currentIndexChanged.connect(_on_pdf_render_changed)
+    pdf_render_h.addWidget(pdf_render_combo)
+    pdf_render_h.addStretch()
+    section_v.addWidget(pdf_render_row)
+
+    # Fast Semantic paragraph formatting. These are independent so users can
+    # preserve the PDF, force a horizontal edge, or explicitly enable/disable
+    # justification without changing the extraction engine.
+    if not hasattr(self, 'pdf_paragraph_alignment_var'):
+        self.pdf_paragraph_alignment_var = self.config.get(
+            'pdf_paragraph_alignment', 'source'
+        )
+    if not hasattr(self, 'pdf_header_alignment_var'):
+        self.pdf_header_alignment_var = self.config.get(
+            'pdf_header_alignment', 'source'
+        )
+    if not hasattr(self, 'pdf_paragraph_justification_var'):
+        self.pdf_paragraph_justification_var = self.config.get(
+            'pdf_paragraph_justification', 'source'
+        )
+    if not hasattr(self, 'pdf_rtl_paragraph_layout_var'):
+        self.pdf_rtl_paragraph_layout_var = bool(
+            self.config.get('pdf_rtl_paragraph_layout', False)
+        )
+
+    pdf_alignment_row = QWidget()
+    pdf_alignment_h = QHBoxLayout(pdf_alignment_row)
+    pdf_alignment_h.setContentsMargins(20, 2, 0, 0)
+    pdf_alignment_h.addWidget(QLabel("Paragraph alignment:"))
+    pdf_alignment_combo = QComboBox()
+    for option_label, option_value in [
+        ("Source PDF (Default)", "source"),
+        ("Left", "left"),
+        ("Center", "center"),
+        ("Right", "right"),
+    ]:
+        pdf_alignment_combo.addItem(option_label, option_value)
+    pdf_alignment_combo.setFixedWidth(190)
+    self._add_combobox_arrow(pdf_alignment_combo)
+    self._disable_combobox_mousewheel(pdf_alignment_combo)
+    alignment_index = pdf_alignment_combo.findData(
+        str(self.pdf_paragraph_alignment_var or 'source').strip().lower()
+    )
+    pdf_alignment_combo.setCurrentIndex(max(0, alignment_index))
+
+    def _on_pdf_alignment_changed(index):
+        selected = str(pdf_alignment_combo.itemData(index) or 'source')
+        self.pdf_paragraph_alignment_var = selected
+        self.config['pdf_paragraph_alignment'] = selected
+        os.environ['PDF_PARAGRAPH_ALIGNMENT'] = selected
+
+    pdf_alignment_combo.currentIndexChanged.connect(_on_pdf_alignment_changed)
+    _on_pdf_alignment_changed(pdf_alignment_combo.currentIndex())
+    pdf_alignment_h.addWidget(pdf_alignment_combo)
+    pdf_alignment_h.addStretch()
+    section_v.addWidget(pdf_alignment_row)
+
+    pdf_header_alignment_row = QWidget()
+    pdf_header_alignment_h = QHBoxLayout(pdf_header_alignment_row)
+    pdf_header_alignment_h.setContentsMargins(20, 2, 0, 0)
+    pdf_header_alignment_h.addWidget(QLabel("Header alignment:"))
+    pdf_header_alignment_combo = QComboBox()
+    for option_label, option_value in [
+        ("Source PDF (Default)", "source"),
+        ("Left", "left"),
+        ("Center", "center"),
+        ("Right", "right"),
+    ]:
+        pdf_header_alignment_combo.addItem(option_label, option_value)
+    pdf_header_alignment_combo.setFixedWidth(190)
+    self._add_combobox_arrow(pdf_header_alignment_combo)
+    self._disable_combobox_mousewheel(pdf_header_alignment_combo)
+    header_alignment_index = pdf_header_alignment_combo.findData(
+        str(self.pdf_header_alignment_var or 'source').strip().lower()
+    )
+    pdf_header_alignment_combo.setCurrentIndex(max(0, header_alignment_index))
+
+    def _on_pdf_header_alignment_changed(index):
+        selected = str(
+            pdf_header_alignment_combo.itemData(index) or 'source'
+        )
+        self.pdf_header_alignment_var = selected
+        self.config['pdf_header_alignment'] = selected
+        os.environ['PDF_HEADER_ALIGNMENT'] = selected
+
+    pdf_header_alignment_combo.currentIndexChanged.connect(
+        _on_pdf_header_alignment_changed
+    )
+    _on_pdf_header_alignment_changed(
+        pdf_header_alignment_combo.currentIndex()
+    )
+    pdf_header_alignment_h.addWidget(pdf_header_alignment_combo)
+    pdf_header_alignment_h.addStretch()
+    section_v.addWidget(pdf_header_alignment_row)
+
+    pdf_justification_row = QWidget()
+    pdf_justification_h = QHBoxLayout(pdf_justification_row)
+    pdf_justification_h.setContentsMargins(20, 2, 0, 0)
+    pdf_justification_h.addWidget(QLabel("Paragraph justification:"))
+    pdf_justification_combo = QComboBox()
+    for option_label, option_value in [
+        ("Source PDF (Default)", "source"),
+        ("Justified", "justify"),
+        ("Not justified", "none"),
+    ]:
+        pdf_justification_combo.addItem(option_label, option_value)
+    pdf_justification_combo.setFixedWidth(190)
+    self._add_combobox_arrow(pdf_justification_combo)
+    self._disable_combobox_mousewheel(pdf_justification_combo)
+    justification_index = pdf_justification_combo.findData(
+        str(self.pdf_paragraph_justification_var or 'source').strip().lower()
+    )
+    pdf_justification_combo.setCurrentIndex(max(0, justification_index))
+
+    def _on_pdf_justification_changed(index):
+        selected = str(pdf_justification_combo.itemData(index) or 'source')
+        self.pdf_paragraph_justification_var = selected
+        self.config['pdf_paragraph_justification'] = selected
+        os.environ['PDF_PARAGRAPH_JUSTIFICATION'] = selected
+
+    pdf_justification_combo.currentIndexChanged.connect(
+        _on_pdf_justification_changed
+    )
+    _on_pdf_justification_changed(pdf_justification_combo.currentIndex())
+    pdf_justification_h.addWidget(pdf_justification_combo)
+    pdf_justification_h.addStretch()
+    section_v.addWidget(pdf_justification_row)
+
+    pdf_rtl_layout_cb = self._create_styled_checkbox(
+        "Right-to-left paragraph layout (RTL)"
+    )
+    pdf_rtl_layout_cb.setToolTip(
+        "Display extracted and translated PDF text from right to left.\n"
+        "Adds RTL direction and bidirectional text handling to the PDF reader "
+        "and compiled PDF output."
+    )
+    pdf_rtl_layout_cb.setChecked(bool(self.pdf_rtl_paragraph_layout_var))
+
+    def _on_pdf_rtl_layout_changed(checked):
+        enabled = bool(checked)
+        self.pdf_rtl_paragraph_layout_var = enabled
+        self.config['pdf_rtl_paragraph_layout'] = enabled
+        os.environ['PDF_RTL_PARAGRAPH_LAYOUT'] = '1' if enabled else '0'
+
+    pdf_rtl_layout_cb.toggled.connect(_on_pdf_rtl_layout_changed)
+    _on_pdf_rtl_layout_changed(pdf_rtl_layout_cb.isChecked())
+    pdf_rtl_layout_cb.setContentsMargins(20, 2, 0, 0)
+    section_v.addWidget(pdf_rtl_layout_cb)
+
+    pdf_paragraph_format_desc = QLabel(
+        "Source PDF preserves detected paragraph and header formatting (default).\n"
+        "Header alignment can be forced independently from paragraph alignment.\n"
+        "An explicit Justified/Not justified choice takes precedence over alignment.\n"
+        "RTL layout uses the right edge for source-left paragraphs while\n"
+        "preserving centered/justified source formatting and explicit alignment overrides."
+    )
+    pdf_paragraph_format_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_paragraph_format_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_paragraph_format_desc)
+    
+    pdf_render_desc = QLabel(
+        "PDF extraction mode:\n"
+        "• Fast Semantic: Reading-oriented text, bookmark-aware and fastest (default)\n"
+        "• Fast Layout: Layout-preserving XHTML with deduplicated external images\n"
+        "• Legacy Layout: Previous MuPDF XHTML behavior for compatibility\n"
+        "• Page Images: Render every page as an image (no text extraction)\n"
+        "Page artifacts are cached, so updated bookmarks can reuse unchanged pages."
+    )
+    pdf_render_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_render_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_render_desc)
+    
+    # Disable 0-based Chapter Detection
+    zero_detect_cb = self._create_styled_checkbox("Disable 0-based Chapter Detection")
+    try:
+        zero_detect_cb.setChecked(bool(self.disable_zero_detection_var))
+    except Exception:
+        pass
+    def _on_zero_detect_toggle(checked):
+        try:
+            self.disable_zero_detection_var = bool(checked)
+        except Exception:
+            pass
+    zero_detect_cb.toggled.connect(_on_zero_detect_toggle)
+    zero_detect_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(zero_detect_cb)
+    
+    zero_detect_desc = QLabel("Always use chapter ranges as specified\n(don't force adjust to chapter 1)")
+    zero_detect_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    zero_detect_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(zero_detect_desc)
+    
+    # Legacy "Use Header as Output Name" is intentionally disabled. It can
+    # create surprising filenames from translated chapter titles.
+    self.use_header_as_output_var = False
+    try:
+        self.config['use_header_as_output'] = False
+    except Exception:
+        pass
+    
+    # Separator
+    sep_opts1 = QFrame()
+    sep_opts1.setFrameShape(QFrame.HLine)
+    sep_opts1.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_opts1)
+    
+    # Chapter Number Offset
+    offset_w = QWidget()
+    offset_h = QHBoxLayout(offset_w)
+    offset_h.setContentsMargins(0, 5, 0, 0)
+    offset_h.addWidget(QLabel("Chapter Number Offset:"))
+    
+    if not hasattr(self, 'chapter_number_offset_var'):
+        self.chapter_number_offset_var = str(self.config.get('chapter_number_offset', '0'))
+    
+    offset_edit = QLineEdit()
+    offset_edit.setFixedWidth(60)
+    try:
+        offset_edit.setText(str(self.chapter_number_offset_var))
+    except Exception:
+        pass
+    def _on_offset_changed(text):
+        try:
+            self.chapter_number_offset_var = text
+        except Exception:
+            pass
+    offset_edit.textChanged.connect(_on_offset_changed)
+    offset_h.addWidget(offset_edit)
+    offset_h.addWidget(QLabel("(+/- adjustment)"))
+    offset_h.addStretch()
+    section_v.addWidget(offset_w)
+    
+    offset_desc = QLabel("Adjust all chapter numbers by this amount.\nUseful for matching file numbers to actual chapters.")
+    offset_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    offset_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(offset_desc)
+    
+    # Separator
+    sep_opts2 = QFrame()
+    sep_opts2.setFrameShape(QFrame.HLine)
+    sep_opts2.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_opts2)
+    
+    # Post-Translation Scanning Phase
+    scan_w = QWidget()
+    scan_h = QHBoxLayout(scan_w)
+    scan_h.setContentsMargins(0, 10, 0, 0)
+    
+    scan_cb = self._create_styled_checkbox("Enable post-translation Scanning phase")
+    self.scan_phase_settings_checkbox = scan_cb
+    try:
+        scan_cb.setChecked(bool(self.scan_phase_enabled_var))
+    except Exception:
+        pass
+    def _on_scan_toggle(checked):
+        try:
+            if hasattr(self, '_set_scan_phase_enabled'):
+                self._set_scan_phase_enabled(checked)
+            else:
+                self.scan_phase_enabled_var = bool(checked)
+        except Exception:
+            pass
+    scan_cb.toggled.connect(_on_scan_toggle)
+    scan_h.addWidget(scan_cb)
+    
+    scan_h.addSpacing(15)
+    scan_h.addWidget(QLabel("Mode:"))
+    
+    scan_combo = QComboBox()
+    scan_combo.addItems(["quick-scan", "aggressive", "ai-hunter", "custom"])
+    scan_combo.setFixedWidth(120)
+    # Add custom styling with unicode arrow
+    scan_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(scan_combo)
+    self._disable_combobox_mousewheel(scan_combo)
+    try:
+        mode_val = self.scan_phase_mode_var
+        idx = scan_combo.findText(mode_val)
+        if idx >= 0:
+            scan_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_scan_mode_changed(text):
+        try:
+            self.scan_phase_mode_var = text
+        except Exception:
+            pass
+    scan_combo.currentTextChanged.connect(_on_scan_mode_changed)
+    scan_h.addWidget(scan_combo)
+    scan_h.addStretch()
+    section_v.addWidget(scan_w)
+    
+    scan_desc = QLabel("Automatically run QA Scanner after translation completes")
+    scan_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    scan_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(scan_desc)
+    
+    # Batching Mode
+    batch_title = QLabel("Batching Mode")
+    batch_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    batch_title.setContentsMargins(0, 8, 0, 4)
+    section_v.addWidget(batch_title)
+
+    from PySide6.QtWidgets import QButtonGroup, QRadioButton
+
+    batch_group = QButtonGroup(section_v)
+
+    batch_row = QWidget()
+    batch_row_h = QHBoxLayout(batch_row)
+    batch_row_h.setContentsMargins(0, 0, 0, 0)
+
+    conservative_rb = QRadioButton("Conservative batching")
+    direct_rb = QRadioButton("Direct batching")
+    aggressive_rb = QRadioButton("No batching")
+    self.batch_conservative_radio = conservative_rb
+    self.batch_direct_radio = direct_rb
+    self.batch_no_batching_radio = aggressive_rb
+
+    batch_group.addButton(conservative_rb)
+    batch_group.addButton(direct_rb)
+    batch_group.addButton(aggressive_rb)
+
+    # Load current selection
+    current_mode = getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive'
+    if current_mode == 'conservative':
+        conservative_rb.setChecked(True)
+    elif current_mode == 'direct':
+        direct_rb.setChecked(True)
+    else:
+        aggressive_rb.setChecked(True)
+
+    # Batch group size (multiplier) for conservative mode
+    batch_group_input = QLineEdit()
+    batch_group_input.setFixedWidth(50)
+    batch_group_input.setText(str(getattr(self, 'batch_group_size_var', '3')))
+    batch_group_input.setToolTip("Conservative mode multiplier applied to batch size")
+
+    def _set_mode(mode):
+        try:
+            if hasattr(self, '_set_batching_mode'):
+                self._set_batching_mode(mode)
+            else:
+                self.batch_mode_var = mode
+                self.config['batching_mode'] = mode
+            if hasattr(self, '_enforce_context_batching_mode'):
+                self._enforce_context_batching_mode()
+        except Exception:
+            pass
+
+    conservative_rb.toggled.connect(lambda checked: _set_mode('conservative') if checked else None)
+    direct_rb.toggled.connect(lambda checked: _set_mode('direct') if checked else None)
+    aggressive_rb.toggled.connect(lambda checked: _set_mode('aggressive') if checked else None)
+
+    def _on_batch_group_change(text):
+        try:
+            self.batch_group_size_var = text
+        except Exception:
+            pass
+    batch_group_input.textChanged.connect(_on_batch_group_change)
+
+    batch_row_h.addWidget(conservative_rb)
+    batch_row_h.addSpacing(6)
+    batch_row_h.addWidget(batch_group_input)
+    batch_row_h.addWidget(QLabel("× batch size"))
+    batch_row_h.addStretch()
+    section_v.addWidget(batch_row)
+
+    # Secondary row for other modes
+    mode_row = QWidget()
+    mode_row_h = QHBoxLayout(mode_row)
+    mode_row_h.setContentsMargins(0, 0, 0, 0)
+    mode_row_h.addWidget(direct_rb)
+    mode_row_h.addSpacing(12)
+    mode_row_h.addWidget(aggressive_rb)
+    mode_row_h.addStretch()
+    section_v.addWidget(mode_row)
+
+    batch_lock_label = QLabel("")
+    batch_lock_label.setContentsMargins(20, 4, 0, 2)
+    batch_lock_label.setVisible(False)
+    self.batch_context_lock_label = batch_lock_label
+    section_v.addWidget(batch_lock_label)
+
+    batch_desc = QLabel(
+        "Direct: fixed batches of batch size.\n"
+        "Conservative: groups = batch size × multiplier (set above).\n"
+        "No batching: keeps parallel slots full by opening a new request whenever one finishes.\n"
+        "Context Mode Off locks translation and glossary to No batching.\n"
+        "Contextual History allows Direct/Conservative and glossary follows it.\n"
+        "Rolling Summary allows Direct/Conservative for translation; glossary stays No batching."
+    )
+    batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    batch_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(batch_desc)
+
+    if hasattr(self, '_enforce_context_batching_mode'):
+        self._enforce_context_batching_mode()
+    
+    # Separator
+    sep_opts3 = QFrame()
+    sep_opts3.setFrameShape(QFrame.HLine)
+    sep_opts3.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_opts3)
+    
+    # API Safety Settings
+    safety_title_row = QWidget()
+    safety_title_h = QHBoxLayout(safety_title_row)
+    safety_title_h.setContentsMargins(0, 5, 0, 5)
+    safety_title_h.setSpacing(10)
+
+    safety_title = QLabel("API Safety Settings")
+    safety_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    safety_title_h.addWidget(safety_title)
+
+    fallback_keys_btn = _create_preview_pool_button(
+        self,
+        'fallback',
+        "Fallback Keys",
+        "Open the Multi API Key Manager focused on fallback keys for blocked content.",
+        section_box,
+    )
+    safety_title_h.addWidget(fallback_keys_btn)
+    safety_title_h.addStretch()
+    section_v.addWidget(safety_title_row)
+    
+    if not hasattr(self, 'disable_gemini_safety_var'):
+        self.disable_gemini_safety_var = self.config.get('disable_gemini_safety', True)
+    
+    if not hasattr(self, 'gemini_safety_threshold_var'):
+        self.gemini_safety_threshold_var = self.config.get('gemini_safety_threshold', 'BLOCK_NONE')
+    
+    # Row with checkbox + dropdown
+    safety_row = QWidget()
+    safety_row_h = QHBoxLayout(safety_row)
+    safety_row_h.setContentsMargins(0, 5, 0, 0)
+    
+    safety_cb = self._create_styled_checkbox("Disable API Safety Filters (Gemini, Groq, Fireworks, etc.)")
+    try:
+        safety_cb.setChecked(bool(self.disable_gemini_safety_var))
+    except Exception:
+        pass
+    def _on_safety_toggle(checked):
+        try:
+            self.disable_gemini_safety_var = bool(checked)
+        except Exception:
+            pass
+    safety_cb.toggled.connect(_on_safety_toggle)
+    safety_row_h.addWidget(safety_cb)
+    
+    safety_row_h.addSpacing(10)
+    safety_row_h.addWidget(QLabel("Threshold:"))
+    
+    safety_threshold_combo = QComboBox()
+    safety_threshold_combo.addItems(["OFF", "BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"])
+    safety_threshold_combo.setFixedWidth(190)
+    safety_threshold_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(safety_threshold_combo)
+    self._disable_combobox_mousewheel(safety_threshold_combo)
+    try:
+        idx = safety_threshold_combo.findText(self.gemini_safety_threshold_var)
+        if idx >= 0:
+            safety_threshold_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_safety_threshold_changed(text):
+        try:
+            self.gemini_safety_threshold_var = text
+        except Exception:
+            pass
+    safety_threshold_combo.currentTextChanged.connect(_on_safety_threshold_changed)
+    safety_row_h.addWidget(safety_threshold_combo)
+    safety_row_h.addStretch()
+    section_v.addWidget(safety_row)
+    
+    safety_warning = QLabel("⚠️ Disables content safety filters for supported providers.\nGemini: Sets all harm categories to selected threshold.\nGroq/Fireworks: Disables moderation parameter.")
+    safety_warning.setStyleSheet("color: #ff6b6b; font-size: 9pt;")
+    safety_warning.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(safety_warning)
+    
+    safety_note = QLabel("Does NOT affect ElectronHub Gemini models (eh/gemini-*) or Together AI")
+    safety_note.setStyleSheet("color: gray; font-size: 8pt;")
+    safety_note.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(safety_note)
+    
+    safety_checks_desc = QLabel(
+        "Even with filters disabled, providers may still refuse content.\n"
+        "Client-side detection: #1 explicit finish_reason, #2 safety keywords in response metadata,\n"
+        "#3 refusal phrases (toggle in Manage Refusal Patterns), #4 empty response = block\n"
+        "(toggle in QA section: 'Disable empty response = safety filter check')."
+    )
+    safety_checks_desc.setStyleSheet("color: #e6c95c; font-size: 8pt;")
+    safety_checks_desc.setContentsMargins(20, 0, 0, 8)
+    safety_checks_desc.setWordWrap(True)
+    section_v.addWidget(safety_checks_desc)
+    
+    # OpenRouter Transport Preference
+    if not hasattr(self, 'openrouter_http_only_var'):
+        self.openrouter_http_only_var = self.config.get('openrouter_use_http_only', False)
+    
+    http_only_cb = self._create_styled_checkbox("Use HTTP-only for OpenRouter/NVIDIA (bypass SDK)")
+    try:
+        http_only_cb.setChecked(bool(self.openrouter_http_only_var))
+    except Exception:
+        pass
+    def _on_http_only_toggle(checked):
+        try:
+            self.openrouter_http_only_var = bool(checked)
+        except Exception:
+            pass
+    http_only_cb.toggled.connect(_on_http_only_toggle)
+    http_only_cb.setContentsMargins(0, 8, 0, 0)
+    section_v.addWidget(http_only_cb)
+    
+    http_only_desc = QLabel("Requests to OpenRouter use direct HTTP POST with explicit headers")
+    http_only_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    http_only_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(http_only_desc)
+    
+    # OpenRouter Disable Compression
+    if not hasattr(self, 'openrouter_accept_identity_var'):
+        self.openrouter_accept_identity_var = self.config.get('openrouter_accept_identity', False)
+    
+    accept_identity_cb = self._create_styled_checkbox("Disable compression for OpenRouter (Accept-Encoding)")
+    try:
+        accept_identity_cb.setChecked(bool(self.openrouter_accept_identity_var))
+    except Exception:
+        pass
+    def _on_accept_identity_toggle(checked):
+        try:
+            self.openrouter_accept_identity_var = bool(checked)
+        except Exception:
+            pass
+    accept_identity_cb.toggled.connect(_on_accept_identity_toggle)
+    accept_identity_cb.setContentsMargins(0, 4, 0, 0)
+    section_v.addWidget(accept_identity_cb)
+    
+    accept_identity_desc = QLabel("Sends Accept-Encoding: identity to request uncompressed responses.\nUse if proxies/CDNs cause corrupted or non-JSON compressed bodies.")
+    accept_identity_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    accept_identity_desc.setContentsMargins(20, 0, 0, 8)
+    section_v.addWidget(accept_identity_desc)
+    
+    # OpenRouter: Provider preference
+    # Default to 'Auto' when missing or blank
+    if not hasattr(self, 'openrouter_preferred_provider_var'):
+        try:
+            v = self.config.get('openrouter_preferred_provider', 'Auto')
+            v = (v or '').strip() or 'Auto'
+        except Exception:
+            v = 'Auto'
+        self.openrouter_preferred_provider_var = v
+        # Keep config aligned so it won't come back blank next time
+        try:
+            self.config['openrouter_preferred_provider'] = v
+        except Exception:
+            pass
+    
+    provider_w = QWidget()
+    provider_h = QHBoxLayout(provider_w)
+    provider_h.setContentsMargins(0, 4, 0, 0)
+    provider_h.addWidget(QLabel("Preferred OpenRouter Provider:"))
+    
+    # Comprehensive list of OpenRouter providers (alphabetically sorted, with Auto first)
+    provider_options = [
+        'Auto', 'AI21', 'AionLabs', 'Alibaba Cloud Int.', 'Amazon Bedrock', 'Anthropic',
+        'AtlasCloud', 'Atoma', 'Avian.io', 'Azure', 'Baseten', 'Cerebras', 'Chutes',
+        'Cloudflare', 'Cohere', 'CrofAI', 'Crusoe', 'DeepInfra', 'DeepSeek', 'Enfer',
+        'Featherless', 'Fireworks', 'Friendli', 'GMICloud', 'Google AI Studio',
+        'google-ai-studio/flex', 'google-ai-studio/priority', 'Google Vertex',
+        'google-vertex/global/flex', 'google-vertex/global/priority',
+        'Groq', 'Hyperbolic', 'Inception', 'inference.net', 'Infermatic', 'Inflection',
+        'kluster.ai', 'Lambda', 'Lepton', 'Leschde', 'Liquid', 'Mancer (private)', 'Meta',
+        'Minimax', 'Mistral', 'Moonshot AI', 'Morph', 'nCompass', 'Nebius AI Studio',
+        'NextBit', 'Nineteen', 'NovitAI', 'NVIDIA', 'OpenAI', 'Open Inference', 'Parasail',
+        'Perplexity', 'Phala', 'Relace', 'SambaNova', 'SiliconFlow', 'Stealth', 'Switchpoint',
+        'Targon', 'Together', 'Ubicloud', 'Venice', 'Weights & Biases', 'xAI', 'Z.AI'
+    ]
+    
+    # Create combobox with autocomplete support (editable)
+    provider_combo = QComboBox()
+    provider_combo.setEditable(True)
+    provider_combo.addItems(provider_options)
+    provider_combo.setFixedWidth(160)  # Reduced for more compact layout
+    # Add custom styling with unicode arrow
+    provider_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(provider_combo)
+    self._disable_combobox_mousewheel(provider_combo)
+    try:
+        idx = provider_combo.findText(self.openrouter_preferred_provider_var)
+        if idx >= 0:
+            provider_combo.setCurrentIndex(idx)
+        else:
+            provider_combo.setCurrentText(self.openrouter_preferred_provider_var)
+    except Exception:
+        pass
+    def _on_provider_changed(text):
+        try:
+            self.openrouter_preferred_provider_var = text
+        except Exception:
+            pass
+    provider_combo.currentTextChanged.connect(_on_provider_changed)
+    provider_combo.lineEdit().textChanged.connect(_on_provider_changed)
+    provider_h.addWidget(provider_combo)
+    provider_h.addStretch()
+    
+    # Store reference for potential autocomplete logic (Tkinter specific, may not be needed)
+    self.openrouter_provider_combo = provider_combo
+    self._provider_all_values = provider_options
+    self._provider_prev_text = self.openrouter_preferred_provider_var
+    
+    section_v.addWidget(provider_w)
+    
+    provider_desc = QLabel("Specify which upstream provider OpenRouter should prefer for your requests.\n'Auto' lets OpenRouter choose. Specific providers may have different availability.\n.../flex and .../priority endpoints are pinned with no fallback — Flex is 50% cheaper but may be slow or 503.")
+    provider_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    provider_desc.setContentsMargins(20, 0, 0, 8)
+    section_v.addWidget(provider_desc)
+
+    # Place the section at row 1, column 1 to match the original grid
+    try:
+        grid = parent.layout()
+        if grid:
+            grid.addWidget(section_box, 1, 1)
+    except Exception:
+        # Fallback: just stack
+        section_box.setParent(parent)
+    
+    # Initial state - show/hide enhanced options
+    self.on_extraction_method_change()
+
+def on_extraction_method_change(self):
+    """Handle extraction method changes and show/hide Enhanced options"""
+    if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'enhanced_options_frame'):
+        try:
+            # Qt version: use setVisible instead of pack/pack_forget
+            if self.text_extraction_method_var == 'enhanced':
+                self.enhanced_options_frame.setVisible(True)
+            else:
+                self.enhanced_options_frame.setVisible(False)
+            
+            # Show/hide BS options frame (opposite of enhanced)
+            if hasattr(self, 'bs_options_frame'):
+                self.bs_options_frame.setVisible(self.text_extraction_method_var == 'standard')
+        except Exception:
+            # Fallback for any errors during transition
+            pass
+            
+def _set_output_mode(self, mode: str):
+    """Central setter for output mode.
+
+    Text   = image translation OFF, normal text output.
+    Vision = image translation ON, text output (OCR from images).
+    Image  = image translation ON, image-gen output.
+    Video  = image translation ON, video-gen output.
+    Audio  = text-to-speech from existing translated output.
+    Refinement = improve existing translated output.
+
+    Updates legacy boolean vars, config, syncs radio buttons and GUI dropdown.
+    """
+    try:
+        # Normalised mode + the legacy flags it implies (settings_rules, shared with mobile)
+        flags = settings_rules.output_mode_flags(mode)
+        mode = flags.mode
+
+        # --- set legacy booleans ---
+        for attr, value in flags.var_values.items():
+            setattr(self, attr, value)
+
+        for key, value in flags.config_values.items():
+            self.config[key] = value
+
+        # --- immediately sync env vars so they never stay stale ---
+        import os as _os
+        for name, value in flags.env.items():
+            _os.environ[name] = value
+
+        # Toggle visibility of the image-translation sub-section
+        try:
+            self.toggle_image_translation_section()
+        except Exception:
+            pass
+
+        # Sync radio buttons in Other Settings (if open)
+        _radios = getattr(self, '_output_mode_radios', None)
+        if _radios and mode in _radios:
+            rb = _radios[mode]
+            if not rb.isChecked():
+                rb.blockSignals(True)
+                rb.setChecked(True)
+                rb.blockSignals(False)
+
+        # Show/hide sub-settings in Other Settings
+        if hasattr(self, '_update_output_mode_sub_settings'):
+            self._update_output_mode_sub_settings(mode)
+
+        # Sync main GUI dropdown (if it exists)
+        combo = getattr(self, '_output_mode_combo', None)
+        if combo:
+            _map = {'text': 0, 'vision': 1, 'image': 2, 'video': 3, 'audio': 4, 'refinement': 5}
+            idx = _map.get(mode, 0)
+            if combo.currentIndex() != idx:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+    except Exception:
+        pass
+
+def _enforce_image_output_dependency(self):
+    """Keep output mode as an explicit user selection."""
+    try:
+        model = str(getattr(self, 'model_var', ''))
+        model_lower = model.lower()
+        current_mode = getattr(self, 'config', {}).get('output_mode', 'text')
+        if current_mode in ('audio', 'refinement'):
+            return
+
+        allow_without_translation = 'gemini-3-pro-image-preview' in model_lower
+
+        image_translation_on = bool(getattr(self, 'enable_image_translation_var', False))
+        allowed = image_translation_on or allow_without_translation
+
+        if not allowed:
+            self._set_output_mode('text')
+    except Exception:
+        pass
+
+def _create_image_translation_section(self, parent):
+    """Create image translation section (PySide6)"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget, QLineEdit, QGridLayout, QPushButton
+    from PySide6.QtCore import Qt
+    
+    section_box = QGroupBox("Image Translation & Vision API")
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
+    
+    # Create horizontal container for two columns inside content container
+    columns_container = QWidget()
+    section_h = QHBoxLayout(columns_container)
+    section_h.setContentsMargins(0, 0, 0, 0)
+    section_h.setSpacing(10)
+    
+    # Left column
+    left_column = QWidget()
+    left_v = QVBoxLayout(left_column)
+    left_v.setContentsMargins(0, 0, 20, 0)
+    
+    # ── Output Mode radio buttons (replaces old Enable Image Translation checkbox) ──
+    from PySide6.QtWidgets import QButtonGroup, QRadioButton
+
+    mode_row = QWidget()
+    mode_h = QHBoxLayout(mode_row)
+    mode_h.setContentsMargins(0, 0, 0, 0)
+    mode_h.setSpacing(14)
+
+    mode_group = QButtonGroup(mode_row)
+
+    rb_text = QRadioButton("📝 Text")
+    rb_text.setToolTip("Normal text translation — image translation OFF")
+    rb_vision = QRadioButton("👁️ Vision")
+    rb_vision.setToolTip("Translate text from images (OCR) — no image/video output")
+    rb_image = QRadioButton("🖼️ Image")
+    rb_image.setToolTip("Image generation output — enables image translation")
+    rb_video = QRadioButton("🎬 Video")
+    rb_video.setToolTip("Video generation output — enables image translation")
+    rb_audio = QRadioButton("🔊 Audio")
+    rb_audio.setToolTip("Generate TTS audio files from existing translated output")
+    rb_refinement = QRadioButton("✨ Refinement")
+    rb_refinement.setToolTip("Improve existing translated output without using raw source HTML")
+
+    mode_group.addButton(rb_text, 0)
+    mode_group.addButton(rb_vision, 1)
+    mode_group.addButton(rb_image, 2)
+    mode_group.addButton(rb_video, 3)
+    mode_group.addButton(rb_audio, 4)
+    mode_group.addButton(rb_refinement, 5)
+
+    mode_h.addWidget(rb_text)
+    mode_h.addWidget(rb_vision)
+    mode_h.addWidget(rb_image)
+    mode_h.addWidget(rb_video)
+    mode_h.addWidget(rb_audio)
+    mode_h.addWidget(rb_refinement)
+    mode_h.addStretch()
+    section_v.addWidget(mode_row)
+
+    # Store refs for sync
+    self._output_mode_radios = {
+        'text': rb_text,
+        'vision': rb_vision,
+        'image': rb_image,
+        'video': rb_video,
+        'audio': rb_audio,
+        'refinement': rb_refinement,
+    }
+
+    # Determine initial mode from legacy booleans
+    if not hasattr(self, 'enable_video_output_mode_var'):
+        self.enable_video_output_mode_var = self.config.get('enable_video_output_mode', False)
+
+    _init_mode = self._get_output_mode() if hasattr(self, '_get_output_mode') else self.config.get('output_mode', None)
+    if _init_mode not in ('text', 'vision', 'image', 'video', 'audio', 'refinement'):
+        if bool(getattr(self, 'enable_image_output_mode_var', False)):
+            _init_mode = 'image'
+        elif bool(getattr(self, 'enable_video_output_mode_var', False)):
+            _init_mode = 'video'
+        elif bool(getattr(self, 'enable_audio_output_mode_var', self.config.get('enable_audio_output_mode', False))):
+            _init_mode = 'audio'
+        elif bool(getattr(self, 'enable_refinement_output_mode_var', self.config.get('enable_refinement_output_mode', False))):
+            _init_mode = 'refinement'
+        elif bool(getattr(self, 'enable_image_translation_var', False)):
+            _init_mode = 'vision'
+        else:
+            _init_mode = 'text'
+
+    rb_text.setChecked(_init_mode == 'text')
+    rb_vision.setChecked(_init_mode == 'vision')
+    rb_image.setChecked(_init_mode == 'image')
+    rb_video.setChecked(_init_mode == 'video')
+    rb_audio.setChecked(_init_mode == 'audio')
+    rb_refinement.setChecked(_init_mode == 'refinement')
+
+    mode_desc = QLabel(
+        "Text = normal · Vision = OCR from images · Image = image-gen · Video = video-gen · Audio = TTS · Refinement = improve output"
+    )
+    mode_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    mode_desc.setContentsMargins(0, 0, 0, 5)
+    section_v.addWidget(mode_desc)
+    
+    # Create container for all content below the main checkbox
+    content_container = QWidget()
+    content_layout = QVBoxLayout(content_container)
+    content_layout.setContentsMargins(0, 0, 0, 0)
+    content_layout.setSpacing(4)
+    
+    # Store reference for fade animation (everything below main checkbox)
+    self.image_translation_content = content_container
+    
+    # Process Long Images
+    webnovel_cb = self._create_styled_checkbox("Process Long Images (Web Novel Style)")
+    try:
+        webnovel_cb.setChecked(bool(self.process_webnovel_images_var))
+    except Exception:
+        pass
+    def _on_webnovel_toggle(checked):
+        try:
+            self.process_webnovel_images_var = bool(checked)
+        except Exception:
+            pass
+    webnovel_cb.toggled.connect(_on_webnovel_toggle)
+    left_v.addWidget(webnovel_cb)
+    
+    webnovel_desc = QLabel("Include tall images often used in web novels")
+    webnovel_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    webnovel_desc.setContentsMargins(20, 0, 0, 10)
+    left_v.addWidget(webnovel_desc)
+    
+    # Hide labels and remove OCR images
+    hide_cb = self._create_styled_checkbox("Hide labels and remove OCR images")
+    try:
+        hide_cb.setChecked(bool(self.hide_image_translation_label_var))
+    except Exception:
+        pass
+    def _on_hide_toggle(checked):
+        try:
+            self.hide_image_translation_label_var = bool(checked)
+        except Exception:
+            pass
+    hide_cb.toggled.connect(_on_hide_toggle)
+    left_v.addWidget(hide_cb)
+    
+    hide_desc = QLabel("Clean mode: removes image and shows only translated text")
+    hide_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    hide_desc.setContentsMargins(20, 0, 0, 10)
+    left_v.addWidget(hide_desc)
+
+    # ── Image sub-settings container (visible when Image mode selected) ──
+    img_sub = QWidget()
+    img_sub_v = QVBoxLayout(img_sub)
+    img_sub_v.setContentsMargins(10, 0, 0, 0)
+    img_sub_v.setSpacing(4)
+
+    resolution_w = QWidget()
+    resolution_h = QHBoxLayout(resolution_w)
+    resolution_h.setContentsMargins(0, 0, 0, 0)
+    resolution_h.setSpacing(8)
+    _res_label = QLabel("Output Resolution:")
+    self.image_output_resolution_label = _res_label
+    resolution_h.addWidget(_res_label)
+
+    resolution_combo = QComboBox()
+    resolution_combo.addItems(["1K", "2K", "4K"])
+    resolution_combo.setFixedWidth(80)
+    resolution_combo.setStyleSheet("""
+        QComboBox::down-arrow { image: none; width: 12px; height: 12px; border: none; }
+    """)
+    self._add_combobox_arrow(resolution_combo)
+    self._disable_combobox_mousewheel(resolution_combo)
+    if not hasattr(self, 'image_output_resolution_var'):
+        self.image_output_resolution_var = self.config.get('image_output_resolution', '1K')
+    try:
+        idx = resolution_combo.findText(self.image_output_resolution_var)
+        if idx >= 0:
+            resolution_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_resolution_changed(text):
+        try:
+            self.image_output_resolution_var = text
+        except Exception:
+            pass
+    resolution_combo.currentTextChanged.connect(_on_resolution_changed)
+    resolution_h.addWidget(resolution_combo)
+    image_keys_btn = _create_preview_pool_button(
+        self,
+        'inpainter',
+        "Image Keys",
+        "Open the Multi API Key Manager focused on the Image Gen/Edit key pool.",
+        section_box,
+    )
+    resolution_h.addWidget(image_keys_btn)
+    resolution_h.addStretch()
+    img_sub_v.addWidget(resolution_w)
+    res_desc = QLabel("Higher resolution = better quality but slower generation")
+    res_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    img_sub_v.addWidget(res_desc)
+    left_v.addWidget(img_sub)
+    self.image_output_resolution_w = resolution_w
+
+    # ── Video sub-settings container (visible when Video mode selected) ──
+    vid_sub = QWidget()
+    vid_sub_v = QVBoxLayout(vid_sub)
+    vid_sub_v.setContentsMargins(10, 0, 0, 0)
+    vid_sub_v.setSpacing(4)
+
+    duration_w = QWidget()
+    duration_h = QHBoxLayout(duration_w)
+    duration_h.setContentsMargins(0, 0, 0, 0)
+    duration_h.setSpacing(8)
+    _dur_label = QLabel("Video Duration:")
+    self.video_duration_label = _dur_label
+    duration_h.addWidget(_dur_label)
+    duration_combo = QComboBox()
+    duration_combo.addItems(["5", "10", "15", "20", "30", "60"])
+    duration_combo.setFixedWidth(80)
+    duration_combo.setStyleSheet("""
+        QComboBox::down-arrow { image: none; width: 12px; height: 12px; border: none; }
+    """)
+    self._add_combobox_arrow(duration_combo)
+    self._disable_combobox_mousewheel(duration_combo)
+    if not hasattr(self, 'nanogpt_video_duration_var'):
+        self.nanogpt_video_duration_var = self.config.get('nanogpt_video_duration', '60')
+    try:
+        idx = duration_combo.findText(str(self.nanogpt_video_duration_var))
+        if idx >= 0:
+            duration_combo.setCurrentIndex(idx)
+        else:
+            duration_combo.setCurrentText(str(self.nanogpt_video_duration_var))
+    except Exception:
+        pass
+    def _on_duration_changed(text):
+        try:
+            self.nanogpt_video_duration_var = text
+        except Exception:
+            pass
+    duration_combo.currentTextChanged.connect(_on_duration_changed)
+    duration_h.addWidget(duration_combo)
+    _dur_unit = QLabel("seconds")
+    _dur_unit.setStyleSheet("color: gray;")
+    duration_h.addWidget(_dur_unit)
+    duration_h.addStretch()
+    vid_sub_v.addWidget(duration_w)
+    self.video_duration_w = duration_w
+    dur_desc = QLabel("Duration of generated video clips (depends on model support)")
+    dur_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    vid_sub_v.addWidget(dur_desc)
+
+    vid_res_w = QWidget()
+    vid_res_h = QHBoxLayout(vid_res_w)
+    vid_res_h.setContentsMargins(0, 0, 0, 0)
+    vid_res_h.setSpacing(8)
+    _vid_res_label = QLabel("Video Resolution:")
+    self.video_resolution_label = _vid_res_label
+    vid_res_h.addWidget(_vid_res_label)
+    vid_res_combo = QComboBox()
+    vid_res_combo.addItems(["360p", "480p", "720p", "1080p"])
+    vid_res_combo.setFixedWidth(100)
+    vid_res_combo.setStyleSheet("""
+        QComboBox::down-arrow { image: none; width: 12px; height: 12px; border: none; }
+    """)
+    self._add_combobox_arrow(vid_res_combo)
+    self._disable_combobox_mousewheel(vid_res_combo)
+    if not hasattr(self, 'nanogpt_video_resolution_var'):
+        self.nanogpt_video_resolution_var = self.config.get('nanogpt_video_resolution', '720p')
+    try:
+        idx = vid_res_combo.findText(str(self.nanogpt_video_resolution_var))
+        if idx >= 0:
+            vid_res_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_vid_res_changed(text):
+        try:
+            self.nanogpt_video_resolution_var = text
+        except Exception:
+            pass
+    vid_res_combo.currentTextChanged.connect(_on_vid_res_changed)
+    vid_res_h.addWidget(vid_res_combo)
+    vid_res_h.addStretch()
+    vid_sub_v.addWidget(vid_res_w)
+    self.video_resolution_w = vid_res_w
+    vid_res_desc = QLabel("Output resolution for generated videos (depends on model support)")
+    vid_res_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    vid_sub_v.addWidget(vid_res_desc)
+    left_v.addWidget(vid_sub)
+
+    # Vision request sub-settings container (visible for Vision and Image modes)
+    vision_sub = QWidget()
+    vision_sub_v = QVBoxLayout(vision_sub)
+    vision_sub_v.setContentsMargins(10, 0, 0, 0)
+    vision_sub_v.setSpacing(4)
+
+    vision_prompt_row = QWidget()
+    vision_prompt_h = QHBoxLayout(vision_prompt_row)
+    vision_prompt_h.setContentsMargins(0, 0, 0, 0)
+    vision_prompt_h.setSpacing(8)
+    btn_vision_ocr = QPushButton("Configure Vision OCR Prompt")
+    btn_vision_ocr.setFixedWidth(230)
+    btn_vision_ocr.clicked.connect(lambda: self.configure_vision_ocr_prompt())
+    vision_prompt_h.addWidget(btn_vision_ocr)
+    vision_keys_btn = _create_preview_pool_button(
+        self,
+        'qa_scan',
+        "Vision Keys",
+        "Open the Multi API Key Manager focused on the Vision key pool.",
+        section_box,
+    )
+    vision_prompt_h.addWidget(vision_keys_btn)
+    vision_prompt_h.addStretch()
+    vision_sub_v.addWidget(vision_prompt_row)
+    vision_ocr_desc = QLabel("Vision mode OCRs images first, then translates the extracted text")
+    vision_ocr_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    vision_ocr_desc.setWordWrap(True)
+    vision_sub_v.addWidget(vision_ocr_desc)
+
+    skip_translation_cb = self._create_styled_checkbox("Skip translation")
+    try:
+        skip_translation_cb.setChecked(bool(getattr(self, 'vision_ocr_skip_translation_var', self.config.get('vision_ocr_skip_translation', False))))
+    except Exception:
+        pass
+
+    def _on_skip_translation_toggle(checked):
+        try:
+            self.vision_ocr_skip_translation_var = bool(checked)
+            self.config['vision_ocr_skip_translation'] = bool(checked)
+            os.environ['VISION_OCR_SKIP_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    skip_translation_cb.toggled.connect(_on_skip_translation_toggle)
+    vision_sub_v.addWidget(skip_translation_cb)
+    skip_translation_desc = QLabel("Only generate the sibling _OCR file (EPUB/PDF). Glossary extraction and translation are skipped.")
+    skip_translation_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    skip_translation_desc.setWordWrap(True)
+    vision_sub_v.addWidget(skip_translation_desc)
+
+    vision_batch_row = QWidget()
+    vision_batch_h = QHBoxLayout(vision_batch_row)
+    vision_batch_h.setContentsMargins(0, 0, 0, 0)
+    vision_batch_h.setSpacing(8)
+    vision_batch_cb = self._create_styled_checkbox("Batch Vision API requests")
+    try:
+        vision_batch_cb.setChecked(bool(getattr(self, 'vision_ocr_batch_translation_var', True)))
+    except Exception:
+        pass
+    vision_batch_h.addWidget(vision_batch_cb)
+    vision_batch_size_entry = QLineEdit()
+    vision_batch_size_entry.setFixedWidth(55)
+    vision_batch_size_entry.setToolTip("Parallel Vision API requests for OCR chunks and EPUB/PDF image output. Use -1 or 0 to inherit Batch Translation and Batch Size.")
+    try:
+        vision_batch_size_entry.setText(str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '-1'))))
+    except Exception:
+        vision_batch_size_entry.setText("-1")
+    vision_batch_h.addWidget(vision_batch_size_entry)
+    vision_batch_h.addStretch()
+
+    def _on_vision_ocr_batch_toggle(checked):
+        try:
+            self.vision_ocr_batch_translation_var = bool(checked)
+            self.config['vision_ocr_batch_translation'] = bool(checked)
+            os.environ['VISION_OCR_BATCH_TRANSLATION'] = '1' if checked else '0'
+            vision_batch_size_entry.setEnabled(bool(checked))
+        except Exception:
+            pass
+
+    def _on_vision_ocr_batch_size_changed(text):
+        try:
+            value = int(str(text).strip() or "-1")
+            if value < -1:
+                value = -1
+            self.vision_ocr_batch_size_var = str(value)
+            self.config['vision_ocr_batch_size'] = value
+            os.environ['VISION_OCR_BATCH_SIZE'] = str(value)
+        except Exception:
+            self.vision_ocr_batch_size_var = str(text)
+
+    vision_batch_cb.toggled.connect(_on_vision_ocr_batch_toggle)
+    vision_batch_size_entry.textChanged.connect(_on_vision_ocr_batch_size_changed)
+    vision_batch_size_entry.setEnabled(bool(getattr(self, 'vision_ocr_batch_translation_var', True)))
+    vision_sub_v.addWidget(vision_batch_row)
+
+    vision_batch_desc = QLabel("Controls parallel Vision API request slots. Use -1 or 0 to inherit the main Batch Translation toggle and Batch Size.")
+    vision_batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    vision_batch_desc.setWordWrap(True)
+    vision_sub_v.addWidget(vision_batch_desc)
+
+    keep_ocr_image_cb = self._create_styled_checkbox("Keep OCR image")
+    try:
+        keep_ocr_image_cb.setChecked(bool(getattr(self, 'vision_ocr_keep_images_var', self.config.get('vision_ocr_keep_images', False))))
+    except Exception:
+        pass
+
+    def _on_keep_ocr_image_toggle(checked):
+        try:
+            self.vision_ocr_keep_images_var = bool(checked)
+            self.config['vision_ocr_keep_images'] = bool(checked)
+            os.environ['VISION_OCR_KEEP_IMAGES'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    keep_ocr_image_cb.toggled.connect(_on_keep_ocr_image_toggle)
+    vision_sub_v.addWidget(keep_ocr_image_cb)
+    keep_ocr_image_desc = QLabel("Always include the source image alongside OCR text in the combined output. Ensures no OCR images are excluded from the compiled EPUB/PDF.")
+    keep_ocr_image_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    keep_ocr_image_desc.setWordWrap(True)
+    vision_sub_v.addWidget(keep_ocr_image_desc)
+    left_v.addWidget(vision_sub)
+
+    vision_only_widgets = (
+        vision_prompt_row,
+        vision_ocr_desc,
+        skip_translation_cb,
+        skip_translation_desc,
+        keep_ocr_image_cb,
+        keep_ocr_image_desc,
+    )
+
+    # ── Show/hide sub-settings based on mode ──
+    def _update_output_mode_sub_settings(mode=None):
+        if mode is None:
+            if rb_image.isChecked():
+                mode = 'image'
+            elif rb_video.isChecked():
+                mode = 'video'
+            elif rb_vision.isChecked():
+                mode = 'vision'
+            else:
+                mode = 'text'
+        visible = settings_rules.output_mode_sub_settings(mode)
+        img_sub.setVisible(visible['image'])
+        vid_sub.setVisible(visible['video'])
+        vision_sub.setVisible(visible['vision_request'])
+        for widget in vision_only_widgets:
+            widget.setVisible(visible['vision_only'])
+        vision_batch_row.setVisible(visible['vision_request'])
+        vision_batch_desc.setVisible(visible['vision_request'])
+    self._update_output_mode_sub_settings = _update_output_mode_sub_settings
+
+    def _on_mode_radio_toggled(btn):
+        bid = mode_group.id(btn)
+        mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video', 4: 'audio', 5: 'refinement'}.get(bid, 'text')
+        if btn.isChecked():
+            self._set_output_mode(mode)
+    rb_text.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_text) if checked else None)
+    rb_vision.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_vision) if checked else None)
+    rb_image.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_image) if checked else None)
+    rb_video.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_video) if checked else None)
+    rb_audio.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_audio) if checked else None)
+    rb_refinement.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_refinement) if checked else None)
+
+    # Set initial visibility
+    _update_output_mode_sub_settings(_init_mode)
+
+    
+    left_v.addSpacing(10)
+    
+    # Watermark Removal
+    watermark_cb = self._create_styled_checkbox("Enable Watermark Removal")
+    try:
+        watermark_cb.setChecked(bool(self.enable_watermark_removal_var))
+    except Exception:
+        pass
+    def _on_watermark_toggle(checked):
+        try:
+            self.enable_watermark_removal_var = bool(checked)
+            _toggle_watermark_options()
+        except Exception:
+            pass
+    watermark_cb.toggled.connect(_on_watermark_toggle)
+    left_v.addWidget(watermark_cb)
+    
+    watermark_desc = QLabel("Advanced preprocessing to remove watermarks from images")
+    watermark_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    watermark_desc.setContentsMargins(20, 0, 0, 10)
+    left_v.addWidget(watermark_desc)
+    
+    # Save Cleaned Images
+    self.save_cleaned_checkbox = self._create_styled_checkbox("Save Cleaned Images")
+    try:
+        self.save_cleaned_checkbox.setChecked(bool(self.save_cleaned_images_var))
+    except Exception:
+        pass
+    def _on_save_cleaned_toggle(checked):
+        try:
+            self.save_cleaned_images_var = bool(checked)
+        except Exception:
+            pass
+    self.save_cleaned_checkbox.toggled.connect(_on_save_cleaned_toggle)
+    self.save_cleaned_checkbox.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(self.save_cleaned_checkbox)
+    
+    save_desc = QLabel("Keep watermark-removed images in OCR/cleaned/")
+    save_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    save_desc.setContentsMargins(40, 0, 0, 10)
+    left_v.addWidget(save_desc)
+    
+    # Advanced Watermark Removal
+    self.advanced_watermark_checkbox = self._create_styled_checkbox("Advanced Watermark Removal")
+    try:
+        self.advanced_watermark_checkbox.setChecked(bool(self.advanced_watermark_removal_var))
+    except Exception:
+        pass
+    def _on_advanced_watermark_toggle(checked):
+        try:
+            self.advanced_watermark_removal_var = bool(checked)
+        except Exception:
+            pass
+    self.advanced_watermark_checkbox.toggled.connect(_on_advanced_watermark_toggle)
+    self.advanced_watermark_checkbox.setContentsMargins(20, 0, 0, 0)
+    left_v.addWidget(self.advanced_watermark_checkbox)
+    
+    advanced_desc = QLabel("Use FFT-based pattern detection for stubborn watermarks")
+    advanced_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    advanced_desc.setContentsMargins(40, 0, 0, 0)
+    left_v.addWidget(advanced_desc)
+    
+    left_v.addStretch()
+    section_h.addWidget(left_column)
+    
+    # Right column
+    right_column = QWidget()
+    right_v = QVBoxLayout(right_column)
+    right_v.setContentsMargins(0, 0, 0, 0)
+    
+    # Settings grid
+    settings_w = QWidget()
+    settings_grid = QGridLayout(settings_w)
+    settings_grid.setContentsMargins(0, 0, 0, 0)
+    
+    settings = [
+        ("Min Image height (px):", self.webnovel_min_height_var, False),
+        ("Max Images per chapter (-1 = all):", self.max_images_per_chapter_var, False),
+        ("Chunk height:", self.image_chunk_height_var, False),
+        ("Chunk overlap (%):", self.image_chunk_overlap_var, True),
+        ("Chunk overlap floor (px):", getattr(self, 'image_chunk_min_overlap_pixels_var', '80'), True)
+    ]
+    
+    for row, (label, var, has_tip) in enumerate(settings):
+        lbl = QLabel(label)
+        settings_grid.addWidget(lbl, row, 0, Qt.AlignLeft)
+        
+        entry = QLineEdit()
+        entry.setFixedWidth(80)
+        try:
+            entry.setText(str(var))
+        except Exception:
+            pass
+        def _make_entry_callback(var_name):
+            def _cb(text):
+                try:
+                    setattr(self, var_name, text)
+                except Exception:
+                    pass
+            return _cb
+        # Extract variable name from var reference
+        var_name = None
+        for name in ['webnovel_min_height_var', 'max_images_per_chapter_var', 'image_chunk_height_var', 'image_chunk_overlap_var', 'image_chunk_min_overlap_pixels_var']:
+            if hasattr(self, name) and getattr(self, name) is var:
+                var_name = name
+                break
+        if var_name:
+            entry.textChanged.connect(_make_entry_callback(var_name))
+        settings_grid.addWidget(entry, row, 1, Qt.AlignLeft)
+
+    right_v.addWidget(settings_w)
+    floor_desc = QLabel("Overlap uses the larger of the percentage value or this floor. Minimum saved value is 80px.")
+    floor_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    floor_desc.setContentsMargins(0, 0, 0, 8)
+    right_v.addWidget(floor_desc)
+    right_v.addSpacing(15)
+
+    # Legacy direct-image translation path; Vision OCR-first ignores this toggle.
+    single_api_cb = self._create_styled_checkbox("Direct image legacy mode: send tall chunks in one multimodal request (NOT RECOMMENDED)")
+    try:
+        single_api_cb.setChecked(bool(self.single_api_image_chunks_var))
+    except Exception:
+        pass
+    def _on_single_api_toggle(checked):
+        try:
+            self.single_api_image_chunks_var = bool(checked)
+        except Exception:
+            pass
+    single_api_cb.toggled.connect(_on_single_api_toggle)
+    right_v.addWidget(single_api_cb)
+    
+    single_api_desc = QLabel("Ignored in Vision OCR mode. Vision OCR always OCRs chunks first, then translates the combined OCR text once.")
+    single_api_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    single_api_desc.setContentsMargins(20, 0, 0, 10)
+    right_v.addWidget(single_api_desc)
+
+    smart_chunk_cb = self._create_styled_checkbox("Smart line-boundary chunking")
+    try:
+        smart_chunk_cb.setChecked(bool(self.image_smart_chunking_var))
+    except Exception:
+        pass
+    def _on_smart_chunk_toggle(checked):
+        try:
+            self.image_smart_chunking_var = bool(checked)
+        except Exception:
+            pass
+    smart_chunk_cb.toggled.connect(_on_smart_chunk_toggle)
+    right_v.addWidget(smart_chunk_cb)
+
+    smart_chunk_desc = QLabel("Try to cut tall images on horizontal whitespace gaps; falls back to overlap chunking when no good cuts are found.")
+    smart_chunk_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    smart_chunk_desc.setContentsMargins(20, 0, 0, 10)
+    right_v.addWidget(smart_chunk_desc)
+
+    fuzzy_dedupe_cb = self._create_styled_checkbox("Fuzzy OCR chunk dedupe")
+    try:
+        fuzzy_dedupe_cb.setChecked(bool(self.vision_ocr_fuzzy_chunk_dedupe_var))
+    except Exception:
+        pass
+    def _on_fuzzy_dedupe_toggle(checked):
+        try:
+            self.vision_ocr_fuzzy_chunk_dedupe_var = bool(checked)
+        except Exception:
+            pass
+    fuzzy_dedupe_cb.toggled.connect(_on_fuzzy_dedupe_toggle)
+    right_v.addWidget(fuzzy_dedupe_cb)
+
+    fuzzy_dedupe_desc = QLabel("Test fuzzy removal of near-duplicate OCR lines created by tall-image chunk overlap.")
+    fuzzy_dedupe_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    fuzzy_dedupe_desc.setContentsMargins(20, 0, 0, 10)
+    right_v.addWidget(fuzzy_dedupe_desc)
+    
+    models_info = QLabel("💡 Supported models:\n• Gemini 1.5 Pro/Flash, 2.0 Flash\n• GPT-4V, GPT-4o, o4-mini")
+    models_info.setStyleSheet("color: #666; font-size: 10pt;")
+    models_info.setContentsMargins(0, 10, 0, 0)
+    right_v.addWidget(models_info)
+    
+    # Configuration buttons section
+    right_v.addSpacing(20)
+    
+    config_title = QLabel("Advanced Configuration:")
+    config_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    right_v.addWidget(config_title)
+    
+    # Image chunk prompt button
+    btn_image_chunk = QPushButton("⚙️ Configure Image Chunk Prompt")
+    btn_image_chunk.setFixedWidth(250)
+    btn_image_chunk.clicked.connect(lambda: self.configure_image_chunk_prompt())
+    right_v.addWidget(btn_image_chunk)
+    
+    btn_image_chunk_desc = QLabel("Configure context for tall image chunks")
+    btn_image_chunk_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    btn_image_chunk_desc.setContentsMargins(0, 0, 0, 5)
+    right_v.addWidget(btn_image_chunk_desc)
+
+    # ── GTool Image Scan Filter Prompt ──
+    btn_gtool_scan = QPushButton("🎮 Configure GTool Scan Prompt")
+    btn_gtool_scan.setFixedWidth(250)
+    btn_gtool_scan.clicked.connect(lambda: _open_gtool_scan_dialog(self))
+    right_v.addWidget(btn_gtool_scan)
+
+    btn_gtool_scan_desc = QLabel("Configure the vision AI prompt for game image text detection")
+    btn_gtool_scan_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    btn_gtool_scan_desc.setContentsMargins(0, 0, 0, 5)
+    right_v.addWidget(btn_gtool_scan_desc)
+    
+    # Image compression button
+    btn_compression = QPushButton("🗜️ Configure Image Compression")
+    btn_compression.setFixedWidth(250)
+    btn_compression.clicked.connect(lambda: self.configure_image_compression())
+    right_v.addWidget(btn_compression)
+    
+    btn_compression_desc = QLabel("Optimize images for API token efficiency")
+    btn_compression_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    btn_compression_desc.setContentsMargins(0, 0, 0, 5)
+    right_v.addWidget(btn_compression_desc)
+    
+    right_v.addStretch()
+    section_h.addWidget(right_column)
+    
+    # Add the columns container to the content container
+    content_layout.addWidget(columns_container)
+    
+    # Add the content container (everything below main checkbox) to main section
+    section_v.addWidget(content_container)
+    
+    # Dependency logic for watermark options
+    def _toggle_watermark_options():
+        try:
+            enabled = bool(self.enable_watermark_removal_var)
+            self.save_cleaned_checkbox.setEnabled(enabled)
+            self.advanced_watermark_checkbox.setEnabled(enabled)
+            if not enabled:
+                self.save_cleaned_images_var = False
+                self.advanced_watermark_removal_var = False
+        except Exception:
+            pass
+    
+    # Call once to set initial state
+    _toggle_watermark_options()
+    
+    # Initialize image translation section visibility
+    self.toggle_image_translation_section()
+    
+    # Place the section at row 2, spanning both columns
+    try:
+        grid = parent.layout()
+        if grid:
+            grid.addWidget(section_box, 2, 0, 1, 2)
+    except Exception:
+        # Fallback: just stack
+        section_box.setParent(parent)
+    
+def on_extraction_mode_change(self):
+    """Handle extraction mode changes and show/hide Enhanced options"""
+    try:
+        # Qt version: use setVisible instead of pack/pack_forget
+        if self.extraction_mode_var == 'enhanced':
+            if hasattr(self, 'enhanced_options_separator'):
+                self.enhanced_options_separator.setVisible(True)
+            if hasattr(self, 'enhanced_options_frame'):
+                self.enhanced_options_frame.setVisible(True)
+        else:
+            if hasattr(self, 'enhanced_options_separator'):
+                self.enhanced_options_separator.setVisible(False)
+            if hasattr(self, 'enhanced_options_frame'):
+                self.enhanced_options_frame.setVisible(False)
+            # Show BS toggle when not enhanced
+            if hasattr(self, '_bs_empty_attr_cb'):
+                _bs_vis = self.extraction_mode_var != 'enhanced'
+                self._bs_empty_attr_cb.setVisible(_bs_vis)
+            if hasattr(self, '_bs_empty_attr_desc'):
+                self._bs_empty_attr_desc.setVisible(_bs_vis)
+    except Exception:
+        # Fallback for any errors during transition
+        pass
+            
+def _create_anti_duplicate_section(self, parent):
+    """Create comprehensive anti-duplicate parameter controls with tabs (PySide6)"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget, QLineEdit, QTabWidget, QSlider, QPushButton
+    from PySide6.QtCore import Qt
+    
+    section_box = QGroupBox("🎯 Anti-Duplicate Parameters")
+    section_v = QVBoxLayout(section_box)
+    
+    # Description
+    desc_label = QLabel("Configure parameters to reduce duplicate translations across all AI providers.")
+    desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+    desc_label.setWordWrap(True)
+    desc_label.setMaximumWidth(520)
+    desc_label.setContentsMargins(0, 0, 0, 10)
+    section_v.addWidget(desc_label)
+    
+    # Enable/Disable toggle
+    self.enable_anti_duplicate_var = self.config.get('enable_anti_duplicate', False)
+    enable_cb = self._create_styled_checkbox("Enable Anti-Duplicate Parameters")
+    try:
+        enable_cb.setChecked(bool(self.enable_anti_duplicate_var))
+    except Exception:
+        pass
+    def _on_enable_anti_dup_toggle(checked):
+        try:
+            self.enable_anti_duplicate_var = bool(checked)
+            self._toggle_anti_duplicate_controls()
+        except Exception:
+            pass
+    enable_cb.toggled.connect(_on_enable_anti_dup_toggle)
+    enable_cb.setContentsMargins(0, 0, 0, 10)
+    section_v.addWidget(enable_cb)
+    
+    # Create container for all content below the main checkbox
+    content_container = QWidget()
+    content_layout = QVBoxLayout(content_container)
+    content_layout.setContentsMargins(0, 0, 0, 0)
+    content_layout.setSpacing(4)
+    
+    # Store reference for slide animation
+    self.anti_duplicate_content = content_container
+    
+    # Create tab widget for organized parameters
+    self.anti_duplicate_notebook = QTabWidget()
+    
+    # Enhanced tab styling
+    self.anti_duplicate_notebook.setStyleSheet("""
+        QTabWidget::pane {
+            border: 1px solid #555;
+            background-color: #2d2d2d;
+            border-top-left-radius: 0px;
+            border-top-right-radius: 4px;
+            border-bottom-left-radius: 4px;
+            border-bottom-right-radius: 4px;
+        }
+        QTabWidget::tab-bar {
+            left: 5px;
+        }
+        QTabBar::tab {
+            background-color: #404040;
+            color: #cccccc;
+            padding: 8px 16px;
+            margin-right: 2px;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            min-width: 80px;
+            font-weight: 500;
+        }
+        QTabBar::tab:selected {
+            background-color: #2d2d2d;
+            color: #ffffff;
+            border-bottom: 2px solid #0078d4;
+            font-weight: bold;
+        }
+        QTabBar::tab:hover:!selected {
+            background-color: #4a4a4a;
+            color: #ffffff;
+        }
+        QTabBar::tab:first {
+            margin-left: 0;
+        }
+    """)
+    
+    content_layout.addWidget(self.anti_duplicate_notebook)
+    
+    # Tab 1: Core Parameters
+    core_frame = QWidget()
+    core_v = QVBoxLayout(core_frame)
+    core_v.setContentsMargins(10, 10, 10, 10)
+    self.anti_duplicate_notebook.addTab(core_frame, "Core Parameters")
+    
+    # Top-P (Nucleus Sampling)
+    def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False, off_at_zero=False):
+        """Helper to create a slider row with label and value display
+        var_holder: object that holds the variable (typically self)
+        var_name: string name of the attribute to set
+        """
+        row_w = QWidget()
+        row_h = QHBoxLayout(row_w)
+        row_h.setContentsMargins(0, 5, 0, 5)
+        
+        lbl = QLabel(label_text)
+        lbl.setFixedWidth(200)
+        row_h.addWidget(lbl)
+        
+        slider = QSlider(Qt.Horizontal)
+        if is_int:
+            slider.setMinimum(int(min_val))
+            slider.setMaximum(int(max_val))
+            try:
+                current_val = getattr(var_holder, var_name, min_val)
+                slider.setValue(int(current_val))
+            except Exception:
+                pass
+        else:
+            # For double values, use int slider and scale
+            steps = int((max_val - min_val) / (0.01 if decimals == 2 else 0.1))
+            slider.setMinimum(0)
+            slider.setMaximum(steps)
+            try:
+                current = float(getattr(var_holder, var_name, min_val))
+                slider.setValue(int((current - min_val) / (max_val - min_val) * steps))
+            except Exception:
+                pass
+        slider.setFixedWidth(200)
+        # Disable mousewheel scrolling on slider
+        slider.wheelEvent = lambda event: None
+        row_h.addWidget(slider)
+        
+        value_lbl = QLabel("")
+        value_lbl.setFixedWidth(80)
+        row_h.addWidget(value_lbl)
+        row_h.addStretch()
+        
+        def _on_slider_change(value):
+            try:
+                if is_int:
+                    actual_value = value
+                    setattr(var_holder, var_name, actual_value)
+                    if actual_value == 0:
+                        value_lbl.setText("OFF")
+                    else:
+                        value_lbl.setText(f"{actual_value}")
+                else:
+                    actual_value = min_val + (value / slider.maximum()) * (max_val - min_val)
+                    setattr(var_holder, var_name, actual_value)
+                    if off_at_zero and actual_value <= 0:
+                        value_lbl.setText("OFF")
+                    elif decimals == 1:
+                        value_lbl.setText(f"{actual_value:.1f}" if actual_value > 0 else "OFF")
+                    else:
+                        value_lbl.setText(f"{actual_value:.2f}")
+            except Exception:
+                pass
+        
+        slider.valueChanged.connect(_on_slider_change)
+        # Trigger initial update
+        _on_slider_change(slider.value())
+        
+        parent_layout.addWidget(row_w)
+        return slider, value_lbl
+    
+    self.top_p_var = self.config.get('top_p', 1.0)
+    top_p_slider, self.top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'top_p_var', 0.1, 1.0, decimals=2)
+    
+    # Min-P (Relative Probability Cutoff)
+    self.min_p_var = self.config.get('min_p', 0.0)
+    min_p_slider, self.min_p_value_label = _create_slider_row(core_v, "Min-P (Relative Cutoff):", self, 'min_p_var', 0.0, 1.0, decimals=2, off_at_zero=True)
+
+    # Min-P allowlist bypass
+    self.bypass_min_p_allowlist_var = self.config.get('bypass_min_p_allowlist', False)
+    bypass_min_p_cb = self._create_styled_checkbox("Bypass Min-P Provider Allowlist")
+    try:
+        bypass_min_p_cb.setChecked(bool(self.bypass_min_p_allowlist_var))
+        bypass_min_p_cb.setToolTip(
+            "Default Min-P allowlist:\n"
+            "local/vLLM OpenAI-compatible endpoints\n"
+            "OpenRouter, Fireworks, Chutes, NanoGPT\n"
+            "NVIDIA, SambaNova, Opencode, custom OpenAI endpoints"
+        )
+    except Exception:
+        pass
+    def _on_bypass_min_p_toggle(checked):
+        try:
+            self.bypass_min_p_allowlist_var = bool(checked)
+        except Exception:
+            pass
+    bypass_min_p_cb.toggled.connect(_on_bypass_min_p_toggle)
+    core_v.addWidget(bypass_min_p_cb)
+
+    bypass_min_p_desc = QLabel("Force-sends Min-P outside the default compatibility allowlist.")
+    bypass_min_p_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    bypass_min_p_desc.setWordWrap(True)
+    bypass_min_p_desc.setContentsMargins(20, 0, 0, 8)
+    core_v.addWidget(bypass_min_p_desc)
+
+    # Top-K (Vocabulary Limit)
+    self.top_k_var = self.config.get('top_k', 0)
+    top_k_slider, self.top_k_value_label = _create_slider_row(core_v, "Top-K (Vocabulary Limit):", self, 'top_k_var', 0, 100, is_int=True)
+    
+    # Frequency Penalty
+    self.frequency_penalty_var = self.config.get('frequency_penalty', 0.0)
+    freq_slider, self.freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'frequency_penalty_var', 0.0, 2.0, decimals=2)
+    
+    # Presence Penalty
+    self.presence_penalty_var = self.config.get('presence_penalty', 0.0)
+    pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'presence_penalty_var', 0.0, 2.0, decimals=2)
+    
+    core_v.addStretch()
+    
+    # Tab 2: Advanced Parameters
+    advanced_frame = QWidget()
+    advanced_v = QVBoxLayout(advanced_frame)
+    advanced_v.setContentsMargins(10, 10, 10, 10)
+    self.anti_duplicate_notebook.addTab(advanced_frame, "Advanced")
+    
+    # Repetition Penalty
+    self.repetition_penalty_var = self.config.get('repetition_penalty', 1.0)
+    rep_slider, self.rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self, 'repetition_penalty_var', 1.0, 2.0, decimals=2)
+    
+    # Candidate Count (Gemini)
+    self.candidate_count_var = self.config.get('candidate_count', 1)
+    candidate_slider, self.candidate_value_label = _create_slider_row(advanced_v, "Candidate Count (Gemini):", self, 'candidate_count_var', 1, 4, is_int=True)
+    
+    advanced_v.addStretch()
+    
+    # Tab 3: Stop Sequences
+    stop_frame = QWidget()
+    stop_v = QVBoxLayout(stop_frame)
+    stop_v.setContentsMargins(10, 10, 10, 10)
+    self.anti_duplicate_notebook.addTab(stop_frame, "Stop Sequences")
+    
+    # Custom Stop Sequences
+    stop_row = QWidget()
+    stop_h = QHBoxLayout(stop_row)
+    stop_h.setContentsMargins(0, 5, 0, 5)
+    stop_h.addWidget(QLabel("Custom Stop Sequences:"))
+    
+    self.custom_stop_sequences_var = self.config.get('custom_stop_sequences', '')
+    stop_entry = QLineEdit()
+    stop_entry.setFixedWidth(300)
+    try:
+        stop_entry.setText(str(self.custom_stop_sequences_var))
+    except Exception:
+        pass
+    def _on_stop_seq_changed(text):
+        try:
+            self.custom_stop_sequences_var = text
+        except Exception:
+            pass
+    stop_entry.textChanged.connect(_on_stop_seq_changed)
+    stop_h.addWidget(stop_entry)
+    
+    stop_tip = QLabel("(comma-separated)")
+    stop_tip.setStyleSheet("color: gray; font-size: 8pt;")
+    stop_h.addWidget(stop_tip)
+    stop_h.addStretch()
+    stop_v.addWidget(stop_row)
+    stop_v.addStretch()
+    
+    # Tab 4: Logit Bias (OpenAI)
+    bias_frame = QWidget()
+    bias_v = QVBoxLayout(bias_frame)
+    bias_v.setContentsMargins(10, 10, 10, 10)
+    self.anti_duplicate_notebook.addTab(bias_frame, "Logit Bias")
+    
+    # Logit Bias Enable
+    self.logit_bias_enabled_var = self.config.get('logit_bias_enabled', False)
+    bias_cb = self._create_styled_checkbox("Enable Logit Bias (OpenAI only)")
+    try:
+        bias_cb.setChecked(bool(self.logit_bias_enabled_var))
+    except Exception:
+        pass
+    def _on_bias_enable_toggle(checked):
+        try:
+            self.logit_bias_enabled_var = bool(checked)
+        except Exception:
+            pass
+    bias_cb.toggled.connect(_on_bias_enable_toggle)
+    bias_cb.setContentsMargins(0, 0, 0, 5)
+    bias_v.addWidget(bias_cb)
+    
+    # Logit Bias Strength
+    self.logit_bias_strength_var = self.config.get('logit_bias_strength', -0.5)
+    bias_slider, self.bias_strength_value_label = _create_slider_row(bias_v, "Bias Strength:", self, 'logit_bias_strength_var', -2.0, 2.0, decimals=1)
+    
+    # Preset bias targets
+    preset_title = QLabel("Preset Bias Targets:")
+    preset_title.setStyleSheet("font-weight: bold; font-size: 9pt;")
+    preset_title.setContentsMargins(0, 10, 0, 5)
+    bias_v.addWidget(preset_title)
+    
+    self.bias_common_words_var = self.config.get('bias_common_words', False)
+    common_cb = self._create_styled_checkbox("Bias against common words (the, and, said)")
+    try:
+        common_cb.setChecked(bool(self.bias_common_words_var))
+    except Exception:
+        pass
+    def _on_common_toggle(checked):
+        try:
+            self.bias_common_words_var = bool(checked)
+        except Exception:
+            pass
+    common_cb.toggled.connect(_on_common_toggle)
+    bias_v.addWidget(common_cb)
+    
+    self.bias_repetitive_phrases_var = self.config.get('bias_repetitive_phrases', False)
+    phrases_cb = self._create_styled_checkbox("Bias against repetitive phrases")
+    try:
+        phrases_cb.setChecked(bool(self.bias_repetitive_phrases_var))
+    except Exception:
+        pass
+    def _on_phrases_toggle(checked):
+        try:
+            self.bias_repetitive_phrases_var = bool(checked)
+        except Exception:
+            pass
+    phrases_cb.toggled.connect(_on_phrases_toggle)
+    bias_v.addWidget(phrases_cb)
+    bias_v.addStretch()
+    
+    # Provider compatibility info
+    compat_title = QLabel("Parameter Compatibility:")
+    compat_title.setStyleSheet("font-weight: bold; font-size: 9pt;")
+    compat_title.setContentsMargins(0, 15, 0, 0)
+    content_layout.addWidget(compat_title)
+    
+    compat_text = QLabel("• Core: Most providers • Advanced: DeepSeek, Mistral, Groq • Logit Bias: OpenAI only")
+    compat_text.setStyleSheet("color: gray; font-size: 8pt;")
+    compat_text.setContentsMargins(0, 5, 0, 0)
+    content_layout.addWidget(compat_text)
+    
+    # Reset button
+    reset_row = QWidget()
+    reset_h = QHBoxLayout(reset_row)
+    reset_h.setContentsMargins(0, 10, 0, 0)
+    
+    reset_btn = QPushButton("🔄 Reset to Defaults")
+    reset_btn.setFixedWidth(180)
+    reset_btn.clicked.connect(lambda: self._reset_anti_duplicate_defaults())
+    reset_h.addWidget(reset_btn)
+    
+    reset_desc = QLabel("Reset all anti-duplicate parameters to default values")
+    reset_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    reset_h.addWidget(reset_desc)
+    reset_h.addStretch()
+    content_layout.addWidget(reset_row)
+    
+    # Add content container to main section
+    section_v.addWidget(content_container)
+    
+    # Store all tab frames for enable/disable
+    self.anti_duplicate_tabs = [core_frame, advanced_frame, stop_frame, bias_frame]
+    
+    # Place the section at row 6, spanning both columns
+    try:
+        grid = parent.layout()
+        if grid:
+            grid.addWidget(section_box, 6, 0, 1, 2)
+    except Exception:
+        # Fallback: just stack
+        section_box.setParent(parent)
+    
+    # Initialize anti-duplicate section visibility
+    self.toggle_anti_duplicate_section()
+
+def toggle_anti_duplicate_section(self):
+    """Toggle visibility of anti-duplicate content with smooth fade"""
+    try:
+        if not hasattr(self, 'anti_duplicate_content'):
+            return
+            
+        enabled = bool(self.enable_anti_duplicate_var)
+        
+        # Import animation components
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        
+        # Stop any existing animation
+        if hasattr(self, '_anti_duplicate_animation') and self._anti_duplicate_animation:
+            self._anti_duplicate_animation.stop()
+        
+        # Ensure widget is visible for animation
+        self.anti_duplicate_content.setVisible(True)
+        
+        # Create or get opacity effect
+        if not hasattr(self.anti_duplicate_content, '_opacity_effect'):
+            effect = QGraphicsOpacityEffect()
+            self.anti_duplicate_content.setGraphicsEffect(effect)
+            self.anti_duplicate_content._opacity_effect = effect
+        else:
+            effect = self.anti_duplicate_content._opacity_effect
+        
+        # Create opacity animation
+        animation = QPropertyAnimation(effect, b"opacity")
+        animation.setDuration(150)  # Faster for no glitch
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        if enabled:
+            # Fade in
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+        else:
+            # Fade out
+            animation.setStartValue(1.0)
+            animation.setEndValue(0.0)
+            # Hide after fade out
+            animation.finished.connect(
+                lambda: self.anti_duplicate_content.setVisible(False) if not enabled else None
+            )
+        
+        self._anti_duplicate_animation = animation
+        animation.start()
+        
+    except Exception:
+        # Fallback to simple show/hide if animation fails
+        try:
+            if hasattr(self, 'anti_duplicate_content'):
+                enabled = bool(self.enable_anti_duplicate_var)
+                self.anti_duplicate_content.setVisible(enabled)
+        except Exception:
+            pass
+
+def _toggle_anti_duplicate_controls(self):
+    """Enable/disable anti-duplicate parameter controls (Qt version)"""
+    # Call the slide animation function
+    self.toggle_anti_duplicate_section()
+
+def _toggle_http_tuning_controls(self):
+    """Enable/disable the HTTP timeout/pooling controls as a group with proper styling (Qt version)"""
+    try:
+        enabled = bool(self.enable_http_tuning_var) if hasattr(self, 'enable_http_tuning_var') else False
+    except Exception:
+        enabled = False
+    
+    # Entry fields
+    for attr in ['connect_timeout_entry', 'read_timeout_entry', 'http_pool_connections_entry', 'http_pool_maxsize_entry']:
+        widget = getattr(self, attr, None)
+        if widget is not None:
+            try:
+                widget.setEnabled(enabled)
+            except Exception:
+                pass
+    
+    # Labels with proper disabled styling
+    label_attrs = [
+        'connect_timeout_label', 'read_timeout_label', 
+        'http_pool_connections_label', 'http_pool_maxsize_label'
+    ]
+    
+    for attr in label_attrs:
+        widget = getattr(self, attr, None)
+        if widget is not None:
+            try:
+                widget.setEnabled(enabled)
+                # Apply proper disabled state styling
+                color = "white" if enabled else "#808080"
+                widget.setStyleSheet(f"color: {color};")
+            except Exception:
+                pass
+    
+    # Retry-After checkbox
+    if hasattr(self, 'ignore_retry_after_checkbox') and self.ignore_retry_after_checkbox is not None:
+        try:
+            self.ignore_retry_after_checkbox.setEnabled(enabled)
+        except Exception:
+            pass
+                            
+def _reset_anti_duplicate_defaults(self):
+    """Reset all anti-duplicate parameters to their default values (Qt version)"""
+    from PySide6.QtWidgets import QMessageBox
+    
+    # Ask for confirmation
+    reply = QMessageBox.question(
+        None,
+        "Reset Anti-Duplicate Parameters",
+        "Are you sure you want to reset all anti-duplicate parameters to their default values?",
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.No
+    )
+    if reply != QMessageBox.Yes:
+        return
+    
+    # Reset all variables to defaults
+    if hasattr(self, 'enable_anti_duplicate_var'):
+        self.enable_anti_duplicate_var = False
+    
+    if hasattr(self, 'top_p_var'):
+        self.top_p_var = 1.0  # Default = no effect
+    
+    if hasattr(self, 'min_p_var'):
+        self.min_p_var = 0.0  # Default = disabled
+
+    if hasattr(self, 'bypass_min_p_allowlist_var'):
+        self.bypass_min_p_allowlist_var = False  # Default = use safe allowlist
+
+    if hasattr(self, 'top_k_var'):
+        self.top_k_var = 0  # Default = disabled
+    
+    if hasattr(self, 'frequency_penalty_var'):
+        self.frequency_penalty_var = 0.0  # Default = no penalty
+    
+    if hasattr(self, 'presence_penalty_var'):
+        self.presence_penalty_var = 0.0  # Default = no penalty
+    
+    if hasattr(self, 'repetition_penalty_var'):
+        self.repetition_penalty_var = 1.0  # Default = no penalty
+    
+    if hasattr(self, 'candidate_count_var'):
+        self.candidate_count_var = 1  # Default = single response
+    
+    if hasattr(self, 'custom_stop_sequences_var'):
+        self.custom_stop_sequences_var = ""  # Default = empty
+    
+    if hasattr(self, 'logit_bias_enabled_var'):
+        self.logit_bias_enabled_var = False  # Default = disabled
+    
+    if hasattr(self, 'logit_bias_strength_var'):
+        self.logit_bias_strength_var = -0.5  # Default strength
+    
+    if hasattr(self, 'bias_common_words_var'):
+        self.bias_common_words_var = False  # Default = disabled
+    
+    if hasattr(self, 'bias_repetitive_phrases_var'):
+        self.bias_repetitive_phrases_var = False  # Default = disabled
+    
+    # Update enable/disable state
+    self._toggle_anti_duplicate_controls()
+    
+    # Show success message
+    from PySide6.QtWidgets import QMessageBox
+    QMessageBox.information(None, "Reset Complete", "All anti-duplicate parameters have been reset to their default values.")
+    
+    # Log the reset
+    if hasattr(self, 'append_log'):
+        self.append_log("🔄 Anti-duplicate parameters reset to defaults")
+
+def _create_custom_api_endpoints_section(self, parent_frame):
+    """Create the Custom API Endpoints section (PySide6)"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget, QLineEdit, QPushButton, QComboBox
+    from PySide6.QtCore import Qt
+    
+    section_box = QGroupBox("Custom API Endpoints")
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
+
+    # AuthZA can either use the ZCode login-plan JWT or provision/reuse a
+    # project API key and call Z.AI's supported general-purpose endpoint.
+    authza_mode_box = QGroupBox("AuthZA / GLM Access Mode")
+    authza_mode_v = QVBoxLayout(authza_mode_box)
+    authza_mode_v.setContentsMargins(8, 8, 8, 8)
+    authza_mode_v.setSpacing(4)
+
+    self.authza_use_general_api_var = bool(
+        self.config.get('authza_use_general_api', False)
+    )
+    authza_general_cb = self._create_styled_checkbox(
+        "Use auto-provisioned API key with Z.AI General API"
+    )
+    self.authza_general_api_checkbox = authza_general_cb
+    authza_general_cb.setChecked(self.authza_use_general_api_var)
+    authza_general_cb.setToolTip(_wrapped_tooltip_html(
+        "OFF uses the ZCode login-plan JWT and subscription quota. ON uses browser login "
+        "to provision or reuse a project API key, then sends authza/ requests to "
+        "https://api.z.ai/api/paas/v4. General API requests consume promotional credits, "
+        "resource packages, or prepaid balance and may incur charges. Each mode keeps a "
+        "separate encrypted credential file."
+    ))
+    authza_mode_v.addWidget(authza_general_cb)
+
+    authza_mode_help = QLabel()
+    authza_mode_help.setWordWrap(True)
+    authza_mode_help.setStyleSheet("color: #b8b8b8; font-size: 8pt;")
+    authza_mode_v.addWidget(authza_mode_help)
+
+    def _refresh_authza_mode_help(enabled):
+        if enabled:
+            authza_mode_help.setText(
+                "General API enabled: authza/ uses https://api.z.ai/api/paas/v4 with the "
+                "project key created/reused during Z.AI Login. This is pay-as-you-go access."
+            )
+            authza_mode_help.setStyleSheet("color: #ffc107; font-size: 8pt;")
+        else:
+            authza_mode_help.setText(
+                "Login-plan enabled: authza/ uses the account-authorized ZCode plan route."
+            )
+            authza_mode_help.setStyleSheet("color: #b8b8b8; font-size: 8pt;")
+
+    def _on_authza_general_api_toggled(checked):
+        enabled = bool(checked)
+        self.authza_use_general_api_var = enabled
+        self.config['authza_use_general_api'] = enabled
+        try:
+            from glm_proxy import set_general_api_mode
+            set_general_api_mode(enabled)
+        except Exception as exc:
+            os.environ['AUTHZA_USE_GENERAL_API'] = '1' if enabled else '0'
+            if hasattr(self, 'append_log'):
+                self.append_log(f"⚠️ AuthZA mode switch could not stop the old proxy: {exc}")
+        _refresh_authza_mode_help(enabled)
+        try:
+            self._update_authza_login_status()
+        except Exception:
+            pass
+        if hasattr(self, 'append_log'):
+            mode = "General API (API key / billable balance)" if enabled else "ZCode login plan"
+            self.append_log(f"🔄 AuthZA access mode: {mode}")
+        # The AuthZA catalog cache is mode-aware. Scheduling the selected
+        # provider now makes a mode switch fetch the matching endpoint instead
+        # of reusing a fresh catalog from the other access mode.
+        try:
+            self._schedule_current_provider_catalog_refresh(0)
+        except Exception:
+            pass
+
+    authza_general_cb.toggled.connect(_on_authza_general_api_toggled)
+    _refresh_authza_mode_help(self.authza_use_general_api_var)
+    section_v.addWidget(authza_mode_box)
+    
+    # Checkbox to enable/disable custom endpoint
+    enable_cb = self._create_styled_checkbox("Enable Custom OpenAI Endpoint")
+    try:
+        enable_cb.setChecked(bool(self.use_custom_openai_endpoint_var))
+    except Exception:
+        pass
+    def _on_enable_custom_endpoint(checked):
+        try:
+            self.use_custom_openai_endpoint_var = bool(checked)
+            self.toggle_custom_endpoint_ui(user_interaction=True)
+        except Exception:
+            pass
+    enable_cb.toggled.connect(_on_enable_custom_endpoint)
+    section_v.addWidget(enable_cb)
+    
+    # Main OpenAI Base URL
+    openai_row = QWidget()
+    openai_h = QHBoxLayout(openai_row)
+    openai_h.setContentsMargins(0, 5, 0, 5)
+    openai_h.addWidget(QLabel("Override API Endpoint:"))
+    
+    self.openai_base_url_var = self.config.get('openai_base_url', '')
+    self.openai_base_url_entry = QLineEdit()
+    try:
+        self.openai_base_url_entry.setText(str(self.openai_base_url_var))
+    except Exception:
+        pass
+    def _on_openai_url_changed(text):
+        try:
+            self.openai_base_url_var = text
+            if str(text).rstrip('/').endswith('/audio/speech'):
+                self.openai_tts_endpoint_var = text
+            self._check_azure_endpoint()
+        except Exception:
+            pass
+    self.openai_base_url_entry.textChanged.connect(_on_openai_url_changed)
+    openai_h.addWidget(self.openai_base_url_entry)
+    
+    self.openai_clear_button = QPushButton("Clear")
+    self.openai_clear_button.setFixedWidth(80)
+    def _clear_openai_url():
+        self.openai_base_url_var = ""
+        self.openai_tts_endpoint_var = ""
+        self.openai_base_url_entry.setText("")
+    self.openai_clear_button.clicked.connect(_clear_openai_url)
+    openai_h.addWidget(self.openai_clear_button)
+    section_v.addWidget(openai_row)
+
+    self.use_custom_image_edit_endpoint_var = self.config.get(
+        'use_custom_image_edit_endpoint',
+        False
+    )
+    image_edit_enable_cb = self._create_styled_checkbox("Enable Custom Image Edit Endpoint")
+    self.use_custom_image_edit_endpoint_checkbox = image_edit_enable_cb
+    try:
+        image_edit_enable_cb.setChecked(bool(self.use_custom_image_edit_endpoint_var))
+    except Exception:
+        pass
+    image_edit_enable_cb.setToolTip(
+        "Use the URL below as an override for image/video output and manga custom-image-edit inpainting. "
+        "Leave the URL blank to use the normal image endpoint/model already configured in the main GUI."
+    )
+    def _on_enable_custom_image_edit_endpoint(checked):
+        try:
+            self.use_custom_image_edit_endpoint_var = bool(checked)
+            self.config['use_custom_image_edit_endpoint'] = bool(checked)
+            url = str(getattr(self, 'custom_image_edit_endpoint_var', '') or '').strip()
+            os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if checked else '0'
+            os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = url if checked else ''
+            os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = url if checked else ''
+            mt = getattr(self, 'manga_translator', None)
+            if mt and hasattr(mt, '_sync_custom_image_edit_controls'):
+                mt._sync_custom_image_edit_controls(url=url, enabled=bool(checked), source='other')
+        except Exception:
+            pass
+    image_edit_enable_cb.toggled.connect(_on_enable_custom_image_edit_endpoint)
+    section_v.addWidget(image_edit_enable_cb)
+
+    image_edit_row = QWidget()
+    image_edit_h = QHBoxLayout(image_edit_row)
+    image_edit_h.setContentsMargins(0, 0, 0, 5)
+    image_edit_label = QLabel("Custom Image Edit Endpoint:")
+    image_edit_label.setToolTip(
+        "Optional OpenAI-compatible endpoint used only for image/video output requests and the manga custom-image-edit inpainter. "
+        "Blank means use the default image endpoint/model from the main GUI."
+    )
+    image_edit_h.addWidget(image_edit_label)
+
+    self.custom_image_edit_endpoint_var = self.config.get('custom_image_edit_endpoint', '')
+    self.custom_image_edit_endpoint_entry = QLineEdit()
+    self.custom_image_edit_endpoint_entry.setPlaceholderText("blank = default image endpoint; optional override like http://localhost:8888/v1")
+    self.custom_image_edit_endpoint_entry.setToolTip(
+        "Optional override for a local OpenAI-compatible image edit server, such as a GGUF image-edit runtime. "
+        "Blank uses the default image endpoint/model from the main GUI."
+    )
+    try:
+        self.custom_image_edit_endpoint_entry.setText(str(self.custom_image_edit_endpoint_var))
+    except Exception:
+        pass
+    def _on_custom_image_edit_url_changed(text):
+        try:
+            self.custom_image_edit_endpoint_var = text
+            self.config['custom_image_edit_endpoint'] = text
+            enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_var', False))
+            os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if enabled else '0'
+            os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = str(text or '').strip() if enabled else ''
+            os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = str(text or '').strip() if enabled else ''
+            mt = getattr(self, 'manga_translator', None)
+            if mt and hasattr(mt, '_sync_custom_image_edit_controls'):
+                mt._sync_custom_image_edit_controls(url=text, enabled=enabled, source='other')
+        except Exception:
+            pass
+    self.custom_image_edit_endpoint_entry.textChanged.connect(_on_custom_image_edit_url_changed)
+    image_edit_h.addWidget(self.custom_image_edit_endpoint_entry)
+
+    self.custom_image_edit_clear_button = QPushButton("Clear")
+    self.custom_image_edit_clear_button.setFixedWidth(80)
+    def _clear_custom_image_edit_url():
+        self.custom_image_edit_endpoint_var = ""
+        self.config['custom_image_edit_endpoint'] = ""
+        self.custom_image_edit_endpoint_entry.setText("")
+        os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = ''
+        os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = ''
+        mt = getattr(self, 'manga_translator', None)
+        if mt and hasattr(mt, '_sync_custom_image_edit_controls'):
+            mt._sync_custom_image_edit_controls(url="", enabled=getattr(self, 'use_custom_image_edit_endpoint_var', False), source='other')
+    self.custom_image_edit_clear_button.clicked.connect(_clear_custom_image_edit_url)
+    image_edit_h.addWidget(self.custom_image_edit_clear_button)
+    section_v.addWidget(image_edit_row)
+
+    tts_voice_row = QWidget()
+    tts_voice_h = QHBoxLayout(tts_voice_row)
+    tts_voice_h.setContentsMargins(0, 0, 0, 5)
+    tts_voice_h.addWidget(QLabel("TTS Voice/File:"))
+    if not hasattr(self, 'tts_voice_var'):
+        self.tts_voice_var = self.config.get('tts_voice', '')
+    self.tts_voice_entry = QLineEdit()
+    self.tts_voice_entry.setPlaceholderText("Optional. For local TTS, use a voice file/name required by the server.")
+    try:
+        self.tts_voice_entry.setText(str(self.tts_voice_var or ''))
+    except Exception:
+        pass
+    def _on_tts_voice_changed(text):
+        try:
+            self.tts_voice_var = text
+            self.config['tts_voice'] = text
+            os.environ['TTS_VOICE'] = text
+        except Exception:
+            pass
+    self.tts_voice_entry.textChanged.connect(_on_tts_voice_changed)
+    tts_voice_h.addWidget(self.tts_voice_entry)
+    section_v.addWidget(tts_voice_row)
+    
+    # Help text with shortcut URLs for Ollama and LM Studio
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtCore import QTimer
+    _ollama_url = "http://localhost:11434/v1"
+    _lmstudio_url = "http://localhost:1234/v1"
+    _tts_url = "http://localhost:8000/audio/speech"
+    _tts_v1_url = "http://localhost:8000/v1/audio/speech"
+
+    help_row = QWidget()
+    help_h = QHBoxLayout(help_row)
+    help_h.setContentsMargins(0, 0, 0, 10)
+    help_h.setSpacing(0)
+
+    help_prefix = QLabel("Enable checkbox to use custom endpoint. ")
+    help_prefix.setStyleSheet("color: gray; font-size: 8pt;")
+    help_h.addWidget(help_prefix)
+
+    # Ollama shortcut label
+    ollama_lbl = QLabel(f"Ollama: <a href='#'>{_ollama_url}</a>")
+    ollama_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    ollama_lbl.setTextFormat(Qt.RichText)
+    ollama_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    ollama_lbl.setOpenExternalLinks(False)
+    ollama_lbl.setToolTip("Double-click to paste Ollama URL into the endpoint field")
+    _ollama_orig_style = ollama_lbl.styleSheet()
+    _ollama_orig_text = ollama_lbl.text()
+    def _dbl_click_ollama(event):
+        self.openai_base_url_entry.setText(_ollama_url)
+        self.openai_base_url_var = _ollama_url
+        self.openai_tts_endpoint_var = ""
+        try:
+            QGuiApplication.clipboard().setText(_ollama_url)
+        except Exception:
+            pass
+        try:
+            ollama_lbl.setStyleSheet(_ollama_orig_style + " color: #00d084;")
+            ollama_lbl.setTextFormat(Qt.PlainText)
+            ollama_lbl.setText(f"✓ Pasted: {_ollama_url}")
+            QTimer.singleShot(900, lambda: (
+                ollama_lbl.setStyleSheet(_ollama_orig_style),
+                ollama_lbl.setTextFormat(Qt.RichText),
+                ollama_lbl.setText(_ollama_orig_text),
+            ))
+        except Exception:
+            pass
+    ollama_lbl.mouseDoubleClickEvent = _dbl_click_ollama
+    help_h.addWidget(ollama_lbl)
+
+    sep_lbl = QLabel("  |  ")
+    sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    help_h.addWidget(sep_lbl)
+
+    # LM Studio shortcut label
+    lmstudio_lbl = QLabel(f"LM Studio: <a href='#'>{_lmstudio_url}</a>")
+    lmstudio_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    lmstudio_lbl.setTextFormat(Qt.RichText)
+    lmstudio_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    lmstudio_lbl.setOpenExternalLinks(False)
+    lmstudio_lbl.setToolTip("Double-click to paste LM Studio URL into the endpoint field")
+    _lms_orig_style = lmstudio_lbl.styleSheet()
+    _lms_orig_text = lmstudio_lbl.text()
+    def _dbl_click_lmstudio(event):
+        self.openai_base_url_entry.setText(_lmstudio_url)
+        self.openai_base_url_var = _lmstudio_url
+        self.openai_tts_endpoint_var = ""
+        try:
+            QGuiApplication.clipboard().setText(_lmstudio_url)
+        except Exception:
+            pass
+        try:
+            lmstudio_lbl.setStyleSheet(_lms_orig_style + " color: #00d084;")
+            lmstudio_lbl.setTextFormat(Qt.PlainText)
+            lmstudio_lbl.setText(f"✓ Pasted: {_lmstudio_url}")
+            QTimer.singleShot(900, lambda: (
+                lmstudio_lbl.setStyleSheet(_lms_orig_style),
+                lmstudio_lbl.setTextFormat(Qt.RichText),
+                lmstudio_lbl.setText(_lms_orig_text),
+            ))
+        except Exception:
+            pass
+    lmstudio_lbl.mouseDoubleClickEvent = _dbl_click_lmstudio
+    help_h.addWidget(lmstudio_lbl)
+
+    sep2_lbl = QLabel("  |  ")
+    sep2_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    help_h.addWidget(sep2_lbl)
+
+    tts_lbl = QLabel(f"TTS: <a href='#'>{_tts_url}</a>")
+    tts_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    tts_lbl.setTextFormat(Qt.RichText)
+    tts_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    tts_lbl.setOpenExternalLinks(False)
+    tts_lbl.setToolTip("Double-click to paste the common local FastAPI TTS endpoint")
+    _tts_orig_style = tts_lbl.styleSheet()
+    _tts_orig_text = tts_lbl.text()
+    def _dbl_click_tts(event):
+        self.openai_base_url_entry.setText(_tts_url)
+        self.openai_base_url_var = _tts_url
+        self.openai_tts_endpoint_var = _tts_url
+        try:
+            QGuiApplication.clipboard().setText(_tts_url)
+        except Exception:
+            pass
+        try:
+            tts_lbl.setStyleSheet(_tts_orig_style + " color: #00d084;")
+            tts_lbl.setTextFormat(Qt.PlainText)
+            tts_lbl.setText(f"✓ Pasted: {_tts_url}")
+            QTimer.singleShot(900, lambda: (
+                tts_lbl.setStyleSheet(_tts_orig_style),
+                tts_lbl.setTextFormat(Qt.RichText),
+                tts_lbl.setText(_tts_orig_text),
+            ))
+        except Exception:
+            pass
+    tts_lbl.mouseDoubleClickEvent = _dbl_click_tts
+    help_h.addWidget(tts_lbl)
+
+    sep3_lbl = QLabel("  |  ")
+    sep3_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    help_h.addWidget(sep3_lbl)
+
+    tts_v1_lbl = QLabel(f"TTS v1: <a href='#'>{_tts_v1_url}</a>")
+    tts_v1_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    tts_v1_lbl.setTextFormat(Qt.RichText)
+    tts_v1_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    tts_v1_lbl.setOpenExternalLinks(False)
+    tts_v1_lbl.setToolTip("Double-click to paste the OpenAI-compatible /v1 TTS endpoint")
+    _tts_v1_orig_style = tts_v1_lbl.styleSheet()
+    _tts_v1_orig_text = tts_v1_lbl.text()
+    def _dbl_click_tts_v1(event):
+        self.openai_base_url_entry.setText(_tts_v1_url)
+        self.openai_base_url_var = _tts_v1_url
+        self.openai_tts_endpoint_var = _tts_v1_url
+        try:
+            QGuiApplication.clipboard().setText(_tts_v1_url)
+        except Exception:
+            pass
+        try:
+            tts_v1_lbl.setStyleSheet(_tts_v1_orig_style + " color: #00d084;")
+            tts_v1_lbl.setTextFormat(Qt.PlainText)
+            tts_v1_lbl.setText(f"✓ Pasted: {_tts_v1_url}")
+            QTimer.singleShot(900, lambda: (
+                tts_v1_lbl.setStyleSheet(_tts_v1_orig_style),
+                tts_v1_lbl.setTextFormat(Qt.RichText),
+                tts_v1_lbl.setText(_tts_v1_orig_text),
+            ))
+        except Exception:
+            pass
+    tts_v1_lbl.mouseDoubleClickEvent = _dbl_click_tts_v1
+    help_h.addWidget(tts_v1_lbl)
+
+    help_h.addStretch()
+    # Keep the double-click endpoint shortcuts directly under the primary
+    # Override API Endpoint field, before image-edit/TTS-specific controls.
+    section_v.insertWidget(2, help_row)
+    
+    # Azure version frame (initially hidden)
+    self.azure_version_frame = QWidget()
+    azure_h = QHBoxLayout(self.azure_version_frame)
+    azure_h.setContentsMargins(0, 0, 0, 10)
+    azure_h.addWidget(QLabel("Azure API Version:"))
+    
+    # Azure API version combo
+    try:
+        self.azure_api_version_var = self.config.get('azure_api_version', '2024-08-01-preview')
+    except Exception:
+        pass
+    versions = [
+        '2025-01-01-preview', '2024-12-01-preview', '2024-10-01-preview',
+        '2024-08-01-preview', '2024-06-01', '2024-05-01-preview',
+        '2024-04-01-preview', '2024-02-01', '2023-12-01-preview',
+        '2023-10-01-preview', '2023-05-15'
+    ]
+    self.azure_version_combo = QComboBox()
+    self.azure_version_combo.addItems(versions)
+    self.azure_version_combo.setFixedWidth(200)
+    # Add custom styling with unicode arrow
+    self.azure_version_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(self.azure_version_combo)
+    self._disable_combobox_mousewheel(self.azure_version_combo)
+    try:
+        idx = self.azure_version_combo.findText(self.azure_api_version_var)
+        if idx >= 0:
+            self.azure_version_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_azure_version_changed(text):
+        try:
+            self.azure_api_version_var = text
+            self._update_azure_api_version_env()
+        except Exception:
+            pass
+    self.azure_version_combo.currentTextChanged.connect(_on_azure_version_changed)
+    azure_h.addWidget(self.azure_version_combo)
+    azure_h.addStretch()
+    self.azure_version_frame.setVisible(False)  # Initially hidden
+    section_v.addWidget(self.azure_version_frame)
+    
+    # Show More Fields button
+    self.show_more_endpoints = False
+    self.more_fields_button = QPushButton("▼ Show More Fields")
+    self.more_fields_button.setStyleSheet("text-align: left; border: none; color: #0dcaf0;")
+    self.more_fields_button.clicked.connect(lambda: self.toggle_more_endpoints())
+    section_v.addWidget(self.more_fields_button)
+    
+    # Add spacing after Show More Fields button to prevent accidental clicks
+    section_v.addSpacing(15)
+    
+    # Container for additional fields (initially hidden)
+    self.additional_endpoints_frame = QWidget()
+    additional_v = QVBoxLayout(self.additional_endpoints_frame)
+    additional_v.setContentsMargins(0, 0, 0, 0)
+    self.additional_endpoints_frame.setVisible(False)  # Initially hidden
+    
+    # Groq/Local Base URL
+    groq_row = QWidget()
+    groq_h = QHBoxLayout(groq_row)
+    groq_h.setContentsMargins(0, 5, 0, 5)
+    groq_h.addWidget(QLabel("Groq/Local Base URL:"))
+    
+    self.groq_base_url_var = self.config.get('groq_base_url', '')
+    self.groq_base_url_entry = QLineEdit()
+    try:
+        self.groq_base_url_entry.setText(str(self.groq_base_url_var))
+    except Exception:
+        pass
+    def _on_groq_url_changed(text):
+        try:
+            self.groq_base_url_var = text
+        except Exception:
+            pass
+    self.groq_base_url_entry.textChanged.connect(_on_groq_url_changed)
+    groq_h.addWidget(self.groq_base_url_entry)
+    
+    groq_clear_btn = QPushButton("Clear")
+    groq_clear_btn.setFixedWidth(80)
+    def _clear_groq_url():
+        self.groq_base_url_var = ""
+        self.groq_base_url_entry.setText("")
+    groq_clear_btn.clicked.connect(_clear_groq_url)
+    groq_h.addWidget(groq_clear_btn)
+    additional_v.addWidget(groq_row)
+    
+    groq_help = QLabel("For vLLM: http://localhost:8000/v1 | For LM Studio: http://localhost:1234/v1")
+    groq_help.setStyleSheet("color: gray; font-size: 8pt;")
+    groq_help.setContentsMargins(0, 0, 0, 5)
+    additional_v.addWidget(groq_help)
+    
+    # Fireworks Base URL
+    fireworks_row = QWidget()
+    fireworks_h = QHBoxLayout(fireworks_row)
+    fireworks_h.setContentsMargins(0, 5, 0, 5)
+    fireworks_h.addWidget(QLabel("Fireworks Base URL:"))
+    
+    self.fireworks_base_url_var = self.config.get('fireworks_base_url', '')
+    self.fireworks_base_url_entry = QLineEdit()
+    try:
+        self.fireworks_base_url_entry.setText(str(self.fireworks_base_url_var))
+    except Exception:
+        pass
+    def _on_fireworks_url_changed(text):
+        try:
+            self.fireworks_base_url_var = text
+        except Exception:
+            pass
+    self.fireworks_base_url_entry.textChanged.connect(_on_fireworks_url_changed)
+    fireworks_h.addWidget(self.fireworks_base_url_entry)
+    
+    fireworks_clear_btn = QPushButton("Clear")
+    fireworks_clear_btn.setFixedWidth(80)
+    def _clear_fireworks_url():
+        self.fireworks_base_url_var = ""
+        self.fireworks_base_url_entry.setText("")
+    fireworks_clear_btn.clicked.connect(_clear_fireworks_url)
+    fireworks_h.addWidget(fireworks_clear_btn)
+    additional_v.addWidget(fireworks_row)
+    
+    # Info about multiple endpoints
+    info_lbl = QLabel("💡 Advanced: Use multiple endpoints to run different local LLM servers simultaneously.\n• Use model prefix 'groq/' to route through Groq endpoint\n• Use model prefix 'fireworks/' to route through Fireworks endpoint\n• Most users only need the main OpenAI endpoint above")
+    info_lbl.setStyleSheet("color: #0dcaf0; font-size: 8pt;")
+    info_lbl.setWordWrap(True)
+    info_lbl.setContentsMargins(0, 10, 0, 10)
+    additional_v.addWidget(info_lbl)
+    
+    # Gemini Custom Endpoint (auto-detects OpenAI-compatible vs gRPC from URL)
+    gemini_cb = self._create_styled_checkbox("Enable Gemini Custom Endpoint")
+    try:
+        gemini_cb.setChecked(bool(self.use_gemini_openai_endpoint_var))
+    except Exception:
+        pass
+    def _on_gemini_endpoint_toggle(checked):
+        try:
+            self.use_gemini_openai_endpoint_var = bool(checked)
+            self.toggle_gemini_endpoint()
+        except Exception:
+            pass
+    gemini_cb.toggled.connect(_on_gemini_endpoint_toggle)
+    gemini_cb.setContentsMargins(0, 5, 0, 5)
+    additional_v.addWidget(gemini_cb)
+    
+    # Gemini endpoint URL input
+    gemini_row = QWidget()
+    gemini_h = QHBoxLayout(gemini_row)
+    gemini_h.setContentsMargins(0, 5, 0, 5)
+    gemini_h.addWidget(QLabel("Gemini Custom Endpoint:"))
+    
+    self.gemini_endpoint_entry = QLineEdit()
+    self.gemini_endpoint_entry.setPlaceholderText("Paste OpenAI-compatible URL or gRPC hostname...")
+    try:
+        self.gemini_endpoint_entry.setText(str(self.gemini_openai_endpoint_var))
+    except Exception:
+        pass
+    def _on_gemini_url_changed(text):
+        try:
+            self.gemini_openai_endpoint_var = text
+        except Exception:
+            pass
+    self.gemini_endpoint_entry.textChanged.connect(_on_gemini_url_changed)
+    gemini_h.addWidget(self.gemini_endpoint_entry)
+    
+    self.gemini_clear_button = QPushButton("Clear")
+    self.gemini_clear_button.setFixedWidth(80)
+    def _clear_gemini_url():
+        self.gemini_openai_endpoint_var = ""
+        self.gemini_endpoint_entry.setText("")
+    self.gemini_clear_button.clicked.connect(_clear_gemini_url)
+    gemini_h.addWidget(self.gemini_clear_button)
+    additional_v.addWidget(gemini_row)
+    
+    gemini_help = QLabel(
+        "Auto-detects mode from URL:\n"
+        "  • URLs with /openai or http(s):// → OpenAI-compatible REST endpoint\n"
+        "  • Bare hostname (no /openai) → ⚡ Raw gRPC (binary protobuf, HTTP/2)"
+    )
+    gemini_help.setStyleSheet("color: gray; font-size: 8pt;")
+    gemini_help.setWordWrap(True)
+    gemini_help.setContentsMargins(0, 0, 0, 3)
+    additional_v.addWidget(gemini_help)
+    
+    # Shortcut URLs — double-click to copy into the endpoint field
+    shortcuts_widget = QWidget()
+    shortcuts_h = QHBoxLayout(shortcuts_widget)
+    shortcuts_h.setContentsMargins(0, 0, 0, 5)
+    shortcuts_h.addWidget(QLabel("Quick paste (double-click):"))
+    
+    openai_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    grpc_host = "generativelanguage.googleapis.com"
+    
+    try:
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QTimer
+    except ImportError:
+        QGuiApplication = None
+        QTimer = None
+    
+    openai_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline;">{openai_url}</span>')
+    openai_shortcut.setStyleSheet("font-size: 8pt;")
+    openai_shortcut.setTextFormat(Qt.RichText)
+    openai_shortcut.setCursor(Qt.PointingHandCursor)
+    openai_shortcut.setToolTip("Double-click to paste OpenAI-compatible endpoint")
+    _openai_orig_style = openai_shortcut.styleSheet()
+    _openai_orig_text = openai_shortcut.text()
+    def _paste_openai_url(event):
+        self.gemini_endpoint_entry.setText(openai_url)
+        self.gemini_openai_endpoint_var = openai_url
+        try:
+            if QGuiApplication:
+                QGuiApplication.clipboard().setText(openai_url)
+        except Exception:
+            pass
+        # Flash green feedback
+        try:
+            openai_shortcut.setStyleSheet(_openai_orig_style + " color: #00d084;")
+            openai_shortcut.setTextFormat(Qt.PlainText)
+            openai_shortcut.setText(f"✓ Pasted: {openai_url}")
+            if QTimer:
+                QTimer.singleShot(900, lambda: (
+                    openai_shortcut.setStyleSheet(_openai_orig_style),
+                    openai_shortcut.setTextFormat(Qt.RichText),
+                    openai_shortcut.setText(_openai_orig_text),
+                ))
+        except Exception:
+            pass
+    openai_shortcut.mouseDoubleClickEvent = _paste_openai_url
+    shortcuts_h.addWidget(openai_shortcut)
+    
+    separator = QLabel(" | ")
+    separator.setStyleSheet("color: gray; font-size: 8pt;")
+    shortcuts_h.addWidget(separator)
+    
+    grpc_shortcut = QLabel(f'<span style="color:#ffc107; text-decoration:underline;">{grpc_host}</span>')
+    grpc_shortcut.setStyleSheet("font-size: 8pt;")
+    grpc_shortcut.setTextFormat(Qt.RichText)
+    grpc_shortcut.setCursor(Qt.PointingHandCursor)
+    grpc_shortcut.setToolTip("Double-click to paste raw gRPC endpoint")
+    _grpc_orig_style = grpc_shortcut.styleSheet()
+    _grpc_orig_text = grpc_shortcut.text()
+    def _paste_grpc_host(event):
+        self.gemini_endpoint_entry.setText(grpc_host)
+        self.gemini_openai_endpoint_var = grpc_host
+        try:
+            if QGuiApplication:
+                QGuiApplication.clipboard().setText(grpc_host)
+        except Exception:
+            pass
+        # Flash green feedback
+        try:
+            grpc_shortcut.setStyleSheet(_grpc_orig_style + " color: #00d084;")
+            grpc_shortcut.setTextFormat(Qt.PlainText)
+            grpc_shortcut.setText(f"✓ Pasted: {grpc_host}")
+            if QTimer:
+                QTimer.singleShot(900, lambda: (
+                    grpc_shortcut.setStyleSheet(_grpc_orig_style),
+                    grpc_shortcut.setTextFormat(Qt.RichText),
+                    grpc_shortcut.setText(_grpc_orig_text),
+                ))
+        except Exception:
+            pass
+    grpc_shortcut.mouseDoubleClickEvent = _paste_grpc_host
+    shortcuts_h.addWidget(grpc_shortcut)
+    
+    shortcuts_h.addStretch()
+    additional_v.addWidget(shortcuts_widget)
+
+    # ── Override Gemma routing (Gemma is also available as a local LLM via Ollama / LM Studio) ──
+    if not hasattr(self, 'override_gemma_for_custom_endpoint_var'):
+        self.override_gemma_for_custom_endpoint_var = bool(
+            self.config.get('override_gemma_for_custom_endpoint', True)
+        )
+    override_gemma_cb = self._create_styled_checkbox("Override Gemma routing (use OpenAI custom endpoint for Gemma models)")
+    override_gemma_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+        "When enabled (default), Gemma models (e.g. gemma-3-27b-it) are routed through the "
+        "<b>Override API Endpoint</b> above (Ollama / LM Studio / vLLM) instead of the "
+        "<b>Gemini Custom Endpoint</b>. Gemma is freely available as a local LLM, so this lets you "
+        "run it locally even while the Gemini Custom Endpoint toggle is enabled for actual Gemini models. "
+        "Disable to force Gemma through the Gemini API endpoint instead."
+        "</p></qt>"
+    )
+    try:
+        override_gemma_cb.setChecked(bool(self.override_gemma_for_custom_endpoint_var))
+    except Exception:
+        pass
+    def _on_override_gemma_toggle(checked):
+        try:
+            self.override_gemma_for_custom_endpoint_var = bool(checked)
+            self.config['override_gemma_for_custom_endpoint'] = self.override_gemma_for_custom_endpoint_var
+            os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if checked else '0'
+        except Exception:
+            pass
+    override_gemma_cb.toggled.connect(_on_override_gemma_toggle)
+    override_gemma_cb.setContentsMargins(0, 8, 0, 5)
+    additional_v.addWidget(override_gemma_cb)
+    # Push the initial value into env so backends pick it up before the user toggles it
+    try:
+        os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if self.override_gemma_for_custom_endpoint_var else '0'
+    except Exception:
+        pass
+
+    # ── Anthropic Custom Endpoint ──
+    anthropic_sep = QFrame()
+    anthropic_sep.setFrameShape(QFrame.HLine)
+    anthropic_sep.setStyleSheet("color: #444;")
+    additional_v.addWidget(anthropic_sep)
+
+    if not hasattr(self, 'force_native_anthropic_var'):
+        self.force_native_anthropic_var = bool(
+            self.config.get(
+                'force_native_anthropic',
+                str(os.environ.get('FORCE_NATIVE_ANTHROPIC', '0')) == '1'
+            )
+        )
+    anthropic_cb = self._create_styled_checkbox("Enable Anthropic Custom Endpoint")
+    anthropic_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Routes Claude models through the native Anthropic Messages API handler "
+        "instead of OpenAI-compatible format. Use this when your endpoint speaks "
+        "native Anthropic protocol (system as top-level field, /v1/messages path)."
+        "</p></qt>"
+    )
+    try:
+        anthropic_cb.setChecked(bool(self.force_native_anthropic_var))
+    except Exception:
+        pass
+    def _on_anthropic_endpoint_toggle(checked):
+        try:
+            self.force_native_anthropic_var = bool(checked)
+            self.config['force_native_anthropic'] = self.force_native_anthropic_var
+            os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if checked else '0'
+            self.toggle_anthropic_endpoint()
+        except Exception:
+            pass
+    anthropic_cb.toggled.connect(_on_anthropic_endpoint_toggle)
+    anthropic_cb.setContentsMargins(0, 5, 0, 5)
+    additional_v.addWidget(anthropic_cb)
+
+    # Anthropic Base URL input
+    anthropic_url_row = QWidget()
+    anthropic_url_h = QHBoxLayout(anthropic_url_row)
+    anthropic_url_h.setContentsMargins(0, 5, 0, 5)
+    anthropic_url_h.addWidget(QLabel("Anthropic Base URL:"))
+
+    if not hasattr(self, 'anthropic_base_url_var'):
+        self.anthropic_base_url_var = self.config.get('anthropic_base_url', '')
+    self.anthropic_base_url_entry = QLineEdit()
+    self.anthropic_base_url_entry.setPlaceholderText("https://api.anthropic.com  (leave blank for default)")
+    try:
+        self.anthropic_base_url_entry.setText(str(self.anthropic_base_url_var))
+    except Exception:
+        pass
+    def _on_anthropic_url_changed(text):
+        try:
+            self.anthropic_base_url_var = text
+            os.environ['ANTHROPIC_BASE_URL'] = text
+        except Exception:
+            pass
+    self.anthropic_base_url_entry.textChanged.connect(_on_anthropic_url_changed)
+    anthropic_url_h.addWidget(self.anthropic_base_url_entry)
+
+    self.anthropic_clear_button = QPushButton("Clear")
+    self.anthropic_clear_button.setFixedWidth(80)
+    def _clear_anthropic_url():
+        self.anthropic_base_url_var = ""
+        self.anthropic_base_url_entry.setText("")
+        os.environ['ANTHROPIC_BASE_URL'] = ''
+    self.anthropic_clear_button.clicked.connect(_clear_anthropic_url)
+    anthropic_url_h.addWidget(self.anthropic_clear_button)
+    additional_v.addWidget(anthropic_url_row)
+
+    anthropic_help = QLabel(
+        "Routes Claude models to the native Anthropic Messages API format.\n"
+        "• System prompt sent as top-level 'system' field (not a message role)\n"
+        "• Requests go to [base_url]/v1/messages instead of /v1/chat/completions\n"
+        "• Use for Anthropic-native proxies, reverse proxies, or the official API\n"
+        "• Leave URL blank to use the official Anthropic API (api.anthropic.com)"
+    )
+    anthropic_help.setStyleSheet("color: gray; font-size: 8pt;")
+    anthropic_help.setWordWrap(True)
+    anthropic_help.setContentsMargins(0, 0, 0, 3)
+    additional_v.addWidget(anthropic_help)
+
+    # Quick paste shortcut for Anthropic endpoint
+    _eh_url = "https://api.electronhub.ai"
+    anthropic_shortcuts = QWidget()
+    anthropic_shortcuts_h = QHBoxLayout(anthropic_shortcuts)
+    anthropic_shortcuts_h.setContentsMargins(0, 0, 0, 5)
+    anthropic_shortcuts_h.addWidget(QLabel("Quick paste (double-click):"))
+
+    eh_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline;">{_eh_url}</span>')
+    eh_shortcut.setStyleSheet("font-size: 8pt;")
+    eh_shortcut.setTextFormat(Qt.RichText)
+    eh_shortcut.setCursor(Qt.PointingHandCursor)
+    eh_shortcut.setToolTip("Double-click to paste ElectronHub URL into the Anthropic Base URL field")
+    _eh_orig_style = eh_shortcut.styleSheet()
+    _eh_orig_text = eh_shortcut.text()
+    def _paste_eh_url(event):
+        self.anthropic_base_url_entry.setText(_eh_url)
+        self.anthropic_base_url_var = _eh_url
+        os.environ['ANTHROPIC_BASE_URL'] = _eh_url
+        try:
+            QGuiApplication.clipboard().setText(_eh_url)
+        except Exception:
+            pass
+        try:
+            eh_shortcut.setStyleSheet(_eh_orig_style + " color: #00d084;")
+            eh_shortcut.setTextFormat(Qt.PlainText)
+            eh_shortcut.setText(f"✓ Pasted: {_eh_url}")
+            QTimer.singleShot(900, lambda: (
+                eh_shortcut.setStyleSheet(_eh_orig_style),
+                eh_shortcut.setTextFormat(Qt.RichText),
+                eh_shortcut.setText(_eh_orig_text),
+            ))
+        except Exception:
+            pass
+    eh_shortcut.mouseDoubleClickEvent = _paste_eh_url
+    anthropic_shortcuts_h.addWidget(eh_shortcut)
+
+    or_sep = QLabel(" | ")
+    or_sep.setStyleSheet("color: gray; font-size: 8pt;")
+    anthropic_shortcuts_h.addWidget(or_sep)
+
+    _or_url = "https://openrouter.ai/api"
+    or_shortcut = QLabel(f'<span style="color:#0dcaf0; text-decoration:underline;">{_or_url}</span>')
+    or_shortcut.setStyleSheet("font-size: 8pt;")
+    or_shortcut.setTextFormat(Qt.RichText)
+    or_shortcut.setCursor(Qt.PointingHandCursor)
+    or_shortcut.setToolTip("Double-click to paste OpenRouter URL into the Anthropic Base URL field")
+    _or_orig_style = or_shortcut.styleSheet()
+    _or_orig_text = or_shortcut.text()
+    def _paste_or_url(event):
+        self.anthropic_base_url_entry.setText(_or_url)
+        self.anthropic_base_url_var = _or_url
+        os.environ['ANTHROPIC_BASE_URL'] = _or_url
+        try:
+            QGuiApplication.clipboard().setText(_or_url)
+        except Exception:
+            pass
+        try:
+            or_shortcut.setStyleSheet(_or_orig_style + " color: #00d084;")
+            or_shortcut.setTextFormat(Qt.PlainText)
+            or_shortcut.setText(f"✓ Pasted: {_or_url}")
+            QTimer.singleShot(900, lambda: (
+                or_shortcut.setStyleSheet(_or_orig_style),
+                or_shortcut.setTextFormat(Qt.RichText),
+                or_shortcut.setText(_or_orig_text),
+            ))
+        except Exception:
+            pass
+    or_shortcut.mouseDoubleClickEvent = _paste_or_url
+    anthropic_shortcuts_h.addWidget(or_shortcut)
+
+    anthropic_shortcuts_h.addStretch()
+    additional_v.addWidget(anthropic_shortcuts)
+
+    
+    # Add the additional endpoints frame to the main section
+    section_v.addWidget(self.additional_endpoints_frame)
+    
+    # Test Connection button
+    test_btn = QPushButton("Test Connection")
+    test_btn.clicked.connect(lambda: self.test_api_connections())
+    section_v.addWidget(test_btn)
+    
+    # Place the section at row 7, spanning both columns
+    try:
+        grid = parent_frame.layout()
+        if grid:
+            grid.addWidget(section_box, 7, 0, 1, 2)
+    except Exception:
+        # Fallback: just stack
+        section_box.setParent(parent_frame)
+    
+    # Set initial states
+    self.toggle_custom_endpoint_ui()
+    self.toggle_gemini_endpoint()
+    self.toggle_anthropic_endpoint()
+
+def _check_azure_endpoint(self, *args):
+    """Check if endpoint is Azure and update UI (Qt version)"""
+    try:
+        if not self.use_custom_openai_endpoint_var:
+            if hasattr(self, 'azure_version_frame'):
+                self.azure_version_frame.setVisible(False)
+            return
+            
+        url = self.openai_base_url_var
+        if '.azure.com' in url or '.cognitiveservices' in url:
+            if hasattr(self, 'api_key_label'):
+                try:
+                    self.api_key_label.setText("Azure Key:")
+                except Exception:
+                    pass
+            
+            # Show Azure version frame
+            if hasattr(self, 'azure_version_frame'):
+                self.azure_version_frame.setVisible(True)
+        else:
+            if hasattr(self, 'api_key_label'):
+                try:
+                    self.api_key_label.setText("API Key:")
+                except Exception:
+                    pass
+            
+            # Hide Azure version frame
+            if hasattr(self, 'azure_version_frame'):
+                self.azure_version_frame.setVisible(False)
+    except Exception:
+        pass
+            
+def _update_azure_api_version_env(self, *args):
+    """Update the AZURE_API_VERSION environment variable when the setting changes"""
+    try:
+        api_version = self.azure_api_version_var
+        if api_version:
+            os.environ['AZURE_API_VERSION'] = api_version
+            #print(f"✅ Updated Azure API Version in environment: {api_version}")
+    except Exception as e:
+        print(f"❌ Error updating Azure API Version environment variable: {e}")
+
+def toggle_gemini_endpoint(self):
+    """Enable/disable Gemini endpoint entry based on toggle (Qt version)"""
+    try:
+        enabled = bool(self.use_gemini_openai_endpoint_var)
+        if hasattr(self, 'gemini_endpoint_entry'):
+            self.gemini_endpoint_entry.setEnabled(enabled)
+        if hasattr(self, 'gemini_clear_button'):
+            self.gemini_clear_button.setEnabled(enabled)
+    except Exception:
+        pass
+
+def toggle_anthropic_endpoint(self):
+    """Enable/disable Anthropic endpoint entry based on toggle (Qt version)"""
+    try:
+        enabled = bool(self.force_native_anthropic_var)
+        if hasattr(self, 'anthropic_base_url_entry'):
+            self.anthropic_base_url_entry.setEnabled(enabled)
+        if hasattr(self, 'anthropic_clear_button'):
+            self.anthropic_clear_button.setEnabled(enabled)
+    except Exception:
+        pass
+
+
+def toggle_custom_endpoint_ui(self, user_interaction=False):
+    """Enable/disable the OpenAI base URL entry and detect Azure (Qt version)"""
+    try:
+        enabled = bool(self.use_custom_openai_endpoint_var)
+        
+        if hasattr(self, 'openai_base_url_entry'):
+            self.openai_base_url_entry.setEnabled(enabled)
+        if hasattr(self, 'openai_clear_button'):
+            self.openai_clear_button.setEnabled(enabled)
+        
+        if enabled:
+            # Check if it's Azure
+            url = self.openai_base_url_var
+            if '.azure.com' in url or '.cognitiveservices' in url:
+                if hasattr(self, 'api_key_label'):
+                    try:
+                        self.api_key_label.setText("Azure Key:")
+                    except Exception:
+                        pass
+            else:
+                if hasattr(self, 'api_key_label'):
+                    try:
+                        self.api_key_label.setText("API Key:")
+                    except Exception:
+                        pass
+            # Only print when user actually interacts with the toggle
+            if user_interaction:
+                print("✅ Custom OpenAI endpoint enabled")
+        else:
+            if hasattr(self, 'api_key_label'):
+                try:
+                    self.api_key_label.setText("API Key:")
+                except Exception:
+                    pass
+            # Only print when user actually interacts with the toggle
+            if user_interaction:
+                print("❌ Custom OpenAI endpoint disabled - using default OpenAI API")
+    except Exception:
+        pass
+
+def toggle_more_endpoints(self):
+    """Toggle visibility of additional endpoint fields (Qt version)"""
+    try:
+        self.show_more_endpoints = not self.show_more_endpoints
+        
+        if hasattr(self, 'additional_endpoints_frame'):
+            self.additional_endpoints_frame.setVisible(self.show_more_endpoints)
+        
+        if hasattr(self, 'more_fields_button'):
+            if self.show_more_endpoints:
+                self.more_fields_button.setText("▲ Show Fewer Fields")
+            else:
+                self.more_fields_button.setText("▼ Show More Fields")
+    except Exception:
+        pass
+             
+def test_api_connections(self):
+    """Test all configured API connections (Qt version)"""
+    import os
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QMessageBox, QPushButton
+    from PySide6.QtCore import Qt, QSize, QTimer, QObject, Signal
+    from PySide6.QtGui import QIcon, QPixmap
+    import threading
+
+    # Resolve app icon once for all dialogs
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    app_icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon("Halgakos.ico")
+    
+    # Collect all configured endpoints (key_pool_service.collect_test_endpoints, moved in U9)
+    from key_pool_service import collect_test_endpoints, run_endpoint_tests
+    endpoints_to_test = collect_test_endpoints(self)
+    
+    if not endpoints_to_test:
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("Info")
+        msg_box.setText("No custom endpoints configured.")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowIcon(app_icon)
+        msg_box.exec()
+        return
+
+    # Show immediate feedback
+    progress_dialog = QDialog(self.current_dialog if hasattr(self, 'current_dialog') else None)
+    progress_dialog.setWindowTitle("Testing Connections...")
+    progress_dialog.setModal(True)  # modal, but we'll provide Cancel
+    # Use screen ratios for sizing
+    from PySide6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.13)
+    height = int(screen.height() * 0.17)
+    progress_dialog.setFixedSize(width, height)
+    
+    # Set icon
+    try:
+        progress_dialog.setWindowIcon(app_icon)
+    except:
+        pass
+    
+    # Center the dialog
+    if progress_dialog.parent():
+        parent_geo = progress_dialog.parent().geometry()
+        x = parent_geo.x() + (parent_geo.width() - 300) // 2
+        y = parent_geo.y() + (parent_geo.height() - 150) // 2
+        progress_dialog.move(x, y)
+    
+    # Add progress message
+    layout = QVBoxLayout(progress_dialog)
+    # layout.addSpacing(10) # Removed spacing to reduce empty space
+
+    # Add app icon at 80x80 with HiDPI scaling (Animated)
+    icon_label = RotatableLabel()
+    # Set fixed size to 120x120 for container, icon itself is scaled to 90x90
+    icon_label.setFixedSize(120, 120)
+    dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+    pix = QPixmap(icon_path) if os.path.exists(icon_path) else app_icon.pixmap(QSize(90, 90))
+    if not pix.isNull():
+        scaled = pix.scaled(int(90 * dpr), int(90 * dpr), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled.setDevicePixelRatio(dpr)
+        icon_label.set_original_pixmap(scaled)
+        icon_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(icon_label, 0, Qt.AlignCenter)
+        
+        # Animate the icon
+        anim = QPropertyAnimation(icon_label, b"rotation", progress_dialog)
+        anim.setDuration(800)
+        anim.setStartValue(0)
+        anim.setEndValue(360)
+        anim.setLoopCount(-1)
+        anim.start()
+    else:
+        # Fallback if image loading fails
+        layout.addWidget(QLabel("Testing..."))
+
+    progress_label = QLabel("Testing API connections\nPlease wait")
+    progress_label.setAlignment(Qt.AlignCenter)
+    progress_label.setStyleSheet("font-size: 10pt;")
+    layout.addWidget(progress_label)
+    
+    # Animate text dots
+    progress_dialog.dot_count = 0
+    def animate_dots():
+        try:
+            progress_dialog.dot_count = (progress_dialog.dot_count + 1) % 4
+            dots = "." * progress_dialog.dot_count
+            progress_label.setText(f"Testing API connections{dots}\nPlease wait{dots}")
+        except RuntimeError:
+            pass  # Dialog deleted
+
+    text_timer = QTimer(progress_dialog)
+    text_timer.timeout.connect(animate_dots)
+    text_timer.start(500)
+
+    # Cancel button to stop background work
+    cancel_event = threading.Event()
+    cancel_btn = QPushButton("Cancel")
+    def _cancel():
+        cancel_event.set()
+        progress_dialog.close()
+    cancel_btn.clicked.connect(_cancel)
+    layout.addWidget(cancel_btn)
+    
+    # Store cancel function in the dialog so it can be called if dialog is closed via X
+    progress_dialog._cancel_func = _cancel
+    def _on_close(event):
+        _cancel()
+        event.accept()
+    progress_dialog.closeEvent = _on_close
+    
+    # Show dialog non-modally so it's visible
+    progress_dialog.show()
+    progress_dialog.repaint()
+    QApplication.processEvents()  # ensure label paints before network calls
+    
+    try:
+        # Ensure we have the openai module
+        import openai
+    except ImportError:
+        progress_dialog.close()
+        QMessageBox.critical(None, "Error", "OpenAI library not installed")
+        return
+    
+    # Get API key from the main GUI  
+    api_key = ''
+    if hasattr(self, 'api_key_entry'):
+        if hasattr(self.api_key_entry, 'text'):  # PySide6 QLineEdit
+            api_key = self.api_key_entry.text()
+        elif hasattr(self.api_key_entry, 'get'):  # Tkinter Entry
+            api_key = self.api_key_entry.get()
+    if not api_key:
+        api_key = self.config.get('api_key', '')
+    if not api_key:
+        api_key = "sk-dummy-key"  # For local models
+
+    # Use module-level Bridge class
+    self.conn_test_bridge = ConnTestBridge()
+
+    def run_tests_background():
+        results = run_endpoint_tests(endpoints_to_test, api_key, openai, cancel_event)
+
+        if not cancel_event.is_set():
+            self.conn_test_bridge.finished.emit(results)
+
+    threading.Thread(target=run_tests_background, daemon=True).start()
+
+    def finish_ui(results):
+        if cancel_event.is_set():
+            return
+        # Show results
+        result_message = "Connection Test Results:\n\n" + "\n\n".join(results)
+        
+        # Close progress dialog
+        progress_dialog.close()
+        
+        # Determine if all succeeded
+        all_success = all("✅" in r for r in results)
+        
+        # Try to use other_settings_dialog as parent to ensure correct stacking
+        parent = getattr(self, '_other_settings_dialog', None)
+        if not parent or not parent.isVisible():
+            parent = progress_dialog.parent() if progress_dialog.parent() else None
+            
+        msg_box = QMessageBox(parent)
+        msg_box.setWindowTitle("Success" if all_success else "Test Results")
+        msg_box.setText(result_message)
+        msg_box.setIcon(QMessageBox.Information if all_success else QMessageBox.Warning)
+        msg_box.setWindowIcon(app_icon)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        
+        # Store in self to prevent garbage collection since we use show() (non-modal)
+        self._connection_result_dialog = msg_box
+        msg_box.setWindowModality(Qt.NonModal)
+        # Ensure it stays on top
+        msg_box.setWindowFlags(msg_box.windowFlags() | Qt.WindowStaysOnTopHint)
+        msg_box.show()
+
+    self.conn_test_bridge.finished.connect(finish_ui)
+    
+
+def run_standalone_translate_headers(self):
+    """Run standalone header translation in a background thread"""
+    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtGui import QIcon
+    import traceback
+    import threading
+    
+    # Get icon path
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+    
+    try:
+        # Get API key and model from GUI fields
+        api_key = self.api_key_entry.text().strip() if hasattr(self, 'api_key_entry') else ""
+        model = self.model_var.strip() if hasattr(self, 'model_var') else ""
+        
+        if not api_key:
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Error")
+            msg_box.setText("API key not configured.")
+            msg_box.setInformativeText("Please enter your API key in the main window before using this feature.")
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+            return
+        
+        if not model:
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Error")
+            msg_box.setText("Model not selected.")
+            msg_box.setInformativeText("Please select a model in the main window before using this feature.")
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+            return
+        
+        # Initialize stop flag and running state
+        self._headers_stop_requested = False
+        self._headers_translation_running = True
+        
+        # Transform button to stop mode (red)
+        if hasattr(self, 'translate_headers_btn'):
+            self.translate_headers_btn.setText("⏹ Stop Headers")
+            self.translate_headers_btn.setStyleSheet(
+                "QPushButton { background-color: #dc3545; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+                "QPushButton:hover { background-color: #c82333; } "
+                "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+            )
+            
+        # Start spinning animation on icon
+        if hasattr(self, 'translate_icon_spin_animation') and hasattr(self, 'translate_headers_icon'):
+            try:
+                from PySide6.QtCore import QTimer, QPropertyAnimation
+                
+                # Start the continuous spin animation
+                if self.translate_icon_spin_animation.state() != QPropertyAnimation.Running:
+                    self.translate_icon_spin_animation.start()
+                
+                # Update button icon periodically and monitor for completion
+                def update_and_monitor():
+                    # Check if still running
+                    if hasattr(self, '_headers_translation_running') and self._headers_translation_running:
+                        # Update spinning icon
+                        if hasattr(self, 'translate_headers_icon') and self.translate_headers_icon.pixmap():
+                            self.translate_headers_btn.setIcon(QIcon(self.translate_headers_icon.pixmap()))
+                        # Continue monitoring
+                        QTimer.singleShot(50, update_and_monitor)
+                    else:
+                        # Translation finished - stop animation gracefully
+                        if hasattr(self, 'translate_icon_spin_animation') and hasattr(self, 'translate_icon_stop_animation'):
+                            if self.translate_icon_spin_animation.state() == QPropertyAnimation.Running:
+                                # Stop the infinite spin
+                                self.translate_icon_spin_animation.stop()
+                                
+                                # Get current rotation and smoothly decelerate to 0
+                                if hasattr(self, 'translate_headers_icon'):
+                                    current_rotation = self.translate_headers_icon.get_rotation()
+                                    current_rotation = current_rotation % 360
+                                    
+                                    # Determine shortest path to 0
+                                    if current_rotation > 180:
+                                        target_rotation = 360
+                                    else:
+                                        target_rotation = 0
+                                    
+                                    self.translate_icon_stop_animation.setStartValue(current_rotation)
+                                    self.translate_icon_stop_animation.setEndValue(target_rotation)
+                                    self.translate_icon_stop_animation.start()
+                        
+                        # Wait for deceleration to finish before resetting button
+                        def reset_button():
+                            if hasattr(self, 'translate_headers_btn'):
+                                self.translate_headers_btn.setText("Translate Headers Now")
+                                self.translate_headers_btn.setStyleSheet(
+                                    "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+                                    "QPushButton:hover { background-color: #28a745; } "
+                                    "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+                                )
+                                # Reset icon to static position
+                                if hasattr(self, 'translate_headers_icon'):
+                                    self.translate_headers_icon.set_rotation(0)
+                                    if self.translate_headers_icon._original_pixmap:
+                                        self.translate_headers_btn.setIcon(QIcon(self.translate_headers_icon._original_pixmap))
+                        
+                        # Delay reset to allow deceleration animation to finish
+                        QTimer.singleShot(900, reset_button)
+                
+                update_and_monitor()
+            except Exception as e:
+                pass
+        
+        # Log that translation is starting
+        self.append_log("🌐 Starting standalone header translation in background...")
+        
+        # Define the thread function
+        def translation_thread():
+            try:
+                # API client set-up, header translation and the EPUB rebuild
+                # (translate_headers_standalone.run_translate_headers_now, shared with mobile)
+                from translate_headers_standalone import run_translate_headers_gui, run_translate_headers_now
+                run_translate_headers_now(self, model, api_key, headers_runner=run_translate_headers_gui)
+            finally:
+                # Reset button to initial state when thread completes
+                # Just set flags - the monitoring timer will handle UI updates
+                self._headers_translation_running = False
+                self._headers_stop_requested = True  # Stop spinning animation
+        
+        # Start the thread
+        thread = threading.Thread(target=translation_thread, daemon=True, name="HeaderTranslationThread")
+        self._headers_thread = thread  # Store reference for stop button
+        thread.start()
+        
+    except Exception as e:
+        error_msg = f"Failed to start standalone header translation: {e}\n\n{traceback.format_exc()}"
+        self.append_log(f"❌ {error_msg}")
+        
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Failed to start standalone header translation: {e}")
+        msg_box.setDetailedText(traceback.format_exc())
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+
+def validate_epub_structure_gui(self):
+    """GUI wrapper for EPUB structure validation."""
+    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtGui import QIcon
+    from PySide6.QtCore import QTimer
+    import os
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_OK)
+    except Exception:
+        pass
+
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+    btn = getattr(self, '_validate_btn', None)
+    status_lbl = getattr(self, '_validate_status', None)
+
+    # Gather all selected EPUB files
+    epub_files_to_process = []
+    if hasattr(self, 'selected_files') and self.selected_files:
+        current_epub_files = [f for f in self.selected_files if str(f).lower().endswith('.epub')]
+        if current_epub_files:
+            epub_files_to_process = [str(f) for f in current_epub_files]
+    if not epub_files_to_process:
+        entry_path = ''
+        if hasattr(self, 'entry_epub'):
+            if hasattr(self.entry_epub, 'text'):
+                entry_path = self.entry_epub.text().strip()
+            elif hasattr(self.entry_epub, 'get'):
+                entry_path = self.entry_epub.get().strip()
+        if entry_path and entry_path.lower().endswith('.epub') and os.path.exists(entry_path):
+            epub_files_to_process = [entry_path]
+
+    if not epub_files_to_process:
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText("Please select an EPUB file first.")
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+        return
+
+    # Output folder lookup, validation and the log / result wording (output_tools_core)
+    all_passed, all_results = validate_epub_outputs(
+        epub_files_to_process,
+        config=self.config if hasattr(self, 'config') else None,
+        log=self.append_log,
+    )
+
+    if all_passed and all_results:
+        # Success — animate inline, no messagebox
+        n = len(epub_files_to_process)
+        if btn:
+            btn.setText("✅ All Valid!")
+            btn.setStyleSheet(
+                "QPushButton { background-color: #22c55e; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+            )
+        if status_lbl:
+            status_lbl.setText(f"{n} EPUB(s) passed")
+            status_lbl.setStyleSheet("color: #22c55e; font-size: 10pt; font-weight: bold;")
+        # Reset button after 3 seconds
+        def _reset_btn():
+            if btn:
+                btn.setText("🔍 Validate EPUB Structure")
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #6f42c1; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+                    "QPushButton:hover { background-color: #5a32a3; }"
+                )
+            if status_lbl:
+                status_lbl.setText("")
+                status_lbl.setStyleSheet("color: gray; font-size: 10pt;")
+        QTimer.singleShot(3000, _reset_btn)
+    else:
+        # Failures — show messagebox
+        result_text = "\n".join(all_results)
+        msg_box = QMessageBox()
+        if all_results:
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("Validation Results")
+            msg_box.setText(f"Results for {len(epub_files_to_process)} EPUB(s):\n\n{result_text}")
+        else:
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("No Results")
+            msg_box.setText("No output directories found for any selected EPUBs.")
+        msg_box.setWindowIcon(icon)
+        msg_box.setStyleSheet("""
+            QPushButton {
+                min-width: 80px;
+                min-height: 30px;
+                padding: 6px 20px;
+                font-size: 10pt;
+            }
+            QDialogButtonBox {
+                qproperty-centerButtons: true;
+            }
+        """)
+        msg_box.exec()
+
+def _delete_translation_cache_files(self, kind, error_label):
+    """Delete Header Files / Delete TOC.txt: the EPUB selection and the dialogs around output_tools_core."""
+    texts = ARTIFACT_DELETE_TEXTS[kind]
+
+    # Get icon path
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+
+    try:
+        # Get all selected EPUB files using the same logic as QA scanner
+        epub_files_to_process = []
+
+        # First check if current selection actually contains EPUBs
+        if hasattr(self, 'selected_files') and self.selected_files:
+            current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+            if current_epub_files:
+                epub_files_to_process = current_epub_files
+                self.append_log(f"📚 Found {len(epub_files_to_process)} EPUB files in current selection")
+
+        # If no EPUBs in selection, try single EPUB methods
+        if not epub_files_to_process:
+            epub_path = self.get_current_epub_path()
+            if not epub_path:
+                entry_path = ''
+                if hasattr(self, 'entry_epub'):
+                    if hasattr(self.entry_epub, 'text'):  # PySide6 QLineEdit
+                        entry_path = self.entry_epub.text().strip()
+                    elif hasattr(self.entry_epub, 'get'):  # Tkinter Entry
+                        entry_path = self.entry_epub.get().strip()
+                if entry_path and entry_path != "No file selected" and os.path.exists(entry_path):
+                    epub_path = entry_path
+
+            if epub_path:
+                epub_files_to_process = [epub_path]
+
+        if not epub_files_to_process:
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Error")
+            msg_box.setText("No EPUB file(s) selected. Please select EPUB file(s) first.")
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+            return
+
+        # First pass: find each EPUB's output folder and cache file (output_tools_core)
+        plan = plan_artifact_cache_delete(
+            kind, epub_files_to_process, config=self.config, log=self.append_log,
+        )
+        files_found = plan.files_found
+        errors = plan.errors
+        linked_counterparts = plan.linked_counterparts
+
+        # Show summary and get user confirmation
+        if plan.nothing_processed:
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("No Files")
+            msg_box.setText("No EPUB files were processed.")
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            msg_box.exec()
+            return
+
+        summary_text = plan.summary_text()
+
+        if files_found:
+            # RECYCLED caches form a dependency pair. Let the user choose
+            # whether the manually requested deletion should break both sides.
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setWindowTitle("Confirm Deletion")
+            delete_linked = False
+            if linked_counterparts:
+                msg_box.setText(plan.question_text())
+                delete_both_button = msg_box.addButton(
+                    texts["delete_both"],
+                    QMessageBox.ButtonRole.DestructiveRole,
+                )
+                delete_only_button = msg_box.addButton(
+                    texts["delete_only"],
+                    QMessageBox.ButtonRole.AcceptRole,
+                )
+                cancel_button = msg_box.addButton(QMessageBox.Cancel)
+                msg_box.setDefaultButton(cancel_button)
+            else:
+                msg_box.setText(summary_text)
+                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg_box.setDefaultButton(QMessageBox.No)
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
+            result = msg_box.exec()
+
+            should_delete = result == QMessageBox.Yes
+            if linked_counterparts:
+                clicked_button = msg_box.clickedButton()
+                should_delete = (
+                    clicked_button is delete_both_button
+                    or clicked_button is delete_only_button
+                )
+                delete_linked = clicked_button is delete_both_button
+
+            if should_delete:
+                # Delete the files (progress entries reset to pending)
+                files_deleted, deleted_file_count = delete_planned_artifact_caches(
+                    plan, delete_linked=delete_linked, log=self.append_log,
+                )
+
+                # Show final results
+                ok, title, message = artifact_delete_result(files_deleted, deleted_file_count, errors)
+                if ok:
+                    msg_box = QMessageBox()
+                    msg_box.setIcon(QMessageBox.Information)
+                    msg_box.setWindowTitle(title)
+                    msg_box.setText(message)
+                    msg_box.setWindowIcon(icon)
+                    _center_messagebox_buttons(msg_box)
+                    msg_box.exec()
+                else:
+                    msg_box = QMessageBox()
+                    msg_box.setIcon(QMessageBox.Critical)
+                    msg_box.setWindowTitle(title)
+                    msg_box.setText(message)
+                    msg_box.setWindowIcon(icon)
+                    _center_messagebox_buttons(msg_box)
+                    msg_box.exec()
+        else:
+            # No files to delete
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("No Files to Delete")
+            msg_box.setText(summary_text)
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(
+                msg_box,
+                min_button_width=180,
+                min_button_height=46,
+            )
+            msg_box.exec()
+
+    except Exception as e:
+        self.append_log(f"❌ Error deleting {error_label}: {e}")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Failed to delete file: {e}")
+        msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
+        msg_box.exec()
+
+
+def delete_translated_headers_file(self):
+    """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
+    return _delete_translation_cache_files(self, "headers", "translated_headers.txt")
+
+
+def delete_toc_txt_file(self):
+    """Delete the TOC.txt (toc.txt) file from the output directory for all selected EPUBs"""
+    return _delete_translation_cache_files(self, "toc", "TOC.txt")
+
+# Prompt profile actions. The profile semantics live in the shared GUI-free prompt_profiles
+# module (the mobile app runs the same functions); these handlers supply the combobox name,
+# the message boxes and the editor / combobox / radio updates, which run as hooks at the
+# points of the original sequence (their Qt signals re-enter on_profile_select and the
+# prompt autosave).
+
+def _open_profile_file(*args, **kwargs):
+    # Profile files are opened through this module's namespace, as before the move.
+    return open(*args, **kwargs)
+
+def _replace_profile_prompt_text(self, prompt):
+    # PySide6: Clear and set QTextEdit content
+    self.prompt_text.clear()
+    self.prompt_text.setPlainText(prompt)
+
+def _sync_extraction_method_radios(self, method):
+    # Update radio button state if Other Settings dialog is open
+    if method == 'standard':
+        if hasattr(self, 'standard_extraction_radio') and hasattr(self, 'enhanced_extraction_radio'):
+            self.standard_extraction_radio.setChecked(True)
+    elif method == 'enhanced':
+        if hasattr(self, 'enhanced_extraction_radio') and hasattr(self, 'standard_extraction_radio'):
+            self.enhanced_extraction_radio.setChecked(True)
+
+def on_profile_select(self, event=None):
+    """Load the selected profile's prompt into the text area."""
+    # Get the current profile name from the combobox
+    name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
+
+    try:
+        update_profile_action = getattr(self, '_update_profile_delete_button_label', None)
+        if callable(update_profile_action):
+            update_profile_action(name)
+    except Exception:
+        pass
+
+    # Skips blank / unknown names; loads the last saved content and switches the
+    # extraction method for *_BeautifulSoup / *_html2text profiles.
+    outcome = prompt_profiles.select_profile(
+        self, name,
+        editor_text=lambda: self.prompt_text.toPlainText(),
+        replace_editor_text=lambda prompt: _replace_profile_prompt_text(self, prompt),
+        extraction_method_changed=lambda method: _sync_extraction_method_radios(self, method),
+    )
+    if outcome is None:
+        return
+
+    try:
+        refresh_review_button = getattr(self, '_refresh_progress_text_analysis_button', None)
+        if callable(refresh_review_button):
+            refresh_review_button()
+    except Exception:
+        pass
+
+def _rebuild_profile_menu(self, names, current):
+    # Rebuild without selection callbacks loading old saved content mid-rename.
+    if hasattr(self, 'profile_menu'):
+        self.profile_menu.blockSignals(True)
+        try:
+            self.profile_menu.clear()
+            self.profile_menu.addItems(names)
+            self.profile_menu.setCurrentIndex(self.profile_menu.findText(current))
+        finally:
+            self.profile_menu.blockSignals(False)
+
+def _restore_profile_menu(self, names, source_name, edit_text):
+    if hasattr(self, 'profile_menu'):
+        self.profile_menu.blockSignals(True)
+        try:
+            self.profile_menu.clear()
+            self.profile_menu.addItems(names)
+            self.profile_menu.setCurrentIndex(self.profile_menu.findText(source_name))
+            self.profile_menu.setEditText(edit_text)
+        finally:
+            self.profile_menu.blockSignals(False)
+
+def save_profile(self):
+    """Save the current prompt, renaming the selected custom profile if needed."""
+    from PySide6.QtWidgets import QMessageBox
+
+    # Get name from combobox or profile_var
+    name = self.profile_menu.currentText().strip() if hasattr(self, 'profile_menu') else self.profile_var.strip()
+
+    # PySide6: the prompt is read from the QTextEdit after the name checks
+    outcome = prompt_profiles.save_profile(
+        self, name, lambda: self.prompt_text.toPlainText(),
+        persist=lambda: self.save_profiles(),
+        rebuild_menu=lambda names, current: _rebuild_profile_menu(self, names, current),
+        restore_menu=lambda names, source_name, edit_text: _restore_profile_menu(self, names, source_name, edit_text),
+    )
+    if outcome.error:
+        if outcome.level == 'critical':
+            QMessageBox.critical(None, outcome.title, outcome.error)
+        else:
+            QMessageBox.warning(None, outcome.title, outcome.error)
+        return
+    if not outcome.ok:
+        return
+
+    try:
+        update_profile_action = getattr(self, '_update_profile_delete_button_label', None)
+        if callable(update_profile_action):
+            update_profile_action(name)
+    except Exception:
+        pass
+
+    # Log the save
+    if hasattr(self, 'append_log'):
+        self.append_log(f"✅ Profile '{name}' saved")
+
+    # Animate the save button to show confirmation
+    if hasattr(self, '_save_profile_btn'):
+        from PySide6.QtCore import QTimer
+        btn = self._save_profile_btn
+        original_text = btn.text()
+
+        # Play Windows notification sound
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except:
+            pass
+
+        # Change to "Saved!" with green background
+        btn.setText("✓ Saved!")
+        btn.setStyleSheet(
+            "QPushButton { "
+            "background-color: #28a745; "
+            "color: white; "
+            "font-weight: bold; "
+            "border-radius: 3px; "
+            "} "
+            "QPushButton:hover { background-color: #28a745; }"
+        )
+        btn.setEnabled(False)  # Disable button during animation
+
+        # Use a more robust approach with QTimer parent
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def restore_button():
+            try:
+                btn.setText(original_text)
+                btn.setStyleSheet("")  # Clear inline style
+                # Force Qt to recompute the style
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+                btn.update()
+                btn.setEnabled(True)
+            except Exception as e:
+                # Fallback: restore without animation
+                btn.setText(original_text)
+                btn.setStyleSheet("")
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+                btn.update()
+                btn.setEnabled(True)
+
+        timer.timeout.connect(restore_button)
+        timer.start(1000)
+
+        # Store timer reference to prevent garbage collection
+        self._save_profile_timer = timer
+
+def _confirm_profile_delete(self, kind, name):
+    """The Yes/No box of delete_profile: reset a built-in profile or delete a custom one."""
+    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtGui import QIcon
+    msg_box = QMessageBox()
+    if kind == 'reset':
+        msg_box.setWindowTitle("Reset Profile")
+        msg_box.setText(f"Reset built-in profile '{name}' to the latest default prompt?")
+    else:
+        msg_box.setWindowTitle("Delete")
+        msg_box.setText(f"Are you sure you want to delete profile '{name}'?")
+    msg_box.setIcon(QMessageBox.Question)
+    msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+    msg_box.setDefaultButton(QMessageBox.No)
+    try:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        if os.path.exists(icon_path):
+            msg_box.setWindowIcon(QIcon(icon_path))
+    except Exception:
+        pass
+    _center_messagebox_buttons(msg_box)
+    result = msg_box.exec()
+    return result == QMessageBox.Yes
+
+def _after_profile_reset(self, name):
+    # Refresh editor selection
+    try:
+        if hasattr(self, 'profile_menu'):
+            self.profile_menu.setCurrentText(name)
+    except Exception:
+        pass
+    try:
+        self.on_profile_select()
+    except Exception:
+        pass
+
+def _after_profile_delete(self, new):
+    if new is not None:
+        # Update combobox
+        self.profile_menu.clear()
+        self.profile_menu.addItems(list(self.prompt_profiles.keys()))
+        self.profile_menu.setCurrentText(new)
+
+        self.on_profile_select()
+    else:
+        # Clear combobox and text
+        self.profile_menu.clear()
+        self.prompt_text.clear()
+
+def delete_profile(self):
+    """Delete the selected profile (or reset built-in profiles to defaults)."""
+    from PySide6.QtWidgets import QMessageBox
+
+    # Get name from combobox or profile_var
+    name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
+
+    # Built-in/required profiles: treat delete as reset-to-default.
+    outcome = prompt_profiles.delete_or_reset_profile(
+        self, name,
+        confirm=lambda kind, profile: _confirm_profile_delete(self, kind, profile),
+        after_reset=lambda profile: _after_profile_reset(self, profile),
+        after_delete=lambda new: _after_profile_delete(self, new),
+        persist=lambda: self.save_profiles(),
+    )
+    if outcome.error:
+        if outcome.level == 'critical':
+            QMessageBox.critical(None, outcome.title, outcome.error)
+        else:
+            QMessageBox.warning(None, outcome.title, outcome.error)
+        return
+
+    if outcome.kind == 'deleted':
+        try:
+            update_profile_action = getattr(self, '_update_profile_delete_button_label', None)
+            if callable(update_profile_action):
+                update_profile_action()
+        except Exception:
+            pass
+
+def save_profiles(self):
+    """Persist prompt profiles, the active profile, and profile-name autofill."""
+    if getattr(self, '_config_restore_pending', False):
+        return False
+    from PySide6.QtWidgets import QMessageBox
+    try:
+        # Get current profile from combobox or profile_var
+        return prompt_profiles.write_profiles_to_config_file(
+            CONFIG_FILE,
+            lambda: self.prompt_profiles,
+            lambda: self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var,
+            lambda: self.config,
+            opener=_open_profile_file,
+        )
+    except Exception as e:
+        QMessageBox.critical(None, "Error", f"Failed to save profiles: {e}")
+        return False
+
+def import_profiles(self):
+    """Import profiles from a JSON file, merging into existing ones."""
+    from PySide6.QtWidgets import QMessageBox, QFileDialog
+
+    path, _ = QFileDialog.getOpenFileName(
+        None,
+        "Import Profiles",
+        "",
+        "JSON files (*.json);;All files (*.*)"
+    )
+
+    if not path:
+        return
+
+    try:
+        data = prompt_profiles.read_profiles_file(path, opener=_open_profile_file)
+
+        prompt_profiles.merge_imported_profiles(self, data)
+
+        # Update combobox
+        self.profile_menu.clear()
+        self.profile_menu.addItems(list(self.prompt_profiles.keys()))
+
+        QMessageBox.information(None, "Imported", f"Imported {len(data)} profiles.")
+    except Exception as e:
+        QMessageBox.critical(None, "Error", f"Failed to import profiles: {e}")
+
+def export_profiles(self):
+    """Export all profiles to a JSON file."""
+    from PySide6.QtWidgets import QMessageBox, QFileDialog
+
+    path, _ = QFileDialog.getSaveFileName(
+        None,
+        "Export Profiles",
+        "",
+        "JSON files (*.json);;All files (*.*)"
+    )
+
+    if not path:
+        return
+
+    # Add .json extension if not present
+    path = prompt_profiles.json_export_path(path)
+
+    try:
+        prompt_profiles.write_profiles_json(path, lambda: self.prompt_profiles, opener=_open_profile_file)
+        QMessageBox.information(None, "Exported", f"Profiles exported to {path}.")
+    except Exception as e:
+        QMessageBox.critical(None, "Error", f"Failed to export profiles: {e}")
+
+def _create_debug_controls_section(self, parent_frame):
+    """Create debug controls section at the bottom of Other Settings (PySide6)"""
+    from PySide6.QtWidgets import (
+        QGroupBox, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame
+    )
+    from PySide6.QtCore import Qt
+    
+    try:
+        grid = parent_frame.layout()
+        current_row = grid.rowCount()
+        
+        # Create a separator line above the debug section
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setStyleSheet("QFrame { color: #404040; margin: 10px 0; }")
+        
+        # Add separator spanning both columns
+        grid.addWidget(separator, current_row, 0, 1, 2)
+        current_row += 1
+        
+        # Create debug controls group box
+        debug_group = QGroupBox("🔧 Debug Controls")
+        debug_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 12pt;
+                color: #dc3545;
+                border: 2px solid #dc3545;
+                border-radius: 8px;
+                margin: 10px 5px;
+                padding-top: 35px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 15px;
+                top: 20px;
+                padding: 0 8px;
+                background-color: transparent;
+                color: #dc3545;
+                font-weight: bold;
+            }
+        """)
+        
+        debug_layout = QVBoxLayout(debug_group)
+        debug_layout.setSpacing(10)
+        debug_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Description label
+        desc_label = QLabel(
+            "Advanced debugging tools for troubleshooting environment variables and system configuration. "
+            "Only enable debug mode when investigating issues."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #888; font-size: 9pt; font-weight: normal; margin-bottom: 10px;")
+        debug_layout.addWidget(desc_label)
+        
+        # Button container
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(15)
+        
+        # Debug Mode Toggle Button
+        def _toggle_debug_mode():
+            try:
+                current_debug_state = getattr(self, 'config', {}).get('show_debug_buttons', False)
+                new_debug_state = not current_debug_state
+                
+                # Update config
+                if not hasattr(self, 'config'):
+                    self.config = {}
+                self.config['show_debug_buttons'] = new_debug_state
+                
+                # Set environment variable for debug mode
+                os.environ['DEBUG_MODE'] = '1' if new_debug_state else '0'
+                
+                # Save config
+                self.save_config(show_message=False)
+                
+                # Update button appearance
+                if new_debug_state:
+                    debug_toggle_btn.setText("🔍 Debug Mode: ON")
+                    debug_toggle_btn.setStyleSheet(
+                        "QPushButton { "
+                        "  background-color: #dc3545; "
+                        "  color: white; "
+                        "  padding: 10px 20px; "
+                        "  font-size: 11pt; "
+                        "  font-weight: bold; "
+                        "  border-radius: 6px; "
+                        "  border: none; "
+                        "} "
+                        "QPushButton:hover { background-color: #c82333; }"
+                        "QPushButton:pressed { background-color: #bd2130; }"
+                    )
+                    self.append_log("✅ [DEBUG MODE] Debug mode ENABLED - enhanced debugging active")
+                    self.append_log("🔧 [DEBUG MODE] Debug features now available:")
+                    self.append_log("   • Enhanced environment variable debugging in save functions")
+                    self.append_log("   • Comprehensive variable verification")
+                    self.append_log("   • Detailed before/after tracking")
+                    
+                    # Show debug action button
+                    debug_action_btn.setVisible(True)
+                    
+                else:
+                    debug_toggle_btn.setText("🔒 Debug Mode: OFF")
+                    debug_toggle_btn.setStyleSheet(
+                        "QPushButton { "
+                        "  background-color: #6c757d; "
+                        "  color: white; "
+                        "  padding: 10px 20px; "
+                        "  font-size: 11pt; "
+                        "  font-weight: bold; "
+                        "  border-radius: 6px; "
+                        "  border: none; "
+                        "} "
+                        "QPushButton:hover { background-color: #5a6268; }"
+                        "QPushButton:pressed { background-color: #545b62; }"
+                    )
+                    self.append_log("🔒 [DEBUG MODE] Debug mode DISABLED - standard logging only")
+                    
+                    # Hide debug action button
+                    debug_action_btn.setVisible(False)
+                
+            except Exception as e:
+                self.append_log(f"❌ [DEBUG MODE] Failed to toggle debug mode: {e}")
+        
+        def _run_debug_check():
+            try:
+                self.append_log("🔍 [DEBUG ACTION] Running comprehensive environment variable check...")
+                # First initialize if needed
+                init_success = self.initialize_environment_variables()
+                # Then debug
+                debug_success = self.debug_environment_variables(show_all=True)
+                
+                if init_success and debug_success:
+                    self.append_log("✅ [DEBUG ACTION] Environment variables are properly configured")
+                else:
+                    self.append_log("❌ [DEBUG ACTION] Environment variable issues detected - check log for details")
+                    
+            except Exception as e:
+                self.append_log(f"❌ [DEBUG ACTION] Debug check failed: {e}")
+        
+        # Create buttons
+        current_debug_state = getattr(self, 'config', {}).get('show_debug_buttons', False)
+        debug_toggle_btn = QPushButton("🔍 Debug Mode: ON" if current_debug_state else "🔒 Debug Mode: OFF")
+        debug_toggle_btn.clicked.connect(_toggle_debug_mode)
+        debug_toggle_btn.setMinimumHeight(45)
+        debug_toggle_btn.setMinimumWidth(180)
+        
+        if current_debug_state:
+            debug_toggle_btn.setStyleSheet(
+                "QPushButton { "
+                "  background-color: #dc3545; "
+                "  color: white; "
+                "  padding: 10px 20px; "
+                "  font-size: 11pt; "
+                "  font-weight: bold; "
+                "  border-radius: 6px; "
+                "  border: none; "
+                "} "
+                "QPushButton:hover { background-color: #c82333; }"
+                "QPushButton:pressed { background-color: #bd2130; }"
+            )
+        else:
+            debug_toggle_btn.setStyleSheet(
+                "QPushButton { "
+                "  background-color: #6c757d; "
+                "  color: white; "
+                "  padding: 10px 20px; "
+                "  font-size: 11pt; "
+                "  font-weight: bold; "
+                "  border-radius: 6px; "
+                "  border: none; "
+                "} "
+                "QPushButton:hover { background-color: #5a6268; }"
+                "QPushButton:pressed { background-color: #545b62; }"
+            )
+        
+        button_layout.addWidget(debug_toggle_btn)
+        
+        # Debug Action Button (only visible when debug mode is on)
+        debug_action_btn = QPushButton("🔍 Check Environment Variables")
+        debug_action_btn.clicked.connect(_run_debug_check)
+        debug_action_btn.setMinimumHeight(45)
+        debug_action_btn.setMinimumWidth(220)
+        debug_action_btn.setStyleSheet(
+            "QPushButton { "
+            "  background-color: #17a2b8; "
+            "  color: white; "
+            "  padding: 10px 20px; "
+            "  font-size: 11pt; "
+            "  font-weight: bold; "
+            "  border-radius: 6px; "
+            "  border: none; "
+            "} "
+            "QPushButton:hover { background-color: #138496; }"
+            "QPushButton:pressed { background-color: #117a8b; }"
+        )
+        
+        # Only show action button if debug mode is currently enabled
+        debug_action_btn.setVisible(current_debug_state)
+        button_layout.addWidget(debug_action_btn)
+        
+        # Add stretch to center buttons
+        button_layout.addStretch()
+        
+        debug_layout.addLayout(button_layout)
+        
+        # Store references for potential future use
+        self._debug_toggle_btn = debug_toggle_btn
+        self._debug_action_btn = debug_action_btn
+        
+        # Add debug group to the grid, spanning both columns at the bottom
+        grid.addWidget(debug_group, current_row, 0, 1, 2)
+        
+    except Exception as e:
+        print(f"Error creating debug controls section: {e}")

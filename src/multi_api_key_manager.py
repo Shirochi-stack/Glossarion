@@ -1,0 +1,11038 @@
+# multi_api_key_manager.py
+"""
+Multi API Key Manager for Glossarion
+Handles multiple API keys with round-robin load balancing and rate limit management
+"""
+
+import os
+import sys
+from request_parameters import normalize_request_parameters
+from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, context_presets, key_enabled_for_context,
+                          normalize_disabled_contexts)
+import key_pool_service
+
+# GUI imports - optional for Discord bot
+_HEADLESS_IMPORT = (
+    os.environ.get("GLOSSARION_HEADLESS_KEY_MANAGER", "0") == "1"
+    or "--run-glossary-extraction" in sys.argv
+)
+
+try:
+    if _HEADLESS_IMPORT:
+        raise ImportError("headless key-manager import requested")
+    from PySide6.QtCore import QMetaObject, Q_ARG
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit,
+        QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox,
+        QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
+        QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
+        QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox,
+        QStyledItemDelegate, QStyleOptionViewItem, QStyle, QToolButton
+    )
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect, QEvent
+    from PySide6.QtGui import (
+        QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform,
+        QColor, QPainter, QPen, QBrush, QConicalGradient, QCursor,
+    )
+    from spinning import create_icon_label, animate_icon
+    HAS_GUI = True
+except ImportError:
+    HAS_GUI = False
+    # Fallback dummy classes for non-GUI usage
+    QObject = object
+    QDialog = object
+    QWidget = object
+    QComboBox = object
+    QLabel = object
+    QPushButton = object
+    QLineEdit = object
+    QCheckBox = object
+    QSpinBox = object
+    QInputDialog = object
+    QTreeWidget = object
+    QTreeWidgetItem = object
+    QMainWindow = object
+    QTextEdit = object
+    QScrollArea = object
+    QFileDialog = object
+    QMessageBox = object
+    QComboBox = object
+    QVBoxLayout = object
+    QHBoxLayout = object
+    QGridLayout = object
+    QGroupBox = object
+    QDoubleSpinBox = object
+    QAbstractSpinBox = object
+    QAbstractItemView = object
+    QHeaderView = object
+    QMenu = object
+    QFrame = object
+    QCompleter = object
+    QDialogButtonBox = object
+    QStyleOptionViewItem = object
+    QStyle = object
+    QToolButton = object
+    QIcon = object
+    QFont = object
+    QPixmap = object
+    QShortcut = object
+    QKeySequence = object
+    QTransform = object
+    QPropertyAnimation = object
+    QEasingCurve = object
+    QMetaObject = None
+    Q_ARG = None
+    Signal = None
+    Qt = type("Qt", (), {"QueuedConnection": None, "AlignLeft": 0})
+    QTimer = type("QTimer", (), {"singleShot": staticmethod(lambda *args, **kwargs: None)})
+    Slot = lambda *args, **kwargs: (lambda func: func)
+    create_icon_label = lambda *args, **kwargs: None
+    animate_icon = lambda *args, **kwargs: None
+
+
+if HAS_GUI:
+    class _ModelComboCompletionPopupFilter(QObject):
+        """Route the custom arrow button to the ranked autocomplete popup."""
+
+        def __init__(self, combo, completer, completion_model, arrow_width=32):
+            super().__init__(combo)
+            self._combo = combo
+            self._completer = completer
+            self._completion_model = completion_model
+            self._arrow_width = max(1, int(arrow_width))
+            self._arrow_popup_open = False
+            self._completer.popup().installEventFilter(self)
+            self._completer.activated.connect(self._mark_popup_closed)
+
+        def _mark_popup_closed(self, *_args):
+            self._arrow_popup_open = False
+
+        def _jump_to_query(self, query):
+            """Select and reveal the best match after Qt lays out the popup."""
+            try:
+                popup = self._completer.popup()
+                popup_model = popup.model()
+                best_index = None
+                best_score = 99
+                for row in range(popup_model.rowCount()):
+                    index = popup_model.index(row, 0)
+                    value = str(index.data(Qt.DisplayRole) or '')
+                    lowered = value.casefold()
+                    if lowered == query:
+                        score = 0
+                    elif lowered.startswith(query):
+                        score = 1
+                    elif any(
+                        part.startswith(query) for part in lowered.split('/')[1:]
+                    ):
+                        score = 2
+                    elif query in lowered:
+                        score = 3
+                    else:
+                        continue
+                    if score < best_score:
+                        best_index = index
+                        best_score = score
+                        if score == 0:
+                            break
+                if best_index is not None:
+                    popup.setCurrentIndex(best_index)
+                    popup.scrollTo(best_index, QAbstractItemView.PositionAtTop)
+            except RuntimeError:
+                pass
+
+        def eventFilter(self, watched, event):
+            try:
+                popup = self._completer.popup()
+            except RuntimeError:
+                return False
+            if watched is popup:
+                if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                    self._arrow_popup_open = False
+                elif event.type() == QEvent.Hide:
+                    try:
+                        local_pos = self._combo.mapFromGlobal(QCursor.pos())
+                        over_arrow = (
+                            self._combo.rect().contains(local_pos)
+                            and local_pos.x() >= self._combo.width() - self._arrow_width
+                        )
+                        if not over_arrow:
+                            self._arrow_popup_open = False
+                    except RuntimeError:
+                        self._arrow_popup_open = False
+                return super().eventFilter(watched, event)
+
+            mouse_events = (
+                QEvent.MouseButtonPress,
+                QEvent.MouseButtonRelease,
+                QEvent.MouseButtonDblClick,
+            )
+            if watched is self._combo and event.type() in mouse_events:
+                try:
+                    if event.button() != Qt.LeftButton:
+                        return False
+                    position = event.position() if hasattr(event, 'position') else event.pos()
+                    if position.x() < self._combo.width() - self._arrow_width:
+                        return False
+
+                    # Consume release/double-click too; otherwise QComboBox
+                    # opens its native editable list over this completer and
+                    # renders the current editor text as a catalog row.
+                    if event.type() != QEvent.MouseButtonPress:
+                        event.accept()
+                        return True
+
+                    if self._arrow_popup_open:
+                        popup.hide()
+                        self._arrow_popup_open = False
+                    else:
+                        query = self._combo.currentText().strip().casefold()
+                        # Typing keeps the compact filtered completion model.
+                        # The arrow mirrors a normal combo: show every allowed
+                        # model, then jump to the first relevant catalog row.
+                        self._completion_model.set_search_text("")
+                        self._completer.setCompletionPrefix("")
+                        popup.setMinimumWidth(self._combo.width())
+                        self._completer.complete()
+                        self._arrow_popup_open = True
+                        if query:
+                            QTimer.singleShot(
+                                0,
+                                lambda target=query: self._jump_to_query(target),
+                            )
+                    event.accept()
+                    return True
+                except RuntimeError:
+                    return False
+            return super().eventFilter(watched, event)
+
+
+    class _ModelCatalogPollBorder(QWidget):
+        """Animated perimeter shown while an online model catalog is polled."""
+
+        def __init__(self, parent):
+            super().__init__(parent)
+            self._phase = 0
+            self.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setGeometry(parent.rect())
+            parent.installEventFilter(self)
+            self._timer = QTimer(self)
+            self._timer.setInterval(40)
+            self._timer.timeout.connect(self._advance)
+            self.hide()
+
+        def eventFilter(self, watched, event):
+            if watched is self.parentWidget() and event.type() in (QEvent.Resize, QEvent.Show):
+                self.setGeometry(watched.rect())
+            return super().eventFilter(watched, event)
+
+        def start(self):
+            parent = self.parentWidget()
+            if parent is not None:
+                self.setGeometry(parent.rect())
+            self.show()
+            self.raise_()
+            if not self._timer.isActive():
+                self._timer.start()
+            self.update()
+
+        def stop(self):
+            self._timer.stop()
+            self.hide()
+
+        def isAnimating(self):
+            return self._timer.isActive() and self.isVisible()
+
+        def _advance(self):
+            self._phase = (self._phase + 5) % 360
+            self.update()
+
+        def paintEvent(self, _event):
+            if self.width() < 4 or self.height() < 4:
+                return
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setBrush(Qt.NoBrush)
+            rect = self.rect().adjusted(1, 1, -2, -2)
+            painter.setPen(QPen(QColor(56, 189, 248, 72), 3))
+            painter.drawRoundedRect(rect, 5, 5)
+            gradient = QConicalGradient(rect.center(), self._phase)
+            gradient.setColorAt(0.00, QColor(103, 232, 249, 235))
+            gradient.setColorAt(0.16, QColor(167, 139, 250, 230))
+            gradient.setColorAt(0.38, QColor(59, 130, 246, 95))
+            gradient.setColorAt(0.70, QColor(30, 41, 59, 55))
+            gradient.setColorAt(0.88, QColor(34, 211, 238, 210))
+            gradient.setColorAt(1.00, QColor(103, 232, 249, 235))
+            painter.setPen(QPen(QBrush(gradient), 2))
+            painter.drawRoundedRect(rect, 5, 5)
+import json
+import threading
+import time
+import queue
+from typing import Dict, List, Optional, Tuple
+import requests
+from datetime import datetime, timedelta
+import logging
+from model_options import (
+    get_current_polled_provider_models,
+    get_model_options,
+    merge_saved_model_options,
+    model_has_polled_marker,
+    PolledModelKeys,
+    numbered_model_completion_values,
+)
+# Dialog for configuring per-key endpoint
+try:
+    if _HEADLESS_IMPORT:
+        raise ImportError("headless key-manager import requested")
+    from individual_endpoint_dialog import IndividualEndpointDialog, RequestParametersDialog
+except Exception:
+    IndividualEndpointDialog = None
+    RequestParametersDialog = None
+
+logger = logging.getLogger(__name__)
+
+
+_MODEL_POLL_MARKER_ROLE = Qt.UserRole + 73 if HAS_GUI else 73
+
+
+if HAS_GUI:
+    class _ModelPollMarkerDelegate(QStyledItemDelegate):
+        """Paint popup checks with an explicit compact check-to-text gap."""
+
+        def __init__(self, checked_icon, parent=None):
+            super().__init__(parent)
+            self._checked_icon = checked_icon
+
+        def set_checked_icon(self, checked_icon):
+            self._checked_icon = checked_icon
+
+        def paint(self, painter, option, index):
+            opt = QStyleOptionViewItem(option)
+            super().initStyleOption(opt, index)
+            text = opt.text
+            marked = bool(index.data(_MODEL_POLL_MARKER_ROLE))
+
+            opt.text = ""
+            opt.icon = QIcon()
+            style = opt.widget.style() if opt.widget is not None else QApplication.style()
+            style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+            content = option.rect.adjusted(4, 0, -4, 0)
+            text_left = content.left()
+            if marked:
+                icon_rect = QRect(
+                    content.left(),
+                    content.top() + max(0, (content.height() - 14) // 2),
+                    14,
+                    14,
+                )
+                self._checked_icon.paint(painter, icon_rect, Qt.AlignCenter)
+                text_left = icon_rect.right() + 3
+
+            text_rect = QRect(
+                text_left,
+                content.top(),
+                max(0, content.right() - text_left + 1),
+                content.height(),
+            )
+            color = (
+                QColor("#ffffff")
+                if option.state & QStyle.State_Selected
+                else opt.palette.text().color()
+            )
+            painter.save()
+            try:
+                painter.setPen(color)
+                painter.setFont(opt.font)
+                rendered = opt.fontMetrics.elidedText(
+                    text,
+                    Qt.ElideRight,
+                    text_rect.width(),
+                )
+                painter.drawText(
+                    text_rect,
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    rendered,
+                )
+            finally:
+                painter.restore()
+
+
+def _model_poll_marker_tooltip(model):
+    route = str(model or "").strip().casefold()
+    if route.startswith(("ollamapull/", "ollama/")):
+        return (
+            "Reported by the local Ollama model catalog during a recent poll. "
+            "This does not confirm the model is loaded in memory or running now."
+        )
+    if route.startswith("lmstudio/"):
+        return (
+            "Reported by the local LM Studio model catalog during a recent poll. "
+            "This does not confirm the model is loaded in memory or running now."
+        )
+    return "Confirmed by a successful provider poll within the past 7 days"
+
+
+def _update_model_field_poll_marker(combo):
+    """Render a compact transparent check inside an editable model field."""
+    if not HAS_GUI or combo is None or not combo.isEditable():
+        return
+    try:
+        line_edit = combo.lineEdit()
+        marker = getattr(combo, "_model_poll_marker_label", None)
+        if marker is None:
+            return
+        current_index = combo.currentIndex()
+        has_check = bool(
+            current_index >= 0
+            and combo.itemData(current_index, _MODEL_POLL_MARKER_ROLE)
+        )
+        marker.move(0, max(0, (line_edit.height() - marker.height()) // 2))
+        marker.setVisible(has_check)
+        margins = line_edit.textMargins()
+        desired_left = 11 if has_check else 0
+        if margins.left() != desired_left:
+            line_edit.setTextMargins(
+                desired_left,
+                margins.top(),
+                margins.right(),
+                margins.bottom(),
+            )
+        line_edit.setToolTip(
+            _model_poll_marker_tooltip(line_edit.text()) if has_check else ""
+        )
+        if has_check:
+            marker.raise_()
+    except RuntimeError:
+        pass
+
+
+def _install_model_field_poll_marker(combo, checked_icon):
+    """Install popup-only decoration and the compact field check overlay."""
+    if not HAS_GUI or combo is None or not combo.isEditable():
+        return
+    try:
+        popup = combo.view()
+        delegate = getattr(combo, "_model_poll_marker_delegate", None)
+        if delegate is None:
+            delegate = _ModelPollMarkerDelegate(checked_icon, popup)
+            popup.setItemDelegate(delegate)
+            combo._model_poll_marker_delegate = delegate
+        else:
+            delegate.set_checked_icon(checked_icon)
+
+        line_edit = combo.lineEdit()
+        marker = getattr(combo, "_model_poll_marker_label", None)
+        if marker is None:
+            marker = QLabel(line_edit)
+            marker.setFixedSize(14, 14)
+            marker.setAlignment(Qt.AlignCenter)
+            marker.setAutoFillBackground(False)
+            marker.setAttribute(Qt.WA_TransparentForMouseEvents)
+            marker.setStyleSheet(
+                "QLabel { background-color: transparent; border: none; padding: 0px; }"
+            )
+            combo._model_poll_marker_label = marker
+        marker.setPixmap(checked_icon.pixmap(QSize(14, 14)))
+
+        if not getattr(combo, "_model_poll_marker_connected", False):
+            combo.currentIndexChanged.connect(
+                lambda _index, target=combo: _update_model_field_poll_marker(target)
+            )
+            combo._model_poll_marker_connected = True
+        _update_model_field_poll_marker(combo)
+    except RuntimeError:
+        pass
+
+
+def preview_pool_button_stylesheet() -> str:
+    return (
+        "QPushButton#previewPoolButton { background-color: #0d6efd; color: white; "
+        "font-weight: bold; padding: 5px 15px; border: 1px solid #64a5ff; "
+        "border-radius: 3px; } "
+        "QPushButton#previewPoolButton:hover { background-color: #2f80ff; } "
+        "QPushButton#previewPoolButton:pressed { background-color: #0a58ca; }"
+    )
+
+
+def style_preview_pool_button(button):
+    """Apply the shared one-pool preview button style."""
+    if not HAS_GUI or button is None:
+        return button
+    button.setObjectName("previewPoolButton")
+    button.setStyleSheet(preview_pool_button_stylesheet())
+    try:
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+    except Exception:
+        pass
+    return button
+
+
+def open_multi_api_key_pool_preview(parent, translator_gui, pool_name: str):
+    """Open the Multi API Key Manager focused on one dedicated pool."""
+    return MultiAPIKeyDialog.show_dialog(parent, translator_gui, preview_pool=pool_name)
+
+
+def create_preview_pool_button(parent, translator_gui, pool_name: str, text: str, tooltip: str = None):
+    """Create a styled button that opens one dedicated key pool."""
+    button = QPushButton(text)
+    if tooltip:
+        button.setToolTip(tooltip)
+    style_preview_pool_button(button)
+    button.clicked.connect(lambda: open_multi_api_key_pool_preview(parent, translator_gui, pool_name))
+    return button
+
+
+# Models/prefixes that don't require an API key - delegates to UnifiedClient's authoritative list
+def _model_needs_api_key(model: str) -> bool:
+    """Return False for models that authenticate without an API key."""
+    return key_pool_service.model_needs_api_key(model)
+
+
+_DEFAULT_KEY_TEST_TIMEOUT_SECONDS = key_pool_service.DEFAULT_KEY_TEST_TIMEOUT_SECONDS
+_OPTIONAL_API_KEY_TEST_TIMEOUT_SECONDS = key_pool_service.OPTIONAL_API_KEY_TEST_TIMEOUT_SECONDS
+
+
+def _api_key_test_timeout_seconds(model: str) -> int:
+    """Give models with optional API keys more time to finish their test request."""
+    return key_pool_service.api_key_test_timeout_seconds(model, _model_needs_api_key)
+
+class RateLimitCache:
+    """Thread-safe rate limit cache"""
+    def __init__(self):
+        self._cache = {}  # key_id -> expiry_time
+        self._lock = threading.Lock()
+
+    def add_rate_limit(self, key_id: str, cooldown_seconds: int):
+        """Add a key to rate limit cache"""
+        with self._lock:
+            self._cache[key_id] = time.time() + cooldown_seconds
+            logger.info(f"Added {key_id} to rate limit cache for {cooldown_seconds}s")
+
+    def is_rate_limited(self, key_id: str) -> bool:
+        """Check if key is rate limited"""
+        with self._lock:
+            if key_id not in self._cache:
+                return False
+
+            if time.time() >= self._cache[key_id]:
+                # Expired, remove it
+                del self._cache[key_id]
+                return False
+
+            return True
+
+    def clear_expired(self):
+        """Remove expired entries"""
+        with self._lock:
+            current_time = time.time()
+            expired = [k for k, v in self._cache.items() if current_time >= v]
+            for k in expired:
+                del self._cache[k]
+
+    def get_remaining_cooldown(self, key_id: str) -> float:
+        """Get remaining cooldown time in seconds"""
+        with self._lock:
+            if key_id not in self._cache:
+                return 0
+            remaining = self._cache[key_id] - time.time()
+            return max(0, remaining)
+
+
+class APIKeyEntry:
+    """Enhanced API key entry with thread-safe operations"""
+    def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True,
+                 google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
+                 azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None,
+                 individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0,
+                 request_parameters: Optional[dict] = None, disabled_contexts=None):
+        self.api_key = api_key
+        self.model = model
+        self.cooldown = cooldown
+        self.enabled = enabled
+        self.disabled_contexts = normalize_disabled_contexts(disabled_contexts)
+        self.google_credentials = google_credentials  # Path to Google service account JSON
+        self.azure_endpoint = azure_endpoint  # Azure endpoint URL (only used if use_individual_endpoint is True)
+        self.google_region = google_region  # Google Cloud region (e.g., us-east5, us-central1)
+        self.azure_api_version = azure_api_version or '2025-01-01-preview'  # Azure API version
+        self.use_individual_endpoint = use_individual_endpoint  # Toggle to enable/disable individual endpoint
+        self.request_parameters = normalize_request_parameters(request_parameters)
+        # Individual output token limit for this key (overrides global limit when set)
+        try:
+            if individual_output_token_limit is not None and individual_output_token_limit != "" and int(individual_output_token_limit) > 0:
+                self.individual_output_token_limit = int(individual_output_token_limit)
+            else:
+                self.individual_output_token_limit = None
+        except (ValueError, TypeError):
+            self.individual_output_token_limit = None
+        # Individual key temperature for this key (overrides global temperature when set)
+        try:
+            if individual_key_temperature is not None and individual_key_temperature != "":
+                val = float(individual_key_temperature)
+                if val >= 0:
+                    self.individual_key_temperature = val
+                else:
+                    self.individual_key_temperature = None
+            else:
+                self.individual_key_temperature = None
+        except (ValueError, TypeError):
+            self.individual_key_temperature = None
+        # Per-key API call delay (0 uses global SEND_INTERVAL_SECONDS)
+        try:
+            v = float(api_call_delay) if api_call_delay not in (None, "") else 0.0
+            self.api_call_delay = v if v >= 0 else 0.0
+        except (ValueError, TypeError):
+            self.api_call_delay = 0.0
+        self.last_error_time = None
+        self.error_count = 0
+        self.success_count = 0
+        self.last_used_time = None
+        self.times_used = 0  # Incremented whenever this key is assigned/used
+        self.is_cooling_down = False
+
+        # Add lock for thread-safe modifications
+        self._lock = threading.Lock()
+
+        # Add test result storage
+        self.last_test_result = None
+        self.last_test_time = None
+        self.last_test_message = None
+
+    def is_available(self, context=None) -> bool:
+        with self._lock:
+            if not key_enabled_for_context(self, context):
+                return False
+            if self.last_error_time and self.is_cooling_down:
+                time_since_error = time.time() - self.last_error_time
+                if time_since_error < (getattr(self, 'error_cooldown', None) or self.cooldown):
+                    return False
+                else:
+                    self.is_cooling_down = False
+                    self.error_cooldown = None
+            return True
+
+    def mark_error(self, error_code: int = None, cooldown: float = None):
+        """``cooldown`` (seconds) overrides the key's own cooldown for this rate limit, e.g. a
+        provider's retry-after or an account mute that lasts hours."""
+        with self._lock:
+            self.error_count += 1
+            self.times_used = getattr(self, 'times_used', 0) + 1
+            self.last_error_time = time.time()
+            self.error_cooldown = float(cooldown) if error_code == 429 and cooldown else None
+            if error_code == 429:
+                self.is_cooling_down = True
+
+    def mark_success(self):
+        with self._lock:
+            self.success_count += 1
+            self.times_used = getattr(self, 'times_used', 0) + 1
+            self.last_used_time = time.time()
+            self.error_count = 0
+
+    def set_test_result(self, result: str, message: str = None):
+        """Store test result"""
+        with self._lock:
+            self.last_test_result = result
+            self.last_test_time = time.time()
+            self.last_test_message = message
+
+    def to_dict(self):
+        """Convert to dictionary for saving"""
+        return {
+            'api_key': self.api_key,
+            'model': self.model,
+            'cooldown': self.cooldown,
+            'enabled': self.enabled,
+            'disabled_contexts': list(self.disabled_contexts),
+            'google_credentials': self.google_credentials,
+            'azure_endpoint': self.azure_endpoint,
+            'google_region': self.google_region,
+            'azure_api_version': self.azure_api_version,
+            'use_individual_endpoint': self.use_individual_endpoint,
+            'request_parameters': dict(self.request_parameters),
+            'individual_output_token_limit': self.individual_output_token_limit,
+            'individual_key_temperature': self.individual_key_temperature,
+            'api_call_delay': getattr(self, 'api_call_delay', 0.0),
+            # Persist times used and test results
+            'times_used': getattr(self, 'times_used', 0),
+            'last_test_result': getattr(self, 'last_test_result', None),
+            'last_test_time': getattr(self, 'last_test_time', None),
+            'last_test_message': getattr(self, 'last_test_message', None)
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Create an APIKeyEntry from a saved dictionary (inverse of to_dict).
+
+        Tolerant of missing/extra fields so it can load keys exported by older
+        versions or hand-written JSON. Restores the persisted usage counter and
+        last-test metadata that to_dict() writes out.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("APIKeyEntry.from_dict expects a dict")
+        entry = cls(
+            api_key=data.get('api_key', ''),
+            model=data.get('model', ''),
+            cooldown=data.get('cooldown', 60),
+            enabled=data.get('enabled', True),
+            disabled_contexts=data.get('disabled_contexts'),
+            google_credentials=data.get('google_credentials'),
+            azure_endpoint=data.get('azure_endpoint'),
+            google_region=data.get('google_region'),
+            azure_api_version=data.get('azure_api_version'),
+            use_individual_endpoint=data.get('use_individual_endpoint', False),
+            request_parameters=data.get('request_parameters'),
+            individual_output_token_limit=data.get('individual_output_token_limit'),
+            individual_key_temperature=data.get('individual_key_temperature'),
+            api_call_delay=data.get('api_call_delay', 0.0),
+        )
+        # Restore persisted usage counter and last-test results
+        entry.times_used = data.get('times_used', 0) or 0
+        entry.last_test_result = data.get('last_test_result')
+        entry.last_test_time = data.get('last_test_time')
+        entry.last_test_message = data.get('last_test_message')
+        return entry
+
+
+class APIKeyPool:
+    """Thread-safe API key pool with proper rotation"""
+    def __init__(self, pool_name: str = "API key pool"):
+        self.pool_name = pool_name
+        self.keys: List[APIKeyEntry] = []
+        self.lock = threading.Lock()  # This already exists
+        self._rotation_index = 0
+        # Stateless/isolated callers cannot retain a thread assignment between
+        # requests. Track their configured rotation frequency at the pool level
+        # so dedicated pools obey the same "every N requests" setting.
+        self._request_rotation_index = None
+        self._request_rotation_count = 0
+        self._thread_assignments = {}
+        self._rate_limit_cache = RateLimitCache()
+        self._last_load_log_signature = None
+
+        # NEW LOCKS:
+        self.key_locks = {}  # Will be populated when keys are loaded
+        self.key_selection_lock = threading.Lock()  # For coordinating key selection across threads
+
+        # Track which keys are currently being used by which threads
+        self._keys_in_use = {}  # key_index -> set of thread_ids
+        self._usage_lock = threading.Lock()
+
+        # Stop flag callback - can be set by UnifiedClient to check for stop requests
+        self._stop_check_callback = None
+
+    def set_stop_check_callback(self, callback):
+        """Set a callback function to check if stop has been requested.
+        The callback should return True if stop is requested, False otherwise.
+        """
+        self._stop_check_callback = callback
+
+    def _is_stop_requested(self) -> bool:
+        """Check if stop has been requested via callback or global flag."""
+        # Check callback first if set
+        if self._stop_check_callback is not None:
+            try:
+                if self._stop_check_callback():
+                    return True
+            except Exception:
+                pass
+
+        # Also check the module-level stop flag from unified_api_client if available
+        try:
+            from unified_api_client import is_stop_requested
+            if is_stop_requested():
+                return True
+        except ImportError:
+            pass
+
+        return False
+
+    def load_from_list(self, key_list: List[dict]):
+        with self.lock:
+            # Preserve existing counters by mapping old entries by (api_key, model)
+            old_map = {}
+            for old in getattr(self, 'keys', []):
+                key = (getattr(old, 'api_key', ''), getattr(old, 'model', ''))
+                old_map[key] = old
+
+            self.keys.clear()
+            self.key_locks.clear()  # Clear existing locks
+
+            for i, key_data in enumerate(key_list):
+                api_key = key_data.get('api_key', '')
+                model = key_data.get('model', '')
+                entry = APIKeyEntry(
+                    api_key=api_key,
+                    model=model,
+                    cooldown=key_data.get('cooldown', 60),
+                    enabled=key_data.get('enabled', True),
+                    disabled_contexts=key_data.get('disabled_contexts'),
+                    google_credentials=key_data.get('google_credentials'),
+                    azure_endpoint=key_data.get('azure_endpoint'),
+                    google_region=key_data.get('google_region'),
+                    azure_api_version=key_data.get('azure_api_version'),
+                    use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+                    request_parameters=key_data.get('request_parameters'),
+                    individual_output_token_limit=key_data.get('individual_output_token_limit'),
+                    individual_key_temperature=key_data.get('individual_key_temperature'),
+                    api_call_delay=key_data.get('api_call_delay', 0.0)
+                )
+                # Load saved test results and usage counter
+                entry.times_used = key_data.get('times_used', 0)
+                entry.last_test_result = key_data.get('last_test_result', None)
+                entry.last_test_time = key_data.get('last_test_time', None)
+                entry.last_test_message = key_data.get('last_test_message', None)
+                # Restore counters if we had this key before
+                old = old_map.get((api_key, model))
+                if old is not None:
+                    try:
+                        entry.success_count = getattr(old, 'success_count', entry.success_count)
+                        entry.error_count = getattr(old, 'error_count', entry.error_count)
+                        entry.times_used = getattr(old, 'times_used', getattr(old, 'success_count', 0) + getattr(old, 'error_count', 0))
+                        entry.last_used_time = getattr(old, 'last_used_time', None)
+                        entry.last_error_time = getattr(old, 'last_error_time', None)
+                        entry.is_cooling_down = getattr(old, 'is_cooling_down', False)
+                        entry.last_test_result = getattr(old, 'last_test_result', None)
+                        entry.last_test_time = getattr(old, 'last_test_time', None)
+                        entry.last_test_message = getattr(old, 'last_test_message', None)
+                    except Exception:
+                        pass
+                self.keys.append(entry)
+                # Create a lock for each key
+                self.key_locks[i] = threading.Lock()
+
+            # Keep rotation index if possible
+            if getattr(self, '_rotation_index', 0) >= len(self.keys):
+                self._rotation_index = 0
+            else:
+                self._rotation_index = getattr(self, '_rotation_index', 0)
+            self._keys_in_use.clear()
+            enabled_count = sum(1 for key in self.keys if getattr(key, 'enabled', True))
+            configured_count = len(self.keys)
+            disabled_count = configured_count - enabled_count
+            pool_name = getattr(self, 'pool_name', None) or "API key pool"
+            log_signature = (
+                pool_name,
+                tuple(
+                    (
+                        getattr(key, 'model', ''),
+                        bool(getattr(key, 'api_key', '')),
+                        bool(getattr(key, 'enabled', True)),
+                        int(getattr(key, 'cooldown', 0) or 0),
+                        bool(getattr(key, 'use_individual_endpoint', False)),
+                    )
+                    for key in self.keys
+                ),
+            )
+            if log_signature != getattr(self, '_last_load_log_signature', None):
+                self._request_rotation_index = None
+                self._request_rotation_count = 0
+            elif (
+                self._request_rotation_index is not None
+                and self._request_rotation_index >= len(self.keys)
+            ):
+                self._request_rotation_index = None
+                self._request_rotation_count = 0
+            disabled_note = f", {disabled_count} disabled" if disabled_count else ""
+            log_message = (
+                f"{pool_name}: loaded {enabled_count} enabled / {configured_count} configured "
+                f"API keys{disabled_note} (individual locks; counters preserved)"
+            )
+            if log_signature != getattr(self, '_last_load_log_signature', None):
+                logger.info(log_message)
+                self._last_load_log_signature = log_signature
+            else:
+                logger.debug(f"{log_message}; unchanged reload suppressed")
+
+    def get_key_for_thread(self, force_rotation: bool = False,
+                          rotation_frequency: int = 1, context=None) -> Optional[Tuple[APIKeyEntry, int, str]]:
+        """Get a key for the current thread with proper rotation logic"""
+        # Check for stop request at start
+        if self._is_stop_requested():
+            logger.info("Stop requested during key selection, returning None")
+            return None
+
+        thread_id = threading.current_thread().ident
+        thread_name = threading.current_thread().name
+
+        # Clear expired rate limits first
+        self._rate_limit_cache.clear_expired()
+
+        # Use key_selection_lock for the entire selection process
+        with self.key_selection_lock:
+            if not self.keys:
+                return None
+
+            # Check if thread already has an assignment
+            if thread_id in self._thread_assignments and not force_rotation:
+                key_index, assignment_time = self._thread_assignments[thread_id]
+                if key_index < len(self.keys):
+                    key = self.keys[key_index]
+                    key_id = f"Key#{key_index+1} ({key.model})"
+
+                    # Check if the assigned key is still available
+                    # Use the key-specific lock for checking availability
+                    with self.key_locks.get(key_index, threading.Lock()):
+                        if key.is_available(context) and not self._rate_limit_cache.is_rate_limited(key_id):
+                            logger.debug(f"[Thread-{thread_name}] Reusing assigned {key_id}")
+
+                            # Track usage
+                            with self._usage_lock:
+                                if key_index not in self._keys_in_use:
+                                    self._keys_in_use[key_index] = set()
+                                self._keys_in_use[key_index].add(thread_id)
+
+                            return key, key_index, key_id
+                        else:
+                            # Remove invalid assignment
+                            del self._thread_assignments[thread_id]
+
+            # Find next available key using round-robin
+            start_index = self._rotation_index
+            attempts = 0
+
+            while attempts < len(self.keys):
+                # Check for stop request in loop
+                if self._is_stop_requested():
+                    logger.info("Stop requested during key rotation loop")
+                    return None
+
+                # Get current index and immediately increment for next thread
+                key_index = self._rotation_index
+                self._rotation_index = (self._rotation_index + 1) % len(self.keys)
+
+                key = self.keys[key_index]
+                key_id = f"Key#{key_index+1} ({key.model})"
+
+                # Use key-specific lock when checking and modifying key state
+                with self.key_locks.get(key_index, threading.Lock()):
+                    if key.is_available(context) and not self._rate_limit_cache.is_rate_limited(key_id):
+                        # Assign to thread
+                        self._thread_assignments[thread_id] = (key_index, time.time())
+
+                        # Increment usage counter on assignment
+                        try:
+                            key.times_used += 1
+                        except Exception:
+                            pass
+
+                        # Track usage
+                        with self._usage_lock:
+                            if key_index not in self._keys_in_use:
+                                self._keys_in_use[key_index] = set()
+                            self._keys_in_use[key_index].add(thread_id)
+
+                        # Clean up old assignments
+                        current_time = time.time()
+                        expired_threads = [
+                            tid for tid, (_, ts) in self._thread_assignments.items()
+                            if current_time - ts > 310  # 5 minutes
+                        ]
+                        for tid in expired_threads:
+                            del self._thread_assignments[tid]
+                            # Remove from usage tracking
+                            with self._usage_lock:
+                                for k_idx in list(self._keys_in_use.keys()):
+                                    self._keys_in_use[k_idx].discard(tid)
+                                    if not self._keys_in_use[k_idx]:
+                                        del self._keys_in_use[k_idx]
+
+                        if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                            try:
+                                from unified_api_client import defer_batch_log
+                                defer_batch_log(f"[Thread-{thread_name}] 🔑 Assigned {key_id}")
+                            except ImportError:
+                                print(f"[Thread-{thread_name}] 🔑 Assigned {key_id}")
+                        # logger.debug("💤 Pausing briefly to improve retry responsiveness after key assignment")
+                        time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers
+                        return key, key_index, key_id
+
+                attempts += 1
+
+            # No available keys - find one with shortest cooldown
+            best_key_index = None
+            min_cooldown = float('inf')
+
+            for i, key in enumerate(self.keys):
+                if key_enabled_for_context(key, context):  # At least check if enabled
+                    key_id = f"Key#{i+1} ({key.model})"
+                    remaining = self._rate_limit_cache.get_remaining_cooldown(key_id)
+
+                    # Also check key's own cooldown
+                    if key.is_cooling_down and key.last_error_time:
+                        key_cooldown = key.cooldown - (time.time() - key.last_error_time)
+                        remaining = max(remaining, key_cooldown)
+
+                    if remaining < min_cooldown:
+                        min_cooldown = remaining
+                        best_key_index = i
+
+            if best_key_index is not None:
+                key = self.keys[best_key_index]
+                key_id = f"Key#{best_key_index+1} ({key.model})"
+                logger.warning(f"[Thread-{thread_name}] All keys on cooldown, using {key_id} (cooldown: {min_cooldown:.1f}s)")
+                self._thread_assignments[thread_id] = (best_key_index, time.time())
+                logger.debug("💤 Pausing briefly to improve retry responsiveness after cooldown key selection")
+                time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers
+                return key, best_key_index, key_id
+
+            logger.error(f"[Thread-{thread_name}] No keys available at all")
+            return None
+
+    def get_key_for_request(self, force_rotation: bool = False,
+                            rotation_frequency: int = 1, context=None) -> Optional[Tuple[APIKeyEntry, int, str]]:
+        """Select a key for a stateless request while respecting rotation frequency.
+
+        Dedicated batch/parallel requests use a fresh temporary client for each
+        call, so thread assignments cannot carry their request count. This
+        pool-level selector keeps one count shared by those calls. A key that
+        enters cooldown is replaced immediately, regardless of the configured
+        frequency.
+        """
+        if self._is_stop_requested():
+            logger.info("Stop requested during request key selection, returning None")
+            return None
+
+        try:
+            frequency = max(1, int(rotation_frequency or 1))
+        except (TypeError, ValueError):
+            frequency = 1
+
+        self._rate_limit_cache.clear_expired()
+        with self.key_selection_lock:
+            if not self.keys:
+                return None
+
+            current_index = self._request_rotation_index
+            current_available = False
+            if current_index is not None and 0 <= current_index < len(self.keys):
+                current_key = self.keys[current_index]
+                current_key_id = f"Key#{current_index+1} ({current_key.model})"
+                with self.key_locks.get(current_index, threading.Lock()):
+                    current_available = (
+                        current_key.is_available(context)
+                        and not self._rate_limit_cache.is_rate_limited(current_key_id)
+                    )
+
+            frequency_reached = (
+                bool(force_rotation)
+                and self._request_rotation_count >= frequency
+            )
+            if current_available and not frequency_reached:
+                self._request_rotation_count += 1
+                return current_key, current_index, current_key_id
+
+            attempts = 0
+            while attempts < len(self.keys):
+                if self._is_stop_requested():
+                    logger.info("Stop requested during request key rotation loop")
+                    return None
+
+                key_index = self._rotation_index
+                self._rotation_index = (self._rotation_index + 1) % len(self.keys)
+                key = self.keys[key_index]
+                key_id = f"Key#{key_index+1} ({key.model})"
+
+                with self.key_locks.get(key_index, threading.Lock()):
+                    if key.is_available(context) and not self._rate_limit_cache.is_rate_limited(key_id):
+                        self._request_rotation_index = key_index
+                        self._request_rotation_count = 1
+                        return key, key_index, key_id
+                attempts += 1
+
+            self._request_rotation_index = None
+            self._request_rotation_count = 0
+            logger.warning(f"[{self.pool_name}] No request keys are currently available")
+            return None
+
+    def mark_key_error(self, key_index: int, error_code: int = None, cooldown: float = None):
+        """Mark a key as having an error (thread-safe with key-specific lock).
+
+        A 429 rests the key for ``cooldown`` seconds when given (the provider's own wait),
+        else for the key's configured cooldown; the other keys keep serving meanwhile."""
+        if 0 <= key_index < len(self.keys):
+            # Use key-specific lock for this operation
+            with self.key_locks.get(key_index, threading.Lock()):
+                # Mark error on the key itself
+                self.keys[key_index].mark_error(error_code, cooldown=cooldown)
+
+                # Add to rate limit cache if it's a 429
+                if error_code == 429:
+                    key = self.keys[key_index]
+                    key_id = f"Key#{key_index+1} ({key.model})"
+                    self._rate_limit_cache.add_rate_limit(key_id, cooldown or key.cooldown)
+
+                    logger.debug(f"Marked key {key_id} with an error code")
+                    time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers
+                    logger.debug("💤 Pausing briefly to improve retry responsiveness after marking key error")
+
+    def mark_key_success(self, key_index: int):
+        """Mark a key as successful (thread-safe with key-specific lock)"""
+        if 0 <= key_index < len(self.keys):
+            # Use key-specific lock for this operation
+            with self.key_locks.get(key_index, threading.Lock()):
+                self.keys[key_index].mark_success()
+
+                # logger.debug(f"Marked key {key_index} ({self.keys[key_index].model}) as successful")
+
+    def release_thread_assignment(self, thread_id: int = None):
+        """Release key assignment for a thread"""
+        if thread_id is None:
+            thread_id = threading.current_thread().ident
+
+        with self.key_selection_lock:
+            # Remove from assignments
+            if thread_id in self._thread_assignments:
+                key_index, _ = self._thread_assignments[thread_id]
+                del self._thread_assignments[thread_id]
+
+                # Remove from usage tracking
+                with self._usage_lock:
+                    if key_index in self._keys_in_use:
+                        self._keys_in_use[key_index].discard(thread_id)
+                        if not self._keys_in_use[key_index]:
+                            del self._keys_in_use[key_index]
+
+                # logger.debug(f"Released key assignment for thread {thread_id}")
+
+    def get_all_keys(self) -> List[APIKeyEntry]:
+        """Get all keys in the pool"""
+        with self.lock:
+            return self.keys.copy()
+
+    @property
+    def current_index(self):
+        """Get the current rotation index"""
+        with self.lock:
+            return self._rotation_index
+
+    @current_index.setter
+    def current_index(self, value: int):
+        """Set the current rotation index"""
+        with self.lock:
+            if self.keys:
+                self._rotation_index = value % len(self.keys)
+            else:
+                self._rotation_index = 0
+
+    def add_key(self, key_entry: APIKeyEntry):
+        """Add a new key to the pool"""
+        with self.lock:
+            self.keys.append(key_entry)
+            logger.info(f"Added key for model {key_entry.model} to pool")
+
+    def remove_key(self, index: int):
+        """Remove a key from the pool by index"""
+        with self.lock:
+            if 0 <= index < len(self.keys):
+                removed_key = self.keys.pop(index)
+                # Clean up any thread assignments for this key
+                threads_to_remove = []
+                for thread_id, (key_index, _) in self._thread_assignments.items():
+                    if key_index == index:
+                        threads_to_remove.append(thread_id)
+                    elif key_index > index:
+                        # Adjust indices for keys after the removed one
+                        self._thread_assignments[thread_id] = (key_index - 1, self._thread_assignments[thread_id][1])
+
+                for thread_id in threads_to_remove:
+                    del self._thread_assignments[thread_id]
+
+                # Reset rotation index if needed
+                if self._rotation_index >= len(self.keys) and len(self.keys) > 0:
+                    self._rotation_index = 0
+
+                logger.info(f"Removed key for model {removed_key.model} from pool")
+
+
+class RefusalPatternsDialog(QDialog):
+    """Dialog for managing AI refusal patterns"""
+
+    def __init__(self, parent, translator_gui):
+        super().__init__(parent)
+        self.translator_gui = translator_gui
+        self.setWindowTitle("Manage Refusal Patterns")
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
+
+        # Set dialog size based on screen size (35% width, 40% height)
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().geometry()
+        dialog_width = int(screen.width() * 0.25)
+        dialog_height = int(screen.height() * 0.4)
+        self.resize(dialog_width, dialog_height)
+
+        # Set window icon
+        self._set_icon()
+
+        # Load patterns from config
+        self.patterns = self._load_patterns()
+        self.disable_refusal_checks = self._load_disable_refusal_checks()
+        self.refusal_length_limit = self._load_refusal_length_limit()
+
+        self._create_dialog()
+
+    def closeEvent(self, event):
+        """Hide instead of closing."""
+        event.ignore()
+        self.hide()
+
+    def _set_icon(self):
+        """Set Halgakos.ico as window icon if available."""
+        try:
+            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                # Load icon with high quality preservation
+                icon = QIcon(ico_path)
+                # Enable high DPI pixmaps for better quality
+                if hasattr(icon, 'setIsMask'):
+                    icon.setIsMask(False)
+                self.setWindowIcon(icon)
+        except Exception:
+            pass
+
+    def _load_patterns(self):
+        """Load refusal patterns from config"""
+        if hasattr(self.translator_gui, 'config'):
+            return key_pool_service.load_refusal_patterns(self.translator_gui.config)
+        return self._get_default_patterns()
+
+    def _get_default_patterns(self):
+        """Get default refusal patterns"""
+        return key_pool_service.default_refusal_patterns()
+
+    def _load_disable_refusal_checks(self):
+        """Load refusal check disable toggle from config"""
+        try:
+            if hasattr(self.translator_gui, 'config'):
+                return key_pool_service.load_disable_refusal_checks(self.translator_gui.config)
+        except Exception:
+            pass
+        return True
+
+    def _load_refusal_length_limit(self):
+        """Load refusal length limit from config"""
+        try:
+            if hasattr(self.translator_gui, 'config'):
+                return key_pool_service.load_refusal_length_limit(self.translator_gui.config)
+        except Exception:
+            pass
+        return 1000
+
+    def _reload_from_config(self):
+        """Reload patterns/toggles from config and refresh UI controls."""
+        try:
+            self.patterns = self._load_patterns()
+            self.disable_refusal_checks = self._load_disable_refusal_checks()
+            self.refusal_length_limit = self._load_refusal_length_limit()
+            self._refresh_tree()
+            if hasattr(self, 'disable_refusal_checks_cb'):
+                self.disable_refusal_checks_cb.setChecked(bool(self.disable_refusal_checks))
+            if hasattr(self.translator_gui, 'disable_refusal_checks_var'):
+                self.translator_gui.disable_refusal_checks_var = bool(self.disable_refusal_checks)
+            if hasattr(self, 'refusal_length_limit_entry'):
+                self.refusal_length_limit_entry.setText(str(self.refusal_length_limit))
+            if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
+                self.translator_gui.refusal_pattern_length_limit_var = int(self.refusal_length_limit)
+        except Exception:
+            pass
+
+    def _load_halgakos_pixmap(self, logical_size: int = 36):
+        """Load the Halgakos icon as a HiDPI-aware pixmap scaled to logical_size."""
+        try:
+            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if not os.path.isfile(ico_path):
+                return None
+            pixmap = QPixmap(ico_path)
+            if pixmap.isNull():
+                return None
+            screen = QApplication.primaryScreen()
+            dpr = screen.devicePixelRatio() if screen else 1.0
+            target = int(logical_size * dpr)
+            scaled = pixmap.scaled(
+                target,
+                target,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            scaled.setDevicePixelRatio(dpr)
+            return scaled
+        except Exception:
+            return None
+
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+        """)
+
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def position_checkmark():
+            try:
+                if checkmark:
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+
+        def update_checkmark():
+            try:
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                pass
+
+        checkbox.stateChanged.connect(update_checkmark)
+        checkbox._update_checkmark = update_checkmark
+
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(0, safe_init)
+
+        return checkbox
+
+    def _create_dialog(self):
+        """Create the dialog UI"""
+        # Apply stylesheet matching other dialogs
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 5px 15px;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                background-color: #3a3a3a;
+                border-color: #5a5a5a;
+            }
+            QPushButton:pressed {
+                background-color: #1a1a1a;
+            }
+            QLineEdit {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QTreeWidget {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                selection-background-color: #4a7ba7;
+            }
+            QTreeWidget::item:hover {
+                background-color: #3a3a3a;
+            }
+            QHeaderView::section {
+                background-color: #252525;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                padding: 4px;
+            }
+        """)
+
+        # Main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        # Title with icons on both sides
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(15)
+        title_layout.setAlignment(Qt.AlignCenter)
+
+        # Left Icon
+        icon_label_left = QLabel()
+        left_pixmap = self._load_halgakos_pixmap(36)
+        if left_pixmap:
+            icon_label_left.setPixmap(left_pixmap)
+            icon_label_left.setFixedSize(36, 36)
+        icon_label_left.setAlignment(Qt.AlignCenter)
+
+        title_layout.addWidget(icon_label_left, 0, Qt.AlignVCenter)
+
+        # Title text
+        title_label = QLabel("Refusal Pattern Management")
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(title_label, 0, Qt.AlignVCenter)
+
+        # Right Icon (mirror of left)
+        icon_label_right = QLabel()
+        right_pixmap = self._load_halgakos_pixmap(36)
+        if right_pixmap:
+            icon_label_right.setPixmap(right_pixmap)
+            icon_label_right.setFixedSize(36, 36)
+        icon_label_right.setAlignment(Qt.AlignCenter)
+
+        title_layout.addWidget(icon_label_right, 0, Qt.AlignVCenter)
+
+        main_layout.addWidget(title_container)
+
+        # Description
+        desc_label = QLabel(
+            "Patterns used to detect AI refusals in responses. "
+            "When detected, fallback keys will be attempted.\n"
+            "Patterns are checked on responses under a configurable length (case-insensitive).")
+        desc_label.setStyleSheet("color: gray; padding: 5px 0px 10px 0px;")
+        desc_label.setWordWrap(True)
+        main_layout.addWidget(desc_label)
+
+
+        # Controls row: disable toggle + length limit
+        controls_row = QWidget()
+        controls_h = QHBoxLayout(controls_row)
+        controls_h.setContentsMargins(0, 0, 0, 10)
+
+        self.disable_refusal_checks_cb = self._create_styled_checkbox("Disable refusal pattern checks")
+        try:
+            self.disable_refusal_checks_cb.setChecked(bool(self.disable_refusal_checks))
+        except Exception:
+            pass
+        controls_h.addWidget(self.disable_refusal_checks_cb)
+
+
+        controls_h.addSpacing(12)
+        controls_h.addWidget(QLabel("Length limit:"))
+        self.refusal_length_limit_entry = QLineEdit()
+        self.refusal_length_limit_entry.setFixedWidth(80)
+        try:
+            self.refusal_length_limit_entry.setText(str(self.refusal_length_limit))
+        except Exception:
+            self.refusal_length_limit_entry.setText("1000")
+        controls_h.addWidget(self.refusal_length_limit_entry)
+        controls_h.addWidget(QLabel("chars"))
+        controls_h.addStretch()
+
+        load_btn = QPushButton("📂 Load Patterns")
+        load_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3d5a80;
+                color: #ffffff;
+                padding: 5px 10px;
+                border: 1px solid #2c4160;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #4e6e96;
+                border-color: #3d5a80;
+            }
+            QPushButton:pressed {
+                background-color: #2c4160;
+            }
+        """)
+        load_btn.setToolTip("Import patterns from a text file (one pattern per line)")
+        load_btn.clicked.connect(self._load_patterns_from_file)
+        self._load_btn = load_btn
+        controls_h.addWidget(load_btn)
+
+        main_layout.addWidget(controls_row)
+
+        # Tree widget for patterns
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Pattern"])
+        self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.tree.header().setStretchLastSection(True)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree.setStyleSheet("""
+            QTreeWidget::item { min-height: 22px; padding: 2px 0px; }
+            QTreeWidget QLineEdit {
+                color: #ffffff;
+                background-color: #3a3a4a;
+                border: 1px solid #5a9fd4;
+                padding: 4px 6px;
+                min-height: 24px;
+                font-size: 10pt;
+            }
+        """)
+        # Connect all editing signals eagerly
+        self.tree.itemDoubleClicked.connect(self._on_double_click)
+        self.tree.itemChanged.connect(self._on_item_edited)
+        self.tree.itemDelegate().closeEditor.connect(self._on_editor_closed)
+        main_layout.addWidget(self.tree)
+
+        # Load patterns into tree
+        self._refresh_tree()
+
+        # Add/Edit/Delete buttons
+        button_frame = QWidget()
+        button_layout = QHBoxLayout(button_frame)
+        button_layout.setContentsMargins(0, 10, 0, 0)
+
+        add_btn = QPushButton("➕ Add Pattern")
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a5c1b;
+                color: #ffffff;
+                padding: 6px 12px;
+                border: 1px solid #145016;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #237024;
+                border-color: #1a5c1b;
+            }
+            QPushButton:pressed {
+                background-color: #0f3d10;
+            }
+        """)
+        add_btn.clicked.connect(self._add_pattern)
+        button_layout.addWidget(add_btn)
+
+        edit_btn = QPushButton("✏️ Edit Selected")
+        edit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2c5278;
+                color: #ffffff;
+                padding: 6px 12px;
+                border: 1px solid #1e3a54;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3a6a94;
+                border-color: #2c5278;
+            }
+            QPushButton:pressed {
+                background-color: #1e3a54;
+            }
+        """)
+        edit_btn.clicked.connect(self._edit_pattern)
+        button_layout.addWidget(edit_btn)
+
+        delete_btn = QPushButton("🗑️ Delete Selected")
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8b2e2e;
+                color: #ffffff;
+                padding: 6px 12px;
+                border: 1px solid #6b1f1f;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #a73a3a;
+                border-color: #8b2e2e;
+            }
+            QPushButton:pressed {
+                background-color: #5c1e1e;
+            }
+        """)
+        delete_btn.clicked.connect(self._delete_patterns)
+        button_layout.addWidget(delete_btn)
+
+        button_layout.addStretch()
+
+        reset_btn = QPushButton("🔄 Reset to Defaults")
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6b5a1e;
+                color: #ffffff;
+                padding: 6px 12px;
+                border: 1px solid #4d4116;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #8b7528;
+                border-color: #6b5a1e;
+            }
+            QPushButton:pressed {
+                background-color: #4d4116;
+            }
+        """)
+        reset_btn.clicked.connect(self._reset_to_defaults)
+        button_layout.addWidget(reset_btn)
+
+        main_layout.addWidget(button_frame)
+
+        # Save/Cancel buttons (centered)
+        save_cancel_frame = QWidget()
+        save_cancel_layout = QHBoxLayout(save_cancel_frame)
+        save_cancel_layout.setContentsMargins(0, 10, 0, 0)
+        save_cancel_layout.addStretch()
+
+
+        cancel_btn = QPushButton("Close")
+        cancel_btn.setMinimumHeight(38)
+        cancel_btn.setMinimumWidth(100)
+        cancel_btn.clicked.connect(self.reject)
+        save_cancel_layout.addWidget(cancel_btn)
+
+        save_btn = QPushButton("Save Refusal Patterns")
+        save_btn.setMinimumHeight(38)
+        save_btn.setMinimumWidth(200)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a7ba7;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5a9fd4;
+            }
+        """)
+        save_btn.clicked.connect(self._save_and_close)
+        self._save_btn = save_btn
+        save_cancel_layout.addWidget(save_btn)
+
+        save_cancel_layout.addStretch()
+
+        main_layout.addWidget(save_cancel_frame)
+
+    def _on_double_click(self, item, column):
+        """Edit pattern on double-click"""
+        if item:
+            old_pattern = item.text(0)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            item.setData(0, Qt.UserRole, "edit")
+            item.setData(0, Qt.UserRole + 1, old_pattern)
+            self.tree.editItem(item, 0)
+
+    def _show_context_menu(self, position):
+        """Show right-click context menu for tree items"""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { menu-scrollable: 1; } QMenu::icon { width: 0px; }")
+
+        add_action = menu.addAction("➕ Add New Pattern")
+        add_action.triggered.connect(self._add_pattern)
+
+        item = self.tree.itemAt(position)
+        selected = self.tree.selectedItems()
+
+        if item:
+            menu.addSeparator()
+
+            edit_action = menu.addAction("✏️ Edit")
+            edit_action.triggered.connect(self._edit_pattern)
+
+            delete_action = menu.addAction("🗑️ Delete")
+            if len(selected) > 1:
+                delete_action.setText(f"🗑️ Delete ({len(selected)} selected)")
+            delete_action.triggered.connect(self._delete_patterns)
+
+        menu.exec_(self.tree.viewport().mapToGlobal(position))
+
+    def _refresh_tree(self):
+        """Refresh the tree widget with current patterns"""
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        for pattern in self.patterns:
+            item = QTreeWidgetItem([pattern])
+            self.tree.addTopLevelItem(item)
+        self.tree.blockSignals(False)
+
+    def _add_pattern(self):
+        """Add a new pattern directly in the tree"""
+        item = QTreeWidgetItem()
+        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        item.setData(0, Qt.UserRole, "new")
+        self.tree.blockSignals(True)
+        item.setText(0, "")
+        self.tree.insertTopLevelItem(0, item)
+        self.tree.blockSignals(False)
+        self.tree.setCurrentItem(item)
+        self.tree.scrollToItem(item)
+        self.tree.editItem(item, 0)
+
+    def _on_editor_closed(self, editor, hint=None):
+        """Clean up empty new items when editor closes without input"""
+        QTimer.singleShot(100, self._cleanup_empty_new_items)
+
+    def _cleanup_empty_new_items(self):
+        """Remove any lingering empty 'new' items"""
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(i)
+                if item and item.data(0, Qt.UserRole) == "new" and not item.text(0).strip():
+                    self.tree.takeTopLevelItem(i)
+                    break
+        except Exception:
+            pass
+
+    def _on_item_edited(self, item, column):
+        """Handle inline edit completion for add/edit"""
+        pattern = item.text(0).strip().lower()
+        is_new = item.data(0, Qt.UserRole) == "new"
+        old_pattern = item.data(0, Qt.UserRole + 1)
+
+        if not pattern:
+            if is_new:
+                index = self.tree.indexOfTopLevelItem(item)
+                if index >= 0:
+                    self.tree.takeTopLevelItem(index)
+            elif old_pattern:
+                self.tree.blockSignals(True)
+                item.setText(0, old_pattern)
+                self.tree.blockSignals(False)
+            return
+
+        if is_new:
+            if pattern in self.patterns:
+                index = self.tree.indexOfTopLevelItem(item)
+                if index >= 0:
+                    self.tree.takeTopLevelItem(index)
+                return
+            self.patterns.insert(0, pattern)
+            item.setData(0, Qt.UserRole, None)
+        else:
+            if old_pattern and pattern != old_pattern:
+                if pattern in self.patterns:
+                    self.tree.blockSignals(True)
+                    item.setText(0, old_pattern)
+                    self.tree.blockSignals(False)
+                    return
+                idx = self.patterns.index(old_pattern)
+                self.patterns[idx] = pattern
+
+        item.setData(0, Qt.UserRole + 1, pattern)
+        self.tree.blockSignals(True)
+        item.setText(0, pattern)
+        self.tree.blockSignals(False)
+
+    def _edit_pattern(self):
+        """Edit the selected pattern inline"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+
+        item = selected[0]
+        old_pattern = item.text(0)
+        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        item.setData(0, Qt.UserRole, "edit")
+        item.setData(0, Qt.UserRole + 1, old_pattern)
+        self.tree.editItem(item, 0)
+
+    def _delete_patterns(self):
+        """Delete selected patterns"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select patterns to delete")
+            return
+
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Delete {len(selected)} pattern(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            for item in selected:
+                pattern = item.text(0)
+                if pattern in self.patterns:
+                    self.patterns.remove(pattern)
+            self._refresh_tree()
+
+    def _reset_to_defaults(self):
+        """Reset patterns to defaults"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Confirm Reset")
+        msg.setText("Reset all patterns to defaults? This will replace your current patterns.")
+        msg.setIcon(QMessageBox.Question)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+        msg.setStyleSheet("""
+            QPushButton {
+                min-width: 70px;
+                min-height: 28px;
+                padding: 4px 14px;
+            }
+        """)
+        # Center the button box
+        for child in msg.findChildren(QDialogButtonBox):
+            child.setCenterButtons(True)
+        reply = msg.exec_()
+
+        if reply == QMessageBox.Yes:
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+            self.patterns = self._get_default_patterns()
+            self._refresh_tree()
+
+
+    def _load_patterns_from_file(self):
+        """Load patterns from a text file (one per line), merging with existing"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Refusal Patterns",
+            "",
+            "Text files (*.txt);;All files (*.*)"
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            added, skipped = key_pool_service.merge_refusal_pattern_lines(self.patterns, lines)
+
+            self._refresh_tree()
+
+            # Flash the load button with result
+            try:
+                _orig_style = self._load_btn.styleSheet()
+                self._load_btn.setText(f"✅ Loaded {added} new, {skipped} skipped")
+                self._load_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2e7d32;
+                        color: white;
+                        font-weight: bold;
+                        padding: 5px 10px;
+                        border: 1px solid #1b5e20;
+                        border-radius: 3px;
+                    }
+                """)
+                def _restore():
+                    try:
+                        self._load_btn.setText("📂 Load Patterns")
+                        self._load_btn.setStyleSheet(_orig_style)
+                    except Exception:
+                        pass
+                QTimer.singleShot(3000, _restore)
+            except Exception:
+                pass
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load file: {e}")
+
+    def _save_and_close(self):
+        """Save patterns and close dialog"""
+        if hasattr(self.translator_gui, 'config'):
+            self.translator_gui.config['refusal_patterns'] = self.patterns
+            # Save refusal controls
+            try:
+                self.translator_gui.config['disable_refusal_checks'] = bool(self.disable_refusal_checks_cb.isChecked())
+                # Keep GUI vars in sync so save_config doesn't overwrite
+                if hasattr(self.translator_gui, 'disable_refusal_checks_var'):
+                    self.translator_gui.disable_refusal_checks_var = self.translator_gui.config['disable_refusal_checks']
+            except Exception:
+                pass
+            try:
+                limit_val = key_pool_service.parse_refusal_length_limit(self.refusal_length_limit_entry.text())
+                self.translator_gui.config['refusal_pattern_length_limit'] = limit_val
+                if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
+                    self.translator_gui.refusal_pattern_length_limit_var = limit_val
+            except Exception:
+                self.translator_gui.config['refusal_pattern_length_limit'] = 1000
+                if hasattr(self.translator_gui, 'refusal_pattern_length_limit_var'):
+                    self.translator_gui.refusal_pattern_length_limit_var = 1000
+            self.translator_gui.save_config(show_message=False)
+            # Update any refusal pattern buttons to reflect new state
+            _disabled = bool(self.disable_refusal_checks_cb.isChecked())
+            _status = "Disabled" if _disabled else "Enabled"
+            _btn_text = f"🚫 Manage Refusal Patterns ({_status})"
+            for attr in ('_refusal_patterns_btn_other', '_refusal_patterns_btn_multi'):
+                try:
+                    btn = getattr(self.translator_gui, attr, None)
+                    if btn is not None:
+                        btn.setText(_btn_text)
+                except Exception:
+                    pass
+            # Animate save button to flash green
+            _count = len(self.patterns)
+            try:
+                self._save_btn.setText(f"💾 Saved {_count} patterns")
+                self._save_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2e7d32;
+                        color: white;
+                        font-weight: bold;
+                    }
+                """)
+                def _restore_btn():
+                    try:
+                        self._save_btn.setText("Save Refusal Patterns")
+                        self._save_btn.setStyleSheet("""
+                            QPushButton {
+                                background-color: #4a7ba7;
+                                color: white;
+                                font-weight: bold;
+                            }
+                            QPushButton:hover {
+                                background-color: #5a9fd4;
+                            }
+                        """)
+                    except Exception:
+                        pass
+                QTimer.singleShot(2000, _restore_btn)
+            except Exception:
+                pass
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+
+
+class MultiAPIKeyDialog(QDialog):
+    """Dialog for managing multiple API keys"""
+
+    API_KEY_TREE_FIRST_COLUMN_WIDTH = 116
+    API_KEY_TREE_FONT_SIZE_CONFIG = 'multi_api_key_tree_font_size'
+    API_KEY_TREE_MIN_FONT_SIZE = 8
+    API_KEY_TREE_MAX_FONT_SIZE = 32
+    API_KEY_TREE_HEIGHTS_CONFIG = 'multi_api_key_tree_heights'
+    API_KEY_TREE_MIN_HEIGHT = 150
+    API_KEY_TREE_MAX_HEIGHT = 1200
+    API_KEY_TREE_UNBOUNDED_HEIGHT = 16777215
+
+    @staticmethod
+    def show_dialog(parent, translator_gui, preview_pool: Optional[str] = None):
+        """Static method to create and show the dialog non-modally.
+
+        This ensures proper PySide6 application context.
+        """
+        # Ensure QApplication exists
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
+
+        preview_pool = (str(preview_pool or '').strip() or None)
+        dialog_attr = '_multi_api_key_dialog' if preview_pool is None else f"_multi_api_key_dialog_preview_{preview_pool}"
+
+        # Check if dialog already exists on the translator_gui
+        if not hasattr(translator_gui, dialog_attr) or getattr(translator_gui, dialog_attr) is None:
+            # Create and show dialog non-modally
+            dialog = MultiAPIKeyDialog(parent, translator_gui, preview_pool=preview_pool)
+            dialog.setWindowModality(Qt.NonModal)
+            setattr(translator_gui, dialog_attr, dialog)
+        else:
+            dialog = getattr(translator_gui, dialog_attr)
+            try:
+                dialog._refresh_visible_key_pool_views()
+            except Exception:
+                pass
+
+        # Keep the manager owned by Glossarion without making it globally topmost.
+        # Reapply this for reused dialogs as well, so stale topmost state is cleared.
+        dialog.setWindowFlags(dialog._standard_manager_window_flags(dialog.windowFlags()))
+        dialog._set_manager_transient_owner(parent)
+
+        # Show and raise the dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+        return dialog
+
+    def __init__(self, parent, translator_gui, preview_pool: Optional[str] = None):
+        # PySide6 dialogs need QWidget parents or None
+        style_parent = parent if HAS_GUI and isinstance(parent, QWidget) else None
+        requested_owner = None
+        if HAS_GUI and isinstance(parent, QWidget):
+            try:
+                requested_owner = parent.window()
+            except Exception:
+                requested_owner = parent
+
+        # IMPORTANT (spinbox rendering): Qt style sheets cascade into child windows.
+        # The "Other Settings" dialog styles ``QSpinBox`` (other_settings.py) but
+        # never defines the ::up-button/::down-button sub-controls, so any dialog
+        # opened as its child inherits that rule and the native Windows style
+        # collapses the rotation spin buttons (the broken/garbled spinbox).
+        # The Refinement view looked correct only because it is parented to a dialog
+        # with no such rule. Re-root ALL instances to the main window, whose
+        # stylesheet has no QSpinBox rule -> native spinbox.
+        if HAS_GUI and isinstance(translator_gui, QWidget):
+            try:
+                style_parent = translator_gui.window()
+            except Exception:
+                pass
+
+        super().__init__(style_parent)
+
+        self.translator_gui = translator_gui
+        self._manager_owner_window = requested_owner
+        self.preview_pool = (str(preview_pool or '').strip() or None)
+        self.tree = None
+        self.test_results = queue.Queue()
+        self._api_key_trees = []
+        self._api_key_tree_zoom_shortcuts = []
+        self._api_key_tree_height_handles = []
+        configured_tree_font_size = (
+            getattr(self.translator_gui, 'config', {}) or {}
+        ).get(self.API_KEY_TREE_FONT_SIZE_CONFIG, 0)
+        try:
+            configured_tree_font_size = int(configured_tree_font_size or 0)
+        except Exception:
+            configured_tree_font_size = 0
+        self._api_key_tree_font_size = (
+            self._bounded_api_key_tree_font_size(configured_tree_font_size)
+            if configured_tree_font_size > 0
+            else 0
+        )
+        configured_tree_heights = (
+            getattr(self.translator_gui, 'config', {}) or {}
+        ).get(self.API_KEY_TREE_HEIGHTS_CONFIG, {})
+        self._api_key_tree_heights = {}
+        if isinstance(configured_tree_heights, dict):
+            for tree_id, height in configured_tree_heights.items():
+                try:
+                    self._api_key_tree_heights[str(tree_id)] = self._bounded_api_key_tree_height(height)
+                except Exception:
+                    continue
+
+        self.key_pool = APIKeyPool("Multi-key manager pool")
+
+        # Attempt to bind to UnifiedClient's shared pool so UI reflects live usage
+        self._bind_shared_pool()
+
+        # Load existing keys from config
+        self._load_keys_from_config()
+
+        # Create and show dialog (suppress toggle logs during init)
+        self._initializing = True
+        self._create_dialog()
+
+        # Use a native resizable window frame with the full system controls.
+        self.setWindowFlags(self._standard_manager_window_flags(self.windowFlags()))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh_model_catalog_choices()
+        self._start_deferred_key_pool_render()
+        QTimer.singleShot(0, self._apply_manager_transient_owner)
+
+    def _set_manager_transient_owner(self, owner):
+        """Keep the manager above its launcher without making it globally topmost."""
+        if HAS_GUI and isinstance(owner, QWidget):
+            try:
+                owner = owner.window()
+            except Exception:
+                pass
+        if owner is self:
+            return
+        self._manager_owner_window = owner
+        self._apply_manager_transient_owner()
+
+    def _apply_manager_transient_owner(self):
+        """Apply native ownership separately from QWidget stylesheet parenting."""
+        owner = getattr(self, '_manager_owner_window', None)
+        if owner is None or owner is self:
+            return
+        try:
+            # Force both native handles to exist before assigning the transient
+            # relationship. This keeps the manager above Other Settings only.
+            owner.winId()
+            self.winId()
+            owner_handle = owner.windowHandle()
+            manager_handle = self.windowHandle()
+            if owner_handle is not None and manager_handle is not None:
+                manager_handle.setTransientParent(owner_handle)
+            if sys.platform == 'win32':
+                # QWidget parenting remains on TranslatorGUI for stylesheet
+                # isolation, so explicitly set the native owner HWND to the
+                # launching Other Settings dialog for correct Windows z-order.
+                import ctypes
+                from ctypes import wintypes
+
+                set_window_owner = getattr(
+                    ctypes.windll.user32,
+                    'SetWindowLongPtrW',
+                    ctypes.windll.user32.SetWindowLongW,
+                )
+                set_window_owner.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.HWND]
+                set_window_owner.restype = wintypes.HWND
+                set_window_owner(int(self.winId()), -8, int(owner.winId()))  # GWLP_HWNDPARENT
+        except (AttributeError, RuntimeError):
+            pass
+
+    @staticmethod
+    def _standard_manager_window_flags(flags):
+        """Return normal owned-window flags with maximize and close controls."""
+        flag_value = (int(flags) & ~int(Qt.WindowType_Mask)) | int(Qt.Window)
+        flag_value |= int(
+            Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        flag_value &= ~int(
+            Qt.WindowContextHelpButtonHint
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowStaysOnTopHint
+        )
+        return Qt.WindowType(flag_value)
+
+    def _set_icon(self, window):
+        """Set Halgakos.ico as window icon if available."""
+        try:
+            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                try:
+                    window.setWindowIcon(QIcon(ico_path))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    @classmethod
+    def _bounded_api_key_tree_font_size(cls, point_size):
+        """Return a safe font size for every API-key tree."""
+        try:
+            point_size = int(point_size)
+        except Exception:
+            point_size = 10
+        return max(cls.API_KEY_TREE_MIN_FONT_SIZE, min(cls.API_KEY_TREE_MAX_FONT_SIZE, point_size))
+
+    @classmethod
+    def _bounded_api_key_tree_height(cls, height):
+        """Return a safe persisted height for an API-key tree."""
+        try:
+            height = int(height)
+        except Exception:
+            height = cls.API_KEY_TREE_MIN_HEIGHT
+        return max(cls.API_KEY_TREE_MIN_HEIGHT, min(cls.API_KEY_TREE_MAX_HEIGHT, height))
+
+    def _set_api_key_tree_height(self, tree, tree_id, height, persist=True):
+        """Resize one key tree independently and optionally persist its height."""
+        height = self._bounded_api_key_tree_height(height)
+        tree_id = str(tree_id)
+        self._api_key_tree_heights[tree_id] = height
+        try:
+            tree.setFixedHeight(height)
+            tree.updateGeometry()
+            parent = tree.parentWidget()
+            if parent is not None:
+                parent.updateGeometry()
+        except RuntimeError:
+            return
+
+        if persist:
+            try:
+                config = getattr(self.translator_gui, 'config', None)
+                if isinstance(config, dict):
+                    config[self.API_KEY_TREE_HEIGHTS_CONFIG] = dict(self._api_key_tree_heights)
+                save_config = getattr(self.translator_gui, 'save_config', None)
+                if callable(save_config):
+                    save_config(show_message=False)
+            except Exception:
+                pass
+
+    def _reset_api_key_tree_height(self, tree, tree_id, persist=True):
+        """Remove one saved height and restore layout-managed tree sizing."""
+        tree_id = str(tree_id)
+        self._api_key_tree_heights.pop(tree_id, None)
+        try:
+            tree.setMinimumHeight(self.API_KEY_TREE_MIN_HEIGHT)
+            tree.setMaximumHeight(self.API_KEY_TREE_UNBOUNDED_HEIGHT)
+            default_height = max(self.API_KEY_TREE_MIN_HEIGHT, tree.sizeHint().height())
+            tree.resize(tree.width(), default_height)
+            tree.updateGeometry()
+            parent = tree.parentWidget()
+            if parent is not None:
+                parent_layout = parent.layout()
+                if parent_layout is not None:
+                    parent_layout.invalidate()
+                    parent_layout.activate()
+                parent.updateGeometry()
+        except RuntimeError:
+            return
+
+        if persist:
+            try:
+                config = getattr(self.translator_gui, 'config', None)
+                if isinstance(config, dict):
+                    config[self.API_KEY_TREE_HEIGHTS_CONFIG] = dict(self._api_key_tree_heights)
+                save_config = getattr(self.translator_gui, 'save_config', None)
+                if callable(save_config):
+                    save_config(show_message=False)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _api_key_tree_resize_event_y(event):
+        """Read a mouse event's global Y coordinate across PySide6 versions."""
+        global_position = getattr(event, 'globalPosition', None)
+        if callable(global_position):
+            return int(global_position().y())
+        global_pos = getattr(event, 'globalPos', None)
+        if callable(global_pos):
+            return int(global_pos().y())
+        return 0
+
+    def _add_api_key_tree_height_resizer(self, tree, parent_layout, tree_id):
+        """Add a draggable horizontal handle beneath one API-key tree row."""
+        tree_id = str(tree_id)
+        tree.setMinimumHeight(self.API_KEY_TREE_MIN_HEIGHT)
+        saved_height = self._api_key_tree_heights.get(tree_id)
+        if saved_height is not None:
+            self._set_api_key_tree_height(tree, tree_id, saved_height, persist=False)
+
+        handle = QFrame()
+        handle.setObjectName('apiKeyTreeHeightResizeHandle')
+        handle.setFixedHeight(9)
+        handle.setCursor(Qt.SizeVerCursor)
+        handle.setToolTip(
+            "Drag up or down to resize this API-key tree\n"
+            "Double-click to reset its default height"
+        )
+        handle.setAccessibleName(f"Resize {tree_id} API-key tree height")
+        handle.setStyleSheet("""
+            QFrame#apiKeyTreeHeightResizeHandle {
+                background-color: #3f4c5a;
+                border: 1px solid #5f6f82;
+                border-radius: 2px;
+                margin: 1px 36px;
+            }
+            QFrame#apiKeyTreeHeightResizeHandle:hover {
+                background-color: #5a9fd4;
+                border-color: #8bc4f5;
+            }
+        """)
+
+        drag_state = {'active': False, 'start_y': 0, 'start_height': 0}
+        original_mouse_press = handle.mousePressEvent
+        original_mouse_move = handle.mouseMoveEvent
+        original_mouse_release = handle.mouseReleaseEvent
+        original_mouse_double_click = handle.mouseDoubleClickEvent
+
+        def mouse_press_event(event):
+            if event.button() == Qt.LeftButton:
+                drag_state['active'] = True
+                drag_state['start_y'] = self._api_key_tree_resize_event_y(event)
+                drag_state['start_height'] = tree.height()
+                handle.grabMouse()
+                event.accept()
+                return
+            original_mouse_press(event)
+
+        def mouse_move_event(event):
+            if drag_state['active'] and event.buttons() & Qt.LeftButton:
+                delta = self._api_key_tree_resize_event_y(event) - drag_state['start_y']
+                self._set_api_key_tree_height(
+                    tree,
+                    tree_id,
+                    drag_state['start_height'] + delta,
+                    persist=False,
+                )
+                event.accept()
+                return
+            original_mouse_move(event)
+
+        def mouse_release_event(event):
+            if drag_state['active']:
+                drag_state['active'] = False
+                handle.releaseMouse()
+                self._set_api_key_tree_height(tree, tree_id, tree.height(), persist=True)
+                event.accept()
+                return
+            original_mouse_release(event)
+
+        def mouse_double_click_event(event):
+            if event.button() == Qt.LeftButton:
+                drag_state['active'] = False
+                if handle.mouseGrabber() is handle:
+                    handle.releaseMouse()
+                self._reset_api_key_tree_height(tree, tree_id, persist=True)
+                event.accept()
+                return
+            original_mouse_double_click(event)
+
+        handle.mousePressEvent = mouse_press_event
+        handle.mouseMoveEvent = mouse_move_event
+        handle.mouseReleaseEvent = mouse_release_event
+        handle.mouseDoubleClickEvent = mouse_double_click_event
+        parent_layout.addWidget(handle)
+        self._api_key_tree_height_handles.append(handle)
+        return handle
+
+    @staticmethod
+    def _proportional_api_key_tree_column_widths(base_widths, available_width):
+        """Fit all tree columns inside the viewport using stable proportions."""
+        proportional_widths = [max(1, int(width)) for width in base_widths]
+        proportional_total = sum(proportional_widths)
+        try:
+            available_width = int(available_width)
+        except Exception:
+            available_width = proportional_total
+        available_width = max(len(proportional_widths), available_width)
+
+        raw_widths = [
+            available_width * width / proportional_total
+            for width in proportional_widths
+        ]
+        widths = [int(width) for width in raw_widths]
+        remaining = available_width - sum(widths)
+        fractional_order = sorted(
+            range(len(widths)),
+            key=lambda index: raw_widths[index] - widths[index],
+            reverse=True,
+        )
+        for index in fractional_order[:remaining]:
+            widths[index] += 1
+        return tuple(widths)
+
+    def _resize_api_key_tree_columns(self, tree):
+        """Fit a registered key tree's columns to its current viewport width."""
+        try:
+            base_widths = tuple(getattr(tree, '_api_key_tree_base_column_widths', ()))
+            if not base_widths or tree.columnCount() != len(base_widths):
+                return
+            available_width = tree.viewport().width()
+            widths = self._proportional_api_key_tree_column_widths(
+                base_widths,
+                available_width,
+            )
+            for column, width in enumerate(widths):
+                tree.setColumnWidth(column, width)
+        except RuntimeError:
+            return
+        except Exception:
+            pass
+
+    def _enable_api_key_tree_responsive_columns(self, tree, base_widths):
+        """Make every key-tree column grow proportionally with the dialog."""
+        if tree is None or bool(tree.property('apiKeyTreeResponsiveColumnsEnabled')):
+            return
+        base_widths = tuple(int(width) for width in base_widths)
+        if tree.columnCount() != len(base_widths):
+            return
+
+        tree.setProperty('apiKeyTreeResponsiveColumnsEnabled', True)
+        tree._api_key_tree_base_column_widths = base_widths
+        header = tree.header()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(16)
+        for column in range(tree.columnCount()):
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
+
+        original_resize_event = tree.resizeEvent
+
+        def responsive_resize_event(event):
+            original_resize_event(event)
+            self._resize_api_key_tree_columns(tree)
+
+        tree.resizeEvent = responsive_resize_event
+        tree.verticalScrollBar().rangeChanged.connect(
+            lambda _minimum, _maximum, target=tree: QTimer.singleShot(
+                0,
+                lambda: self._resize_api_key_tree_columns(target),
+            )
+        )
+        QTimer.singleShot(0, lambda: self._resize_api_key_tree_columns(tree))
+
+    def _set_api_key_tree_font_size(self, point_size, persist=True):
+        """Apply one zoom level to all key trees in this manager window."""
+        point_size = self._bounded_api_key_tree_font_size(point_size)
+        self._api_key_tree_font_size = point_size
+
+        live_trees = []
+        for tree in getattr(self, '_api_key_trees', []):
+            try:
+                font = tree.font()
+                font.setPointSize(point_size)
+                tree.setFont(font)
+
+                header = tree.header()
+                header_font = header.font()
+                header_font.setPointSize(point_size)
+                header_font.setBold(True)
+                header.setFont(header_font)
+                header_base_style = getattr(
+                    tree,
+                    '_api_key_tree_header_base_stylesheet',
+                    '',
+                )
+                header_zoom_style = f"""
+                    QHeaderView::section {{
+                        font-size: {point_size}pt;
+                        font-weight: bold;
+                    }}
+                """
+                header.setStyleSheet(
+                    f"{header_base_style}\n{header_zoom_style}"
+                    if header_base_style
+                    else header_zoom_style
+                )
+                header.setMinimumHeight(header.fontMetrics().height() + 12)
+                header.style().unpolish(header)
+                header.style().polish(header)
+                header.updateGeometry()
+                header.viewport().update()
+
+                tree.doItemsLayout()
+                tree.updateGeometry()
+                tree.viewport().update()
+                self._resize_api_key_tree_columns(tree)
+                live_trees.append(tree)
+            except RuntimeError:
+                # Deferred pool sections can be destroyed while the dialog is
+                # closing; do not keep stale Qt wrappers in the registry.
+                continue
+            except Exception:
+                live_trees.append(tree)
+        self._api_key_trees = live_trees
+
+        if persist:
+            try:
+                config = getattr(self.translator_gui, 'config', None)
+                if isinstance(config, dict):
+                    config[self.API_KEY_TREE_FONT_SIZE_CONFIG] = point_size
+                save_config = getattr(self.translator_gui, 'save_config', None)
+                if callable(save_config):
+                    save_config(show_message=False)
+            except Exception:
+                pass
+
+    def _adjust_api_key_tree_font_size(self, delta):
+        """Zoom every API-key tree in or out by one point."""
+        current = int(getattr(self, '_api_key_tree_font_size', 0) or 0)
+        if current <= 0:
+            trees = getattr(self, '_api_key_trees', [])
+            if trees:
+                try:
+                    current = trees[0].font().pointSize()
+                except Exception:
+                    current = 0
+        if current <= 0:
+            current = 10
+        self._set_api_key_tree_font_size(current + int(delta), persist=True)
+
+    def _enable_api_key_tree_font_zoom(self, tree):
+        """Add glossary-editor-style keyboard and Ctrl-wheel zoom to a key tree."""
+        if tree is None or bool(tree.property('apiKeyTreeFontZoomEnabled')):
+            return
+        tree.setProperty('apiKeyTreeFontZoomEnabled', True)
+        self._api_key_trees.append(tree)
+        tree._api_key_tree_header_base_stylesheet = tree.header().styleSheet()
+
+        if self._api_key_tree_font_size <= 0:
+            self._api_key_tree_font_size = self._bounded_api_key_tree_font_size(
+                tree.font().pointSize() or 10
+            )
+        self._set_api_key_tree_font_size(self._api_key_tree_font_size, persist=False)
+
+        registered_sequences = set()
+
+        def add_zoom_shortcuts(sequences, delta):
+            for raw_sequence in sequences:
+                sequence = QKeySequence(raw_sequence)
+                sequence_id = sequence.toString()
+                if not sequence_id or sequence_id in registered_sequences:
+                    continue
+                registered_sequences.add(sequence_id)
+                shortcut = QShortcut(sequence, tree)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.activated.connect(
+                    lambda zoom_delta=delta: self._adjust_api_key_tree_font_size(zoom_delta)
+                )
+                self._api_key_tree_zoom_shortcuts.append(shortcut)
+
+        add_zoom_shortcuts(
+            (QKeySequence.ZoomIn, QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")),
+            1,
+        )
+        add_zoom_shortcuts(
+            (QKeySequence.ZoomOut, QKeySequence("Ctrl+-")),
+            -1,
+        )
+
+        original_wheel_event = tree.wheelEvent
+
+        def zoomable_wheel_event(event):
+            try:
+                if event.modifiers() & Qt.ControlModifier:
+                    delta = event.angleDelta().y() or event.pixelDelta().y()
+                    if delta:
+                        self._adjust_api_key_tree_font_size(1 if delta > 0 else -1)
+                        event.accept()
+                        return
+            except Exception:
+                pass
+            original_wheel_event(event)
+
+        tree.wheelEvent = zoomable_wheel_event
+
+    def _tighten_api_key_tree_first_column(self, tree):
+        """Reduce the unused left gutter in API key trees."""
+        try:
+            tree.setRootIsDecorated(False)
+            tree.setIndentation(1)
+            tree.setItemsExpandable(False)
+            tree.header().setDefaultAlignment(Qt.AlignCenter)
+            tree_style = """
+                QTreeWidget {
+                    border: 1px solid #5f6f82;
+                }
+                QTreeWidget::item {
+                    border-left: 1px solid #4f5f70;
+                    border-right: 1px solid #4f5f70;
+                    border-bottom: 1px solid #3f4c5a;
+                    padding-left: 1px;
+                    padding-right: 3px;
+                }
+                QTreeWidget::item:selected,
+                QTreeWidget::item:selected:active,
+                QTreeWidget::item:selected:!active {
+                    background-color: #2f6fb3;
+                    color: #ffffff;
+                    border-left: 1px solid #6f9ed0;
+                    border-right: 1px solid #6f9ed0;
+                    border-bottom: 1px solid #6f9ed0;
+                }
+                QHeaderView::section {
+                    background-color: #252525;
+                    color: #e0e0e0;
+                    border-top: 1px solid #3a3a3a;
+                    border-left: 1px solid #3a3a3a;
+                    border-right: 1px solid #5f6f82;
+                    border-bottom: 1px solid #5f6f82;
+                    padding: 4px 3px;
+                }
+            """
+            existing = tree.styleSheet()
+            tree.setStyleSheet(f"{existing}\n{tree_style}" if existing else tree_style)
+        except Exception:
+            pass
+
+    def _center_api_key_tree_item_text(self, item):
+        """Center text in every visible column of an API key tree row."""
+        try:
+            for col in range(item.columnCount()):
+                item.setTextAlignment(col, Qt.AlignCenter)
+        except Exception:
+            pass
+
+    def _halgakos_icon_path(self):
+        """Return the best available Halgakos icon path for Qt stylesheets."""
+        candidates = []
+        try:
+            candidates.append(os.path.join(getattr(self.translator_gui, 'base_dir', ''), 'Halgakos.ico'))
+        except Exception:
+            pass
+        candidates.extend([
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico'),
+            os.path.join(os.getcwd(), 'Halgakos.ico'),
+        ])
+        for path in candidates:
+            if path and os.path.exists(path):
+                return path
+        return candidates[0] if candidates else 'Halgakos.ico'
+
+    def _apply_combobox_icon(self, combobox):
+        """Use Halgakos.ico as the dropdown arrow for a combo box."""
+        icon_path = self._halgakos_icon_path().replace('\\', '/')
+        arrow_style = f"""
+            QComboBox {{
+                padding-right: 0px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 32px;
+                border-left: 1px solid #4a5568;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{icon_path}");
+                width: 16px;
+                height: 16px;
+            }}
+            QComboBox::down-arrow:on {{
+                top: 1px;
+                left: 1px;
+            }}
+        """
+        existing = combobox.styleSheet()
+        combobox.setStyleSheet(f"{existing}\n{arrow_style}" if existing else arrow_style)
+        return combobox
+
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        checkbox = QCheckBox(text)
+
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def position_checkmark():
+            try:
+                if checkmark:
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+
+        def update_checkmark():
+            try:
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        checkmark.setText("−" if checkbox.checkState() == Qt.PartiallyChecked else "✓")
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                pass
+
+        checkbox.stateChanged.connect(update_checkmark)
+        checkbox._update_checkmark = update_checkmark
+
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(0, safe_init)
+
+        return checkbox
+
+
+    def _disable_spinbox_mousewheel(self, spinbox):
+        """Disable mousewheel scrolling on a spinbox (PySide6)"""
+        spinbox.wheelEvent = lambda event: None
+
+    def _normalize_rotation_spinbox_appearance(self):
+        """Keep rotation frequency on the native spinbox appearance.
+
+        The spinbox must stay NATIVE (no custom QSS) so it matches the Refinement
+        view. The real cause of the broken spinbox was an inherited ``QSpinBox``
+        rule cascading from a styled parent dialog; that is handled at construction
+        time by re-rooting preview-pool windows to the unstyled main window (see
+        __init__), so here we simply clear any local stylesheet and let the native
+        style draw the control.
+        """
+        spinbox = getattr(self, 'frequency_spinbox', None)
+        if spinbox is None:
+            return
+        try:
+            spinbox.setStyleSheet("")
+            spinbox.setMinimumHeight(0)
+            spinbox.setMaximumHeight(16777215)
+            spinbox.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+            spinbox.setAlignment(Qt.AlignCenter)
+            spinbox.setMinimumWidth(60)
+            spinbox.setMaximumWidth(70)
+            spinbox.style().unpolish(spinbox)
+            spinbox.style().polish(spinbox)
+            spinbox.update()
+        except Exception:
+            pass
+
+    def _disable_combobox_mousewheel(self, combobox):
+        """Disable mousewheel scrolling on a combobox (PySide6)"""
+        combobox.wheelEvent = lambda event: None
+
+    def _set_combo_text_silently(self, combo, text):
+        """Set editable combo text without triggering live model refresh/completer work."""
+        if combo is None:
+            return
+        previous_suspend = getattr(self, '_suspend_model_requirement_refresh', False)
+        self._suspend_model_requirement_refresh = True
+        combo_blocked = False
+        line_blocked = None
+        try:
+            combo_blocked = combo.blockSignals(True)
+            line_edit = combo.lineEdit() if hasattr(combo, 'lineEdit') else None
+            if line_edit is not None:
+                line_blocked = line_edit.blockSignals(True)
+                line_edit.setText(text)
+            else:
+                combo.setCurrentText(text)
+            timer = getattr(combo, '_model_completer_search_timer', None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+        except RuntimeError:
+            pass
+        except Exception:
+            try:
+                combo.setCurrentText(text)
+            except Exception:
+                pass
+        finally:
+            try:
+                line_edit = combo.lineEdit() if hasattr(combo, 'lineEdit') else None
+                if line_edit is not None and line_blocked is not None:
+                    line_edit.blockSignals(line_blocked)
+                combo.blockSignals(combo_blocked)
+            except Exception:
+                pass
+            self._suspend_model_requirement_refresh = previous_suspend
+
+    def _get_model_options_for_dropdown(self):
+        """Return the same model list shape used by the main translator dropdown."""
+        models = None
+        removed_models = []
+        try:
+            live_models = getattr(self.translator_gui, '_model_all_values', None)
+            if isinstance(live_models, list):
+                return list(live_models)
+            if hasattr(self.translator_gui, 'config'):
+                models = self.translator_gui.config.get('custom_model_list')
+                removed_models = self.translator_gui.config.get(
+                    'model_manager_removed_models', []
+                )
+        except Exception:
+            models = None
+
+        return merge_saved_model_options(
+            models,
+            get_model_options(),
+            removed_models,
+        )
+
+    def _model_needs_google_creds(self, model: str) -> bool:
+        model = (model or '').strip().lower()
+        return (
+            '@' in model
+            or model.startswith('vertex/')
+            or model.startswith('vertex_ai/')
+            or model == 'google-translate'
+        )
+
+    def _model_affects_parent_provider_controls(self, model: str) -> bool:
+        model = (model or '').strip().lower()
+        return (
+            self._model_needs_google_creds(model)
+            or model.startswith('authgpt')
+            or model.startswith('authnan')
+            or model.startswith('authgrok')
+            or model.startswith('authcd')
+            or model.startswith('authgem')
+            or model.startswith('authza')
+            or model.startswith('autharena')
+        )
+
+    def _has_pending_google_creds_model(self):
+        """Check live add-key model fields before they have been saved as keys."""
+        widget_names = [
+            'model_combo',
+            'fallback_model_combo',
+            'glossary_model_combo',
+            'glossary_refinement_model_combo',
+            'metadata_model_combo',
+            'qa_scan_model_combo',
+            'ai_truncation_detection_model_combo',
+            'rolling_summary_model_combo',
+            'truncation_retry_model_combo',
+            'inpainter_model_combo',
+        ]
+        for name in widget_names:
+            combo = getattr(self, name, None)
+            try:
+                if combo and self._model_needs_google_creds(combo.currentText()):
+                    return True
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        return False
+
+    def _has_pending_authgrok_pool_model(self, provider='authgrok'):
+        """Check live model fields for a rotating account-pool route."""
+        import re
+
+        widget_names = [
+            'model_combo',
+            'fallback_model_combo',
+            'glossary_model_combo',
+            'glossary_refinement_model_combo',
+            'metadata_model_combo',
+            'qa_scan_model_combo',
+            'ai_truncation_detection_model_combo',
+            'rolling_summary_model_combo',
+            'truncation_retry_model_combo',
+            'inpainter_model_combo',
+        ]
+        for name in widget_names:
+            combo = getattr(self, name, None)
+            try:
+                model = str(combo.currentText() if combo else '').strip().lower()
+                if re.match(r'^' + re.escape(provider) + r'0(?:/|$)', model):
+                    return True
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        return False
+
+    def _pending_autharena_model(self, provider="autharena"):
+        """Report live numbered routes without creating login widgets."""
+        import re
+        for combo in getattr(self, '_model_search_combos', []) or []:
+            try:
+                model = str(combo.currentText() or '').strip()
+                if re.match(r'^' + re.escape(provider) + r'\d{0,4}(?:/|$)', model, re.I):
+                    return model
+            except RuntimeError:
+                continue
+        return ''
+
+    def _has_pending_proxy_model(self, provider):
+        """Check live model text only; account loading belongs to the parent GUI."""
+        for combo in getattr(self, '_model_search_combos', []) or []:
+            try:
+                model = str(combo.currentText() or '').strip().lower()
+                if model == provider or model.startswith(provider + '/'):
+                    return True
+            except RuntimeError:
+                continue
+        return False
+
+    def _refresh_parent_model_requirements(self, save_config=False):
+        """Ask the parent GUI to refresh provider buttons from saved and live manager state."""
+        if save_config:
+            try:
+                self._save_keys_to_config()
+            except Exception:
+                pass
+
+        try:
+            for provider in ('antigravity', 'ocagy'):
+                setattr(self.translator_gui, '_multi_key_manager_' + provider + '_hint',
+                        self._has_pending_proxy_model(provider))
+            self.translator_gui._multi_key_manager_autharena_model_hint = self._pending_autharena_model()
+            self.translator_gui._multi_key_manager_authgem_vertex_model_hint = self._pending_autharena_model('authgem-vertex')
+            self.translator_gui._multi_key_manager_authgpt_pool_hint = self._has_pending_authgrok_pool_model('authgpt')
+            self.translator_gui._multi_key_manager_authnan_pool_hint = self._has_pending_authgrok_pool_model('authnan')
+            self.translator_gui._multi_key_manager_authnan_model_hint = self._pending_autharena_model('authnan')
+            setattr(
+                self.translator_gui,
+                '_multi_key_manager_needs_google_creds_hint',
+                self._has_pending_google_creds_model(),
+            )
+            setattr(
+                self.translator_gui,
+                '_multi_key_manager_authgrok_pool_hint',
+                self._has_pending_authgrok_pool_model(),
+            )
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.translator_gui, 'on_model_change'):
+                self.translator_gui.on_model_change()
+        except Exception:
+            pass
+
+    def _sync_parent_google_credentials(self, filename):
+        """Load a manager-selected Google credentials file into the parent GUI too."""
+        try:
+            if hasattr(self.translator_gui, 'config'):
+                self.translator_gui.config['google_cloud_credentials'] = filename
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = filename
+            if hasattr(self.translator_gui, 'save_config'):
+                self.translator_gui.save_config(show_message=False)
+            if hasattr(self.translator_gui, 'append_log'):
+                self.translator_gui.append_log(f"Google Cloud credentials loaded: {os.path.basename(filename)}")
+        except Exception:
+            pass
+        self._refresh_parent_model_requirements(save_config=False)
+
+    def _flush_model_requirement_refresh(self):
+        """Run the expensive parent model-requirement refresh after typing settles."""
+        self._refresh_parent_model_requirements(save_config=False)
+
+    def _on_model_requirement_input_changed(self, immediate=False):
+        """Debounce live model-field edits so typing in key pools stays responsive."""
+        if getattr(self, '_suspend_model_requirement_refresh', False):
+            return
+        if immediate:
+            try:
+                timer = getattr(self, '_model_requirement_refresh_timer', None)
+                if timer is not None and timer.isActive():
+                    timer.stop()
+            except Exception:
+                pass
+            self._flush_model_requirement_refresh()
+            return
+
+        try:
+            timer = getattr(self, '_model_requirement_refresh_timer', None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._flush_model_requirement_refresh)
+                self._model_requirement_refresh_timer = timer
+            timer.start(350)
+        except Exception:
+            self._flush_model_requirement_refresh()
+
+    def _bind_shared_pool(self):
+        """Bind this dialog to the UnifiedClient's shared APIKeyPool if available.
+        If UnifiedClient has no pool yet, register our pool as the shared pool.
+        This keeps Times Used and other counters in sync across UI and runtime.
+        """
+        try:
+            from unified_api_client import UnifiedClient
+            # If UC already has a pool, use it; otherwise share ours
+            if getattr(UnifiedClient, '_api_key_pool', None) is not None:
+                self.key_pool = UnifiedClient._api_key_pool
+            else:
+                UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            # If import fails (early load), continue with local pool
+            pass
+
+    def _load_keys_from_config(self):
+        """Load API keys from translator GUI config"""
+        if hasattr(self.translator_gui, 'config'):
+            multi_api_keys = self.translator_gui.config.get('multi_api_keys', [])
+            self.key_pool.load_from_list(multi_api_keys)
+
+    def _set_checkbox_from_config(self, checkbox, checked):
+        if checkbox is None:
+            return
+        try:
+            previous = checkbox.blockSignals(True)
+            checkbox.setChecked(bool(checked))
+            checkbox.blockSignals(previous)
+            refresh_checkmark = getattr(checkbox, '_update_checkmark', None)
+            if callable(refresh_checkmark):
+                refresh_checkmark()
+            checkbox.update()
+        except Exception:
+            pass
+
+    def _set_spinbox_from_config(self, spinbox, value):
+        if spinbox is None:
+            return
+        try:
+            previous = spinbox.blockSignals(True)
+            spinbox.setValue(int(value))
+            spinbox.blockSignals(previous)
+        except Exception:
+            pass
+
+    def _sync_rotation_controls_from_config(self):
+        cfg = getattr(self.translator_gui, 'config', {}) or {}
+        self._normalize_rotation_spinbox_appearance()
+        self._set_checkbox_from_config(
+            getattr(self, 'force_rotation_checkbox', None),
+            cfg.get('force_key_rotation', True),
+        )
+        self._set_spinbox_from_config(
+            getattr(self, 'frequency_spinbox', None),
+            cfg.get('rotation_frequency', 1) or 1,
+        )
+        self._update_rotation_display()
+
+    def _sync_main_controls_from_config(self):
+        cfg = getattr(self.translator_gui, 'config', {}) or {}
+        self._set_checkbox_from_config(
+            getattr(self, 'enabled_checkbox', None),
+            cfg.get('use_multi_api_keys', False),
+        )
+        if hasattr(self, 'enabled_checkbox'):
+            self._toggle_multi_key_mode()
+        self._sync_rotation_controls_from_config()
+
+    def _sync_fallback_controls_from_config(self):
+        cfg = getattr(self.translator_gui, 'config', {}) or {}
+        self._set_checkbox_from_config(
+            getattr(self, 'use_fallback_checkbox', None),
+            cfg.get('use_fallback_keys', False),
+        )
+        self._set_checkbox_from_config(
+            getattr(self, 'use_main_key_fallback_checkbox', None),
+            cfg.get('use_main_key_fallback', True),
+        )
+        self._set_checkbox_from_config(
+            getattr(self, 'fallback_key_shuffle_checkbox', None),
+            cfg.get('fallback_key_shuffle', False),
+        )
+        if hasattr(self, 'use_fallback_checkbox'):
+            self._toggle_fallback_section()
+
+    def _sync_dedicated_controls_from_config(self, pool_name: str):
+        cfg = getattr(self.translator_gui, 'config', {}) or {}
+        spec = self._dedicated_pool_spec(pool_name)
+        checkbox = self._dedicated_widget(pool_name, 'keys_checkbox')
+        self._set_checkbox_from_config(checkbox, cfg.get(spec['toggle_key'], False))
+        if checkbox is not None:
+            self._dedicated_toggle_section(pool_name)
+
+    def _refresh_visible_key_pool_views(self):
+        self._refresh_pool_from_config(None, refresh_keys=True)
+
+    def _refresh_pool_from_config(self, pool_name=None, refresh_keys=False):
+        if getattr(self, '_syncing_external_key_pool_state', False):
+            return
+        self._syncing_external_key_pool_state = True
+        try:
+            self._sync_rotation_controls_from_config()
+
+            if pool_name == 'rotation':
+                return
+
+            if self.preview_pool == 'fallback':
+                if pool_name not in (None, 'fallback'):
+                    return
+                self._sync_fallback_controls_from_config()
+                if refresh_keys and hasattr(self, 'fallback_tree'):
+                    self._load_fallback_keys()
+                return
+
+            if self.preview_pool:
+                if pool_name not in (None, self.preview_pool):
+                    return
+                self._sync_dedicated_controls_from_config(self.preview_pool)
+                if refresh_keys and self._dedicated_widget(self.preview_pool, 'tree') is not None:
+                    self._dedicated_load_keys(self.preview_pool)
+                return
+
+            if pool_name in (None, 'main'):
+                if refresh_keys:
+                    self._load_keys_from_config()
+                self._sync_main_controls_from_config()
+                if refresh_keys and getattr(self, 'tree', None) is not None:
+                    self._refresh_key_list()
+
+            if pool_name in (None, 'fallback'):
+                self._sync_fallback_controls_from_config()
+                if refresh_keys and hasattr(self, 'fallback_tree'):
+                    self._load_fallback_keys()
+
+            pool_names = [pool_name] if pool_name not in (None, 'main', 'fallback') else sorted(self._dedicated_pool_specs())
+            for current_pool in pool_names:
+                if current_pool not in self._dedicated_pool_specs():
+                    continue
+                if self._dedicated_widget(current_pool, 'tree') is None:
+                    continue
+                self._sync_dedicated_controls_from_config(current_pool)
+                if refresh_keys:
+                    self._dedicated_load_keys(current_pool)
+        finally:
+            self._syncing_external_key_pool_state = False
+
+    def _broadcast_key_pool_config_changed(self, pool_name=None, refresh_keys=False):
+        """Refresh sibling key-manager dialogs after this dialog writes shared config."""
+        try:
+            for attr_name, dialog in vars(self.translator_gui).items():
+                if not str(attr_name).startswith('_multi_api_key_dialog'):
+                    continue
+                if dialog is self or not isinstance(dialog, MultiAPIKeyDialog):
+                    continue
+                try:
+                    dialog._refresh_pool_from_config(pool_name, refresh_keys=refresh_keys)
+                except RuntimeError:
+                    try:
+                        setattr(self.translator_gui, attr_name, None)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _schedule_key_pool_config_flush(self, pool_name=None, refresh_keys=False, refresh_parent=True, delay_ms=160):
+        """Coalesce config saves and sibling/parent refreshes after UI updates settle."""
+        pending = getattr(self, '_pending_key_pool_config_flush', None)
+        if pending is None:
+            pending = {
+                'all': False,
+                'all_refresh_keys': False,
+                'pools': {},
+                'refresh_parent': False,
+            }
+            self._pending_key_pool_config_flush = pending
+
+        if pool_name is None:
+            pending['all'] = True
+            pending['all_refresh_keys'] = bool(pending['all_refresh_keys'] or refresh_keys)
+        else:
+            pools = pending.setdefault('pools', {})
+            pools[pool_name] = bool(pools.get(pool_name, False) or refresh_keys)
+        pending['refresh_parent'] = bool(pending.get('refresh_parent', False) or refresh_parent)
+
+        timer = getattr(self, '_key_pool_config_flush_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_key_pool_config_changes)
+            self._key_pool_config_flush_timer = timer
+        timer.start(delay_ms)
+
+    def _flush_key_pool_config_changes(self):
+        pending = getattr(self, '_pending_key_pool_config_flush', None)
+        if not pending:
+            return
+        self._pending_key_pool_config_flush = None
+
+        self._save_key_pool_config_snapshot_async()
+
+        if pending.get('all'):
+            self._broadcast_key_pool_config_changed(None, refresh_keys=bool(pending.get('all_refresh_keys')))
+        else:
+            for pool_name, refresh_keys in (pending.get('pools') or {}).items():
+                self._broadcast_key_pool_config_changed(pool_name, refresh_keys=bool(refresh_keys))
+
+        if pending.get('refresh_parent'):
+            self._refresh_parent_model_requirements(save_config=False)
+
+    def _save_key_pool_config_snapshot_async(self):
+        """Persist the already-updated config without running the full GUI save path."""
+        try:
+            config_snapshot = dict(getattr(self.translator_gui, 'config', {}) or {})
+            config_path = getattr(self.translator_gui, 'config_file_path', None)
+            if not config_path:
+                return
+        except Exception:
+            return
+
+        def _write_snapshot():
+            try:
+                from api_key_encryption import encrypt_config
+                encrypted_config = encrypt_config(config_snapshot)
+                google_creds_path = config_snapshot.get('google_cloud_credentials')
+                if google_creds_path:
+                    encrypted_config['google_cloud_credentials'] = google_creds_path
+                tmp_path = f"{config_path}.tmp.{os.getpid()}.{threading.get_ident()}"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, config_path)
+            except Exception as exc:
+                print(f"[MULTI_KEY_SAVE] Warning: lightweight config save failed: {exc}")
+
+        threading.Thread(target=_write_snapshot, daemon=True).start()
+
+    def _coerce_bool_config_value(self, value, default=False):
+        """Coerce persisted config values without treating non-empty strings as True."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in ('1', 'true', 'yes', 'on', 'enabled'):
+            return True
+        if text in ('0', 'false', 'no', 'off', 'disabled'):
+            return False
+        return default
+
+    def _read_persisted_bool(self, key, default=False):
+        """Read a boolean from the live config, refreshed from the persisted config file when possible."""
+        value = self.translator_gui.config.get(key, default) if hasattr(self.translator_gui, 'config') else default
+        config_path = getattr(self.translator_gui, 'config_file_path', None)
+        if config_path and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    disk_config = json.load(f)
+                if key in disk_config:
+                    value = disk_config.get(key, default)
+                    if hasattr(self.translator_gui, 'config'):
+                        self.translator_gui.config[key] = self._coerce_bool_config_value(value, default)
+            except Exception:
+                pass
+        return self._coerce_bool_config_value(value, default)
+
+    def _update_rotation_display(self, *args):
+        """Update the rotation description based on settings"""
+        # Read current state from widgets
+        if hasattr(self, 'force_rotation_checkbox') and self.force_rotation_checkbox.isChecked():
+            freq = self.frequency_spinbox.value() if hasattr(self, 'frequency_spinbox') else 1
+            if freq == 1:
+                desc = "Keys will rotate on every request (maximum distribution)"
+            else:
+                desc = f"Keys will rotate every {freq} requests"
+        else:
+            desc = "Keys will only rotate on errors or rate limits"
+
+        if hasattr(self, 'rotation_desc_label'):
+            self.rotation_desc_label.setText(desc)
+        if hasattr(self, 'force_rotation_checkbox'):
+            self.force_rotation_var = self.force_rotation_checkbox.isChecked()
+        if hasattr(self, 'frequency_spinbox'):
+            self.rotation_frequency_var = self.frequency_spinbox.value()
+
+    def _on_rotation_settings_changed(self, *args):
+        """Persist and broadcast global rotation setting changes."""
+        self._update_rotation_display()
+        if (
+            hasattr(self.translator_gui, 'config')
+            and hasattr(self, 'force_rotation_checkbox')
+            and hasattr(self, 'frequency_spinbox')
+            and not getattr(self, '_initializing', False)
+            and not getattr(self, '_syncing_external_key_pool_state', False)
+        ):
+            self.translator_gui.config['force_key_rotation'] = self.force_rotation_checkbox.isChecked()
+            self.translator_gui.config['rotation_frequency'] = self.frequency_spinbox.value()
+            self._apply_rotation_settings_to_runtime_pools()
+            self._broadcast_key_pool_config_changed('rotation', refresh_keys=False)
+
+    def _apply_rotation_settings_to_runtime_pools(self):
+        """Reapply current rotation settings to all enabled in-memory key pools."""
+        if not hasattr(self.translator_gui, 'config'):
+            return
+        cfg = self.translator_gui.config
+        force_rotation = bool(cfg.get('force_key_rotation', True))
+        try:
+            rotation_frequency = int(cfg.get('rotation_frequency', 1) or 1)
+        except Exception:
+            rotation_frequency = 1
+        try:
+            os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+            os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+        except Exception:
+            pass
+        try:
+            from unified_api_client import UnifiedClient
+        except Exception:
+            return
+        try:
+            multi_keys = cfg.get('multi_api_keys', []) or []
+            if bool(cfg.get('use_multi_api_keys', False)) and multi_keys:
+                UnifiedClient.set_in_memory_multi_keys(
+                    multi_keys,
+                    force_rotation=force_rotation,
+                    rotation_frequency=rotation_frequency,
+                )
+        except Exception:
+            pass
+        for pool_name, spec in self._dedicated_pool_specs().items():
+            try:
+                keys = cfg.get(spec['config_key'], []) or []
+                if bool(cfg.get(spec['toggle_key'], False)) and keys:
+                    getattr(UnifiedClient, spec['set_method'])(
+                        keys,
+                        force_rotation=force_rotation,
+                        rotation_frequency=rotation_frequency,
+                    )
+            except Exception:
+                pass
+
+    def _save_keys_to_config(self):
+        """Save API keys and rotation settings to translator GUI config"""
+        if hasattr(self.translator_gui, 'config'):
+            if getattr(self, 'preview_pool', None):
+                self._save_preview_pool_controls_to_config()
+                self.translator_gui.save_config(show_message=False)
+                self._broadcast_key_pool_config_changed(self.preview_pool, refresh_keys=True)
+                return
+
+            # Convert keys to list of dicts
+            key_list = [key.to_dict() for key in self.key_pool.get_all_keys()]
+            self.translator_gui.config['multi_api_keys'] = key_list
+
+            # Save fallback settings - read from checkbox
+            use_fallback = (
+                self.use_fallback_checkbox.isChecked()
+                if hasattr(self, 'use_fallback_checkbox')
+                else bool(self.translator_gui.config.get('use_fallback_keys', False))
+            )
+            self.translator_gui.config['use_fallback_keys'] = use_fallback
+            # Save main-key-fallback toggle (persist in config)
+            if hasattr(self, 'use_main_key_fallback_checkbox'):
+                self.translator_gui.config['use_main_key_fallback'] = self.use_main_key_fallback_checkbox.isChecked()
+            # Save fallback key shuffle toggle
+            if hasattr(self, 'fallback_key_shuffle_checkbox'):
+                self.translator_gui.config['fallback_key_shuffle'] = self.fallback_key_shuffle_checkbox.isChecked()
+            # Update the parent GUI's variable to stay in sync
+            if hasattr(self.translator_gui, 'use_fallback_keys_var'):
+                try:
+                    self.translator_gui.use_fallback_keys_var.set(use_fallback)
+                except:
+                    self.translator_gui.use_fallback_keys_var = use_fallback
+            # Fallback keys are already saved when added/removed
+
+            # Use the current state of the toggle - read from checkbox
+            enabled = (
+                self.enabled_checkbox.isChecked()
+                if hasattr(self, 'enabled_checkbox')
+                else bool(self.translator_gui.config.get('use_multi_api_keys', False))
+            )
+            self.translator_gui.config['use_multi_api_keys'] = enabled
+
+            # Save rotation settings - read from widgets
+            force_rotation = (
+                self.force_rotation_checkbox.isChecked()
+                if hasattr(self, 'force_rotation_checkbox')
+                else bool(self.translator_gui.config.get('force_key_rotation', True))
+            )
+            rotation_freq = (
+                self.frequency_spinbox.value()
+                if hasattr(self, 'frequency_spinbox')
+                else int(self.translator_gui.config.get('rotation_frequency', 1) or 1)
+            )
+            self.translator_gui.config['force_key_rotation'] = force_rotation
+            self.translator_gui.config['rotation_frequency'] = rotation_freq
+
+            # Save glossary keys toggle
+            use_glossary = (
+                self.use_glossary_keys_checkbox.isChecked()
+                if hasattr(self, 'use_glossary_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_glossary_keys', False))
+            )
+            self.translator_gui.config['use_glossary_keys'] = use_glossary
+
+            use_glossary_refinement = (
+                self.use_glossary_refinement_keys_checkbox.isChecked()
+                if hasattr(self, 'use_glossary_refinement_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_glossary_refinement_keys', False))
+            )
+            self.translator_gui.config['use_glossary_refinement_keys'] = use_glossary_refinement
+            self.translator_gui.use_glossary_refinement_keys_var = use_glossary_refinement
+
+            use_metadata = (
+                self.use_metadata_keys_checkbox.isChecked()
+                if hasattr(self, 'use_metadata_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_metadata_keys', False))
+            )
+            self.translator_gui.config['use_metadata_keys'] = use_metadata
+            self.translator_gui.use_metadata_keys_var = use_metadata
+
+            # Save Vision keys toggle (stored under the legacy qa_scan config key)
+            use_qa_scan = (
+                self.use_qa_scan_keys_checkbox.isChecked()
+                if hasattr(self, 'use_qa_scan_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_qa_scan_keys', False))
+            )
+            self.translator_gui.config['use_qa_scan_keys'] = use_qa_scan
+
+            use_ai_truncation_detection = (
+                self.use_ai_truncation_detection_keys_checkbox.isChecked()
+                if hasattr(self, 'use_ai_truncation_detection_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_ai_truncation_detection_keys', False))
+            )
+            self.translator_gui.config['use_ai_truncation_detection_keys'] = use_ai_truncation_detection
+            self.translator_gui.use_ai_truncation_detection_keys_var = use_ai_truncation_detection
+
+            use_rolling_summary = (
+                self.use_rolling_summary_keys_checkbox.isChecked()
+                if hasattr(self, 'use_rolling_summary_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_rolling_summary_keys', False))
+            )
+            self.translator_gui.config['use_rolling_summary_keys'] = use_rolling_summary
+            self.translator_gui.use_rolling_summary_keys_var = use_rolling_summary
+
+            # Save Truncation Retry keys toggle
+            use_truncation_retry = (
+                self.use_truncation_retry_keys_checkbox.isChecked()
+                if hasattr(self, 'use_truncation_retry_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_truncation_retry_keys', False))
+            )
+            self.translator_gui.config['use_truncation_retry_keys'] = use_truncation_retry
+            self.translator_gui.use_truncation_retry_keys_var = use_truncation_retry
+
+            # Save Image gen/edit keys toggle
+            use_inpainter = (
+                self.use_inpainter_keys_checkbox.isChecked()
+                if hasattr(self, 'use_inpainter_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_inpainter_keys', False))
+            )
+            self.translator_gui.config['use_inpainter_keys'] = use_inpainter
+            self.translator_gui.use_inpainter_keys_var = use_inpainter
+
+            # Save Audio / TTS keys toggle
+            use_tts = (
+                self.use_tts_keys_checkbox.isChecked()
+                if hasattr(self, 'use_tts_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_tts_keys', False))
+            )
+            self.translator_gui.config['use_tts_keys'] = use_tts
+            self.translator_gui.use_tts_keys_var = use_tts
+
+            # Save config
+            self.translator_gui.save_config(show_message=False)
+
+            # Update multi-key status label in other settings if it exists
+            if hasattr(self.translator_gui, '_update_multi_key_status_label'):
+                try:
+                    self.translator_gui._update_multi_key_status_label()
+                except Exception:
+                    pass
+            self._broadcast_key_pool_config_changed(None, refresh_keys=True)
+
+    def _save_preview_pool_controls_to_config(self):
+        """Save controls visible in a one-pool preview without touching main keys."""
+        if not hasattr(self.translator_gui, 'config'):
+            return
+        if hasattr(self, 'force_rotation_checkbox'):
+            self.translator_gui.config['force_key_rotation'] = self.force_rotation_checkbox.isChecked()
+        if hasattr(self, 'frequency_spinbox'):
+            self.translator_gui.config['rotation_frequency'] = self.frequency_spinbox.value()
+
+        if self.preview_pool == 'fallback':
+            if hasattr(self, 'use_fallback_checkbox'):
+                use_fallback = self.use_fallback_checkbox.isChecked()
+                self.translator_gui.config['use_fallback_keys'] = use_fallback
+                if hasattr(self.translator_gui, 'use_fallback_keys_var'):
+                    try:
+                        self.translator_gui.use_fallback_keys_var.set(use_fallback)
+                    except Exception:
+                        self.translator_gui.use_fallback_keys_var = use_fallback
+            if hasattr(self, 'use_main_key_fallback_checkbox'):
+                self.translator_gui.config['use_main_key_fallback'] = self.use_main_key_fallback_checkbox.isChecked()
+            if hasattr(self, 'fallback_key_shuffle_checkbox'):
+                self.translator_gui.config['fallback_key_shuffle'] = self.fallback_key_shuffle_checkbox.isChecked()
+            return
+
+        if self.preview_pool:
+            spec = self._dedicated_pool_spec(self.preview_pool)
+            checkbox = self._dedicated_widget(self.preview_pool, 'keys_checkbox')
+            if checkbox is not None:
+                enabled = checkbox.isChecked()
+                self.translator_gui.config[spec['toggle_key']] = enabled
+                setattr(self.translator_gui, f"use_{self.preview_pool}_keys_var", enabled)
+
+    def _create_rotation_settings_section(self, parent_layout):
+        """Create the global rotation settings shared by every key pool."""
+        self.rotation_frame = QGroupBox("Rotation Settings")
+        rotation_frame_layout = QVBoxLayout(self.rotation_frame)
+        rotation_frame_layout.setContentsMargins(15, 10, 15, 10)
+
+        rotation_settings = QWidget()
+        rotation_settings_layout = QVBoxLayout(rotation_settings)
+        rotation_settings_layout.setContentsMargins(0, 0, 0, 0)
+        rotation_settings_layout.setSpacing(6)
+
+        self.force_rotation_var = self.translator_gui.config.get('force_key_rotation', True)
+        self.force_rotation_checkbox = self._create_styled_checkbox("Force Key Rotation")
+        self.force_rotation_checkbox.setChecked(self.force_rotation_var)
+        self.force_rotation_checkbox.toggled.connect(self._on_rotation_settings_changed)
+        rotation_settings_layout.addWidget(self.force_rotation_checkbox)
+
+        frequency_row = QWidget()
+        frequency_layout = QHBoxLayout(frequency_row)
+        frequency_layout.setContentsMargins(0, 0, 0, 0)
+        frequency_layout.setSpacing(8)
+        frequency_layout.addWidget(QLabel("Every"))
+        self.rotation_frequency_var = self.translator_gui.config.get('rotation_frequency', 1)
+        self.frequency_spinbox = QSpinBox()
+        self.frequency_spinbox.setRange(1, 100)
+        self.frequency_spinbox.setValue(self.rotation_frequency_var)
+        self._normalize_rotation_spinbox_appearance()
+        self.frequency_spinbox.valueChanged.connect(self._on_rotation_settings_changed)
+        self._disable_spinbox_mousewheel(self.frequency_spinbox)
+        frequency_layout.addWidget(self.frequency_spinbox)
+        frequency_layout.addWidget(QLabel("requests"))
+        frequency_layout.addStretch()
+        rotation_settings_layout.addWidget(frequency_row)
+
+        rotation_frame_layout.addWidget(rotation_settings)
+
+        self.rotation_desc_label = QLabel()
+        self.rotation_desc_label.setStyleSheet("color: #5a9fd4; font-style: italic;")
+        rotation_frame_layout.addWidget(self.rotation_desc_label)
+        self._update_rotation_display()
+
+        parent_layout.addWidget(self.rotation_frame)
+
+    def _create_dialog(self):
+        """Create the main dialog using PySide6"""
+        # Set window properties
+        if self.preview_pool:
+            return self._create_preview_dialog()
+
+        self.setWindowTitle("Multi API Key Manager")
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.52)  # 52% of screen width
+        height = int(screen.height() * 0.68)  # 68% of screen height
+        self.resize(width, height)
+
+        # Create scroll area
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        # Create scrollable content widget
+        scrollable_widget = QWidget()
+        scrollable_layout = QVBoxLayout(scrollable_widget)
+        scrollable_layout.setContentsMargins(20, 10, 20, 20)  # Reduced top margin from 20 to 10
+        scrollable_layout.setSpacing(10)  # Set spacing between widgets
+        scroll_area.setWidget(scrollable_widget)
+
+        # Set main layout - will have scroll area AND button bar
+        dialog_layout = QVBoxLayout(self)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.setSpacing(0)
+        dialog_layout.addWidget(scroll_area)
+
+        # Store references
+        self.main_frame = scrollable_widget
+        self.scrollable_frame = scrollable_widget
+        self.main_layout = scrollable_layout
+        self.scrollable_layout = scrollable_layout  # Store for adjusting spacing
+
+        # Title and description
+        title_frame = QWidget()
+        title_layout = QHBoxLayout(title_frame)
+        title_layout.setContentsMargins(0, 0, 0, 5)  # Reduced bottom margin from 10 to 5
+
+        title_label = QLabel("Multi API Key Management")
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+
+        scrollable_layout.addWidget(title_frame)
+
+        # Store reference to description label for hide/show
+        self.multikey_desc_label = QLabel(
+                "Manage translation, fallback, and dedicated task-specific API key pools.\n"
+                "Each pool below is controlled independently.")
+        self.multikey_desc_label.setStyleSheet("color: gray; padding-bottom: 10px;")
+        self.multikey_desc_label.setWordWrap(True)
+        scrollable_layout.addWidget(self.multikey_desc_label)
+
+        self._create_rotation_settings_section(scrollable_layout)
+        self._create_translation_key_pool_section(scrollable_layout)
+        self._prepare_deferred_key_pool_sections(scrollable_layout)
+
+        # Add stretch to fill remaining space in scroll area
+        scrollable_layout.addStretch(1)
+
+        # Button bar at the bottom - moved outside scroll area below
+        # (will be added to dialog_layout instead)
+
+        # Create button bar outside scroll area (fixed at bottom)
+        self._create_button_bar(dialog_layout)
+
+        # Set icon
+        self._set_icon(self)
+
+        if not getattr(self, '_pending_key_pool_section_builders', None):
+            self._finish_key_pool_render()
+
+    def _create_preview_dialog(self):
+        """Create a one-pool manager view using the normal dedicated-pool UI."""
+        if self.preview_pool == 'fallback':
+            title = "Fallback Keys"
+        else:
+            spec = self._dedicated_pool_spec(self.preview_pool)
+            title = spec['title']
+        self.setWindowTitle(f"{title} - Multi API Key Manager")
+        screen = QApplication.primaryScreen().geometry()
+        self.resize(int(screen.width() * 0.50), int(screen.height() * 0.54))
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        scrollable_widget = QWidget()
+        scrollable_layout = QVBoxLayout(scrollable_widget)
+        scrollable_layout.setContentsMargins(20, 10, 20, 20)
+        scrollable_layout.setSpacing(10)
+        scroll_area.setWidget(scrollable_widget)
+
+        dialog_layout = QVBoxLayout(self)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.setSpacing(0)
+        dialog_layout.addWidget(scroll_area)
+
+        self.main_frame = scrollable_widget
+        self.scrollable_frame = scrollable_widget
+        self.main_layout = scrollable_layout
+        self.scrollable_layout = scrollable_layout
+
+        title_label = QLabel(title)
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        scrollable_layout.addWidget(title_label)
+
+        self._create_rotation_settings_section(scrollable_layout)
+
+        if self.preview_pool == 'fallback':
+            self._create_fallback_section(scrollable_layout)
+        else:
+            self._create_dedicated_key_pool_section(scrollable_layout, self.preview_pool)
+        scrollable_layout.addStretch(1)
+        self._create_button_bar(dialog_layout)
+        self._set_icon(self)
+        self._initializing = False
+
+    def _multi_key_mode_widgets(self):
+        return [
+            getattr(self, 'add_key_frame', None),
+            getattr(self, 'multikey_separator', None),
+            getattr(self, 'key_list_frame', None),
+        ]
+
+    def _deferred_key_pool_section_builders(self):
+        return (
+            self._create_fallback_section,
+            self._create_truncation_retry_section,
+            self._create_glossary_section,
+            self._create_glossary_refinement_section,
+            self._create_metadata_section,
+            self._create_ai_truncation_detection_section,
+            self._create_rolling_summary_section,
+            self._create_qa_scan_section,
+            self._create_inpainter_section,
+            self._create_tts_section,
+        )
+
+    def _prepare_deferred_key_pool_sections(self, parent_layout):
+        self._pending_key_pool_section_builders = list(self._deferred_key_pool_section_builders())
+        self._deferred_key_pool_render_started = False
+        if not self._pending_key_pool_section_builders:
+            return
+
+        self._deferred_key_pool_host = QWidget()
+        self._deferred_key_pool_host_layout = QVBoxLayout(self._deferred_key_pool_host)
+        self._deferred_key_pool_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._deferred_key_pool_host_layout.setSpacing(10)
+        parent_layout.addWidget(self._deferred_key_pool_host)
+        self._refresh_deferred_key_pool_geometry()
+
+    def _start_deferred_key_pool_render(self):
+        if getattr(self, 'preview_pool', None):
+            return
+        if getattr(self, '_deferred_key_pool_render_started', False):
+            return
+        if not getattr(self, '_pending_key_pool_section_builders', None):
+            return
+        self._deferred_key_pool_render_started = True
+        QTimer.singleShot(25, self._render_next_deferred_key_pool_section)
+
+    def _render_next_deferred_key_pool_section(self):
+        pending_builders = getattr(self, '_pending_key_pool_section_builders', None)
+        if not pending_builders:
+            self._finish_key_pool_render()
+            return
+
+        build_section = pending_builders.pop(0)
+        parent_layout = getattr(self, '_deferred_key_pool_host_layout', None)
+        if parent_layout is None:
+            parent_layout = getattr(self, 'scrollable_layout', None)
+
+        if parent_layout is not None:
+            try:
+                build_section(parent_layout)
+                self._refresh_deferred_key_pool_geometry()
+            except Exception as exc:
+                print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
+
+        if pending_builders:
+            QTimer.singleShot(75, self._render_next_deferred_key_pool_section)
+        else:
+            self._finish_key_pool_render()
+
+    def _refresh_deferred_key_pool_geometry(self):
+        try:
+            host_layout = getattr(self, '_deferred_key_pool_host_layout', None)
+            if host_layout is not None:
+                host_layout.activate()
+
+            host = getattr(self, '_deferred_key_pool_host', None)
+            if host is not None:
+                host.updateGeometry()
+
+            scrollable_layout = getattr(self, 'scrollable_layout', None)
+            if scrollable_layout is not None:
+                scrollable_layout.activate()
+
+            for widget_name in ('scrollable_frame', 'main_frame'):
+                widget = getattr(self, widget_name, None)
+                if widget is not None:
+                    widget.updateGeometry()
+        except Exception:
+            pass
+
+    def _create_translation_key_pool_section(self, parent_layout):
+        self.translation_key_pool_frame = QGroupBox("Translation Keys (Main Pool)")
+        translation_pool_layout = QVBoxLayout(self.translation_key_pool_frame)
+        translation_pool_layout.setContentsMargins(15, 15, 15, 15)
+        translation_pool_layout.setSpacing(10)
+
+        translation_pool_desc = QLabel(key_pool_service.POOL_SPECS['main']['description'])
+        translation_pool_desc.setStyleSheet("color: gray;")
+        translation_pool_desc.setWordWrap(True)
+        translation_pool_layout.addWidget(translation_pool_desc)
+
+        translation_pool_enable_row = QWidget()
+        translation_pool_enable_layout = QHBoxLayout(translation_pool_enable_row)
+        translation_pool_enable_layout.setContentsMargins(0, 0, 0, 0)
+        translation_pool_enable_layout.setSpacing(8)
+
+        self.enabled_var = self.translator_gui.config.get('use_multi_api_keys', False)
+        self.enabled_checkbox = self._create_styled_checkbox("Enable Translation Keys")
+        self.enabled_checkbox.setChecked(self.enabled_var)
+        self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
+
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.multikey_icon = QLabel()
+        self.multikey_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.multikey_icon.setPixmap(pm)
+        self.multikey_icon.setFixedSize(36, 36)
+        self.multikey_icon.setAlignment(Qt.AlignCenter)
+        self.enabled_checkbox.toggled.connect(lambda: animate_icon(self.multikey_icon))
+
+        translation_pool_enable_layout.addWidget(self.multikey_icon)
+        translation_pool_enable_layout.addWidget(self.enabled_checkbox)
+        translation_pool_enable_layout.addStretch()
+        translation_pool_layout.addWidget(translation_pool_enable_row)
+
+        self._create_add_key_section(translation_pool_layout)
+
+        self.multikey_separator = QFrame()
+        self.multikey_separator.setFrameShape(QFrame.HLine)
+        self.multikey_separator.setFrameShadow(QFrame.Sunken)
+        translation_pool_layout.addWidget(self.multikey_separator)
+
+        self._create_key_list_section(translation_pool_layout)
+        parent_layout.addWidget(self.translation_key_pool_frame)
+
+        self._refresh_key_list()
+        self._toggle_multi_key_mode()
+
+    def _finish_key_pool_render(self):
+        if getattr(self, '_key_pool_render_finished', False):
+            return
+        self._key_pool_render_finished = True
+        if not getattr(self, 'preview_pool', None):
+            self._toggle_multi_key_mode()
+        self._initializing = False
+
+    def _create_fallback_section(self, parent_layout):
+        """Create the fallback keys section at the bottom"""
+        # Container that can be hidden
+        self.fallback_container = QWidget()
+        fallback_container_layout = QVBoxLayout(self.fallback_container)
+        fallback_container_layout.setContentsMargins(0, 5, 0, 0)  # Reduced top margin from 10 to 5
+
+        # Separator - store reference to hide when multi-key mode is off
+        self.fallback_separator = QFrame()
+        self.fallback_separator.setFrameShape(QFrame.HLine)
+        self.fallback_separator.setFrameShadow(QFrame.Sunken)
+        fallback_container_layout.addWidget(self.fallback_separator)
+
+        # Main fallback frame
+        fallback_frame = QGroupBox("Fallback Keys (For Prohibited Content)")
+        fallback_frame_layout = QVBoxLayout(fallback_frame)
+        fallback_frame_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Description
+        desc_label = QLabel(key_pool_service.POOL_SPECS['fallback']['description'])
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        fallback_frame_layout.addWidget(desc_label)
+
+        # Enable fallback checkbox with spinning icon
+        fallback_checkbox_container = QWidget()
+        fallback_checkbox_layout = QHBoxLayout(fallback_checkbox_container)
+        fallback_checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        fallback_checkbox_layout.setSpacing(8)
+
+        self.use_fallback_var = self.translator_gui.config.get('use_fallback_keys', False)
+        self.use_fallback_checkbox = self._create_styled_checkbox("Enable Fallback Keys")
+        self.use_fallback_checkbox.setChecked(self.use_fallback_var)
+        self.use_fallback_checkbox.toggled.connect(self._toggle_fallback_section)
+
+        # Add spinning icon next to fallback keys checkbox (HiDPI-aware like Extract Glossary)
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.fallback_icon = QLabel()
+        self.fallback_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.fallback_icon.setPixmap(pm)
+        self.fallback_icon.setFixedSize(36, 36)
+        self.fallback_icon.setAlignment(Qt.AlignCenter)
+        self.use_fallback_checkbox.toggled.connect(lambda: animate_icon(self.fallback_icon))
+
+        fallback_checkbox_layout.addWidget(self.fallback_icon)
+        fallback_checkbox_layout.addWidget(self.use_fallback_checkbox)
+        fallback_checkbox_layout.addStretch()
+
+        fallback_frame_layout.addWidget(fallback_checkbox_container)
+
+        # Toggle: use main GUI key as first fallback entry
+        self.use_main_key_fallback_var = self.translator_gui.config.get('use_main_key_fallback', True)
+        self.use_main_key_fallback_checkbox = self._create_styled_checkbox("Use Main GUI Key as Fallback #1")
+        self.use_main_key_fallback_checkbox.setChecked(self.use_main_key_fallback_var)
+        fallback_frame_layout.addWidget(self.use_main_key_fallback_checkbox)
+
+        # Toggle: fallback key shuffle (skip cooling-down keys instead of waiting)
+        self.fallback_key_shuffle_var = self.translator_gui.config.get('fallback_key_shuffle', False)
+        self.fallback_key_shuffle_checkbox = self._create_styled_checkbox(
+            "Fallback Key Shuffle (skip keys on API delay cooldown, try next available)")
+        self.fallback_key_shuffle_checkbox.setChecked(self.fallback_key_shuffle_var)
+        fallback_frame_layout.addWidget(self.fallback_key_shuffle_checkbox)
+
+        # Add fallback key section
+        self.add_fallback_frame = QWidget()
+        add_fallback_grid = QGridLayout(self.add_fallback_frame)
+        add_fallback_grid.setContentsMargins(0, 0, 0, 10)
+
+        # Row 0: Fallback API Key and Model
+        add_fallback_grid.addWidget(QLabel("Fallback API Key:"), 0, 0, Qt.AlignLeft)
+        self.fallback_key_entry = QLineEdit()
+        self.fallback_key_entry.setEchoMode(QLineEdit.Password)
+        add_fallback_grid.addWidget(self.fallback_key_entry, 0, 1)
+
+        # Toggle fallback visibility
+        self.show_fallback_btn = QPushButton("👁")
+        self.show_fallback_btn.setFixedWidth(40)
+        self.show_fallback_btn.clicked.connect(self._toggle_fallback_visibility)
+        add_fallback_grid.addWidget(self.show_fallback_btn, 0, 2)
+
+        # Fallback Model
+        add_fallback_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        fallback_models = self._get_model_options_for_dropdown()
+        self.fallback_model_combo = QComboBox()
+        self.fallback_model_combo.addItems(fallback_models)
+        self.fallback_model_combo.setEditable(True)
+        self._attach_model_autofill(self.fallback_model_combo, self._on_model_requirement_input_changed)
+        self._apply_combobox_icon(self.fallback_model_combo)
+        self._disable_combobox_mousewheel(self.fallback_model_combo)  # Disable mousewheel
+        add_fallback_grid.addWidget(self._wrap_model_with_ollama_settings(self.fallback_model_combo), 0, 4)
+
+        # Add fallback button
+        add_fallback_btn = QPushButton("Add Fallback Key")
+        add_fallback_btn.clicked.connect(self._add_fallback_key)
+        add_fallback_grid.addWidget(add_fallback_btn, 0, 5, Qt.AlignRight)
+
+        # Set column stretch
+        add_fallback_grid.setColumnStretch(1, 1)
+        add_fallback_grid.setColumnStretch(4, 1)
+
+        fallback_frame_layout.addWidget(self.add_fallback_frame)
+
+        # Row 1: Google Credentials (optional, discretely styled)
+        google_creds_label = QLabel("Google Creds:")
+        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
+        add_fallback_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
+        self.fallback_google_creds_entry = QLineEdit()
+        self.fallback_google_creds_entry.setStyleSheet("font-size: 7pt;")
+        add_fallback_grid.addWidget(self.fallback_google_creds_entry, 1, 1)
+
+        # Google credentials browse button
+        browse_google_btn = QPushButton("📁")
+        browse_google_btn.setFixedWidth(40)
+        browse_google_btn.clicked.connect(self._browse_fallback_google_credentials)
+        add_fallback_grid.addWidget(browse_google_btn, 1, 2)
+
+        # Google region field for fallback
+        region_label = QLabel("Region:")
+        region_label.setStyleSheet("color: gray;")
+        add_fallback_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
+        self.fallback_google_region_entry = QLineEdit("us-east5")
+        self.fallback_google_region_entry.setStyleSheet("font-size: 7pt;")
+        self.fallback_google_region_entry.setMaximumWidth(100)
+        add_fallback_grid.addWidget(self.fallback_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
+
+        # Row 2: Individual Endpoint Toggle for fallback
+        self.fallback_use_individual_endpoint_var = False
+        self.fallback_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
+        self.fallback_individual_endpoint_toggle.setChecked(False)
+        self.fallback_individual_endpoint_toggle.toggled.connect(self._toggle_fallback_individual_endpoint_fields)
+        add_fallback_grid.addWidget(self.fallback_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
+
+        # Row 3: Individual Endpoint (initially hidden)
+        self.fallback_individual_endpoint_label = QLabel("Individual Endpoint:")
+        self.fallback_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_fallback_grid.addWidget(self.fallback_individual_endpoint_label, 3, 0, Qt.AlignLeft)
+        self.fallback_azure_endpoint_entry = QLineEdit()
+        self.fallback_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
+        add_fallback_grid.addWidget(self.fallback_azure_endpoint_entry, 3, 1, 1, 2)
+
+        # Individual Endpoint API Version (small dropdown, initially hidden)
+        self.fallback_individual_api_version_label = QLabel("API Ver:")
+        self.fallback_individual_api_version_label.setStyleSheet("color: gray;")
+        add_fallback_grid.addWidget(self.fallback_individual_api_version_label, 3, 3, Qt.AlignLeft)
+        fallback_azure_versions = [
+            '2025-01-01-preview',
+            '2024-12-01-preview',
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ]
+        self.fallback_azure_api_version_combo = QComboBox()
+        self.fallback_azure_api_version_combo.addItems(fallback_azure_versions)
+        self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.fallback_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self._apply_combobox_icon(self.fallback_azure_api_version_combo)
+        self.fallback_azure_api_version_combo.setMaximumWidth(180)
+        self._disable_combobox_mousewheel(self.fallback_azure_api_version_combo)  # Disable mousewheel
+        add_fallback_grid.addWidget(self.fallback_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
+
+
+        # Initially hide the endpoint fields when toggle is off
+        self._toggle_fallback_individual_endpoint_fields()
+
+        # Fallback keys list
+        self._create_fallback_list(fallback_frame_layout)
+
+        # Add fallback container to parent
+        fallback_container_layout.addWidget(fallback_frame)
+        parent_layout.addWidget(self.fallback_container)
+
+        # Initially disable if checkbox is unchecked
+        self._toggle_fallback_section()
+
+    def _create_fallback_list(self, parent_layout):
+        """Create the fallback keys list"""
+        # Label - store reference for hide/show
+        self.fallback_list_label = QLabel("Fallback Keys (tried in order):")
+        list_label_font = QFont()
+        list_label_font.setBold(True)
+        self.fallback_list_label.setFont(list_label_font)
+        parent_layout.addWidget(self.fallback_list_label)
+
+        # Container for tree and buttons
+        self.fallback_tree_container = QWidget()
+        container_layout = QHBoxLayout(self.fallback_tree_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Left side: Move buttons - store reference for hide/show
+        self.fallback_move_frame = QWidget()
+        move_layout = QVBoxLayout(self.fallback_move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+
+        order_label = QLabel("Reorder")
+        order_font = QFont()
+        order_font.setBold(True)
+        order_label.setFont(order_font)
+        move_layout.addWidget(order_label)
+
+        # Move to top button
+        top_btn = QPushButton("↑ ↑")
+        top_btn.setFixedSize(55, 32)
+        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        top_btn.clicked.connect(lambda: self._move_fallback_key('top'))
+        move_layout.addWidget(top_btn)
+
+        up_btn = QPushButton("↑")
+        up_btn.setFixedSize(55, 32)
+        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        up_btn.clicked.connect(lambda: self._move_fallback_key('up'))
+        move_layout.addWidget(up_btn)
+
+        down_btn = QPushButton("↓")
+        down_btn.setFixedSize(55, 32)
+        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        down_btn.clicked.connect(lambda: self._move_fallback_key('down'))
+        move_layout.addWidget(down_btn)
+
+        # Move to bottom button
+        bottom_btn = QPushButton("↓ ↓")
+        bottom_btn.setFixedSize(55, 32)
+        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        bottom_btn.clicked.connect(lambda: self._move_fallback_key('bottom'))
+        move_layout.addWidget(bottom_btn)
+
+        move_layout.addSpacing(10)
+
+        self.fallback_position_label = QLabel()
+        self.fallback_position_label.setStyleSheet("color: gray;")
+        move_layout.addWidget(self.fallback_position_label)
+        move_layout.addStretch()
+        container_layout.addWidget(self.fallback_move_frame)
+
+        # Right side: TreeWidget with drag and drop
+        self.fallback_tree = QTreeWidget()
+        self.fallback_tree.setUniformRowHeights(True)
+        self._tighten_api_key_tree_first_column(self.fallback_tree)
+        # Add explicit column for per-key output token limit
+        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        self.fallback_tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)  # API Key
+        self.fallback_tree.setColumnWidth(1, 220)  # Model
+        self.fallback_tree.setColumnWidth(2, 105)  # Output Limit
+        self.fallback_tree.setColumnWidth(3, 100)  # Temperature
+        self.fallback_tree.setColumnWidth(4, 90)   # API Delay
+        self.fallback_tree.setColumnWidth(5, 170)  # Status
+        self.fallback_tree.setColumnWidth(6, 42)   # Success
+        self.fallback_tree.setColumnWidth(7, 42)   # Errors
+        self.fallback_tree.setColumnWidth(8, 80)   # Requests
+
+        # Set header font to match multi-key tree
+        fb_header = self.fallback_tree.header()
+        fb_header_font = QFont()
+        fb_header_font.setBold(True)
+        fb_header_font.setPointSize(11)
+        fb_header.setFont(fb_header_font)
+        self._enable_api_key_tree_font_zoom(self.fallback_tree)
+        self._enable_api_key_tree_responsive_columns(
+            self.fallback_tree,
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
+        )
+
+        self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
+        self.fallback_tree.setMinimumHeight(150)
+
+        # Enable drag and drop for fallback tree using InternalMove (like profile manager)
+        self.fallback_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.fallback_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        # Connect to model's rowsMoved signal to sync data after Qt moves items
+        self.fallback_tree.model().rowsMoved.connect(self._on_fallback_rows_moved)
+        self.fallback_tree.itemSelectionChanged.connect(self._on_fallback_selection_change)
+
+        # Connect double-click for inline editing (consistent with multi-key tree)
+        self.fallback_tree.itemDoubleClicked.connect(self._on_fallback_click)
+        self.fallback_tree.itemClicked.connect(lambda item, col: self._key_status_clicked('fallback', item, col))
+
+        container_layout.addWidget(self.fallback_tree)
+
+        parent_layout.addWidget(self.fallback_tree_container)
+        self.fallback_tree_height_handle = self._add_api_key_tree_height_resizer(
+            self.fallback_tree,
+            parent_layout,
+            'fallback',
+        )
+
+        # Action buttons - store reference for toggling
+        self.fallback_action_frame = QWidget()
+        fallback_action_layout = QHBoxLayout(self.fallback_action_frame)
+        fallback_action_layout.setContentsMargins(0, 10, 0, 0)
+
+        test_selected_btn = QPushButton("Test Selected")
+        test_selected_btn.clicked.connect(self._test_selected_fallback)
+        fallback_action_layout.addWidget(test_selected_btn)
+
+        test_all_btn = QPushButton("Test All")
+        test_all_btn.clicked.connect(self._test_all_fallbacks)
+        fallback_action_layout.addWidget(test_all_btn)
+
+        enable_selected_btn = QPushButton("Enable Selected")
+        enable_selected_btn.clicked.connect(self._enable_selected_fallback)
+        fallback_action_layout.addWidget(enable_selected_btn)
+
+        disable_selected_btn = QPushButton("Disable Selected")
+        disable_selected_btn.clicked.connect(self._disable_selected_fallback)
+        fallback_action_layout.addWidget(disable_selected_btn)
+
+        remove_selected_btn = QPushButton("Remove Selected")
+        remove_selected_btn.clicked.connect(self._remove_selected_fallback)
+        fallback_action_layout.addWidget(remove_selected_btn)
+
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self._clear_all_fallbacks)
+        fallback_action_layout.addWidget(clear_all_btn)
+
+        fallback_action_layout.addStretch()
+        # Status label specific to fallback actions
+        self.fallback_status_label = QLabel()
+        self.fallback_status_label.setStyleSheet("color: gray;")
+        fallback_action_layout.addWidget(self.fallback_status_label)
+        parent_layout.addWidget(self.fallback_action_frame)
+
+        # Load existing fallback keys
+        self._load_fallback_keys()
+
+    def _test_all_fallbacks(self):
+        """Test all fallback keys in parallel"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+
+        if not fallback_keys:
+            QMessageBox.warning(self, "Warning", "No fallback keys to test")
+            return
+
+        # Update UI to show testing status for all keys
+        for i in range(self.fallback_tree.topLevelItemCount()):
+            item = self.fallback_tree.topLevelItem(i)
+            if item:
+                # Status column is index 5 (after Delay)
+                item.setText(5, "⏳ Testing...")
+
+        # Submit all tests to executor in parallel
+        for i, key_data in enumerate(fallback_keys):
+            self._test_single_fallback_key(key_data, i)
+
+    def _show_fallback_context_menu(self, position):
+        """Show context menu for fallback keys."""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        self._show_shared_key_context_menu(
+            tree=self.fallback_tree,
+            position=position,
+            total_keys=len(fallback_keys),
+            key_at_index=lambda i: fallback_keys[i],
+            move_callback=self._move_fallback_key,
+            change_model_callback=self._change_fallback_model_for_selected,
+            configure_endpoint_callback=self._configure_fallback_individual_endpoint,
+            configure_parameters_callback=lambda i: self._edit_key_request_parameters(
+                fallback_keys[i],
+                lambda: (self.translator_gui.save_config(show_message=False), self._load_fallback_keys()),
+            ),
+            disable_endpoint_callback=lambda i: self._toggle_fallback_individual_endpoint(i, False),
+            set_cooldown_callback=self._set_fallback_cooldown_for_selected,
+            set_limit_callback=self._set_fallback_output_token_limit_for_selected,
+            clear_limit_callback=self._clear_fallback_output_token_limit_for_selected,
+            set_temp_callback=self._set_fallback_key_temperature_for_selected,
+            clear_temp_callback=self._clear_fallback_key_temperature_for_selected,
+            set_delay_callback=self._set_fallback_api_call_delay_for_selected,
+            clear_delay_callback=self._clear_fallback_api_call_delay_for_selected,
+            configure_contexts_callback=lambda: self._edit_selected_key_contexts('fallback'),
+            test_callback=self._test_selected_fallback,
+            enable_callback=self._enable_selected_fallback,
+            disable_callback=self._disable_selected_fallback,
+            remove_callback=self._remove_selected_fallback,
+            clear_all_callback=self._clear_all_fallbacks,
+            index_resolver=lambda item, _visual: self._fallback_config_index_for_item(item),
+        )
+
+    def _change_fallback_model_for_selected(self):
+        """Change model name for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        current_model = ""
+        if selected_indices and selected_indices[0] < len(fallback_keys):
+            current_model = fallback_keys[selected_indices[0]].get('model', '')
+
+        new_model, ok = self._show_model_selection_dialog(
+            current_model,
+            title=f"Change Model for {len(selected)} Fallback Keys",
+            accept_text="Apply",
+        )
+        if not ok or not new_model:
+            return
+
+        for item in selected:
+            index = self.fallback_tree.indexOfTopLevelItem(item)
+            if index < len(fallback_keys):
+                fallback_keys[index]['model'] = new_model
+
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
+        self._notify_authgpt_visibility()
+
+    def _load_fallback_keys(self):
+        """Load fallback keys from config"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+
+        # Save scroll position and selection
+        v_scroll = self.fallback_tree.verticalScrollBar().value()
+        h_scroll = self.fallback_tree.horizontalScrollBar().value()
+
+        # Save selection (by index)
+        selected_indices = []
+        for item in self.fallback_tree.selectedItems():
+            selected_indices.append(self.fallback_tree.indexOfTopLevelItem(item))
+
+        self.fallback_tree.setUpdatesEnabled(False)
+
+        # Clear tree
+        self.fallback_tree.clear()
+
+        # Add keys to tree
+        tree_items = []
+        for config_index, key_data in enumerate(fallback_keys):
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            times_used = int(key_data.get('times_used', 0))
+
+            # Mask API key
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+
+            # Determine per-key output token limit display value
+            try:
+                raw_limit = key_data.get('individual_output_token_limit')
+                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
+            except Exception:
+                per_key_limit = None
+            if per_key_limit and per_key_limit > 0:
+                output_limit_str = str(per_key_limit)
+            else:
+                output_limit_str = "global"
+
+            # Determine per-key temperature display value
+            try:
+                raw_temp = key_data.get('individual_key_temperature')
+                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
+            except Exception:
+                per_key_temp = None
+            if per_key_temp is not None:
+                temp_str = str(per_key_temp)
+            else:
+                temp_str = "global"
+
+            # Determine status and coloring (match multi-key tree style)
+            enabled = key_data.get('enabled', True)
+            test_result = key_data.get('last_test_result')
+            if not enabled:
+                status = "Disabled"
+                color = Qt.gray
+            elif test_result == 'passed':
+                status = "✅ Passed"
+                color = Qt.darkGreen
+            elif test_result == 'failed':
+                status = "❌ Failed"
+                color = Qt.red
+            elif test_result == 'timeout':
+                status = "⏱️ Timed Out"
+                color = Qt.darkYellow
+            elif test_result == 'error':
+                status = "❌ Error"
+                color = Qt.darkRed
+            else:
+                status = "Enabled"
+                color = Qt.gray
+
+            # Determine per-key API call delay display value
+            try:
+                raw_delay = key_data.get('api_call_delay')
+                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
+            except Exception:
+                per_key_delay = 0.0
+            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+
+            # Insert into tree (with Success and Errors columns matching multi-key tree)
+            success_count = int(key_data.get('success_count', 0))
+            error_count = int(key_data.get('error_count', 0))
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
+            self._center_api_key_tree_item_text(item)
+            item.setData(0, Qt.UserRole, config_index)
+            # Apply status-based coloring (consistent with multi-key tree)
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+
+            # Tooltip for per-key settings
+            tooltip_parts = []
+            if per_key_limit and per_key_limit > 0:
+                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
+            else:
+                tooltip_parts.append("Using global output token limit")
+            if per_key_temp is not None:
+                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
+            else:
+                tooltip_parts.append("Using global temperature")
+            if per_key_delay > 0:
+                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
+            else:
+                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
+            tooltip = "\n".join(tooltip_parts)
+            for col in range(item.columnCount()):
+                item.setToolTip(col, tooltip)
+
+            # Disable drop on this item to prevent nesting (keep it a flat list)
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self._decorate_key_context_status(item, key_data, 'fallback')
+            tree_items.append(item)
+
+        if tree_items:
+            self.fallback_tree.addTopLevelItems(tree_items)
+
+        # Restore selection
+        for index in selected_indices:
+            if index < self.fallback_tree.topLevelItemCount():
+                item = self.fallback_tree.topLevelItem(index)
+                item.setSelected(True)
+
+        # Restore scroll position
+        self.fallback_tree.verticalScrollBar().setValue(v_scroll)
+        self.fallback_tree.horizontalScrollBar().setValue(h_scroll)
+        self.fallback_tree.setUpdatesEnabled(True)
+        self.fallback_tree.viewport().update()
+
+    def _fallback_config_index_for_item(self, item):
+        if item is None:
+            return -1
+        try:
+            index = item.data(0, Qt.UserRole)
+            if index is not None:
+                return int(index)
+        except Exception:
+            pass
+        return self.fallback_tree.indexOfTopLevelItem(item)
+
+    def _set_fallback_item_enabled_display(self, item, enabled: bool, key_data=None):
+        if item is None:
+            return
+        test_result = (key_data or {}).get('last_test_result')
+        if not enabled:
+            status, color = "Disabled", Qt.gray
+        elif test_result == 'passed':
+            status, color = "Passed", Qt.darkGreen
+        elif test_result == 'failed':
+            status, color = "Failed", Qt.red
+        elif test_result == 'timeout':
+            status, color = "Timed Out", Qt.darkYellow
+        elif test_result == 'error':
+            status, color = "Error", Qt.darkRed
+        else:
+            status, color = "Enabled", Qt.gray
+        item.setText(5, status)
+        self._decorate_key_context_status(item, key_data or {}, 'fallback')
+        for col in range(item.columnCount()):
+            item.setForeground(col, color)
+
+    def _add_fallback_key(self):
+        """Add a new fallback key with optional Google credentials and Azure endpoint"""
+        api_key = self.fallback_key_entry.text().strip()
+        model = self.fallback_model_combo.currentText().strip()
+        google_credentials = self.fallback_google_creds_entry.text().strip() or None
+        if google_credentials:
+            self._sync_parent_google_credentials(google_credentials)
+        google_region = self.fallback_google_region_entry.text().strip() or None
+
+        # Only use individual endpoint if toggle is enabled
+        use_individual_endpoint = self.fallback_individual_endpoint_toggle.isChecked()
+        azure_endpoint = self.fallback_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
+        azure_api_version = self.fallback_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
+
+        model_error = key_pool_service.missing_model_error(model)
+        if model_error:
+            QMessageBox.critical(self, "Error", model_error)
+            return
+
+        # Get current fallback keys
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+
+        # Add new key with additional fields
+        fallback_keys.append(key_pool_service.new_key_entry(
+            api_key,
+            model,
+            google_credentials=google_credentials,
+            azure_endpoint=azure_endpoint,
+            google_region=google_region,
+            azure_api_version=azure_api_version,
+            use_individual_endpoint=use_individual_endpoint,
+        ))
+
+        # Save to config
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+
+        # Clear inputs
+        self.fallback_key_entry.clear()
+        self._set_combo_text_silently(self.fallback_model_combo, "")
+        self.fallback_google_creds_entry.clear()
+        self.fallback_azure_endpoint_entry.clear()
+        self.fallback_google_region_entry.setText("us-east5")
+        self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.fallback_individual_endpoint_toggle.setChecked(False)
+
+        # Update the UI to disable endpoint fields
+        self._toggle_fallback_individual_endpoint_fields()
+
+        # Reload list
+        self._load_fallback_keys()
+
+        # Show success
+        extra_info = key_pool_service.added_key_extra_info(google_credentials, azure_endpoint)
+        self._show_fallback_status(f"Added fallback key for model: {model}{extra_info}")
+
+        # Re-evaluate AuthGPT login button visibility
+        self._schedule_key_pool_config_flush(
+            'fallback',
+            refresh_keys=True,
+            refresh_parent=self._model_affects_parent_provider_controls(model),
+        )
+
+    def _move_fallback_key(self, direction):
+        """Move selected fallback key up or down"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        item = selected[0]
+        index = self.fallback_tree.indexOfTopLevelItem(item)
+
+        # Get current fallback keys
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+
+        if index >= len(fallback_keys):
+            return
+
+        new_index = index
+        if direction == 'top' and index > 0:
+            new_index = 0
+        elif direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(fallback_keys) - 1:
+            new_index = index + 1
+        elif direction == 'bottom' and index < len(fallback_keys) - 1:
+            new_index = len(fallback_keys) - 1
+
+        if new_index != index:
+            # Move key to new position (pop and insert for top/bottom support)
+            key = fallback_keys.pop(index)
+            fallback_keys.insert(new_index, key)
+
+            # Save to config
+            self.translator_gui.config['fallback_keys'] = fallback_keys
+            self.translator_gui.save_config(show_message=False)
+
+            # Reload list
+            self._load_fallback_keys()
+
+            # Reselect item
+            if new_index < self.fallback_tree.topLevelItemCount():
+                item = self.fallback_tree.topLevelItem(new_index)
+                if item:
+                    self.fallback_tree.setCurrentItem(item)
+                    item.setSelected(True)
+
+    def _test_selected_fallback(self):
+        """Test selected fallback key"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select a fallback key to test")
+            return
+
+        index = self.fallback_tree.indexOfTopLevelItem(selected[0])
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+
+        if index >= len(fallback_keys):
+            return
+
+        # Update UI to show testing status immediately
+        if index < self.fallback_tree.topLevelItemCount():
+            item = self.fallback_tree.topLevelItem(index)
+            if item:
+                # Status column is index 5 (after Delay)
+                item.setText(5, "⏳ Testing...")
+
+        key_data = fallback_keys[index]
+
+        # Run test on main thread using QTimer (non-blocking)
+        QTimer.singleShot(100, lambda: self._test_single_fallback_key(key_data, index))
+
+    # Decorate _update_fallback_test_result as a slot for invokeMethod
+    @Slot(int, bool) if HAS_GUI else lambda x: x
+    def _update_fallback_test_result(self, index, success):
+        """Update fallback tree item with test result and bump times used"""
+        # Increment times_used in config
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        if index < len(fallback_keys):
+            try:
+                fallback_keys[index]['times_used'] = int(fallback_keys[index].get('times_used', 0)) + 1
+                if success:
+                    fallback_keys[index]['success_count'] = int(fallback_keys[index].get('success_count', 0)) + 1
+                else:
+                    fallback_keys[index]['error_count'] = int(fallback_keys[index].get('error_count', 0)) + 1
+                # Persist
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+            except Exception:
+                pass
+
+        if index < self.fallback_tree.topLevelItemCount():
+            item = self.fallback_tree.topLevelItem(index)
+            if item:
+                # Update status (column 5) and apply coloring (consistent with multi-key tree)
+                if success:
+                    item.setText(5, "✅ Passed")
+                    color = Qt.darkGreen
+                else:
+                    item.setText(5, "❌ Failed")
+                    color = Qt.red
+                key_data = self.translator_gui.config.get('fallback_keys', [])[index]
+                self._decorate_key_context_status(item, key_data, 'fallback')
+                for col in range(item.columnCount()):
+                    item.setForeground(col, color)
+                # Update success (col 6) / errors (col 7) cells
+                try:
+                    if success:
+                        current = int(item.text(6))
+                        item.setText(6, str(current + 1))
+                    else:
+                        current = int(item.text(7))
+                        item.setText(7, str(current + 1))
+                except Exception:
+                    pass
+                # Update times used cell (column 8)
+                try:
+                    current_times = int(item.text(8))
+                    item.setText(8, str(current_times + 1))
+                except Exception:
+                    item.setText(8, "1")
+
+    @Slot(int) if HAS_GUI else lambda x: x
+    def _update_fallback_timeout_status(self, index):
+        """Update fallback tree item with timeout status (distinct from pass/fail)"""
+        if index < self.fallback_tree.topLevelItemCount():
+            item = self.fallback_tree.topLevelItem(index)
+            if item:
+                item.setText(5, "⏱️ Timed Out")
+                key_data = self.translator_gui.config.get('fallback_keys', [])[index]
+                self._decorate_key_context_status(item, key_data, 'fallback')
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+
+    def _test_single_fallback_key(self, key_data, index):
+        """Test a single fallback key - REAL API TEST"""
+        api_key = key_data.get('api_key', '')
+        model = key_data.get('model', '')
+        timeout_seconds = _api_key_test_timeout_seconds(model)
+
+        print(f"[DEBUG] Starting REAL fallback key test for {model}")
+
+        # Run REAL API test using executor like translation does
+        from concurrent.futures import ThreadPoolExecutor
+        from unified_api_client import UnifiedClient
+
+        # Use shared executor from main GUI
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+        executor = getattr(self.translator_gui, 'executor', None)
+
+        # Shared refs so timeout wrapper can hard-cancel and suppress stale results
+        client_ref = [None]
+        timed_out = [False]
+
+        def run_api_test():
+            try:
+                # Client setup (Google creds/region, individual endpoint) and the probe
+                # come from the shared key-test request (key_pool_service).
+                request = key_pool_service.build_test_request(key_data, 'fallback', api_key=api_key, model=model)
+                _client, response = key_pool_service.send_test_request(
+                    request,
+                    client_cls=UnifiedClient,
+                    on_client=lambda c: client_ref.__setitem__(0, c),  # expose to timeout wrapper
+                    log=print,
+                )
+
+                if key_pool_service.test_response_passed(response, request):
+                    print(f"[DEBUG] Fallback key test completed for {model}: PASSED")
+                    if not timed_out[0]:
+                        if HAS_GUI:
+                            QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                        else:
+                            self._update_fallback_test_result(index, True)
+                    return
+
+                # Failed
+                print(f"[DEBUG] Fallback key test completed for {model}: FAILED")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_fallback_test_result(index, False)
+            except Exception as e:
+                print(f"[DEBUG] Fallback key test error for {model}: {e}")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_fallback_test_result(index, False)
+
+        # Submit to the shared executor with a model-aware per-key timeout.
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=timeout_seconds)
+                except FuturesTimeout:
+                    timed_out[0] = True  # suppress stale results from run_api_test
+                    print(f"[DEBUG] Fallback key test TIMED OUT for {model} ({timeout_seconds}s)")
+                    key_pool_service.cancel_test_client(client_ref[0])
+                    # Clear watchdog so progress bar stops showing in-flight
+                    key_pool_service.reset_api_watchdog()
+                    # Set timeout status directly on tree item (distinct from generic failure)
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_fallback_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
+                    else:
+                        self._update_fallback_timeout_status(index)
+                except Exception:
+                    pass  # Already handled inside run_api_test
+
+        if executor:
+            executor.submit(run_with_timeout)
+        else:
+            thread = threading.Thread(target=run_with_timeout, daemon=True)
+            thread.start()
+
+    def _remove_selected_fallback(self):
+        """Remove selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected fallback key(s)?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            indices = sorted([self.fallback_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
+
+            fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+
+            for index in indices:
+                if index < len(fallback_keys):
+                    del fallback_keys[index]
+
+            self.translator_gui.config['fallback_keys'] = fallback_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_fallback_keys()
+            self._show_fallback_status(f"Removed {len(selected)} fallback key(s)")
+            self._notify_authgpt_visibility()
+
+    def _enable_selected_fallback(self):
+        """Enable selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        for item in selected:
+            index = self._fallback_config_index_for_item(item)
+            if 0 <= index < len(fallback_keys):
+                fallback_keys[index]['enabled'] = True
+                fallback_keys[index]['disabled_contexts'] = []
+                self._set_fallback_item_enabled_display(item, True, fallback_keys[index])
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        if self._can_emit_live_key_pool_updates():
+            os.environ['FALLBACK_KEYS'] = json.dumps(fallback_keys)
+        self._show_fallback_status(f"Enabled {len(selected)} fallback key(s)")
+        self._notify_authgpt_visibility()
+
+    def _disable_selected_fallback(self):
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        keys = self.translator_gui.config.get('fallback_keys', [])
+        for item in selected:
+            index = self._fallback_config_index_for_item(item)
+            if 0 <= index < len(keys):
+                keys[index]['enabled'] = False
+                self._set_fallback_item_enabled_display(item, False, keys[index])
+        self.translator_gui.save_config(show_message=False)
+        if self._can_emit_live_key_pool_updates():
+            os.environ['FALLBACK_KEYS'] = json.dumps(keys)
+        self._broadcast_key_pool_config_changed('fallback', refresh_keys=True)
+        self._show_fallback_status(f"Disabled {len(selected)} fallback key(s)")
+        self._notify_authgpt_visibility()
+
+    def _clear_all_fallbacks(self):
+        """Clear all fallback keys"""
+        if self.fallback_tree.topLevelItemCount() == 0:
+            return
+
+        reply = QMessageBox.question(self, "Confirm", "Remove ALL fallback keys?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            # Clear fallback keys
+            self.translator_gui.config['fallback_keys'] = []
+            self.translator_gui.save_config(show_message=False)
+
+            # Reload list
+            self._load_fallback_keys()
+
+            self._show_fallback_status("Cleared all fallback keys")
+
+            # Re-evaluate AuthGPT login button visibility
+            self._notify_authgpt_visibility()
+
+    def _toggle_fallback_section(self):
+        """Toggle fallback section - simply hide/show elements"""
+        enabled = self.use_fallback_checkbox.isChecked()
+        self.translator_gui.config['use_fallback_keys'] = enabled
+        if hasattr(self.translator_gui, 'use_fallback_keys_var'):
+            try:
+                self.translator_gui.use_fallback_keys_var.set(enabled)
+            except Exception:
+                self.translator_gui.use_fallback_keys_var = enabled
+        live_updates = self._can_emit_live_key_pool_updates()
+        if live_updates:
+            self._broadcast_key_pool_config_changed('fallback', refresh_keys=False)
+
+        # Show/hide the input frame
+        if hasattr(self, 'add_fallback_frame'):
+            self.add_fallback_frame.setVisible(enabled)
+
+        # Show/hide the list label
+        if hasattr(self, 'fallback_list_label'):
+            self.fallback_list_label.setVisible(enabled)
+
+        # Show/hide the tree container (includes move buttons and tree)
+        if hasattr(self, 'fallback_tree_container'):
+            self.fallback_tree_container.setVisible(enabled)
+        if hasattr(self, 'fallback_tree_height_handle'):
+            self.fallback_tree_height_handle.setVisible(enabled)
+
+        # Show/hide action buttons
+        if hasattr(self, 'fallback_action_frame'):
+            self.fallback_action_frame.setVisible(enabled)
+
+        # Clear selection when disabled
+        if hasattr(self, 'fallback_tree') and not enabled:
+            self.fallback_tree.clearSelection()
+
+        # === Check if multi-key is also disabled ===
+        multikey_enabled = self.enabled_checkbox.isChecked() if hasattr(self, 'enabled_checkbox') else False
+        both_disabled = not enabled and not multikey_enabled
+
+        # === Adjust fallback container spacing ===
+        if hasattr(self, 'fallback_container'):
+            layout = self.fallback_container.layout()
+            if layout:
+                if both_disabled:
+                    layout.setContentsMargins(0, 0, 0, 0)  # No top margin when both are off
+                else:
+                    layout.setContentsMargins(0, 5, 0, 0)  # Normal spacing otherwise
+
+        # === Hide fallback separator when both are off ===
+        if hasattr(self, 'fallback_separator'):
+            self.fallback_separator.setVisible(not both_disabled)
+
+        # === Adjust layout spacing ===
+        if hasattr(self, 'scrollable_layout'):
+            if both_disabled:
+                self.scrollable_layout.setSpacing(0)  # No spacing when both disabled
+            else:
+                self.scrollable_layout.setSpacing(10)  # Normal spacing otherwise
+
+        # Show status message
+        status = "enabled" if enabled else "disabled"
+        self._show_fallback_status(f"Fallback Keys {status}")
+        if live_updates:
+            fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+            if enabled:
+                msg = f"🔑 Fallback key pool: {len(fallback_keys)} keys loaded"
+            else:
+                msg = f"🔑 Fallback key pool: disabled"
+            if hasattr(self.translator_gui, 'append_log'):
+                try:
+                    self.translator_gui.append_log(msg)
+                except Exception:
+                    print(msg)  # fallback to print only if append_log fails
+            else:
+                print(msg)
+
+        if live_updates:
+            # Sync env vars immediately
+            try:
+                import os as _os
+                if enabled:
+                    _os.environ['USE_FALLBACK_KEYS'] = '1'
+                else:
+                    _os.environ['USE_FALLBACK_KEYS'] = '0'
+            except Exception:
+                pass
+
+            # Re-evaluate AuthGPT login button visibility
+            self._notify_authgpt_visibility()
+
+    def _toggle_fallback_visibility(self):
+        """Toggle fallback key visibility"""
+        if self.fallback_key_entry.echoMode() == QLineEdit.Password:
+            self.fallback_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_fallback_btn.setText('🔒')
+        else:
+            self.fallback_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_fallback_btn.setText('👁')
+
+    def _toggle_fallback_individual_endpoint_fields(self):
+        """Toggle visibility and state of fallback individual endpoint fields"""
+        enabled = self.fallback_individual_endpoint_toggle.isChecked()
+
+        # Show/hide and enable/disable endpoint fields
+        self.fallback_individual_endpoint_label.setVisible(enabled)
+        self.fallback_azure_endpoint_entry.setVisible(enabled)
+        self.fallback_individual_api_version_label.setVisible(enabled)
+        self.fallback_azure_api_version_combo.setVisible(enabled)
+
+        self.fallback_azure_endpoint_entry.setEnabled(enabled)
+        self.fallback_azure_api_version_combo.setEnabled(enabled)
+
+        if not enabled:
+            # Clear the fields when disabled
+            self.fallback_azure_endpoint_entry.clear()
+            self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+
+    def _configure_fallback_individual_endpoint(self, fallback_index):
+        """Configure individual endpoint for a fallback key"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        if fallback_index >= len(fallback_keys):
+            return
+
+        key_data = fallback_keys[fallback_index]
+
+        # Create a temporary APIKeyEntry object for compatibility with IndividualEndpointDialog
+        temp_key = APIKeyEntry(
+            api_key=key_data.get('api_key', ''),
+            model=key_data.get('model', ''),
+            cooldown=60,  # Not used for fallback keys
+            enabled=True,
+            google_credentials=key_data.get('google_credentials'),
+            azure_endpoint=key_data.get('azure_endpoint'),
+            google_region=key_data.get('google_region'),
+            azure_api_version=key_data.get('azure_api_version'),
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+            request_parameters=key_data.get('request_parameters'),
+        )
+
+        # Define callback to update config after dialog closes
+        def on_endpoint_configured():
+            # Update the fallback key with new values
+            fallback_keys[fallback_index]['azure_endpoint'] = temp_key.azure_endpoint
+            fallback_keys[fallback_index]['azure_api_version'] = temp_key.azure_api_version
+            fallback_keys[fallback_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            fallback_keys[fallback_index]['request_parameters'] = dict(temp_key.request_parameters)
+
+            # Save to config
+            self.translator_gui.config['fallback_keys'] = fallback_keys
+            self.translator_gui.save_config(show_message=False)
+
+            # Reload the fallback list
+            self._load_fallback_keys()
+
+            # Show status
+            status = "configured" if temp_key.use_individual_endpoint else "disabled"
+            self._show_fallback_status(f"Individual endpoint {status} for fallback key")
+
+        # Create individual endpoint dialog using the class
+        if IndividualEndpointDialog is None:
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
+            return
+        dialog = IndividualEndpointDialog(
+            self, self.translator_gui, temp_key, on_endpoint_configured,
+            self._show_fallback_status, persist_to_main_config=False,
+        )
+        dialog.exec_()
+
+    def _set_fallback_cooldown_for_selected(self):
+        """Set rate-limit cooldown for selected fallback keys."""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self._fallback_config_index_for_item(item) for item in selected]
+        selected_keys = [fallback_keys[idx] for idx in selected_indices if 0 <= idx < len(fallback_keys)]
+        value, ok = self._show_cooldown_edit_dialog(self._default_cooldown(selected_keys))
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                fallback_keys[idx]['cooldown'] = value
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Set cooldown to {value}s for {len(selected_indices)} key(s)")
+
+    def _set_fallback_output_token_limit_for_selected(self):
+        """Set per-key output token limit for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+
+        selected_keys = [fallback_keys[idx] for idx in selected_indices if 0 <= idx < len(fallback_keys)]
+        value, ok = self._show_output_token_limit_dialog(
+            self._default_output_token_limit(selected_keys),
+            title="Set Fallback Output Token Limit",
+            label="Max output tokens for selected fallback key(s) (0 = use global):",
+            allow_global=True,
+        )
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                fallback_keys[idx]['individual_output_token_limit'] = int(value) if value > 0 else None
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Set fallback output token limit to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_fallback_output_token_limit_for_selected(self):
+        """Clear per-key output token limit for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                if 'individual_output_token_limit' in fallback_keys[idx]:
+                    del fallback_keys[idx]['individual_output_token_limit']
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Cleared fallback output token limit for {len(selected_indices)} key(s)")
+
+    def _set_fallback_key_temperature_for_selected(self):
+        """Set per-key temperature for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+
+        selected_keys = [fallback_keys[idx] for idx in selected_indices if 0 <= idx < len(fallback_keys)]
+        value, ok = self._show_key_temperature_dialog(
+            self._default_key_temperature(selected_keys, allow_global=True),
+            title="Set Fallback Key Temperature",
+            label="Temperature for selected fallback key(s) (-1 = use global, 0.0 - 1.0):",
+            allow_global=True,
+        )
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                if value < 0:
+                    fallback_keys[idx].pop('individual_key_temperature', None)
+                else:
+                    fallback_keys[idx]['individual_key_temperature'] = value
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Set fallback key temperature to {value if value >= 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_fallback_key_temperature_for_selected(self):
+        """Clear per-key temperature for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                if 'individual_key_temperature' in fallback_keys[idx]:
+                    del fallback_keys[idx]['individual_key_temperature']
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Cleared fallback key temperature for {len(selected_indices)} key(s)")
+
+    def _set_fallback_api_call_delay_for_selected(self):
+        """Set per-key API call delay for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [fallback_keys[idx] for idx in selected_indices if 0 <= idx < len(fallback_keys)]
+        value, ok = self._show_api_call_delay_dialog(self._default_api_call_delay(selected_keys))
+        if ok:
+            for idx in selected_indices:
+                if 0 <= idx < len(fallback_keys):
+                    fallback_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+            self.translator_gui.config['fallback_keys'] = fallback_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_fallback_keys()
+            self._show_fallback_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_fallback_api_call_delay_for_selected(self):
+        """Clear per-key API call delay for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                fallback_keys[idx]['api_call_delay'] = 0.0
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
+
+    def _toggle_fallback_individual_endpoint(self, fallback_index, enabled):
+        """Quick toggle individual endpoint on/off for fallback key"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        if fallback_index >= len(fallback_keys):
+            return
+
+        fallback_keys[fallback_index]['use_individual_endpoint'] = enabled
+
+        # Save to config
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+
+        # Reload fallback list
+        self._load_fallback_keys()
+
+        # Show status
+        status = "enabled" if enabled else "disabled"
+        model = fallback_keys[fallback_index].get('model', 'unknown')
+        self._show_fallback_status(f"Individual endpoint {status} for fallback key ({model})")
+
+    def _create_button_bar(self, parent_layout):
+        """Create the bottom button bar as a fixed section"""
+        preview_mode = bool(getattr(self, 'preview_pool', None))
+        # Create container for separator and buttons
+        button_container = QWidget()
+        button_container_layout = QVBoxLayout(button_container)
+        button_container_layout.setContentsMargins(0, 0, 0, 0)
+        button_container_layout.setSpacing(0)
+
+        # Add separator line
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setStyleSheet("QFrame { color: #3a3a3a; background-color: #3a3a3a; }")
+        button_container_layout.addWidget(separator)
+
+        # Create button frame
+        self.button_frame = QWidget()
+        self.button_frame.setStyleSheet("""
+            QWidget {
+                background-color: #252525;
+                padding: 0px;
+            }
+        """)
+        button_layout = QHBoxLayout(self.button_frame)
+        button_layout.setContentsMargins(20, 15, 20, 15)
+
+        if not preview_mode:
+            # Import/Export
+            import_btn = QPushButton("Import")
+            import_btn.setMinimumHeight(40)
+            import_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
+            import_btn.clicked.connect(self._import_keys)
+            button_layout.addWidget(import_btn)
+
+            export_btn = QPushButton("Export")
+            export_btn.setMinimumHeight(40)
+            export_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
+            export_btn.clicked.connect(self._export_keys)
+            button_layout.addWidget(export_btn)
+
+            # Manage Refusal Patterns button
+            _refusal_disabled = self.translator_gui.config.get('disable_refusal_checks', True)
+            _refusal_status = "Disabled" if _refusal_disabled else "Enabled"
+            refusal_btn = QPushButton(f"🚫 Manage Refusal Patterns ({_refusal_status})")
+            self.translator_gui._refusal_patterns_btn_multi = refusal_btn
+            refusal_btn.setMinimumHeight(40)
+            refusal_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #5c2e5b;
+                    color: #ffffff;
+                    font-size: 11pt;
+                    padding: 8px 20px;
+                    border: 1px solid #42213f;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #733d71;
+                    border-color: #5c2e5b;
+                }
+                QPushButton:pressed {
+                    background-color: #3d1d3c;
+                }
+            """)
+            refusal_btn.clicked.connect(self._manage_refusal_patterns)
+            button_layout.addWidget(refusal_btn)
+
+        button_layout.addStretch()
+
+        # Close button
+        cancel_btn = QPushButton("Close")
+        cancel_btn.setMinimumHeight(44)
+        cancel_btn.setMinimumWidth(110)
+        cancel_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 10px 24px; }")
+        cancel_btn.clicked.connect(self._on_close)
+        button_layout.addWidget(cancel_btn)
+
+        # Save button
+        save_btn = QPushButton("Save")
+        save_btn.setMinimumHeight(44)
+        save_btn.setMinimumWidth(130)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a7ba7;
+                color: white;
+                font-weight: bold;
+                font-size: 11pt;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #5a9fd4;
+            }
+        """)
+        save_btn.clicked.connect(self._save_and_close)
+        self._save_btn = save_btn
+        button_layout.addWidget(save_btn)
+
+        # Add button frame to container
+        button_container_layout.addWidget(self.button_frame)
+
+        # Add button container to parent layout
+        parent_layout.addWidget(button_container)
+
+    def _create_key_list_section(self, parent_layout):
+        """Create the key list section with inline editing and rearrangement controls"""
+        # Store reference for enabling/disabling
+        self.key_list_frame = QGroupBox("API Keys")
+        list_frame_layout = QVBoxLayout(self.key_list_frame)
+        list_frame_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Add primary key indicator frame at the top with improved styling
+        primary_frame = QFrame()
+        primary_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2d5a7b, stop:0.5 #4a7ba7, stop:1 #2d5a7b);
+                border: none;
+                border-radius: 6px;
+            }
+        """)
+        primary_frame_layout = QVBoxLayout(primary_frame)
+        primary_frame_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.primary_key_label = QLabel("⭐ PRIMARY KEY: Position #1 will be used first in rotation ⭐")
+        self.primary_key_label.setStyleSheet("""
+            QLabel {
+                background: transparent;
+                color: #ffffff;
+                font-weight: bold;
+                font-size: 11pt;
+                padding: 2px;
+            }
+        """)
+        primary_label_font = QFont()
+        primary_label_font.setBold(True)
+        primary_label_font.setPointSize(11)
+        self.primary_key_label.setFont(primary_label_font)
+        self.primary_key_label.setAlignment(Qt.AlignCenter)
+        primary_frame_layout.addWidget(self.primary_key_label)
+
+        list_frame_layout.addWidget(primary_frame)
+
+        # Main container with treeview and controls
+        main_container = QWidget()
+        main_container_layout = QHBoxLayout(main_container)
+        main_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Left side: Move buttons
+        move_frame = QWidget()
+        move_layout = QVBoxLayout(move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+
+        reorder_label = QLabel("Reorder")
+        reorder_font = QFont()
+        reorder_font.setBold(True)
+        reorder_label.setFont(reorder_font)
+        move_layout.addWidget(reorder_label)
+
+        # Move to top button with expanded width
+        top_btn = QPushButton("↑ ↑")
+        top_btn.setFixedSize(55, 32)
+        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        top_btn.clicked.connect(lambda: self._move_key('top'))
+        move_layout.addWidget(top_btn)
+
+        # Move up button with expanded width
+        up_btn = QPushButton("↑")
+        up_btn.setFixedSize(55, 32)
+        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        up_btn.clicked.connect(lambda: self._move_key('up'))
+        move_layout.addWidget(up_btn)
+
+        # Move down button with expanded width
+        down_btn = QPushButton("↓")
+        down_btn.setFixedSize(55, 32)
+        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        down_btn.clicked.connect(lambda: self._move_key('down'))
+        move_layout.addWidget(down_btn)
+
+        # Move to bottom button with expanded width
+        bottom_btn = QPushButton("↓ ↓")
+        bottom_btn.setFixedSize(55, 32)
+        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        bottom_btn.clicked.connect(lambda: self._move_key('bottom'))
+        move_layout.addWidget(bottom_btn)
+
+        # Spacer
+        move_layout.addSpacing(10)
+
+        # Position label
+        self.position_label = QLabel()
+        self.position_label.setStyleSheet("color: gray;")
+        move_layout.addWidget(self.position_label)
+        move_layout.addStretch()
+
+        main_container_layout.addWidget(move_frame)
+
+        # Right side: TreeWidget with drag and drop support
+        self.tree = QTreeWidget()
+        self.tree.setUniformRowHeights(True)
+        self._tighten_api_key_tree_first_column(self.tree)
+        # Add explicit column for per-key output token limit
+        self.tree.setHeaderLabels(['API Key', 'Model', '\u231b', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        # Adjusted column widths: balanced distribution
+        self.tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)  # API Key
+        self.tree.setColumnWidth(1, 220)  # Model
+        self.tree.setColumnWidth(2, 42)   # Cooldown
+        self.tree.setColumnWidth(3, 105)  # Output Limit
+        self.tree.setColumnWidth(4, 100)  # Temperature
+        self.tree.setColumnWidth(5, 90)   # API Delay
+        self.tree.setColumnWidth(6, 170)  # Status
+        self.tree.setColumnWidth(7, 42)   # Success
+        self.tree.setColumnWidth(8, 42)   # Errors
+        self.tree.setColumnWidth(9, 80)   # Requests
+
+        # Set header font
+        header = self.tree.header()
+        header_font = QFont()
+        header_font.setBold(True)
+        header_font.setPointSize(11)
+        header.setFont(header_font)
+        self._enable_api_key_tree_font_zoom(self.tree)
+        self._enable_api_key_tree_responsive_columns(
+            self.tree,
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 42, 105, 100, 90, 170, 42, 42, 80),
+        )
+
+        # Set context menu
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
+
+        # Set selection mode
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        # Enable drag and drop using InternalMove (like profile manager)
+        # This is the simplest approach - let Qt handle everything
+        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
+
+        # Connect to model's rowsMoved signal to sync data after Qt moves items
+        self.tree.model().rowsMoved.connect(self._on_tree_rows_moved)
+
+        # Connect signals
+        self.tree.itemDoubleClicked.connect(self._on_click)
+        self.tree.itemClicked.connect(lambda item, col: self._key_status_clicked('main', item, col))
+        self.tree.itemSelectionChanged.connect(self._on_selection_change)
+
+        # Track editing state
+        self.edit_widget = None
+
+        main_container_layout.addWidget(self.tree)
+        list_frame_layout.addWidget(main_container)
+        self.tree_height_handle = self._add_api_key_tree_height_resizer(
+            self.tree,
+            list_frame_layout,
+            'translation',
+        )
+
+        # Action buttons
+        action_frame = QWidget()
+        action_layout = QHBoxLayout(action_frame)
+        action_layout.setContentsMargins(0, 10, 0, 0)
+
+        # Store references to action buttons for enabling/disabling
+        self.test_selected_btn = QPushButton("Test Selected")
+        self.test_selected_btn.clicked.connect(self._test_selected)
+        action_layout.addWidget(self.test_selected_btn)
+
+        self.test_all_btn = QPushButton("Test All")
+        self.test_all_btn.clicked.connect(self._test_all)
+        action_layout.addWidget(self.test_all_btn)
+
+        self.enable_selected_btn = QPushButton("Enable Selected")
+        self.enable_selected_btn.clicked.connect(self._enable_selected)
+        action_layout.addWidget(self.enable_selected_btn)
+
+        self.disable_selected_btn = QPushButton("Disable Selected")
+        self.disable_selected_btn.clicked.connect(self._disable_selected)
+        action_layout.addWidget(self.disable_selected_btn)
+
+        self.remove_selected_btn = QPushButton("Remove Selected")
+        self.remove_selected_btn.clicked.connect(self._remove_selected)
+        action_layout.addWidget(self.remove_selected_btn)
+
+        action_layout.addStretch()
+
+        # Stats label
+        self.stats_label = QLabel()
+        self.stats_label.setStyleSheet("color: gray;")
+        stats_font = QFont()
+        stats_font.setPointSize(11)
+        self.stats_label.setFont(stats_font)
+        action_layout.addWidget(self.stats_label)
+
+        list_frame_layout.addWidget(action_frame)
+        parent_layout.addWidget(self.key_list_frame)
+
+    def _create_add_key_section(self, parent_layout):
+        """Create the add key section with Google credentials and Azure endpoint support"""
+        # Store reference for enabling/disabling
+        self.add_key_frame = QGroupBox("Add New API Key")
+        add_grid = QGridLayout(self.add_key_frame)
+        add_grid.setContentsMargins(15, 15, 15, 15)
+
+        # Row 0: API Key and Model
+        add_grid.addWidget(QLabel("API Key:"), 0, 0, Qt.AlignLeft)
+        self.api_key_entry = QLineEdit()
+        self.api_key_entry.setEchoMode(QLineEdit.Password)
+        add_grid.addWidget(self.api_key_entry, 0, 1)
+
+        # Toggle visibility button
+        self.show_key_btn = QPushButton("👁")
+        self.show_key_btn.setFixedWidth(40)
+        self.show_key_btn.clicked.connect(self._toggle_key_visibility)
+        add_grid.addWidget(self.show_key_btn, 0, 2)
+
+        # Model
+        add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        add_models = self._get_model_options_for_dropdown()
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(add_models)
+        self.model_combo.setEditable(True)
+        self._attach_model_autofill(self.model_combo, self._on_model_requirement_input_changed)
+        self._apply_combobox_icon(self.model_combo)
+        self._disable_combobox_mousewheel(self.model_combo)  # Disable mousewheel
+        add_grid.addWidget(self._wrap_model_with_ollama_settings(self.model_combo), 0, 4)
+
+        # Row 1: Cooldown and buttons
+        add_grid.addWidget(QLabel("Cooldown (s):"), 1, 0, Qt.AlignLeft)
+        cooldown_widget = QWidget()
+        cooldown_layout = QHBoxLayout(cooldown_widget)
+        cooldown_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.cooldown_spinbox = QSpinBox()
+        self.cooldown_spinbox.setRange(10, 3600)
+        self.cooldown_spinbox.setValue(60)
+        self.cooldown_spinbox.setMaximumWidth(100)
+        self._disable_spinbox_mousewheel(self.cooldown_spinbox)  # Disable mousewheel
+        cooldown_layout.addWidget(self.cooldown_spinbox)
+
+        cooldown_hint = QLabel("(10-3600)")
+        cooldown_hint.setStyleSheet("color: gray;")
+        cooldown_layout.addWidget(cooldown_hint)
+        cooldown_layout.addStretch()
+        add_grid.addWidget(cooldown_widget, 1, 1)
+
+        # Add button and Copy Current Key button
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.addStretch()
+
+        # Store references for enabling/disabling
+        self.add_key_btn = QPushButton("Add Key")
+        self.add_key_btn.clicked.connect(self._add_key)
+        button_layout.addWidget(self.add_key_btn)
+
+        self.copy_current_btn = QPushButton("Copy Current Key")
+        self.copy_current_btn.clicked.connect(self._copy_current_settings)
+        button_layout.addWidget(self.copy_current_btn)
+
+        add_grid.addWidget(button_widget, 1, 4, Qt.AlignRight)
+
+        # Row 2: Google Credentials (optional, discretely styled)
+        google_creds_label = QLabel("Google Creds:")
+        google_creds_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_grid.addWidget(google_creds_label, 2, 0, Qt.AlignLeft)
+        self.google_creds_entry = QLineEdit()
+        self.google_creds_entry.setStyleSheet("font-size: 8pt;")
+        add_grid.addWidget(self.google_creds_entry, 2, 1)
+
+        # Google credentials browse button
+        google_browse_btn = QPushButton("📁")
+        google_browse_btn.setFixedWidth(40)
+        google_browse_btn.clicked.connect(self._browse_google_credentials)
+        add_grid.addWidget(google_browse_btn, 2, 2)
+
+        # Google region field
+        region_label = QLabel("Region:")
+        region_label.setStyleSheet("color: gray;")
+        add_grid.addWidget(region_label, 2, 3, Qt.AlignLeft)
+        self.google_region_entry = QLineEdit("us-east5")
+        self.google_region_entry.setStyleSheet("font-size: 8pt;")
+        self.google_region_entry.setMaximumWidth(120)
+        add_grid.addWidget(self.google_region_entry, 2, 4, 1, 1, Qt.AlignLeft)
+
+        # Row 3: Individual Endpoint Toggle
+        self.use_individual_endpoint_var = False
+        self.individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
+        self.individual_endpoint_toggle.setChecked(False)
+        self.individual_endpoint_toggle.toggled.connect(self._toggle_individual_endpoint_fields)
+        add_grid.addWidget(self.individual_endpoint_toggle, 3, 0, 1, 2, Qt.AlignLeft)
+
+        # Row 4: Individual Endpoint (initially hidden)
+        self.individual_endpoint_label = QLabel("Individual Endpoint:")
+        self.individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_grid.addWidget(self.individual_endpoint_label, 4, 0, Qt.AlignLeft)
+        self.azure_endpoint_entry = QLineEdit()
+        self.azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
+        self.azure_endpoint_entry.setEnabled(False)
+        add_grid.addWidget(self.azure_endpoint_entry, 4, 1, 1, 2)
+
+        # Individual Endpoint API Version (small dropdown, initially hidden)
+        self.individual_api_version_label = QLabel("API Ver:")
+        self.individual_api_version_label.setStyleSheet("color: gray;")
+        add_grid.addWidget(self.individual_api_version_label, 4, 3, Qt.AlignLeft)
+        azure_versions = [
+            '2025-01-01-preview',
+            '2024-12-01-preview',
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ]
+        self.azure_api_version_combo = QComboBox()
+        self.azure_api_version_combo.addItems(azure_versions)
+        self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self._apply_combobox_icon(self.azure_api_version_combo)
+        self.azure_api_version_combo.setMaximumWidth(180)
+        self.azure_api_version_combo.setEnabled(False)
+        self._disable_combobox_mousewheel(self.azure_api_version_combo)  # Disable mousewheel
+        add_grid.addWidget(self.azure_api_version_combo, 4, 4, 1, 1, Qt.AlignLeft)
+
+
+        # Set column stretch
+        add_grid.setColumnStretch(1, 1)
+        add_grid.setColumnStretch(4, 1)
+
+        # Initially hide the endpoint fields
+        self._toggle_individual_endpoint_fields()
+
+        parent_layout.addWidget(self.add_key_frame)
+
+    def _toggle_individual_endpoint_fields(self):
+        """Toggle visibility and state of individual endpoint fields"""
+        enabled = self.individual_endpoint_toggle.isChecked()
+
+        # Show/hide and enable/disable endpoint fields
+        self.individual_endpoint_label.setVisible(enabled)
+        self.azure_endpoint_entry.setVisible(enabled)
+        self.individual_api_version_label.setVisible(enabled)
+        self.azure_api_version_combo.setVisible(enabled)
+
+        self.azure_endpoint_entry.setEnabled(enabled)
+        self.azure_api_version_combo.setEnabled(enabled)
+
+        if not enabled:
+            # Clear the fields when disabled
+            self.azure_endpoint_entry.clear()
+            self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
+
+    def _move_key(self, direction):
+        """Move selected key in the specified direction"""
+        selected = self.tree.selectedItems()
+        if not selected or len(selected) != 1:
+            return
+
+        item = selected[0]
+        index = self.tree.indexOfTopLevelItem(item)
+
+        if index >= len(self.key_pool.keys):
+            return
+
+        new_index = index
+
+        if direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(self.key_pool.keys) - 1:
+            new_index = index + 1
+        elif direction == 'top':
+            new_index = 0
+        elif direction == 'bottom':
+            new_index = len(self.key_pool.keys) - 1
+
+        if new_index != index:
+            # Swap keys in the pool
+            with self.key_pool.lock:
+                self.key_pool.keys[index], self.key_pool.keys[new_index] = \
+                    self.key_pool.keys[new_index], self.key_pool.keys[index]
+
+            # Refresh display
+            self._refresh_key_list()
+
+            # Reselect the moved item
+            if new_index < self.tree.topLevelItemCount():
+                new_item = self.tree.topLevelItem(new_index)
+                if new_item:
+                    self.tree.setCurrentItem(new_item)
+                    new_item.setSelected(True)
+                    self.tree.scrollToItem(new_item)
+
+            # Show status
+            self._show_status(f"Moved key to position {new_index + 1}")
+
+    def _on_selection_change(self):
+        """Update position label when selection changes"""
+        selected = self.tree.selectedItems()
+        if selected:
+            index = self.tree.indexOfTopLevelItem(selected[0])
+            total = len(self.key_pool.keys)
+            self.position_label.setText(f"#{index + 1}/{total}")
+        else:
+            self.position_label.setText("")
+
+    def _on_tree_rows_moved(self):
+        """Sync key_pool.keys with tree order after Qt moves rows via drag-drop"""
+        # Read the new order from the tree and rebuild key_pool.keys
+        new_order = []
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item:
+                # Find the matching key by masked API key and model
+                masked_key = item.text(0)
+                model = item.text(1)
+                for key in self.key_pool.keys:
+                    key_masked = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
+                    if key_masked == masked_key and key.model == model and key not in new_order:
+                        new_order.append(key)
+                        break
+
+        # Update the pool if we got a valid reordering
+        if len(new_order) == len(self.key_pool.keys):
+            with self.key_pool.lock:
+                self.key_pool.keys = new_order
+
+            # Save to config
+            self._save_keys_to_config()
+
+            # Update primary key label
+            if hasattr(self, 'primary_key_label') and new_order:
+                first_key = new_order[0]
+                masked = first_key.api_key[:8] + "..." + first_key.api_key[-4:] if len(first_key.api_key) > 12 else first_key.api_key
+                self.primary_key_label.setText(f"⭐ PRIMARY KEY: {first_key.model} ({masked}) ⭐")
+
+            self._show_status("Reordered keys")
+
+    def _show_fallback_status(self, message: str):
+        """Show status message in the fallback section."""
+        if hasattr(self, 'fallback_status_label'):
+            self.fallback_status_label.setText(message)
+
+    def _on_fallback_rows_moved(self):
+        """Sync fallback_keys config with tree order after Qt moves rows via drag-drop"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+
+        # Read the new order from the tree
+        new_order = []
+        for i in range(self.fallback_tree.topLevelItemCount()):
+            item = self.fallback_tree.topLevelItem(i)
+            if item:
+                # Find the matching key by masked API key and model
+                masked_key = item.text(0)
+                model = item.text(1)
+                for key_data in fallback_keys:
+                    api_key = key_data.get('api_key', '')
+                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
+                        new_order.append(key_data)
+                        break
+
+        # Update config if we got a valid reordering
+        if len(new_order) == len(fallback_keys):
+            self.translator_gui.config['fallback_keys'] = new_order
+            self.translator_gui.save_config(show_message=False)
+            self._show_fallback_status("Reordered fallback keys")
+
+    def _on_fallback_selection_change(self):
+        """Update position label when fallback selection changes"""
+        selected = self.fallback_tree.selectedItems()
+        if selected:
+            index = self.fallback_tree.indexOfTopLevelItem(selected[0])
+            total = self.fallback_tree.topLevelItemCount()
+            self.fallback_position_label.setText(f"#{index + 1}/{total}")
+        else:
+            self.fallback_position_label.setText("")
+
+    def _on_fallback_click(self, item, column):
+        """Handle double-click on fallback tree item for inline editing (consistent with multi-key tree)"""
+        if not item:
+            return
+
+        index = self.fallback_tree.indexOfTopLevelItem(item)
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        if index >= len(fallback_keys):
+            return
+
+        # Column 1 = Model (editable)
+        # Column 2 = Output Limit (editable)
+        # Column 3 = Temp (editable)
+        # Column 4 = API Delay (editable)
+        if column == 1:
+            old_value = item.text(1)
+            new_value, ok = self._show_model_edit_dialog(old_value)
+            if ok and new_value and new_value != old_value:
+                fallback_keys[index]['model'] = new_value
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_fallback_keys()
+                self._show_fallback_status(f"Updated model to: {new_value}")
+                self._notify_authgpt_visibility()
+        elif column == 2:  # Output Limit column
+            value, ok = self._show_output_token_limit_dialog(
+                self._default_output_token_limit([fallback_keys[index]], fallback=0),
+                title="Edit Output Token Limit",
+                label="Output token limit (0 = use global):",
+                allow_global=True,
+            )
+            if ok:
+                fallback_keys[index]['individual_output_token_limit'] = value if value > 0 else None
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_fallback_keys()
+                self._show_fallback_status(f"Updated output limit to: {value if value > 0 else 'global'}")
+        elif column == 3:  # Temp column
+            value, ok = self._show_key_temperature_dialog(
+                self._default_key_temperature([fallback_keys[index]], allow_global=True),
+                title="Edit Key Temperature",
+                label="Temperature (-1 = use global, 0.0 - 1.0):",
+                allow_global=True,
+            )
+            if ok:
+                if value < 0:
+                    if 'individual_key_temperature' in fallback_keys[index]:
+                        del fallback_keys[index]['individual_key_temperature']
+                else:
+                    fallback_keys[index]['individual_key_temperature'] = value
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_fallback_keys()
+                self._show_fallback_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+        elif column == 4:  # API Delay column
+            value, ok = self._show_api_call_delay_dialog(
+                self._default_api_call_delay([fallback_keys[index]]),
+                "Edit API Call Delay",
+            )
+            if ok:
+                fallback_keys[index]['api_call_delay'] = value if value > 0 else 0.0
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_fallback_keys()
+                self._show_fallback_status(f"Updated API delay to: {value if value > 0 else 'global'}")
+
+
+    def _refresh_key_list(self):
+        """Refresh the key list display preserving test results and highlighting key #1"""
+        # Save scroll position and selection
+        v_scroll = self.tree.verticalScrollBar().value()
+        h_scroll = self.tree.horizontalScrollBar().value()
+
+        # Save selection (by index)
+        selected_indices = []
+        for item in self.tree.selectedItems():
+            selected_indices.append(self.tree.indexOfTopLevelItem(item))
+
+        self.tree.setUpdatesEnabled(False)
+
+        # Clear tree
+        self.tree.clear()
+
+        # Update primary key label if it exists
+        if hasattr(self, 'primary_key_label'):
+            keys = self.key_pool.get_all_keys()
+            if keys:
+                first_key = keys[0]
+                masked = first_key.api_key[:8] + "..." + first_key.api_key[-4:] if len(first_key.api_key) > 12 else first_key.api_key
+                self.primary_key_label.setText(f"⭐ PRIMARY KEY: {first_key.model} ({masked}) ⭐")
+
+        # Add keys
+        keys = self.key_pool.get_all_keys()
+        tree_items = []
+        for i, key in enumerate(keys):
+            # Mask API key for display
+            masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
+
+            # Determine per-key output token limit display value
+            per_key_limit = getattr(key, 'individual_output_token_limit', None)
+            if per_key_limit and per_key_limit > 0:
+                output_limit_str = str(per_key_limit)
+            else:
+                output_limit_str = "global"
+
+            # Determine per-key temperature display value
+            per_key_temp = getattr(key, 'individual_key_temperature', None)
+            if per_key_temp is not None:
+                temp_str = str(per_key_temp)
+            else:
+                temp_str = "global"
+
+            # Determine per-key API call delay display value
+            per_key_delay = getattr(key, 'api_call_delay', 0.0)
+            if per_key_delay and per_key_delay > 0:
+                delay_str = str(per_key_delay)
+            else:
+                delay_str = "global"
+
+            # Position indicator (not currently shown in a column, but kept for potential future use)
+            position = f"#{i+1}"
+            if i == 0:
+                position = "⭐ #1"
+
+            # Determine status based on test results and current state
+            status, tags = key_pool_service.key_tree_status(key)
+
+            # Times used (counter)
+            times_used = getattr(key, 'times_used', key.success_count + key.error_count)
+
+            # Insert into tree (now includes explicit Output Limit and Temp columns)
+            item = QTreeWidgetItem([
+                masked_key,
+                key.model,
+                f"{key.cooldown}s",
+                output_limit_str,
+                temp_str,
+                delay_str,
+                status,
+                str(key.success_count),
+                str(key.error_count),
+                str(times_used),
+            ])
+            self._center_api_key_tree_item_text(item)
+
+            # Tooltip for per-key settings
+            tooltip_parts = []
+            if per_key_limit and per_key_limit > 0:
+                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
+            else:
+                tooltip_parts.append("Using global output token limit")
+            if per_key_temp is not None:
+                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
+            else:
+                tooltip_parts.append("Using global temperature")
+            if per_key_delay and per_key_delay > 0:
+                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
+            else:
+                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
+            tooltip = "\n".join(tooltip_parts)
+            for col in range(item.columnCount()):
+                item.setToolTip(col, tooltip)
+
+            # Set colors based on status
+            if tags == ('active',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.green)
+            elif tags == ('cooling',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+            elif tags == ('disabled',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.gray)
+            elif tags == ('testing',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.blue)
+            elif tags == ('passed',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkGreen)
+            elif tags == ('failed',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.red)
+            elif tags == ('ratelimited',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+            elif tags == ('timeout',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+            elif tags == ('error',):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkRed)
+
+            # Disable drop on this item to prevent nesting (keep it a flat list)
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self._decorate_key_context_status(item, key, 'main')
+            tree_items.append(item)
+
+        if tree_items:
+            self.tree.addTopLevelItems(tree_items)
+
+        # Update stats
+        active_count = sum(1 for k in keys if k.enabled and not k.is_cooling_down)
+        total_count = len(keys)
+        passed_count = sum(1 for k in keys if k.last_test_result == 'passed')
+        self.stats_label.setText(f"Keys: {active_count} active / {total_count} total | {passed_count} passed tests")
+
+        # Restore selection
+        for index in selected_indices:
+            if index < self.tree.topLevelItemCount():
+                item = self.tree.topLevelItem(index)
+                item.setSelected(True)
+
+        # Restore scroll position
+        self.tree.verticalScrollBar().setValue(v_scroll)
+        self.tree.horizontalScrollBar().setValue(h_scroll)
+        self.tree.setUpdatesEnabled(True)
+        self.tree.viewport().update()
+
+    def _on_click(self, item, column):
+        """Handle click on tree item for inline editing"""
+        if not item:
+            return
+
+        index = self.tree.indexOfTopLevelItem(item)
+        if index >= len(self.key_pool.keys):
+            return
+
+        key = self.key_pool.keys[index]
+
+        # Column 1 = Model (editable)
+        # Column 2 = Cooldown (editable)
+        # Column 3 = Output Limit (editable)
+        # Column 4 = Temp (editable)
+        # Column 5 = API Delay (editable)
+        if column == 1:  # Model column
+            # Create inline editor for model
+            old_value = item.text(1)
+            new_value, ok = self._show_model_edit_dialog(old_value)
+            if ok and new_value and new_value != old_value:
+                key.model = new_value
+                self._refresh_key_list()
+                self._show_status(f"Updated model to: {new_value}")
+                self._notify_authgpt_visibility()
+        elif column == 2:  # Cooldown column
+            # Create inline editor for cooldown
+            old_value = key.cooldown
+            new_value, ok = self._show_cooldown_edit_dialog(old_value)
+            if ok and new_value != old_value:
+                key.cooldown = new_value
+                self._refresh_key_list()
+                self._show_status(f"Updated cooldown to: {new_value}s")
+        elif column == 3:  # Output Limit column
+            value, ok = self._show_output_token_limit_dialog(
+                self._default_output_token_limit([key], fallback=0),
+                title="Edit Output Token Limit",
+                label="Output token limit (0 = use global):",
+                allow_global=True,
+            )
+            if ok:
+                key.individual_output_token_limit = value if value > 0 else None
+                self._refresh_key_list()
+                self._show_status(f"Updated output limit to: {value if value > 0 else 'global'}")
+        elif column == 4:  # Temp column
+            value, ok = self._show_key_temperature_dialog(
+                self._default_key_temperature([key], allow_global=True),
+                title="Edit Key Temperature",
+                label="Temperature (-1 = use global, 0.0 - 1.0):",
+                allow_global=True,
+            )
+            if ok:
+                if value < 0:
+                    key.individual_key_temperature = None
+                else:
+                    key.individual_key_temperature = value
+                self._refresh_key_list()
+                self._show_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+        elif column == 5:  # API Delay column
+            value, ok = self._show_api_call_delay_dialog(
+                self._default_api_call_delay([key]),
+                "Edit API Call Delay",
+            )
+            if ok:
+                key.api_call_delay = value if value > 0 else 0.0
+                self._refresh_key_list()
+                self._show_status(f"Updated API delay to: {value if value > 0 else 'global'}")
+
+    def _show_model_edit_dialog(self, current_value):
+        """Show dialog for editing model name"""
+        return self._show_model_selection_dialog(current_value, title="Edit Model", accept_text="OK")
+
+    def _show_model_selection_dialog(self, current_value="", title="Edit Model", label_text="Model Name:", accept_text="OK"):
+        """Show the shared model editor used by every key pool."""
+        all_models = self._get_model_options_for_dropdown()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(560)
+        self._set_icon(dialog)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        layout.addWidget(QLabel(label_text))
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        self._attach_model_autofill(combo, None, model_values=all_models)
+        combo.setCurrentText(current_value)
+        self._apply_combobox_icon(combo)
+        if combo.lineEdit():
+            combo.lineEdit().selectAll()
+        layout.addWidget(self._wrap_model_with_ollama_settings(combo, dialog))
+
+        button_layout = QHBoxLayout()
+        ok_btn = QPushButton(accept_text)
+        ok_btn.setDefault(True)
+        cancel_btn = QPushButton("Cancel")
+
+        def accept_dialog():
+            if combo.currentText().strip():
+                dialog.accept()
+
+        ok_btn.clicked.connect(accept_dialog)
+        cancel_btn.clicked.connect(dialog.reject)
+        if combo.lineEdit():
+            combo.lineEdit().returnPressed.connect(accept_dialog)
+        try:
+            escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), dialog)
+            escape_shortcut.activated.connect(dialog.reject)
+        except Exception:
+            pass
+
+        button_layout.addStretch()
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        combo.setFocus()
+
+        result = dialog.exec_()
+        return (combo.currentText().strip(), result == QDialog.Accepted)
+
+    def _show_cooldown_edit_dialog(self, current_value):
+        """Show dialog for editing cooldown"""
+        value, ok = QInputDialog.getInt(
+            self, "Edit Cooldown", "Cooldown (seconds):",
+            current_value, 10, 3600, 10
+        )
+        return (value, ok)
+
+    def _key_setting_value(self, key_entry, setting: str, default=None):
+        """Read a per-key setting from either dict-backed or object-backed key entries."""
+        if key_entry is None:
+            return default
+        if isinstance(key_entry, dict):
+            return key_entry.get(setting, default)
+        return getattr(key_entry, setting, default)
+
+    def _default_cooldown(self, key_entries):
+        """Pick a sensible cooldown default from selected keys."""
+        for entry in key_entries or []:
+            try:
+                value = self._key_setting_value(entry, 'cooldown', 60)
+                if value not in (None, ""):
+                    value = int(value)
+                    if value > 0:
+                        return value
+            except Exception:
+                pass
+        return 60
+
+    def _default_output_token_limit(self, key_entries, fallback=None):
+        """Pick a sensible output-limit default from selected keys or the global setting."""
+        for entry in key_entries or []:
+            try:
+                value = self._key_setting_value(entry, 'individual_output_token_limit')
+                if value not in (None, ""):
+                    value = int(value)
+                    if value > 0:
+                        return value
+            except Exception:
+                pass
+        if fallback is not None:
+            return fallback
+        try:
+            return int(getattr(self.translator_gui, 'max_output_tokens', 8192))
+        except Exception:
+            return 8192
+
+    def _default_key_temperature(self, key_entries, fallback=0.7, allow_global=False):
+        """Pick a sensible temperature default from selected keys."""
+        for entry in key_entries or []:
+            try:
+                value = self._key_setting_value(entry, 'individual_key_temperature')
+                if value not in (None, ""):
+                    return float(value)
+            except Exception:
+                pass
+        return -1.0 if allow_global else fallback
+
+    def _default_api_call_delay(self, key_entries):
+        """Pick the first positive per-key API delay from selected keys."""
+        for entry in key_entries or []:
+            try:
+                raw = self._key_setting_value(entry, 'api_call_delay', 0.0)
+                value = float(raw if raw not in (None, "") else 0.0)
+                if value > 0:
+                    return value
+            except Exception:
+                pass
+        return 0.0
+
+    def _show_per_key_setting_dialog(self, setting: str, current_value, *, title=None, label=None, allow_global=False):
+        """Shared editor for output limit, temperature, and API delay per-key settings."""
+        if setting == 'individual_output_token_limit':
+            try:
+                current_value = int(current_value or 0)
+            except (TypeError, ValueError):
+                current_value = 0
+            return QInputDialog.getInt(
+                self,
+                title or "Set Output Token Limit",
+                label or ("Output token limit (0 = use global):" if allow_global else "Max output tokens:"),
+                current_value,
+                0 if allow_global else 1,
+                2000000,
+                100 if allow_global else 512,
+            )
+        if setting == 'individual_key_temperature':
+            try:
+                current_value = float(current_value)
+            except (TypeError, ValueError):
+                current_value = -1.0 if allow_global else 0.7
+            return QInputDialog.getDouble(
+                self,
+                title or "Set Key Temperature",
+                label or ("Temperature (-1 = use global, 0.0 - 1.0):" if allow_global else "Temperature (0.0 - 1.0):"),
+                current_value,
+                -1.0 if allow_global else 0.0,
+                1.0,
+                2,
+            )
+        if setting == 'api_call_delay':
+            try:
+                current_value = float(current_value if current_value not in (None, "") else 0.0)
+            except (TypeError, ValueError):
+                current_value = 0.0
+            return QInputDialog.getDouble(
+                self,
+                title or "Set API Call Delay",
+                label or "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+                current_value,
+                0.0,
+                3600.0,
+                2,
+            )
+        raise ValueError(f"Unsupported per-key setting: {setting}")
+
+    def _show_output_token_limit_dialog(self, current_value, title="Set Output Token Limit", label="Max output tokens:", allow_global=False):
+        return self._show_per_key_setting_dialog(
+            'individual_output_token_limit',
+            current_value,
+            title=title,
+            label=label,
+            allow_global=allow_global,
+        )
+
+    def _show_key_temperature_dialog(self, current_value, title="Set Key Temperature", label="Temperature (-1 = use global, 0.0 - 1.0):", allow_global=True):
+        return self._show_per_key_setting_dialog(
+            'individual_key_temperature',
+            current_value,
+            title=title,
+            label=label,
+            allow_global=allow_global,
+        )
+
+    def _show_api_call_delay_dialog(self, current_value=0.0, title="Set API Call Delay"):
+        """Shared editor for per-key API call delay values."""
+        return self._show_per_key_setting_dialog(
+            'api_call_delay',
+            current_value,
+            title=title,
+            label="API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            allow_global=True,
+        )
+
+    def _show_shared_key_context_menu(
+        self, *, tree, position, total_keys, key_at_index, move_callback,
+        change_model_callback, configure_endpoint_callback, configure_parameters_callback,
+        disable_endpoint_callback, set_cooldown_callback,
+        set_limit_callback, clear_limit_callback,
+        set_temp_callback, clear_temp_callback, set_delay_callback,
+        clear_delay_callback, test_callback, enable_callback, disable_callback,
+        remove_callback, clear_all_callback=None, index_resolver=None,
+        configure_contexts_callback=None
+    ):
+        """Shared context menu for every API key tree."""
+        item = tree.itemAt(position)
+        if not item:
+            return
+        if item not in tree.selectedItems():
+            tree.setCurrentItem(item)
+
+        visual_index = tree.indexOfTopLevelItem(item)
+        key_index = index_resolver(item, visual_index) if index_resolver else visual_index
+        selected_count = len(tree.selectedItems())
+
+        def selected_label(base):
+            return f"{base} ({selected_count} selected)" if selected_count > 1 else base
+
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu::item { padding: 4px 16px; }")
+
+        if total_keys > 1:
+            reorder_menu = menu.addMenu("🔀 Reorder")
+            reorder_menu.addAction("⏫ Move to Top").triggered.connect(lambda: move_callback('top'))
+            reorder_menu.addAction("⬆️ Move Up").triggered.connect(lambda: move_callback('up'))
+            reorder_menu.addAction("⬇️ Move Down").triggered.connect(lambda: move_callback('down'))
+            reorder_menu.addAction("⏬ Move to Bottom").triggered.connect(lambda: move_callback('bottom'))
+            menu.addSeparator()
+
+        menu.addAction(selected_label("📝 Change Model")).triggered.connect(change_model_callback)
+        menu.addAction(selected_label("⏳ Set Cooldown")).triggered.connect(set_cooldown_callback)
+        menu.addSeparator()
+
+        key_data = key_at_index(key_index) if 0 <= key_index < total_keys else None
+        if key_data is not None:
+            if isinstance(key_data, dict):
+                endpoint_enabled = key_data.get('use_individual_endpoint', False)
+                endpoint_url = key_data.get('azure_endpoint', '')
+            else:
+                endpoint_enabled = getattr(key_data, 'use_individual_endpoint', False)
+                endpoint_url = getattr(key_data, 'azure_endpoint', '')
+            if endpoint_enabled and endpoint_url:
+                menu.addAction("✅ Individual Endpoint").triggered.connect(lambda i=key_index: configure_endpoint_callback(i))
+                menu.addAction("🚫 Disable Individual Endpoint").triggered.connect(lambda i=key_index: disable_endpoint_callback(i))
+            else:
+                menu.addAction("🔧 Configure Individual Endpoint").triggered.connect(lambda i=key_index: configure_endpoint_callback(i))
+            menu.addAction("🧩 Custom Request Parameters").triggered.connect(
+                lambda i=key_index: configure_parameters_callback(i)
+            )
+            menu.addSeparator()
+
+        menu.addAction(selected_label("🎯 Set Output Token Limit")).triggered.connect(set_limit_callback)
+        menu.addAction("🧹 Clear Output Token Limit").triggered.connect(clear_limit_callback)
+        menu.addSeparator()
+        menu.addAction(selected_label("🌡️ Set Key Temperature")).triggered.connect(set_temp_callback)
+        menu.addAction("🧹 Clear Key Temperature").triggered.connect(clear_temp_callback)
+        menu.addSeparator()
+        menu.addAction(selected_label("⏱️ Set API Call Delay")).triggered.connect(set_delay_callback)
+        menu.addAction("🧹 Clear API Call Delay").triggered.connect(clear_delay_callback)
+        menu.addSeparator()
+        menu.addAction("🧪 Test Selected").triggered.connect(test_callback)
+        if configure_contexts_callback:
+            menu.addAction(selected_label("🎛️ Configure Request Contexts…")).triggered.connect(configure_contexts_callback)
+        menu.addAction("✅ Enable Selected").triggered.connect(enable_callback)
+        menu.addAction("🚫 Disable Selected").triggered.connect(disable_callback)
+        menu.addAction("🗑️ Remove Selected").triggered.connect(remove_callback)
+        if clear_all_callback and total_keys:
+            menu.addAction("🧨 Clear All").triggered.connect(clear_all_callback)
+
+        menu.exec_(tree.viewport().mapToGlobal(position))
+
+    def _edit_key_request_parameters(self, key_data, save_callback):
+        """Edit the request-body fields belonging to one key entry."""
+        if RequestParametersDialog is None:
+            QMessageBox.critical(self, "Error", "Request parameter editor is not available.")
+            return
+        if isinstance(key_data, dict):
+            model = key_data.get('model', '')
+            parameters = key_data.get('request_parameters', {})
+        else:
+            model = getattr(key_data, 'model', '')
+            parameters = getattr(key_data, 'request_parameters', {})
+        dialog = RequestParametersDialog(self, model, parameters)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        if isinstance(key_data, dict):
+            key_data['request_parameters'] = dialog.request_parameters
+        else:
+            key_data.request_parameters = dialog.request_parameters
+        save_callback()
+
+    def _show_context_menu(self, position):
+        """Show context menu with reorder and per-key settings"""
+        self._show_shared_key_context_menu(
+            tree=self.tree,
+            position=position,
+            total_keys=len(self.key_pool.keys),
+            key_at_index=lambda i: self.key_pool.keys[i],
+            move_callback=self._move_key,
+            change_model_callback=self._change_model_for_selected,
+            configure_endpoint_callback=self._configure_individual_endpoint,
+            configure_parameters_callback=lambda i: self._edit_key_request_parameters(
+                self.key_pool.keys[i],
+                lambda: (self._save_keys_to_config(), self._refresh_key_list()),
+            ),
+            disable_endpoint_callback=lambda i: self._toggle_individual_endpoint(i, False),
+            set_cooldown_callback=self._set_cooldown_for_selected,
+            set_limit_callback=self._set_output_token_limit_for_selected,
+            clear_limit_callback=self._clear_output_token_limit_for_selected,
+            set_temp_callback=self._set_key_temperature_for_selected,
+            clear_temp_callback=self._clear_key_temperature_for_selected,
+            set_delay_callback=self._set_api_call_delay_for_selected,
+            clear_delay_callback=self._clear_api_call_delay_for_selected,
+            configure_contexts_callback=lambda: self._edit_selected_key_contexts('main'),
+            test_callback=self._test_selected,
+            enable_callback=self._enable_selected,
+            disable_callback=self._disable_selected,
+            remove_callback=self._remove_selected,
+        )
+
+    def _set_cooldown_for_selected(self):
+        """Set rate-limit cooldown for selected multi-key entries."""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [self.key_pool.keys[idx] for idx in selected_indices if 0 <= idx < len(self.key_pool.keys)]
+        value, ok = self._show_cooldown_edit_dialog(self._default_cooldown(selected_keys))
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].cooldown = value
+        self._refresh_key_list()
+        self._show_status(f"Set cooldown to {value}s for {len(selected_indices)} key(s)")
+
+    def _set_output_token_limit_for_selected(self):
+        """Set per-key output token limit for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [self.key_pool.keys[idx] for idx in selected_indices if 0 <= idx < len(self.key_pool.keys)]
+        value, ok = self._show_output_token_limit_dialog(
+            self._default_output_token_limit(selected_keys),
+            title="Set Output Token Limit",
+            label="Max output tokens for selected key(s) (0 = use global):",
+            allow_global=True,
+        )
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].individual_output_token_limit = value if value > 0 else None
+        self._refresh_key_list()
+        self._show_status(f"Set output token limit to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_output_token_limit_for_selected(self):
+        """Clear per-key output token limit for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].individual_output_token_limit = None
+        self._refresh_key_list()
+        self._show_status(f"Cleared output token limit for {len(selected_indices)} key(s)")
+
+    def _set_key_temperature_for_selected(self):
+        """Set per-key temperature for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [self.key_pool.keys[idx] for idx in selected_indices if 0 <= idx < len(self.key_pool.keys)]
+        value, ok = self._show_key_temperature_dialog(
+            self._default_key_temperature(selected_keys, allow_global=True),
+            title="Set Key Temperature",
+            label="Temperature for selected key(s) (-1 = use global, 0.0 - 1.0):",
+            allow_global=True,
+        )
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].individual_key_temperature = value if value >= 0 else None
+        self._refresh_key_list()
+        self._show_status(f"Set key temperature to {value if value >= 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_key_temperature_for_selected(self):
+        """Clear per-key temperature for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].individual_key_temperature = None
+        self._refresh_key_list()
+        self._show_status(f"Cleared key temperature for {len(selected_indices)} key(s)")
+
+    def _set_api_call_delay_for_selected(self):
+        """Set per-key API call delay for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [self.key_pool.keys[idx] for idx in selected_indices if 0 <= idx < len(self.key_pool.keys)]
+        value, ok = self._show_api_call_delay_dialog(self._default_api_call_delay(selected_keys))
+        if ok:
+            for idx in selected_indices:
+                if 0 <= idx < len(self.key_pool.keys):
+                    self.key_pool.keys[idx].api_call_delay = value if value > 0 else 0.0
+            self._refresh_key_list()
+            self._show_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_api_call_delay_for_selected(self):
+        """Clear per-key API call delay for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].api_call_delay = 0.0
+        self._refresh_key_list()
+        self._show_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
+
+    def _change_model_for_selected(self):
+        """Change model for all selected entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        current_model = ""
+        if selected_indices and selected_indices[0] < len(self.key_pool.keys):
+            current_model = self.key_pool.keys[selected_indices[0]].model
+
+        new_model, ok = self._show_model_selection_dialog(
+            current_model,
+            title=f"Change Model for {len(selected)} Keys",
+            accept_text="Apply",
+        )
+        if not ok or not new_model:
+            return
+
+        for item in selected:
+            index = self.tree.indexOfTopLevelItem(item)
+            if index < len(self.key_pool.keys):
+                self.key_pool.keys[index].model = new_model
+
+        self._refresh_key_list()
+        self._show_status(f"Changed model to '{new_model}' for {len(selected)} keys")
+        self._notify_authgpt_visibility()
+
+    def _configure_individual_endpoint(self, key_index):
+        """Configure individual endpoint for a specific key"""
+        if key_index >= len(self.key_pool.keys):
+            return
+
+        key = self.key_pool.keys[key_index]
+
+        # Create individual endpoint dialog using the class
+        if IndividualEndpointDialog is None:
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
+            return
+        dialog = IndividualEndpointDialog(
+            self, self.translator_gui, key,
+            lambda: (self._save_keys_to_config(), self._refresh_key_list()),
+            self._show_status,
+        )
+        dialog.exec_()
+
+    def _toggle_endpoint_fields(self, enable_checkbox, endpoint_entry, version_combo):
+        """Toggle endpoint configuration fields based on enable state"""
+        enabled = enable_checkbox.isChecked()
+        endpoint_entry.setEnabled(enabled)
+        version_combo.setEnabled(enabled)
+
+    def _toggle_individual_endpoint(self, key_index, enabled):
+        """Quick toggle individual endpoint on/off"""
+        if key_index >= len(self.key_pool.keys):
+            return
+
+        key = self.key_pool.keys[key_index]
+        key.use_individual_endpoint = enabled
+
+        # Refresh display
+        self._refresh_key_list()
+
+        # Show status
+        status = "enabled" if enabled else "disabled"
+        self._show_status(f"Individual endpoint {status} for {key.model}")
+
+    # Additional helper method to swap keys programmatically
+    def swap_keys(self, index1: int, index2: int):
+        """Swap two keys by their indices"""
+        with self.key_pool.lock:
+            if 0 <= index1 < len(self.key_pool.keys) and 0 <= index2 < len(self.key_pool.keys):
+                self.key_pool.keys[index1], self.key_pool.keys[index2] = \
+                    self.key_pool.keys[index2], self.key_pool.keys[index1]
+                self._refresh_key_list()
+                return True
+        return False
+
+    # Method to move a key to a specific position
+    def move_key_to_position(self, from_index: int, to_index: int):
+        """Move a key from one position to another"""
+        with self.key_pool.lock:
+            if 0 <= from_index < len(self.key_pool.keys) and 0 <= to_index < len(self.key_pool.keys):
+                key = self.key_pool.keys.pop(from_index)
+                self.key_pool.keys.insert(to_index, key)
+                self._refresh_key_list()
+                return True
+        return False
+
+    # Note: Duplicate _create_button_bar removed - PySide6 version defined earlier at line 1491
+
+    def _browse_google_credentials(self):
+        """Browse for Google Cloud credentials JSON file"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON",
+            "",
+            "JSON files (*.json);;All files (*.*)"
+        )
+
+        if filename:
+            # The check and its messages are shared with the mobile app (settings_rules)
+            from settings_rules import INVALID_GOOGLE_CREDENTIALS, google_credentials_load_error, is_google_service_account
+            try:
+                # Validate it's a valid Google Cloud credentials file
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if is_google_service_account(creds_data):
+                        self.google_creds_entry.setText(filename)
+                        self._sync_parent_google_credentials(filename)
+                        self._show_status(f"Selected Google credentials: {os.path.basename(filename)}")
+                    else:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            INVALID_GOOGLE_CREDENTIALS
+                        )
+            except Exception as e:
+                QMessageBox.critical(self, "Error", google_credentials_load_error(e))
+
+    def _browse_fallback_google_credentials(self):
+        """Browse for Google Cloud credentials JSON file for fallback keys"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON for Fallback",
+            "",
+            "JSON files (*.json);;All files (*.*)"
+        )
+
+        if filename:
+            # The check and its messages are shared with the mobile app (settings_rules)
+            from settings_rules import INVALID_GOOGLE_CREDENTIALS, google_credentials_load_error, is_google_service_account
+            try:
+                # Validate it's a valid Google Cloud credentials file
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if is_google_service_account(creds_data):
+                        self.fallback_google_creds_entry.setText(filename)
+                        self._sync_parent_google_credentials(filename)
+                        self._show_fallback_status(f"Selected fallback Google credentials: {os.path.basename(filename)}")
+                    else:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            INVALID_GOOGLE_CREDENTIALS
+                        )
+            except Exception as e:
+                QMessageBox.critical(self, "Error", google_credentials_load_error(e))
+
+    # ===================================================================
+    # GLOSSARY KEYS SECTION — mirrors fallback keys for glossary API calls
+    # ===================================================================
+
+    def _create_glossary_section(self, parent_layout):
+        """Create the glossary keys section below fallback"""
+        # Container that can be hidden
+        self.glossary_container = QWidget()
+        glossary_container_layout = QVBoxLayout(self.glossary_container)
+        glossary_container_layout.setContentsMargins(0, 5, 0, 0)
+
+        # Separator
+        self.glossary_separator = QFrame()
+        self.glossary_separator.setFrameShape(QFrame.HLine)
+        self.glossary_separator.setFrameShadow(QFrame.Sunken)
+        glossary_container_layout.addWidget(self.glossary_separator)
+
+        # Main glossary frame
+        glossary_frame = QGroupBox("Glossary Keys (For Glossary API Calls)")
+        glossary_frame_layout = QVBoxLayout(glossary_frame)
+        glossary_frame_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Description
+        desc_label = QLabel(key_pool_service.POOL_SPECS['glossary']['description'])
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        glossary_frame_layout.addWidget(desc_label)
+
+        # Enable checkbox with spinning icon
+        glossary_checkbox_container = QWidget()
+        glossary_checkbox_layout = QHBoxLayout(glossary_checkbox_container)
+        glossary_checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        glossary_checkbox_layout.setSpacing(8)
+
+        self.use_glossary_keys_var = self.translator_gui.config.get('use_glossary_keys', False)
+        self.use_glossary_keys_checkbox = self._create_styled_checkbox("Enable Glossary Keys")
+        self.use_glossary_keys_checkbox.setChecked(self.use_glossary_keys_var)
+        self.use_glossary_keys_checkbox.toggled.connect(self._toggle_glossary_section)
+
+        # spinning icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.glossary_icon = QLabel()
+        self.glossary_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.glossary_icon.setPixmap(pm)
+        self.glossary_icon.setFixedSize(36, 36)
+        self.glossary_icon.setAlignment(Qt.AlignCenter)
+        self.use_glossary_keys_checkbox.toggled.connect(lambda: animate_icon(self.glossary_icon))
+
+        glossary_checkbox_layout.addWidget(self.glossary_icon)
+        glossary_checkbox_layout.addWidget(self.use_glossary_keys_checkbox)
+        glossary_checkbox_layout.addStretch()
+
+        glossary_frame_layout.addWidget(glossary_checkbox_container)
+
+        # Add glossary key section
+        self.add_glossary_frame = QWidget()
+        add_glossary_grid = QGridLayout(self.add_glossary_frame)
+        add_glossary_grid.setContentsMargins(0, 0, 0, 10)
+
+        # Row 0: API Key and Model
+        add_glossary_grid.addWidget(QLabel("Glossary API Key:"), 0, 0, Qt.AlignLeft)
+        self.glossary_key_entry = QLineEdit()
+        self.glossary_key_entry.setEchoMode(QLineEdit.Password)
+        add_glossary_grid.addWidget(self.glossary_key_entry, 0, 1)
+
+        # Toggle visibility
+        self.show_glossary_btn = QPushButton("👁")
+        self.show_glossary_btn.setFixedWidth(40)
+        self.show_glossary_btn.clicked.connect(self._toggle_glossary_visibility)
+        add_glossary_grid.addWidget(self.show_glossary_btn, 0, 2)
+
+        # Model
+        add_glossary_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        glossary_models = self._get_model_options_for_dropdown()
+        self.glossary_model_combo = QComboBox()
+        self.glossary_model_combo.addItems(glossary_models)
+        self.glossary_model_combo.setEditable(True)
+        self._attach_model_autofill(self.glossary_model_combo, self._on_model_requirement_input_changed)
+        self._apply_combobox_icon(self.glossary_model_combo)
+        self._disable_combobox_mousewheel(self.glossary_model_combo)
+        add_glossary_grid.addWidget(self._wrap_model_with_ollama_settings(self.glossary_model_combo), 0, 4)
+
+        # Add button
+        add_glossary_btn = QPushButton("Add Glossary Key")
+        add_glossary_btn.clicked.connect(self._add_glossary_key)
+        add_glossary_grid.addWidget(add_glossary_btn, 0, 5, Qt.AlignRight)
+
+        add_glossary_grid.setColumnStretch(1, 1)
+        add_glossary_grid.setColumnStretch(4, 1)
+
+        glossary_frame_layout.addWidget(self.add_glossary_frame)
+
+        # Row 1: Google Credentials
+        google_creds_label = QLabel("Google Creds:")
+        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
+        add_glossary_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
+        self.glossary_google_creds_entry = QLineEdit()
+        self.glossary_google_creds_entry.setStyleSheet("font-size: 7pt;")
+        add_glossary_grid.addWidget(self.glossary_google_creds_entry, 1, 1)
+
+        browse_google_btn = QPushButton("📁")
+        browse_google_btn.setFixedWidth(40)
+        browse_google_btn.clicked.connect(self._browse_glossary_google_credentials)
+        add_glossary_grid.addWidget(browse_google_btn, 1, 2)
+
+        region_label = QLabel("Region:")
+        region_label.setStyleSheet("color: gray;")
+        add_glossary_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
+        self.glossary_google_region_entry = QLineEdit("us-east5")
+        self.glossary_google_region_entry.setStyleSheet("font-size: 7pt;")
+        self.glossary_google_region_entry.setMaximumWidth(100)
+        add_glossary_grid.addWidget(self.glossary_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
+
+        # Row 2: Individual Endpoint Toggle
+        self.glossary_use_individual_endpoint_var = False
+        self.glossary_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
+        self.glossary_individual_endpoint_toggle.setChecked(False)
+        self.glossary_individual_endpoint_toggle.toggled.connect(self._toggle_glossary_individual_endpoint_fields)
+        add_glossary_grid.addWidget(self.glossary_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
+
+        # Row 3: Individual Endpoint (initially hidden)
+        self.glossary_individual_endpoint_label = QLabel("Individual Endpoint:")
+        self.glossary_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_glossary_grid.addWidget(self.glossary_individual_endpoint_label, 3, 0, Qt.AlignLeft)
+        self.glossary_azure_endpoint_entry = QLineEdit()
+        self.glossary_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
+        add_glossary_grid.addWidget(self.glossary_azure_endpoint_entry, 3, 1, 1, 2)
+
+        self.glossary_individual_api_version_label = QLabel("API Ver:")
+        self.glossary_individual_api_version_label.setStyleSheet("color: gray;")
+        add_glossary_grid.addWidget(self.glossary_individual_api_version_label, 3, 3, Qt.AlignLeft)
+        glossary_azure_versions = [
+            '2025-01-01-preview',
+            '2024-12-01-preview',
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ]
+        self.glossary_azure_api_version_combo = QComboBox()
+        self.glossary_azure_api_version_combo.addItems(glossary_azure_versions)
+        self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.glossary_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self._apply_combobox_icon(self.glossary_azure_api_version_combo)
+        self.glossary_azure_api_version_combo.setMaximumWidth(180)
+        self._disable_combobox_mousewheel(self.glossary_azure_api_version_combo)
+        add_glossary_grid.addWidget(self.glossary_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
+
+
+        # Initially hide endpoint fields
+        self._toggle_glossary_individual_endpoint_fields()
+
+        # Glossary keys list
+        self._create_glossary_list(glossary_frame_layout)
+
+        # Add container to parent
+        glossary_container_layout.addWidget(glossary_frame)
+        parent_layout.addWidget(self.glossary_container)
+
+        # Initially disable if checkbox is unchecked
+        self._toggle_glossary_section()
+
+    def _create_glossary_list(self, parent_layout):
+        """Create the glossary keys list"""
+        self.glossary_list_label = QLabel("Glossary Keys (tried in order):")
+        list_label_font = QFont()
+        list_label_font.setBold(True)
+        self.glossary_list_label.setFont(list_label_font)
+        parent_layout.addWidget(self.glossary_list_label)
+
+        # Container for tree and buttons
+        self.glossary_tree_container = QWidget()
+        container_layout = QHBoxLayout(self.glossary_tree_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Left side: Move buttons
+        self.glossary_move_frame = QWidget()
+        move_layout = QVBoxLayout(self.glossary_move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+
+        order_label = QLabel("Reorder")
+        order_font = QFont()
+        order_font.setBold(True)
+        order_label.setFont(order_font)
+        move_layout.addWidget(order_label)
+
+        top_btn = QPushButton("↑ ↑")
+        top_btn.setFixedSize(55, 32)
+        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        top_btn.clicked.connect(lambda: self._move_glossary_key('top'))
+        move_layout.addWidget(top_btn)
+
+        up_btn = QPushButton("↑")
+        up_btn.setFixedSize(55, 32)
+        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        up_btn.clicked.connect(lambda: self._move_glossary_key('up'))
+        move_layout.addWidget(up_btn)
+
+        down_btn = QPushButton("↓")
+        down_btn.setFixedSize(55, 32)
+        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        down_btn.clicked.connect(lambda: self._move_glossary_key('down'))
+        move_layout.addWidget(down_btn)
+
+        bottom_btn = QPushButton("↓ ↓")
+        bottom_btn.setFixedSize(55, 32)
+        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        bottom_btn.clicked.connect(lambda: self._move_glossary_key('bottom'))
+        move_layout.addWidget(bottom_btn)
+
+        move_layout.addSpacing(10)
+
+        self.glossary_position_label = QLabel()
+        self.glossary_position_label.setStyleSheet("color: gray;")
+        move_layout.addWidget(self.glossary_position_label)
+        move_layout.addStretch()
+        container_layout.addWidget(self.glossary_move_frame)
+
+        # Right side: TreeWidget with drag and drop
+        self.glossary_tree = QTreeWidget()
+        self.glossary_tree.setUniformRowHeights(True)
+        self._tighten_api_key_tree_first_column(self.glossary_tree)
+        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        self.glossary_tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)
+        self.glossary_tree.setColumnWidth(1, 220)
+        self.glossary_tree.setColumnWidth(2, 105)
+        self.glossary_tree.setColumnWidth(3, 100)
+        self.glossary_tree.setColumnWidth(4, 90)
+        self.glossary_tree.setColumnWidth(5, 170)
+        self.glossary_tree.setColumnWidth(6, 42)
+        self.glossary_tree.setColumnWidth(7, 42)
+        self.glossary_tree.setColumnWidth(8, 80)
+
+        gl_header = self.glossary_tree.header()
+        gl_header_font = QFont()
+        gl_header_font.setBold(True)
+        gl_header_font.setPointSize(11)
+        gl_header.setFont(gl_header_font)
+        self._enable_api_key_tree_font_zoom(self.glossary_tree)
+        self._enable_api_key_tree_responsive_columns(
+            self.glossary_tree,
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
+        )
+
+        self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.glossary_tree.customContextMenuRequested.connect(self._show_glossary_context_menu)
+        self.glossary_tree.setMinimumHeight(150)
+
+        self.glossary_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        self.glossary_tree.model().rowsMoved.connect(self._on_glossary_rows_moved)
+        self.glossary_tree.itemSelectionChanged.connect(self._on_glossary_selection_change)
+        self.glossary_tree.itemDoubleClicked.connect(self._on_glossary_click)
+        self.glossary_tree.itemClicked.connect(lambda item, col: self._key_status_clicked('glossary', item, col))
+
+        container_layout.addWidget(self.glossary_tree)
+        parent_layout.addWidget(self.glossary_tree_container)
+        self.glossary_tree_height_handle = self._add_api_key_tree_height_resizer(
+            self.glossary_tree,
+            parent_layout,
+            'glossary',
+        )
+
+        # Action buttons
+        self.glossary_action_frame = QWidget()
+        glossary_action_layout = QHBoxLayout(self.glossary_action_frame)
+        glossary_action_layout.setContentsMargins(0, 10, 0, 0)
+
+        test_selected_btn = QPushButton("Test Selected")
+        test_selected_btn.clicked.connect(self._test_selected_glossary)
+        glossary_action_layout.addWidget(test_selected_btn)
+
+        test_all_btn = QPushButton("Test All")
+        test_all_btn.clicked.connect(self._test_all_glossary)
+        glossary_action_layout.addWidget(test_all_btn)
+
+        enable_selected_btn = QPushButton("Enable Selected")
+        enable_selected_btn.clicked.connect(self._enable_selected_glossary)
+        glossary_action_layout.addWidget(enable_selected_btn)
+
+        disable_selected_btn = QPushButton("Disable Selected")
+        disable_selected_btn.clicked.connect(self._disable_selected_glossary)
+        glossary_action_layout.addWidget(disable_selected_btn)
+
+        remove_selected_btn = QPushButton("Remove Selected")
+        remove_selected_btn.clicked.connect(self._remove_selected_glossary)
+        glossary_action_layout.addWidget(remove_selected_btn)
+
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self._clear_all_glossary)
+        glossary_action_layout.addWidget(clear_all_btn)
+
+        glossary_action_layout.addStretch()
+        self.glossary_status_label = QLabel()
+        self.glossary_status_label.setStyleSheet("color: gray;")
+        glossary_action_layout.addWidget(self.glossary_status_label)
+        parent_layout.addWidget(self.glossary_action_frame)
+
+        # Load existing glossary keys
+        self._load_glossary_keys()
+
+    def _load_glossary_keys(self):
+        """Load glossary keys from config"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+
+        v_scroll = self.glossary_tree.verticalScrollBar().value()
+        h_scroll = self.glossary_tree.horizontalScrollBar().value()
+
+        selected_indices = []
+        for item in self.glossary_tree.selectedItems():
+            selected_indices.append(self.glossary_tree.indexOfTopLevelItem(item))
+
+        self.glossary_tree.setUpdatesEnabled(False)
+        self.glossary_tree.clear()
+
+        tree_items = []
+        for key_data in glossary_keys:
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            times_used = int(key_data.get('times_used', 0))
+
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+
+            try:
+                raw_limit = key_data.get('individual_output_token_limit')
+                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
+            except Exception:
+                per_key_limit = None
+            if per_key_limit and per_key_limit > 0:
+                output_limit_str = str(per_key_limit)
+            else:
+                output_limit_str = "global"
+
+            # Determine per-key temperature display value
+            try:
+                raw_temp = key_data.get('individual_key_temperature')
+                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
+            except Exception:
+                per_key_temp = None
+            if per_key_temp is not None:
+                temp_str = str(per_key_temp)
+            else:
+                temp_str = "global"
+
+            enabled = key_data.get('enabled', True)
+            test_result = key_data.get('last_test_result')
+            if not enabled:
+                status = "Disabled"
+                color = Qt.gray
+            elif test_result == 'passed':
+                status = "✅ Passed"
+                color = Qt.darkGreen
+            elif test_result == 'failed':
+                status = "❌ Failed"
+                color = Qt.red
+            elif test_result == 'timeout':
+                status = "⏱️ Timed Out"
+                color = Qt.darkYellow
+            elif test_result == 'error':
+                status = "❌ Error"
+                color = Qt.darkRed
+            else:
+                status = "Enabled"
+                color = Qt.gray
+
+            # Determine per-key API call delay display value
+            try:
+                raw_delay = key_data.get('api_call_delay')
+                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
+            except Exception:
+                per_key_delay = 0.0
+            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+
+            success_count = int(key_data.get('success_count', 0))
+            error_count = int(key_data.get('error_count', 0))
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
+            self._center_api_key_tree_item_text(item)
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+
+            # Tooltip for per-key settings
+            tooltip_parts = []
+            if per_key_limit and per_key_limit > 0:
+                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
+            else:
+                tooltip_parts.append("Using global output token limit")
+            if per_key_temp is not None:
+                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
+            else:
+                tooltip_parts.append("Using global temperature")
+            if per_key_delay > 0:
+                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
+            else:
+                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
+            tooltip = "\n".join(tooltip_parts)
+            for col in range(item.columnCount()):
+                item.setToolTip(col, tooltip)
+
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self._decorate_key_context_status(item, key_data, 'glossary')
+            tree_items.append(item)
+
+        if tree_items:
+            self.glossary_tree.addTopLevelItems(tree_items)
+
+        for index in selected_indices:
+            if index < self.glossary_tree.topLevelItemCount():
+                item = self.glossary_tree.topLevelItem(index)
+                item.setSelected(True)
+
+        self.glossary_tree.verticalScrollBar().setValue(v_scroll)
+        self.glossary_tree.horizontalScrollBar().setValue(h_scroll)
+        self.glossary_tree.setUpdatesEnabled(True)
+        self.glossary_tree.viewport().update()
+
+        # Auto-refresh the in-memory pool so changes take effect immediately
+        if self._can_emit_live_key_pool_updates():
+            self._refresh_glossary_pool()
+
+    def _add_glossary_key(self):
+        """Add a new glossary key"""
+        api_key = self.glossary_key_entry.text().strip()
+        model = self.glossary_model_combo.currentText().strip()
+        google_credentials = self.glossary_google_creds_entry.text().strip() or None
+        if google_credentials:
+            self._sync_parent_google_credentials(google_credentials)
+        google_region = self.glossary_google_region_entry.text().strip() or None
+
+        use_individual_endpoint = self.glossary_individual_endpoint_toggle.isChecked()
+        azure_endpoint = self.glossary_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
+        azure_api_version = self.glossary_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
+
+        model_error = key_pool_service.missing_model_error(model)
+        if model_error:
+            QMessageBox.critical(self, "Error", model_error)
+            return
+
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+
+        glossary_keys.append(key_pool_service.new_key_entry(
+            api_key,
+            model,
+            google_credentials=google_credentials,
+            azure_endpoint=azure_endpoint,
+            google_region=google_region,
+            azure_api_version=azure_api_version,
+            use_individual_endpoint=use_individual_endpoint,
+        ))
+
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+
+        # Clear inputs
+        self.glossary_key_entry.clear()
+        self._set_combo_text_silently(self.glossary_model_combo, "")
+        self.glossary_google_creds_entry.clear()
+        self.glossary_azure_endpoint_entry.clear()
+        self.glossary_google_region_entry.setText("us-east5")
+        self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.glossary_individual_endpoint_toggle.setChecked(False)
+
+        self._toggle_glossary_individual_endpoint_fields()
+
+        self._load_glossary_keys()
+
+        extra_info = key_pool_service.added_key_extra_info(google_credentials, azure_endpoint)
+        self._show_glossary_status(f"Added glossary key for model: {model}{extra_info}")
+
+        self._schedule_key_pool_config_flush(
+            'glossary',
+            refresh_keys=True,
+            refresh_parent=self._model_affects_parent_provider_controls(model),
+        )
+
+    def _move_glossary_key(self, direction):
+        """Move selected glossary key up or down"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        item = selected[0]
+        index = self.glossary_tree.indexOfTopLevelItem(item)
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+
+        if index >= len(glossary_keys):
+            return
+
+        new_index = index
+        if direction == 'top' and index > 0:
+            new_index = 0
+        elif direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(glossary_keys) - 1:
+            new_index = index + 1
+        elif direction == 'bottom' and index < len(glossary_keys) - 1:
+            new_index = len(glossary_keys) - 1
+
+        if new_index != index:
+            key = glossary_keys.pop(index)
+            glossary_keys.insert(new_index, key)
+
+            self.translator_gui.config['glossary_keys'] = glossary_keys
+            self.translator_gui.save_config(show_message=False)
+
+            self._load_glossary_keys()
+
+            if new_index < self.glossary_tree.topLevelItemCount():
+                item = self.glossary_tree.topLevelItem(new_index)
+                if item:
+                    self.glossary_tree.setCurrentItem(item)
+                    item.setSelected(True)
+
+    def _test_selected_glossary(self):
+        """Test selected glossary key"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select a glossary key to test")
+            return
+
+        index = self.glossary_tree.indexOfTopLevelItem(selected[0])
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+
+        if index >= len(glossary_keys):
+            return
+
+        if index < self.glossary_tree.topLevelItemCount():
+            item = self.glossary_tree.topLevelItem(index)
+            if item:
+                item.setText(5, "⏳ Testing...")
+
+        key_data = glossary_keys[index]
+
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.set_in_memory_glossary_keys(glossary_keys)
+        except Exception:
+            pass
+
+        QTimer.singleShot(100, lambda: self._test_single_glossary_key(key_data, index))
+
+    def _test_all_glossary(self):
+        """Test all glossary keys in parallel"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+
+        if not glossary_keys:
+            QMessageBox.warning(self, "Warning", "No glossary keys to test")
+            return
+
+        for i in range(self.glossary_tree.topLevelItemCount()):
+            item = self.glossary_tree.topLevelItem(i)
+            if item:
+                item.setText(5, "⏳ Testing...")
+
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.set_in_memory_glossary_keys(glossary_keys)
+        except Exception:
+            pass
+
+        for i, key_data in enumerate(glossary_keys):
+            self._test_single_glossary_key(key_data, i)
+
+    @Slot(int, bool) if HAS_GUI else lambda x: x
+    def _update_glossary_test_result(self, index, success):
+        """Update glossary tree item with test result"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        if index < len(glossary_keys):
+            try:
+                glossary_keys[index]['times_used'] = int(glossary_keys[index].get('times_used', 0)) + 1
+                if success:
+                    glossary_keys[index]['success_count'] = int(glossary_keys[index].get('success_count', 0)) + 1
+                else:
+                    glossary_keys[index]['error_count'] = int(glossary_keys[index].get('error_count', 0)) + 1
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+            except Exception:
+                pass
+
+        if index < self.glossary_tree.topLevelItemCount():
+            item = self.glossary_tree.topLevelItem(index)
+            if item:
+                if success:
+                    item.setText(5, "✅ Passed")
+                    color = Qt.darkGreen
+                else:
+                    item.setText(5, "❌ Failed")
+                    color = Qt.red
+                key_data = self.translator_gui.config.get('glossary_keys', [])[index]
+                self._decorate_key_context_status(item, key_data, 'glossary')
+                for col in range(item.columnCount()):
+                    item.setForeground(col, color)
+                try:
+                    if success:
+                        current = int(item.text(6))
+                        item.setText(6, str(current + 1))
+                    else:
+                        current = int(item.text(7))
+                        item.setText(7, str(current + 1))
+                except Exception:
+                    pass
+                try:
+                    current_times = int(item.text(8))
+                    item.setText(8, str(current_times + 1))
+                except Exception:
+                    item.setText(8, "1")
+
+    @Slot(int) if HAS_GUI else lambda x: x
+    def _update_glossary_timeout_status(self, index):
+        """Update glossary tree item with timeout status"""
+        if index < self.glossary_tree.topLevelItemCount():
+            item = self.glossary_tree.topLevelItem(index)
+            if item:
+                item.setText(5, "⏱️ Timed Out")
+                key_data = self.translator_gui.config.get('glossary_keys', [])[index]
+                self._decorate_key_context_status(item, key_data, 'glossary')
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+
+    def _test_single_glossary_key(self, key_data, index):
+        """Test a single glossary key — REAL API TEST"""
+        api_key = key_data.get('api_key', '')
+        model = key_data.get('model', '')
+
+        print(f"[DEBUG] Starting REAL glossary key test for {model}")
+        timeout_seconds = _api_key_test_timeout_seconds(model)
+
+        from concurrent.futures import ThreadPoolExecutor
+        from unified_api_client import UnifiedClient
+
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+        executor = getattr(self.translator_gui, 'executor', None)
+
+        client_ref = [None]
+        timed_out = [False]
+
+        def run_api_test():
+            try:
+                request = key_pool_service.build_test_request(key_data, 'glossary', api_key=api_key, model=model)
+                _client, response = key_pool_service.send_test_request(
+                    request,
+                    client_cls=UnifiedClient,
+                    on_client=lambda c: client_ref.__setitem__(0, c),
+                )
+
+                if key_pool_service.test_response_passed(response, request):
+                    print(f"[DEBUG] Glossary key test completed for {model}: PASSED")
+                    if not timed_out[0]:
+                        if HAS_GUI:
+                            QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                        else:
+                            self._update_glossary_test_result(index, True)
+                    return
+
+                print(f"[DEBUG] Glossary key test completed for {model}: FAILED")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_glossary_test_result(index, False)
+            except Exception as e:
+                print(f"[DEBUG] Glossary key test error for {model}: {e}")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_glossary_test_result(index, False)
+
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=timeout_seconds)
+                except FuturesTimeout:
+                    timed_out[0] = True
+                    print(f"[DEBUG] Glossary key test TIMED OUT for {model} ({timeout_seconds}s)")
+                    key_pool_service.cancel_test_client(client_ref[0])
+                    key_pool_service.reset_api_watchdog()
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_glossary_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
+                    else:
+                        self._update_glossary_timeout_status(index)
+                except Exception:
+                    pass
+
+        if executor:
+            executor.submit(run_with_timeout)
+        else:
+            thread = threading.Thread(target=run_with_timeout, daemon=True)
+            thread.start()
+
+    def _remove_selected_glossary(self):
+        """Remove selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected glossary key(s)?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            indices = sorted([self.glossary_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
+
+            glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+
+            for index in indices:
+                if index < len(glossary_keys):
+                    del glossary_keys[index]
+
+            self.translator_gui.config['glossary_keys'] = glossary_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._show_glossary_status(f"Removed {len(selected)} glossary key(s)")
+            self._notify_authgpt_visibility()
+
+    def _enable_selected_glossary(self):
+        """Enable selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        for item in selected:
+            index = self.glossary_tree.indexOfTopLevelItem(item)
+            if index < len(glossary_keys):
+                glossary_keys[index]['enabled'] = True
+                glossary_keys[index]['disabled_contexts'] = []
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Enabled {len(selected)} glossary key(s)")
+        self._notify_authgpt_visibility()
+
+    def _disable_selected_glossary(self):
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        keys = self.translator_gui.config.get('glossary_keys', [])
+        for item in selected:
+            index = self.glossary_tree.indexOfTopLevelItem(item)
+            if 0 <= index < len(keys):
+                keys[index]['enabled'] = False
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._refresh_glossary_pool()
+        self._broadcast_key_pool_config_changed('glossary', refresh_keys=True)
+        self._show_glossary_status(f"Disabled {len(selected)} glossary key(s)")
+        self._notify_authgpt_visibility()
+
+    def _clear_all_glossary(self):
+        """Clear all glossary keys"""
+        if self.glossary_tree.topLevelItemCount() == 0:
+            return
+
+        reply = QMessageBox.question(self, "Confirm", "Remove ALL glossary keys?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.translator_gui.config['glossary_keys'] = []
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._show_glossary_status("Cleared all glossary keys")
+            self._notify_authgpt_visibility()
+
+    def _toggle_glossary_section(self):
+        """Toggle glossary section visibility"""
+        enabled = self.use_glossary_keys_checkbox.isChecked()
+
+        if hasattr(self, 'add_glossary_frame'):
+            self.add_glossary_frame.setVisible(enabled)
+        if hasattr(self, 'glossary_list_label'):
+            self.glossary_list_label.setVisible(enabled)
+        if hasattr(self, 'glossary_tree_container'):
+            self.glossary_tree_container.setVisible(enabled)
+        if hasattr(self, 'glossary_tree_height_handle'):
+            self.glossary_tree_height_handle.setVisible(enabled)
+        if hasattr(self, 'glossary_action_frame'):
+            self.glossary_action_frame.setVisible(enabled)
+        if hasattr(self, 'glossary_tree') and not enabled:
+            self.glossary_tree.clearSelection()
+
+        self._show_glossary_status(f"Glossary Keys {'enabled' if enabled else 'disabled'}")
+
+        # Update in-memory config immediately so glossary extraction reads the correct value
+        # (config is also saved when the dialog is closed/saved via the normal save handler)
+        self.translator_gui.config['use_glossary_keys'] = enabled
+        if hasattr(self.translator_gui, 'use_glossary_keys_var'):
+            self.translator_gui.use_glossary_keys_var = enabled
+
+        live_updates = self._can_emit_live_key_pool_updates()
+        if live_updates:
+            glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+            if enabled:
+                msg = f"🔑 Glossary key pool: {len(glossary_keys)} keys loaded"
+            else:
+                msg = f"🔑 Glossary key pool: disabled"
+            if hasattr(self.translator_gui, 'append_log'):
+                try:
+                    self.translator_gui.append_log(msg)
+                except Exception:
+                    print(msg)
+            else:
+                print(msg)
+
+        if live_updates:
+            try:
+                import os as _os
+                _os.environ['USE_GLOSSARY_KEYS'] = '1' if enabled else '0'
+            except Exception:
+                pass
+
+            if enabled:
+                # Setup in-memory glossary pool so keys work immediately without restart
+                try:
+                    from unified_api_client import UnifiedClient
+                    gk_list = self.translator_gui.config.get('glossary_keys', []) or []
+                    if gk_list:
+                        UnifiedClient.set_in_memory_glossary_keys(gk_list)
+                except Exception:
+                    pass
+            else:
+                # Clear in-memory glossary pool when disabled to prevent stale pool usage
+                try:
+                    from unified_api_client import UnifiedClient
+                    UnifiedClient.clear_in_memory_glossary_keys()
+                except Exception:
+                    pass
+
+            self._notify_authgpt_visibility()
+
+    def _refresh_glossary_pool(self):
+        """Refresh the in-memory glossary key pool after any change (add/remove/enable/disable).
+        Mirrors how multi-key pool is refreshed via set_in_memory_multi_keys."""
+        try:
+            use_glossary = self.use_glossary_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_keys_checkbox') else False
+            if not use_glossary:
+                return
+            from unified_api_client import UnifiedClient
+            gk_list = self.translator_gui.config.get('glossary_keys', []) or []
+            if gk_list:
+                UnifiedClient.set_in_memory_glossary_keys(gk_list)
+            else:
+                UnifiedClient.clear_in_memory_glossary_keys()
+        except Exception:
+            pass
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def _toggle_glossary_visibility(self):
+        """Toggle glossary key field visibility"""
+        if self.glossary_key_entry.echoMode() == QLineEdit.Password:
+            self.glossary_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_glossary_btn.setText('🔒')
+        else:
+            self.glossary_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_glossary_btn.setText('👁')
+
+    def _toggle_glossary_individual_endpoint_fields(self):
+        """Toggle visibility of glossary individual endpoint fields"""
+        enabled = self.glossary_individual_endpoint_toggle.isChecked()
+
+        self.glossary_individual_endpoint_label.setVisible(enabled)
+        self.glossary_azure_endpoint_entry.setVisible(enabled)
+        self.glossary_individual_api_version_label.setVisible(enabled)
+        self.glossary_azure_api_version_combo.setVisible(enabled)
+
+        self.glossary_azure_endpoint_entry.setEnabled(enabled)
+        self.glossary_azure_api_version_combo.setEnabled(enabled)
+
+        if not enabled:
+            self.glossary_azure_endpoint_entry.clear()
+            self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+
+    def _show_glossary_context_menu(self, position):
+        """Show context menu for glossary keys."""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        self._show_shared_key_context_menu(
+            tree=self.glossary_tree,
+            position=position,
+            total_keys=len(glossary_keys),
+            key_at_index=lambda i: glossary_keys[i],
+            move_callback=self._move_glossary_key,
+            change_model_callback=self._change_glossary_model_for_selected,
+            configure_endpoint_callback=self._configure_glossary_individual_endpoint,
+            configure_parameters_callback=lambda i: self._edit_key_request_parameters(
+                glossary_keys[i],
+                lambda: (self.translator_gui.save_config(show_message=False), self._load_glossary_keys()),
+            ),
+            disable_endpoint_callback=lambda i: self._toggle_glossary_individual_endpoint(i, False),
+            set_cooldown_callback=self._set_glossary_cooldown_for_selected,
+            set_limit_callback=self._set_glossary_output_token_limit_for_selected,
+            clear_limit_callback=self._clear_glossary_output_token_limit_for_selected,
+            set_temp_callback=self._set_glossary_key_temperature_for_selected,
+            clear_temp_callback=self._clear_glossary_key_temperature_for_selected,
+            set_delay_callback=self._set_glossary_api_call_delay_for_selected,
+            clear_delay_callback=self._clear_glossary_api_call_delay_for_selected,
+            configure_contexts_callback=lambda: self._edit_selected_key_contexts('glossary'),
+            test_callback=self._test_selected_glossary,
+            enable_callback=self._enable_selected_glossary,
+            disable_callback=self._disable_selected_glossary,
+            remove_callback=self._remove_selected_glossary,
+            clear_all_callback=self._clear_all_glossary,
+        )
+
+    def _change_glossary_model_for_selected(self):
+        """Change model name for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        current_model = ""
+        if selected_indices and selected_indices[0] < len(glossary_keys):
+            current_model = glossary_keys[selected_indices[0]].get('model', '')
+
+        new_model, ok = self._show_model_selection_dialog(
+            current_model,
+            title=f"Change Model for {len(selected)} Glossary Keys",
+            accept_text="Apply",
+        )
+        if not ok or not new_model:
+            return
+
+        for item in selected:
+            idx = self.glossary_tree.indexOfTopLevelItem(item)
+            if idx < len(glossary_keys):
+                glossary_keys[idx]['model'] = new_model
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Changed model to '{new_model}' for {len(selected)} glossary keys")
+        self._notify_authgpt_visibility()
+
+    def _on_glossary_rows_moved(self):
+        """Sync glossary_keys config with tree order after drag-drop"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+
+        new_order = []
+        for i in range(self.glossary_tree.topLevelItemCount()):
+            item = self.glossary_tree.topLevelItem(i)
+            if item:
+                masked_key = item.text(0)
+                model = item.text(1)
+                for key_data in glossary_keys:
+                    api_key = key_data.get('api_key', '')
+                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
+                        new_order.append(key_data)
+                        break
+
+        if len(new_order) == len(glossary_keys):
+            self.translator_gui.config['glossary_keys'] = new_order
+            self.translator_gui.save_config(show_message=False)
+            self._show_glossary_status("Reordered glossary keys")
+
+    def _on_glossary_selection_change(self):
+        """Update position label when glossary selection changes"""
+        selected = self.glossary_tree.selectedItems()
+        if selected:
+            index = self.glossary_tree.indexOfTopLevelItem(selected[0])
+            total = self.glossary_tree.topLevelItemCount()
+            self.glossary_position_label.setText(f"#{index + 1}/{total}")
+        else:
+            self.glossary_position_label.setText("")
+
+    def _on_glossary_click(self, item, column):
+        """Handle double-click on glossary tree item for inline editing"""
+        if not item:
+            return
+
+        index = self.glossary_tree.indexOfTopLevelItem(item)
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        if index >= len(glossary_keys):
+            return
+
+        # Column 1 = Model, 2 = Output Limit, 3 = Temp, 4 = API Delay
+        if column == 1:
+            old_value = item.text(1)
+            new_value, ok = self._show_model_edit_dialog(old_value)
+            if ok and new_value and new_value != old_value:
+                glossary_keys[index]['model'] = new_value
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Updated model to: {new_value}")
+                self._notify_authgpt_visibility()
+        elif column == 2:  # Output Limit column
+            value, ok = self._show_output_token_limit_dialog(
+                self._default_output_token_limit([glossary_keys[index]], fallback=0),
+                title="Edit Output Token Limit",
+                label="Output token limit (0 = use global):",
+                allow_global=True,
+            )
+            if ok:
+                glossary_keys[index]['individual_output_token_limit'] = value if value > 0 else None
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Updated output limit to: {value if value > 0 else 'global'}")
+        elif column == 3:  # Temp column
+            value, ok = self._show_key_temperature_dialog(
+                self._default_key_temperature([glossary_keys[index]], allow_global=True),
+                title="Edit Key Temperature",
+                label="Temperature (-1 = use global, 0.0 - 1.0):",
+                allow_global=True,
+            )
+            if ok:
+                if value < 0:
+                    if 'individual_key_temperature' in glossary_keys[index]:
+                        del glossary_keys[index]['individual_key_temperature']
+                else:
+                    glossary_keys[index]['individual_key_temperature'] = value
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+        elif column == 4:  # API Delay column
+            value, ok = self._show_api_call_delay_dialog(
+                self._default_api_call_delay([glossary_keys[index]]),
+                "Edit API Call Delay",
+            )
+            if ok:
+                glossary_keys[index]['api_call_delay'] = value if value > 0 else 0.0
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Updated API delay to: {value if value > 0 else 'global'}")
+
+
+    def _show_glossary_status(self, message: str):
+        """Show status message in the glossary section."""
+        if hasattr(self, 'glossary_status_label'):
+            self.glossary_status_label.setText(message)
+
+    def _configure_glossary_individual_endpoint(self, glossary_index):
+        """Configure individual endpoint for a glossary key"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        if glossary_index >= len(glossary_keys):
+            return
+
+        key_data = glossary_keys[glossary_index]
+
+        temp_key = APIKeyEntry(
+            api_key=key_data.get('api_key', ''),
+            model=key_data.get('model', ''),
+            cooldown=60,
+            enabled=True,
+            google_credentials=key_data.get('google_credentials'),
+            azure_endpoint=key_data.get('azure_endpoint'),
+            google_region=key_data.get('google_region'),
+            azure_api_version=key_data.get('azure_api_version'),
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+            request_parameters=key_data.get('request_parameters'),
+        )
+
+        def on_endpoint_configured():
+            glossary_keys[glossary_index]['azure_endpoint'] = temp_key.azure_endpoint
+            glossary_keys[glossary_index]['azure_api_version'] = temp_key.azure_api_version
+            glossary_keys[glossary_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            glossary_keys[glossary_index]['request_parameters'] = dict(temp_key.request_parameters)
+            self.translator_gui.config['glossary_keys'] = glossary_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            status = "configured" if temp_key.use_individual_endpoint else "disabled"
+            self._show_glossary_status(f"Individual endpoint {status} for glossary key")
+
+        if IndividualEndpointDialog is None:
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
+            return
+        dialog = IndividualEndpointDialog(
+            self, self.translator_gui, temp_key, on_endpoint_configured,
+            self._show_glossary_status, persist_to_main_config=False,
+        )
+        dialog.exec_()
+
+    def _set_glossary_cooldown_for_selected(self):
+        """Set rate-limit cooldown for selected glossary keys."""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [glossary_keys[idx] for idx in selected_indices if 0 <= idx < len(glossary_keys)]
+        value, ok = self._show_cooldown_edit_dialog(self._default_cooldown(selected_keys))
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                glossary_keys[idx]['cooldown'] = value
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Set cooldown to {value}s for {len(selected_indices)} key(s)")
+
+    def _set_glossary_output_token_limit_for_selected(self):
+        """Set per-key output token limit for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+
+        selected_keys = [glossary_keys[idx] for idx in selected_indices if 0 <= idx < len(glossary_keys)]
+        value, ok = self._show_output_token_limit_dialog(
+            self._default_output_token_limit(selected_keys),
+            title="Set Glossary Output Token Limit",
+            label="Max output tokens for selected glossary key(s) (0 = use global):",
+            allow_global=True,
+        )
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                glossary_keys[idx]['individual_output_token_limit'] = int(value) if value > 0 else None
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Set glossary output token limit to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_glossary_output_token_limit_for_selected(self):
+        """Clear per-key output token limit for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                if 'individual_output_token_limit' in glossary_keys[idx]:
+                    del glossary_keys[idx]['individual_output_token_limit']
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Cleared glossary output token limit for {len(selected_indices)} key(s)")
+
+    def _set_glossary_key_temperature_for_selected(self):
+        """Set per-key temperature for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+
+        selected_keys = [glossary_keys[idx] for idx in selected_indices if 0 <= idx < len(glossary_keys)]
+        value, ok = self._show_key_temperature_dialog(
+            self._default_key_temperature(selected_keys, allow_global=True),
+            title="Set Glossary Key Temperature",
+            label="Temperature for selected glossary key(s) (-1 = use global, 0.0 - 1.0):",
+            allow_global=True,
+        )
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                if value < 0:
+                    glossary_keys[idx].pop('individual_key_temperature', None)
+                else:
+                    glossary_keys[idx]['individual_key_temperature'] = value
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Set glossary key temperature to {value if value >= 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_glossary_key_temperature_for_selected(self):
+        """Clear per-key temperature for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                if 'individual_key_temperature' in glossary_keys[idx]:
+                    del glossary_keys[idx]['individual_key_temperature']
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Cleared glossary key temperature for {len(selected_indices)} key(s)")
+
+    def _set_glossary_api_call_delay_for_selected(self):
+        """Set per-key API call delay for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [glossary_keys[idx] for idx in selected_indices if 0 <= idx < len(glossary_keys)]
+        value, ok = self._show_api_call_delay_dialog(self._default_api_call_delay(selected_keys))
+        if ok:
+            for idx in selected_indices:
+                if 0 <= idx < len(glossary_keys):
+                    glossary_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+            self.translator_gui.config['glossary_keys'] = glossary_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._show_glossary_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_glossary_api_call_delay_for_selected(self):
+        """Clear per-key API call delay for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                glossary_keys[idx]['api_call_delay'] = 0.0
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
+
+    def _toggle_glossary_individual_endpoint(self, glossary_index, enabled):
+        """Quick toggle individual endpoint on/off for glossary key"""
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        if glossary_index >= len(glossary_keys):
+            return
+
+        glossary_keys[glossary_index]['use_individual_endpoint'] = enabled
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+
+        status = "enabled" if enabled else "disabled"
+        model = glossary_keys[glossary_index].get('model', 'unknown')
+        self._show_glossary_status(f"Individual endpoint {status} for glossary key ({model})")
+
+    def _browse_glossary_google_credentials(self):
+        """Browse for Google Cloud credentials JSON file for glossary keys"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON for Glossary",
+            "",
+            "JSON files (*.json);;All files (*.*)"
+        )
+
+        if filename:
+            # The check and its messages are shared with the mobile app (settings_rules)
+            from settings_rules import INVALID_GOOGLE_CREDENTIALS, google_credentials_load_error, is_google_service_account
+            try:
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if is_google_service_account(creds_data):
+                        self.glossary_google_creds_entry.setText(filename)
+                        self._sync_parent_google_credentials(filename)
+                        self._show_glossary_status(f"Selected glossary Google credentials: {os.path.basename(filename)}")
+                    else:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            INVALID_GOOGLE_CREDENTIALS
+                        )
+            except Exception as e:
+                QMessageBox.critical(self, "Error", google_credentials_load_error(e))
+
+    # ===================================================================
+    # END GLOSSARY KEYS SECTION
+    # ===================================================================
+
+    # ===================================================================
+    # VISION KEYS SECTION
+    # ===================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # ===================================================================
+    # END QA SCAN KEYS SECTION
+    # ===================================================================
+
+    # ===================================================================
+    # TRUNCATION RETRY KEYS SECTION
+    # ===================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # ===================================================================
+    # END TRUNCATION RETRY KEYS SECTION
+    # ===================================================================
+
+
+    # ===================================================================
+    # IMAGE GEN / EDIT KEYS SECTION
+    # ===================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # ===================================================================
+    # END IMAGE GEN / EDIT KEYS SECTION
+    # ===================================================================
+
+    def _manage_refusal_patterns(self):
+        """Open dialog to manage refusal patterns (non-modal)"""
+        # Keep reference to prevent garbage collection
+        if not hasattr(self, '_refusal_patterns_dialog') or self._refusal_patterns_dialog is None:
+            self._refusal_patterns_dialog = RefusalPatternsDialog(self, self.translator_gui)
+            self._refusal_patterns_dialog.setWindowModality(Qt.NonModal)
+        else:
+            try:
+                self._refusal_patterns_dialog._reload_from_config()
+            except Exception:
+                pass
+
+        # Show and raise the dialog
+        self._refusal_patterns_dialog.show()
+        self._refusal_patterns_dialog.raise_()
+        self._refusal_patterns_dialog.activateWindow()
+
+    @staticmethod
+    def _current_model_poll_state(owner):
+        """Read the translator's live/persisted marker and visibility state."""
+        translator = getattr(owner, 'translator_gui', None)
+        ensure_state = getattr(translator, '_ensure_polled_model_marker_state', None)
+        if callable(ensure_state):
+            try:
+                ensure_state()
+            except Exception:
+                pass
+
+        polled_model_keys = set(
+            getattr(translator, '_polled_online_model_ids', set()) or set()
+        )
+        if not polled_model_keys:
+            try:
+                catalogs = get_current_polled_provider_models()
+                polled_model_keys = {
+                    str(model).casefold()
+                    for models in catalogs.values()
+                    for model in (models or [])
+                }
+            except Exception:
+                polled_model_keys = set()
+
+        config = getattr(translator, 'config', {}) or {}
+        hide_unpolled = bool(config.get('model_manager_hide_unpolled_models', False))
+        checked_icon = getattr(translator, '_model_polled_icon', None)
+        if not isinstance(checked_icon, QIcon) or checked_icon.isNull():
+            create_icon = getattr(translator, '_create_polled_model_icon', None)
+            try:
+                checked_icon = create_icon() if callable(create_icon) else QIcon()
+            except Exception:
+                checked_icon = QIcon()
+        return PolledModelKeys(polled_model_keys), checked_icon, hide_unpolled
+
+    @staticmethod
+    def _apply_model_combo_poll_rows(combo, polled_model_keys, checked_icon, hide_unpolled):
+        """Apply marker icons and row visibility without changing item text."""
+        polled_model_keys = PolledModelKeys(polled_model_keys)
+        empty_icon = QIcon()
+        line_edit = combo.lineEdit() if combo.isEditable() else None
+        current_index = combo.currentIndex()
+        current_text = line_edit.text() if line_edit is not None else combo.currentText()
+        cursor_position = line_edit.cursorPosition() if line_edit is not None else 0
+        selection_start = line_edit.selectionStart() if line_edit is not None else -1
+        selection_length = (
+            len(line_edit.selectedText())
+            if line_edit is not None and selection_start >= 0
+            else 0
+        )
+        combo_blocked = combo.blockSignals(True)
+        line_blocked = line_edit.blockSignals(True) if line_edit is not None else False
+        try:
+            combo.setIconSize(QSize(14, 14))
+            popup = combo.view()
+            for row in range(combo.count()):
+                model = combo.itemText(row)
+                is_polled = model_has_polled_marker(model, polled_model_keys)
+                combo.setItemIcon(row, empty_icon)
+                combo.setItemData(row, is_polled, _MODEL_POLL_MARKER_ROLE)
+                if popup is not None:
+                    popup.setRowHidden(row, bool(hide_unpolled and not is_polled))
+        except RuntimeError:
+            pass
+        finally:
+            try:
+                combo.setCurrentIndex(current_index)
+                if line_edit is not None:
+                    line_edit.setText(current_text)
+                    if selection_start >= 0:
+                        line_edit.setSelection(selection_start, selection_length)
+                    else:
+                        line_edit.setCursorPosition(
+                            max(0, min(cursor_position, len(current_text)))
+                        )
+                    line_edit.blockSignals(line_blocked)
+                combo.blockSignals(combo_blocked)
+            except RuntimeError:
+                pass
+        _install_model_field_poll_marker(combo, checked_icon)
+
+    @staticmethod
+    def _set_combo_model_poll_border_active(combo, active):
+        """Mirror translator_gui's animated catalog-poll perimeter."""
+        try:
+            border = getattr(combo, '_model_catalog_poll_border', None)
+            if border is None:
+                border = _ModelCatalogPollBorder(combo)
+                combo._model_catalog_poll_border = border
+            if active:
+                border.start()
+            else:
+                border.stop()
+        except RuntimeError:
+            pass
+
+    def _show_model_context_menu(self, combo, global_position):
+        """Show the translator model field's edit and catalog actions."""
+        line_edit = combo.lineEdit() if combo.isEditable() else None
+        clipboard = QApplication.clipboard()
+        menu = QMenu(combo)
+
+        cut_action = menu.addAction("✂️ Cut")
+        cut_action.setShortcut("Ctrl+X")
+        cut_action.setEnabled(bool(
+            line_edit is not None
+            and not line_edit.isReadOnly()
+            and line_edit.hasSelectedText()
+        ))
+
+        copy_action = menu.addAction("📋 Copy")
+        copy_action.setShortcut("Ctrl+C")
+        copy_action.setEnabled(bool(
+            (line_edit is not None and line_edit.hasSelectedText())
+            or combo.currentText()
+        ))
+
+        paste_action = menu.addAction("📥 Paste")
+        paste_action.setShortcut("Ctrl+V")
+        paste_action.setEnabled(bool(
+            line_edit is not None
+            and not line_edit.isReadOnly()
+            and clipboard.text()
+        ))
+
+        menu.addSeparator()
+        refresh_action = menu.addAction("🌐 Refresh Online Models")
+        manage_action = menu.addAction("⚙️ Manage Models...")
+        action = menu.exec(global_position)
+
+        if action == refresh_action:
+            MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, True)
+            translator = getattr(self, 'translator_gui', None)
+            active_model = combo.currentText().strip().lower()
+            started = False
+            if active_model.startswith('antigravity'):
+                refresh = getattr(
+                    translator, '_start_provider_catalog_refresh_with_antigravity', None,
+                )
+            else:
+                refresh = getattr(
+                    translator, '_start_provider_model_catalog_refresh', None,
+                )
+            if callable(refresh):
+                try:
+                    result = refresh(show_feedback=True)
+                    # Antigravity preflight is asynchronous and intentionally
+                    # returns no result before it starts the catalog worker.
+                    started = result is not False
+                except RuntimeError:
+                    started = False
+            if not started:
+                thread = getattr(translator, '_provider_model_catalog_thread', None)
+                if thread is None or not thread.is_alive():
+                    MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, False)
+        elif action == manage_action:
+            open_manager = getattr(getattr(self, 'translator_gui', None), '_open_model_manager', None)
+            if callable(open_manager):
+                open_manager()
+        elif action == cut_action and line_edit is not None:
+            line_edit.cut()
+        elif action == copy_action:
+            if line_edit is not None and line_edit.hasSelectedText():
+                line_edit.copy()
+            else:
+                clipboard.setText(combo.currentText())
+        elif action == paste_action and line_edit is not None:
+            line_edit.paste()
+
+    def _install_model_context_menu(self, combo):
+        """Install the shared model menu on both the combo and its editor."""
+        if getattr(combo, '_model_context_menu_installed', False):
+            return
+        combo.setContextMenuPolicy(Qt.CustomContextMenu)
+        combo.customContextMenuRequested.connect(
+            lambda point, target=combo: MultiAPIKeyDialog._show_model_context_menu(
+                self, target, target.mapToGlobal(point)
+            )
+        )
+        editor = combo.lineEdit() if combo.isEditable() else None
+        if editor is not None:
+            editor.setContextMenuPolicy(Qt.CustomContextMenu)
+            editor.customContextMenuRequested.connect(
+                lambda point, target=combo, source=editor: MultiAPIKeyDialog._show_model_context_menu(
+                    self, target, source.mapToGlobal(point)
+                )
+            )
+        combo._model_context_menu_installed = True
+
+    def _set_all_model_poll_borders_active(self, active):
+        """Stop or start catalog animation on every live manager model field."""
+        live_combos = []
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, active)
+                live_combos.append(combo)
+            except RuntimeError:
+                continue
+        self._model_search_combos = live_combos
+
+    def _refresh_model_poll_markers(self):
+        """Refresh every registered model picker after polling/filter changes."""
+        polled_model_keys, checked_icon, hide_unpolled = (
+            MultiAPIKeyDialog._current_model_poll_state(self)
+        )
+        live_combos = []
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                MultiAPIKeyDialog._apply_model_combo_poll_rows(
+                    combo,
+                    polled_model_keys,
+                    checked_icon,
+                    hide_unpolled,
+                )
+                completion_model = getattr(combo, '_model_completer_proxy', None)
+                update_state = getattr(completion_model, 'set_polled_state', None)
+                if callable(update_state):
+                    update_state(polled_model_keys, checked_icon, hide_unpolled)
+                live_combos.append(combo)
+            except RuntimeError:
+                continue
+        self._model_search_combos = live_combos
+
+    def _refresh_model_catalog_choices(self):
+        """Synchronize live model pickers with the translator's saved model list."""
+        model_values = MultiAPIKeyDialog._get_model_options_for_dropdown(self)
+        live_combos = []
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                line_edit = combo.lineEdit() if combo.isEditable() else None
+                current_text = (
+                    line_edit.text() if line_edit is not None else combo.currentText()
+                )
+                cursor_position = (
+                    line_edit.cursorPosition() if line_edit is not None else 0
+                )
+                selection_start = (
+                    line_edit.selectionStart() if line_edit is not None else -1
+                )
+                selection_length = (
+                    len(line_edit.selectedText())
+                    if line_edit is not None and selection_start >= 0
+                    else 0
+                )
+                combo_blocked = combo.blockSignals(True)
+                line_blocked = (
+                    line_edit.blockSignals(True) if line_edit is not None else False
+                )
+                try:
+                    current_values = [
+                        combo.itemText(index) for index in range(combo.count())
+                    ]
+                    if current_values != model_values:
+                        combo.clear()
+                        combo.addItems(model_values)
+                    matching_index = combo.findText(current_text)
+                    combo.setCurrentIndex(matching_index)
+                    if line_edit is not None:
+                        line_edit.setText(current_text)
+                        if selection_start >= 0:
+                            line_edit.setSelection(selection_start, selection_length)
+                        else:
+                            line_edit.setCursorPosition(
+                                max(0, min(cursor_position, len(current_text)))
+                            )
+
+                    completion_model = getattr(
+                        combo, '_model_completer_proxy', None
+                    )
+                    update_models = getattr(
+                        completion_model, 'set_model_values', None
+                    )
+                    if callable(update_models):
+                        update_models(model_values, current_text)
+                finally:
+                    if line_edit is not None:
+                        line_edit.blockSignals(line_blocked)
+                    combo.blockSignals(combo_blocked)
+                live_combos.append(combo)
+            except RuntimeError:
+                continue
+        self._model_search_combos = live_combos
+        MultiAPIKeyDialog._refresh_model_poll_markers(self)
+        if not getattr(
+            getattr(self, 'translator_gui', None),
+            '_provider_model_catalog_poll_active',
+            False,
+        ):
+            for combo in live_combos:
+                MultiAPIKeyDialog._set_combo_model_poll_border_active(combo, False)
+
+    @staticmethod
+    def _set_authza_editor_button_margin(combo, visible):
+        editor = combo.lineEdit() if combo.isEditable() else None
+        if editor is None:
+            return
+        margins = editor.textMargins()
+        original_right = int(getattr(combo, '_authza_original_right_margin', 0) or 0)
+        editor.setTextMargins(
+            margins.left(),
+            margins.top(),
+            max(original_right, 28) if visible else original_right,
+            margins.bottom(),
+        )
+
+    def _refresh_authza_login_button(self, combo):
+        """Show an account-aware login affordance inside one model editor."""
+        button = getattr(combo, '_authza_login_button', None)
+        if button is None:
+            return
+        try:
+            from glm_proxy import account_id_from_model, has_credentials
+
+            account_id = account_id_from_model(combo.currentText())
+            if account_id is None:
+                MultiAPIKeyDialog._set_authza_editor_button_margin(combo, False)
+                button.hide()
+                return
+            MultiAPIKeyDialog._set_authza_editor_button_margin(combo, True)
+            button.setProperty('authzaAccountId', account_id)
+            logged_in = has_credentials(account_id)
+            busy = bool(getattr(self, '_authza_login_busy', False))
+            active_combo = getattr(self, '_authza_login_combo', None)
+            button.setEnabled(not busy)
+            if busy and active_combo is combo:
+                button.setText("⏳")
+            else:
+                button.setText("✅" if logged_in else "🔐")
+            account_label = "default" if account_id == 0 else f"#{account_id}"
+            state = "Logged in; click to replace this login" if logged_in else "Click to log in"
+            button.setToolTip(
+                f"{state} for Z.AI AuthZA account {account_label}. "
+                "The local GLM proxy and its packages are managed automatically. "
+                "Numbered routes force Z.AI account selection."
+            )
+            button.show()
+            button.raise_()
+        except (ImportError, RuntimeError):
+            try:
+                MultiAPIKeyDialog._set_authza_editor_button_margin(combo, False)
+            except RuntimeError:
+                pass
+            button.hide()
+
+    def _install_authza_login_button(self, combo):
+        """Install the AuthZA login control on a dynamically created model combo."""
+        if getattr(combo, '_authza_login_button', None) is not None:
+            MultiAPIKeyDialog._refresh_authza_login_button(self, combo)
+            return
+        editor = combo.lineEdit() if combo.isEditable() else None
+        if editor is None:
+            return
+
+        button = QToolButton(editor)
+        button.setFixedSize(24, 22)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            "QToolButton { background-color: #4c1d95; color: white; "
+            "border: 1px solid #8b5cf6; border-radius: 4px; padding: 0; } "
+            "QToolButton:hover { background-color: #6d28d9; } "
+            "QToolButton:disabled { background-color: #374151; color: #d1d5db; }"
+        )
+        button.setAccessibleName("Z.AI AuthZA login")
+        button.hide()
+        combo._authza_login_button = button
+
+        margins = editor.textMargins()
+        combo._authza_original_right_margin = margins.right()
+
+        def _position_button():
+            try:
+                button.move(
+                    max(0, editor.width() - button.width() - 2),
+                    max(0, (editor.height() - button.height()) // 2),
+                )
+                button.raise_()
+            except RuntimeError:
+                pass
+
+        original_resize = editor.resizeEvent
+
+        def _resize_with_authza_button(event):
+            original_resize(event)
+            _position_button()
+
+        editor.resizeEvent = _resize_with_authza_button
+        button.clicked.connect(
+            lambda _checked=False, target=combo: MultiAPIKeyDialog._authza_login_for_combo(
+                self, target
+            )
+        )
+        combo.currentTextChanged.connect(
+            lambda _text, target=combo: MultiAPIKeyDialog._refresh_authza_login_button(
+                self, target
+            )
+        )
+        combo.editTextChanged.connect(
+            lambda _text, target=combo: MultiAPIKeyDialog._refresh_authza_login_button(
+                self, target
+            )
+        )
+        QTimer.singleShot(0, _position_button)
+        MultiAPIKeyDialog._refresh_authza_login_button(self, combo)
+
+    def _refresh_all_authza_login_buttons(self):
+        for combo in list(getattr(self, '_model_search_combos', []) or []):
+            try:
+                MultiAPIKeyDialog._refresh_authza_login_button(self, combo)
+            except RuntimeError:
+                continue
+
+    def _authza_login_for_combo(self, combo):
+        """Log into the numbered AuthZA account typed in a key-pool field."""
+        if getattr(self, '_authza_login_busy', False):
+            return
+        from glm_proxy import account_id_from_model
+
+        account_id = account_id_from_model(combo.currentText())
+        if account_id is None:
+            return
+        self._authza_login_busy = True
+        self._authza_login_combo = combo
+        self._authza_login_account_id = account_id
+        MultiAPIKeyDialog._refresh_all_authza_login_buttons(self)
+        account_label = "default account" if account_id == 0 else f"account #{account_id}"
+        log_fn = getattr(self.translator_gui, 'append_log', logger.info)
+        log_fn(
+            f"🔐 AuthZA: preparing the local GLM proxy and opening Z.AI login for {account_label}…"
+        )
+
+        def _worker():
+            try:
+                from glm_proxy import open_login
+
+                self._authza_login_url = open_login(
+                    log_fn=log_fn,
+                    account_id=account_id,
+                )
+                QMetaObject.invokeMethod(
+                    self, "_authza_manager_login_finished", Qt.QueuedConnection
+                )
+            except Exception as exc:
+                self._authza_login_error = str(exc)
+                QMetaObject.invokeMethod(
+                    self, "_authza_manager_login_failed", Qt.QueuedConnection
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _authza_manager_login_finished(self):
+        account_id = int(getattr(self, '_authza_login_account_id', 0) or 0)
+        self._authza_login_busy = False
+        self._authza_login_combo = None
+        MultiAPIKeyDialog._refresh_all_authza_login_buttons(self)
+        account_label = "default account" if account_id == 0 else f"account #{account_id}"
+        log_fn = getattr(self.translator_gui, 'append_log', logger.info)
+        log_fn(
+            f"✅ AuthZA: Z.AI login completed for {account_label}; proxy ready at "
+            f"{getattr(self, '_authza_login_url', '')}."
+        )
+
+        # An explicit login is also an explicit request to populate that
+        # account's live model catalog, even when the main translator field is
+        # currently using a different provider.
+        refresh = getattr(
+            self.translator_gui, '_start_provider_model_catalog_refresh', None
+        )
+        if callable(refresh):
+            provider = 'authza' if account_id == 0 else f'authza:{account_id}'
+            try:
+                refresh(only_provider=provider, automatic=True)
+            except Exception as exc:
+                log_fn(f"⚠️ AuthZA model auto-poll could not start: {exc}")
+        self._refresh_parent_model_requirements(save_config=False)
+
+    @Slot()
+    def _authza_manager_login_failed(self):
+        self._authza_login_busy = False
+        self._authza_login_combo = None
+        MultiAPIKeyDialog._refresh_all_authza_login_buttons(self)
+        err = getattr(self, '_authza_login_error', 'Unknown error')
+        log_fn = getattr(self.translator_gui, 'append_log', logger.info)
+        log_fn(f"❌ AuthZA login failed: {err}")
+        QMessageBox.warning(self, "Z.AI Login Failed", f"Z.AI login failed:\n{err}")
+
+    def _wrap_model_with_ollama_settings(self, combo, dialog_parent=None):
+        """Keep an Ollama settings button directly beside every model editor."""
+        from ollama_settings_dialog import OllamaRouteButtonController
+
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(combo, 1)
+        button = QPushButton("🦙 Load Ollama")
+        button.setToolTip("Install Ollama or configure its local settings")
+        row.addWidget(button)
+        controller = OllamaRouteButtonController(
+            button, self.translator_gui, combo.currentText, dialog_parent or self,
+        )
+        combo.currentTextChanged.connect(controller.update_model)
+        combo.editTextChanged.connect(controller.update_model)
+        controller.update_model()
+        combo._ollama_settings_button = button
+        combo._ollama_route_controller = controller
+        return container
+
+    def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None):
+        """Attach the same prefix-priority contains completer used by translator_gui."""
+        from PySide6.QtCore import QStringListModel
+
+        # Model text is saved by the key editor itself. Never let an editable
+        # QComboBox silently append a partial typed value to its catalog.
+        combo.setInsertPolicy(QComboBox.NoInsert)
+
+        class _PrefixPriorityCompletionModel(QStringListModel):
+            """Rank only matching models without a Python-sorted Qt proxy."""
+
+            def __init__(
+                self,
+                base_model_values,
+                polled_model_keys,
+                checked_icon,
+                hide_unpolled,
+                parent=None,
+            ):
+                super().__init__([], parent)
+                self._search = ""
+                self._base_model_values = list(base_model_values)
+                self._polled_model_keys = PolledModelKeys(polled_model_keys)
+                self._checked_icon = checked_icon
+                self._hide_unpolled = bool(hide_unpolled)
+                self.set_search_text("")
+
+            def data(self, index, role=Qt.DisplayRole):
+                if index.isValid() and role in (
+                    Qt.DecorationRole,
+                    Qt.ToolTipRole,
+                    _MODEL_POLL_MARKER_ROLE,
+                ):
+                    value = super().data(index, Qt.DisplayRole)
+                    is_polled = model_has_polled_marker(
+                        value,
+                        self._polled_model_keys,
+                    )
+                    if role == _MODEL_POLL_MARKER_ROLE:
+                        return is_polled
+                    if role == Qt.DecorationRole:
+                        return self._checked_icon if is_polled else QIcon()
+                    return "✓ " + _model_poll_marker_tooltip(value) if is_polled else ""
+                return super().data(index, role)
+
+            @staticmethod
+            def _score(text, search):
+                if not search:
+                    return 0
+                if text == search:
+                    return 0
+                if text.startswith(search):
+                    return 1
+                return 2 if any(
+                    part.startswith(search) for part in text.split('/')[1:]
+                ) else 3
+
+            def set_search_text(self, text):
+                self._search = (text or "").lower()
+                rendered = numbered_model_completion_values(
+                    self._base_model_values,
+                    text,
+                )
+                if self._search:
+                    rendered = [
+                        value for value in rendered
+                        if self._search in str(value).lower()
+                    ]
+                if self._hide_unpolled:
+                    rendered = [
+                        value for value in rendered
+                        if model_has_polled_marker(value, self._polled_model_keys)
+                    ]
+                ranked = sorted(
+                    rendered,
+                    key=lambda value: (
+                        self._score(str(value).lower(), self._search),
+                        str(value).lower(),
+                    ),
+                )
+                if ranked != self.stringList():
+                    self.setStringList(ranked)
+
+            def set_polled_state(self, polled_model_keys, checked_icon, hide_unpolled):
+                self._polled_model_keys = PolledModelKeys(polled_model_keys)
+                self._checked_icon = checked_icon
+                self._hide_unpolled = bool(hide_unpolled)
+                previous_values = self.stringList()
+                self.set_search_text(self._search)
+                if previous_values == self.stringList() and self.rowCount():
+                    self.dataChanged.emit(
+                        self.index(0, 0),
+                        self.index(self.rowCount() - 1, 0),
+                        [Qt.DecorationRole, Qt.ToolTipRole],
+                    )
+
+            def set_model_values(self, model_values, search_text=None):
+                """Replace stale completion choices after Manage Models saves."""
+                self._base_model_values = list(model_values)
+                if search_text is None:
+                    search_text = self._search
+                self.set_search_text(search_text)
+
+        if model_values is None:
+            model_values = [combo.itemText(i) for i in range(combo.count())]
+        else:
+            model_values = list(model_values)
+        polled_model_keys, checked_icon, hide_unpolled = (
+            MultiAPIKeyDialog._current_model_poll_state(self)
+        )
+        completion_model = _PrefixPriorityCompletionModel(
+            model_values,
+            polled_model_keys,
+            checked_icon,
+            hide_unpolled,
+            combo,
+        )
+
+        completer = QCompleter(completion_model, combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setFilterMode(Qt.MatchContains)
+        # The completer owns a separate popup that does not inherit the combo
+        # icon size.  Match the actual poll-check size so Qt does not reserve
+        # an oversized decoration column between the check and model text.
+        completer.popup().setIconSize(QSize(14, 14))
+        completer.popup().setItemDelegate(
+            _ModelPollMarkerDelegate(checked_icon, completer.popup())
+        )
+        combo.setCompleter(completer)
+        popup_filter = _ModelComboCompletionPopupFilter(
+            combo,
+            completer,
+            completion_model,
+            arrow_width=32,
+        )
+        combo.installEventFilter(popup_filter)
+        combo._model_completion_popup_filter = popup_filter
+
+        # Store callback for changes. This used to call the parent model refresh
+        # synchronously on every keystroke, which made all key-pool model fields
+        # laggy while typing.
+        if on_change:
+            def _notify_model_change(immediate=False):
+                try:
+                    on_change(immediate=immediate)
+                except TypeError:
+                    on_change()
+            combo.currentTextChanged.connect(lambda: _notify_model_change(False))
+            combo.editTextChanged.connect(lambda: _notify_model_change(False))
+
+        if combo.lineEdit():
+            if on_change:
+                combo.lineEdit().editingFinished.connect(lambda: _notify_model_change(True))
+            # Completion filtering is now inexpensive, so update immediately.
+            # Delaying this left the canonical catalog active for one extra
+            # keystroke: ``authgpt1`` showed no results until ``/`` was typed.
+            combo.lineEdit().textEdited.connect(completion_model.set_search_text)
+            restore_model = getattr(
+                getattr(self, 'translator_gui', None),
+                '_restore_removed_model_choices',
+                None,
+            )
+            if callable(restore_model):
+                combo.lineEdit().textEdited.connect(
+                    lambda text: restore_model(
+                        [text], add_to_saved=True, refresh=True
+                    )
+                )
+
+        combo._model_completer = completer
+        combo._model_completer_proxy = completion_model
+        combo._model_completer_source = completion_model
+        MultiAPIKeyDialog._apply_model_combo_poll_rows(
+            combo,
+            polled_model_keys,
+            checked_icon,
+            hide_unpolled,
+        )
+        registered_combos = list(getattr(self, '_model_search_combos', []) or [])
+        if combo not in registered_combos:
+            registered_combos.append(combo)
+        self._model_search_combos = registered_combos
+        MultiAPIKeyDialog._install_model_context_menu(self, combo)
+        MultiAPIKeyDialog._install_authza_login_button(self, combo)
+
+    def _notify_authgpt_visibility(self):
+        """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""
+        self._refresh_parent_model_requirements(save_config=True)
+
+    def _can_emit_live_key_pool_updates(self) -> bool:
+        """Return True only for user actions, not initial dialog construction/sync."""
+        return (
+            not getattr(self, '_initializing', False)
+            and not getattr(self, '_syncing_external_key_pool_state', False)
+        )
+
+    def _toggle_key_visibility(self):
+        """Toggle API key visibility"""
+        if self.api_key_entry.echoMode() == QLineEdit.Password:
+            self.api_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_key_btn.setText('🔒')
+        else:
+            self.api_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_key_btn.setText('👁')
+
+    def _toggle_multi_key_mode(self):
+        """Toggle multi-key mode - simply hide/show sections"""
+        enabled = self.enabled_checkbox.isChecked()
+        self.translator_gui.config['use_multi_api_keys'] = enabled
+        self.enabled_var = enabled
+
+        # Save the config immediately for direct user toggles. Live-sync refreshes
+        # are already reading the saved value from the shared config.
+        live_updates = self._can_emit_live_key_pool_updates()
+        if live_updates:
+            self.translator_gui.save_config(show_message=False)
+            self._broadcast_key_pool_config_changed('main', refresh_keys=False)
+
+        # Sync environment variables and UnifiedClient pool immediately (skip during init)
+        if live_updates:
+            try:
+                import os as _os
+                if enabled:
+                    _os.environ['USE_MULTI_API_KEYS'] = '1'
+                    _os.environ['USE_MULTI_KEYS'] = '1'
+                    # Apply rotation settings
+                    force_rotation = bool(self.translator_gui.config.get('force_key_rotation', True))
+                    rotation_frequency = int(self.translator_gui.config.get('rotation_frequency', 1))
+                    _os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+                    _os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+                    # Setup in-memory pool
+                    try:
+                        from unified_api_client import UnifiedClient
+                        mk_list = self.translator_gui.config.get('multi_api_keys', []) or []
+                        if mk_list:
+                            UnifiedClient.set_in_memory_multi_keys(
+                                mk_list,
+                                force_rotation=force_rotation,
+                                rotation_frequency=rotation_frequency,
+                            )
+                    except Exception:
+                        pass
+                else:
+                    _os.environ['USE_MULTI_API_KEYS'] = '0'
+                    _os.environ['USE_MULTI_KEYS'] = '0'
+                    # Clear in-memory pool so UnifiedClient stops rotating
+                    try:
+                        from unified_api_client import UnifiedClient
+                        UnifiedClient.clear_in_memory_multi_keys()
+                    except Exception:
+                        pass
+                    msg = "🔑 Translation key pool: disabled"
+                    if hasattr(self.translator_gui, 'append_log') and not getattr(self, '_syncing_external_key_pool_state', False):
+                        try:
+                            self.translator_gui.append_log(msg)
+                        except Exception:
+                            print(msg)
+                    elif not getattr(self, '_syncing_external_key_pool_state', False):
+                        print(msg)
+            except Exception as _env_err:
+                print(f"[MULTI_KEY_TOGGLE] Failed to sync env/pool: {_env_err}")
+
+        # === Add Key Section ===
+        if hasattr(self, 'add_key_frame'):
+            if enabled:
+                self.add_key_frame.setMaximumHeight(16777215)  # Reset to max
+                self.add_key_frame.show()
+            else:
+                self.add_key_frame.hide()
+                self.add_key_frame.setMaximumHeight(0)
+
+        # === Separator ===
+        if hasattr(self, 'multikey_separator'):
+            if enabled:
+                self.multikey_separator.setMaximumHeight(16777215)  # Reset to max
+                self.multikey_separator.show()
+            else:
+                self.multikey_separator.hide()
+                self.multikey_separator.setMaximumHeight(0)
+
+        # === Key List Section ===
+        if hasattr(self, 'key_list_frame'):
+            if enabled:
+                self.key_list_frame.setMaximumHeight(16777215)  # Reset to max
+                self.key_list_frame.show()
+            else:
+                self.key_list_frame.hide()
+                self.key_list_frame.setMaximumHeight(0)
+
+        # === Check if fallback is also disabled ===
+        fallback_enabled = self.use_fallback_checkbox.isChecked() if hasattr(self, 'use_fallback_checkbox') else False
+        both_disabled = not enabled and not fallback_enabled
+
+        # === Adjust fallback container spacing ===
+        # When both toggles are disabled, eliminate all top spacing
+        if hasattr(self, 'fallback_container'):
+            layout = self.fallback_container.layout()
+            if layout:
+                if both_disabled:
+                    layout.setContentsMargins(0, 0, 0, 0)  # No top margin when both are off
+                else:
+                    layout.setContentsMargins(0, 5, 0, 0)  # Normal spacing otherwise
+
+        # === Hide fallback separator when both are off ===
+        if hasattr(self, 'fallback_separator'):
+            self.fallback_separator.setVisible(not both_disabled)
+
+        # === Adjust layout spacing ===
+        # Reduce spacing between widgets when both toggles are off
+        if hasattr(self, 'scrollable_layout'):
+            if both_disabled:
+                self.scrollable_layout.setSpacing(0)  # No spacing when both disabled
+            else:
+                self.scrollable_layout.setSpacing(10)  # Normal spacing otherwise
+
+        # Show status message
+        status = "enabled" if enabled else "disabled"
+        self._show_status(f"Translation Keys (Main Pool) {status}")
+
+        # Update multi-key status labels in other settings and manga integration
+        if hasattr(self.translator_gui, '_update_multi_key_status_label'):
+            try:
+                self.translator_gui._update_multi_key_status_label()
+            except Exception:
+                pass
+        # Update manga integration label if it exists
+        if hasattr(self.translator_gui, '_manga_widget') and self.translator_gui._manga_widget:
+            try:
+                mw = self.translator_gui._manga_widget
+                if hasattr(mw, 'multi_key_label'):
+                    if enabled:
+                        mk_list = self.translator_gui.config.get('multi_api_keys', [])
+                        active = sum(1 for k in mk_list if k.get('enabled', True))
+                        mw.multi_key_label.setText(f"• Multi-Key: ON ({active} keys)")
+                        mw.multi_key_label.setStyleSheet("color: green;")
+                    else:
+                        mw.multi_key_label.setText("• Multi-Key: OFF")
+                        mw.multi_key_label.setStyleSheet("color: gray;")
+            except Exception:
+                pass
+
+        # Re-evaluate AuthGPT login button visibility only for real user changes.
+        if live_updates:
+            self._notify_authgpt_visibility()
+
+    def _copy_current_settings(self):
+        """Copy current API key and model from main GUI"""
+        # Get current API key and model from translator GUI
+        if hasattr(self.translator_gui, 'api_key_entry'):
+            api_key = self.translator_gui.api_key_entry.text()
+            if api_key:
+                self.api_key_entry.setText(api_key)
+
+        if hasattr(self.translator_gui, 'model_combo'):
+            model = self.translator_gui.model_combo.currentText()
+            if model:
+                self._set_combo_text_silently(self.model_combo, model)
+
+    def _add_key(self):
+        """Add a new API key with optional Google credentials and individual endpoint"""
+        api_key = self.api_key_entry.text().strip()
+        model = self.model_combo.currentText().strip()
+        cooldown = self.cooldown_spinbox.value()
+        google_credentials = self.google_creds_entry.text().strip() or None
+        if google_credentials:
+            self._sync_parent_google_credentials(google_credentials)
+        google_region = self.google_region_entry.text().strip() or None
+
+        # Only use individual endpoint if toggle is enabled
+        use_individual_endpoint = self.individual_endpoint_toggle.isChecked()
+        azure_endpoint = self.azure_endpoint_entry.text().strip() if use_individual_endpoint else None
+        azure_api_version = self.azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
+
+        model_error = key_pool_service.missing_model_error(model)
+        if model_error:
+            QMessageBox.critical(self, "Error", model_error)
+            return
+
+        # Add to pool with new fields
+        key_entry = key_pool_service.new_main_key_entry(
+            api_key,
+            model,
+            cooldown,
+            google_credentials=google_credentials,
+            azure_endpoint=azure_endpoint,
+            google_region=google_region,
+            azure_api_version=azure_api_version,
+            use_individual_endpoint=use_individual_endpoint,
+            entry_cls=APIKeyEntry,
+        )
+        self.key_pool.add_key(key_entry)
+        self.translator_gui.config['multi_api_keys'] = [key.to_dict() for key in self.key_pool.get_all_keys()]
+
+        # Clear inputs
+        self.api_key_entry.clear()
+        self._set_combo_text_silently(self.model_combo, "")
+        self.cooldown_spinbox.setValue(60)
+        self.google_creds_entry.clear()
+        self.azure_endpoint_entry.clear()
+        self.google_region_entry.setText("us-east5")
+        self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.individual_endpoint_toggle.setChecked(False)
+
+        # Update the UI to hide endpoint fields
+        self._toggle_individual_endpoint_fields()
+
+        # Refresh list
+        self._refresh_key_list()
+
+        # Show success
+        extra_info = key_pool_service.added_key_extra_info(google_credentials, azure_endpoint)
+        self._show_status(f"Added key for model: {model}{extra_info}")
+
+        # Re-evaluate AuthGPT login button visibility
+        self._schedule_key_pool_config_flush(
+            'main',
+            refresh_keys=True,
+            refresh_parent=self._model_affects_parent_provider_controls(model),
+        )
+
+    # Note: _refresh_key_list is defined earlier in the file (PySide6 version)
+
+    def _test_selected(self):
+        """Test selected API keys with inline progress"""
+        # Guard against re-entrant clicks while tests are running
+        if getattr(self, '_tests_in_flight', False):
+            print("[DEBUG] Tests already in progress, ignoring click")
+            return
+
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select keys to test")
+            return
+
+        # Get selected indices
+        indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+
+        # Mark keys as testing BEFORE starting thread (in main thread)
+        for index in indices:
+            if index < len(self.key_pool.keys):
+                key = self.key_pool.keys[index]
+                key.last_test_result = None
+                key._testing = True
+                print(f"[DEBUG] Pre-marked key {index} as testing")
+
+        # Refresh UI immediately to show testing status
+        self._refresh_key_list()
+        QApplication.processEvents()  # Force UI update
+
+        # NOTE: Do NOT set UnifiedClient._api_key_pool here — it contaminates
+        # the class-level pool reference even when multi-key mode is disabled.
+        # Individual key tests create their own UnifiedClient instances.
+
+        # Run all tests in parallel using executor
+        self._test_results = []
+        self._total_tests = len(indices)
+        self._completed_tests = 0
+        self._tests_in_flight = True
+
+        # Submit all tests to executor at once
+        for index in indices:
+            self._submit_single_test(index)
+
+    def _test_all(self):
+        """Test all enabled API keys with inline progress"""
+        # Guard against re-entrant clicks while tests are running
+        if getattr(self, '_tests_in_flight', False):
+            print("[DEBUG] Tests already in progress, ignoring click")
+            return
+
+        if not self.key_pool.keys:
+            QMessageBox.warning(self, "Warning", "No keys to test")
+            return
+
+        # Only test enabled keys
+        indices = [i for i, key in enumerate(self.key_pool.keys) if key.enabled]
+
+        if not indices:
+            QMessageBox.warning(self, "Warning", "No enabled keys to test")
+            return
+
+        # Mark keys as testing BEFORE starting thread (in main thread)
+        for index in indices:
+            if index < len(self.key_pool.keys):
+                key = self.key_pool.keys[index]
+                key.last_test_result = None
+                key._testing = True
+                print(f"[DEBUG] Pre-marked key {index} as testing")
+
+        # Refresh UI immediately to show testing status
+        self._refresh_key_list()
+        QApplication.processEvents()  # Force UI update
+
+        # NOTE: Do NOT set UnifiedClient._api_key_pool here — it contaminates
+        # the class-level pool reference even when multi-key mode is disabled.
+        # Individual key tests create their own UnifiedClient instances.
+
+        # Run all tests in parallel using executor
+        self._test_results = []
+        self._total_tests = len(indices)
+        self._completed_tests = 0
+        self._tests_in_flight = True
+
+        # Submit all tests to executor at once
+        for index in indices:
+            self._submit_single_test(index)
+
+    def _submit_single_test(self, index):
+        """Submit a single test to executor for parallel execution"""
+        if index >= len(self.key_pool.keys):
+            return
+
+        key = self.key_pool.keys[index]
+        timeout_seconds = _api_key_test_timeout_seconds(key.model)
+        print(f"[DEBUG] Submitting test for key {index}: {key.model}")
+
+        # Run REAL API test using executor like translation does
+        from concurrent.futures import ThreadPoolExecutor
+        from unified_api_client import UnifiedClient
+
+        # Use shared executor from main GUI
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+        executor = getattr(self.translator_gui, 'executor', None)
+
+        # Shared refs so timeout wrapper can hard-cancel and suppress stale results
+        client_ref = [None]
+        timed_out = [False]
+
+        def run_api_test():
+            try:
+                # Client setup (Google creds/region, individual endpoint) and the probe
+                # come from the shared key-test request (key_pool_service).
+                request = key_pool_service.build_test_request(key, 'main')
+                _client, response = key_pool_service.send_test_request(
+                    request,
+                    client_cls=UnifiedClient,
+                    on_client=lambda c: client_ref.__setitem__(0, c),  # expose to timeout wrapper
+                    log=print,
+                )
+
+                if key_pool_service.test_response_passed(response, request):
+                    # Success - update via signal/slot for thread safety
+                    if not timed_out[0]:
+                        if HAS_GUI:
+                            QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True), Q_ARG(str, "Test passed"))
+                        else:
+                            self._handle_test_result(index, True, "Test passed")
+                    return
+
+                # Failed - update via signal/slot
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, "Unexpected response"))
+                    else:
+                        self._handle_test_result(index, False, "Unexpected response")
+            except Exception as e:
+                if not timed_out[0]:
+                    error_msg = str(e)[:50]
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, f"Error: {error_msg}"))
+                    else:
+                        self._handle_test_result(index, False, f"Error: {error_msg}")
+
+        # Submit to the shared executor with a model-aware per-key timeout.
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            # Use a separate single-thread pool so we can enforce the timeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=timeout_seconds)
+                except FuturesTimeout:
+                    # The model-aware deadline elapsed; cancel the HTTP session and mark a timeout.
+                    timed_out[0] = True  # suppress stale results from run_api_test
+                    print(f"[DEBUG] Key test TIMED OUT for {key.model} ({timeout_seconds}s)")
+                    key_pool_service.cancel_test_client(client_ref[0])
+                    # Clear watchdog so progress bar stops showing in-flight
+                    key_pool_service.reset_api_watchdog()
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, f"Timed out ({timeout_seconds}s)"))
+                    else:
+                        self._handle_test_result(index, False, f"Timed out ({timeout_seconds}s)")
+                except Exception:
+                    pass  # Already handled inside run_api_test
+
+        if executor:
+            executor.submit(run_with_timeout)
+        else:
+            thread = threading.Thread(target=run_with_timeout, daemon=True)
+            thread.start()
+
+    # Decorate _handle_test_result as a slot
+    @Slot(int, bool, str) if HAS_GUI else lambda x: x
+    def _handle_test_result(self, index, success, message):
+        """Handle test result from background thread"""
+        # Defensive init — prevents AttributeError if called from stale thread callback
+        if not hasattr(self, '_test_results'):
+            self._test_results = []
+        if not hasattr(self, '_completed_tests'):
+            self._completed_tests = 0
+        if not hasattr(self, '_total_tests'):
+            self._total_tests = 0
+
+        if index < len(self.key_pool.keys):
+            key = self.key_pool.keys[index]
+            if success:
+                key.mark_success()
+                key.set_test_result('passed', message)
+            else:
+                key.mark_error()
+                if 'Timed out' in (message or ''):
+                    key.set_test_result('timeout', message)
+                else:
+                    key.set_test_result('failed', message)
+
+            self._test_results.append((index, success, message))
+            print(f"[DEBUG] Key {index} test completed - {'PASSED' if success else 'FAILED'}: {message}")
+
+            # Update UI
+            self._refresh_key_list()
+
+        # Track completion
+        self._completed_tests += 1
+        print(f"[DEBUG] Completed {self._completed_tests}/{self._total_tests} tests")
+
+        # If all tests done, finalize
+        if self._total_tests > 0 and self._completed_tests >= self._total_tests:
+            self._finalize_tests()
+
+    def _finalize_tests(self):
+        """Finalize after all tests complete"""
+        # Clear re-entrancy guard
+        self._tests_in_flight = False
+
+        # Clear testing flags
+        for i, key in enumerate(self.key_pool.keys):
+            if hasattr(key, '_testing'):
+                delattr(key, '_testing')
+
+        # Calculate summary
+        success_count = sum(1 for _, success, _ in getattr(self, '_test_results', []) if success)
+        total_count = len(getattr(self, '_test_results', []))
+
+        # Final UI update
+        self._refresh_key_list()
+        self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
+
+        # Auto-save to persist test results
+        self._save_keys_to_config()
+        print(f"[DEBUG] All tests completed and saved: {success_count}/{total_count} passed")
+
+    def _run_inline_tests(self, indices: List[int]):
+        """Run API tests with persistent inline results"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
+
+        print(f"[DEBUG] Starting tests for {len(indices)} keys")
+
+        # Keys are already marked as testing in the main thread before this function is called
+        # Just verify they're still marked
+        for index in indices:
+            if index < len(self.key_pool.keys):
+                key = self.key_pool.keys[index]
+                print(f"[DEBUG] Key {index} testing state: _testing={hasattr(key, '_testing')}, last_test_result={key.last_test_result}")
+
+        # Create thread pool for parallel testing
+        max_workers = min(10, len(indices))
+
+        def test_single_key(index):
+            """Test a single API key directly"""
+            print(f"[DEBUG] Testing key at index {index}")
+
+            if index >= len(self.key_pool.keys):
+                return None
+
+            key = self.key_pool.keys[index]
+
+            try:
+                # Simple test - just check if we can import the libraries
+                # This is a minimal test to see if the function completes
+                print(f"[DEBUG] Testing {key.model} with key {key.api_key[:8]}...")
+
+                # Simulate a test
+                import time
+                time.sleep(1)  # Simulate API call
+
+                # For now, just mark as passed to test the flow
+                key.mark_success()
+                key.set_test_result('passed', 'Test successful')
+                print(f"[DEBUG] Key {index} test completed - PASSED")
+                time.sleep(0.5)  # Brief pause to improve retry responsiveness
+                logger.debug("💤 Pausing briefly to improve retry responsiveness after test completion")
+                return (index, True, "Test passed")
+
+            except Exception as e:
+                print(f"[DEBUG] Key {index} test failed: {e}")
+                key.mark_error()
+                key.set_test_result('error', str(e)[:30])
+                return (index, False, f"Error: {str(e)[:50]}...")
+
+        # Run tests sequentially to avoid threading issues
+        results = []
+        for index in indices:
+            print(f"[DEBUG] Starting test for key {index}")
+            result = test_single_key(index)
+            if result:
+                results.append(result)
+                print(f"[DEBUG] Got result: {result}")
+                # Schedule UI update on main thread (NOT from background thread)
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_refresh_key_list", Qt.QueuedConnection)
+
+        print(f"[DEBUG] All tests complete. Results: {len(results)}")
+
+        # Calculate summary
+        success_count = sum(1 for _, success, _ in results if success)
+        total_count = len(results)
+
+        # Clear testing flags
+        for index in indices:
+            if index < len(self.key_pool.keys):
+                key = self.key_pool.keys[index]
+                if hasattr(key, '_testing'):
+                    delattr(key, '_testing')
+                    print(f"[DEBUG] Cleared testing flag for key {index}")
+
+        # Schedule final UI update on main thread
+        def _final_update():
+            try:
+                self._refresh_key_list()
+                self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
+                self._save_keys_to_config()
+            except Exception as e:
+                print(f"[WARN] Final update error: {e}")
+
+        if HAS_GUI:
+            QTimer.singleShot(0, _final_update)
+        else:
+            _final_update()
+        print(f"[DEBUG] UI refresh and save completed")
+
+
+
+    def _update_tree_item(self, index: int):
+        """Update a single tree item based on current key state"""
+        def update():
+            # Find the tree item for this index
+            if index >= self.tree.topLevelItemCount() or index >= len(self.key_pool.keys):
+                return
+
+            item = self.tree.topLevelItem(index)
+            if not item:
+                return
+
+            key = self.key_pool.keys[index]
+
+            # Determine status
+            if key.last_test_result is None:
+                status = "⏳ Testing..."
+            elif not key.enabled:
+                status = "Disabled"
+            elif key.last_test_result == 'passed':
+                if key.is_cooling_down:
+                    remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                    status = f"✅ Passed (cooling {remaining}s)"
+                else:
+                    status = "✅ Passed"
+            elif key.last_test_result == 'failed':
+                status = "❌ Failed"
+            elif key.last_test_result == 'rate_limited':
+                remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                status = f"⚠️ Rate Limited ({remaining}s)"
+            elif key.last_test_result == 'error':
+                status = "❌ Error"
+                if key.last_test_message:
+                    status += f": {key.last_test_message[:20]}..."
+            elif key.is_cooling_down:
+                remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                status = f"Cooling ({remaining}s)"
+            else:
+                status = "Active"
+
+            # Update status column (column 6)
+            item.setText(6, status)
+            self._decorate_key_context_status(item, key, 'main')
+
+            # Update success/error counts
+            item.setText(7, str(key.success_count))
+            item.setText(8, str(key.error_count))
+
+            # Update times used
+            times_used = getattr(key, 'times_used', key.success_count + key.error_count)
+            item.setText(9, str(times_used))
+
+        # Run in main thread
+        QTimer.singleShot(0, update)
+
+    # Note: Another duplicate _refresh_key_list removed - using PySide6 version defined earlier
+
+    def _create_progress_dialog(self):
+        """Create simple progress dialog at mouse cursor position"""
+        from PySide6.QtGui import QCursor
+
+        self.progress_dialog = QDialog(self)
+        self.progress_dialog.setWindowTitle("Testing API Keys")
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.26)  # 26% of screen width
+        height = int(screen.height() * 0.39)  # 39% of screen height
+        self.progress_dialog.resize(width, height)
+
+        # Get mouse position and move dialog there
+        cursor_pos = QCursor.pos()
+        self.progress_dialog.move(cursor_pos.x() - 50, cursor_pos.y() - 30)
+
+        # Layout
+        layout = QVBoxLayout(self.progress_dialog)
+
+        # Add label
+        label = QLabel("Testing in progress...")
+        label_font = QFont()
+        label_font.setPointSize(10)
+        label_font.setBold(True)
+        label.setFont(label_font)
+        layout.addWidget(label)
+
+        # Add text widget for results
+        self.progress_text = QTextEdit()
+        self.progress_text.setReadOnly(True)
+        self.progress_text.setMinimumWidth(500)
+        self.progress_text.setMinimumHeight(300)
+        layout.addWidget(self.progress_text)
+
+        # Add close button (initially disabled)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.progress_dialog.close)
+        self.close_button.setEnabled(False)
+        layout.addWidget(self.close_button)
+
+        # Show dialog
+        self.progress_dialog.show()
+
+    def _run_tests(self, indices: List[int]):
+        """Run API tests for specified keys in parallel"""
+        from unified_api_client import UnifiedClient
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
+
+        # Get Gemini endpoint settings (auto-detects gRPC vs OpenAI from URL)
+        use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
+        gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
+
+        # Create thread pool for parallel testing
+        max_workers = min(10, len(indices))  # Limit to 10 concurrent tests
+
+        def test_single_key(index):
+            """Test a single API key"""
+            if index >= len(self.key_pool.keys):
+                return None
+
+            key = self.key_pool.keys[index]
+
+            # Create a key identifier
+            key_preview = f"{key.api_key[:8]}...{key.api_key[-4:]}" if len(key.api_key) > 12 else key.api_key
+            test_label = f"{key.model} [{key_preview}]"
+
+            # Update UI to show test started
+            QTimer.singleShot(0, lambda label=test_label: self.progress_text.append(f"Testing {label}... "))
+            QTimer.singleShot(0, lambda: self.progress_text.moveCursor(self.progress_text.textCursor().End))
+
+            try:
+                # Count this usage for times used in testing as well
+                try:
+                    key.times_used += 1
+                except Exception:
+                    pass
+
+                # Check if this is a Gemini model with custom endpoint
+                is_gemini_model = key.model.lower().startswith('gemini')
+                # Auto-detect: bare hostname = gRPC (skip OpenAI test), URL with http/openai = REST
+                _ep_lower = gemini_endpoint.strip().lower() if gemini_endpoint else ""
+                _is_openai_rest = _ep_lower.startswith("http") or "/openai" in _ep_lower
+
+                if is_gemini_model and use_gemini_endpoint and gemini_endpoint and _is_openai_rest:
+                    # Test Gemini with OpenAI-compatible endpoint
+                    import openai
+
+                    endpoint_url = gemini_endpoint
+                    if not endpoint_url.endswith('/openai/'):
+                        endpoint_url = endpoint_url.rstrip('/') + '/openai/'
+
+                    client = openai.OpenAI(
+                        api_key=key.api_key,
+                        base_url=endpoint_url,
+                        timeout=10.0
+                    )
+
+                    response = client.chat.completions.create(
+                        model=key.model.replace('gemini/', ''),
+                        messages=[
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                        ],
+                        max_tokens=1000,
+                        temperature=0.7
+                    )
+
+                    content = response.choices[0].message.content
+                    if content and "test successful" in content.lower():
+                        QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, True))
+                        key.mark_success()
+                        key.set_test_result('passed', 'Test successful')
+                        return (index, True, "Test passed")
+                    else:
+                        QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
+                        key.mark_error()
+                        key.set_test_result('failed', 'Unexpected response')
+                        return (index, False, "Unexpected response")
+                else:
+                    # Use UnifiedClient for non-Gemini or regular Gemini
+                    client = UnifiedClient(
+                        api_key=key.api_key,
+                        model=key.model,
+                        output_dir=None
+                    )
+
+                    # Set Google credentials and other key-specific settings
+                    if hasattr(key, 'google_credentials') and key.google_credentials:
+                        client.current_key_google_creds = key.google_credentials
+                        client.google_creds_path = key.google_credentials
+
+                    if hasattr(key, 'google_region') and key.google_region:
+                        client.current_key_google_region = key.google_region
+
+                    # Set Azure endpoint settings if configured
+                    if hasattr(key, 'use_individual_endpoint') and key.use_individual_endpoint:
+                        if hasattr(key, 'azure_endpoint') and key.azure_endpoint:
+                            client.current_key_azure_endpoint = key.azure_endpoint
+                            client.current_key_use_individual_endpoint = True
+
+                        if hasattr(key, 'azure_api_version') and key.azure_api_version:
+                            client.current_key_azure_api_version = key.azure_api_version
+
+                    messages = [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                    ]
+
+                    response = client.send(
+                        messages,
+                        temperature=0.7,
+                        max_tokens=1000
+                    )
+
+                    if response and isinstance(response, tuple):
+                        content, finish_reason = response
+                        if content and "test successful" in content.lower():
+                            QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, True))
+                            key.mark_success()
+                            key.set_test_result('passed', 'Test successful')
+                            return (index, True, "Test passed")
+                        else:
+                            QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
+                            key.mark_error()
+                            key.set_test_result('failed', 'Unexpected response')
+                            return (index, False, "Unexpected response")
+                    else:
+                        QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
+                        key.mark_error()
+                        key.set_test_result('failed', 'No response')
+                        return (index, False, "No response")
+
+            except Exception as e:
+                error_msg = str(e)
+                error_code = None
+
+                if key_pool_service.is_rate_limit_error(error_msg):
+                    error_code = 429
+                    key.set_test_result('rate_limited', error_msg[:30])
+                else:
+                    key.set_test_result('error', error_msg[:30])
+
+                QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False, error=True))
+                key.mark_error(error_code)
+                return (index, False, f"Error: {error_msg}")
+
+        # Run tests in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all test tasks
+            future_to_index = {executor.submit(test_single_key, i): i for i in indices}
+
+            # Process results as they complete
+            for future in as_completed(future_to_index):
+                result = future.result()
+                if result:
+                    self.test_results.put(result)
+
+        # Show completion and close button
+        QTimer.singleShot(0, self._show_completion)
+
+        # Process final results
+        QTimer.singleShot(0, self._process_test_results)
+
+    def _update_test_result(self, test_label, success, error=False):
+        """Update the progress text with test result"""
+        # Find the line with this test label
+        content = self.progress_text.toPlainText()
+        lines = content.split('\n')
+
+        for i, line in enumerate(lines):
+            if test_label in line and not any(status in line for status in ["✅", "❌"]):
+                # This is our line, update it
+                if error:
+                    result_text = "❌ ERROR"
+                elif success:
+                    result_text = "✅ PASSED"
+                else:
+                    result_text = "❌ FAILED"
+
+                # Update the line
+                lines[i] = line + result_text
+
+                # Set updated text
+                self.progress_text.setPlainText('\n'.join(lines))
+
+                # Scroll to end
+                cursor = self.progress_text.textCursor()
+                cursor.movePosition(cursor.End)
+                self.progress_text.setTextCursor(cursor)
+                break
+
+    def _show_completion(self):
+        """Show completion in the same dialog"""
+        self.progress_text.append("\n--- Testing Complete ---\n")
+        cursor = self.progress_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.progress_text.setTextCursor(cursor)
+        self.close_button.setEnabled(True)
+
+    def _process_test_results(self):
+        """Process test results and show in the same dialog"""
+        results = []
+
+        # Get all results
+        while not self.test_results.empty():
+            try:
+                results.append(self.test_results.get_nowait())
+            except Exception:
+                break
+
+        if results:
+            # Build result message
+            success_count = sum(1 for _, success, _ in results if success)
+            total_count = len(results)
+
+            # Update everything at once after all tests complete
+            def final_update():
+                # Get indices from results
+                indices = [i for i, _, _ in results]
+                # Clear testing flags
+                for index in indices:
+                    if index < len(self.key_pool.keys):
+                        key = self.key_pool.keys[index]
+                        if hasattr(key, '_testing'):
+                            delattr(key, '_testing')
+
+                self._refresh_key_list()
+                self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
+
+            # Use QTimer to update in main thread
+            QTimer.singleShot(0, lambda: final_update())
+
+            # Add summary to the same dialog
+            self.progress_text.append(f"\nSummary: {success_count}/{total_count} passed\n")
+            self.progress_text.append("-" * 50 + "\n\n")
+
+            for i, success, msg in results:
+                key = self.key_pool.keys[i]
+                # Show key identifier in results too
+                key_preview = f"{key.api_key[:8]}...{key.api_key[-4:]}" if len(key.api_key) > 12 else key.api_key
+                status = "✅" if success else "❌"
+                self.progress_text.append(f"{status} {key.model} [{key_preview}]: {msg}\n")
+
+            # Scroll to end
+            cursor = self.progress_text.textCursor()
+            cursor.movePosition(cursor.End)
+            self.progress_text.setTextCursor(cursor)
+
+            # Enable close button now that testing is complete
+            self.close_button.setEnabled(True)
+
+            # Update the dialog title
+            self.progress_dialog.setWindowTitle(f"API Test Results - {success_count}/{total_count} passed")
+
+            # Refresh list
+            self._refresh_key_list()
+
+    def _enable_selected(self):
+        """Enable selected keys"""
+        selected = self.tree.selectedItems()
+        for item in selected:
+            index = self.tree.indexOfTopLevelItem(item)
+            if index < len(self.key_pool.keys):
+                self.key_pool.keys[index].enabled = True
+                self.key_pool.keys[index].disabled_contexts = []
+
+        self._save_keys_to_config()
+        if self._can_emit_live_key_pool_updates():
+            self._apply_rotation_settings_to_runtime_pools()
+        self._refresh_key_list()
+        self._show_status(f"Enabled {len(selected)} key(s)")
+        self._notify_authgpt_visibility()
+
+    def _key_context_tree(self, pool_name):
+        if pool_name == 'main':
+            return self.tree
+        if pool_name == 'fallback':
+            return self.fallback_tree
+        if pool_name == 'glossary':
+            return self.glossary_tree
+        return self._dedicated_widget(pool_name, 'tree')
+
+    def _key_status_clicked(self, pool_name, item, column):
+        if column == (6 if pool_name == 'main' else 5):
+            self._edit_selected_key_contexts(pool_name, items=[item])
+
+    def _decorate_key_context_status(self, item, key, pool_name):
+        column = 6 if pool_name == 'main' else 5
+        routes = POOL_CONTEXTS[pool_name]
+        allowed = [c for c in routes if key_enabled_for_context(key, c)]
+        if allowed and len(allowed) < len(routes):
+            item.setText(column, f"◐ {len(allowed)}/{len(routes)} contexts")
+        elif not allowed:
+            item.setText(column, 'Disabled')
+        tooltip = ['Click to choose which request contexts may use this key.']
+        tooltip.extend(f"{'✅' if c in allowed else '🚫'} {CONTEXT_LABELS[c]}" for c in routes)
+        item.setToolTip(column, '\n'.join(tooltip))
+
+    def _edit_selected_key_contexts(self, pool_name, items=None):
+        tree = self._key_context_tree(pool_name)
+        selected = tree.selectedItems() if items is None else items
+        if pool_name == 'main':
+            keys = self.key_pool.keys
+        elif pool_name in ('fallback', 'glossary'):
+            keys = self.translator_gui.config.get(f'{pool_name}_keys', [])
+        else:
+            keys = self._dedicated_keys(pool_name)
+        indices = [self._fallback_config_index_for_item(item) if pool_name == 'fallback'
+                   else tree.indexOfTopLevelItem(item) for item in selected]
+        entries = [keys[i] for i in indices if 0 <= i < len(keys)]
+        if not entries:
+            return
+        routes = POOL_CONTEXTS[pool_name]
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Key request contexts')
+        layout = QVBoxLayout(dialog)
+        explanation = QLabel(
+            f'Choose the contexts allowed to use {len(entries)} selected key(s).\n'
+            'Unchecked contexts skip these keys during requests and retries.\n'
+            'Mixed checkboxes keep each key’s current setting until changed.'
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        shortcuts = QHBoxLayout()
+        layout.addLayout(shortcuts)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        grid = QGridLayout(content)
+        checkboxes = {}
+        for i, context in enumerate(routes):
+            checkbox = self._create_styled_checkbox(CONTEXT_LABELS[context])
+            checkbox.setToolTip(context)
+            states = [key_enabled_for_context(key, context) for key in entries]
+            if any(states) and not all(states):
+                checkbox.setTristate(True)
+                checkbox.setCheckState(Qt.PartiallyChecked)
+            else:
+                checkbox.setChecked(all(states))
+            grid.addWidget(checkbox, i // 2, i % 2)
+            checkboxes[context] = checkbox
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        def set_routes(allowed):
+            for context, checkbox in checkboxes.items():
+                checkbox.setTristate(False)
+                checkbox.setChecked(context in allowed)
+
+        for label, allowed in context_presets(routes):
+            button = QPushButton(label)
+            button.clicked.connect(lambda checked=False, values=allowed: set_routes(values))
+            shortcuts.addWidget(button)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.setCenterButtons(True)
+        buttons.layout().setSpacing(16)
+        for button in buttons.buttons():
+            button.setMinimumWidth(120)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(680, min(650, 230 + 34 * ((len(routes) + 1) // 2)))
+        if dialog.exec() != QDialog.Accepted:
+            return
+        for key in entries:
+            original = key.get('disabled_contexts', []) if isinstance(key, dict) else key.disabled_contexts
+            blocked = set(normalize_disabled_contexts(original))
+            if not (key.get('enabled', True) if isinstance(key, dict) else key.enabled):
+                blocked.update(routes)
+            for context, checkbox in checkboxes.items():
+                state = checkbox.checkState()
+                if state == Qt.PartiallyChecked:
+                    continue
+                if state == Qt.Checked:
+                    blocked.discard(context)
+                else:
+                    blocked.add(context)
+            # Mixed selections retain globally disabled entries unless an allowed
+            # route was explicitly checked for them.
+            originally_enabled = key.get('enabled', True) if isinstance(key, dict) else key.enabled
+            allowed_explicitly = any(cb.checkState() == Qt.Checked for cb in checkboxes.values())
+            enabled = (originally_enabled or allowed_explicitly) and any(c not in blocked for c in routes)
+            if isinstance(key, dict):
+                key.update(enabled=enabled, disabled_contexts=sorted(blocked))
+            else:
+                key.enabled = enabled
+                key.disabled_contexts = sorted(blocked)
+        if pool_name == 'main':
+            self._save_keys_to_config()
+            if self._can_emit_live_key_pool_updates():
+                self._apply_rotation_settings_to_runtime_pools()
+            self._refresh_key_list()
+        elif pool_name == 'fallback':
+            self.translator_gui.save_config(show_message=False)
+            if self._can_emit_live_key_pool_updates():
+                os.environ['FALLBACK_KEYS'] = json.dumps(keys)
+            self._load_fallback_keys()
+            self._broadcast_key_pool_config_changed('fallback', refresh_keys=True)
+        elif pool_name == 'glossary':
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._refresh_glossary_pool()
+            self._broadcast_key_pool_config_changed('glossary', refresh_keys=True)
+        else:
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+        self._notify_authgpt_visibility()
+
+    def _disable_selected(self):
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        for item in selected:
+            index = self.tree.indexOfTopLevelItem(item)
+            if 0 <= index < len(self.key_pool.keys):
+                self.key_pool.keys[index].enabled = False
+        self._save_keys_to_config()
+        if self._can_emit_live_key_pool_updates():
+            self._apply_rotation_settings_to_runtime_pools()
+        self._refresh_key_list()
+        self._show_status(f"Disabled {len(selected)} key(s)")
+        self._notify_authgpt_visibility()
+
+    def _remove_selected(self):
+        """Remove selected keys"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected key(s)?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            # Get indices in reverse order to avoid index shifting
+            indices = sorted([self.tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
+
+            for index in indices:
+                self.key_pool.remove_key(index)
+
+            self._refresh_key_list()
+            self._show_status(f"Removed {len(selected)} key(s)")
+
+            # Re-evaluate AuthGPT login button visibility
+            self._notify_authgpt_visibility()
+
+    def _edit_cooldown(self):
+        """Edit cooldown for selected key"""
+        selected = self.tree.selectedItems()
+        if not selected or len(selected) != 1:
+            QMessageBox.warning(self, "Warning", "Please select exactly one key")
+            return
+
+        index = self.tree.indexOfTopLevelItem(selected[0])
+        if index >= len(self.key_pool.keys):
+            return
+
+        key = self.key_pool.keys[index]
+
+        value, ok = QInputDialog.getInt(
+            self, "Edit Cooldown", f"Cooldown for {key.model} (seconds):",
+            key.cooldown, 10, 3600, 10
+        )
+
+        if ok:
+            key.cooldown = value
+            self._refresh_key_list()
+            self._show_status(f"Updated cooldown to {value}s")
+
+    # ------------------------------------------------------------------
+    # Pool-aware import / export
+    #
+    # Export writes a single JSON file containing *every* key pool (the main
+    # Translation pool, the Fallback pool, and all dedicated pools) so it can be
+    # used as a complete backup or to transfer a setup between machines. Import
+    # understands that structured format and also still accepts the legacy flat
+    # list (which is restored into the Translation pool).
+    # ------------------------------------------------------------------
+
+    def _export_pool_order(self):
+        """Logical pool order: main, fallback, then the dedicated pools."""
+        return key_pool_service.export_pool_order(self._dedicated_pool_specs)
+
+    def _pool_title(self, pool_name: str) -> str:
+        return key_pool_service.pool_title(pool_name, self._dedicated_pool_spec)
+
+    def _pool_toggle_key(self, pool_name: str):
+        return key_pool_service.pool_toggle_key(pool_name, self._dedicated_pool_spec)
+
+    def _read_pool_keys(self, pool_name: str):
+        """Return the current list of key dicts for a pool."""
+        cfg = self.translator_gui.config
+        if pool_name == 'main':
+            # Prefer live edits held in the key pool object; fall back to config.
+            try:
+                keys = [k.to_dict() for k in self.key_pool.get_all_keys()]
+            except Exception:
+                keys = []
+            if not keys:
+                keys = key_pool_service.read_pool_keys(cfg, 'main')
+            return keys
+        if pool_name == 'fallback':
+            return key_pool_service.read_pool_keys(cfg, 'fallback')
+        try:
+            return list(self._dedicated_keys(pool_name) or [])
+        except Exception:
+            return []
+
+    def _collect_pools_for_export(self):
+        return key_pool_service.collect_pools_for_export(
+            self.translator_gui.config,
+            self._read_pool_keys,
+            self._export_pool_order(),
+            title=self._pool_title,
+            toggle_key=self._pool_toggle_key,
+        )
+
+    @staticmethod
+    def _set_checkbox_silent(checkbox, value):
+        """Set a checkbox state without firing its toggled handlers."""
+        if checkbox is None:
+            return
+        try:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(value))
+        except Exception:
+            pass
+        finally:
+            try:
+                checkbox.blockSignals(False)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _sanitize_imported_keys(raw_keys):
+        """Filter a raw list down to valid key dicts (lossless, native shape).
+
+        Returns (clean_keys, skipped_count).
+        """
+        return key_pool_service.sanitize_imported_keys(raw_keys)
+
+    def _import_keys(self):
+        """Import keys from a JSON file.
+
+        Supported formats:
+          * Pool-aware export: {"format": "glossarion-key-pools", "pools": {...}}
+            -> each recognized pool in the file is restored to its matching pool.
+          * Legacy flat list:  [ {api_key, model, ...}, ... ]
+            -> imported into the Translation (main) pool for backwards compat.
+        """
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import API Keys",
+            "",
+            "JSON files (*.json);;All files (*.*)"
+        )
+        if not filename:
+            return
+
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
+            return
+
+        try:
+            kind, payload = key_pool_service.classify_key_import(data)
+            if kind == 'pools':
+                self._import_pool_aware(payload)
+            elif kind == 'legacy':
+                self._import_legacy_list(payload)
+            else:
+                QMessageBox.critical(self, "Error", key_pool_service.INVALID_IMPORT_MESSAGE)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
+
+    def _import_legacy_list(self, data):
+        """Append a flat list of keys to the Translation pool (legacy format)."""
+        valid, skipped = self._sanitize_imported_keys(data)
+        if not valid:
+            QMessageBox.critical(self, "Error", key_pool_service.NO_VALID_KEYS_MESSAGE)
+            return
+
+        entries, failed = key_pool_service.legacy_key_entries(valid, APIKeyEntry)
+        for entry in entries:
+            self.key_pool.add_key(entry)
+        imported = len(entries)
+        skipped += failed
+
+        # Persist the appended state so it survives even before pressing Save.
+        try:
+            self.translator_gui.config['multi_api_keys'] = [
+                k.to_dict() for k in self.key_pool.get_all_keys()
+            ]
+            self.translator_gui.save_config(show_message=False)
+        except Exception:
+            pass
+        try:
+            self._refresh_key_list()
+        except Exception:
+            pass
+        try:
+            self._notify_authgpt_visibility()
+        except Exception:
+            pass
+
+        msg = key_pool_service.legacy_import_result_message(imported, skipped)
+        QMessageBox.information(self, "Success", msg)
+
+    def _apply_imported_pool(self, pool_name: str, keys, enabled=None):
+        """Replace a single pool's keys (and optional enable toggle)."""
+        cfg = self.translator_gui.config
+        toggle_key = self._pool_toggle_key(pool_name)
+
+        if pool_name == 'main':
+            cfg['multi_api_keys'] = keys
+            try:
+                self.key_pool.load_from_list(keys)
+            except Exception:
+                pass
+            if enabled is not None and toggle_key:
+                cfg[toggle_key] = bool(enabled)
+                self._set_checkbox_silent(getattr(self, 'enabled_checkbox', None), enabled)
+            try:
+                self._refresh_key_list()
+            except Exception:
+                pass
+        elif pool_name == 'fallback':
+            cfg['fallback_keys'] = keys
+            if enabled is not None and toggle_key:
+                cfg[toggle_key] = bool(enabled)
+                self._set_checkbox_silent(getattr(self, 'use_fallback_checkbox', None), enabled)
+            try:
+                self._load_fallback_keys()
+            except Exception:
+                pass
+        else:
+            # Dedicated pool: _dedicated_set_keys writes config + refreshes views.
+            try:
+                self._dedicated_set_keys(pool_name, keys, save_config=False, broadcast=True)
+            except Exception:
+                try:
+                    cfg[self._dedicated_pool_spec(pool_name)['config_key']] = keys
+                except Exception:
+                    pass
+            if enabled is not None and toggle_key:
+                cfg[toggle_key] = bool(enabled)
+                self._set_checkbox_silent(self._dedicated_widget(pool_name, 'keys_checkbox'), enabled)
+
+    def _import_pool_aware(self, pools_obj):
+        """Restore every recognized pool found in a structured export file."""
+        plan, total_skipped, unknown_pools = key_pool_service.plan_pool_aware_import(
+            pools_obj, self._export_pool_order())
+
+        if not plan:
+            QMessageBox.critical(self, "Error", key_pool_service.NO_POOLS_MESSAGE)
+            return
+
+        # Confirm — a structured import REPLACES the contents of listed pools.
+        summary = key_pool_service.pool_import_summary(plan, self._pool_title)
+        confirm = QMessageBox.question(
+            self,
+            "Import key pools",
+            "This will REPLACE the contents of these pools:\n\n"
+            f"{summary}\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        applied_keys = 0
+        for pool_name, keys, enabled in plan:
+            self._apply_imported_pool(pool_name, keys, enabled)
+            applied_keys += len(keys)
+
+        # Persist everything once, then refresh all visible views.
+        try:
+            self.translator_gui.save_config(show_message=False)
+        except Exception:
+            pass
+        try:
+            self._refresh_visible_key_pool_views()
+        except Exception:
+            pass
+        try:
+            self._notify_authgpt_visibility()
+        except Exception:
+            pass
+
+        msg = key_pool_service.pool_import_result_message(
+            applied_keys, len(plan), total_skipped, unknown_pools)
+        QMessageBox.information(self, "Success", msg)
+
+    def _export_keys(self):
+        """Export every key pool to a single pool-aware JSON file."""
+        pools = self._collect_pools_for_export()
+        total_keys = key_pool_service.count_pool_keys(pools)
+        if total_keys == 0:
+            QMessageBox.warning(self, "Warning", "No keys to export in any pool")
+            return
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export API Keys (all pools)",
+            "",
+            "JSON files (*.json);;All files (*.*)"
+        )
+        if not filename:
+            return
+        if not filename.lower().endswith('.json'):
+            filename += '.json'
+
+        payload = key_pool_service.build_export_payload(pools)
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            non_empty = key_pool_service.count_nonempty_pools(pools)
+            QMessageBox.information(
+                self, "Success",
+                f"Exported {total_keys} API key(s) across {non_empty} pool(s)"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
+
+    def _show_status(self, message: str):
+        """Show status message"""
+        if hasattr(self, 'stats_label'):
+            self.stats_label.setText(message)
+
+    def _dedicated_pool_specs(self):
+        """Specs for full-parity dedicated key-pool UI sections.
+
+        Adding another section should be a spec-only change when it uses the
+        standard key shape: api key, model, per-key limits, temp, delay, Google
+        creds, individual endpoint, test/reorder/enable/disable.
+        """
+        return key_pool_service.dedicated_pool_specs()
+
+    def _dedicated_pool_spec(self, pool_name: str):
+        return key_pool_service.dedicated_pool_spec(pool_name, self._dedicated_pool_specs)
+
+    def _dedicated_attr(self, pool_name: str, suffix: str) -> str:
+        return f"{pool_name}_{suffix}"
+
+    def _dedicated_widget(self, pool_name: str, suffix: str):
+        return getattr(self, self._dedicated_attr(pool_name, suffix), None)
+
+    def _dedicated_keys(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        return self.translator_gui.config.get(spec['config_key'], []) or []
+
+    def _dedicated_set_keys(self, pool_name: str, keys, save_config=True, broadcast=True):
+        spec = self._dedicated_pool_spec(pool_name)
+        self.translator_gui.config[spec['config_key']] = keys
+        if save_config:
+            self.translator_gui.save_config(show_message=False)
+        if broadcast and not getattr(self, '_syncing_external_key_pool_state', False):
+            self._broadcast_key_pool_config_changed(pool_name, refresh_keys=True)
+
+    def _dedicated_status(self, pool_name: str, message: str):
+        label = self._dedicated_widget(pool_name, 'status_label')
+        if label is not None:
+            label.setText(message)
+
+    def _dedicated_set_env(self, pool_name: str, enabled: Optional[bool] = None):
+        spec = self._dedicated_pool_spec(pool_name)
+        if enabled is None:
+            enabled = bool(self.translator_gui.config.get(spec['toggle_key'], False))
+        keys_json = json.dumps(self._dedicated_keys(pool_name))
+        for env_name in spec.get('use_envs', []):
+            os.environ[env_name] = '1' if enabled else '0'
+        for env_name in spec.get('keys_envs', []):
+            os.environ[env_name] = keys_json
+
+    def _dedicated_refresh_pool(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        enabled = bool(self.translator_gui.config.get(spec['toggle_key'], False))
+        keys = self._dedicated_keys(pool_name)
+        self._dedicated_set_env(pool_name, enabled)
+        try:
+            from unified_api_client import UnifiedClient
+            if enabled and keys:
+                force_rotation = bool(self.translator_gui.config.get('force_key_rotation', True))
+                rotation_frequency = int(self.translator_gui.config.get('rotation_frequency', 1))
+                getattr(UnifiedClient, spec['set_method'])(
+                    keys,
+                    force_rotation=force_rotation,
+                    rotation_frequency=rotation_frequency,
+                )
+            else:
+                getattr(UnifiedClient, spec['clear_method'])()
+        except Exception:
+            pass
+
+    def _create_dedicated_key_pool_section(self, parent_layout, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        container = QWidget()
+        setattr(self, self._dedicated_attr(pool_name, 'container'), container)
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 5, 0, 0)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        container_layout.addWidget(separator)
+
+        frame = QGroupBox(spec['title'])
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(15, 15, 15, 15)
+
+        desc_label = QLabel(spec['description'])
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        frame_layout.addWidget(desc_label)
+
+        toggle_container = QWidget()
+        toggle_layout = QHBoxLayout(toggle_container)
+        toggle_layout.setContentsMargins(0, 0, 0, 0)
+        toggle_layout.setSpacing(8)
+
+        checkbox = self._create_styled_checkbox(f"Enable {spec['title']}")
+        checkbox.setChecked(bool(self.translator_gui.config.get(spec['toggle_key'], False)))
+        checkbox.toggled.connect(lambda _checked=False, p=pool_name: self._dedicated_toggle_section(p))
+        setattr(self, self._dedicated_attr(pool_name, 'keys_checkbox'), checkbox)
+        setattr(self, f"use_{pool_name}_keys_checkbox", checkbox)
+        setattr(self, f"use_{pool_name}_keys_var", checkbox.isChecked())
+
+        icon = QLabel()
+        icon.setStyleSheet("background-color: transparent;")
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        if os.path.exists(icon_path):
+            icon_obj = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon_obj.pixmap(dev_px, dev_px)
+            if not pm.isNull():
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                icon.setPixmap(pm)
+        icon.setFixedSize(36, 36)
+        icon.setAlignment(Qt.AlignCenter)
+        checkbox.toggled.connect(lambda _checked=False, icon=icon: animate_icon(icon))
+        toggle_layout.addWidget(icon)
+        toggle_layout.addWidget(checkbox)
+        toggle_layout.addStretch()
+        frame_layout.addWidget(toggle_container)
+
+        add_frame = QWidget()
+        setattr(self, self._dedicated_attr(pool_name, 'add_frame'), add_frame)
+        setattr(self, f"add_{pool_name}_frame", add_frame)
+        add_grid = QGridLayout(add_frame)
+        add_grid.setContentsMargins(0, 0, 0, 10)
+
+        add_grid.addWidget(QLabel(f"{spec['label']} API Key:"), 0, 0, Qt.AlignLeft)
+        key_entry = QLineEdit()
+        key_entry.setEchoMode(QLineEdit.Password)
+        setattr(self, self._dedicated_attr(pool_name, 'key_entry'), key_entry)
+        add_grid.addWidget(key_entry, 0, 1)
+
+        show_btn = QPushButton("👁")
+        show_btn.setFixedWidth(40)
+        show_btn.clicked.connect(lambda _checked=False, p=pool_name: self._dedicated_toggle_key_visibility(p))
+        setattr(self, self._dedicated_attr(pool_name, 'show_btn'), show_btn)
+        add_grid.addWidget(show_btn, 0, 2)
+
+        add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        model_combo = QComboBox()
+        model_combo.addItems(self._get_model_options_for_dropdown())
+        model_combo.setEditable(True)
+        self._attach_model_autofill(model_combo, self._on_model_requirement_input_changed)
+        self._apply_combobox_icon(model_combo)
+        self._disable_combobox_mousewheel(model_combo)
+        setattr(self, self._dedicated_attr(pool_name, 'model_combo'), model_combo)
+        add_grid.addWidget(self._wrap_model_with_ollama_settings(model_combo), 0, 4)
+
+        add_btn = QPushButton(f"Add {spec['label']} Key")
+        add_btn.clicked.connect(lambda _checked=False, p=pool_name: self._dedicated_add_key(p))
+        add_grid.addWidget(add_btn, 0, 5, Qt.AlignRight)
+        add_grid.setColumnStretch(1, 1)
+        add_grid.setColumnStretch(4, 1)
+        frame_layout.addWidget(add_frame)
+
+        add_grid.addWidget(QLabel("Google Creds:"), 1, 0, Qt.AlignLeft)
+        google_entry = QLineEdit()
+        google_entry.setStyleSheet("font-size: 7pt;")
+        setattr(self, self._dedicated_attr(pool_name, 'google_creds_entry'), google_entry)
+        add_grid.addWidget(google_entry, 1, 1)
+        browse_btn = QPushButton("📁")
+        browse_btn.setFixedWidth(40)
+        browse_btn.clicked.connect(lambda _checked=False, p=pool_name: self._dedicated_browse_google_credentials(p))
+        add_grid.addWidget(browse_btn, 1, 2)
+
+        add_grid.addWidget(QLabel("Region:"), 1, 3, Qt.AlignLeft)
+        region_entry = QLineEdit("us-east5")
+        region_entry.setStyleSheet("font-size: 7pt;")
+        region_entry.setMaximumWidth(100)
+        setattr(self, self._dedicated_attr(pool_name, 'google_region_entry'), region_entry)
+        add_grid.addWidget(region_entry, 1, 4, 1, 1, Qt.AlignLeft)
+
+        endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
+        endpoint_toggle.toggled.connect(lambda _checked=False, p=pool_name: self._dedicated_toggle_endpoint_fields(p))
+        setattr(self, self._dedicated_attr(pool_name, 'individual_endpoint_toggle'), endpoint_toggle)
+        add_grid.addWidget(endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
+
+        endpoint_label = QLabel("Individual Endpoint:")
+        endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        setattr(self, self._dedicated_attr(pool_name, 'individual_endpoint_label'), endpoint_label)
+        add_grid.addWidget(endpoint_label, 3, 0, Qt.AlignLeft)
+        endpoint_entry = QLineEdit()
+        endpoint_entry.setStyleSheet("font-size: 8pt;")
+        setattr(self, self._dedicated_attr(pool_name, 'azure_endpoint_entry'), endpoint_entry)
+        add_grid.addWidget(endpoint_entry, 3, 1, 1, 2)
+
+        api_version_label = QLabel("API Ver:")
+        api_version_label.setStyleSheet("color: gray;")
+        setattr(self, self._dedicated_attr(pool_name, 'individual_api_version_label'), api_version_label)
+        add_grid.addWidget(api_version_label, 3, 3, Qt.AlignLeft)
+        api_version_combo = QComboBox()
+        api_version_combo.addItems([
+            '2025-01-01-preview', '2024-12-01-preview', '2024-10-01-preview',
+            '2024-08-01-preview', '2024-06-01', '2024-02-01', '2023-12-01-preview'
+        ])
+        api_version_combo.setCurrentText('2025-01-01-preview')
+        api_version_combo.setStyleSheet("font-size: 7pt;")
+        self._apply_combobox_icon(api_version_combo)
+        api_version_combo.setMaximumWidth(180)
+        self._disable_combobox_mousewheel(api_version_combo)
+        setattr(self, self._dedicated_attr(pool_name, 'azure_api_version_combo'), api_version_combo)
+        add_grid.addWidget(api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
+        self._dedicated_toggle_endpoint_fields(pool_name)
+
+        self._create_dedicated_key_pool_list(frame_layout, pool_name)
+        container_layout.addWidget(frame)
+        parent_layout.addWidget(container)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_toggle_section(pool_name)
+
+    def _create_dedicated_key_pool_list(self, parent_layout, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        label = QLabel(f"{spec['title']} (tried in order):")
+        font = QFont()
+        font.setBold(True)
+        label.setFont(font)
+        setattr(self, self._dedicated_attr(pool_name, 'list_label'), label)
+        parent_layout.addWidget(label)
+
+        tree_container = QWidget()
+        setattr(self, self._dedicated_attr(pool_name, 'tree_container'), tree_container)
+        layout = QHBoxLayout(tree_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        move_frame = QWidget()
+        move_layout = QVBoxLayout(move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+        order_label = QLabel("Reorder")
+        order_font = QFont()
+        order_font.setBold(True)
+        order_label.setFont(order_font)
+        move_layout.addWidget(order_label)
+        for text, direction, size in (("↑ ↑", "top", 14), ("↑", "up", 16), ("↓", "down", 16), ("↓ ↓", "bottom", 14)):
+            btn = QPushButton(text)
+            btn.setFixedSize(55, 32)
+            btn.setStyleSheet(f"QPushButton {{ font-size: {size}pt; padding: 2px; }}")
+            btn.clicked.connect(lambda _checked=False, p=pool_name, d=direction: self._dedicated_move_key(p, d))
+            move_layout.addWidget(btn)
+        move_layout.addSpacing(10)
+        position_label = QLabel()
+        position_label.setStyleSheet("color: gray;")
+        setattr(self, self._dedicated_attr(pool_name, 'position_label'), position_label)
+        move_layout.addWidget(position_label)
+        move_layout.addStretch()
+        layout.addWidget(move_frame)
+
+        tree = QTreeWidget()
+        tree.setUniformRowHeights(True)
+        self._tighten_api_key_tree_first_column(tree)
+        tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        for col, width in enumerate((self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80)):
+            tree.setColumnWidth(col, width)
+        header = tree.header()
+        header_font = QFont()
+        header_font.setBold(True)
+        header_font.setPointSize(11)
+        header.setFont(header_font)
+        self._enable_api_key_tree_font_zoom(tree)
+        self._enable_api_key_tree_responsive_columns(
+            tree,
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 170, 42, 42, 80),
+        )
+        tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        tree.customContextMenuRequested.connect(lambda pos, p=pool_name: self._dedicated_show_context_menu(p, pos))
+        tree.setMinimumHeight(150)
+        tree.setDragDropMode(QAbstractItemView.InternalMove)
+        tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        tree.model().rowsMoved.connect(lambda *args, p=pool_name: self._dedicated_on_rows_moved(p))
+        tree.itemSelectionChanged.connect(lambda p=pool_name: self._dedicated_on_selection_change(p))
+        tree.itemDoubleClicked.connect(lambda item, column, p=pool_name: self._dedicated_on_click(p, item, column))
+        tree.itemClicked.connect(lambda item, col, p=pool_name: self._key_status_clicked(p, item, col))
+        setattr(self, self._dedicated_attr(pool_name, 'tree'), tree)
+        setattr(self, f"{pool_name}_tree", tree)
+        layout.addWidget(tree)
+        parent_layout.addWidget(tree_container)
+        tree_height_handle = self._add_api_key_tree_height_resizer(
+            tree,
+            parent_layout,
+            f'dedicated:{pool_name}',
+        )
+        setattr(self, self._dedicated_attr(pool_name, 'tree_height_handle'), tree_height_handle)
+
+        action_frame = QWidget()
+        setattr(self, self._dedicated_attr(pool_name, 'action_frame'), action_frame)
+        action_layout = QHBoxLayout(action_frame)
+        action_layout.setContentsMargins(0, 10, 0, 0)
+        for text, handler in (
+            ("Test Selected", self._dedicated_test_selected),
+            ("Test All", self._dedicated_test_all),
+            ("Enable Selected", self._dedicated_enable_selected),
+            ("Disable Selected", self._dedicated_disable_selected),
+            ("Remove Selected", self._dedicated_remove_selected),
+            ("Clear All", self._dedicated_clear_all),
+        ):
+            btn = QPushButton(text)
+            btn.clicked.connect(lambda _checked=False, p=pool_name, h=handler: h(p))
+            action_layout.addWidget(btn)
+        action_layout.addStretch()
+        status_label = QLabel()
+        status_label.setStyleSheet("color: gray;")
+        setattr(self, self._dedicated_attr(pool_name, 'status_label'), status_label)
+        action_layout.addWidget(status_label)
+        parent_layout.addWidget(action_frame)
+
+    def _dedicated_load_keys(self, pool_name: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        if tree is None:
+            return
+        keys = self._dedicated_keys(pool_name)
+        v_scroll = tree.verticalScrollBar().value()
+        h_scroll = tree.horizontalScrollBar().value()
+        selected_indices = [tree.indexOfTopLevelItem(item) for item in tree.selectedItems()]
+        tree.setUpdatesEnabled(False)
+        tree.clear()
+        tree_items = []
+        for key_data in keys:
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+            per_key_limit = key_data.get('individual_output_token_limit') or None
+            output_limit_str = str(per_key_limit) if per_key_limit else "global"
+            key_temp = key_data.get('individual_key_temperature')
+            temp_str = str(key_temp) if key_temp not in (None, "") else "global"
+            raw_delay = key_data.get('api_call_delay', 0.0) or 0.0
+            try:
+                per_key_delay = float(raw_delay)
+            except Exception:
+                per_key_delay = 0.0
+            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+            enabled = key_data.get('enabled', True)
+            test_result = key_data.get('last_test_result')
+            if not enabled:
+                status, color = "Disabled", Qt.gray
+            elif test_result == 'passed':
+                status, color = "✅ Passed", Qt.darkGreen
+            elif test_result == 'failed':
+                status, color = "❌ Failed", Qt.red
+            elif test_result == 'timeout':
+                status, color = "⏱️ Timed Out", Qt.darkYellow
+            elif test_result == 'error':
+                status, color = "❌ Error", Qt.darkRed
+            else:
+                status, color = "Enabled", Qt.gray
+            item = QTreeWidgetItem([
+                masked_key, model, output_limit_str, temp_str, delay_str, status,
+                str(int(key_data.get('success_count', 0))),
+                str(int(key_data.get('error_count', 0))),
+                str(int(key_data.get('times_used', 0))),
+            ])
+            self._center_api_key_tree_item_text(item)
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self._decorate_key_context_status(item, key_data, pool_name)
+            tree_items.append(item)
+        if tree_items:
+            tree.addTopLevelItems(tree_items)
+        for index in selected_indices:
+            if index < tree.topLevelItemCount():
+                tree.topLevelItem(index).setSelected(True)
+        tree.verticalScrollBar().setValue(v_scroll)
+        tree.horizontalScrollBar().setValue(h_scroll)
+        tree.setUpdatesEnabled(True)
+        tree.viewport().update()
+        if self._can_emit_live_key_pool_updates():
+            self._dedicated_refresh_pool(pool_name)
+
+    def _dedicated_add_key(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        key_entry = self._dedicated_widget(pool_name, 'key_entry')
+        model_combo = self._dedicated_widget(pool_name, 'model_combo')
+        api_key = key_entry.text().strip()
+        model = model_combo.currentText().strip()
+        model_error = key_pool_service.missing_model_error(model)
+        if model_error:
+            QMessageBox.critical(self, "Error", model_error)
+            return
+        google_credentials = self._dedicated_widget(pool_name, 'google_creds_entry').text().strip() or None
+        if google_credentials:
+            self._sync_parent_google_credentials(google_credentials)
+        google_region = self._dedicated_widget(pool_name, 'google_region_entry').text().strip() or None
+        use_endpoint = self._dedicated_widget(pool_name, 'individual_endpoint_toggle').isChecked()
+        azure_endpoint = self._dedicated_widget(pool_name, 'azure_endpoint_entry').text().strip() if use_endpoint else None
+        azure_api_version = self._dedicated_widget(pool_name, 'azure_api_version_combo').currentText().strip() if use_endpoint else None
+        keys = self._dedicated_keys(pool_name)
+        keys.append(key_pool_service.new_key_entry(
+            api_key,
+            model,
+            google_credentials=google_credentials,
+            azure_endpoint=azure_endpoint,
+            google_region=google_region,
+            azure_api_version=azure_api_version,
+            use_individual_endpoint=use_endpoint,
+        ))
+        self._dedicated_set_keys(pool_name, keys, save_config=False, broadcast=False)
+        key_entry.clear()
+        self._set_combo_text_silently(model_combo, "")
+        self._dedicated_widget(pool_name, 'google_creds_entry').clear()
+        self._dedicated_widget(pool_name, 'azure_endpoint_entry').clear()
+        self._dedicated_widget(pool_name, 'google_region_entry').setText("us-east5")
+        self._dedicated_widget(pool_name, 'azure_api_version_combo').setCurrentText('2025-01-01-preview')
+        self._dedicated_widget(pool_name, 'individual_endpoint_toggle').setChecked(False)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"Added {spec['label']} key for model: {model}")
+        self._schedule_key_pool_config_flush(
+            pool_name,
+            refresh_keys=True,
+            refresh_parent=self._model_affects_parent_provider_controls(model),
+        )
+
+    def _dedicated_move_key(self, pool_name: str, direction: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        selected = tree.selectedItems()
+        if not selected:
+            return
+        index = tree.indexOfTopLevelItem(selected[0])
+        keys = self._dedicated_keys(pool_name)
+        if not (0 <= index < len(keys)):
+            return
+        new_index = index
+        if direction == 'top':
+            new_index = 0
+        elif direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(keys) - 1:
+            new_index = index + 1
+        elif direction == 'bottom':
+            new_index = len(keys) - 1
+        if new_index != index:
+            key = keys.pop(index)
+            keys.insert(new_index, key)
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+            if new_index < tree.topLevelItemCount():
+                item = tree.topLevelItem(new_index)
+                tree.setCurrentItem(item)
+                item.setSelected(True)
+
+    def _dedicated_selected_indices(self, pool_name: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        return [tree.indexOfTopLevelItem(item) for item in tree.selectedItems()]
+
+    def _dedicated_test_selected(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            QMessageBox.warning(self, "Warning", f"Please select a {spec['label']} key to test")
+            return
+        index = indices[0]
+        keys = self._dedicated_keys(pool_name)
+        if 0 <= index < len(keys):
+            self._dedicated_set_status_column(pool_name, index, "⏳ Testing...", Qt.gray)
+            QTimer.singleShot(100, lambda p=pool_name, kd=keys[index], i=index: self._dedicated_test_single_key(p, kd, i))
+
+    def _dedicated_test_all(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        keys = self._dedicated_keys(pool_name)
+        if not keys:
+            QMessageBox.warning(self, "Warning", f"No {spec['title']} to test")
+            return
+        for i, key_data in enumerate(keys):
+            self._dedicated_set_status_column(pool_name, i, "⏳ Testing...", Qt.gray)
+            self._dedicated_test_single_key(pool_name, key_data, i)
+
+    def _dedicated_test_single_key(self, pool_name: str, key_data: dict, index: int):
+        spec = self._dedicated_pool_spec(pool_name)
+        api_key = key_data.get('api_key', '')
+        model = key_data.get('model', '')
+        timeout_seconds = _api_key_test_timeout_seconds(model)
+
+        def finish(success=None, timeout=False):
+            if timeout:
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_dedicated_update_timeout_queued", Qt.QueuedConnection, Q_ARG(str, pool_name), Q_ARG(int, index))
+                else:
+                    self._dedicated_update_timeout(pool_name, index)
+            else:
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_dedicated_update_test_result_queued", Qt.QueuedConnection, Q_ARG(str, pool_name), Q_ARG(int, index), Q_ARG(bool, bool(success)))
+                else:
+                    self._dedicated_update_test_result(pool_name, index, bool(success))
+
+        def run_api_test():
+            try:
+                from unified_api_client import UnifiedClient
+                request = key_pool_service.build_test_request(key_data, pool_name, api_key=api_key, model=model)
+                _client, response = key_pool_service.send_test_request(request, client_cls=UnifiedClient)
+                finish(success=key_pool_service.test_response_passed(response, request))
+            except Exception as exc:
+                print(f"[DEBUG] {spec['label']} key test error for {model}: {exc}")
+                finish(success=False)
+
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=timeout_seconds)
+                except FuturesTimeout:
+                    finish(timeout=True)
+                    key_pool_service.reset_api_watchdog()
+
+        executor = getattr(self.translator_gui, 'executor', None)
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+            executor = getattr(self.translator_gui, 'executor', executor)
+        if executor:
+            executor.submit(run_with_timeout)
+        else:
+            threading.Thread(target=run_with_timeout, daemon=True).start()
+
+    def _dedicated_set_status_column(self, pool_name: str, index: int, status: str, color):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        if tree is not None and 0 <= index < tree.topLevelItemCount():
+            item = tree.topLevelItem(index)
+            item.setText(5, status)
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+
+    @Slot(str, int, bool) if HAS_GUI else lambda x: x
+    def _dedicated_update_test_result_queued(self, pool_name: str, index: int, success: bool):
+        self._dedicated_update_test_result(pool_name, index, success)
+
+    @Slot(str, int) if HAS_GUI else lambda x: x
+    def _dedicated_update_timeout_queued(self, pool_name: str, index: int):
+        self._dedicated_update_timeout(pool_name, index)
+
+    def _dedicated_update_test_result(self, pool_name: str, index: int, success: bool):
+        keys = self._dedicated_keys(pool_name)
+        if 0 <= index < len(keys):
+            keys[index]['last_test_result'] = 'passed' if success else 'failed'
+            keys[index]['times_used'] = int(keys[index].get('times_used', 0)) + 1
+            counter = 'success_count' if success else 'error_count'
+            keys[index][counter] = int(keys[index].get(counter, 0)) + 1
+            self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+
+    def _dedicated_update_timeout(self, pool_name: str, index: int):
+        keys = self._dedicated_keys(pool_name)
+        if 0 <= index < len(keys):
+            keys[index]['last_test_result'] = 'timeout'
+            keys[index]['error_count'] = int(keys[index].get('error_count', 0)) + 1
+            self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+
+    def _dedicated_remove_selected(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = sorted(self._dedicated_selected_indices(pool_name), reverse=True)
+        if not indices:
+            return
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(indices)} selected {spec['label']} key(s)?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        keys = self._dedicated_keys(pool_name)
+        for index in indices:
+            if 0 <= index < len(keys):
+                del keys[index]
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"Removed {len(indices)} {spec['label']} key(s)")
+        self._notify_authgpt_visibility()
+
+    def _dedicated_enable_selected(self, pool_name: str):
+        self._dedicated_set_selected_enabled(pool_name, True)
+
+    def _dedicated_disable_selected(self, pool_name: str):
+        self._dedicated_set_selected_enabled(pool_name, False)
+
+    def _dedicated_set_selected_enabled(self, pool_name: str, enabled: bool):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = self._dedicated_selected_indices(pool_name)
+        keys = self._dedicated_keys(pool_name)
+        for index in indices:
+            if 0 <= index < len(keys):
+                keys[index]['enabled'] = enabled
+                if enabled:
+                    keys[index]['disabled_contexts'] = []
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"{'Enabled' if enabled else 'Disabled'} {len(indices)} {spec['label']} key(s)")
+        self._notify_authgpt_visibility()
+
+    def _dedicated_clear_all(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        if not self._dedicated_keys(pool_name):
+            return
+        reply = QMessageBox.question(self, "Confirm", f"Remove ALL {spec['title']}?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self._dedicated_set_keys(pool_name, [])
+            self._dedicated_load_keys(pool_name)
+            self._dedicated_status(pool_name, f"Cleared all {spec['title']}")
+            self._notify_authgpt_visibility()
+
+    def _dedicated_toggle_section(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        checkbox = self._dedicated_widget(pool_name, 'keys_checkbox')
+        enabled = checkbox.isChecked() if checkbox is not None else False
+        for suffix in ('add_frame', 'list_label', 'tree_container', 'tree_height_handle', 'action_frame'):
+            widget = self._dedicated_widget(pool_name, suffix)
+            if widget is not None:
+                widget.setVisible(enabled)
+        tree = self._dedicated_widget(pool_name, 'tree')
+        if tree is not None and not enabled:
+            tree.clearSelection()
+        self.translator_gui.config[spec['toggle_key']] = enabled
+        setattr(self.translator_gui, f"use_{pool_name}_keys_var", enabled)
+        live_updates = self._can_emit_live_key_pool_updates()
+        if live_updates:
+            self._broadcast_key_pool_config_changed(pool_name, refresh_keys=False)
+            self._dedicated_set_env(pool_name, enabled)
+            self._dedicated_refresh_pool(pool_name)
+        self._dedicated_status(pool_name, f"{spec['title']} {'enabled' if enabled else 'disabled'}")
+        if live_updates:
+            msg = f"🔑 {spec['label']} key pool: {len(self._dedicated_keys(pool_name)) if enabled else 'disabled'}"
+            try:
+                self.translator_gui.append_log(msg)
+            except Exception:
+                print(msg)
+            self._notify_authgpt_visibility()
+
+    def _dedicated_toggle_key_visibility(self, pool_name: str):
+        entry = self._dedicated_widget(pool_name, 'key_entry')
+        btn = self._dedicated_widget(pool_name, 'show_btn')
+        if entry.echoMode() == QLineEdit.Password:
+            entry.setEchoMode(QLineEdit.Normal)
+            btn.setText('🔒')
+        else:
+            entry.setEchoMode(QLineEdit.Password)
+            btn.setText('👁')
+
+    def _dedicated_toggle_endpoint_fields(self, pool_name: str):
+        toggle = self._dedicated_widget(pool_name, 'individual_endpoint_toggle')
+        enabled = toggle.isChecked() if toggle is not None else False
+        for suffix in ('individual_endpoint_label', 'azure_endpoint_entry', 'individual_api_version_label', 'azure_api_version_combo'):
+            widget = self._dedicated_widget(pool_name, suffix)
+            if widget is not None:
+                widget.setVisible(enabled)
+                widget.setEnabled(enabled)
+        if not enabled:
+            endpoint = self._dedicated_widget(pool_name, 'azure_endpoint_entry')
+            version = self._dedicated_widget(pool_name, 'azure_api_version_combo')
+            if endpoint is not None:
+                endpoint.clear()
+            if version is not None:
+                version.setCurrentText('2025-01-01-preview')
+
+    def _dedicated_show_context_menu(self, pool_name: str, position):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        keys = self._dedicated_keys(pool_name)
+        self._show_shared_key_context_menu(
+            tree=tree,
+            position=position,
+            total_keys=len(keys),
+            key_at_index=lambda i: keys[i],
+            move_callback=lambda direction: self._dedicated_move_key(pool_name, direction),
+            change_model_callback=lambda: self._dedicated_change_model_for_selected(pool_name),
+            configure_endpoint_callback=lambda i: self._dedicated_configure_endpoint(pool_name, i),
+            configure_parameters_callback=lambda i: self._edit_key_request_parameters(
+                keys[i],
+                lambda: (self._dedicated_set_keys(pool_name, keys), self._dedicated_load_keys(pool_name)),
+            ),
+            disable_endpoint_callback=lambda i: self._dedicated_toggle_individual_endpoint(pool_name, i, False),
+            set_cooldown_callback=lambda: self._dedicated_set_cooldown_for_selected(pool_name),
+            set_limit_callback=lambda: self._dedicated_set_output_token_limit_for_selected(pool_name),
+            clear_limit_callback=lambda: self._dedicated_clear_output_token_limit_for_selected(pool_name),
+            set_temp_callback=lambda: self._dedicated_set_temperature_for_selected(pool_name),
+            clear_temp_callback=lambda: self._dedicated_clear_temperature_for_selected(pool_name),
+            set_delay_callback=lambda: self._dedicated_set_api_call_delay_for_selected(pool_name),
+            clear_delay_callback=lambda: self._dedicated_clear_api_call_delay_for_selected(pool_name),
+            configure_contexts_callback=lambda: self._edit_selected_key_contexts(pool_name),
+            test_callback=lambda: self._dedicated_test_selected(pool_name),
+            enable_callback=lambda: self._dedicated_enable_selected(pool_name),
+            disable_callback=lambda: self._dedicated_disable_selected(pool_name),
+            remove_callback=lambda: self._dedicated_remove_selected(pool_name),
+            clear_all_callback=lambda: self._dedicated_clear_all(pool_name),
+        )
+
+    def _dedicated_change_model_for_selected(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        keys = self._dedicated_keys(pool_name)
+        current = keys[indices[0]].get('model', '') if indices[0] < len(keys) else ''
+        new_model, ok = self._show_model_selection_dialog(
+            current,
+            title=f"Change Model for {len(indices)} {spec['title']}",
+            accept_text="Apply",
+        )
+        if not ok or not new_model:
+            return
+
+        for idx in indices:
+            if 0 <= idx < len(keys):
+                keys[idx]['model'] = new_model
+        self._dedicated_set_keys(pool_name, keys, save_config=False, broadcast=False)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"Changed model to '{new_model}' for {len(indices)} key(s)")
+        self._schedule_key_pool_config_flush(pool_name, refresh_keys=True, refresh_parent=True)
+
+    def _dedicated_on_rows_moved(self, pool_name: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        keys = self._dedicated_keys(pool_name)
+        new_order = []
+        for i in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(i)
+            masked_key = item.text(0)
+            model = item.text(1)
+            for key_data in keys:
+                api_key = key_data.get('api_key', '')
+                key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+                if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
+                    new_order.append(key_data)
+                    break
+        if len(new_order) == len(keys):
+            self._dedicated_set_keys(pool_name, new_order)
+            self._dedicated_status(pool_name, f"Reordered {self._dedicated_pool_spec(pool_name)['title']}")
+
+    def _dedicated_on_selection_change(self, pool_name: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        label = self._dedicated_widget(pool_name, 'position_label')
+        selected = tree.selectedItems()
+        label.setText(f"#{tree.indexOfTopLevelItem(selected[0]) + 1}/{tree.topLevelItemCount()}" if selected else "")
+
+    def _dedicated_on_click(self, pool_name: str, item, column: int):
+        if column == 1:
+            self._dedicated_change_model_for_selected(pool_name)
+        elif column == 2:
+            self._dedicated_set_output_token_limit_for_selected(pool_name)
+        elif column == 3:
+            self._dedicated_set_temperature_for_selected(pool_name)
+        elif column == 4:
+            self._dedicated_set_api_call_delay_for_selected(pool_name)
+
+    def _dedicated_configure_endpoint(self, pool_name: str, key_index: int):
+        keys = self._dedicated_keys(pool_name)
+        if key_index >= len(keys):
+            return
+        key_data = keys[key_index]
+        temp_key = APIKeyEntry(
+            api_key=key_data.get('api_key', ''),
+            model=key_data.get('model', ''),
+            cooldown=60,
+            enabled=True,
+            google_credentials=key_data.get('google_credentials'),
+            azure_endpoint=key_data.get('azure_endpoint'),
+            google_region=key_data.get('google_region'),
+            azure_api_version=key_data.get('azure_api_version'),
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+            request_parameters=key_data.get('request_parameters'),
+        )
+
+        def on_endpoint_configured():
+            keys[key_index]['azure_endpoint'] = temp_key.azure_endpoint
+            keys[key_index]['azure_api_version'] = temp_key.azure_api_version
+            keys[key_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            keys[key_index]['request_parameters'] = dict(temp_key.request_parameters)
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+            self._dedicated_status(pool_name, f"Individual endpoint {'configured' if temp_key.use_individual_endpoint else 'disabled'}")
+
+        if IndividualEndpointDialog is None:
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
+            return
+        IndividualEndpointDialog(
+            self, self.translator_gui, temp_key, on_endpoint_configured,
+            lambda msg: self._dedicated_status(pool_name, msg),
+            persist_to_main_config=False,
+        ).exec_()
+
+    def _dedicated_toggle_individual_endpoint(self, pool_name: str, key_index: int, enabled: bool):
+        keys = self._dedicated_keys(pool_name)
+        if key_index < len(keys):
+            keys[key_index]['use_individual_endpoint'] = enabled
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+
+    def _dedicated_set_cooldown_for_selected(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        keys = self._dedicated_keys(pool_name)
+        selected_keys = [keys[idx] for idx in indices if 0 <= idx < len(keys)]
+        value, ok = self._show_cooldown_edit_dialog(self._default_cooldown(selected_keys))
+        if not ok:
+            return
+        for idx in indices:
+            if 0 <= idx < len(keys):
+                keys[idx]['cooldown'] = value
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"Set cooldown to {value}s for {len(indices)} {spec['label']} key(s)")
+
+    def _dedicated_set_output_token_limit_for_selected(self, pool_name: str):
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        keys = self._dedicated_keys(pool_name)
+        selected_keys = [keys[idx] for idx in indices if 0 <= idx < len(keys)]
+        value, ok = self._show_output_token_limit_dialog(
+            self._default_output_token_limit(selected_keys),
+            title="Set Output Token Limit",
+            label="Max output tokens (0 = use global):",
+            allow_global=True,
+        )
+        if ok:
+            for idx in indices:
+                if 0 <= idx < len(keys):
+                    keys[idx]['individual_output_token_limit'] = int(value) if value > 0 else None
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+
+    def _dedicated_clear_output_token_limit_for_selected(self, pool_name: str):
+        self._dedicated_clear_selected_key(pool_name, 'individual_output_token_limit')
+
+    def _dedicated_set_temperature_for_selected(self, pool_name: str):
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        keys = self._dedicated_keys(pool_name)
+        selected_keys = [keys[idx] for idx in indices if 0 <= idx < len(keys)]
+        value, ok = self._show_key_temperature_dialog(
+            self._default_key_temperature(selected_keys, allow_global=True),
+            title="Set Key Temperature",
+            label="Temperature (-1 = use global, 0.0 - 1.0):",
+            allow_global=True,
+        )
+        if ok:
+            for idx in indices:
+                if 0 <= idx < len(keys):
+                    if value < 0:
+                        keys[idx].pop('individual_key_temperature', None)
+                    else:
+                        keys[idx]['individual_key_temperature'] = value
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+
+    def _dedicated_clear_temperature_for_selected(self, pool_name: str):
+        self._dedicated_clear_selected_key(pool_name, 'individual_key_temperature')
+
+    def _dedicated_set_api_call_delay_for_selected(self, pool_name: str):
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        keys = self._dedicated_keys(pool_name)
+        selected_keys = [keys[idx] for idx in indices if 0 <= idx < len(keys)]
+        value, ok = self._show_api_call_delay_dialog(self._default_api_call_delay(selected_keys))
+        if ok:
+            for idx in indices:
+                if 0 <= idx < len(keys):
+                    keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+
+    def _dedicated_clear_api_call_delay_for_selected(self, pool_name: str):
+        keys = self._dedicated_keys(pool_name)
+        for idx in self._dedicated_selected_indices(pool_name):
+            if 0 <= idx < len(keys):
+                keys[idx]['api_call_delay'] = 0.0
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+
+    def _dedicated_clear_selected_key(self, pool_name: str, key: str):
+        keys = self._dedicated_keys(pool_name)
+        for idx in self._dedicated_selected_indices(pool_name):
+            if 0 <= idx < len(keys):
+                keys[idx].pop(key, None)
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+
+    def _dedicated_browse_google_credentials(self, pool_name: str):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Select Google Cloud Credentials JSON", "", "JSON files (*.json);;All files (*.*)"
+        )
+        if filename:
+            # The check and the load-failure message are shared with the mobile app (settings_rules)
+            from settings_rules import google_credentials_load_error, is_google_service_account
+            try:
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                if is_google_service_account(creds_data):
+                    self._dedicated_widget(pool_name, 'google_creds_entry').setText(filename)
+                    self._sync_parent_google_credentials(filename)
+                    self._dedicated_status(pool_name, f"Selected Google credentials: {os.path.basename(filename)}")
+                else:
+                    QMessageBox.critical(self, "Error", "Invalid Google Cloud credentials file.")
+            except Exception as exc:
+                QMessageBox.critical(self, "Error", google_credentials_load_error(exc))
+
+    def _create_glossary_refinement_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'glossary_refinement')
+
+    def _create_metadata_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'metadata')
+
+    def _create_qa_scan_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'qa_scan')
+
+    def _create_ai_truncation_detection_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'ai_truncation_detection')
+
+    def _create_rolling_summary_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'rolling_summary')
+
+    def _create_truncation_retry_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'truncation_retry')
+
+    def _create_inpainter_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'inpainter')
+
+    def _create_tts_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'tts')
+
+    def _save_and_close(self):
+        """Save configuration"""
+        self._save_keys_to_config()
+        # Animate the save button to flash green
+        try:
+            self._save_btn.setText("💾 Saved!")
+            self._save_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2e7d32;
+                    color: white;
+                    font-weight: bold;
+                    font-size: 11pt;
+                    padding: 8px 20px;
+                }
+            """)
+            def _restore_btn():
+                try:
+                    self._save_btn.setText("Save")
+                    self._save_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #4a7ba7;
+                            color: white;
+                            font-weight: bold;
+                            font-size: 11pt;
+                            padding: 8px 20px;
+                        }
+                        QPushButton:hover {
+                            background-color: #5a9fd4;
+                        }
+                    """)
+                except Exception:
+                    pass
+            QTimer.singleShot(2000, _restore_btn)
+        except Exception:
+            pass
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except Exception:
+            pass
+
+    def _on_close(self):
+        """Handle dialog close"""
+        self.reject()

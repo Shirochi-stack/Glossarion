@@ -1,0 +1,2043 @@
+import ast
+import json
+import os
+import queue
+import stat
+import sys
+import threading
+from types import SimpleNamespace
+from pathlib import Path
+
+import pytest
+from _src_corpus import DESKTOP_GUI_MODULES, SRC_DIR, desktop_gui_source, module_tree
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import ocagy_cli
+
+
+def test_zen_poll_accepts_only_free_cli_catalog_rows(monkeypatch):
+    calls = []
+    def listing(args, timeout):
+        calls.append((args, timeout))
+        return SimpleNamespace(returncode=0, stdout=(
+            'opencode/mimo-v2.6-flash-free\n'
+            'opencode/paid-model\n'
+            'warning: opencode/deepseek-v4-flash-free\n'
+            'google/other-free\n'
+            'opencode/mimo-v2.6-flash-free\n'
+        ), stderr='')
+    monkeypatch.setattr(ocagy_cli, '_run_short', listing)
+    assert ocagy_cli.poll_zen_models(timeout=9) == ['ocz/mimo-v2.6-flash-free']
+    assert calls == [(['models', 'opencode'], 9)]
+
+
+def test_zen_poll_failure_does_not_confirm_models_in_error_logs(monkeypatch):
+    monkeypatch.setattr(ocagy_cli, '_run_short', lambda *args, **kwargs:
+                        SimpleNamespace(returncode=1, stdout='', stderr='opencode/invalid-free'))
+    with pytest.raises(ocagy_cli.OcAgyError, match='polling failed'):
+        ocagy_cli.poll_zen_models()
+
+
+def test_zen_error_detail_unwraps_effect_causes_without_duplicate_logs():
+    detail = (
+        'Model not found: opencode/deepseek-v4-flash-free. '
+        'Did you mean: mimo-v2.6-flash-free?'
+    )
+    logs = '\n'.join(
+        'timestamp=2026-10-02T16:29:19Z level=ERROR message="prompt failed" cause='
+        + json.dumps(f'Cause([{kind}(ProviderModelNotFoundError: {detail})])')
+        for kind in ('Fail', 'Die')
+    )
+    assert ocagy_cli._zen_error_detail(logs) == detail
+
+
+def test_zen_error_detail_preserves_unstructured_error():
+    assert ocagy_cli._zen_error_detail('Connection refused') == 'Connection refused'
+
+
+@pytest.mark.parametrize('error_type,expect_traceback', [
+    ('config_error', False), ('cancelled', False), ('api_error', True),
+])
+def test_text_translation_error_handler_limits_expected_tracebacks(monkeypatch, error_type, expect_traceback):
+    # Execute the actual handler without loading the GUI or starting a translation.
+    # U3: the handler lives in text_jobs.TextJobsMixin._process_text_file
+    trees = [module_tree(m) for m in DESKTOP_GUI_MODULES if (SRC_DIR / f"{m}.py").exists()]
+    handler = next(
+        node for tree in trees for node in ast.walk(tree)
+        if isinstance(node, ast.ExceptHandler)
+        and any(isinstance(child, ast.Name) and child.id == 'is_config_error'
+                for child in ast.walk(node))
+    )
+    function = ast.FunctionDef(
+        name='handle',
+        args=ast.arguments(posonlyargs=[], args=[ast.arg(arg='self'), ast.arg(arg='e')],
+                           kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=handler.body, decorator_list=[],
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+
+    class ClientError(Exception):
+        def __init__(self, message):
+            super().__init__(message)
+            self.error_type = error_type
+
+    monkeypatch.setitem(sys.modules, 'unified_api_client', SimpleNamespace(UnifiedClientError=ClientError))
+    namespace = {}
+    exec(compile(module, '<text-error-handler>', 'exec'), namespace)
+    messages = []
+    assert namespace['handle'](SimpleNamespace(append_log=messages.append), ClientError('Model not found')) is False
+    assert any('Full error:' in message for message in messages) == expect_traceback
+    if error_type == 'config_error':
+        assert messages == ['❌ Translation error: Model not found']
+
+
+@pytest.fixture(autouse=True)
+def isolate_credential_runtime_patching(monkeypatch):
+    # CLI fakes must never patch the user's real installed OAuth plugin.
+    # Real copied-runtime adapter coverage lives in test_proxy_token_storage.
+    monkeypatch.setattr(ocagy_cli, "_secure_plugin_account_storage", lambda **kwargs: None)
+
+
+def _fake_opencode(tmp_path: Path) -> Path:
+    script = tmp_path / "fake_opencode.py"
+    script.write_text(
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "if '--version' in args:\n"
+        "    print('1.4.11')\n"
+        "    raise SystemExit(0)\n"
+        "if args[:2] == ['models', 'google']:\n"
+        "    print('google/antigravity-gemini-3.1-pro\\ngoogle/antigravity-gemini-3-flash')\n"
+        "    raise SystemExit(0)\n"
+        "if args[:2] == ['auth', 'login']:\n"
+        "    print('login')\n"
+        "    raise SystemExit(0)\n"
+        "prompt = sys.stdin.read()\n"
+        "model = args[args.index('--model') + 1]\n"
+        "variant = args[args.index('--variant') + 1] if '--variant' in args else ''\n"
+        "print(json.dumps({'type':'step_finish','part':{'usage':{'input_tokens':12,'output_tokens':2,'total_tokens':14}}}))\n"
+        "print(json.dumps({'type':'text','part':{'text':'OK:' + model + ':' + variant + ':' + str(len(prompt))}}))\n",
+        encoding="utf-8",
+    )
+
+    if os.name == "nt":
+        exe = tmp_path / "opencode.cmd"
+        exe.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+        )
+    else:
+        exe = tmp_path / "opencode"
+        exe.write_text(
+            f"#!{sys.executable}\n" + script.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    return exe
+
+
+def _write_enabled_account(config_dir: Path) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "antigravity-accounts.json").write_text(
+        json.dumps({
+            "accounts": [
+                {"email": "one@example.com", "refreshToken": "secret", "enabled": True},
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+
+def _write_accounts(config_dir: Path) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "antigravity-accounts.json").write_text(
+        json.dumps({
+            "version": 1,
+            "accounts": [
+                {"email": "one@example.com", "refreshToken": "token-one", "enabled": True},
+                {"email": "two@example.com", "refreshToken": "token-two", "enabled": True},
+                {"email": "three@example.com", "refreshToken": "token-three", "enabled": False},
+            ],
+            "activeIndex": 1,
+            "activeIndexByFamily": {"gemini": 1, "claude": 0},
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_numbered_prefix_account_mapping():
+    expected_model = "gemini-3.1-pro-high"
+    assert ocagy_cli.parse_account_route(f"ocagy0/{expected_model}") == (0, expected_model)
+    assert ocagy_cli.parse_account_route(f"ocagy/{expected_model}") == (1, expected_model)
+    assert ocagy_cli.parse_account_route(f"ocagy1/{expected_model}") == (2, expected_model)
+    assert ocagy_cli.parse_account_route(f"ocagy2/{expected_model}") == (3, expected_model)
+    assert ocagy_cli.parse_account_route(expected_model) == (0, expected_model)
+    assert ocagy_cli.resolve_model(f"ocagy1/{expected_model}") == (
+        "google/antigravity-gemini-3.1-pro",
+        "high",
+    )
+
+
+def test_generation_controls_are_encoded_for_opencode():
+    config = ocagy_cli._workspace_config(temperature=0.3)
+
+    assert config["agent"]["glossarion"]["temperature"] == 0.3
+    assert all(
+        model["temperature"] is True
+        for model in config["provider"]["google"]["models"].values()
+    )
+    assert ocagy_cli._effective_output_limit(
+        "google/antigravity-gemini-3.1-pro",
+        128000,
+    ) == 65535
+    assert ocagy_cli._effective_output_limit(
+        "google/antigravity-claude-sonnet-4-6",
+        4096,
+    ) == 4096
+
+
+def test_numbered_prefix_isolates_selected_account(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_accounts(config_dir)
+    (config_dir / "antigravity.json").write_text(
+        json.dumps({
+            "pid_offset_enabled": True,
+            "account_selection_strategy": "round-robin",
+            "quota_fallback": True,
+        }),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_server_send(**kwargs):
+        isolated_dir = Path(kwargs["subprocess_env"]["OPENCODE_CONFIG_DIR"])
+        from proxy_token_storage import load_accounts
+        from token_encryption import is_encrypted
+        assert is_encrypted(str(isolated_dir / "antigravity-accounts.json"))
+        account_store = load_accounts(isolated_dir / "antigravity-accounts.json")
+        plugin_settings = json.loads(
+            (isolated_dir / "antigravity.json").read_text(encoding="utf-8")
+        )
+        captured.update({
+            "isolated_dir": isolated_dir,
+            "account_store": account_store,
+            "plugin_settings": plugin_settings,
+        })
+        return {
+            "content": "PINNED",
+            "finish_reason": "stop",
+            "usage": None,
+            "raw_response": [],
+        }
+
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(ocagy_cli, "_send_via_server", fake_server_send)
+    ocagy_cli.reset_cancel()
+
+    result = ocagy_cli.send_chat_completion(
+        messages=[{"role": "user", "content": "test"}],
+        model="ocagy1/gemini-3.1-pro-high",
+        timeout=30,
+    )
+
+    assert result["content"] == "PINNED"
+    assert captured["isolated_dir"] != config_dir
+    assert not captured["isolated_dir"].exists()
+    assert [item["email"] for item in captured["account_store"]["accounts"]] == ["two@example.com"]
+    assert captured["account_store"]["activeIndex"] == 0
+    assert captured["plugin_settings"]["pid_offset_enabled"] is False
+    assert captured["plugin_settings"]["account_selection_strategy"] == "sticky"
+    assert captured["plugin_settings"]["quota_fallback"] is True
+
+
+def test_numbered_prefix_rejects_missing_and_disabled_slots(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    _write_accounts(config_dir)
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+
+    with pytest.raises(ocagy_cli.OcAgyError, match=r"account #4 is not linked"):
+        ocagy_cli._require_oauth_account(4)
+    with pytest.raises(ocagy_cli.OcAgyError, match=r"account #3 is disabled"):
+        ocagy_cli._require_oauth_account(3)
+
+
+def test_send_uses_live_server_and_variant(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_enabled_account(config_dir)
+    captured = {}
+
+    def fake_server_send(**kwargs):
+        captured.update(kwargs)
+        captured["request_config"] = json.loads(
+            (Path(kwargs["request_dir"]) / "opencode.json").read_text(encoding="utf-8")
+        )
+        return {
+            "content": (
+                "OK:"
+                + kwargs["model_id"]
+                + ":"
+                + str(kwargs["variant"] or "")
+                + ":"
+                + str(len(kwargs["prompt"]))
+            ),
+            "finish_reason": "stop",
+            "usage": {"prompt_tokens": 12, "completion_tokens": 2, "total_tokens": 14},
+            "raw_response": [],
+        }
+
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(ocagy_cli, "_send_via_server", fake_server_send)
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+    ocagy_cli.reset_cancel()
+    logs = []
+
+    result = ocagy_cli.send_chat_completion(
+        messages=[
+            {"role": "system", "content": "Translate faithfully."},
+            {"role": "user", "content": "한글 test " * 10000},
+        ],
+        model="ocagy0/gemini-3.1-pro-high",
+        temperature=0.25,
+        max_tokens=128000,
+        timeout=30,
+        log_fn=logs.append,
+    )
+
+    assert result["content"].startswith("OK:google/antigravity-gemini-3.1-pro:high:")
+    assert result["variant"] == "high"
+    assert result["usage"]["total_tokens"] == 14
+    assert captured["log_stream"] is True
+    assert captured["model_id"] == "google/antigravity-gemini-3.1-pro"
+    assert Path(captured["subprocess_env"]["OPENCODE_CONFIG_DIR"]) == config_dir
+    assert captured["subprocess_env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "128000"
+    assert captured["request_config"]["agent"]["glossarion"]["temperature"] == 0.25
+    assert any(
+        "Glossarion controls OpenCode generation" in message
+        and "max_tokens=65,535" in message
+        and "requested 128,000" in message
+        for message in logs
+    )
+    config = json.loads((tmp_path / "workspace" / "opencode.json").read_text(encoding="utf-8"))
+    assert config["plugin"] == ["opencode-antigravity-auth@latest"]
+    assert config["permission"]["*"] == "deny"
+
+
+def test_status_discovers_plugin_models_and_accounts(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "antigravity-accounts.json").write_text(
+        json.dumps({
+            "accounts": [
+                {"email": "one@example.com", "refreshToken": "secret", "enabled": True},
+                {"email": "off@example.com", "refreshToken": "secret", "enabled": False},
+            ]
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+
+    status = ocagy_cli.get_status()
+    assert status["installed"] is True
+    assert status["plugin_ready"] is True
+    assert status["authenticated"] is True
+    assert status["account_count"] == 1
+    assert status["emails"] == ["one@example.com"]
+    assert "google/antigravity-gemini-3.1-pro" in status["models"]
+
+    account_summary = ocagy_cli.get_account_summary()
+    assert account_summary["account_count"] == 1
+    assert account_summary["emails"] == ["one@example.com"]
+    assert "refreshToken" not in account_summary
+
+
+def test_quota_status_fetches_live_plugin_pools_without_exposing_tokens(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_enabled_account(config_dir)
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+    calls = []
+
+    def fake_form(url, values, timeout):
+        calls.append((url, values["refresh_token"], timeout))
+        return {"access_token": "temporary-access-token"}
+
+    def fake_post(url, access_token, payload, timeout, *, user_agent=ocagy_cli._ANTIGRAVITY_QUOTA_USER_AGENT):
+        assert access_token == "temporary-access-token"
+        calls.append((url, dict(payload), user_agent))
+        if url.endswith(":loadCodeAssist"):
+            return {"cloudaicompanionProject": {"id": "managed-project"}}
+        assert payload == {"project": "managed-project"}
+        if url.endswith(":fetchAvailableModels"):
+            return {
+                "models": {
+                    "claude-sonnet-4-6": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.75,
+                            "resetTime": "2030-01-02T00:00:00Z",
+                        }
+                    },
+                    "gemini-3.1-pro-high": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.6,
+                            "resetTime": "2030-01-01T23:00:00Z",
+                        }
+                    },
+                    "gemini-3.1-pro-low": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.8,
+                            "resetTime": "2030-01-02T00:00:00Z",
+                        }
+                    },
+                    "gemini-3-flash": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.15,
+                            "resetTime": "2030-01-01T22:00:00Z",
+                        }
+                    },
+                }
+            }
+        if url.endswith(":retrieveUserQuota"):
+            return {
+                "buckets": [{
+                    "modelId": "gemini-2.5-pro",
+                    "remainingFraction": 0.9,
+                    "resetTime": "2030-01-02T00:00:00Z",
+                }]
+            }
+        raise AssertionError(f"Unexpected quota URL: {url}")
+
+    monkeypatch.setattr(ocagy_cli, "_quota_form_json", fake_form)
+    monkeypatch.setattr(ocagy_cli, "_quota_post_json", fake_post)
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_plugin_oauth_client_credentials",
+        lambda: ("test-client-id", "test-client-secret"),
+    )
+
+    status = ocagy_cli.get_quota_status(timeout=7)
+
+    assert status["account_count"] == 1
+    account = status["quota_accounts"][0]
+    assert account["status"] == "ok"
+    assert account["antigravity"]["claude"]["remaining_fraction"] == 0.75
+    assert account["antigravity"]["gemini-pro"]["remaining_fraction"] == 0.6
+    assert account["antigravity"]["gemini-pro"]["model_count"] == 2
+    assert account["antigravity"]["gemini-flash"]["remaining_fraction"] == 0.15
+    assert account["gemini_cli"][0]["remaining_fraction"] == 0.9
+    serialized = json.dumps(status)
+    assert "secret" not in serialized
+    assert "temporary-access-token" not in serialized
+    assert any(call[0].endswith(":fetchAvailableModels") for call in calls)
+    assert any(call[0].endswith(":retrieveUserQuota") for call in calls)
+
+
+def test_oauth_application_metadata_is_loaded_from_installed_plugin(tmp_path, monkeypatch):
+    plugin_root = tmp_path / "opencode-antigravity-auth"
+    constants = plugin_root / "dist" / "src" / "constants.js"
+    constants.parent.mkdir(parents=True)
+    constants.write_text(
+        "export const ANTIGRAVITY_CLIENT_ID = 'test-client-id';\n"
+        "export const ANTIGRAVITY_CLIENT_SECRET = 'test-client-secret';\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OCAGY_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.delenv("OCAGY_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("OCAGY_GOOGLE_CLIENT_SECRET", raising=False)
+
+    assert ocagy_cli._plugin_oauth_client_credentials() == (
+        "test-client-id",
+        "test-client-secret",
+    )
+
+
+def test_poll_models_expands_opencode_models_into_ocagy_variants(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_enabled_account(config_dir)
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+
+    models = ocagy_cli.poll_models(timeout=5)
+
+    assert models == [
+        "ocagy/gemini-3.1-pro-high",
+        "ocagy/gemini-3.1-pro-low",
+        "ocagy/gemini-3-flash-minimal",
+        "ocagy/gemini-3-flash-low",
+        "ocagy/gemini-3-flash-medium",
+        "ocagy/gemini-3-flash-high",
+    ]
+
+
+def test_polled_unknown_antigravity_model_remains_routable():
+    models = ocagy_cli.normalize_polled_models([
+        "google/gemini-2.5-pro",
+        "google/antigravity-future-model",
+    ])
+
+    assert models == ["ocagy/antigravity-future-model"]
+    assert ocagy_cli.resolve_model(models[0]) == (
+        "google/antigravity-future-model",
+        None,
+    )
+
+
+def test_send_without_oauth_account_stops_before_launch(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "empty-config"
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(
+        ocagy_cli.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("OpenCode should not launch")),
+    )
+
+    try:
+        ocagy_cli.send_chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            model="gemini-3.1-pro-high",
+        )
+    except ocagy_cli.OcAgyError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected an OAuth setup error")
+
+    assert "does not use or require a Google API key" in message
+    assert "OAuth with Google (Antigravity)" in message
+    assert "Do not select Manually enter API Key" in message
+
+
+def test_google_api_key_fallback_error_is_rewritten_as_oauth_guidance():
+    error = ocagy_cli._classify_error(
+        "Google Generative AI API key is missing. Pass GOOGLE_GENERATIVE_AI_API_KEY.",
+        1,
+    )
+
+    message = str(error)
+    assert "fell back to its built-in Google provider" in message
+    assert "does not use or require a Google API key" in message
+    assert "OAuth with Google (Antigravity)" in message
+
+
+def test_live_event_state_collects_deltas_reasoning_usage_and_completion():
+    state = ocagy_cli._OpenCodeStreamState("session-1")
+    assert state.finish_reason is None
+    assert state.feed({
+        "type": "message.updated",
+        "properties": {"info": {"id": "assistant-1", "role": "assistant"}},
+    }) == []
+
+    reasoning = state.feed({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "reason-1",
+                "sessionID": "session-1",
+                "messageID": "assistant-1",
+                "type": "reasoning",
+                "text": "Think",
+            },
+            "delta": "Think",
+        },
+    })
+    first = state.feed({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "text-1",
+                "sessionID": "session-1",
+                "messageID": "assistant-1",
+                "type": "text",
+                "text": "Hel",
+            },
+            "delta": "Hel",
+        },
+    })
+    second = state.feed({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "text-1",
+                "sessionID": "session-1",
+                "messageID": "assistant-1",
+                "type": "text",
+                "text": "Hello",
+            },
+            "delta": "lo",
+        },
+    })
+    state.feed({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "step-1",
+                "sessionID": "session-1",
+                "messageID": "assistant-1",
+                "type": "step-finish",
+                "reason": "stop",
+                "tokens": {"input": 8, "output": 2, "total": 10},
+            }
+        },
+    })
+    state.feed({
+        "type": "session.status",
+        "properties": {"sessionID": "session-1", "status": {"type": "idle"}},
+    })
+
+    assert reasoning == [("reasoning", "Think")]
+    assert first == [("text", "Hel")]
+    assert second == [("text", "lo")]
+    assert state.content() == "Hello"
+    assert state.complete is True
+    assert state.finish_reason == "stop"
+    assert state.raw_finish_reason == "stop"
+    assert state.finish_reason_source == "sse_step_finish"
+    assert ocagy_cli._usage_from_value(state.step_events)["total_tokens"] == 10
+
+
+def test_live_event_state_captures_out_of_order_content_filter_finish():
+    state = ocagy_cli._OpenCodeStreamState("session-1")
+
+    # OpenCode can publish a part before its message.updated notification is
+    # observed by this client. Finish metadata must not depend on that ordering.
+    state.feed({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "step-1",
+                "sessionID": "session-1",
+                "messageID": "assistant-1",
+                "type": "step-finish",
+                "reason": "content-filter",
+            }
+        },
+    })
+
+    assert state.finish_reason == "prohibited_content"
+    assert state.raw_finish_reason == "content-filter"
+    assert state.finish_reason_source == "sse_step_finish"
+
+
+def test_persisted_message_finish_prefers_step_finish_reason():
+    reason, source, evidence = ocagy_cli._finish_reason_from_message_records(
+        [{
+            "info": {
+                "id": "assistant-1",
+                "role": "assistant",
+                "finish": "stop",
+            },
+            "parts": [{
+                "id": "step-1",
+                "type": "step-finish",
+                "reason": "max_tokens",
+            }],
+        }],
+        ["assistant-1"],
+    )
+
+    assert reason == "max_tokens"
+    assert source == "server_message_step_finish"
+    assert evidence == {
+        "message_id": "assistant-1",
+        "part_id": "step-1",
+    }
+    assert ocagy_cli._normalize_opencode_finish_reason(reason) == "length"
+
+
+def test_live_event_state_handles_opencode_part_delta_events():
+    state = ocagy_cli._OpenCodeStreamState("session-1")
+    state.feed({
+        "type": "message.updated",
+        "properties": {"info": {"id": "assistant-1", "role": "assistant"}},
+    })
+    state.feed({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "text-1",
+                "sessionID": "session-1",
+                "messageID": "assistant-1",
+                "type": "text",
+            }
+        },
+    })
+
+    first = state.feed({
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "session-1",
+            "messageID": "assistant-1",
+            "partID": "text-1",
+            "field": "text",
+            "delta": "Hel",
+        },
+    })
+    second = state.feed({
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "session-1",
+            "messageID": "assistant-1",
+            "partID": "text-1",
+            "field": "text",
+            "delta": "lo",
+        },
+    })
+
+    assert first == [("text", "Hel")]
+    assert second == [("text", "lo")]
+    assert state.content() == "Hello"
+
+
+def test_httpx_sse_reader_emits_event_before_stream_finishes():
+    blocked_after_first_event = threading.Event()
+    release_stream = threading.Event()
+    output = queue.Queue()
+
+    class FakeHttpxResponse:
+        def iter_lines(self):
+            yield 'data: {"type":"server.connected"}'
+            yield ""
+            blocked_after_first_event.set()
+            release_stream.wait(timeout=2)
+            yield 'data: {"type":"session.idle","properties":{"sessionID":"s1"}}'
+            yield ""
+
+    reader = threading.Thread(
+        target=ocagy_cli._read_sse_events,
+        args=(FakeHttpxResponse(), output),
+        daemon=True,
+    )
+    reader.start()
+    try:
+        assert blocked_after_first_event.wait(timeout=1)
+        kind, event = output.get(timeout=1)
+        assert kind == "event"
+        assert event == {"type": "server.connected"}
+        assert reader.is_alive(), "The first event must arrive while the HTTP stream is still open"
+    finally:
+        release_stream.set()
+        reader.join(timeout=2)
+
+
+def test_ocagy_server_setup_uses_request_deadline_not_short_hardcoded_timeouts(tmp_path, monkeypatch):
+    import io
+    from types import SimpleNamespace
+
+    http_calls = []
+    stream_timeouts = {}
+
+    class FakeProcess:
+        pid = 12345
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+
+        def poll(self):
+            return None
+
+    class FakeEventResponse:
+        status_code = 200
+
+        def close(self):
+            pass
+
+    class FakeStreamContext:
+        def __enter__(self):
+            return FakeEventResponse()
+
+        def __exit__(self, *args):
+            pass
+
+    class FakeTimeout:
+        def __init__(self, default, *, connect):
+            stream_timeouts.update(default=default, connect=connect)
+
+    def fake_http_json(base_url, path, **kwargs):
+        http_calls.append((path, kwargs["timeout"]))
+        if path == "/global/health":
+            return {"healthy": True}
+        if path == "/session":
+            return {"id": "session-1"}
+        if path == "/session/session-1/message/assistant-1":
+            return {
+                "info": {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "finish": "stop",
+                },
+                "parts": [{
+                    "id": "step-1",
+                    "type": "step-finish",
+                    "reason": "max_tokens",
+                }],
+            }
+        return {}
+
+    def fake_read_events(_response, output):
+        output.put(("event", {
+            "type": "server.connected",
+        }))
+        output.put(("event", {
+            "type": "message.updated",
+            "properties": {"info": {"id": "assistant-1", "role": "assistant"}},
+        }))
+        output.put(("event", {
+            "type": "message.part.updated",
+            "properties": {
+                "part": {
+                    "id": "text-1",
+                    "sessionID": "session-1",
+                    "messageID": "assistant-1",
+                    "type": "text",
+                    "text": "OK",
+                },
+                "delta": "OK",
+            },
+        }))
+        output.put(("event", {
+            "type": "session.idle",
+            "properties": {"sessionID": "session-1"},
+        }))
+
+    fake_httpx = SimpleNamespace(
+        Timeout=FakeTimeout,
+        stream=lambda *args, **kwargs: FakeStreamContext(),
+        TimeoutException=type("FakeTimeoutException", (Exception,), {}),
+        RequestError=type("FakeRequestError", (Exception,), {}),
+    )
+
+    monkeypatch.setattr(ocagy_cli.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(ocagy_cli, "_http_json", fake_http_json)
+    monkeypatch.setattr(ocagy_cli, "_read_sse_events", fake_read_events)
+    monkeypatch.setattr(ocagy_cli, "_terminate_process_tree", lambda proc: None)
+    monkeypatch.setattr(ocagy_cli, "httpx", fake_httpx)
+
+    result = ocagy_cli._send_via_server(
+        exe="opencode",
+        request_dir=tmp_path,
+        prompt="test",
+        model_id="google/antigravity-gemini-3.1-pro",
+        variant="high",
+        timeout_seconds=120,
+        logger=lambda message: None,
+        log_stream=False,
+        subprocess_env={},
+    )
+
+    timeout_by_path = {path: timeout for path, timeout in http_calls}
+    assert result["content"] == "OK"
+    assert result["finish_reason"] == "length"
+    assert result["raw_finish_reason"] == "max_tokens"
+    assert result["finish_reason_source"] == "server_message_step_finish"
+    assert result["finish_reason_fallback"] is False
+    assert timeout_by_path["/session"] > 100
+    assert timeout_by_path["/session/session-1/prompt_async"] > 100
+    assert stream_timeouts["default"] > 100
+    assert stream_timeouts["connect"] > 100
+
+
+def test_ocagy_forced_stream_includes_thinking_when_thinking_toggle_is_off(monkeypatch):
+    monkeypatch.setenv("STREAM_THINKING_LOGS", "0")
+
+    assert ocagy_cli._forced_stream_thinking_logging_enabled(True) is True
+    assert ocagy_cli._forced_stream_thinking_logging_enabled(False) is False
+
+
+def test_prompt_preserves_roles():
+    prompt = ocagy_cli.build_prompt([
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "USER"},
+        {"role": "assistant", "content": "MEMORY"},
+    ])
+    assert "<SYSTEM_INSTRUCTIONS>\nSYS" in prompt
+    assert "<USER>\nUSER\n</USER>" in prompt
+    assert "<ASSISTANT>\nMEMORY\n</ASSISTANT>" in prompt
+
+
+def test_missing_cli_error_has_copyable_install_commands(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(tmp_path / "missing-opencode.exe"))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(ocagy_cli, "_candidate_paths", lambda: [])
+
+    try:
+        ocagy_cli.find_executable()
+    except ocagy_cli.OcAgyError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected a missing-CLI error")
+
+    assert ocagy_cli.OPENCODE_NPM_INSTALL_COMMAND in message
+    assert "Searched:" not in message
+    if os.name == "nt":
+        assert ocagy_cli.NODEJS_WINGET_INSTALL_COMMAND in message
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows npm shim behavior")
+def test_find_executable_prefers_native_binary_over_npm_shim(tmp_path, monkeypatch):
+    npm_dir = tmp_path / "npm"
+    native = npm_dir / "node_modules" / "opencode-ai" / "node_modules" / "opencode-windows-x64" / "bin" / "opencode.exe"
+    native.parent.mkdir(parents=True)
+    native.touch()
+    (npm_dir / "opencode.cmd").touch()
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    # APPDATA/npm is the package location; a stale PATH can still find the shim.
+    monkeypatch.setattr(ocagy_cli.shutil, "which", lambda name: str(npm_dir / "opencode.cmd") if name == "opencode" else None)
+
+    assert ocagy_cli.find_executable() == str(native.resolve())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Node.js PATH behavior")
+def test_subprocess_env_adds_newly_installed_node_to_stale_path(tmp_path, monkeypatch):
+    node_dir = tmp_path / "Local" / "Programs" / "nodejs"
+    node_dir.mkdir(parents=True)
+    (node_dir / "node.exe").touch()
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    monkeypatch.setenv("PATH", str(tmp_path / "old-path"))
+
+    env = ocagy_cli._subprocess_env()
+
+    assert str(node_dir) in env["PATH"].split(os.pathsep)
+
+
+def test_ensure_opencode_installed_runs_installer_and_redetects_cli(monkeypatch):
+    state = {"installed": False}
+    logs = []
+    setup_calls = []
+
+    def fake_find(_explicit_path=None):
+        if state["installed"]:
+            return "/home/test/.opencode/bin/opencode"
+        raise ocagy_cli.OcAgyError(ocagy_cli.get_install_instructions())
+
+    def fake_setup(command, **kwargs):
+        setup_calls.append((command, kwargs))
+        state["installed"] = True
+        return {"ok": True, "output": "installed"}
+
+    monkeypatch.setattr(ocagy_cli, "find_executable", fake_find)
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_opencode_install_command",
+        lambda: ["npm", "install", "-g", "opencode-ai"],
+    )
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", fake_setup)
+
+    executable = ocagy_cli.ensure_opencode_installed(log_fn=logs.append)
+
+    assert executable == "/home/test/.opencode/bin/opencode"
+    assert setup_calls[0][0] == ["npm", "install", "-g", "opencode-ai"]
+    assert any("installing it automatically" in message for message in logs)
+    assert any("OpenCode installed successfully" in message for message in logs)
+
+
+def test_ensure_opencode_installed_keeps_manual_commands_as_failure_fallback(monkeypatch):
+    def missing(_explicit_path=None):
+        raise ocagy_cli.OcAgyError(ocagy_cli.get_install_instructions())
+
+    monkeypatch.setattr(ocagy_cli, "find_executable", missing)
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_opencode_install_command",
+        lambda: ["npm", "install", "-g", "opencode-ai"],
+    )
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_run_setup_command",
+        lambda *_args, **_kwargs: {"ok": False, "error": "network blocked"},
+    )
+
+    with pytest.raises(ocagy_cli.OcAgyError) as error:
+        ocagy_cli.ensure_opencode_installed()
+
+    message = str(error.value)
+    assert "could not install OpenCode automatically" in message
+    assert "network blocked" in message
+    assert ocagy_cli.OPENCODE_NPM_INSTALL_COMMAND in message
+
+
+def test_ensure_auth_plugin_installed_resolves_plugin_through_opencode(tmp_path, monkeypatch):
+    executable = str(tmp_path / "opencode")
+    logs = []
+    calls = []
+    key = str(Path(executable).resolve(strict=False)).casefold()
+    ocagy_cli._PLUGIN_BOOTSTRAPPED_EXECUTABLES.discard(key)
+
+    def fake_setup(command, **kwargs):
+        calls.append((command, kwargs))
+        return {
+            "ok": True,
+            "output": "google/antigravity-gemini-3.1-pro",
+        }
+
+    monkeypatch.setattr(ocagy_cli, "_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", fake_setup)
+
+    ocagy_cli.ensure_auth_plugin_installed(executable, log_fn=logs.append)
+
+    assert calls[0][0] == [executable, "models", "google"]
+    assert calls[0][1]["cwd"] == tmp_path
+    assert key in ocagy_cli._PLUGIN_BOOTSTRAPPED_EXECUTABLES
+    assert any("auth plugin is installed and ready" in message for message in logs)
+
+
+def test_ensure_auth_plugin_installed_reports_manual_fallback_after_failure(tmp_path, monkeypatch):
+    executable = str(tmp_path / "opencode-failing")
+    key = str(Path(executable).resolve(strict=False)).casefold()
+    ocagy_cli._PLUGIN_BOOTSTRAPPED_EXECUTABLES.discard(key)
+
+    monkeypatch.setattr(ocagy_cli, "_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_run_setup_command",
+        lambda *_args, **_kwargs: {"ok": False, "error": "plugin download blocked"},
+    )
+
+    with pytest.raises(ocagy_cli.OcAgyError) as error:
+        ocagy_cli.ensure_auth_plugin_installed(executable)
+
+    message = str(error.value)
+    assert "could not install or verify opencode-antigravity-auth automatically" in message
+    assert "plugin download blocked" in message
+    assert "Fallback:" in message
+    assert "opencode models google" in message
+
+
+def test_model_catalog_exposes_ocagy_high_variant():
+    from model_options import get_model_options
+
+    options = set(get_model_options())
+    assert "ocagy/gemini-3.1-pro-high" in options
+    assert "ocagy/gemini-3.1-pro-low" in options
+
+
+def test_unified_client_routes_ocagy_without_api_key(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {
+            "content": "ROUTED",
+            "finish_reason": "stop",
+            "usage": {"total_tokens": 3},
+        }
+
+    monkeypatch.setattr(
+        unified,
+        "_ocagy_send",
+        fake_ocagy_send,
+    )
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("BATCH_TRANSLATION", "1")
+    monkeypatch.setenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "1")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    assert client.client_type == "ocagy"
+    assert client._model_needs_api_key("ocagy/gemini-3.1-pro-high") is False
+    response = client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+    assert response.content == "ROUTED"
+    assert response.usage["total_tokens"] == 3
+    assert captured["log_stream"] is True
+    assert captured["model"] == "ocagy/gemini-3.1-pro-high"
+
+
+def test_ocagy_uses_effectively_unlimited_timeout_when_overrides_are_off(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "OK", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("ENABLE_HTTP_TUNING", "0")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+
+    assert captured["timeout"] == 36000
+
+
+def test_ocagy_uses_read_timeout_only_when_http_overrides_are_on(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "OK", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("ENABLE_HTTP_TUNING", "1")
+    monkeypatch.setenv("READ_TIMEOUT", "12.5")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+
+    assert captured["timeout"] == 12.5
+
+
+def test_ocagy_content_filter_raises_prohibited_content(monkeypatch):
+    import unified_api_client as unified
+
+    def fake_ocagy_send(**kwargs):
+        raise ocagy_cli.OcAgyError(
+            "OpenCode Antigravity failed (exit 1): "
+            "The response was blocked by the provider's content filter"
+        )
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+
+    with pytest.raises(unified.UnifiedClientError) as exc_info:
+        client._send_ocagy(
+            [{"role": "user", "content": "test"}],
+            0.2,
+            1024,
+            "test",
+        )
+
+    assert exc_info.value.error_type == "prohibited_content"
+    assert "blocked by the provider's content filter" in str(exc_info.value)
+
+
+def test_ocagy_content_filter_skips_generic_api_retries(monkeypatch):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_ocagy_send(**kwargs):
+        attempts.append(1)
+        raise ocagy_cli.OcAgyError(
+            "OpenCode Antigravity failed (exit 1): "
+            "The response was blocked by the provider's content filter"
+        )
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    monkeypatch.setattr(client, "_save_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_save_failed_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_track_stats", lambda *args, **kwargs: None)
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="ocagy-filter-test",
+    )
+
+    assert finish_reason == "prohibited_content"
+    assert len(attempts) == 1
+
+
+def test_disabled_timeout_retry_does_not_retry_provider_timeout(monkeypatch):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_response(*args, **kwargs):
+        attempts.append(1)
+        raise unified.UnifiedClientError("timed out", error_type="provider_error")
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    monkeypatch.setattr(client, "_get_response", fake_response)
+    monkeypatch.setattr(client, "_save_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_save_failed_request", lambda *args, **kwargs: None)
+
+    with pytest.raises(unified.UnifiedClientError, match="timed out"):
+        client._send_internal(
+            [{"role": "user", "content": "test"}],
+            temperature=0.2,
+            max_tokens=1024,
+            context="translation",
+            request_id="timeout-test",
+        )
+
+    assert len(attempts) == 1
+
+
+def test_unified_client_preserves_numbered_ocagy_route(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "PINNED", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy2/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    response = client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+
+    assert client.client_type == "ocagy"
+    assert response.content == "PINNED"
+    assert captured["model"] == "ocagy2/gemini-3.1-pro-high"
+
+
+def test_ocagy_forced_stream_logs_ignore_general_streaming_toggle(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "LIVE", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setenv("ENABLE_STREAMING", "0")
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "1")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    response = client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+
+    assert response.content == "LIVE"
+    assert captured["log_stream"] is True
+
+
+MISSING_FINISH_PROVIDERS = (
+    (
+        "ocagy",
+        "ocagy/gemini-3.1-pro-high",
+        "_ocagy_send",
+        {
+            "content": "translated",
+            "finish_reason": "stop",
+            "finish_reason_fallback": True,
+            "finish_reason_source": "fallback_stop",
+            "usage": None,
+        },
+    ),
+    (
+        "authnd",
+        "authnd/z-ai/glm-5.1",
+        "_authnd_send",
+        {
+            "content": "translated",
+            "finish_reason": "stop",
+            "finish_reason_explicit": False,
+            "finish_reason_inference": "done_without_finish_reason",
+            "usage": None,
+        },
+    ),
+)
+
+
+def _make_missing_finish_client(monkeypatch, model):
+    import unified_api_client as unified
+
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setattr(unified, "_authnd_reset_cancel", lambda: None)
+    client = unified.UnifiedClient("", model, _skip_cancel_reset=True)
+    monkeypatch.setattr(client, "_save_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_save_failed_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_track_stats", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_compute_backoff", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(unified.time, "sleep", lambda _seconds: None)
+    return unified, client
+
+
+def test_authnd_graceful_stop_cannot_cross_cleared_provider_boundary(monkeypatch):
+    import unified_api_client as unified
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setattr(unified, "_api_watchdog_external_write", lambda _state: None)
+    entered_preflight = threading.Event()
+    release_preflight = threading.Event()
+    provider_posts = []
+    progress_updates = []
+    preflight_cancel_checks = []
+
+    def fake_authnd_send(**kwargs):
+        entered_preflight.set()
+        assert release_preflight.wait(2.0)
+        preflight_cancel_checks.append(kwargs["cancel_check"]())
+        # Exercise the final atomic boundary as well, even though the real
+        # AuthND helper exits as soon as the cancellation check turns true.
+        kwargs["before_send_callback"]()
+        provider_posts.append(True)
+        return {
+            "content": "translated",
+            "finish_reason": "stop",
+            "finish_reason_explicit": True,
+            "finish_reason_inference": "provider",
+            "usage": None,
+        }
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    unified, client = _make_missing_finish_client(
+        monkeypatch, "authnd/moonshotai/kimi-k3",
+    )
+    request_id = "authnd-graceful-pending"
+    unified._api_watchdog_reset()
+    unified._api_watchdog_started(
+        "glossary", request_id=request_id, chapter=12, queued=True,
+    )
+    outcome = {}
+
+    def run_request():
+        try:
+            tls = client._get_thread_local_client()
+            tls.current_request_id = request_id
+            tls.pre_api_call_callback = lambda: progress_updates.append(True)
+            outcome["result"] = client._send_authnd([], 0.2, 1024, "test")
+        except Exception as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_request)
+    worker.start()
+    assert entered_preflight.wait(2.0)
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert unified._api_watchdog_clear_pending_requests() == 1
+    release_preflight.set()
+    worker.join(2.0)
+
+    assert not worker.is_alive()
+    assert isinstance(outcome.get("error"), unified.UnifiedClientError)
+    assert outcome["error"].error_type == "cancelled"
+    assert preflight_cancel_checks == [True]
+    assert progress_updates == []
+    assert provider_posts == []
+    assert unified.get_api_watchdog_state()["in_flight"] == 0
+    unified._api_watchdog_reset()
+
+
+def test_authnd_graceful_stop_preserves_claimed_provider_call(monkeypatch):
+    import unified_api_client as unified
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setattr(unified, "_api_watchdog_external_write", lambda _state: None)
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+    progress_updates = []
+
+    def fake_authnd_send(**kwargs):
+        kwargs["before_send_callback"]()
+        provider_started.set()
+        assert release_provider.wait(2.0)
+        # AuthND checks this repeatedly while consuming SSE chunks.  A graceful
+        # stop must not turn it true after the provider boundary was claimed.
+        assert kwargs["cancel_check"]() is False
+        return {
+            "content": "translated",
+            "finish_reason": "stop",
+            "finish_reason_explicit": True,
+            "finish_reason_inference": "provider",
+            "usage": None,
+        }
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    unified, client = _make_missing_finish_client(
+        monkeypatch, "authnd/moonshotai/kimi-k3",
+    )
+    request_id = "authnd-graceful-active"
+    unified._api_watchdog_reset()
+    unified._api_watchdog_started(
+        "glossary", request_id=request_id, chapter=12, queued=True,
+    )
+    outcome = {}
+
+    def run_request():
+        try:
+            tls = client._get_thread_local_client()
+            tls.current_request_id = request_id
+            tls.pre_api_call_callback = lambda: progress_updates.append(True)
+            outcome["result"] = client._send_authnd([], 0.2, 1024, "test")
+        except Exception as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_request)
+    worker.start()
+    assert provider_started.wait(2.0)
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    assert unified._api_watchdog_clear_pending_requests() == 0
+    assert unified.get_api_watchdog_state()["in_flight"] == 1
+    release_provider.set()
+    worker.join(2.0)
+
+    assert not worker.is_alive()
+    assert "error" not in outcome
+    assert outcome["result"].content == "translated"
+    assert progress_updates == [True]
+    unified._api_watchdog_reset()
+
+
+def test_graceful_stop_blocks_next_empty_truncation_retry(monkeypatch):
+    """A claimed AuthND call may finish, but it must not launch retry N+1."""
+    import unified_api_client as unified
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "0")
+    monkeypatch.setenv("RETRY_TRUNCATED", "1")
+    monkeypatch.setenv("TRUNCATION_RETRY_ATTEMPTS", "3")
+    unified, client = _make_missing_finish_client(
+        monkeypatch, "authnd/moonshotai/kimi-k3",
+    )
+    provider_requests = []
+
+    def fake_send_internal(**_kwargs):
+        provider_requests.append(True)
+        # This represents Stop being pressed while the already-claimed AuthND
+        # stream is running. Its truncated result is still allowed to return.
+        monkeypatch.setenv("GRACEFUL_STOP", "1")
+        return "", "length"
+
+    monkeypatch.setattr(client, "_send_internal", fake_send_internal)
+
+    with pytest.raises(unified.UnifiedClientError) as exc_info:
+        client._retry_empty_truncated_response(
+            messages=[{"role": "user", "content": "translate"}],
+            temperature=0.2,
+            max_tokens=1024,
+            max_completion_tokens=None,
+            context="glossary",
+            retry_reason=None,
+            request_id="authnd-truncation-graceful-stop",
+            image_data=None,
+            finish_reason="length",
+        )
+
+    assert exc_info.value.error_type == "cancelled"
+    assert provider_requests == [True]
+
+
+@pytest.mark.parametrize(
+    "provider,model,send_attr,result",
+    MISSING_FINISH_PROVIDERS[:1],
+)
+def test_missing_finish_reason_toggle_on_routes_to_prohibited_content(
+    monkeypatch,
+    provider,
+    model,
+    send_attr,
+    result,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_send(**_kwargs):
+        attempts.append(1)
+        return dict(result)
+
+    monkeypatch.setattr(unified, send_attr, fake_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(monkeypatch, model)
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id=f"{provider}-missing-finish-toggle-on",
+    )
+
+    output = "\n".join(logs)
+    assert finish_reason == "prohibited_content"
+    assert len(attempts) == 1
+    assert f"{provider}: missing finish_reason fallback triggered" in output.lower()
+    assert "toggle is on" in output.lower()
+
+
+@pytest.mark.parametrize(
+    "provider,model,send_attr,result",
+    MISSING_FINISH_PROVIDERS[:1],
+)
+def test_missing_finish_reason_toggle_off_is_api_error_and_globally_retried(
+    monkeypatch,
+    provider,
+    model,
+    send_attr,
+    result,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_send(**_kwargs):
+        attempts.append(1)
+        return dict(result)
+
+    monkeypatch.setattr(unified, send_attr, fake_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(monkeypatch, model)
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    with pytest.raises(unified.UnifiedClientError) as exc_info:
+        if provider == "ocagy":
+            client._send_ocagy([], 0.2, 1024, "test")
+        else:
+            client._send_authnd([], 0.2, 1024, "test")
+    assert exc_info.value.error_type == "api_error"
+    attempts.clear()
+    logs.clear()
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id=f"{provider}-missing-finish-toggle-off",
+    )
+
+    output = "\n".join(logs)
+    assert finish_reason == "error"
+    assert len(attempts) == 3
+    assert f"{provider}: missing finish_reason fallback triggered" in output.lower()
+    assert "toggle is off" in output.lower()
+    assert "api_error for global retry" in output.lower()
+    assert "server error (api error)" in output.lower()
+
+
+def test_authnd_completed_done_stream_is_accepted_without_duplicate_retry(
+    monkeypatch,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_authnd_send(**_kwargs):
+        attempts.append(1)
+        return dict(MISSING_FINISH_PROVIDERS[1][3])
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch, "authnd/z-ai/glm-5.1",
+    )
+
+    content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "Hi"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="authnd-completed-done",
+    )
+
+    assert content == "translated"
+    assert finish_reason == "stop"
+    assert attempts == [1]
+
+
+def test_authnd_interruptible_transport_retains_caller_thread_identity(monkeypatch):
+    import authnd_auth
+
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+    monkeypatch.delenv("GRACEFUL_STOP", raising=False)
+    authnd_auth.reset_cancel()
+    observed_names = []
+
+    @authnd_auth._interruptible_transport
+    def fake_transport():
+        observed_names.append(threading.current_thread().name)
+        return "ok"
+
+    caller_name = threading.current_thread().name
+    assert fake_transport() == "ok"
+    assert observed_names == [f"AuthNDTransport[{caller_name}]"]
+
+
+def test_direct_text_maps_authnd_transport_logs_to_api_worker():
+    import translator_gui
+
+    resolve = translator_gui._InputOutputDialog._thread_key_from_log
+    source = "AuthNDTransport[Thread-2 (api_call)]"
+
+    assert resolve("🧠 [authnd] Thinking...", source) == "Thread-2 (api_call)"
+    assert resolve("translated text", source) == "Thread-2 (api_call)"
+    assert (
+        resolve("translated text", "AuthNDTransport[TranslationWorker_7]")
+        == "TranslationWorker_7"
+    )
+
+
+def test_direct_text_displays_authnd_queue_state_on_request_card():
+    import translator_gui
+
+    dialog_type = translator_gui._InputOutputDialog
+    segment = {"phase": "processing", "complete": False}
+
+    class Harness:
+        _DIRECT_RESPONSE_PAYLOAD_PREFIX = dialog_type._DIRECT_RESPONSE_PAYLOAD_PREFIX
+        _DIRECT_GLOSSARY_STREAM_START_PREFIX = (
+            dialog_type._DIRECT_GLOSSARY_STREAM_START_PREFIX
+        )
+        _HIDDEN_STREAM_START_LOG_PHRASES = (
+            dialog_type._HIDDEN_STREAM_START_LOG_PHRASES
+        )
+        _STREAM_END_LOG_PHRASES = dialog_type._STREAM_END_LOG_PHRASES
+        _PIPELINE_LOG_PHRASES = dialog_type._PIPELINE_LOG_PHRASES
+        _stream_phase_by_thread = {}
+
+        @staticmethod
+        def _request_segment_for_thread(_source_thread=None, create=True):
+            assert create is True
+            return segment
+
+    kind = dialog_type._classify_line(
+        Harness(),
+        "⏳ AuthND: NVIDIA queue / prefill — response headers received "
+        "in 12.4s; waiting for first token",
+        "Thread-2 (api_call)",
+        channel_hint="processing",
+    )
+
+    assert kind == "log"
+    assert segment["phase"] == "queue"
+    assert segment["status_label"] == (
+        "NVIDIA queue / prefill · Headers in 12.4s · Waiting for first token"
+    )
+
+
+@pytest.mark.parametrize(
+    "provider,model,send_attr,result",
+    MISSING_FINISH_PROVIDERS,
+)
+def test_explicit_unknown_finish_reason_is_not_treated_as_missing(
+    monkeypatch,
+    provider,
+    model,
+    send_attr,
+    result,
+):
+    import unified_api_client as unified
+
+    explicit_result = dict(result)
+    explicit_result["finish_reason"] = "unknown"
+    if provider == "ocagy":
+        explicit_result["finish_reason_fallback"] = False
+    else:
+        explicit_result["finish_reason_explicit"] = True
+        explicit_result["finish_reason_inference"] = "provider"
+
+    monkeypatch.setattr(unified, send_attr, lambda **_kwargs: explicit_result)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "1")
+    _unified, client = _make_missing_finish_client(monkeypatch, model)
+
+    if provider == "ocagy":
+        response = client._send_ocagy([], 0.2, 1024, "test")
+    else:
+        response = client._send_authnd([], 0.2, 1024, "test")
+
+    assert response.finish_reason == "unknown"
+
+
+def test_translation_environment_exports_disable_empty_safety_toggle():
+    gui_source = desktop_gui_source()
+    environment_builder = gui_source.split(
+        "    def _get_environment_variables(self, epub_path, api_key):",
+        1,
+    )[1].split("\n    def ", 1)[0]
+
+    assert "'DISABLE_EMPTY_SAFETY_HEURISTIC':" in environment_builder
+
+    # U2: the glossary run builds env_updates in the split-out _build_glossary_extraction_env
+    glossary_environment_builder = gui_source.split(
+        "    def _build_glossary_extraction_env(",
+        1,
+    )[1].split("\n    def ", 1)[0]
+
+    assert "'DISABLE_EMPTY_SAFETY_HEURISTIC':" in glossary_environment_builder
+
+
+@pytest.mark.parametrize("explicit_finish_reason", ("stop", "unknown"))
+def test_authnd_explicit_empty_finish_is_not_prohibited_when_empty_safety_disabled(
+    monkeypatch,
+    explicit_finish_reason,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_authnd_send(**_kwargs):
+        attempts.append(1)
+        return {
+            "content": "",
+            "finish_reason": explicit_finish_reason,
+            "finish_reason_explicit": True,
+            "finish_reason_inference": "provider",
+            "usage": None,
+            "reasoning_content": "Enkidu blocked Sieg's hand-blade.",
+            "raw_response": {
+                "choices": [{
+                    "delta": {
+                        "reasoning_content": "Enkidu blocked Sieg's hand-blade.",
+                        "content": "",
+                    },
+                    "finish_reason": explicit_finish_reason,
+                }],
+            },
+        }
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch,
+        "authnd/deepseek-ai/deepseek-v4-flash",
+    )
+    monkeypatch.setattr(client, "_dump_raw_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_log_truncation_failure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_attach_usage_to_last_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_handle_empty_result", lambda *args, **kwargs: "[EMPTY]")
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id=f"authnd-empty-explicit-{explicit_finish_reason}",
+    )
+
+    assert content == "[EMPTY]"
+    assert finish_reason == "error"
+    assert len(attempts) == 3
+    output = "\n".join(logs).lower()
+    assert "routing api_error through global retry logic" in output
+    assert "global api_error retries exhausted after 3 attempt(s)" in output
+    assert "qa issue: api_error" in output
+    assert "prohibited content detected" not in output
+
+
+def test_finish_reason_error_uses_global_retries_then_returns_api_error_for_qa(
+    monkeypatch,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_response(*_args, **_kwargs):
+        attempts.append(1)
+        return unified.UnifiedResponse(
+            content="partial provider response",
+            finish_reason="error",
+            raw_response={"finish_reason": "error"},
+        )
+
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch,
+        "ocagy/gemini-3.1-pro-high",
+    )
+    monkeypatch.setattr(client, "_get_response", fake_response)
+    monkeypatch.setattr(client, "_save_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_attach_usage_to_last_payload", lambda *args, **kwargs: None)
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="explicit-finish-reason-error",
+    )
+
+    output = "\n".join(logs).lower()
+    assert content == "partial provider response"
+    assert finish_reason == "error"
+    assert len(attempts) == 3
+    assert "server error (api error)" in output
+    assert "global api_error retries exhausted after 3 attempt(s)" in output
+    assert "qa issue: api_error" in output
+
+
+@pytest.mark.parametrize("explicit_finish_reason", ("stop", "unknown"))
+def test_authnd_explicit_empty_finish_is_prohibited_when_empty_safety_enabled(
+    monkeypatch,
+    explicit_finish_reason,
+):
+    import unified_api_client as unified
+
+    monkeypatch.setattr(
+        unified,
+        "_authnd_send",
+        lambda **_kwargs: {
+            "content": "",
+            "finish_reason": explicit_finish_reason,
+            "finish_reason_explicit": True,
+            "finish_reason_inference": "provider",
+            "usage": None,
+            "raw_response": {"finish_reason": explicit_finish_reason},
+        },
+    )
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "0")
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch,
+        "authnd/deepseek-ai/deepseek-v4-flash",
+    )
+    monkeypatch.setattr(client, "_dump_raw_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_log_truncation_failure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_attach_usage_to_last_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_handle_empty_result", lambda *args, **kwargs: "[EMPTY]")
+
+    content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id=f"authnd-empty-safety-enabled-{explicit_finish_reason}",
+    )
+
+    assert content == "[EMPTY]"
+    assert finish_reason == "content_filter"
+
+
+def test_authnd_empty_inferred_stop_toggle_off_is_api_error_not_prohibited(
+    monkeypatch,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_authnd_send(**_kwargs):
+        attempts.append(1)
+        return {
+            "content": "",
+            "finish_reason": "stop",
+            "finish_reason_explicit": False,
+            "finish_reason_inference": "done_without_finish_reason",
+            "usage": None,
+            "raw_response": {"finish_reason": None},
+        }
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch,
+        "authnd/deepseek-ai/deepseek-v4-flash",
+    )
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="authnd-empty-inferred-stop",
+    )
+
+    output = "\n".join(logs).lower()
+    assert finish_reason == "error"
+    assert len(attempts) == 3
+    assert "api_error for global retry" in output
+    assert "prohibited content detected" not in output
+
+
+def test_empty_safety_toggle_applies_to_providers_outside_old_allowlist(
+    monkeypatch,
+):
+    import unified_api_client as unified
+
+    client = object.__new__(unified.UnifiedClient)
+    response = unified.UnifiedResponse(
+        content="",
+        finish_reason="stop",
+        raw_response={"finish_reason": "stop"},
+    )
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "0")
+    assert (
+        client._detect_safety_filter(
+            [],
+            "",
+            "stop",
+            response,
+            "future-provider",
+        )
+        is True
+    )
+
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
+    assert (
+        client._detect_safety_filter(
+            [],
+            "",
+            "stop",
+            response,
+            "future-provider",
+        )
+        is False
+    )
+
+
+def test_empty_safety_toggle_defaults_to_enabled(monkeypatch):
+    import unified_api_client as unified
+
+    client = object.__new__(unified.UnifiedClient)
+    response = unified.UnifiedResponse(
+        content="",
+        finish_reason="stop",
+        raw_response={"finish_reason": "stop"},
+    )
+    monkeypatch.delenv("DISABLE_EMPTY_SAFETY_HEURISTIC", raising=False)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+
+    assert (
+        client._detect_safety_filter(
+            [],
+            "",
+            "stop",
+            response,
+            "future-provider",
+        )
+        is False
+    )

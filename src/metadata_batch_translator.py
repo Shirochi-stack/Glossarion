@@ -1,0 +1,4458 @@
+"""
+Metadata and Batch Header Translation Module
+Handles custom metadata fields and batch chapter header translation
+Complete implementation - no truncation
+"""
+
+import os
+import json
+import ast
+
+# GUI imports - optional for non-GUI usage
+try:
+    import dpi_setup
+    dpi_setup.configure()
+except Exception:
+    pass
+try:
+    from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
+                                   QCheckBox, QRadioButton, QButtonGroup, QWidget, QScrollArea,
+                                   QFrame, QGroupBox, QTabWidget, QTextEdit, QLineEdit, QComboBox,
+                                   QMessageBox, QApplication)
+    from PySide6.QtGui import QFont, QIcon
+    from PySide6.QtCore import Qt, QSize
+    HAS_GUI = True
+except ImportError:
+    HAS_GUI = False
+    # Dummy classes for non-GUI usage
+    QDialog = object
+    QWidget = object
+from typing import Dict, List, Tuple, Optional, Any
+import zipfile
+from bs4 import BeautifulSoup
+from epub_metadata_utils import extract_dc_metadata
+from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
+from language_options import TARGET_LANGUAGES
+from translation_artifacts import update_translation_artifact_progress
+from epub_package import find_epub_opf_member
+from metadata_defaults import ensure_metadata_prompt_defaults, reset_metadata_prompts
+import re
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
+
+_GLOSSARY_CONFIG_OPTIONS = {
+    'append_glossary': 'APPEND_GLOSSARY',
+    'append_glossary_prompt': 'APPEND_GLOSSARY_PROMPT',
+    'compress_glossary_prompt': 'COMPRESS_GLOSSARY_PROMPT',
+    'add_additional_glossary': 'ADD_ADDITIONAL_GLOSSARY',
+    'enable_unified_glossary': 'ENABLE_UNIFIED_GLOSSARY',
+    'generate_unified_glossary': 'GENERATE_UNIFIED_GLOSSARY',
+    'unified_glossary_source_language': 'UNIFIED_GLOSSARY_SOURCE_LANGUAGE',
+    'unified_glossary_combine_all_languages': 'UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES',
+    'unified_glossary_exclude_gender_entries': 'UNIFIED_GLOSSARY_EXCLUDE_GENDER_ENTRIES',
+    'auto_glossary_mode': 'AUTO_GLOSSARY_MODE',
+    'manual_glossary': 'MANUAL_GLOSSARY',
+    'glossary_shared_dir': 'GLOSSARY_SHARED_DIR',
+    'emergency_glossary_compliance': 'EMERGENCY_GLOSSARY_COMPLIANCE',
+    'emergency_glossary_compliance_mode': 'EMERGENCY_GLOSSARY_COMPLIANCE_MODE',
+    'emergency_glossary_compliance_custom_types': 'EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES',
+    'emergency_glossary_compliance_min_chars': 'EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS',
+    'glossary_skip_gender_tracking': 'GLOSSARY_SKIP_GENDER_TRACKING',
+    'glossary_gender_noise_threshold': 'GLOSSARY_GENDER_NOISE_THRESHOLD',
+    'glossary_gender_tracking_bias': 'GLOSSARY_GENDER_TRACKING_BIAS',
+    'compress_glossary_strict_matching_mode': 'COMPRESS_GLOSSARY_STRICT_MATCHING_MODE',
+    'compress_glossary_strict_matching_custom_types': 'COMPRESS_GLOSSARY_STRICT_MATCHING_CUSTOM_TYPES',
+    'compress_glossary_consider_translated_column': 'COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN',
+    'compress_glossary_multipass_exclude_matching': 'COMPRESS_GLOSSARY_MULTIPASS_EXCLUDE_MATCHING',
+    'output_language': 'OUTPUT_LANGUAGE',
+    'model': 'MODEL',
+}
+
+
+def _glossary_request_settings(config):
+    """Return request-local glossary settings without mutating ``os.environ``."""
+    config = config or {}
+    explicit = config.get('_glossary_settings')
+    settings = dict(explicit) if isinstance(explicit, dict) else {}
+    for config_name, env_name in _GLOSSARY_CONFIG_OPTIONS.items():
+        if config_name not in config:
+            continue
+        value = config.get(config_name)
+        if isinstance(value, bool):
+            value = '1' if value else '0'
+        elif isinstance(value, (list, tuple, dict)):
+            value = json.dumps(value, ensure_ascii=False)
+        settings[env_name] = value
+    return settings or None
+
+
+def _prepare_artifact_glossary_request(
+    system_prompt,
+    payload,
+    config,
+    client,
+    *,
+    chapter_ref=None,
+):
+    """Use the chapter translation glossary pipeline for metadata artifacts."""
+    config = config or {}
+    settings = _glossary_request_settings(config)
+    output_dir = (
+        config.get('output_dir')
+        or getattr(client, 'output_dir', None)
+        or (settings or {}).get('OUTPUT_DIRECTORY')
+        or os.getenv('OUTPUT_DIRECTORY')
+        or os.getcwd()
+    )
+    source_path = (
+        config.get('source_path')
+        or (settings or {}).get('GLOSSARY_SOURCE_PATH')
+        or (settings or {}).get('EPUB_PATH')
+        or os.getenv('GLOSSARY_SOURCE_PATH')
+        or os.getenv('EPUB_PATH')
+    )
+    from TransateKRtoEN import prepare_glossary_aware_request
+
+    return prepare_glossary_aware_request(
+        system_prompt,
+        payload,
+        output_dir=output_dir,
+        glossary_path=config.get('glossary_path'),
+        source_path=source_path,
+        chapter_ref=chapter_ref,
+        settings=settings,
+    )
+
+
+def _first_header_chapter_ref(headers):
+    """Return the chapter identity represented by the first item in a batch."""
+    if not headers:
+        return None
+    first_key = next(iter(headers))
+    try:
+        chapter_num = float(first_key)
+        if chapter_num.is_integer():
+            chapter_num = int(chapter_num)
+    except (TypeError, ValueError):
+        return None
+    return {'chapter_num': chapter_num}
+
+
+
+# ─── "Configure Metadata Translation" field rules (U7) ──────────────────────
+# Lifted out of MetadataBatchTranslatorUI.configure_metadata_fields so the
+# mobile Headers & metadata screen applies the same tables and save rules.
+
+#: Standard metadata fields: field -> (label, description), in dialog order.
+METADATA_STANDARD_FIELDS = {
+    'title': ('Title', 'The book title'),
+    'creator': ('Author/Creator', 'The author or creator'),
+    'publisher': ('Publisher', 'The publishing company'),
+    'subject': ('Subject/Genre', 'Subject categories or genres'),
+    'description': ('Description', 'Book synopsis'),
+    'series': ('Series Name', 'Name of the book series'),
+    'language': ('Language', 'Original language'),
+    'date': ('Publication Date', 'When published'),
+    'rights': ('Rights', 'Copyright information')
+}
+
+#: Fields that are enabled by default.
+#: Title used to be controlled exclusively by the main toggle. Keep
+#: it enabled when migrating configurations without an explicit key.
+METADATA_DEFAULT_ENABLED_FIELDS = frozenset({'title', 'description', 'subject'})
+
+
+def saved_metadata_fields_for_epub(translate_fields_config, epub_path):
+    """Get saved field selections for a specific EPUB."""
+    basename = os.path.basename(epub_path) if epub_path else ''
+    # Check for per-EPUB config first
+    per_epub = translate_fields_config.get('_per_epub', {})
+    if basename in per_epub:
+        return per_epub[basename]
+    # Fallback to flat config
+    return translate_fields_config
+
+
+def metadata_field_checked(field, saved, field_sync_state, default_value):
+    """A field checkbox's state: synced state if available, then saved, then default."""
+    if field in field_sync_state:
+        checked = field_sync_state[field]
+    else:
+        checked = saved.get(field, default_value)
+        field_sync_state[field] = checked
+    return checked
+
+
+def store_metadata_field_selection(translate_fields_config, epub_paths, epub_path, saved):
+    """Store one EPUB's checkbox states (``_per_epub`` with several EPUBs, else the flat dict)."""
+    # Store in translate_fields_config
+    if len(epub_paths) > 1:
+        if '_per_epub' not in translate_fields_config:
+            translate_fields_config['_per_epub'] = {}
+        translate_fields_config['_per_epub'][os.path.basename(epub_path)] = saved
+    else:
+        translate_fields_config.clear()
+        translate_fields_config.update(saved)
+
+
+def final_metadata_fields_config(translate_fields_config, epub_paths):
+    """``translate_metadata_fields`` to save: per-EPUB data plus their merge, or the flat dict."""
+    # Build final config
+    if len(epub_paths) > 1:
+        # Multi-EPUB: merge all per-epub selections into a combined flat dict
+        # for backward compat, while also keeping per-epub data
+        combined = {}
+        per_epub = translate_fields_config.get('_per_epub', {})
+        for basename, fields in per_epub.items():
+            combined.update(fields)
+        combined['_per_epub'] = per_epub
+        return combined
+    else:
+        # Single EPUB: flat dict
+        return {k: v for k, v in translate_fields_config.items() if k != '_per_epub'}
+
+
+class MetadataBatchTranslatorUI:
+    """UI handlers for metadata and batch translation features"""
+    
+    def __init__(self, parent_gui):
+        """Initialize with reference to main TranslatorGUI"""
+        self.gui = parent_gui
+        # WindowManager and UIHelper removed - not needed in PySide6
+        
+        # Initialize default prompts if not in config
+        self._initialize_default_prompts()
+    
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        from PySide6.QtCore import QTimer
+        
+        checkbox = QCheckBox(text)
+        # Don't set inline stylesheet - use the global stylesheet from container
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_checkmark():
+            try:
+                # Check if checkmark still exists and is valid
+                if checkmark and not checkmark.isHidden() or True:  # Always try to set geometry
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        def update_checkmark():
+            try:
+                # Check if both widgets still exist
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        
+        # Use try-except to handle case where widgets are deleted before timer fires
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+        
+        QTimer.singleShot(0, safe_init)
+        
+        return checkbox
+    
+    def _initialize_default_prompts(self):
+        """Initialize all default prompts in config if not present"""
+        # Defaults live in metadata_defaults (GUI-free, shared with mobile)
+        ensure_metadata_prompt_defaults(self.gui.config)
+
+            
+    def configure_metadata_fields(self):
+            """Configure which metadata fields to translate"""
+            # Ensure QApplication instance exists
+            import sys
+            app = QApplication.instance()
+            if not app:
+                try:
+                    import dpi_setup
+                    dpi_setup.configure()
+                except Exception:
+                    pass
+                app = QApplication(sys.argv)
+
+            # Always recreate dialog to stay in sync with current EPUB selection
+            if hasattr(self, '_metadata_fields_dialog') and self._metadata_fields_dialog is not None:
+                try:
+                    self._metadata_fields_dialog.close()
+                    self._metadata_fields_dialog.deleteLater()
+                except (RuntimeError, Exception):
+                    pass
+                self._metadata_fields_dialog = None
+
+            # Create dialog — child of other_settings, non-modal
+            parent = getattr(self.gui, '_other_settings_dialog', None) or None
+            dialog = QDialog(parent)
+            dialog.setWindowTitle("Configure Metadata Translation")
+            dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+            dialog.setWindowModality(Qt.NonModal)
+
+            # Get screen dimensions and calculate size
+            screen = app.primaryScreen().geometry()
+            dialog_width = int(screen.width() * 0.28)
+            dialog_height = int(screen.height() * 0.50)
+            dialog.resize(dialog_width, dialog_height)
+
+            # Hide on close
+            dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+            self._metadata_fields_dialog = dialog
+            
+            # Set window icon
+            # Try several locations to find the icon
+            if getattr(sys, 'frozen', False):
+                # In .exe environment
+                icon_path = os.path.join(sys._MEIPASS, 'Halgakos.ico')
+            else:
+                # In Python environment
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if not os.path.exists(icon_path):
+                    icon_path = 'Halgakos.ico'
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+            
+            # Apply global stylesheet for checkboxes and radio buttons
+            checkbox_radio_style = """
+                QCheckBox {
+                    color: white;
+                    spacing: 6px;
+                }
+                QCheckBox::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border: 1px solid #5a9fd4;
+                    border-radius: 2px;
+                    background-color: #2d2d2d;
+                }
+                QCheckBox::indicator:hover {
+                    border: 1px solid #7ab8e8;
+                    background-color: #3d3d3d;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #5a9fd4;
+                    border: 1px solid #5a9fd4;
+                }
+                QCheckBox::indicator:checked:hover {
+                    background-color: #7ab8e8;
+                    border: 1px solid #7ab8e8;
+                }
+                QCheckBox::indicator:disabled {
+                    border: 1px solid #555555;
+                    background-color: #1e1e1e;
+                }
+                QRadioButton {
+                    color: white;
+                    spacing: 6px;
+                }
+                QRadioButton::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border: 1px solid #5a9fd4;
+                    border-radius: 7px;
+                    background-color: #2d2d2d;
+                }
+                QRadioButton::indicator:hover {
+                    border: 1px solid #7ab8e8;
+                    background-color: #3d3d3d;
+                }
+                QRadioButton::indicator:checked {
+                    background-color: #5a9fd4;
+                    border: 1px solid #5a9fd4;
+                }
+                QRadioButton::indicator:checked:hover {
+                    background-color: #7ab8e8;
+                    border: 1px solid #7ab8e8;
+                }
+                QRadioButton::indicator:disabled {
+                    border: 1px solid #555555;
+                    background-color: #1e1e1e;
+                }
+                QGroupBox {
+                    color: white;
+                    border: 1px solid #555555;
+                    border-radius: 4px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    subcontrol-position: top left;
+                    left: 10px;
+                    padding: 0 5px;
+                    color: #5a9fd4;
+                    font-weight: bold;
+                }
+            """
+            dialog.setStyleSheet(checkbox_radio_style)
+            
+            # Main layout
+            main_layout = QVBoxLayout()
+            main_layout.setContentsMargins(20, 20, 20, 20)
+            
+            # --- Gather all EPUB paths ---
+            epub_paths = []
+            selected_files = getattr(self.gui, 'selected_epub_files', None) or getattr(self.gui, 'selected_files', None) or []
+            for f in selected_files:
+                f_str = str(f)
+                if f_str.lower().endswith('.epub') and os.path.isfile(f_str):
+                    epub_paths.append(f_str)
+            # Fallback to single entry
+            if not epub_paths:
+                single = None
+                for attr in ['entry_epub', 'file_entry', 'epub_entry']:
+                    if hasattr(self.gui, attr):
+                        w = getattr(self.gui, attr)
+                        if hasattr(w, 'text'):
+                            single = w.text().strip()
+                            break
+                if single and single.lower().endswith('.epub') and os.path.isfile(single):
+                    epub_paths = [single]
+            
+            # Title
+            title_label = QLabel("Select Metadata Fields to Translate")
+            title_font = QFont()
+            title_font.setPointSize(14)
+            title_font.setBold(True)
+            title_label.setFont(title_font)
+            main_layout.addWidget(title_label)
+            
+            # Description
+            desc_label = QLabel("These fields will be translated along with or separately from the book title:")
+            desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+            desc_label.setWordWrap(True)
+            desc_label.setContentsMargins(0, 10, 0, 10)
+            main_layout.addWidget(desc_label)
+            
+            # --- EPUB dropdown navigator (only visible when multiple EPUBs) ---
+            nav_widget = QWidget()
+            nav_layout = QHBoxLayout(nav_widget)
+            nav_layout.setContentsMargins(0, 0, 0, 10)
+            nav_layout.setSpacing(6)
+            
+            nav_arrow_style = """
+                QPushButton {
+                    background-color: #3a3a3a; color: white; border: 1px solid #555;
+                    border-radius: 3px; padding: 4px 10px; font-size: 11pt; font-weight: bold;
+                    min-width: 28px; max-width: 28px;
+                }
+                QPushButton:hover { background-color: #505050; border-color: #5a9fd4; }
+                QPushButton:disabled { color: #555; background-color: #2a2a2a; }
+            """
+            
+            prev_btn = QPushButton("◀")
+            prev_btn.setStyleSheet(nav_arrow_style)
+            prev_btn.setToolTip("Previous EPUB")
+            nav_layout.addWidget(prev_btn)
+            
+            from PySide6.QtWidgets import QComboBox
+            epub_combo = QComboBox()
+            epub_combo.setStyleSheet("""
+                QComboBox {
+                    background-color: #2b2b2b; color: white; border: 1px solid #555;
+                    border-radius: 3px; padding: 4px 8px; font-size: 10pt;
+                }
+                QComboBox:hover { border-color: #5a9fd4; }
+                QComboBox::drop-down {
+                    border: none; width: 20px;
+                }
+                QComboBox::down-arrow { image: none; border: none; }
+                QComboBox QAbstractItemView {
+                    background-color: #2b2b2b; color: white;
+                    selection-background-color: #5a9fd4;
+                    border: 1px solid #555;
+                }
+            """)
+            for ep in epub_paths:
+                epub_combo.addItem(os.path.basename(ep), ep)
+            nav_layout.addWidget(epub_combo, 1)
+            
+            next_btn = QPushButton("▶")
+            next_btn.setStyleSheet(nav_arrow_style)
+            next_btn.setToolTip("Next EPUB")
+            nav_layout.addWidget(next_btn)
+            
+            # Counter label
+            counter_label = QLabel("")
+            counter_label.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+            nav_layout.addWidget(counter_label)
+            
+            main_layout.addWidget(nav_widget)
+            
+            # Hide navigator if only 1 (or 0) EPUBs
+            if len(epub_paths) <= 1:
+                nav_widget.hide()
+            
+            # --- Scrollable fields area (rebuilt on EPUB switch) ---
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.NoFrame)
+            main_layout.addWidget(scroll_area)
+            
+            # State tracking
+            per_epub_field_vars = {}  # {epub_path: {field: checkbox}}
+            current_epub_state = {'path': epub_paths[0] if epub_paths else None}
+            # Shared field sync state — when a checkbox is toggled, sync across all EPUBs
+            field_sync_state = {}  # {field_name: bool}
+            sync_enabled = {'active': True}  # Guard to prevent recursion
+            
+            # Fields that are enabled by default (shared table)
+            default_enabled_fields = METADATA_DEFAULT_ENABLED_FIELDS
+            
+            # Get saved per-EPUB settings (or flat dict for backward compat)
+            translate_fields_config = self.gui.config.get('translate_metadata_fields', {})
+            
+            standard_fields = METADATA_STANDARD_FIELDS
+            
+            def _get_saved_fields_for_epub(epub_path):
+                """Get saved field selections for a specific EPUB."""
+                return saved_metadata_fields_for_epub(translate_fields_config, epub_path)
+            
+            def _rebuild_fields(epub_path):
+                """Rebuild the fields area for the given EPUB."""
+                # Save current selections before switching
+                _save_current_selections()
+                
+                current_epub_state['path'] = epub_path
+                
+                # Detect metadata for this EPUB
+                all_fields = self._detect_all_metadata_fields_for_epub(epub_path)
+                saved = _get_saved_fields_for_epub(epub_path)
+                
+                # Create new container
+                fields_container = QWidget()
+                fields_layout = QVBoxLayout(fields_container)
+                fields_layout.setContentsMargins(0, 0, 0, 0)
+                
+                field_vars = {}
+                
+                if not all_fields:
+                    empty_label = QLabel("No metadata fields found in this EPUB.")
+                    empty_label.setStyleSheet("color: gray; font-size: 11pt;")
+                    empty_label.setAlignment(Qt.AlignCenter)
+                    fields_layout.addWidget(empty_label)
+                else:
+                    # Standard fields section
+                    section_label = QLabel("Standard Metadata Fields:")
+                    section_font = QFont()
+                    section_font.setPointSize(12)
+                    section_font.setBold(True)
+                    section_label.setFont(section_font)
+                    section_label.setContentsMargins(0, 10, 0, 5)
+                    fields_layout.addWidget(section_label)
+                    
+                    for field, (label, description) in standard_fields.items():
+                        if field in all_fields:
+                            frame = QWidget()
+                            frame_layout = QHBoxLayout(frame)
+                            frame_layout.setContentsMargins(0, 5, 0, 5)
+                            
+                            # Every standard field, including the title, is
+                            # configurable here. The main "Translate Book
+                            # Title / Metadata" toggle remains the overall gate.
+                            default_value = field in default_enabled_fields
+                            # Use synced state if available, then saved, then default
+                            checked = metadata_field_checked(field, saved, field_sync_state, default_value)
+                            checkbox = self._create_styled_checkbox(f"{label}:")
+                            checkbox.setChecked(checked)
+                            checkbox.setMinimumWidth(200)
+                            field_vars[field] = checkbox
+                            # Connect sync handler
+                            def _make_sync(f):
+                                def _on_toggle(state):
+                                    if sync_enabled['active']:
+                                        field_sync_state[f] = bool(state)
+                                return _on_toggle
+                            checkbox.stateChanged.connect(_make_sync(field))
+                            frame_layout.addWidget(checkbox)
+                            
+                            current_value = str(all_fields[field])
+                            if len(current_value) > 50:
+                                current_value = current_value[:47] + "..."
+                            value_label = QLabel(current_value)
+                            value_label.setStyleSheet("color: gray; font-size: 9pt;")
+                            frame_layout.addWidget(value_label)
+                            frame_layout.addStretch()
+                            fields_layout.addWidget(frame)
+                    
+                    # Custom fields
+                    custom_fields = {k: v for k, v in all_fields.items() if k not in standard_fields}
+                    if custom_fields:
+                        custom_label = QLabel("Custom Metadata Fields:")
+                        custom_font = QFont()
+                        custom_font.setPointSize(12)
+                        custom_font.setBold(True)
+                        custom_label.setFont(custom_font)
+                        custom_label.setContentsMargins(0, 20, 0, 5)
+                        fields_layout.addWidget(custom_label)
+                        
+                        custom_desc = QLabel("(Non-standard fields found in your EPUB)")
+                        custom_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                        custom_desc.setContentsMargins(0, 0, 0, 10)
+                        fields_layout.addWidget(custom_desc)
+                        
+                        for field, value in custom_fields.items():
+                            frame = QWidget()
+                            frame_layout = QHBoxLayout(frame)
+                            frame_layout.setContentsMargins(0, 5, 0, 5)
+                            
+                            checkbox = self._create_styled_checkbox(f"{field}:")
+                            checked = metadata_field_checked(field, saved, field_sync_state, False)
+                            checkbox.setChecked(checked)
+                            checkbox.setMinimumWidth(200)
+                            field_vars[field] = checkbox
+                            # Connect sync handler
+                            def _make_sync_custom(f):
+                                def _on_toggle(state):
+                                    if sync_enabled['active']:
+                                        field_sync_state[f] = bool(state)
+                                return _on_toggle
+                            checkbox.stateChanged.connect(_make_sync_custom(field))
+                            frame_layout.addWidget(checkbox)
+                            
+                            display_value = str(value)
+                            if len(display_value) > 50:
+                                display_value = display_value[:47] + "..."
+                            value_label = QLabel(display_value)
+                            value_label.setStyleSheet("color: gray; font-size: 9pt;")
+                            frame_layout.addWidget(value_label)
+                            frame_layout.addStretch()
+                            fields_layout.addWidget(frame)
+                
+                fields_layout.addStretch()
+                scroll_area.setWidget(fields_container)
+                per_epub_field_vars[epub_path] = field_vars
+                
+                # Update counter
+                if len(epub_paths) > 1:
+                    idx = epub_paths.index(epub_path) if epub_path in epub_paths else 0
+                    counter_label.setText(f"{idx + 1} / {len(epub_paths)}")
+                    prev_btn.setEnabled(idx > 0)
+                    next_btn.setEnabled(idx < len(epub_paths) - 1)
+            
+            def _save_current_selections():
+                """Save checkbox states for the currently displayed EPUB."""
+                ep = current_epub_state.get('path')
+                if ep and ep in per_epub_field_vars:
+                    saved = {}
+                    for field, cb in per_epub_field_vars[ep].items():
+                        try:
+                            saved[field] = cb.isChecked()
+                        except RuntimeError:
+                            pass
+                    per_epub_field_vars[ep] = None  # Clear widget refs (will be rebuilt)
+                    # Store in translate_fields_config
+                    store_metadata_field_selection(translate_fields_config, epub_paths, ep, saved)
+            
+            # Nav button handlers
+            def _on_prev():
+                idx = epub_combo.currentIndex()
+                if idx > 0:
+                    epub_combo.setCurrentIndex(idx - 1)
+            
+            def _on_next():
+                idx = epub_combo.currentIndex()
+                if idx < epub_combo.count() - 1:
+                    epub_combo.setCurrentIndex(idx + 1)
+            
+            def _on_combo_changed(index):
+                if index >= 0 and index < len(epub_paths):
+                    _rebuild_fields(epub_paths[index])
+            
+            prev_btn.clicked.connect(_on_prev)
+            next_btn.clicked.connect(_on_next)
+            epub_combo.currentIndexChanged.connect(_on_combo_changed)
+            
+            # Initial build
+            if epub_paths:
+                _rebuild_fields(epub_paths[0])
+            
+            # Translation mode
+            mode_group = QGroupBox("Translation Mode")
+            mode_layout = QVBoxLayout()
+            mode_layout.setContentsMargins(10, 10, 10, 10)
+            
+            translation_mode_group = QButtonGroup()
+            current_mode = self.gui.config.get('metadata_translation_mode', 'together')
+            
+            rb1 = QRadioButton("Translate together (single API call)")
+            rb1.setChecked(current_mode == 'together')
+            rb1.setProperty("value", "together")
+            translation_mode_group.addButton(rb1)
+            mode_layout.addWidget(rb1)
+            
+            rb2 = QRadioButton("Translate Metadata separately (2 API calls)")
+            rb2.setChecked(current_mode == 'metadata_separate')
+            rb2.setProperty("value", "metadata_separate")
+            rb2.setToolTip(
+                "Translate the book title first, then translate all selected "
+                "metadata fields together in a second request."
+            )
+            translation_mode_group.addButton(rb2)
+            mode_layout.addWidget(rb2)
+
+            rb3 = QRadioButton("Translate separately (parallel API calls)")
+            rb3.setChecked(current_mode == 'parallel')
+            rb3.setProperty("value", "parallel")
+            translation_mode_group.addButton(rb3)
+            mode_layout.addWidget(rb3)
+            
+            mode_group.setLayout(mode_layout)
+            main_layout.addWidget(mode_group)
+            
+            # Buttons
+            button_layout = QHBoxLayout()
+            button_layout.setSpacing(10)
+            button_layout.addStretch()
+            
+            def save_metadata_config():
+                # Save current EPUB selections first
+                _save_current_selections()
+                
+                # Build final config (per-EPUB data + merge, or the flat dict)
+                self.gui.translate_metadata_fields = final_metadata_fields_config(translate_fields_config, epub_paths)
+                
+                # Get selected translation mode
+                selected_mode = 'together'
+                for button in translation_mode_group.buttons():
+                    if button.isChecked():
+                        selected_mode = button.property("value")
+                        break
+                
+                self.gui.config['translate_metadata_fields'] = self.gui.translate_metadata_fields
+                self.gui.config['metadata_translation_mode'] = selected_mode
+                self.gui.save_config(show_message=False)
+                if hasattr(self.gui, '_sync_metadata_progress_toggle'):
+                    self.gui._sync_metadata_progress_toggle(
+                        bool(getattr(self.gui, 'translate_book_title_var', True))
+                    )
+                dialog.hide()
+            
+            def reset_metadata_config():
+                msg_box = QMessageBox(dialog)
+                msg_box.setIcon(QMessageBox.Question)
+                msg_box.setWindowTitle("Reset Metadata Fields")
+                msg_box.setText("Are you sure you want to reset all metadata field selections to defaults?\n\nDescription and Subject will be enabled; all others will be unchecked.")
+                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg_box.setDefaultButton(QMessageBox.No)
+                msg_box.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
+                if os.path.exists(icon_path):
+                    msg_box.setWindowIcon(QIcon(icon_path))
+                
+                if msg_box.exec() == QMessageBox.Yes:
+                    # Reset sync state to defaults
+                    sync_enabled['active'] = False
+                    for f in list(field_sync_state.keys()):
+                        field_sync_state[f] = f in default_enabled_fields
+                    sync_enabled['active'] = True
+                    # Apply to current checkboxes
+                    ep = current_epub_state.get('path')
+                    if ep and ep in per_epub_field_vars and per_epub_field_vars[ep]:
+                        for field, checkbox in per_epub_field_vars[ep].items():
+                            checkbox.setChecked(field in default_enabled_fields)
+            
+            save_btn = QPushButton("💾 Save")
+            save_btn.setMinimumWidth(120)
+            save_btn.setMinimumHeight(35)
+            save_btn.clicked.connect(save_metadata_config)
+            save_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #28a745;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #218838;
+                }
+            """)
+            button_layout.addWidget(save_btn)
+            
+            reset_btn = QPushButton("↺ Reset")
+            reset_btn.setMinimumWidth(120)
+            reset_btn.setMinimumHeight(35)
+            reset_btn.clicked.connect(reset_metadata_config)
+            reset_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #ffc107;
+                    color: black;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #e0a800;
+                }
+            """)
+            button_layout.addWidget(reset_btn)
+            
+            cancel_btn = QPushButton("❌ Cancel")
+            cancel_btn.setMinimumWidth(120)
+            cancel_btn.setMinimumHeight(35)
+            cancel_btn.clicked.connect(dialog.hide)
+            cancel_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #5a6268;
+                }
+            """)
+            button_layout.addWidget(cancel_btn)
+            button_layout.addStretch()
+            
+            main_layout.addLayout(button_layout)
+            dialog.setLayout(main_layout)
+            
+            # Show non-modally with fade
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(dialog, duration=220)
+            except Exception:
+                dialog.show()
+    
+    def configure_translation_prompts(self):
+        """Configure all translation prompts in one place"""
+        # Ensure QApplication instance exists
+        import sys
+        app = QApplication.instance()
+        if not app:
+            try:
+                import dpi_setup
+                dpi_setup.configure()
+            except Exception:
+                pass
+            app = QApplication(sys.argv)
+        
+        # Reuse existing dialog
+        if hasattr(self, '_translation_prompts_dialog') and self._translation_prompts_dialog is not None:
+            try:
+                try:
+                    from dialog_animations import show_dialog_with_fade
+                    show_dialog_with_fade(self._translation_prompts_dialog, duration=220)
+                except Exception:
+                    self._translation_prompts_dialog.show()
+                self._translation_prompts_dialog.raise_()
+                self._translation_prompts_dialog.activateWindow()
+                return
+            except RuntimeError:
+                self._translation_prompts_dialog = None
+
+        # Create dialog — child of other_settings, non-modal
+        parent = getattr(self.gui, '_other_settings_dialog', None) or None
+        dialog = QDialog(parent)
+        dialog.setWindowTitle("Configure Translation Prompts")
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        dialog.setWindowModality(Qt.NonModal)
+        
+        # Get screen dimensions and calculate size
+        screen = app.primaryScreen().geometry()
+        dialog_width = int(screen.width() * 0.3)
+        dialog_height = int(screen.height() * 0.8)
+        dialog.resize(dialog_width, dialog_height)
+
+        # Hide on close
+        dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+        self._translation_prompts_dialog = dialog
+        
+        # Apply global stylesheet for checkboxes and radio buttons
+        checkbox_radio_style = """
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            QRadioButton {
+                color: white;
+                spacing: 5px;
+            }
+            QRadioButton::indicator {
+                width: 13px;
+                height: 13px;
+                border: 2px solid #5a9fd4;
+                border-radius: 7px;
+                background-color: #2d2d2d;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #5a9fd4;
+                border: 2px solid #5a9fd4;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QRadioButton:disabled {
+                color: #666666;
+            }
+            QRadioButton::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """
+        dialog.setStyleSheet(checkbox_radio_style)
+        
+        # Set window icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        if os.path.exists(icon_path):
+            dialog.setWindowIcon(QIcon(icon_path))
+        
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title_label = QLabel("Configure All Translation Prompts")
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        main_layout.addWidget(title_label)
+        
+        # Description
+        desc_label = QLabel("Customize how different types of content are translated")
+        desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+        desc_label.setContentsMargins(0, 10, 0, 20)
+        main_layout.addWidget(desc_label)
+        
+        # Create tab widget for different prompt categories
+        tab_widget = QTabWidget()
+        
+        # Style the tab widget to make tabs stand out
+        tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 2px solid #3daee9;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+            }
+            QTabBar::tab {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                padding: 8px 20px;
+                margin-right: 2px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background-color: #3daee9;
+                color: white;
+                border-color: #3daee9;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #505050;
+                color: white;
+            }
+        """)
+        
+        # Tab 1: Book Title Prompts
+        title_tab = QWidget()
+        tab_widget.addTab(title_tab, "📖 Book Titles")
+        self._create_title_prompts_tab(title_tab)
+        
+        # Tab 2: Chapter Header Prompts
+        header_tab = QWidget()
+        tab_widget.addTab(header_tab, "📑 Chapter Headers")
+        self._create_header_prompts_tab(header_tab)
+        
+        # Tab 3: Metadata Field Prompts
+        metadata_tab = QWidget()
+        tab_widget.addTab(metadata_tab, "🏷️ Metadata Fields")
+        self._create_metadata_prompts_tab(metadata_tab)
+        
+        # Tab 4: Advanced Prompts
+        advanced_tab = QWidget()
+        tab_widget.addTab(advanced_tab, "⚙️ Advanced")
+        self._create_advanced_prompts_tab(advanced_tab)
+        
+        main_layout.addWidget(tab_widget)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+        
+        def save_all_prompts():
+            # Save all text widgets to config
+            self._save_all_prompt_configs()
+            self.gui.save_config(show_message=False)
+            dialog.hide()
+        
+        def reset_all_prompts():
+            msg_box = QMessageBox(dialog)  # Set dialog as parent
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setWindowTitle("Reset All Prompts")
+            msg_box.setText("Are you sure you want to reset ALL prompts to their default values?\n\nThis cannot be undone.")
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg_box.setDefaultButton(QMessageBox.No)
+            msg_box.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)  # Force on top
+            if os.path.exists(icon_path):
+                msg_box.setWindowIcon(QIcon(icon_path))
+            
+            if msg_box.exec() == QMessageBox.Yes:
+                self._reset_all_prompts_to_defaults()
+                dialog.hide()
+                # Re-open dialog with defaults to refresh the UI
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(100, self.configure_translation_prompts)
+        
+        save_btn = QPushButton("💾 Save All")
+        save_btn.setMinimumWidth(150)
+        save_btn.setMinimumHeight(35)
+        save_btn.clicked.connect(save_all_prompts)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        button_layout.addWidget(save_btn)
+        
+        reset_btn = QPushButton("↺ Reset All to Defaults")
+        reset_btn.setMinimumWidth(200)
+        reset_btn.setMinimumHeight(35)
+        reset_btn.clicked.connect(reset_all_prompts)
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffc107;
+                color: black;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #e0a800;
+            }
+        """)
+        button_layout.addWidget(reset_btn)
+        
+        cancel_btn = QPushButton("❌ Cancel")
+        cancel_btn.setMinimumWidth(120)
+        cancel_btn.setMinimumHeight(35)
+        cancel_btn.clicked.connect(dialog.hide)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
+        button_layout.addWidget(cancel_btn)
+        
+        # Center the buttons
+        button_layout.insertStretch(0)
+        button_layout.addStretch()
+        
+        main_layout.addLayout(button_layout)
+        dialog.setLayout(main_layout)
+        
+        # Show non-modally with fade
+        try:
+            from dialog_animations import show_dialog_with_fade
+            show_dialog_with_fade(dialog, duration=220)
+        except Exception:
+            dialog.show()
+    
+    def _create_title_prompts_tab(self, parent):
+        """Create tab for book title prompts"""
+        parent.setStyleSheet("background-color: #2b2b2b;")
+        tab_layout = QVBoxLayout(parent)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # System prompt
+        system_label = QLabel("System Prompt (AI Instructions)")
+        system_font = QFont()
+        system_font.setPointSize(12)
+        system_font.setBold(True)
+        system_label.setFont(system_font)
+        tab_layout.addWidget(system_label)
+        
+        system_desc = QLabel("Defines how the AI should behave when translating titles:")
+        system_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        system_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(system_desc)
+        
+        self.title_system_text = QTextEdit()
+        self.title_system_text.setMinimumHeight(100)
+        self.title_system_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
+        self.title_system_text.setPlainText(self.gui.config.get('book_title_system_prompt', 
+            "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."))
+        tab_layout.addWidget(self.title_system_text)
+        
+        # User prompt
+        user_label = QLabel("User Prompt (Translation Request)")
+        user_font = QFont()
+        user_font.setPointSize(12)
+        user_font.setBold(True)
+        user_label.setFont(user_font)
+        user_label.setContentsMargins(0, 15, 0, 0)
+        tab_layout.addWidget(user_label)
+        
+        user_desc = QLabel("Instructions for how to translate the book title:")
+        user_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        user_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(user_desc)
+        
+        self.title_user_text = QTextEdit()
+        self.title_user_text.setMinimumHeight(80)
+        self.title_user_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
+        self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
+            ""))
+        tab_layout.addWidget(self.title_user_text)
+        
+        var_label = QLabel("Variables available: {target_lang} - detected source language")
+        var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
+        var_label.setContentsMargins(0, 10, 0, 0)
+        tab_layout.addWidget(var_label)
+        
+        tab_layout.addStretch()
+    
+    def _create_header_prompts_tab(self, parent):
+        """Create tab for chapter header prompts"""
+        parent.setStyleSheet("background-color: #2b2b2b;")
+        tab_layout = QVBoxLayout(parent)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
+
+        # Prepend number pattern (optional, applied AFTER translation,
+        # only to the headers written into the HTML files)
+        prepend_label = QLabel("Prepend number pattern")
+        prepend_font = QFont()
+        prepend_font.setPointSize(12)
+        prepend_font.setBold(True)
+        prepend_label.setFont(prepend_font)
+        tab_layout.addWidget(prepend_label)
+
+        prepend_desc = QLabel(
+            "Optional. When filled, every translated header gets this pattern prepended, "
+            "with its number incrementing per chapter in reading order.\n"
+            "Examples: 'Chapter 0' → 'Chapter 0 <title>', 'Chapter 1 <title>', …;  "
+            "'1.' → '1. <title>', '2. <title>', …  Leave blank to disable.\n"
+            "Applied only to the headers inside the HTML files — "
+            "translated_headers.txt and TOC files are not modified.")
+        prepend_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        prepend_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(prepend_desc)
+
+        self.header_prepend_number_entry = QLineEdit()
+        self.header_prepend_number_entry.setPlaceholderText("e.g. Chapter 0  (blank = disabled)")
+        self.header_prepend_number_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QLineEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
+        self.header_prepend_number_entry.setText(
+            str(self.gui.config.get('batch_header_prepend_number_pattern', '') or ''))
+        tab_layout.addWidget(self.header_prepend_number_entry)
+
+        # System prompt for batch headers
+        system_label = QLabel("System Prompt (AI Instructions)")
+        system_font = QFont()
+        system_font.setPointSize(12)
+        system_font.setBold(True)
+        system_label.setFont(system_font)
+        tab_layout.addWidget(system_label)
+        
+        system_desc = QLabel("Defines how the AI should behave when translating chapter headers:")
+        system_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        system_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(system_desc)
+        
+        self.header_batch_system_text = QTextEdit()
+        self.header_batch_system_text.setMinimumHeight(100)
+        self.header_batch_system_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
+        self.header_batch_system_text.setPlainText(self.gui.config.get('batch_header_system_prompt',
+            "You are a professional translator specializing in novel chapter titles. "
+            "You must translate chapter titles to {target_lang}. "
+            "Respond with only the translated JSON, nothing else. "
+            "Maintain the original tone and style while making titles natural in the target language."))
+        tab_layout.addWidget(self.header_batch_system_text)
+        
+        # User prompt for batch headers
+        user_label = QLabel("User Prompt (Translation Request)")
+        user_font = QFont()
+        user_font.setPointSize(12)
+        user_font.setBold(True)
+        user_label.setFont(user_font)
+        user_label.setContentsMargins(0, 15, 0, 0)
+        tab_layout.addWidget(user_label)
+        
+        user_desc = QLabel("Instructions for how to translate the chapter headers:")
+        user_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        user_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(user_desc)
+        
+        self.header_batch_text = QTextEdit()
+        self.header_batch_text.setMinimumHeight(150)
+        self.header_batch_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
+        self.header_batch_text.setPlainText(self.gui.config.get('batch_header_prompt',
+            "Translate these chapter titles to {target_lang}\n"
+            "Return ONLY a JSON object with chapter numbers as keys.\n"
+            "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"))
+        tab_layout.addWidget(self.header_batch_text)
+        
+        var_label = QLabel("Variables available: {target_lang} - detected source language")
+        var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
+        var_label.setContentsMargins(0, 10, 0, 0)
+        tab_layout.addWidget(var_label)
+        
+        tab_layout.addStretch()
+    
+    def _create_metadata_prompts_tab(self, parent):
+        """Create tab for metadata field prompts"""
+        # Create scroll area for this tab
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                background-color: #2b2b2b;
+                border: none;
+            }
+        """)
+        
+        scroll_widget = QWidget()
+        scroll_widget.setStyleSheet("background-color: #2b2b2b;")
+        tab_layout = QVBoxLayout(scroll_widget)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Batch prompt
+        batch_label = QLabel("Batch Metadata Translation Prompt")
+        batch_font = QFont()
+        batch_font.setPointSize(12)
+        batch_font.setBold(True)
+        batch_label.setFont(batch_font)
+        tab_layout.addWidget(batch_label)
+        
+        batch_desc = QLabel("Used when translating multiple metadata fields together:")
+        batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        batch_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(batch_desc)
+        
+        self.metadata_batch_text = QTextEdit()
+        self.metadata_batch_text.setMinimumHeight(100)
+        self.metadata_batch_text.setMaximumHeight(120)
+        self.metadata_batch_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
+        self.metadata_batch_text.setPlainText(self.gui.config.get('metadata_batch_prompt',
+            "Translate the following metadata fields to {target_lang}.\n"
+            "Return ONLY a JSON object with the same field names as keys."))
+        tab_layout.addWidget(self.metadata_batch_text)
+        
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setContentsMargins(0, 20, 0, 20)
+        tab_layout.addWidget(separator)
+        
+        # Field-specific prompts
+        field_label = QLabel("Field-Specific Prompts")
+        field_font = QFont()
+        field_font.setPointSize(12)
+        field_font.setBold(True)
+        field_label.setFont(field_font)
+        tab_layout.addWidget(field_label)
+        
+        field_desc = QLabel("Customize prompts for each metadata field type:")
+        field_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        field_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(field_desc)
+        
+        field_prompts = self.gui.config.get('metadata_field_prompts', {})
+        self.field_prompt_widgets = {}
+        
+        fields = [
+            ('creator', 'Author/Creator'),
+            ('publisher', 'Publisher'),
+            ('subject', 'Subject/Genre'),
+            ('description', 'Description'),
+            ('series', 'Series Name'),
+            ('_default', 'Default (Other Fields)')
+        ]
+        
+        for field_key, field_label_text in fields:
+            field_widget = QWidget()
+            field_layout = QVBoxLayout(field_widget)
+            field_layout.setContentsMargins(0, 10, 0, 0)
+            
+            label = QLabel(f"{field_label_text}:")
+            label_font = QFont()
+            label_font.setBold(True)
+            label.setFont(label_font)
+            field_layout.addWidget(label)
+            
+            text_widget = QTextEdit()
+            text_widget.setMinimumHeight(60)
+            text_widget.setMaximumHeight(80)
+            text_widget.setStyleSheet("""
+                QTextEdit {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                    border: 1px solid #555555;
+                    border-radius: 3px;
+                    padding: 5px;
+                    font-family: 'Consolas', 'Courier New', monospace;
+                }
+                QTextEdit:focus {
+                    border: 1px solid #5a9fd4;
+                }
+            """)
+            
+            default_prompt = field_prompts.get(field_key, f"Translate this {field_label_text.lower()} to {{target_lang}}:")
+            text_widget.setPlainText(default_prompt)
+            
+            self.field_prompt_widgets[field_key] = text_widget
+            field_layout.addWidget(text_widget)
+            
+            tab_layout.addWidget(field_widget)
+        
+        var_label = QLabel("Variables: {target_lang} - detected language, {field_value} - the text to translate")
+        var_label.setStyleSheet("color: #5a9fd4; font-size: 10pt;")
+        var_label.setContentsMargins(0, 10, 0, 0)
+        tab_layout.addWidget(var_label)
+        
+        tab_layout.addStretch()
+        scroll_area.setWidget(scroll_widget)
+        
+        # Set scroll area as the tab's main widget
+        main_layout = QVBoxLayout(parent)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(scroll_area)
+            
+    def _create_advanced_prompts_tab(self, parent):
+        """Create tab for advanced prompt settings"""
+        parent.setStyleSheet("background-color: #2b2b2b;")
+        tab_layout = QVBoxLayout(parent)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title_label = QLabel("Advanced Prompt Settings")
+        title_font = QFont()
+        title_font.setPointSize(12)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setContentsMargins(0, 0, 0, 10)
+        tab_layout.addWidget(title_label)
+        
+        # Language detection behavior
+        lang_group = QGroupBox("Language Detection")
+        lang_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #555555;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #3daee9;
+            }
+        """)
+        lang_layout = QVBoxLayout()
+        lang_layout.setContentsMargins(15, 15, 15, 15)
+        
+        lang_desc = QLabel("How to handle source language in prompts:")
+        lang_desc.setContentsMargins(0, 0, 0, 10)
+        lang_layout.addWidget(lang_desc)
+        
+        self.lang_behavior_group = QButtonGroup()
+        current_behavior = self.gui.config.get('lang_prompt_behavior', 'auto')
+        
+        rb1 = QRadioButton("Auto-detect and include language (e.g., 'Translate this Korean text')")
+        rb1.setChecked(current_behavior == 'auto')
+        rb1.setProperty("value", "auto")
+        self.lang_behavior_group.addButton(rb1)
+        lang_layout.addWidget(rb1)
+        
+        rb2 = QRadioButton("Never include language (e.g., 'Translate this text')")
+        rb2.setChecked(current_behavior == 'never')
+        rb2.setProperty("value", "never")
+        self.lang_behavior_group.addButton(rb2)
+        lang_layout.addWidget(rb2)
+        
+        rb3 = QRadioButton("Always specify language:")
+        rb3.setChecked(current_behavior == 'always')
+        rb3.setProperty("value", "always")
+        self.lang_behavior_group.addButton(rb3)
+        lang_layout.addWidget(rb3)
+        
+        # Language entry
+        lang_entry_widget = QWidget()
+        lang_entry_layout = QHBoxLayout(lang_entry_widget)
+        lang_entry_layout.setContentsMargins(20, 5, 0, 0)
+        
+        lang_entry_label = QLabel("Language to use:")
+        lang_entry_layout.addWidget(lang_entry_label)
+        
+        self.forced_lang_entry = QLineEdit()
+        self.forced_lang_entry.setText(self.gui.config.get('forced_source_lang', 'Korean'))
+        self.forced_lang_entry.setFixedWidth(150)
+        self.forced_lang_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
+        lang_entry_layout.addWidget(self.forced_lang_entry)
+        lang_entry_layout.addStretch()
+        
+        lang_layout.addWidget(lang_entry_widget)
+        lang_group.setLayout(lang_layout)
+        tab_layout.addWidget(lang_group)
+        
+        # Output language
+        output_group = QGroupBox("Output Language")
+        output_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #555555;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #3daee9;
+            }
+        """)
+        output_layout = QVBoxLayout()
+        output_layout.setContentsMargins(15, 15, 15, 15)
+        
+        output_desc = QLabel("Target language for translations:")
+        output_desc.setContentsMargins(0, 0, 0, 10)
+        output_layout.addWidget(output_desc)
+        
+        lang_label = QLabel("Target language:")
+        output_layout.addWidget(lang_label)
+        
+        self.output_lang_combo = QComboBox()
+        self.output_lang_combo.addItems(list(TARGET_LANGUAGES))
+        self.output_lang_combo.setEditable(True)
+        self.output_lang_combo.setCurrentText(self.gui.config.get('output_language', 'English'))
+        self.output_lang_combo.setFixedWidth(250)
+
+        # Set up icon path properly for both frozen and non-frozen environments
+        import sys
+        if getattr(sys, 'frozen', False):
+            # In .exe environment
+            icon_path = os.path.join(sys._MEIPASS, 'Halgakos.ico')
+        else:
+            # In Python environment
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        
+        # Build stylesheet with properly escaped icon path
+        # Use the same pattern as working dropdowns in other_settings.py
+        self.output_lang_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                padding-right: 30px;
+            }
+            QComboBox:focus {
+                border: 1px solid #5a9fd4;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 30px;
+                border-left: 1px solid #555555;
+                background-color: transparent;
+            }
+            QComboBox::drop-down:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+            QComboBox::down-arrow {
+                image: url(""" + icon_path.replace('\\', '/') + """);
+                width: 16px;
+                height: 16px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                selection-background-color: #3daee9;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 5px;
+                border: none;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #3daee9;
+                color: white;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #3daee9;
+                color: white;
+            }
+        """)
+        output_layout.addWidget(self.output_lang_combo)
+        
+        # Force the dropdown to be properly clickable
+        from PySide6.QtCore import Qt
+        
+        # Get the dropdown list view and ensure it accepts mouse events
+        dropdown_view = self.output_lang_combo.view()
+        dropdown_view.setMouseTracking(True)
+        dropdown_view.setAttribute(Qt.WA_Hover, True)
+        
+        # Ensure the combo box itself is properly configured
+        self.output_lang_combo.setAttribute(Qt.WA_Hover, True)
+        self.output_lang_combo.setFocusPolicy(Qt.StrongFocus)
+        
+        # Make sure it's enabled
+        self.output_lang_combo.setEnabled(True)
+        dropdown_view.setEnabled(True)
+        
+        # Force proper selection handling
+        from PySide6.QtWidgets import QAbstractItemView
+        dropdown_view.setSelectionMode(QAbstractItemView.SingleSelection)
+        dropdown_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        
+        # Connect a manual click handler to the view
+        def on_view_clicked(index):
+            if index.isValid():
+                self.output_lang_combo.setCurrentIndex(index.row())
+                self.output_lang_combo.hidePopup()
+        
+        dropdown_view.clicked.connect(on_view_clicked)
+        
+        # Debug: Print current state
+        # print(f"Dropdown enabled: {self.output_lang_combo.isEnabled()}")
+        # print(f"Dropdown view enabled: {dropdown_view.isEnabled()}")
+        # print(f"Parent group enabled: {output_group.isEnabled()}")
+        # print(f"Parent layout widget enabled: {output_group.parent().isEnabled() if output_group.parent() else 'No parent'}")
+        
+        # Add proper signal connections like the working model dropdown
+        def sync_to_main(text):
+            if hasattr(self.gui, 'update_target_language'):
+                self.gui.update_target_language(text)
+                
+        self.output_lang_combo.currentTextChanged.connect(sync_to_main)
+        
+        # Disable mousewheel scrolling
+        self.output_lang_combo.wheelEvent = lambda event: None
+        
+        output_note = QLabel("This will replace '{target_lang}' in all prompts with your chosen language")
+        output_note.setStyleSheet("color: gray; font-size: 9pt;")
+        output_note.setContentsMargins(0, 5, 0, 0)
+        output_layout.addWidget(output_note)
+        
+        output_group.setLayout(output_layout)
+        tab_layout.addWidget(output_group)
+        
+        tab_layout.addStretch()
+    
+    def _save_all_prompt_configs(self):
+        """Save all prompt configurations"""
+        # Book title prompts
+        self.gui.config['book_title_system_prompt'] = self.title_system_text.toPlainText().strip()
+        self.gui.config['book_title_prompt'] = self.title_user_text.toPlainText().strip()
+        # Only set attribute if it exists on the gui object
+        if hasattr(self.gui, 'book_title_prompt'):
+            self.gui.book_title_prompt = self.gui.config['book_title_prompt']
+        
+        # Batch header prompts
+        self.gui.config['batch_header_system_prompt'] = self.header_batch_system_text.toPlainText().strip()
+        self.gui.config['batch_header_prompt'] = self.header_batch_text.toPlainText().strip()
+        if hasattr(self, 'header_prepend_number_entry'):
+            _prepend_pattern = self.header_prepend_number_entry.text().strip()
+            self.gui.config['batch_header_prepend_number_pattern'] = _prepend_pattern
+            os.environ['BATCH_HEADER_PREPEND_NUMBER_PATTERN'] = _prepend_pattern
+        
+        # Metadata prompts
+        self.gui.config['metadata_batch_prompt'] = self.metadata_batch_text.toPlainText().strip()
+        
+        # Field-specific prompts
+        field_prompts = {}
+        for field_key, widget in self.field_prompt_widgets.items():
+            field_prompts[field_key] = widget.toPlainText().strip()
+        self.gui.config['metadata_field_prompts'] = field_prompts
+        
+        # Advanced settings - get selected radio button value
+        lang_behavior = 'auto'
+        for button in self.lang_behavior_group.buttons():
+            if button.isChecked():
+                lang_behavior = button.property("value")
+                break
+        
+        self.gui.config['lang_prompt_behavior'] = lang_behavior
+        self.gui.config['forced_source_lang'] = self.forced_lang_entry.text()
+        self.gui.config['output_language'] = self.output_lang_combo.currentText()
+    
+    def _reset_all_prompts_to_defaults(self):
+        """Reset all prompts to default values"""
+        # Remove prompt-related keys from config, force set book title prompt to new default and
+        # re-initialize other defaults (metadata_defaults.reset_metadata_prompts, shared with the mobile app)
+        reset_metadata_prompts(self.gui.config)
+        if hasattr(self.gui, 'book_title_prompt'):
+            self.gui.book_title_prompt = ""
+        
+        # Force save and reload to ensure fresh state
+        self.gui.save_config(show_message=False)
+        
+        # Reload config from disk
+        try:
+            import json, sys
+            from api_key_encryption import decrypt_config
+            if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+                _cfg_path = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), 'config.json')
+            else:
+                _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+            with open(_cfg_path, 'r', encoding='utf-8') as f:
+                self.gui.config = json.load(f)
+                self.gui.config = decrypt_config(self.gui.config)
+        except Exception as e:
+            print(f"Error reloading config: {e}")
+        
+        # Re-initialize defaults again after reload (in case config.json didn't have them)
+        self._initialize_default_prompts()
+        
+        # --- Update all UI widgets to reflect the reset defaults ---
+        
+        # Book Title tab
+        if hasattr(self, 'title_system_text'):
+            self.title_system_text.setPlainText(self.gui.config.get('book_title_system_prompt',
+                "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."))
+        if hasattr(self, 'title_user_text'):
+            self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
+                ""))
+        
+        # Chapter Headers tab
+        if hasattr(self, 'header_batch_system_text'):
+            self.header_batch_system_text.setPlainText(self.gui.config.get('batch_header_system_prompt',
+                "You are a professional translator specializing in novel chapter titles. "
+                "You must translate the chapter titles to {target_lang}. "
+                "Respond with only the translated JSON, nothing else. "
+                "Maintain the original tone and style while making titles natural in the target language."))
+        if hasattr(self, 'header_batch_text'):
+            self.header_batch_text.setPlainText(self.gui.config.get('batch_header_prompt',
+                "Translate these chapter titles to {target_lang}.\n"
+                "- For titles with parenthetical text, translate both the main title and the parenthetical content.\n"
+                "- Translate the meaning accurately - don't use overly dramatic words unless the original implies them.\n"
+                "- Preserve the chapter number format exactly as shown.\n"
+                "Return ONLY a JSON object with chapter numbers as keys.\n"
+                "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"))
+        if hasattr(self, 'header_prepend_number_entry'):
+            self.header_prepend_number_entry.setText('')
+
+        # Metadata Fields tab
+        if hasattr(self, 'metadata_batch_text'):
+            self.metadata_batch_text.setPlainText(self.gui.config.get('metadata_batch_prompt',
+                "Translate the following metadata fields to {target_lang}.\n"
+                "Output ONLY a JSON object with the same field names as keys."))
+        
+        # Field-specific prompts
+        if hasattr(self, 'field_prompt_widgets'):
+            default_field_prompts = self.gui.config.get('metadata_field_prompts', {})
+            for field_key, widget in self.field_prompt_widgets.items():
+                default_prompt = default_field_prompts.get(field_key, '')
+                widget.setPlainText(default_prompt)
+        
+        # Advanced tab - language detection radio buttons
+        if hasattr(self, 'lang_behavior_group'):
+            for button in self.lang_behavior_group.buttons():
+                button.setChecked(button.property("value") == 'auto')
+        
+        # Advanced tab - forced language entry
+        if hasattr(self, 'forced_lang_entry'):
+            self.forced_lang_entry.setText('Korean')
+        
+        # Advanced tab - output language combo
+        if hasattr(self, 'output_lang_combo'):
+            self.output_lang_combo.setCurrentText('English')
+    
+    def _detect_all_metadata_fields_for_epub(self, epub_path: str) -> Dict[str, Any]:
+        """Detect ALL metadata fields in the given EPUB file"""
+        metadata_fields = {}
+        
+        if not epub_path or not epub_path.endswith('.epub') or not os.path.isfile(epub_path):
+            return metadata_fields
+        
+        try:
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                if (opf_name := find_epub_opf_member(zf)):
+                        opf_content = zf.read(opf_name)
+                        soup = BeautifulSoup(opf_content, 'xml')
+                        
+                        # Keep repeatable Dublin Core fields (notably subject)
+                        # as ordered lists so the configuration preview matches
+                        # what will actually be translated.
+                        metadata_fields.update(extract_dc_metadata(soup))
+                        
+                        # Get ALL meta tags
+                        meta_tags = soup.find_all('meta')
+                        for meta in meta_tags:
+                            name = meta.get('name') or meta.get('property', '')
+                            content = meta.get('content', '')
+                            
+                            if name and content:
+                                # Clean calibre: prefix
+                                if name.startswith('calibre:'):
+                                    name = name[8:]
+                                
+                                metadata_fields[name] = content
+                        
+        except Exception as e:
+            self.gui.append_log(f"Error reading EPUB metadata: {e}")
+        
+        return metadata_fields
+
+    def _detect_all_metadata_fields(self) -> Dict[str, Any]:
+        """Detect ALL metadata fields in the current EPUB"""
+        # Try different possible attribute names for the file path
+        epub_path = None
+        
+        # Common patterns for file path in translator GUIs
+        path_attributes = [
+            'entry_epub',      # Most common
+            'file_entry',      
+            'epub_entry',
+            'input_entry',
+            'file_path_entry',
+            'epub_path',
+            'file_path',
+            'input_file'
+        ]
+        
+        for attr in path_attributes:
+            if hasattr(self.gui, attr):
+                widget = getattr(self.gui, attr)
+                # Try Qt widget methods first
+                if hasattr(widget, 'text'):
+                    epub_path = widget.text()
+                    break
+                # Then try tkinter methods
+                elif hasattr(widget, 'get'):
+                    epub_path = widget.get()
+                    break
+                # Handle if it's a string directly
+                elif isinstance(widget, str):
+                    epub_path = widget
+                    break
+        
+        if not epub_path:
+            # Try to get from config or recent files
+            if hasattr(self.gui, 'config') and 'last_epub_path' in self.gui.config:
+                epub_path = self.gui.config.get('last_epub_path', '')
+        
+        return self._detect_all_metadata_fields_for_epub(epub_path)
+
+def get_header_prepend_number_pattern(config=None):
+    """Active "Prepend number pattern" (Other Settings → Chapter Headers).
+
+    Empty string = feature disabled.
+    """
+    return str(
+        (config or {}).get('batch_header_prepend_number_pattern')
+        or os.getenv('BATCH_HEADER_PREPEND_NUMBER_PATTERN')
+        or ''
+    ).strip()
+
+
+def _prepend_pattern_parts(pattern):
+    """Split *pattern* around its LAST number → (prefix, start, width, suffix).
+
+    Returns (None, 0, 0, None) when the pattern has no number.
+    """
+    num_match = None
+    for num_match in re.finditer(r'\d+', pattern):
+        pass  # keep the LAST number
+    if not num_match:
+        return None, 0, 0, None
+    return (pattern[:num_match.start()], int(num_match.group(0)),
+            len(num_match.group(0)), pattern[num_match.end():])
+
+
+def _prepend_pattern_already_applied(pattern, label):
+    """True when *label* already starts with this pattern's numbered form.
+
+    Makes the numbering idempotent: the workspace toc.ncx updater and the
+    compile-time TOC build can both run without stacking 'Chapter 1
+    Chapter 0 …' prefixes.
+    """
+    prefix, _start, _width, suffix = _prepend_pattern_parts(pattern)
+    if prefix is None:
+        skeleton = re.escape(pattern) + r'\s+\d+'
+    else:
+        skeleton = re.escape(prefix) + r'\d+' + re.escape(suffix)
+    return bool(re.match(r'\s*' + skeleton, str(label or '')))
+
+
+def prepend_number_pattern_to_label(pattern, label, offset):
+    """Prepend the numbered form of *pattern* (advanced by *offset*) to *label*."""
+    pattern = str(pattern or '').strip()
+    label = str(label or '').strip()
+    if not pattern or _prepend_pattern_already_applied(pattern, label):
+        return label
+    prefix, start, width, suffix = _prepend_pattern_parts(pattern)
+    if prefix is None:
+        numbered = f"{pattern} {offset}"
+    else:
+        numbered = prefix + str(start + offset).zfill(width) + suffix
+    return f"{numbered} {label}".strip() if label else numbered
+
+
+def _ncx_file_stem(name):
+    """Normalize an NCX src / chapter filename to a comparable stem."""
+    base = os.path.basename(str(name or '').split('#')[0]).lower()
+    if base.startswith('response_'):
+        base = base[len('response_'):]
+    while True:
+        stem, ext = os.path.splitext(base)
+        if ext in ('.html', '.xhtml', '.htm', '.xml'):
+            base = stem
+        else:
+            break
+    return base
+
+
+def toc_ncx_prepend_offset_map(html_dir):
+    """Map normalized chapter-file stem → 0-based navPoint position.
+
+    The "Prepend number pattern" numbers chapters BY THEIR TOC ENTRY:
+    the navPoint order defines each file's number, and files that no
+    navPoint links to get no number at all. Returns None when no
+    toc.ncx is found (callers fall back to sequential numbering).
+    """
+    candidates = []
+    for d in (html_dir, os.path.dirname(os.path.normpath(html_dir or ''))):
+        if d:
+            candidates.append(os.path.join(d, 'toc.ncx'))
+    toc_path = next((p for p in candidates if os.path.isfile(p)), None)
+    if not toc_path:
+        return None
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.parse(toc_path).getroot()
+        ns = {'ncx': 'http://www.daisy.org/z3986/2005/ncx/'}
+        offset_map = {}
+        for pos, nav_point in enumerate(root.findall('.//ncx:navPoint', ns)):
+            content = nav_point.find('ncx:content', ns)
+            if content is None:
+                continue
+            stem = _ncx_file_stem(content.get('src') or '')
+            if stem and stem not in offset_map:
+                offset_map[stem] = pos
+        return offset_map or None
+    except Exception:
+        return None
+
+
+def prepend_number_pattern_to_headers(headers, ordered_source=None, config=None):
+    """Prepend the configured number pattern to every header in *headers*.
+
+    Returns a NEW dict; *headers* is untouched. Entries increment in the
+    order of *ordered_source* (reading order); without it, numeric keys
+    are sorted ascending. No-op when the pattern is blank.
+    """
+    pattern = get_header_prepend_number_pattern(config)
+    if not pattern or not headers:
+        return headers
+    keys = []
+    if ordered_source:
+        keys = [k for k in ordered_source if k in headers]
+    remaining = [k for k in headers if k not in keys]
+    if not keys:
+        try:
+            remaining = sorted(remaining)
+        except TypeError:
+            pass
+    keys.extend(remaining)
+    result = dict(headers)
+    for offset, key in enumerate(keys):
+        result[key] = prepend_number_pattern_to_label(pattern, result.get(key), offset)
+    return result
+
+
+class BatchHeaderTranslator:
+    """Translate chapter headers in batches"""
+    
+    def __init__(self, client, config: dict = None, stop_check_fn=None):
+        self.client = client
+        self.config = config if config is not None else {}
+        self.stop_flag = False
+        self._last_batch_actual_model = None
+        
+        # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
+        if stop_check_fn is not None:
+            self.stop_check_fn = stop_check_fn
+        else:
+            try:
+                from TransateKRtoEN import is_stop_requested
+                self.stop_check_fn = is_stop_requested
+            except ImportError:
+                self.stop_check_fn = lambda: False
+        
+        # Use the batch_header_system_prompt, with fallback to env var or default
+        # Use 'or' chaining to handle None, empty string, or missing values
+        self.system_prompt = (
+            self.config.get('batch_header_system_prompt') or
+            os.getenv('BATCH_HEADER_SYSTEM_PROMPT') or
+            "You are a professional translator specializing in novel chapter titles. "
+            "Translate to {target_lang}. "
+            "Respond with only the translated JSON, nothing else. "
+            "Maintain the original tone and style while making titles natural in the target language."
+        )
+        
+        # Get default batch size from config or environment
+        self.default_batch_size = int(os.getenv('HEADERS_PER_BATCH', 
+                                      self.config.get('headers_per_batch', '-1')))
+        if self.default_batch_size <= 0:
+            self.default_batch_size = self._auto_batch_size()
+        
+    def set_stop_flag(self, flag: bool):
+        self.stop_flag = flag
+    
+    def _send_with_retry(self, messages, temperature, max_tokens, context=None,
+                         before_dispatch_callback=None,
+                         before_send_callback=None):
+        """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
+        try:
+            from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
+            with _skip_thinking_env('TOC'):
+                response = send_with_interrupt(
+                    messages=messages,
+                    client=self.client,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop_check_fn=self.stop_check_fn,
+                    context=context,
+                    before_send_callback=before_send_callback,
+                    before_dispatch_callback=before_dispatch_callback,
+                )
+        except ImportError:
+            # Fallback to direct send if send_with_interrupt is not available
+            print("⚠️ send_with_interrupt not available, using direct client.send()")
+            if callable(before_dispatch_callback):
+                before_dispatch_callback()
+            callback_tls = None
+            if callable(before_send_callback) and hasattr(
+                self.client, '_get_thread_local_client'
+            ):
+                try:
+                    callback_tls = self.client._get_thread_local_client()
+                    callback_tls.pre_api_call_callback = before_send_callback
+                except Exception:
+                    callback_tls = None
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    context=context,
+                )
+            finally:
+                if callback_tls is not None:
+                    try:
+                        callback_tls.pre_api_call_callback = None
+                    except Exception:
+                        pass
+        
+        # Extract content from response - handle both object and tuple formats
+        response_content = None
+        if hasattr(response, 'content'):
+            response_content = response.content
+        elif isinstance(response, tuple):
+            response_content = response[0] if response else ""
+        else:
+            response_content = str(response)
+        return response_content
+    
+    @staticmethod
+    def _auto_batch_size() -> int:
+        """Calculate batch size from output token limit / compression factor.
+        
+        Each header entry is estimated at ~50 tokens (title text + JSON key/formatting).
+        So available_tokens / 50 gives the number of entries that fit in one API call.
+        """
+        max_output_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', '8192'))
+        compression_factor = float(os.getenv('COMPRESSION_FACTOR', '3.0'))
+        if compression_factor <= 0:
+            compression_factor = 3.0
+        available_tokens = int(max_output_tokens / compression_factor)
+        batch_size = max(10, available_tokens // 50)
+        print(f"📐 Auto header batch size: {batch_size} entries "
+              f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
+              f"{available_tokens:,} available tokens, ~50 tok/entry)")
+        return batch_size
+        
+    def translate_and_save_headers(self,
+                                  html_dir: str,
+                                  headers_dict: Dict[int, str], 
+                                  batch_size: int = None,  # Changed from hardcoded 500
+                                  output_dir: str = None,
+                                  update_html: bool = True,
+                                  save_to_file: bool = True,
+                                  current_titles: Dict[int, Dict[str, str]] = None,
+                                  reused_headers: Dict[int, str] = None,
+                                  source_headers_full: Dict[int, str] = None) -> Dict[int, str]:
+        """Translate headers with optional file output and HTML updates
+        
+        Args:
+            html_dir: Directory containing HTML files
+            headers_dict: Dict mapping chapter numbers to source titles needing translation
+            batch_size: Number of titles to translate in one API call
+            output_dir: Directory for saving translation file
+            update_html: Whether to update HTML files
+            save_to_file: Whether to save translations to file
+            current_titles: Dict mapping chapter numbers to {'title': str, 'filename': str}
+            reused_headers: Dict of pre-translated headers to merge in
+            source_headers_full: The complete source dict (headers_dict + reused_headers keys)
+        """
+        # Use configured batch size if not explicitly provided
+        if batch_size is None:
+            batch_size = int(os.getenv('HEADERS_PER_BATCH', str(self.default_batch_size)))
+            print(f"[DEBUG] Using headers_per_batch from GUI/env: {batch_size}")
+        
+        # Auto-calculate if batch_size is <= 0 (whether from caller or env)
+        if batch_size is not None and batch_size <= 0:
+            batch_size = self._auto_batch_size()
+            print(f"[DEBUG] Auto-calculated batch size: {batch_size}")
+        
+        # Translate headers
+        translated_headers = self.translate_headers_batch(
+            headers_dict, batch_size, translation_type='header'
+        )
+        
+        # Merge reused headers
+        if reused_headers:
+            if not translated_headers:
+                translated_headers = {}
+            translated_headers.update(reused_headers)
+
+        if not translated_headers:
+            return {}
+
+        # Save to file if requested — always the PURE translations.
+        # The prepend-number pattern is deliberately not applied here so
+        # translated_headers.txt / TOC files keep the clean titles.
+        if save_to_file:
+            if output_dir is None:
+                output_dir = html_dir
+            translations_file = os.path.join(output_dir, "translated_headers.txt")
+            _full_dict = source_headers_full if source_headers_full else headers_dict
+            self._save_translations_to_file(_full_dict, translated_headers, translations_file, current_titles)
+
+        # Update HTML files if requested. The optional "Prepend number
+        # pattern" (Other Settings → Chapter Headers) is applied inside
+        # the _update_html_headers* sinks themselves, so the numbering
+        # lands in the chapter HTML headers but neither in the saved
+        # translation files nor in the returned dict (which feeds
+        # TOC/NCX generation — numbered separately at its own sinks).
+        if update_html:
+            if current_titles:
+                # Use exact replacement method
+                self._update_html_headers_exact(html_dir, translated_headers, current_titles)
+            else:
+                # Fallback to pattern-based method
+                self._update_html_headers(html_dir, translated_headers)
+
+        return translated_headers
+        
+    def _apply_prepend_number_pattern(self, translated_headers, ordered_source=None):
+        """Prepend an incrementing number pattern to every translated header.
+
+        Pattern comes from config key ``batch_header_prepend_number_pattern``
+        (set in Other Settings → Configure Translation Prompts → Chapter
+        Headers) or the ``BATCH_HEADER_PREPEND_NUMBER_PATTERN`` env var.
+        Blank = disabled (returns the headers untouched). Returns a NEW
+        dict — callers apply it only to the HTML update so the saved
+        translation files (translated_headers.txt, TOC) stay clean.
+
+        The LAST number in the pattern is the starting value and keeps its
+        zero-padding ('Chapter 0' → 'Chapter 0 <title>', 'Chapter 1 <title>',
+        …; '01' → '01 <title>', '02 <title>', …). A pattern with no number
+        gets a counter starting at 0 appended to it ('Part' → 'Part 0
+        <title>', …). Entries increment in reading order (the order of
+        *ordered_source*, which callers pass in OPF spine order).
+        """
+        pattern = get_header_prepend_number_pattern(self.config)
+        if not pattern or not translated_headers:
+            return translated_headers
+        result = prepend_number_pattern_to_headers(
+            translated_headers, ordered_source, self.config)
+        print(f"🔢 Prepended number pattern '{pattern}' to {len(result)} header(s) "
+              "(translated_headers.txt / TOC.txt caches left untouched)")
+        return result
+
+    def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None, translation_type: str = 'header') -> Dict[int, str]:
+        """Translate one header/TOC workload while publishing its live state."""
+        if not headers_dict:
+            return {}
+
+        artifact_kind = 'toc' if translation_type == 'toc' else 'headers'
+        output_dir = (
+            self.config.get('output_dir')
+            or getattr(self.client, 'output_dir', None)
+            or os.getenv('OUTPUT_DIRECTORY')
+        )
+        model_name = getattr(self.client, 'model', None)
+        if output_dir:
+            update_translation_artifact_progress(
+                output_dir,
+                artifact_kind,
+                'in_progress',
+                clear_model_name=True,
+            )
+
+        self._last_batch_actual_model = None
+        try:
+            translations = self._translate_headers_batch_impl(
+                headers_dict, batch_size, translation_type
+            )
+        except Exception as exc:
+            if output_dir:
+                update_translation_artifact_progress(
+                    output_dir,
+                    artifact_kind,
+                    'failed',
+                    model_name=model_name,
+                    error_message=exc,
+                )
+            raise
+
+        # ``self.client.model`` is the main-key default, not necessarily the
+        # concrete model selected by a dedicated metadata key. Each worker
+        # captures the request metadata installed by send_with_interrupt; use
+        # that value for the durable progress row once dispatch has completed.
+        actual_model_name = str(self._last_batch_actual_model or "").strip()
+        if actual_model_name:
+            model_name = actual_model_name
+
+        requested_keys = set(headers_dict)
+        translated_keys = {
+            key for key in requested_keys
+            if str(translations.get(key, '') or '').strip()
+        }
+        unresolved_count = len(requested_keys - translated_keys)
+        translation_complete = unresolved_count == 0
+
+        if output_dir:
+            update_translation_artifact_progress(
+                output_dir,
+                artifact_kind,
+                'completed' if translation_complete else 'failed',
+                model_name=model_name,
+                error_message=(
+                    None
+                    if translation_complete
+                    else (
+                        f'Incomplete translation: {len(translated_keys)} of '
+                        f'{len(requested_keys)} entries translated; '
+                        f'{unresolved_count} unresolved'
+                    )
+                ),
+            )
+        return translations
+
+    def _translate_headers_batch_impl(self, headers_dict: Dict[int, str], batch_size: int = None, translation_type: str = 'header') -> Dict[int, str]:
+        """Translate headers/TOC entries in batches using configured prompts with parallel execution
+        
+        Args:
+            translation_type: 'header' or 'toc' - controls log messages and API context
+        """
+        if not headers_dict:
+            return {}
+        
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        # Import tiktoken for token counting
+        try:
+            import tiktoken
+            # Try to use model-specific encoding
+            try:
+                model_name = self.client.model if hasattr(self.client, 'model') else 'gpt-3.5-turbo'
+                enc = tiktoken.encoding_for_model(model_name)
+            except:
+                # Fallback to cl100k_base encoding
+                enc = tiktoken.get_encoding("cl100k_base")
+            has_tiktoken = True
+        except ImportError:
+            has_tiktoken = False
+            print("[DEBUG] tiktoken not available, using character-based estimation")
+        
+        def count_tokens(text: str) -> int:
+            """Count tokens in text"""
+            if has_tiktoken and enc:
+                return len(enc.encode(text))
+            else:
+                # Fallback: estimate ~4 characters per token
+                return max(1, len(text) // 4)
+        
+        # Get configured prompt template from user's config (this is the user prompt)
+        # Use 'or' to handle None or empty string
+        prompt_template = (
+            self.config.get('batch_header_prompt') or
+            os.getenv('BATCH_HEADER_PROMPT') or
+            "Translate these chapter titles to {target_lang}.\n"
+            "Return ONLY a JSON object with chapter numbers as keys.\n"
+            "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"
+        )
+        
+        # Handle output language - this is what {target_lang} should be replaced with
+        # Check environment variable first (set by GUI), then config, then fallback to English
+        output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
+        
+        # Replace {target_lang} variable in both system prompt and user prompt with the output language
+        system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
+        prompt_template = prompt_template.replace('{target_lang}', output_lang)
+        
+        print(f"[DEBUG] System prompt: '{system_prompt}'")
+        print(f"[DEBUG] User prompt: '{prompt_template}'")
+        
+        # Add the titles to translate
+        user_prompt_template = prompt_template + "\n\nTitles to translate:\n"
+        
+        # Preserve original order (OPF spine order) - do NOT sort by chapter number
+        # The headers_dict is already in the correct order from the caller
+        sorted_headers = list(headers_dict.items())
+        all_translations = {}
+        
+        # Safety guard: if batch_size is still <= 0, auto-calculate it
+        if batch_size is None or batch_size <= 0:
+            batch_size = self._auto_batch_size()
+            print(f"[DEBUG] Auto-calculated batch size in translate_headers_batch: {batch_size}")
+        
+        total_batches = (len(sorted_headers) + batch_size - 1) // batch_size
+        
+        # Get temperature and max_tokens from environment (passed by GUI) or config as fallback
+        temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
+        max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 12000)))
+        
+        print(f"[DEBUG] Using temperature: {temperature}, max_tokens: {max_tokens} (from GUI/env)")
+        
+        # The final system prompt is built per batch because glossary compression
+        # and chapter-aware gender resolution depend on that batch's source text.
+        base_system_tokens = count_tokens(system_prompt)
+        print(f"[DEBUG] Base system prompt tokens: {base_system_tokens}")
+        
+        # Determine max workers from config or environment variable
+        # Use extraction_workers setting, with fallback to default of 3
+        configured_workers = int(os.getenv('EXTRACTION_WORKERS', self.config.get('extraction_workers', 3)))
+        batch_translation_enabled = os.getenv('BATCH_TRANSLATION', '0') == '1'
+        # The global Batch Translation toggle governs metadata chunks too.
+        # With it off, process every header/TOC batch sequentially so the next
+        # API call begins only after the previous one has fully returned.
+        max_workers = (
+            max(1, min(configured_workers, total_batches))
+            if batch_translation_enabled
+            else 1
+        )
+        execution_mode = 'parallel' if max_workers > 1 else 'sequential'
+        print(
+            f"[DEBUG] Using ThreadPoolExecutor with {max_workers} worker(s) "
+            f"for {total_batches} batches ({execution_mode}; configured: "
+            f"{configured_workers}, batch translation: "
+            f"{'on' if batch_translation_enabled else 'off'})"
+        )
+
+        
+        # Thread-safe lock for updating all_translations
+        translations_lock = threading.Lock()
+        actual_request_models = []
+        actual_request_models_lock = threading.Lock()
+
+        def capture_actual_request_model():
+            """Remember the concrete per-key model used by this batch worker."""
+            try:
+                from unified_api_client import get_current_thread_actual_request_model
+                actual_model = str(
+                    get_current_thread_actual_request_model() or ""
+                ).strip()
+            except Exception:
+                actual_model = ""
+            if not actual_model:
+                return ""
+            with actual_request_models_lock:
+                if actual_model not in actual_request_models:
+                    actual_request_models.append(actual_model)
+            return actual_model
+
+        artifact_kind = 'toc' if translation_type == 'toc' else 'headers'
+        artifact_output_dir = (
+            self.config.get('output_dir')
+            or getattr(self.client, 'output_dir', None)
+            or os.getenv('OUTPUT_DIRECTORY')
+        )
+
+        def publish_actual_in_progress_model():
+            """Refresh the live row after the dedicated key has been selected."""
+            actual_model = capture_actual_request_model()
+            if artifact_output_dir and actual_model:
+                update_translation_artifact_progress(
+                    artifact_output_dir,
+                    artifact_kind,
+                    'in_progress',
+                    model_name=actual_model,
+                )
+        
+        def translate_batch(batch_num: int, batch_headers: Dict[int, str]):
+            """Translate a single batch - thread-safe function"""
+            if self.stop_flag:
+                return None
+            
+            try:
+                batch_system_prompt, compliant_headers, _ = (
+                    _prepare_artifact_glossary_request(
+                        system_prompt,
+                        batch_headers,
+                        self.config,
+                        self.client,
+                        chapter_ref=_first_header_chapter_ref(batch_headers),
+                    )
+                )
+                titles_json = json.dumps(
+                    compliant_headers, ensure_ascii=False, indent=2
+                )
+                user_prompt = user_prompt_template + titles_json
+                
+                # Count tokens in the user prompt
+                user_tokens = count_tokens(user_prompt)
+                system_tokens = count_tokens(batch_system_prompt)
+                total_input_tokens = system_tokens + user_tokens
+                
+                # Debug output showing input tokens
+                type_label = 'TOC' if translation_type == 'toc' else 'Header'
+                request_label = (
+                    f"{type_label} batch {batch_num + 1}/{total_batches}"
+                )
+                direct_text_order = 1_000_000 + batch_num
+                print(f"\n📚 Translating {type_label} batch {batch_num + 1}/{total_batches}")
+                print(f"[DEBUG] Batch {batch_num + 1} input tokens:")
+                print(f"  - System prompt: {system_tokens} tokens")
+                print(f"  - User prompt: {user_tokens} tokens")
+                print(f"  - Total input: {total_input_tokens} tokens (including system prompt)")
+                print(f"  - Headers in batch: {len(batch_headers)}")
+                
+                # Show a sample of the headers being translated (first 3)
+                sample_headers = list(batch_headers.items())[:3]
+                if sample_headers:
+                    print(f"[DEBUG] Sample headers being sent:")
+                    for ch_num, title in sample_headers:
+                        print(f"    Chapter {ch_num}: {title}")
+                    if len(batch_headers) > 3:
+                        print(f"    ... and {len(batch_headers) - 3} more")
+                
+                # Check stop flag before making API call (respect graceful stop mode)
+                if self.stop_flag:
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    if not graceful_stop_active:
+                        # Force stop - abort immediately
+                        return None
+                
+                messages = [
+                    {"role": "system", "content": batch_system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+                
+                # Pass temperature and max_tokens through send_with_retry
+                response_content = self._send_with_retry(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    context='batch_toc_translation' if translation_type == 'toc' else 'batch_header_translation',
+                    before_send_callback=publish_actual_in_progress_model,
+                    before_dispatch_callback=(
+                        lambda label=request_label, order=direct_text_order: print(
+                            f"📚 {label} [spine-order:{order}] "
+                            "Direct Text dispatch"
+                        )
+                    ) if os.getenv('DIRECT_TEXT_ORDERED_BATCH', '0') == '1' else None,
+                )
+                capture_actual_request_model()
+
+                if response_content:
+                    if os.getenv('DIRECT_TEXT_ORDERED_BATCH', '0') == '1':
+                        payload = json.dumps(
+                            {
+                                'label': request_label,
+                                'order': direct_text_order,
+                                'content': response_content,
+                            },
+                            ensure_ascii=False,
+                        )
+                        print(f"[DIRECT_TEXT_RESPONSE_PAYLOAD] {payload}")
+                    translations = self._parse_json_response(response_content, batch_headers)
+                    
+                    # Count output tokens for debug
+                    output_tokens = count_tokens(response_content)
+                    print(f"[DEBUG] Batch {batch_num + 1} response tokens: {output_tokens}")
+                    
+                    for num, translated in translations.items():
+                        if num in batch_headers:
+                            print(f"  ✓ Ch{num}: {batch_headers[num]} → {translated}")
+                    
+                    return translations
+                else:
+                    print(f"  ⚠️ Batch {batch_num + 1}: Empty response from API")
+                    return {}
+                    
+            except json.JSONDecodeError as e:
+                print(f"  ❌ Batch {batch_num + 1}: Failed to parse JSON response: {e}")
+                # Try to extract translations manually from the response
+                if response_content:
+                    return self._fallback_parse(response_content, batch_headers)
+                return {}
+            except Exception as e:
+                error_msg = str(e)
+                if "cancelled" in error_msg.lower() and not self.stop_flag:
+                    print(f"  ❌ Batch {batch_num + 1}: Error: {error_msg} (NOTE: API Error triggered cancellation logic)")
+                else:
+                    print(f"  ❌ Batch {batch_num + 1}: Error: {e}")
+                return {}
+        
+        # Create batches
+        batch_tasks = []
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min((batch_num + 1) * batch_size, len(sorted_headers))
+            batch_headers = dict(sorted_headers[start_idx:end_idx])
+            batch_tasks.append((batch_num, batch_headers))
+        
+        # Execute batches in parallel using ThreadPoolExecutor
+        thread_prefix = 'TOCBatch' if translation_type == 'toc' else 'HeaderBatch'
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_prefix) as executor:
+            # Submit all tasks
+            future_to_batch = {executor.submit(translate_batch, batch_num, headers): batch_num 
+                             for batch_num, headers in batch_tasks}
+            
+            # Collect results as they complete
+            completed = 0
+            # Initialize progress bar
+            from TransateKRtoEN import ProgressBar
+            for future in as_completed(future_to_batch):
+                if self.stop_flag:
+                    # Check graceful stop settings (same as main translation)
+                    graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+                    wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
+                    
+                    if graceful_stop_active and wait_for_chunks:
+                        print("\n⏳ Graceful stop — waiting for current batch(es) to finish...")
+                        # Don't shutdown - let remaining batches complete
+                    else:
+                        print("\n❌ Translation interrupted by user")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                
+                batch_num = future_to_batch[future]
+                try:
+                    translations = future.result()
+                    if translations:
+                        with translations_lock:
+                            all_translations.update(translations)
+                    completed += 1
+                    # Update progress bar
+                    ProgressBar.update(completed, total_batches, prefix="Batch Progress", bar_length=30)
+                except Exception as e:
+                    print(f"\n❌ Batch {batch_num + 1} generated exception: {e}")
+                    completed += 1
+                    ProgressBar.update(completed, total_batches, prefix="Batch Progress", bar_length=30)
+            
+            # Finish progress bar
+            ProgressBar.finish()
+
+        if actual_request_models:
+            if len(actual_request_models) == 1:
+                self._last_batch_actual_model = actual_request_models[0]
+            else:
+                shown = actual_request_models[:3]
+                suffix = (
+                    f", +{len(actual_request_models) - 3} more"
+                    if len(actual_request_models) > 3 else ""
+                )
+                self._last_batch_actual_model = (
+                    "mixed: " + ", ".join(shown) + suffix
+                )
+        
+        print(f"\n✅ Translated {len(all_translations)} headers total (using parallel execution)")
+        return all_translations
+    
+    def _parse_json_response(self, response: str, original_headers: Dict[int, str]) -> Dict[int, str]:
+        """Parse JSON response from API"""
+        try:
+            response = response.strip()
+            
+            # Remove markdown blocks
+            if response.startswith("```"):
+                lines = response.split('\n')
+                response_lines = []
+                in_code_block = False
+                
+                for line in lines:
+                    if line.strip().startswith("```"):
+                        in_code_block = not in_code_block
+                        continue
+                    if in_code_block:
+                        response_lines.append(line)
+                
+                response = '\n'.join(response_lines)
+            
+            parsed = json.loads(response)
+            
+            result = {}
+            for key, value in parsed.items():
+                try:
+                    chapter_num = int(key)
+                    if chapter_num in original_headers:
+                        result[chapter_num] = str(value).strip()
+                except (ValueError, TypeError):
+                    continue
+                    
+            return result
+            
+        except json.JSONDecodeError:
+            return self._fallback_parse(response, original_headers)
+        except Exception:
+            return {}
+    
+    def _fallback_parse(self, response: str, original_headers: Dict[int, str]) -> Dict[int, str]:
+        """Fallback parsing if JSON fails"""
+        result = {}
+        pattern = re.compile(
+            r"""
+            (?P<key_quote>["']?)
+            (?P<key>\d+)
+            (?P=key_quote)
+            \s*:\s*
+            (?P<value_quote>["'])
+            (?P<value>
+                (?:
+                    \\[^\r\n]
+                    |
+                    (?!(?P=value_quote))[^\r\n]
+                )*
+            )
+            (?P=value_quote)
+            """,
+            re.VERBOSE,
+        )
+        
+        for match in re.finditer(pattern, response):
+            try:
+                num = int(match.group('key'))
+                quote = match.group('value_quote')
+                raw_title = match.group('value')
+                try:
+                    title = ast.literal_eval(f"{quote}{raw_title}{quote}").strip()
+                except (SyntaxError, ValueError):
+                    title = raw_title.strip()
+                if num in original_headers and title:
+                    result[num] = title
+            except (TypeError, ValueError):
+                continue
+                
+        return result
+    
+    def _save_translations_to_file(self, 
+                                  original: Dict[int, str], 
+                                  translated: Dict[int, str],
+                                  output_path: str,
+                                  current_titles: Dict[int, Dict[str, str]] = None):
+        """Save translations to text file"""
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write("Chapter Header Translations\n")
+                f.write("=" * 50 + "\n\n")
+                
+                # Preserve order from original dict (OPF spine order) - do NOT sort by chapter number
+                chapter_numbers = list(original.keys())
+                
+                # Summary info
+                total_chapters = len(original)
+                successfully_translated = len(translated)
+                
+                # Check if we have chapter 0
+                has_chapter_zero = 0 in chapter_numbers
+                if has_chapter_zero:
+                    f.write(f"Note: This novel uses 0-based chapter numbering (starts with Chapter 0)\n")
+                    f.write("-" * 50 + "\n\n")
+                
+                # Write each chapter's translation
+                for num in chapter_numbers:
+                    orig_title = original.get(num, "Unknown")
+                    trans_title = translated.get(num, orig_title)
+                    
+                    f.write(f"Chapter {num}:\n")
+                    f.write(f"  Original:   {orig_title}\n")
+                    f.write(f"  Translated: {trans_title}\n")
+                    
+                    # Add output file if available
+                    if current_titles and num in current_titles:
+                        filename = current_titles[num].get('filename', '')
+                        if filename:
+                            # Strip response_ prefix and extensions to harden matching
+                            clean_filename = filename
+                            if clean_filename.startswith('response_'):
+                                clean_filename = clean_filename[9:]
+                            
+                            # Strip all extensions
+                            while True:
+                                name_without_ext, ext = os.path.splitext(clean_filename)
+                                if ext and ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+                                    clean_filename = name_without_ext
+                                else:
+                                    break
+                                    
+                            f.write(f"  Output File: {clean_filename}\n")
+                    
+                    # Mark if translation failed for this chapter
+                    if num not in translated:
+                        f.write(f"  Status:     ⚠️ Using original (translation failed)\n")
+                    
+                    f.write("-" * 40 + "\n")
+                
+                # Summary at the end
+                f.write(f"\nSummary:\n")
+                f.write(f"Total chapters: {total_chapters}\n")
+                f.write(f"Chapter range: {min(chapter_numbers)} to {max(chapter_numbers)}\n")
+                f.write(f"Successfully translated: {successfully_translated}\n")
+                
+                if successfully_translated < total_chapters:
+                    failed_chapters = [num for num in original if num not in translated]
+                    f.write(f"Failed chapters: {', '.join(map(str, failed_chapters))}\n")
+                
+            print(f"✅ Saved translations to: {output_path}")
+            
+        except Exception as e:
+            print(f"❌ Error saving translations: {e}")
+    
+    def _check_html_has_header(self, html_path: str) -> tuple:
+        """Check if HTML file has any header tags (h1-h6)
+        
+        Returns:
+            tuple: (has_header, soup) where has_header is bool and soup is BeautifulSoup object
+        """
+        # If file is missing, assume it has a header to avoid rewriting and skip logging
+        if not os.path.exists(html_path):
+            return True, None
+
+        try:
+            with open(html_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            soup = BeautifulSoup(content, 'lxml')
+            
+            # Check ONLY for header tags (h1-h6)
+            # NOT checking title tag per user requirement
+            header_tags = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+            
+            has_header = bool(header_tags)
+            
+            if not has_header:
+                print(f"📝 {os.path.basename(html_path)} has no header tags (h1-h6)")
+            
+            return has_header, soup
+            
+        except Exception:
+            # Suppress noisy per-file errors; assume header to avoid accidental overwrites
+            return True, None
+    
+    def _insert_header_into_html(self, soup, new_title: str, preferred_tag: str = 'h1') -> bool:
+        """Insert a header into HTML that lacks one
+        
+        Args:
+            soup: BeautifulSoup object of the HTML
+            new_title: The translated title to insert
+            preferred_tag: The header tag to use (h1, h2, h3, etc.)
+            
+        Returns:
+            bool: True if successfully inserted, False otherwise
+        """
+        try:
+            # Find or create body tag
+            body = soup.find('body')
+            
+            # If no body tag exists, try to find the main content area
+            if not body:
+                # Sometimes the HTML might not have a proper body tag
+                # Look for the html tag instead
+                html_tag = soup.find('html')
+                if html_tag:
+                    # Create a body tag
+                    body = soup.new_tag('body')
+                    # Move all content from html to body
+                    for child in list(html_tag.children):
+                        if child.name != 'head':
+                            body.append(child.extract())
+                    html_tag.append(body)
+                else:
+                    # Last resort: treat the entire soup as the body
+                    body = soup
+            
+            if body:
+                # Create new header tag with the translated title
+                header_tag = soup.new_tag(preferred_tag)
+                header_tag.string = new_title
+                
+                # Add some styling to make it stand out (optional)
+                # header_tag['style'] = 'text-align: center; margin: 1em 0;'
+                
+                # Find the best insertion point
+                insertion_done = False
+                
+                # Strategy 1: Insert after any <head> or <meta> tags at the beginning
+                first_content = None
+                for child in body.children:
+                    # Skip whitespace text nodes
+                    if hasattr(child, 'name'):
+                        if child.name and child.name not in ['script', 'style', 'link', 'meta']:
+                            first_content = child
+                            break
+                    elif isinstance(child, str) and child.strip():
+                        # Non-empty text node
+                        first_content = child
+                        break
+                
+                if first_content:
+                    # Insert before the first content element
+                    first_content.insert_before(header_tag)
+                    insertion_done = True
+                    print(f"✓ Inserted {preferred_tag} before first content element")
+                else:
+                    # Body appears to be empty or contains only scripts/styles
+                    # Insert at the beginning of body
+                    if len(list(body.children)) > 0:
+                        # Body has some children (maybe scripts/styles)
+                        # Insert at position 0
+                        body.insert(0, header_tag)
+                    else:
+                        # Body is completely empty
+                        body.append(header_tag)
+                    insertion_done = True
+                    print(f"✓ Inserted {preferred_tag} at beginning of body")
+                
+                # Also add a line break after the header for better formatting
+                if insertion_done:
+                    br_tag = soup.new_tag('br')
+                    header_tag.insert_after(br_tag)
+                    
+                    # Optional: Also add a horizontal rule for visual separation
+                    # hr_tag = soup.new_tag('hr')
+                    # br_tag.insert_after(hr_tag)
+                
+                print(f"✓ Successfully added {preferred_tag} tag with: '{new_title}'")
+                return True
+                
+            else:
+                print(f"⚠️ Could not find or create body tag in HTML")
+                
+                # Fallback: Try to insert at the root level
+                # Create the header tag
+                header_tag = soup.new_tag(preferred_tag)
+                header_tag.string = new_title
+                
+                # Find first element that's not a DOCTYPE or processing instruction
+                first_element = None
+                for item in soup.contents:
+                    if hasattr(item, 'name') and item.name:
+                        first_element = item
+                        break
+                
+                if first_element:
+                    first_element.insert_before(header_tag)
+                    print(f"✓ Added {preferred_tag} tag at root level with: '{new_title}'")
+                    return True
+                else:
+                    # Last resort: append to soup
+                    soup.append(header_tag)
+                    print(f"✓ Appended {preferred_tag} tag to document with: '{new_title}'")
+                    return True
+                    
+        except Exception as e:
+            print(f"❌ Error inserting header: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _update_html_headers_exact(self, html_dir: str, translated_headers: Dict[int, str],
+                                  current_titles: Dict[int, Dict[str, str]]):
+        """Update HTML files by replacing exact current titles with translations
+        Also handles HTML files without headers by adding them.
+        """
+        # Apply the optional "Prepend number pattern" HERE — this is the
+        # lowest-level sink every header-update path funnels through
+        # (pipeline translation, compile-time reuse of existing
+        # translations, standalone script). Numbering is TOC-BASED: each
+        # chapter takes the 0-based position of the navPoint that links
+        # to its file, so the <h1> number always matches its TOC entry,
+        # and files with no TOC entry get no number. Falls back to
+        # sequential numbering only when no toc.ncx exists. Idempotent,
+        # and never touches translated_headers.txt / TOC caches.
+        _prepend_pattern = get_header_prepend_number_pattern(self.config)
+        if _prepend_pattern and translated_headers:
+            _offset_map = toc_ncx_prepend_offset_map(html_dir)
+            if _offset_map:
+                _numbered = {}
+                for _num, _title in translated_headers.items():
+                    _fname = ''
+                    if current_titles and _num in current_titles:
+                        _fname = (current_titles[_num] or {}).get('filename', '')
+                    _off = _offset_map.get(_ncx_file_stem(_fname)) if _fname else None
+                    _numbered[_num] = (
+                        prepend_number_pattern_to_label(_prepend_pattern, _title, _off)
+                        if _off is not None else _title)
+                translated_headers = _numbered
+                print(f"🔢 Prepending number pattern '{_prepend_pattern}' by TOC entry position")
+            else:
+                translated_headers = self._apply_prepend_number_pattern(translated_headers)
+        updated_count = 0
+        added_count = 0
+        skipped_files = []  # collect up-to-date files for a single summary line
+        missing_mappings = []
+
+        for num, new_title in translated_headers.items():
+            if num not in current_titles:
+                missing_mappings.append(num)
+                continue
+
+            current_info = current_titles[num]
+            current_title = current_info['title']
+            html_file = current_info['filename']
+            html_path = os.path.join(html_dir, html_file)
+
+            # Skip if the translated name is identical to what's already in the file
+            if new_title.strip() == current_title.strip():
+                skipped_files.append(html_file)
+                continue
+
+            try:
+                # Check if HTML has a header
+                has_header, soup = self._check_html_has_header(html_path)
+                
+                if not soup:
+                    continue
+                
+                if not has_header:
+                    # HTML has no header, insert the translated one WITHOUT rewriting the rest of the file
+                    print(f"📝 Adding header to {html_file}: '{new_title}'")
+                    header_html = f"<h1>{new_title}</h1><br/>"
+                    with open(html_path, 'r', encoding='utf-8') as rf:
+                        original = rf.read()
+                    import re as _re
+                    new_content, n = _re.subn(r'(\<body\b[^>]*\>)', lambda m: m.group(1) + header_html, original, count=1, flags=_re.IGNORECASE)
+                    if n == 0:
+                        # Fallback: prepend at the very beginning if <body> not found
+                        new_content = header_html + "\n" + original
+                    with open(html_path, 'w', encoding='utf-8') as wf:
+                        wf.write(new_content)
+                    added_count += 1
+                    print(f"✓ Added header to {html_file}")
+                else:
+                    # HTML has header, update it WITHOUT reparsing/rewriting the rest of the file
+                    updated = False
+                    import re as _re
+                    with open(html_path, 'r', encoding='utf-8') as rf:
+                        original = rf.read()
+                    content = original
+                    # Replace title text only if it exactly matches current_title
+                    def _repl_title(m):
+                        inner = m.group(2).strip()
+                        return m.group(1) + new_title + m.group(3) if inner == current_title else m.group(0)
+                    content2 = _re.sub(r'(<title[^>]*>)([\s\S]*?)(</title>)', _repl_title, content, count=1, flags=_re.IGNORECASE)
+                    if content2 != content:
+                        updated = True
+                        content = content2
+                    # Replace exact text inside first h1/h2/h3/p/div/span if it equals current_title
+                    # Use BeautifulSoup for robust handling of nested tags and HTML entities
+                    from bs4 import BeautifulSoup as BS
+                    temp_soup = BS(content, 'html.parser')
+                    tag_updated = False
+                    for tag_name in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
+                        tag = temp_soup.find(tag_name)
+                        if tag and tag.get_text().strip() == current_title:
+                            # Clear the tag and set new content
+                            tag.clear()
+                            tag.string = new_title
+                            content2 = str(temp_soup)
+                            if content2 != content:
+                                updated = True
+                                content = content2
+                                tag_updated = True
+                                break
+                    
+                    # Fallback to regex if BeautifulSoup didn't work
+                    if not tag_updated:
+                        for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
+                            pattern = rf'(<{tag}[^>]*>)\s*{_re.escape(current_title)}\s*(</{tag}>)'
+                            def replacement_func(match):
+                                return match.group(1) + new_title + match.group(2)
+                            content2, n = _re.subn(pattern, replacement_func, content, count=1, flags=_re.IGNORECASE)
+                            if n > 0:
+                                updated = True
+                                content = content2
+                                break
+                    # Update meta og:title content if it matches
+                    def _repl_meta(m):
+                        before, val, after = m.group(1), m.group(2), m.group(3)
+                        return before + new_title + after if val.strip() == current_title else m.group(0)
+                    content2 = _re.sub(r'(<meta\b[^>]*property=["\']og:title["\'][^>]*content=["\'])([^"\']*)(["\'][^>]*>)', _repl_meta, content, count=1, flags=_re.IGNORECASE)
+                    if content2 != content:
+                        updated = True
+                        content = content2
+                    if updated:
+                        # Check if duplicate heading+P removal is enabled
+                        remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
+                        if remove_duplicate_h1_p:
+                            # Remove duplicate heading+P pairs after updating (P before or after H1)
+                            from bs4 import BeautifulSoup as BS
+                            temp_soup = BS(content, 'html.parser')
+                            removed_any = remove_duplicate_heading_paragraph_pairs(temp_soup)
+                            if removed_any:
+                                content = str(temp_soup)
+                        
+                        with open(html_path, 'w', encoding='utf-8') as wf:
+                            wf.write(content)
+                        updated_count += 1
+                        print(f"✓ Updated {html_file}: '{current_title}' → '{new_title}'")
+                    else:
+                        print(f"⚠️ Could not find '{current_title}' in {html_file}")
+                    
+            except Exception as e:
+                print(f"❌ Error processing {html_file}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        if missing_mappings:
+            shown = ", ".join(str(num) for num in missing_mappings[:5])
+            if len(missing_mappings) > 5:
+                shown += f", +{len(missing_mappings) - 5} more"
+            print(
+                f"⚠️ No HTML file mapping for {len(missing_mappings)} "
+                f"chapter(s) ({shown}); skipped those header updates"
+            )
+
+        if skipped_files:
+            print(f"⏭️ {len(skipped_files)} file(s) already up-to-date (skipped write)")
+        print(f"\n📝 Updated {updated_count} HTML files, added headers to {added_count} files")
+    
+    def _update_html_headers(self, html_dir: str, translated_headers: Dict[int, str]):
+        """Fallback: Update HTML files with translated headers using pattern matching
+        Also handles HTML files without headers by adding them.
+        """
+        # See _update_html_headers_exact — numbering applies at this sink
+        # so every caller gets it (idempotent; caches stay clean).
+        # TOC-based when a toc.ncx exists (per-file, inside the loop once
+        # the file is resolved); sequential fallback otherwise.
+        _prepend_pattern = get_header_prepend_number_pattern(self.config)
+        _offset_map = toc_ncx_prepend_offset_map(html_dir) if _prepend_pattern else None
+        if _prepend_pattern and _offset_map is None:
+            translated_headers = self._apply_prepend_number_pattern(translated_headers)
+        updated_count = 0
+        added_count = 0
+        skipped_files = []  # collect up-to-date files for a single summary line
+        
+        # Get all HTML files in directory (support all HTML extensions)
+        html_extensions = ('.html', '.xhtml', '.htm')
+        all_html_files = [f for f in os.listdir(html_dir) if f.lower().endswith(html_extensions)]
+        
+        for num, new_title in translated_headers.items():
+            # Try multiple filename patterns
+            possible_patterns = [
+                f"response_{num}_",  # Standard pattern
+                f"response_{num}.",  # With dot
+                f"chapter_{num}_",   # Alternative pattern
+                f"chapter{num}_",    # Without underscore
+                f"{num}_",           # Just number
+                f"{num}.",           # Number with dot
+                f"ch{num}_",         # Abbreviated
+                f"ch_{num}_",        # Abbreviated with underscore
+            ]
+            
+            html_file = None
+            for pattern in possible_patterns:
+                matching_files = [f for f in all_html_files if f.startswith(pattern)]
+                if matching_files:
+                    html_file = matching_files[0]
+                    break
+            
+            if not html_file:
+                # Last resort: check if any file contains the chapter number
+                for f in all_html_files:
+                    if re.search(rf'\b{num}\b', f):
+                        html_file = f
+                        break
+            
+            if not html_file:
+                print(f"⚠️ No HTML file found for chapter {num}")
+                continue
+
+            # TOC-based numbering: this file's number is its navPoint
+            # position; files without a TOC entry stay un-numbered.
+            if _prepend_pattern and _offset_map is not None:
+                _off = _offset_map.get(_ncx_file_stem(html_file))
+                if _off is not None:
+                    new_title = prepend_number_pattern_to_label(
+                        _prepend_pattern, new_title, _off)
+
+            html_path = os.path.join(html_dir, html_file)
+            
+            try:
+                # Check if HTML has a header
+                has_header, soup = self._check_html_has_header(html_path)
+                
+                if not soup:
+                    print(f"⚠️ Could not parse {html_file}")
+                    continue
+                
+                if not has_header:
+                    # HTML has no header, insert the translated one WITHOUT rewriting the rest of the file
+                    print(f"📝 Adding header to {html_file}: '{new_title}'")
+                    header_html = f"<h1>{new_title}</h1><br/>"
+                    with open(html_path, 'r', encoding='utf-8') as rf:
+                        original = rf.read()
+                    import re as _re
+                    new_content, n = _re.subn(r'(\<body\b[^>]*\>)', lambda m: m.group(1) + header_html, original, count=1, flags=_re.IGNORECASE)
+                    if n == 0:
+                        # Fallback: prepend at the top if <body> not found
+                        new_content = header_html + "\n" + original
+                    with open(html_path, 'w', encoding='utf-8') as wf:
+                        wf.write(new_content)
+                    added_count += 1
+                    print(f"✓ Added header to {html_file}")
+                else:
+                    # HTML has header, update it WITHOUT reparsing/rewriting the rest of the file
+                    # Check existing header text first to avoid unnecessary writes
+                    existing_title = None
+                    for _tag_name in ['h1', 'h2', 'h3']:
+                        _tag = soup.find(_tag_name)
+                        if _tag:
+                            existing_title = _tag.get_text().strip()
+                            break
+                    if existing_title and existing_title == new_title.strip():
+                        skipped_files.append(html_file)
+                        continue
+
+                    updated = False
+                    import re as _re
+                    with open(html_path, 'r', encoding='utf-8') as rf:
+                        original = rf.read()
+                    content = original
+                    # Replace title text (first <title>)
+                    # Use lambda to avoid backreference issues when new_title starts with digits
+                    content2, n = _re.subn(r'(<title[^>]*>)[\s\S]*?(</title>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)
+                    if n > 0:
+                        updated = True
+                        content = content2
+                    # Replace first h1/h2/h3
+                    for tag in ['h1', 'h2', 'h3']:
+                        content2, n = _re.subn(rf'(<{tag}[^>]*>)[\s\S]*?(</{tag}>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)
+                        if n > 0:
+                            updated = True
+                            content = content2
+                            break
+                    # Update or add meta og:title (set content=...)
+                    # Replace existing
+                    content2, n = _re.subn(r'(<meta\b[^>]*property=["\']og:title["\'][^>]*content=["\'])[^"\']*(["\'][^>]*>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)
+                    if n == 0:
+                        # Try to add if missing: insert after <head>
+                        # Escape new_title for use in HTML attribute
+                        escaped_title = new_title.replace('"', '&quot;').replace('\\', '\\\\')
+                        content2, n2 = _re.subn(r'(<head\b[^>]*>)', lambda m: m.group(1) + f'\n<meta property="og:title" content="{escaped_title}"/>', content, count=1, flags=_re.IGNORECASE)
+                        if n2 > 0:
+                            updated = True
+                            content = content2
+                    else:
+                        updated = True
+                        content = content2
+                    if updated:
+                        # Check if duplicate heading+P removal is enabled
+                        remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
+                        if remove_duplicate_h1_p:
+                            from bs4 import BeautifulSoup as BS
+                            temp_soup = BS(content, 'html.parser')
+                            removed_any = remove_duplicate_heading_paragraph_pairs(temp_soup)
+                            if removed_any:
+                                content = str(temp_soup)
+                        with open(html_path, 'w', encoding='utf-8') as wf:
+                            wf.write(content)
+                        updated_count += 1
+                        print(f"✓ Updated {html_file} with: {new_title}")
+            except Exception as e:
+                print(f"❌ Error processing chapter {num}: {e}")
+        
+        if skipped_files:
+            print(f"⏭️ {len(skipped_files)} file(s) already up-to-date (skipped write)")
+        print(f"\n📝 Updated {updated_count} HTML files, added headers to {added_count} files")
+
+class MetadataTranslationCancelled(Exception):
+    """Raised when metadata translation stops because the user cancelled the run."""
+
+
+class MetadataTranslator:
+    """Translate EPUB metadata fields"""
+    
+    def __init__(
+        self,
+        client,
+        config: dict = None,
+        stop_check_fn=None,
+        progress_callback=None,
+    ):
+        self.client = client
+        self.config = config or {}
+        self.progress_callback = progress_callback
+        self.last_completed_fields = set()
+        self.last_requested_fields = set()
+        self.last_no_request_fields = set()
+        self._prefer_explicit_config = bool(
+            self.config.get('_prefer_explicit_config', False)
+        )
+        self._quiet = bool(self.config.get('quiet', False))
+        self.system_prompt = self._setting(
+            'METADATA_SYSTEM_PROMPT',
+            'metadata_system_prompt',
+            "You are a translator. Respond with only the translated text, nothing else.",
+        )
+        # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
+        if stop_check_fn is not None:
+            self.stop_check_fn = stop_check_fn
+        else:
+            try:
+                from TransateKRtoEN import is_stop_requested
+                self.stop_check_fn = is_stop_requested
+            except ImportError:
+                self.stop_check_fn = lambda: False
+
+    def _setting(self, env_name: str, config_name: str, default=None):
+        """Read an option without requiring per-thread environment mutation."""
+        if self._prefer_explicit_config and config_name in self.config:
+            return self.config.get(config_name, default)
+        return os.getenv(env_name, self.config.get(config_name, default))
+
+    def _source_language(self) -> str:
+        if self._prefer_explicit_config and 'source_language' in self.config:
+            return str(self.config.get('source_language') or '')
+        return _get_source_language()
+
+    def _print(self, *args, **kwargs) -> None:
+        if not self._quiet:
+            print(*args, **kwargs)
+
+    def _print_exception(self) -> None:
+        if not self._quiet:
+            import traceback
+
+            traceback.print_exc()
+
+    def _notify_field_progress(self, field_name, status, error=None):
+        if not callable(self.progress_callback):
+            return
+        try:
+            self.progress_callback(field_name, status, error)
+        except Exception as callback_error:
+            self._print(f"⚠️ Metadata progress callback failed: {callback_error}")
+
+    def _stop_check_active(self) -> bool:
+        try:
+            return bool(self.stop_check_fn and self.stop_check_fn())
+        except Exception:
+            return False
+
+    def _is_force_stop_requested(self) -> bool:
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            return True
+        try:
+            if hasattr(self.client, 'is_globally_cancelled') and self.client.is_globally_cancelled():
+                return True
+        except Exception:
+            pass
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        return self._stop_check_active()
+
+    def _is_any_stop_requested(self) -> bool:
+        return (
+            self._is_force_stop_requested()
+            or os.environ.get('GRACEFUL_STOP') == '1'
+            or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+            or self._stop_check_active()
+        )
+
+    @staticmethod
+    def _is_cancelled_error(exc: Exception) -> bool:
+        error_type = getattr(exc, 'error_type', '')
+        if isinstance(exc, MetadataTranslationCancelled) or error_type == 'cancelled':
+            return True
+        message = str(exc).lower()
+        return (
+            'stopped by user' in message
+            or 'cancelled by user' in message
+            or 'canceled by user' in message
+            or 'operation cancelled' in message
+            or 'operation canceled' in message
+        )
+
+    def _raise_if_stop_requested(self) -> None:
+        if self._is_any_stop_requested():
+            raise MetadataTranslationCancelled("Metadata translation stopped by user")
+
+    def _cancel_active_metadata_calls(self) -> None:
+        if not self._is_force_stop_requested():
+            return
+        try:
+            if hasattr(self.client, 'cancel_current_operation'):
+                self.client.cancel_current_operation()
+        except Exception:
+            pass
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            if hasattr(unified_api_client, 'hard_cancel_all'):
+                unified_api_client.hard_cancel_all()
+        except Exception:
+            pass
+    
+    def _send_with_retry(self, messages, temperature, max_tokens, context=None):
+        """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
+        self._raise_if_stop_requested()
+        try:
+            from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
+            with _skip_thinking_env('METADATA', quiet=self._quiet):
+                response = send_with_interrupt(
+                    messages=messages,
+                    client=self.client,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop_check_fn=self.stop_check_fn,
+                    context=context,
+                )
+        except ImportError:
+            # Fallback to direct send if send_with_interrupt is not available
+            self._print("⚠️ send_with_interrupt not available, using direct client.send()")
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    context=context,
+                )
+            except Exception as exc:
+                if self._is_cancelled_error(exc):
+                    raise MetadataTranslationCancelled(
+                        "Metadata translation stopped by user"
+                    ) from None
+                raise
+        except Exception as exc:
+            if self._is_cancelled_error(exc):
+                raise MetadataTranslationCancelled(
+                    "Metadata translation stopped by user"
+                ) from None
+            raise
+
+        self._raise_if_stop_requested()
+        
+        # Extract content from response - handle both object and tuple formats
+        response_content = None
+        if hasattr(response, 'content'):
+            response_content = response.content
+        elif isinstance(response, tuple):
+            response_content = response[0] if response else ""
+        else:
+            response_content = str(response)
+        return response_content
+    
+    def translate_metadata(self, 
+                          metadata: Dict[str, Any],
+                          fields_to_translate: Dict[str, bool],
+                          mode: str = 'together') -> Dict[str, Any]:
+        """Translate selected metadata fields"""
+        self.last_completed_fields = set()
+        self.last_requested_fields = set()
+        self.last_no_request_fields = set()
+        if not any(fields_to_translate.values()):
+            return metadata
+            
+        translated_metadata = metadata.copy()
+        
+        if mode != 'parallel':
+            translated_fields = self._translate_fields_together(
+                metadata, fields_to_translate
+            )
+            translated_metadata.update(translated_fields)
+        else:
+            translated_fields = self._translate_fields_parallel(
+                metadata, fields_to_translate
+            )
+            translated_metadata.update(translated_fields)
+
+        # Completion is based on a successful response, not on whether the
+        # returned string differs from the input. Only skip a request when we
+        # can safely establish that the value already matches the target.
+        self.last_completed_fields.update(translated_fields.keys())
+        for field, should_translate in fields_to_translate.items():
+            value = metadata.get(field)
+            if (
+                should_translate
+                and value
+                and self._is_already_target_language(value)
+            ):
+                self.last_completed_fields.add(field)
+                self.last_no_request_fields.add(field)
+                self._notify_field_progress(field, "completed")
+            
+        return translated_metadata
+ 
+    def _is_already_english(self, text: Any) -> bool:
+        """Conservatively recognize text written in the Latin script."""
+        if not text:
+            return True
+
+        if isinstance(text, (list, tuple)):
+            return all(self._is_already_english(item) for item in text)
+
+        text = str(text)
+        
+        # Any recognized non-Latin script means this is not English. This is
+        # intentionally conservative; metadata translation must not be marked
+        # complete merely because a string is not CJK.
+        for char in text:
+            if (
+                '\u4e00' <= char <= '\u9fff' or  # Chinese
+                '\u3040' <= char <= '\u30ff' or  # Japanese
+                '\uac00' <= char <= '\ud7af' or  # Korean
+                '\u0600' <= char <= '\u06ff' or  # Arabic
+                '\u0750' <= char <= '\u077f' or
+                '\u08a0' <= char <= '\u08ff' or
+                '\u0590' <= char <= '\u05ff' or  # Hebrew
+                '\u0400' <= char <= '\u052f' or  # Cyrillic
+                '\u0370' <= char <= '\u03ff' or  # Greek
+                '\u0e00' <= char <= '\u0e7f' or  # Thai
+                '\u0900' <= char <= '\u097f'     # Devanagari
+            ):
+                return False
+
+        return True
+
+    def _is_already_target_language(self, text: Any) -> bool:
+        """Return True only when a no-request completion is defensible.
+
+        Script alone cannot distinguish English from other Latin-script
+        languages. For any non-English target, always make the configured
+        translation request instead of fabricating a successful completion.
+        """
+        if not text:
+            return True
+        if isinstance(text, (list, tuple)):
+            return all(self._is_already_target_language(item) for item in text)
+
+        target_language = str(
+            self._setting('OUTPUT_LANGUAGE', 'output_language', 'English')
+            or 'English'
+        ).strip().casefold()
+        english_target = (
+            target_language in {'en', 'eng'}
+            or target_language.startswith('english')
+        )
+        return english_target and self._is_already_english(text)
+ 
+    def _translate_fields_together(self, 
+                                  metadata: Dict[str, Any],
+                                  fields_to_translate: Dict[str, bool]) -> Dict[str, Any]:
+        """Translate all fields in one API call"""
+        fields_to_send = {}
+        
+        for field, should_translate in fields_to_translate.items():
+            if should_translate and field in metadata and metadata[field]:
+                if metadata.get(f'{field}_translated', False):
+                    continue
+                if not self._is_already_target_language(metadata[field]):
+                    fields_to_send[field] = metadata[field]
+                
+        if not fields_to_send:
+            return {}
+        self.last_requested_fields.update(fields_to_send)
+        
+        # Get configured prompt
+        prompt_template = self.config.get('metadata_batch_prompt',
+            "Translate the following metadata fields to {target_lang}.\n"
+            "Return ONLY a JSON object with the same field names as keys.")
+        if any(isinstance(value, list) for value in fields_to_send.values()):
+            prompt_template += (
+                "\nPreserve every JSON array as an array with the same number "
+                "of items in the same order. Translate each array item separately."
+            )
+        
+        # Handle language behavior
+        lang_behavior = self.config.get('lang_prompt_behavior', 'auto')
+        source_lang = self._source_language()
+        
+        if lang_behavior == 'never':
+            lang_str = ""
+        elif lang_behavior == 'always':
+            lang_str = self.config.get('forced_source_lang', 'Korean')
+        else:  # auto
+            lang_str = source_lang if source_lang else ""
+        
+        # Handle output language - check env first (set by GUI), then config
+        output_lang = self._setting(
+            'OUTPUT_LANGUAGE', 'output_language', 'English'
+        )
+        self._print(f"[DEBUG] MetadataTranslator output_lang='{output_lang}' (env={os.getenv('OUTPUT_LANGUAGE')}, config={self.config.get('output_language')})")
+        
+        # Replace variables
+        prompt_template = prompt_template.replace('{target_lang}', output_lang)
+        metadata_system_prompt, compliant_fields, _ = (
+            _prepare_artifact_glossary_request(
+                prompt_template,
+                fields_to_send,
+                self.config,
+                self.client,
+                chapter_ref={'use_storage_gender': True},
+            )
+        )
+        user_prompt = (
+            "Fields to translate:\n"
+            + json.dumps(compliant_fields, ensure_ascii=False, indent=2)
+        )
+        
+        # Check if we're using a translation service (not AI)
+        client_type = getattr(self.client, 'client_type', '')
+        is_translation_service = client_type in ['deepl', 'google_translate']
+        
+        try:
+            if is_translation_service:
+                # For translation services, send only the field values without AI prompts
+                self._print(f"🌐 Using translation service ({client_type}) - sending fields directly")
+                # Convert fields to a simple text format
+                field_text = "\n".join(
+                    f"{field}: {value}"
+                    for field, value in compliant_fields.items()
+                )
+                messages = [
+                    {"role": "user", "content": field_text}
+                ]
+            else:
+                # Use the batch metadata prompt as the system prompt
+                messages = [
+                    {"role": "system", "content": metadata_system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+            
+            # Get temperature and max_tokens from environment or config
+            temperature = float(self._setting(
+                'TRANSLATION_TEMPERATURE', 'temperature', 0.3
+            ))
+            max_tokens = int(self._setting(
+                'MAX_OUTPUT_TOKENS', 'max_tokens', 4096
+            ))
+            
+            response_content = self._send_with_retry(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                context='metadata'
+            )
+            
+            if response_content:
+                translated = self._parse_metadata_response(response_content, fields_to_send)
+                
+                for field, value in translated.items():
+                    if field in metadata:
+                        self._print(f"✔ Translated {field}: {metadata[field]}\n  ↓\n{value}")
+                        
+                return translated
+            else:
+                self._print("⚠️ Empty response from API")
+                return {}
+            
+        except Exception as e:
+            if self._is_cancelled_error(e):
+                self._print(f"⏭️ Metadata translation cancelled by user")
+                raise
+            self._print(f"❌ Error translating metadata: {repr(e)}")
+            self._print_exception()
+            return {}
+    
+    def _translate_fields_parallel(self,
+                                  metadata: Dict[str, Any],
+                                  fields_to_translate: Dict[str, bool]) -> Dict[str, Any]:
+        """Translate fields in parallel"""
+        fields_to_process = [
+            (field, value) for field, should_translate in fields_to_translate.items()
+            if should_translate
+            and not metadata.get(f'{field}_translated', False)
+            and (value := metadata.get(field))
+            and not self._is_already_target_language(value)
+        ]
+        
+        if not fields_to_process:
+            return {}
+        self.last_requested_fields.update(
+            field for field, _value in fields_to_process
+        )
+            
+        translated = {}
+        max_workers = min(5, len(fields_to_process))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures = {}
+        next_field_index = 0
+        force_cancelled = False
+
+        def submit_available_work() -> None:
+            nonlocal next_field_index
+            while (
+                next_field_index < len(fields_to_process)
+                and len(futures) < max_workers
+                and not self._is_any_stop_requested()
+            ):
+                field, value = fields_to_process[next_field_index]
+                next_field_index += 1
+                self._notify_field_progress(field, "in_progress")
+                future = executor.submit(self._translate_single_field, field, value)
+                futures[future] = field
+
+        try:
+            submit_available_work()
+
+            while futures:
+                if self._is_force_stop_requested():
+                    force_cancelled = True
+                    self._cancel_active_metadata_calls()
+                    for pending_future in futures:
+                        pending_future.cancel()
+                    raise MetadataTranslationCancelled("Metadata translation stopped by user")
+
+                done, _ = wait(futures.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+
+                for future in done:
+                    field = futures.pop(future)
+                    try:
+                        result = future.result()
+                        if result:
+                            translated[field] = result
+                            self._notify_field_progress(field, "completed")
+                            self._print(f"✓ Translated {field}: {metadata.get(field)} → {result}")
+                        else:
+                            self._notify_field_progress(
+                                field, "failed", "Metadata field returned no translation"
+                            )
+                    except Exception as e:
+                        if self._is_cancelled_error(e):
+                            force_cancelled = self._is_force_stop_requested()
+                            if force_cancelled:
+                                self._cancel_active_metadata_calls()
+                            for pending_future in futures:
+                                pending_future.cancel()
+                            raise
+                        self._print(f"❌ Error translating {field}: {repr(e)}")
+                        self._notify_field_progress(field, "failed", e)
+                        self._print_exception()
+
+                submit_available_work()
+
+            if self._is_any_stop_requested():
+                raise MetadataTranslationCancelled("Metadata translation stopped by user")
+
+            return translated
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+    
+    def _translate_single_field(self, field_name: str, field_value: Any) -> Optional[Any]:
+        """Translate a single field using configured prompts"""
+        if self._is_already_target_language(field_value):
+            return field_value
+        is_list_value = isinstance(field_value, list)
+        field_value_text = (
+            json.dumps(field_value, ensure_ascii=False)
+            if is_list_value
+            else str(field_value)
+        )
+        # Get field-specific prompts
+        field_prompts = self.config.get('metadata_field_prompts', {})
+        
+        # Get the specific prompt or default
+        prompt_template = field_prompts.get(field_name, 
+                                           field_prompts.get('_default', 
+                                                           "Translate this text to {target_lang}."))
+        
+        # Handle language behavior
+        lang_behavior = self.config.get('lang_prompt_behavior', 'auto')
+        source_lang = self._source_language()
+        
+        if lang_behavior == 'never':
+            lang_str = ""
+        elif lang_behavior == 'always':
+            lang_str = self.config.get('forced_source_lang', 'Korean')
+        else:  # auto
+            lang_str = source_lang if source_lang else ""
+        
+        # Handle output language - check env first (set by GUI), then config
+        output_lang = self._setting(
+            'OUTPUT_LANGUAGE', 'output_language', 'English'
+        )
+        self._print(f"[DEBUG] MetadataTranslator._translate_single_field({field_name}) output_lang='{output_lang}' (env={os.getenv('OUTPUT_LANGUAGE')}, config={self.config.get('output_language')})")
+        
+        # Replace variables
+        prompt = prompt_template.replace('{target_lang}', output_lang)
+        if is_list_value:
+            prompt += (
+                " The input is a JSON array. Output only a JSON array with "
+                "the same number of items in the same order, translating each "
+                "item separately."
+            )
+        # Clean up double spaces
+        prompt = ' '.join(prompt.split())
+        prepared_prompt, compliant_value, _ = (
+            _prepare_artifact_glossary_request(
+                prompt,
+                field_value,
+                self.config,
+                self.client,
+                chapter_ref={'use_storage_gender': True},
+            )
+        )
+        compliant_field_value_text = (
+            json.dumps(compliant_value, ensure_ascii=False)
+            if is_list_value
+            else str(compliant_value)
+        )
+        prepared_prompt = prepared_prompt.replace(
+            '{field_value}', compliant_field_value_text
+        )
+        self._print(f"[DEBUG] prompt_template BEFORE replace: '{prompt_template}'")
+        self._print(f"[DEBUG] prompt AFTER replace: '{prepared_prompt[:200]}'")
+        
+        # Check if we're using a translation service (not AI)
+        client_type = getattr(self.client, 'client_type', '')
+        is_translation_service = client_type in ['deepl', 'google_translate']
+        
+        try:
+            if is_translation_service:
+                # For translation services, send only the field value without AI prompts
+                messages = [
+                    {"role": "user", "content": compliant_field_value_text}
+                ]
+            else:
+                # Replace {target_lang} in prompts with output language
+                # Use field-specific prompt as system prompt if available, otherwise fall back to base
+                if prepared_prompt:
+                    system_prompt = prepared_prompt
+                else:
+                    system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
+                self._print(f"[DEBUG] FINAL system_prompt sent to API: '{system_prompt[:200]}'")
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": compliant_field_value_text}
+                ]
+            
+            # Get temperature and max_tokens from environment or config
+            temperature = float(self._setting(
+                'TRANSLATION_TEMPERATURE', 'temperature', 0.3
+            ))
+            max_tokens = int(self._setting(
+                'MAX_OUTPUT_TOKENS', 'max_tokens', 4096
+            ))
+            
+            response_content = self._send_with_retry(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                context='metadata'
+            )
+            
+            if response_content:
+                if is_list_value:
+                    return self._parse_list_translation_response(
+                        response_content, field_value
+                    )
+                return response_content.strip()
+            else:
+                self._print(f"⚠️ Empty response when translating {field_name}")
+                return None
+            
+        except Exception as e:
+            # Gracefully handle user-initiated cancellation without traceback
+            if self._is_cancelled_error(e):
+                self._print(f"⏭️ Metadata translation of '{field_name}' cancelled by user")
+                raise
+            self._print(f"❌ Error translating {field_name}: {repr(e)}")
+            self._print_exception()
+            return None
+    
+    @staticmethod
+    def _strip_json_code_fence(response: str) -> str:
+        response = str(response).strip()
+        if not response.startswith("```"):
+            return response
+
+        lines = response.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    def _parse_list_translation_response(
+        self, response: str, original_values: List[Any]
+    ) -> Optional[List[str]]:
+        """Parse a translated JSON array without allowing subject loss."""
+        try:
+            parsed = json.loads(self._strip_json_code_fence(response))
+        except (TypeError, ValueError, json.JSONDecodeError) as e:
+            self._print(f"Error parsing metadata array response: {e}")
+            return None
+
+        if not isinstance(parsed, list) or len(parsed) != len(original_values):
+            self._print(
+                "Error parsing metadata array response: expected "
+                f"{len(original_values)} items, received "
+                f"{len(parsed) if isinstance(parsed, list) else 'a non-array value'}"
+            )
+            return None
+
+        values = [str(value).strip() for value in parsed]
+        return values if all(values) else None
+
+    def _parse_metadata_response(self, response: str, original_fields: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse metadata response"""
+        try:
+            parsed = json.loads(self._strip_json_code_fence(response))
+            
+            result = {}
+            for field, value in parsed.items():
+                if field in original_fields and value:
+                    original_value = original_fields[field]
+                    if isinstance(original_value, list):
+                        if not isinstance(value, list) or len(value) != len(original_value):
+                            self._print(
+                                f"Ignoring translated {field}: expected an array "
+                                f"with {len(original_value)} items"
+                            )
+                            continue
+                        translated_values = [str(item).strip() for item in value]
+                        if all(translated_values):
+                            result[field] = translated_values
+                    else:
+                        result[field] = str(value).strip()
+                    
+            return result
+            
+        except Exception as e:
+            self._print(f"Error parsing response: {e}")
+            return {}
+
+
+def _get_source_language() -> str:
+    """
+    Get source language from EPUB metadata or detect from content
+    
+    NOTE: This properly detects language from the actual content/metadata
+    instead of inferring from profile names (which are for prompt presets)
+    """
+    # Try to get language from metadata first
+    metadata_path = os.path.join(os.path.dirname(os.getenv('EPUB_PATH', '')), 'metadata.json')
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+                # Check for language field
+                lang = metadata.get('language', '').lower()
+                if 'ko' in lang or 'korean' in lang:
+                    return 'Korean'
+                elif 'ja' in lang or 'japanese' in lang:
+                    return 'Japanese'
+                elif 'zh' in lang or 'chinese' in lang:
+                    return 'Chinese'
+        except:
+            pass
+    
+    # If no metadata, return empty string so prompts are generic
+    return ''
+
+
+def enhance_epub_compiler(compiler_instance):
+    """Enhance an EPUBCompiler instance with translation features"""
+    # Get settings from environment
+    translate_metadata_fields = {}
+    try:
+        fields_str = os.getenv('TRANSLATE_METADATA_FIELDS', '{}')
+        translate_metadata_fields = json.loads(fields_str)
+        if translate_metadata_fields:
+            print(f"[DEBUG] Metadata fields to translate: {translate_metadata_fields}")
+        else:
+            print("[DEBUG] No metadata fields configured for translation")
+    except Exception as e:
+        print(f"[ERROR] Failed to parse TRANSLATE_METADATA_FIELDS: {e}")
+        translate_metadata_fields = {}
+
+    # "Translate Book Title / Metadata" is the overall metadata gate.  Keep
+    # header translation independent, but do not let the compiler perform a
+    # second metadata pass when the main toggle is disabled.
+    if os.getenv('TRANSLATE_BOOK_TITLE', '1') != '1':
+        translate_metadata_fields = {}
+        print("[DEBUG] Book title / metadata translation disabled")
+    
+    batch_translate = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', -1))
+    update_html = os.getenv('UPDATE_HTML_HEADERS', '1') == '1'
+    save_translations = os.getenv('SAVE_HEADER_TRANSLATIONS', '1') == '1'
+    
+    # Add settings to compiler
+    compiler_instance.translate_metadata_fields = translate_metadata_fields
+    compiler_instance.metadata_translation_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
+    compiler_instance.batch_translate_headers = batch_translate
+    compiler_instance.headers_per_batch = headers_per_batch
+    compiler_instance.update_html_headers = update_html
+    compiler_instance.save_header_translations = save_translations
+    
+    # Log what we're setting
+    print(f"[DEBUG] Compiler settings:")
+    print(f"  - translate_metadata_fields: {compiler_instance.translate_metadata_fields}")
+    print(f"  - metadata_translation_mode: {compiler_instance.metadata_translation_mode}")
+    print(f"  - batch_translate_headers: {compiler_instance.batch_translate_headers}")
+    
+    # extraction method with mapping support
+    compiler_instance._extract_source_headers_and_current_titles = lambda: extract_source_headers_and_current_titles(
+        os.getenv('EPUB_PATH', ''), 
+        compiler_instance.html_dir,
+        compiler_instance.log
+    )
+    
+    # Create translators if needed
+    needs_translators = batch_translate or any(translate_metadata_fields.values())
+    print(f"[DEBUG] Needs translators: {needs_translators} (batch={batch_translate}, metadata={any(translate_metadata_fields.values())})")
+    
+    if compiler_instance.api_client and needs_translators:
+        # Try to get config from multiple locations
+        config_paths = [
+            os.path.join(compiler_instance.base_dir, '..', 'config.json'),
+            os.path.join(os.path.dirname(compiler_instance.base_dir), 'config.json'),
+            os.path.join(os.path.dirname(os.path.dirname(compiler_instance.base_dir)), 'config.json'),
+            'config.json'  # Current directory as last resort
+        ]
+        
+        config = {}
+        for config_path in config_paths:
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    print(f"[DEBUG] Loaded config from: {config_path}")
+                    break
+                except Exception as e:
+                    print(f"[WARNING] Failed to load config from {config_path}: {e}")
+
+        # Keep artifact requests tied to this compiler. This is required when
+        # several books share one API client or run concurrently.
+        config['output_dir'] = os.path.abspath(compiler_instance.output_dir)
+        config['source_path'] = (
+            getattr(compiler_instance, 'epub_path', None)
+            or os.getenv('GLOSSARY_SOURCE_PATH')
+            or os.getenv('EPUB_PATH')
+            or ''
+        )
+        
+        # PRIORITY: Use GUI values from environment first, then config as fallback
+        
+        # Get temperature - GUI passes this via TRANSLATION_TEMPERATURE env var
+        env_temp = os.getenv('TRANSLATION_TEMPERATURE')
+        if env_temp:
+            try:
+                config['temperature'] = float(env_temp)
+                print(f"[DEBUG] Using temperature from GUI (env): {config['temperature']}")
+            except ValueError:
+                print(f"[WARNING] Invalid temperature value: {env_temp}")
+                config['temperature'] = 0.3
+        elif 'translation_temperature' in config:
+            config['temperature'] = config['translation_temperature']
+            print(f"[DEBUG] Using temperature from config: {config['temperature']}")
+        else:
+            config['temperature'] = 0.3  # Last resort default
+            print(f"[DEBUG] Using default temperature: {config['temperature']}")
+            
+        # Get max_tokens - GUI passes this via MAX_OUTPUT_TOKENS env var
+        env_max_tokens = os.getenv('MAX_OUTPUT_TOKENS')
+        if env_max_tokens and env_max_tokens.isdigit():
+            config['max_tokens'] = int(env_max_tokens)
+            print(f"[DEBUG] Using max_tokens from GUI (env): {config['max_tokens']}")
+        elif 'max_output_tokens' in config:
+            config['max_tokens'] = config['max_output_tokens']
+            print(f"[DEBUG] Using max_tokens from config: {config['max_tokens']}")
+        else:
+            config['max_tokens'] = 4096  # Last resort default
+            print(f"[DEBUG] Using default max_tokens: {config['max_tokens']}")
+            
+        # Set temperature and max_tokens on the client if possible
+        if hasattr(compiler_instance.api_client, 'default_temperature'):
+            compiler_instance.api_client.default_temperature = config['temperature']
+        if hasattr(compiler_instance.api_client, 'default_max_tokens'):
+            compiler_instance.api_client.default_max_tokens = config['max_tokens']
+        
+        # Get compression factor from environment or config
+        compression_factor = float(os.getenv('COMPRESSION_FACTOR', '1.0'))
+        if hasattr(compiler_instance.api_client, 'compression_factor'):
+            compiler_instance.api_client.compression_factor = compression_factor
+            print(f"[DEBUG] Set compression factor: {compression_factor}")
+        
+        # Get output_language - GUI should pass this via OUTPUT_LANGUAGE env var
+        env_output_lang = os.getenv('OUTPUT_LANGUAGE')
+        if env_output_lang:
+            config['output_language'] = env_output_lang
+            print(f"[DEBUG] Using output_language from GUI (env): {config['output_language']}")
+        elif 'output_language' not in config:
+            config['output_language'] = 'English'  # Default
+            print(f"[DEBUG] Using default output_language: {config['output_language']}")
+        
+        # Get metadata field prompts - GUI passes these via env vars to the subprocess
+        env_field_prompts = os.getenv('METADATA_FIELD_PROMPTS')
+        if env_field_prompts:
+            try:
+                config['metadata_field_prompts'] = json.loads(env_field_prompts)
+                print(f"[DEBUG] Using metadata_field_prompts from GUI (env)")
+            except Exception as e:
+                print(f"[WARNING] Failed to parse METADATA_FIELD_PROMPTS env var: {e}")
+        
+        env_batch_prompt = os.getenv('METADATA_BATCH_PROMPT')
+        if env_batch_prompt:
+            config['metadata_batch_prompt'] = env_batch_prompt
+            print(f"[DEBUG] Using metadata_batch_prompt from GUI (env)")
+        
+        try:
+            # Create batch header translator if needed
+            if batch_translate:
+                compiler_instance.header_translator = BatchHeaderTranslator(
+                    compiler_instance.api_client, config
+                )
+                print(f"[DEBUG] Created BatchHeaderTranslator")
+            
+            # Create metadata translator if needed
+            if any(translate_metadata_fields.values()):
+                compiler_instance.metadata_translator = MetadataTranslator(
+                    compiler_instance.api_client, config
+                )
+                print(f"[DEBUG] Config metadata_field_prompts: {config.get('metadata_field_prompts', 'NOT IN CONFIG')}")
+                print(f"[DEBUG] Config output_language: {config.get('output_language', 'NOT IN CONFIG')}")
+                print(f"[DEBUG] Created MetadataTranslator for fields: {[k for k, v in translate_metadata_fields.items() if v]}")
+                
+                # Verify the translator was created
+                if hasattr(compiler_instance, 'metadata_translator'):
+                    print("[DEBUG] MetadataTranslator successfully attached to compiler")
+                else:
+                    print("[ERROR] MetadataTranslator not attached to compiler!")
+            else:
+                print("[DEBUG] No metadata fields selected for translation")
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize translators: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        if not compiler_instance.api_client:
+            print("[WARNING] No API client available for translation")
+        if not needs_translators:
+            print("[DEBUG] No translation features requested")
+    
+    return compiler_instance
+
+
+def _strip_xml_control_chars(text: str) -> str:
+    """Remove XML-illegal control characters from extracted header/title text.
+
+    Corrupted source EPUBs sometimes embed control bytes (e.g. ESC 0x1B, DC1
+    0x11) inside <h1>/<title>. BeautifulSoup preserves them, but the toc.ncx
+    path strips them during XML parsing — so the same title would otherwise
+    appear differently in translated_headers.txt vs TOC.txt. Stripping the same
+    set here keeps both extraction paths consistent and XML-safe. Visible
+    characters (including junk like '>' or '?') are left untouched.
+    """
+    if not text:
+        return ''
+    return re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', text).strip()
+
+
+def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log_callback=None) -> Tuple[Dict[int, str], Dict[int, str]]:
+    """Extract source headers AND current titles from HTML files using STRICT OPF ordering
+    
+    Returns:
+        Tuple of (source_headers, current_titles) where:
+        - source_headers: Maps output chapter numbers to original language titles from source EPUB (in OPF order)
+        - current_titles: Maps output chapter numbers to current titles in HTML files
+    """
+    from bs4 import BeautifulSoup
+    import xml.etree.ElementTree as ET
+    
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    log("📖 Extracting headers and mapping to output files...")
+    
+    # Step 1: Get HTML files that contain numbers (support all HTML extensions)
+    html_extensions = ('.html', '.xhtml', '.htm')
+    all_html_files = sorted([f for f in os.listdir(html_dir) 
+                             if f.lower().endswith(html_extensions) 
+                             and re.search(r'\d+', f)])  # Only files with numbers
+    log(f"📁 Found {len(all_html_files)} HTML files with numbers in {html_dir}")
+    
+    # Step 2: Load translation_progress.json to understand the chapter mapping
+    progress_file = os.path.join(html_dir, 'translation_progress.json')
+    progress_data = {}
+    chapter_to_file_map = {}
+    has_chapter_zero = False
+    uses_zero_based = False
+    
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                progress_data = json.load(f)
+            
+            uses_zero_based = progress_data.get('uses_zero_based', False)
+            all_chapters = progress_data.get('chapters', {})
+            
+            log(f"📊 Scanning {len(all_chapters)} entries in translation_progress.json")
+            log(f"📊 Novel uses {'0-based' if uses_zero_based else '1-based'} numbering")
+            
+            # Check if we have chapter 0
+            for chapter_hash, chapter_info in all_chapters.items():
+                if isinstance(chapter_info, dict):
+                    actual_num = chapter_info.get('actual_num')
+                    if actual_num == 0:
+                        has_chapter_zero = True
+                        log("  ✔ Found Chapter 0 in translation_progress.json")
+                        break
+            
+            # Build complete mapping (only files with numbers)
+            for chapter_hash, chapter_info in all_chapters.items():
+                if isinstance(chapter_info, dict):
+                    has_output = chapter_info.get('output_file')
+                    is_completed = chapter_info.get('status') == 'completed' or has_output
+                    
+                    if is_completed and has_output:
+                        actual_num = chapter_info.get('actual_num')
+                        output_file = os.path.basename(chapter_info['output_file'])
+                        
+                        # Skip files without numbers (but allow retain extension naming patterns)
+                        if not re.search(r'\d+', output_file):
+                            continue
+                        
+                        if actual_num is not None and output_file in all_html_files:
+                            chapter_to_file_map[actual_num] = output_file
+                            
+            log(f"📊 Found {len(chapter_to_file_map)} chapter mappings in translation_progress.json")
+            
+            if chapter_to_file_map:
+                min_ch = min(chapter_to_file_map.keys())
+                max_ch = max(chapter_to_file_map.keys())
+                log(f"  Chapter range: {min_ch} to {max_ch}")
+                        
+        except Exception as e:
+            log(f"⚠️ Could not load translation_progress.json: {e}")
+    
+    # Step 3: Extract current titles from HTML files
+    current_titles = {}
+    
+    if chapter_to_file_map:
+        for chapter_num, html_file in chapter_to_file_map.items():
+            try:
+                html_path = os.path.join(html_dir, html_file)
+                with open(html_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                parser = 'lxml-xml' if html_path.lower().endswith('.xhtml') or content.lstrip().startswith('<?xml') else 'lxml'
+                soup = BeautifulSoup(content, parser)
+                
+                current_title = None
+                for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                    tag = soup.find(tag_name)
+                    if tag:
+                        text = _strip_xml_control_chars(tag.get_text())
+                        if text:
+                            current_title = text
+                            break
+                
+                if not current_title:
+                    continue
+                
+                current_titles[chapter_num] = {
+                    'title': current_title,
+                    'filename': html_file
+                }
+                    
+            except Exception as e:
+                log(f"⚠️ Error reading {html_file}: {e}")
+    else:
+        # No mapping - use file order (only files with numbers)
+        log("⚠️ No translation_progress.json mapping found, using file order")
+        start_num = 0 if has_chapter_zero else 1
+        
+        for idx, html_file in enumerate(all_html_files):
+            chapter_num = idx + start_num
+            try:
+                html_path = os.path.join(html_dir, html_file)
+                with open(html_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                current_title = None
+                for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                    tag = soup.find(tag_name)
+                    if tag:
+                        text = _strip_xml_control_chars(tag.get_text())
+                        if text:
+                            current_title = text
+                            break
+                
+                if not current_title:
+                    continue
+                
+                current_titles[chapter_num] = {
+                    'title': current_title,
+                    'filename': html_file
+                }
+                    
+            except Exception as e:
+                log(f"⚠️ Error reading {html_file}: {e}")
+    
+    log(f"📊 Found {len(current_titles)} current titles in HTML files")
+    
+    # Step 4: Extract headers from source EPUB using STRICT OPF ordering
+    source_headers = {}
+    
+    if not os.path.exists(epub_path):
+        log(f"⚠️ Source EPUB not found: {epub_path}")
+        return source_headers, current_titles
+    
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Find and parse OPF file
+            opf_content = None
+            opf_path = None
+            
+            opf_path = find_epub_opf_member(zf)
+            if opf_path:
+                opf_content = zf.read(opf_path)
+                log(f"📋 Found OPF package: {opf_path}")
+            
+            # Parse OPF to get spine order
+            spine_order = []
+            if opf_content:
+                try:
+                    root = ET.fromstring(opf_content)
+                    
+                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                    if root.tag.startswith('{'):
+                        default_ns = root.tag[1:root.tag.index('}')]
+                        ns = {'opf': default_ns}
+                    
+                    # Get manifest to map IDs to files
+                    manifest = {}
+                    opf_dir = os.path.dirname(opf_path) if opf_path else ''
+                    
+                    for item in root.findall('.//opf:manifest/opf:item', ns):
+                        item_id = item.get('id')
+                        href = item.get('href')
+                        media_type = item.get('media-type', '')
+                        
+                        if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                            if opf_dir:
+                                full_path = os.path.join(opf_dir, href).replace('\\', '/')
+                            else:
+                                full_path = href
+                            manifest[item_id] = full_path
+                    
+                    # Get spine order - only include files with numbers
+                    spine = root.find('.//opf:spine', ns)
+                    if spine is not None:
+                        for itemref in spine.findall('opf:itemref', ns):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest:
+                                file_path = manifest[idref]
+                                # Only include files with numbers
+                                if re.search(r'\d+', file_path):
+                                    spine_order.append(file_path)
+                    
+                    log(f"📋 Found {len(spine_order)} content files with numbers in OPF spine order")
+                    
+                    # Show breakdown
+                    notice_count = sum(1 for f in spine_order if 'notice' in f.lower())
+                    chapter_count = sum(1 for f in spine_order if 'chapter' in f.lower() and 'notice' not in f.lower())
+                    if notice_count > 0:
+                        log(f"   • Notice/Copyright files: {notice_count}")
+                    if chapter_count > 0:
+                        log(f"   • Chapter files: {chapter_count}")
+                    
+                except Exception as e:
+                    log(f"⚠️ Error parsing OPF: {e}")
+                    spine_order = []
+            
+            # Use spine order if available, otherwise alphabetical (only files with numbers)
+            if spine_order:
+                epub_html_files = spine_order
+                log("✅ Using STRICT OPF spine order for source headers")
+            else:
+                # Fallback: only files with numbers
+                epub_html_files = sorted([f for f in zf.namelist() 
+                                         if f.endswith(('.html', '.xhtml', '.htm')) 
+                                         and not f.startswith('__MACOSX')
+                                         and re.search(r'\d+', f)])
+                log("⚠️ No OPF spine found, using alphabetical order (only files with numbers)")
+            
+            log(f"📚 Processing {len(epub_html_files)} content files from source EPUB")
+            
+            # Extract ALL titles from source EPUB files (in OPF order)
+            source_titles_by_index = {}
+            
+            for idx, content_file in enumerate(epub_html_files):
+                try:
+                    html_content = zf.read(content_file).decode('utf-8', errors='ignore')
+                    
+                    if not html_content:
+                        continue
+                    
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    title = None
+                    for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                        tag = soup.find(tag_name)
+                        if tag:
+                            text = _strip_xml_control_chars(tag.get_text())
+                            if text:
+                                title = text
+                                break
+                    
+                    if title:
+                        source_titles_by_index[idx] = title
+                        if idx < 5:
+                            log(f"  Source[{idx}] ({os.path.basename(content_file)}): {title}")
+                    
+                except Exception as e:
+                    log(f"  ⚠️ Error reading source chapter {idx}: {e}")
+                    continue
+            
+            log(f"📚 Extracted {len(source_titles_by_index)} titles from source EPUB")
+            
+            # NOW THE KEY FIX: Map source to output using OPF spine positions
+            # The chapter_idx in content_hashes should match the OPF spine position
+            source_to_output = {}
+            
+            # First try to use content_hashes if available
+            if progress_data and 'content_hashes' in progress_data:
+                content_hashes = progress_data.get('content_hashes', {})
+                chapters_data = progress_data.get('chapters', {})
+                
+                log(f"  Checking {len(content_hashes)} content hash entries...")
+                
+                # The issue: chapter_idx might not match OPF order if files were processed alphabetically
+                # We need to correct this by matching actual_num directly
+                
+                for chapter_hash, hash_info in content_hashes.items():
+                    if not isinstance(hash_info, dict):
+                        continue
+                    
+                    actual_num = hash_info.get('actual_num')
+                    
+                    # Check if this chapter is completed
+                    chapter_info = chapters_data.get(chapter_hash, {})
+                    has_output = chapter_info.get('output_file')
+                    is_completed = chapter_info.get('status') == 'completed' or has_output
+                    
+                    # Skip if output file doesn't have a number or isn't an HTML file
+                    if has_output:
+                        output_file = os.path.basename(chapter_info['output_file'])
+                        if not re.search(r'\d+', output_file) or not output_file.lower().endswith(html_extensions):
+                            continue
+                    
+                    if is_completed and actual_num is not None:
+                        # Map OPF spine index to actual_num
+                        # The actual_num is what we need to match
+                        # Find the spine index that corresponds to this chapter number
+                        
+                        # If OPF has notice files (0-13) and chapters (14+)
+                        # And actual_num is 0-based, then:
+                        # actual_num 0 = spine index 0 (first notice file)
+                        # actual_num 14 = spine index 14 (first chapter file)
+                        
+                        # Direct mapping: actual_num IS the spine index
+                        source_to_output[actual_num] = actual_num
+            
+            log(f"  Direct mapping: {len(source_to_output)} chapters mapped")
+            
+            # Apply the mapping to create source_headers
+            for spine_idx, output_num in source_to_output.items():
+                if spine_idx in source_titles_by_index and output_num in current_titles:
+                    source_headers[output_num] = source_titles_by_index[spine_idx]
+                    if len(source_headers) <= 5:
+                        log(f"  Mapped: Spine[{spine_idx}] → Output Ch.{output_num}: {source_titles_by_index[spine_idx][:50]}...")
+            
+            # If we still have missing mappings, use direct index mapping
+            missing_chapters = set(current_titles.keys()) - set(source_headers.keys())
+            if missing_chapters:
+                log(f"⚠️ Missing mappings for chapters: {sorted(missing_chapters)[:10]}...")
+                
+                for missing_ch in sorted(missing_chapters):
+                    # Direct mapping: chapter number = spine index
+                    if missing_ch in source_titles_by_index:
+                        source_headers[missing_ch] = source_titles_by_index[missing_ch]
+                        if len(missing_chapters) <= 10:
+                            log(f"    Direct mapped: Ch.{missing_ch} → {source_titles_by_index[missing_ch][:50]}...")
+            
+            log(f"📊 Final result: {len(source_headers)} source headers mapped to output chapters")
+            
+            # Debug output
+            if source_headers:
+                log(f"📋 Sample mappings:")
+                for ch_num in sorted(list(source_headers.keys()))[:5]:
+                    current = current_titles.get(ch_num, {})
+                    log(f"   Ch.{ch_num}: {source_headers[ch_num][:40]}... → {current.get('title', 'N/A')[:40]}...")
+        
+    except Exception as e:
+        log(f"❌ Error extracting source headers: {e}")
+        import traceback
+        log(traceback.format_exc())
+    
+    return source_headers, current_titles

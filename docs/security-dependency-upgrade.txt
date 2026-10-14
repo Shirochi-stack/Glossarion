@@ -1,0 +1,38 @@
+Security dependency update — 7 October 2026
+
+Desktop requirements now require Pillow >=12.3.0 and cryptography >=50.0.2.
+CPU and CUDA builds use matching torch 2.13.0 / torchvision 0.28.0 wheels.
+The Linux build's explicit installation step uses the same patched CPU pair.
+The base requirements impose torch >=2.13.0 for transitive ML consumers.
+
+Apple Silicon development requirements use torch 2.13.0 / torchvision 0.28.0,
+whose official wheels require macOS 14+. Intel macOS requirements omit torch,
+torchvision and ultralytics; ONNX inference remains available. Existing macOS
+Lite packaging specifications already exclude the PyTorch/ultralytics stack.
+PyTorch model loading and PT-to-ONNX conversion are unavailable on Intel.
+
+Mobile pyproject.toml and uv.lock use Pillow 12.3.0 and cryptography 50.0.2.
+cryptography 50.0.2 also avoids GHSA-g6cj-pr64-35w5, which upgrading to 49.0.0
+would introduce even though it was not among the original repository alerts.
+
+Mobile release blocker: current configured PyPI/Flet indexes have no compatible
+patched Android Pillow wheels and no cryptography 50.0.2 Android/iOS wheels.
+The existing mobile wheel check deliberately remains enabled and fails until
+patched wheels are supplied. A resolving host lockfile is not proof that an
+APK/IPA can be built. Do not downgrade security pins to bypass this blocker.
+
+Untrusted Pillow image reads use safe_image.open_image. It selects allowed
+parsers before opening headers, excluding EPS, JPEG2000 and McIdas. Pixel-bomb
+checks remain enabled. Optional missing parsers do not break supported input.
+PNG, JPEG, WebP, GIF, BMP and TIFF decoding and the shared cover path are tested.
+This is defense in depth; it does not replace native dependency updates.
+
+Audit caveat: pip-audit's PyPI service reports PYSEC-2022-252 against
+deep-translator 1.11.4. The authoritative PyPA entry explicitly lists the
+malicious release as 1.8.5, but its ecosystem range has no fixed event, causing
+newer versions to be flagged. No automatic ignore/dismissal was added.
+Source: https://raw.githubusercontent.com/pypa/advisory-database/main/vulns/deep-translator/PYSEC-2022-252.yaml
+
+Changes must be pushed to the default branch before GitHub can reevaluate its
+alerts. Already distributed applications and already installed desktop
+environments remain unchanged until rebuilt/reinstalled.

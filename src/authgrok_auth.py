@@ -1,0 +1,2152 @@
+# authgrok_auth.py - Grok OAuth authentication and Responses API adapter
+"""OAuth support for Grok models through an xAI account session.
+
+Prefix models with ``authgrok/`` (or ``authgrokN/`` for numbered account
+slots) to use xAI's OAuth-backed Grok CLI proxy without an API key. The
+explicit ``authgrok0/`` route rotates the distinct saved account slots.
+
+The browser is opened on xAI's authorization page. Users may choose any
+sign-in method offered there, including Google account sign-in. Interactive
+logins use xAI's device grant and first sign out the existing website session,
+so both the default and numbered slots receive a fresh account selection.
+
+The wire contract follows the public, MIT-licensed pi-xai-oauth reference:
+https://github.com/BlockedPath/pi-xai-oauth
+
+run_device_oauth_flow() runs the device login end to end. begin_device_login()
+/ poll_device_login() split it for callers that open the browser themselves
+(Glossarion Mobile shows the user code and opens the page; there the module
+never opens a browser and never imports an official Grok CLI login).
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import logging
+import os
+import re
+import secrets
+import threading
+import time
+import uuid
+import webbrowser
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlencode, urlparse
+
+import requests
+
+import oauth_session
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Cancellation
+# ---------------------------------------------------------------------------
+
+_cancel_event = threading.Event()
+
+
+def cancel_stream() -> None:
+    """Signal active AuthGrok response streams to stop."""
+    _cancel_event.set()
+
+
+def reset_cancel() -> None:
+    """Clear cancellation unless Glossarion currently has a hard stop active."""
+    if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        return
+    _cancel_event.clear()
+
+
+def is_cancelled() -> bool:
+    return _cancel_event.is_set() or os.environ.get("TRANSLATION_CANCELLED") == "1"
+
+
+# ---------------------------------------------------------------------------
+# xAI OAuth and proxy constants
+# ---------------------------------------------------------------------------
+
+XAI_OAUTH_ISSUER = "https://auth.x.ai"
+XAI_OAUTH_DISCOVERY_URL = f"{XAI_OAUTH_ISSUER}/.well-known/openid-configuration"
+XAI_OAUTH_AUTHORIZATION_URL = f"{XAI_OAUTH_ISSUER}/oauth2/authorize"
+XAI_OAUTH_TOKEN_URL = f"{XAI_OAUTH_ISSUER}/oauth2/token"
+XAI_OAUTH_DEVICE_CODE_URL = f"{XAI_OAUTH_ISSUER}/oauth2/device/code"
+XAI_OAUTH_JWKS_URL = f"{XAI_OAUTH_ISSUER}/.well-known/jwks.json"
+XAI_ACCOUNTS_ORIGIN = "https://accounts.x.ai"
+XAI_ACCOUNTS_SIGN_OUT_URL = f"{XAI_ACCOUNTS_ORIGIN}/sign-out"
+XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+XAI_OAUTH_SCOPE = (
+    "openid profile email offline_access grok-cli:access api:access "
+    "conversations:read conversations:write"
+)
+XAI_OAUTH_REDIRECT_HOST = "127.0.0.1"
+XAI_OAUTH_REDIRECT_PORT = 56121
+XAI_OAUTH_REDIRECT_PATH = "/callback"
+TOKEN_REFRESH_MARGIN_SECONDS = 120
+DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+DEVICE_CODE_DEFAULT_POLL_SECONDS = 5
+DEVICE_CODE_SLOW_DOWN_SECONDS = 5
+OIDC_CACHE_DEFAULT_SECONDS = 300
+JWKS_CACHE_DEFAULT_SECONDS = 300
+OAUTH_CACHE_MAX_SECONDS = 3600
+
+XAI_CLI_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
+XAI_CLI_RESPONSES_URL = f"{XAI_CLI_BASE_URL}/responses"
+XAI_CLI_MODELS_URL = f"{XAI_CLI_BASE_URL}/models-v2"
+DEFAULT_MODEL = "grok-4.5"
+
+try:
+    from app_version import APP_VERSION as _APP_VERSION
+except Exception:  # pragma: no cover - standalone use outside Glossarion
+    _APP_VERSION = "unknown"
+
+XAI_CLIENT_IDENTIFIER = "glossarion"
+XAI_CLIENT_VERSION = str(_APP_VERSION)
+XAI_USER_AGENT = f"Glossarion/{XAI_CLIENT_VERSION}"
+
+# ~/.glossarion; GLOSSARION_TOKEN_DIR when set (Glossarion Mobile: <data>/home/.glossarion)
+_DEFAULT_TOKEN_DIR = oauth_session.default_token_dir()
+_DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgrok_tokens.json")
+_OFFICIAL_GROK_AUTH_FILE = os.path.join(os.path.expanduser("~"), ".grok", "auth.json")
+_OFFICIAL_GROK_SCOPE_KEY = f"{XAI_OAUTH_ISSUER}::{XAI_OAUTH_CLIENT_ID}"
+_OFFICIAL_GROK_LEGACY_SCOPE_KEY = "https://accounts.x.ai/sign-in"
+
+_oidc_cache_lock = threading.RLock()
+_oidc_discovery_cache: Optional[Tuple[Dict[str, Any], float]] = None
+_jwks_cache: Optional[Tuple[Dict[str, Any], float]] = None
+
+
+# ---------------------------------------------------------------------------
+# PKCE, OIDC discovery, and ID-token validation
+# ---------------------------------------------------------------------------
+
+
+def _b64url_decode(value: str) -> bytes:
+    value = str(value or "")
+    value += "=" * ((4 - len(value) % 4) % 4)
+    return base64.urlsafe_b64decode(value.encode("ascii"))
+
+
+def _decode_jwt_part(token: str, index: int) -> Dict[str, Any]:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return {}
+        value = json.loads(_b64url_decode(parts[index]).decode("utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def generate_pkce() -> Tuple[str, str]:
+    """Return a high-entropy PKCE verifier and its S256 challenge."""
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def _oauth_headers() -> Dict[str, str]:
+    return {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": XAI_USER_AGENT,
+        "X-Grok-Client-Version": XAI_CLIENT_VERSION,
+        "X-Grok-Client-Surface": "ui",
+    }
+
+
+def _response_cache_seconds(response: Any, default_seconds: int) -> float:
+    """Honor HTTP cache lifetime hints, with a conservative bounded fallback."""
+    headers = getattr(response, "headers", {}) or {}
+    cache_control = str(
+        headers.get("Cache-Control") or headers.get("cache-control") or ""
+    )
+    directives = {part.strip().casefold() for part in cache_control.split(",") if part.strip()}
+    if "no-store" in directives or "no-cache" in directives:
+        return 0.0
+
+    max_age = None
+    for directive in directives:
+        if directive.startswith("max-age="):
+            try:
+                max_age = max(0.0, float(directive.split("=", 1)[1].strip('"')))
+            except (TypeError, ValueError):
+                pass
+            break
+
+    if max_age is not None:
+        try:
+            age = max(0.0, float(headers.get("Age") or headers.get("age") or 0))
+        except (TypeError, ValueError):
+            age = 0.0
+        return min(max(0.0, max_age - age), float(OAUTH_CACHE_MAX_SECONDS))
+
+    expires = headers.get("Expires") or headers.get("expires")
+    if expires:
+        try:
+            expires_at = parsedate_to_datetime(str(expires)).timestamp()
+            return min(
+                max(0.0, expires_at - time.time()),
+                float(OAUTH_CACHE_MAX_SECONDS),
+            )
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return float(default_seconds)
+
+
+def _load_oidc_discovery(
+    timeout: int = 15,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    global _oidc_discovery_cache
+    if not force_refresh:
+        with _oidc_cache_lock:
+            if _oidc_discovery_cache and _oidc_discovery_cache[1] > time.monotonic():
+                return dict(_oidc_discovery_cache[0])
+
+    response = requests.get(
+        XAI_OAUTH_DISCOVERY_URL,
+        headers={"Accept": "application/json", "User-Agent": XAI_USER_AGENT},
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    if response.is_redirect or response.is_permanent_redirect:
+        raise RuntimeError("xAI OIDC discovery unexpectedly redirected")
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("xAI OIDC discovery returned an invalid document")
+
+    pinned = {
+        "issuer": XAI_OAUTH_ISSUER,
+        "authorization_endpoint": XAI_OAUTH_AUTHORIZATION_URL,
+        "token_endpoint": XAI_OAUTH_TOKEN_URL,
+        "jwks_uri": XAI_OAUTH_JWKS_URL,
+    }
+    for key, expected in pinned.items():
+        if data.get(key) != expected:
+            raise RuntimeError(f"xAI OIDC discovery advertised an untrusted {key}")
+    if "ES256" not in (data.get("id_token_signing_alg_values_supported") or []):
+        raise RuntimeError("xAI OIDC discovery did not advertise ES256 ID tokens")
+    cache_seconds = _response_cache_seconds(response, OIDC_CACHE_DEFAULT_SECONDS)
+    with _oidc_cache_lock:
+        _oidc_discovery_cache = (dict(data), time.monotonic() + cache_seconds)
+    return dict(data)
+
+
+def _load_jwks(
+    discovery: Dict[str, Any],
+    timeout: int = 15,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Load pinned xAI signing keys, refreshing safely when keys rotate."""
+    global _jwks_cache
+    if discovery.get("jwks_uri") != XAI_OAUTH_JWKS_URL:
+        raise RuntimeError("Refusing to use an untrusted xAI JWKS endpoint")
+    if not force_refresh:
+        with _oidc_cache_lock:
+            if _jwks_cache and _jwks_cache[1] > time.monotonic():
+                return dict(_jwks_cache[0])
+
+    response = requests.get(
+        XAI_OAUTH_JWKS_URL,
+        headers={"Accept": "application/json", "User-Agent": XAI_USER_AGENT},
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    if response.is_redirect or response.is_permanent_redirect:
+        raise RuntimeError("xAI JWKS request unexpectedly redirected")
+    response.raise_for_status()
+    jwks = response.json()
+    if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):
+        raise RuntimeError("xAI JWKS response was invalid")
+    cache_seconds = _response_cache_seconds(response, JWKS_CACHE_DEFAULT_SECONDS)
+    with _oidc_cache_lock:
+        _jwks_cache = (dict(jwks), time.monotonic() + cache_seconds)
+    return dict(jwks)
+
+
+def _warm_jwks_cache(discovery: Dict[str, Any]) -> None:
+    """Overlap signing-key retrieval with the user's browser interaction."""
+    try:
+        _load_jwks(discovery)
+    except Exception as exc:
+        # Token validation retries this normally and reports any persistent error.
+        logger.debug("AuthGrok JWKS cache warm-up failed: %s", exc)
+
+
+def build_auth_url(
+    code_challenge: str,
+    state: str,
+    redirect_uri: str,
+    nonce: str,
+    authorization_endpoint: str = XAI_OAUTH_AUTHORIZATION_URL,
+    force_account_selection: bool = False,
+) -> str:
+    """Build the xAI authorization URL for the browser PKCE flow."""
+    if authorization_endpoint != XAI_OAUTH_AUTHORIZATION_URL:
+        raise RuntimeError("Refusing to use an untrusted xAI authorization endpoint")
+    params = {
+        "response_type": "code",
+        "client_id": XAI_OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": XAI_OAUTH_SCOPE,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+        "nonce": nonce,
+    }
+    if force_account_selection:
+        # These hints are retained for callers that explicitly construct a
+        # fresh PKCE URL. Numbered Glossarion slots use the device flow below.
+        params["prompt"] = "login"
+        params["max_age"] = "0"
+    return f"{authorization_endpoint}?{urlencode(params)}"
+
+
+_MOBILE_SIGN_IN_MESSAGE = (
+    "AuthGrok: sign in to Grok from Glossarion's Accounts screen "
+    "(the app shows the code and opens the xAI page itself)."
+)
+
+
+def _open_oauth_browser(auth_url: str) -> None:
+    """Open xAI OAuth in the user's normal default browser.
+
+    Never on Glossarion Mobile, where the app opens begin_device_login()'s page.
+    """
+    if oauth_session.is_mobile():
+        raise RuntimeError(_MOBILE_SIGN_IN_MESSAGE)
+    if not webbrowser.open(auth_url):
+        raise RuntimeError("Could not open the default browser for xAI login")
+
+
+def _validate_id_token(
+    id_token: str,
+    nonce: Optional[str],
+    discovery: Dict[str, Any],
+    timeout: int = 15,
+) -> Dict[str, Any]:
+    """Verify the fresh-login xAI ID token and return its claims."""
+    header = _decode_jwt_part(id_token, 0)
+    claims = _decode_jwt_part(id_token, 1)
+    parts = id_token.split(".")
+    if len(parts) != 3 or not header or not claims:
+        raise RuntimeError("xAI token response did not include a valid signed ID token")
+    if header.get("alg") != "ES256" or not isinstance(header.get("kid"), str):
+        raise RuntimeError("xAI ID token used an unsupported signing policy")
+
+    jwks = _load_jwks(discovery, timeout=timeout)
+    keys = jwks.get("keys", []) if isinstance(jwks, dict) else []
+    matches = [
+        key for key in keys
+        if isinstance(key, dict) and key.get("kid") == header["kid"]
+    ]
+    if len(matches) != 1:
+        # A previously cached key set may be stale after xAI rotates keys.
+        jwks = _load_jwks(discovery, timeout=timeout, force_refresh=True)
+        keys = jwks.get("keys", []) if isinstance(jwks, dict) else []
+        matches = [
+            key for key in keys
+            if isinstance(key, dict) and key.get("kid") == header["kid"]
+        ]
+    if len(matches) != 1:
+        raise RuntimeError("xAI ID token signing key was missing or ambiguous")
+    key = matches[0]
+    if (
+        key.get("kty") != "EC"
+        or key.get("crv") != "P-256"
+        or key.get("alg", "ES256") != "ES256"
+        or not key.get("x")
+        or not key.get("y")
+    ):
+        raise RuntimeError("xAI ID token signing key did not match the ES256 policy")
+
+    try:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+        public_key = ec.EllipticCurvePublicNumbers(
+            int.from_bytes(_b64url_decode(key["x"]), "big"),
+            int.from_bytes(_b64url_decode(key["y"]), "big"),
+            ec.SECP256R1(),
+        ).public_key()
+        raw_signature = _b64url_decode(parts[2])
+        if len(raw_signature) != 64:
+            raise ValueError("invalid ES256 signature length")
+        der_signature = encode_dss_signature(
+            int.from_bytes(raw_signature[:32], "big"),
+            int.from_bytes(raw_signature[32:], "big"),
+        )
+        public_key.verify(
+            der_signature,
+            f"{parts[0]}.{parts[1]}".encode("ascii"),
+            ec.ECDSA(hashes.SHA256()),
+        )
+    except ImportError as exc:
+        raise RuntimeError("cryptography is required to verify the xAI login") from exc
+    except Exception as exc:
+        raise RuntimeError("xAI ID token signature validation failed") from exc
+
+    now = time.time()
+    audience = claims.get("aud")
+    audience_ok = (
+        audience == XAI_OAUTH_CLIENT_ID
+        or (isinstance(audience, list) and XAI_OAUTH_CLIENT_ID in audience)
+    )
+    if claims.get("iss") != XAI_OAUTH_ISSUER:
+        raise RuntimeError("xAI ID token issuer mismatch")
+    if not audience_ok or (claims.get("azp") not in (None, XAI_OAUTH_CLIENT_ID)):
+        raise RuntimeError("xAI ID token audience mismatch")
+    if not isinstance(claims.get("sub"), str) or not claims["sub"]:
+        raise RuntimeError("xAI ID token subject was invalid")
+    if not isinstance(claims.get("exp"), (int, float)) or claims["exp"] <= now:
+        raise RuntimeError("xAI ID token has expired")
+    if not isinstance(claims.get("iat"), (int, float)) or claims["iat"] > now + 60:
+        raise RuntimeError("xAI ID token issued-at time was invalid")
+    if nonce is not None:
+        if (
+            not isinstance(claims.get("nonce"), str)
+            or not secrets.compare_digest(claims["nonce"], nonce)
+        ):
+            raise RuntimeError("xAI ID token nonce mismatch")
+    return claims
+
+
+# ---------------------------------------------------------------------------
+# Token exchange and refresh
+# ---------------------------------------------------------------------------
+
+
+def _normalize_oauth_token_data(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str):
+        raise RuntimeError("xAI token response did not include an access token")
+    expires_in = data.get("expires_in", 3600)
+    if not isinstance(expires_in, (int, float)) or expires_in <= 0:
+        expires_in = 3600
+    normalized = dict(data)
+    normalized["expires_at"] = time.time() + float(expires_in)
+    normalized["token_endpoint"] = XAI_OAUTH_TOKEN_URL
+    return normalized
+
+
+def _post_oauth_token(payload: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
+    response = requests.post(
+        XAI_OAUTH_TOKEN_URL,
+        data=payload,
+        headers=_oauth_headers(),
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    if response.is_redirect or response.is_permanent_redirect:
+        raise RuntimeError("xAI token endpoint unexpectedly redirected")
+    if response.status_code >= 400:
+        raise RuntimeError(f"xAI token request failed with HTTP {response.status_code}")
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError("xAI token endpoint returned invalid JSON") from exc
+    return _normalize_oauth_token_data(data)
+
+
+def exchange_code_for_tokens(auth_code: str, code_verifier: str, redirect_uri: str) -> Dict[str, Any]:
+    data = _post_oauth_token({
+        "grant_type": "authorization_code",
+        "code": auth_code,
+        "redirect_uri": redirect_uri,
+        "client_id": XAI_OAUTH_CLIENT_ID,
+        "code_verifier": code_verifier,
+    })
+    if not data.get("refresh_token"):
+        raise RuntimeError("xAI token response did not include a refresh token")
+    if not data.get("id_token"):
+        raise RuntimeError("xAI token response did not include an ID token")
+    return data
+
+
+def refresh_access_token(refresh_token: str) -> Dict[str, Any]:
+    """Exchange an xAI refresh token for a fresh access token."""
+    if not refresh_token:
+        raise RuntimeError("AuthGrok refresh token is missing")
+    return _post_oauth_token({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": XAI_OAUTH_CLIENT_ID,
+    })
+
+
+def request_device_code(timeout: int = 30) -> Dict[str, Any]:
+    """Start xAI's RFC 8628 device authorization flow."""
+    response = requests.post(
+        XAI_OAUTH_DEVICE_CODE_URL,
+        data={
+            "client_id": XAI_OAUTH_CLIENT_ID,
+            "scope": XAI_OAUTH_SCOPE,
+            "referrer": "grok-build",
+        },
+        headers=_oauth_headers(),
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    if response.is_redirect or response.is_permanent_redirect:
+        raise RuntimeError("xAI device authorization endpoint unexpectedly redirected")
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"xAI device authorization failed with HTTP {response.status_code}"
+        )
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError("xAI device authorization returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("xAI device authorization returned an invalid response")
+
+    required_strings = ("device_code", "user_code", "verification_uri")
+    if any(not isinstance(data.get(key), str) or not data[key] for key in required_strings):
+        raise RuntimeError("xAI device authorization response was incomplete")
+    if not all(
+        char.isascii() and (char.isalnum() or char == "-")
+        for char in data["user_code"]
+    ):
+        raise RuntimeError("xAI device authorization returned an invalid user code")
+
+    verification_urls = [data["verification_uri"]]
+    complete_url = data.get("verification_uri_complete")
+    if complete_url is not None:
+        if not isinstance(complete_url, str) or not complete_url:
+            raise RuntimeError("xAI device authorization returned an invalid verification URL")
+        verification_urls.append(complete_url)
+    for verification_url in verification_urls:
+        if any(char.isascii() and ord(char) < 32 for char in verification_url):
+            raise RuntimeError("xAI device authorization returned an invalid verification URL")
+        parsed = urlparse(verification_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise RuntimeError("xAI device authorization returned an unsafe verification URL")
+
+    expires_in = data.get("expires_in", 600)
+    interval = data.get("interval", DEVICE_CODE_DEFAULT_POLL_SECONDS)
+    if not isinstance(expires_in, (int, float)) or expires_in <= 0:
+        expires_in = 600
+    if not isinstance(interval, (int, float)) or interval <= 0:
+        interval = DEVICE_CODE_DEFAULT_POLL_SECONDS
+    result = dict(data)
+    result["expires_in"] = float(expires_in)
+    result["interval"] = float(interval)
+    return result
+
+
+def _sleep_until_stopped(seconds: float, should_stop) -> None:
+    """Sleep *seconds*, waking every 0.2 s to return early once should_stop() is true."""
+    end = time.monotonic() + seconds
+    while not should_stop():
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(0.2, left))
+
+
+def poll_device_code_tokens(
+    device_code: Dict[str, Any],
+    timeout: int = 300,
+    should_stop=None,
+) -> Dict[str, Any]:
+    """Poll xAI until the browser device authorization completes.
+
+    *should_stop* (optional, no arguments) ends the poll with RuntimeError
+    once it returns True; it is checked about every 0.2 s while waiting.
+    """
+    interval = max(1.0, float(device_code.get("interval", DEVICE_CODE_DEFAULT_POLL_SECONDS)))
+    expires_in = max(1.0, float(device_code.get("expires_in", timeout)))
+    deadline = time.monotonic() + min(float(timeout), expires_in)
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("xAI device authorization timed out; try the Grok login again")
+        if should_stop is None:
+            time.sleep(min(interval, remaining))
+        else:
+            _sleep_until_stopped(min(interval, remaining), should_stop)
+            if should_stop():
+                raise RuntimeError("xAI device authorization was cancelled")
+
+        response = requests.post(
+            XAI_OAUTH_TOKEN_URL,
+            data={
+                "grant_type": DEVICE_CODE_GRANT_TYPE,
+                "device_code": str(device_code["device_code"]),
+                "client_id": XAI_OAUTH_CLIENT_ID,
+            },
+            headers=_oauth_headers(),
+            timeout=min(30, max(1, int(remaining))),
+            allow_redirects=False,
+        )
+        if response.is_redirect or response.is_permanent_redirect:
+            raise RuntimeError("xAI device token endpoint unexpectedly redirected")
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError("xAI device token endpoint returned invalid JSON") from exc
+
+        if response.status_code < 400:
+            tokens = _normalize_oauth_token_data(data)
+            if not tokens.get("refresh_token"):
+                raise RuntimeError("xAI device token response did not include a refresh token")
+            if not tokens.get("id_token"):
+                raise RuntimeError("xAI device token response did not include an ID token")
+            return tokens
+
+        error = str(data.get("error") or "") if isinstance(data, dict) else ""
+        detail = str(data.get("error_description") or error) if isinstance(data, dict) else ""
+        if error == "authorization_pending":
+            continue
+        if error == "slow_down":
+            interval += DEVICE_CODE_SLOW_DOWN_SECONDS
+            continue
+        if error == "access_denied":
+            raise RuntimeError("xAI device authorization was denied")
+        if error == "expired_token":
+            raise RuntimeError("xAI device authorization expired; try the Grok login again")
+        raise RuntimeError(f"xAI device authorization failed: {detail or 'unknown error'}")
+
+
+def build_signed_out_device_url(verification_url: str) -> str:
+    """Log out the xAI website session, then continue to device authorization."""
+    parsed = urlparse(verification_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "accounts.x.ai"
+        or parsed.path != "/oauth2/device"
+        or parsed.fragment
+    ):
+        raise RuntimeError("xAI device authorization returned an unsafe verification URL")
+
+    return_to = parsed.path
+    if parsed.query:
+        return_to += f"?{parsed.query}"
+    sign_out_query = urlencode({
+        "redirect": "oauth2-provider",
+        "return_to": return_to,
+    })
+    return f"{XAI_ACCOUNTS_SIGN_OUT_URL}?{sign_out_query}"
+
+
+class DeviceSession:
+    """An xAI device login (RFC 8628) started by :func:`begin_device_login`.
+
+    The user approves ``user_code`` at ``verification_uri`` (prefilled at
+    ``verification_uri_complete``). ``open_url`` is the page to open: it signs
+    the xAI website out first, then continues to that verification page, so
+    the account can be chosen. ``interval`` is the poll interval in seconds and
+    ``expires_at`` (alias ``expires``) the time.time() at which the code stops
+    working. :func:`poll_device_login` waits for the approval; :meth:`close`
+    ends a poll that was given ``should_stop``.
+    """
+
+    provider = "authgrok"
+
+    def __init__(
+        self,
+        device_code: Dict[str, Any],
+        discovery: Dict[str, Any],
+        open_url: str,
+        store: Optional["AuthGrokTokenStore"] = None,
+        account_id: Optional[int] = None,
+        timeout: int = 300,
+        created_at: Optional[float] = None,
+    ):
+        self.device_code = dict(device_code)
+        self.discovery = dict(discovery or {})
+        self.open_url = open_url
+        self.user_code = str(self.device_code.get("user_code") or "")
+        self.verification_uri = str(self.device_code.get("verification_uri") or "")
+        self.verification_uri_complete = self.device_code.get("verification_uri_complete") or None
+        self.interval = float(self.device_code.get("interval", DEVICE_CODE_DEFAULT_POLL_SECONDS))
+        self.expires_in = float(self.device_code.get("expires_in", 600))
+        self.created_at = time.time() if created_at is None else float(created_at)
+        self.expires_at = self.created_at + self.expires_in
+        self.store = store
+        self.account_id = account_id
+        self.timeout = timeout
+        self._stop = threading.Event()
+
+    @property
+    def expires(self) -> float:
+        return self.expires_at
+
+    @property
+    def signed_out_url(self) -> str:
+        return self.open_url
+
+    @property
+    def closed(self) -> bool:
+        return self._stop.is_set()
+
+    def close(self) -> None:
+        """End a :func:`poll_device_login` that was given ``should_stop``."""
+        self._stop.set()
+
+    def pending_state(self) -> Dict[str, Any]:
+        """What :func:`resume_device_login` needs (saved encrypted; it holds the device code)."""
+        return {
+            "provider": "authgrok",
+            "flow": "device",
+            "device_code": dict(self.device_code),
+            "open_url": self.open_url,
+            "account_id": self.account_id,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+        }
+
+    def _remaining_device_code(self) -> Dict[str, Any]:
+        device_code = dict(self.device_code)
+        device_code["expires_in"] = max(1.0, self.expires_at - time.time())
+        return device_code
+
+
+def begin_device_login(
+    store: Optional["AuthGrokTokenStore"] = None,
+    account_id: Optional[int] = None,
+    timeout: int = 300,
+    persist: bool = True,
+    warm_jwks: bool = True,
+) -> DeviceSession:
+    """Start an xAI device login without opening a browser.
+
+    Requests the device code and returns a :class:`DeviceSession`; the caller
+    shows ``user_code``, opens ``session.open_url`` itself and then calls
+    :func:`poll_device_login`. *store* (or ``get_store(account_id)`` when only
+    *account_id* is given) receives the tokens. With *persist*, the device code
+    is saved encrypted next to the store's token file, so
+    :func:`resume_device_login` can keep polling after the app was killed.
+    """
+    if store is None and account_id is not None:
+        store = get_store(account_id)
+    if account_id is None and store is not None:
+        account_id = getattr(store, "account_id", None)
+
+    discovery = _load_oidc_discovery()
+    device_code = request_device_code(timeout=min(30, timeout))
+    verification_url = (
+        device_code.get("verification_uri_complete")
+        or device_code["verification_uri"]
+    )
+
+    signed_out_url = build_signed_out_device_url(str(verification_url))
+    session = DeviceSession(
+        device_code, discovery, signed_out_url,
+        store=store, account_id=account_id, timeout=timeout,
+    )
+    if warm_jwks:
+        threading.Thread(
+            target=_warm_jwks_cache,
+            args=(discovery,),
+            daemon=True,
+        ).start()
+    if persist and store is not None and hasattr(store, "save_pending_oauth"):
+        store.save_pending_oauth(session.pending_state())
+    return session
+
+
+def resume_device_login(
+    store: Optional["AuthGrokTokenStore"] = None,
+    account_id: Optional[int] = None,
+    timeout: int = 300,
+) -> Optional[DeviceSession]:
+    """The device login :func:`begin_device_login` saved for this slot, or None.
+
+    None when nothing is saved, it expired or it is not a device login.
+    """
+    if store is None:
+        store = get_store(account_id)
+    if account_id is None:
+        account_id = getattr(store, "account_id", None)
+    pending = store.load_pending_oauth() if hasattr(store, "load_pending_oauth") else None
+    if not pending or pending.get("provider") != "authgrok" or pending.get("flow") != "device":
+        return None
+    device_code = pending.get("device_code")
+    if not isinstance(device_code, dict) or not device_code.get("device_code"):
+        return None
+    return DeviceSession(
+        device_code, _load_oidc_discovery(), str(pending.get("open_url") or ""),
+        store=store, account_id=account_id, timeout=timeout, created_at=pending.get("created_at"),
+    )
+
+
+def poll_device_login(
+    session: DeviceSession,
+    should_stop=None,
+    timeout: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Wait until the user approves *session*'s code; return the validated tokens.
+
+    *should_stop* (no arguments) is checked about every 0.2 s; once it returns
+    True, or after ``session.close()``, the poll ends with RuntimeError. Without
+    it the poll is the desktop one. The ID token is verified and the account's
+    email/name/subject are kept in ``tokens["account"]``. With a store
+    (``session.store``), the tokens are checked against the other saved slots
+    (:func:`validate_account_slot_tokens`) and saved; the saved device code is
+    cleared whatever the outcome.
+    """
+    if timeout is None:
+        timeout = session.timeout
+    store = session.store
+    try:
+        if should_stop is None:
+            tokens = poll_device_code_tokens(session.device_code, timeout=timeout)
+        else:
+            def stop() -> bool:
+                return session.closed or bool(should_stop())
+
+            tokens = poll_device_code_tokens(
+                session._remaining_device_code(), timeout=timeout, should_stop=stop,
+            )
+        claims = _validate_id_token(tokens["id_token"], None, session.discovery)
+        tokens["account"] = {
+            "email": str(claims.get("email", "") or ""),
+            "name": str(claims.get("name", "") or ""),
+            "subject": str(claims.get("sub", "") or ""),
+        }
+        print("Grok device authorization successful.")
+        if tokens["account"]["email"]:
+            print(f"Account: {tokens['account']['email']}")
+        if store is not None:
+            validate_account_slot_tokens(int(session.account_id or 0), tokens)
+            store.save_tokens(tokens)
+    finally:
+        if store is not None and hasattr(store, "clear_pending_oauth"):
+            store.clear_pending_oauth()
+    return tokens
+
+
+def run_device_oauth_flow(timeout: int = 300) -> Dict[str, Any]:
+    """Authorize an account and receive its tokens without code pasting.
+
+    Composes :func:`begin_device_login` (nothing persisted) and
+    :func:`poll_device_login` (tokens returned, not saved). Not on Glossarion
+    Mobile, which runs those two itself.
+    """
+    if oauth_session.is_mobile():
+        raise RuntimeError(_MOBILE_SIGN_IN_MESSAGE)
+    session = begin_device_login(timeout=timeout, persist=False, warm_jwks=False)
+    print(
+        "Opening the regular browser for this Grok account. "
+        "Glossarion will sign out the previous xAI website session first, then finish "
+        "automatically after you approve the new account."
+    )
+    _open_oauth_browser(session.open_url)
+    threading.Thread(
+        target=_warm_jwks_cache,
+        args=(session.discovery,),
+        daemon=True,
+    ).start()
+    return poll_device_login(session)
+
+
+# ---------------------------------------------------------------------------
+# Browser callback server
+# ---------------------------------------------------------------------------
+
+
+class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):  # noqa: A002
+        pass
+
+    def _write_cors(self) -> None:
+        origin = self.headers.get("Origin", "")
+        if origin in ("https://accounts.x.ai", "https://auth.x.ai"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+            self.send_header("Vary", "Origin")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._write_cors()
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path != XAI_OAUTH_REDIRECT_PATH:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        query = parse_qs(parsed.query)
+        returned_state = query.get("state", [None])[0]
+        expected_state = str(getattr(self.server, "_expected_state", ""))
+        if (
+            not isinstance(returned_state, str)
+            or not secrets.compare_digest(returned_state, expected_state)
+        ):
+            self.send_response(400)
+            self._write_cors()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(
+                b"<html><body><h1>xAI authorization state mismatch.</h1>"
+                b"Return to Glossarion and try again.</body></html>"
+            )
+            return
+
+        self.server._auth_code = query.get("code", [None])[0]
+        self.server._returned_state = returned_state
+        self.server._error = query.get("error", [None])[0]
+        self.send_response(200)
+        self._write_cors()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.server._error:
+            html = "<html><body><h1>xAI authorization failed.</h1>You can close this tab.</body></html>"
+        else:
+            html = oauth_session.oauth_success_html(
+                "authgrok",
+                "<html><body><h1>Grok authorization received.</h1>You can close this tab and return to Glossarion.</body></html>",
+                "&#10004; Grok authorization received.",
+            )
+        self.wfile.write(html.encode("utf-8"))
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+
+def _create_callback_server(state: str) -> HTTPServer:
+    try:
+        server = HTTPServer((XAI_OAUTH_REDIRECT_HOST, XAI_OAUTH_REDIRECT_PORT), _OAuthCallbackHandler)
+    except OSError:
+        server = HTTPServer((XAI_OAUTH_REDIRECT_HOST, 0), _OAuthCallbackHandler)
+    server._expected_state = state
+    server._auth_code = None
+    server._returned_state = None
+    server._error = None
+    return server
+
+
+def run_oauth_flow(
+    timeout: int = 300,
+    force_account_selection: bool = True,
+) -> Dict[str, Any]:
+    """Open xAI login in the browser and return validated OAuth tokens.
+
+    Not on Glossarion Mobile, which signs in with begin_device_login() /
+    poll_device_login() and opens the page itself.
+    """
+    if oauth_session.is_mobile():
+        raise RuntimeError(_MOBILE_SIGN_IN_MESSAGE)
+    if force_account_selection:
+        # xAI may render an out-of-band Grok Build code instead of redirecting
+        # to localhost. Its device grant is designed for exactly this case:
+        # the app polls and receives tokens automatically.
+        return run_device_oauth_flow(timeout=timeout)
+
+    discovery = _load_oidc_discovery()
+    verifier, challenge = generate_pkce()
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    server = _create_callback_server(state)
+    redirect_uri = (
+        f"http://{XAI_OAUTH_REDIRECT_HOST}:{server.server_port}"
+        f"{XAI_OAUTH_REDIRECT_PATH}"
+    )
+    auth_url = build_auth_url(
+        challenge,
+        state,
+        redirect_uri,
+        nonce,
+        discovery["authorization_endpoint"],
+        force_account_selection=force_account_selection,
+    )
+
+    print("Opening browser for Grok login (Google sign-in is supported by xAI)...")
+    print(f"If the browser does not open, visit:\n{auth_url}")
+    _open_oauth_browser(auth_url)
+
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    server_thread.join(timeout=timeout)
+    server.shutdown()
+    server.server_close()
+
+    if server._error:
+        raise RuntimeError("xAI OAuth authorization was denied or failed")
+    if not server._auth_code:
+        raise RuntimeError("xAI OAuth login timed out; no callback was received")
+    if not secrets.compare_digest(str(server._returned_state), state):
+        raise RuntimeError("xAI OAuth state mismatch")
+
+    tokens = exchange_code_for_tokens(server._auth_code, verifier, redirect_uri)
+    claims = _validate_id_token(tokens["id_token"], nonce, discovery)
+    tokens["account"] = {
+        "email": str(claims.get("email", "") or ""),
+        "name": str(claims.get("name", "") or ""),
+        "subject": str(claims.get("sub", "") or ""),
+    }
+    print("Grok OAuth authentication successful.")
+    if tokens["account"]["email"]:
+        print(f"Account: {tokens['account']['email']}")
+    return tokens
+
+
+# ---------------------------------------------------------------------------
+# Official Grok CLI credential import
+# ---------------------------------------------------------------------------
+
+
+def _parse_expiry(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value / 1000 if value > 10_000_000_000 else value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        numeric = float(value)
+        return numeric / 1000 if numeric > 10_000_000_000 else numeric
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def load_grok_cli_credentials(auth_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Read, but never modify, credentials created by the official Grok CLI.
+
+    Glossarion Mobile never imports a Grok CLI login: None there unless an
+    *auth_file* is given.
+    """
+    if not auth_file and oauth_session.is_mobile():
+        return None
+    path = auth_file or _OFFICIAL_GROK_AUTH_FILE
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return None
+
+    oidc = data.get(_OFFICIAL_GROK_SCOPE_KEY) if isinstance(data, dict) else None
+    if isinstance(oidc, dict):
+        access = str(oidc.get("key") or oidc.get("access_token") or oidc.get("token") or "")
+        if access:
+            return {
+                "access_token": access,
+                "refresh_token": str(oidc.get("refresh_token") or oidc.get("refresh") or ""),
+                "expires_at": _parse_expiry(oidc.get("expires_at")) or time.time() + 6 * 3600,
+                "token_type": "Bearer",
+                "token_endpoint": XAI_OAUTH_TOKEN_URL,
+                "_source": "grok-cli",
+            }
+
+    legacy = data.get(_OFFICIAL_GROK_LEGACY_SCOPE_KEY) if isinstance(data, dict) else None
+    if isinstance(legacy, dict):
+        access = str(legacy.get("key") or legacy.get("access_token") or legacy.get("token") or "")
+        if access:
+            return {
+                "access_token": access,
+                "refresh_token": "",
+                "expires_at": time.time() + 30 * 24 * 3600,
+                "token_type": "Bearer",
+                "_source": "grok-cli-legacy",
+            }
+
+    if isinstance(data, dict):
+        access = str(data.get("access_token") or data.get("token") or "")
+        if access:
+            return {
+                "access_token": access,
+                "refresh_token": str(data.get("refresh_token") or data.get("refresh") or ""),
+                "expires_at": _parse_expiry(data.get("expires_at") or data.get("expires")) or time.time() + 30 * 24 * 3600,
+                "token_type": str(data.get("token_type") or "Bearer"),
+                "token_endpoint": XAI_OAUTH_TOKEN_URL,
+                "_source": "grok-cli",
+            }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Encrypted, account-slot-aware token store
+# ---------------------------------------------------------------------------
+
+
+class AuthGrokTokenStore(oauth_session.PendingOAuthMixin):
+    """Thread-safe AuthGrok token store backed by an encrypted JSON file.
+
+    Also keeps the encrypted pending device login of begin_device_login()
+    (``pending_oauth_file``, ``save/load/clear_pending_oauth``).
+    """
+
+    _pending_label = "AuthGrok"
+
+    def __init__(self, token_file: Optional[str] = None, account_id: int = 0):
+        self._token_file = token_file or os.environ.get("AUTHGROK_TOKEN_FILE") or _DEFAULT_TOKEN_FILE
+        self._account_id = int(account_id or 0)
+        self._lock = threading.RLock()
+        self._tokens: Optional[Dict[str, Any]] = None
+        self._on_change_callbacks: List[Any] = []
+        self._load_from_disk()
+
+    def on_token_change(self, callback) -> None:
+        self._on_change_callbacks.append(callback)
+
+    def _fire_change_callbacks(self) -> None:
+        for callback in self._on_change_callbacks:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def _ensure_dir(self) -> None:
+        directory = os.path.dirname(self._token_file)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+    def _load_from_disk(self) -> None:
+        try:
+            if not os.path.isfile(self._token_file):
+                return
+            try:
+                from token_encryption import load_encrypted_tokens
+                self._tokens = load_encrypted_tokens(self._token_file)
+            except ImportError:
+                with open(self._token_file, "r", encoding="utf-8") as handle:
+                    self._tokens = json.load(handle)
+                    logger.warning("🔓 AuthGrok: loaded UNENCRYPTED credentials; encryption module is unavailable")
+            except Exception as exc:
+                logger.warning("❌ AuthGrok token decryption failed (%s); removing corrupt file", type(exc).__name__)
+                try:
+                    os.remove(self._token_file)
+                except OSError:
+                    pass
+                self._tokens = None
+        except Exception as exc:
+            logger.warning("Failed to load AuthGrok tokens: %s", exc)
+            self._tokens = None
+
+    def save_tokens(self, tokens: Dict[str, Any]) -> None:
+        with self._lock:
+            self._tokens = dict(tokens)
+            try:
+                self._ensure_dir()
+                saved = False
+                try:
+                    from token_encryption import save_encrypted_tokens
+                    save_encrypted_tokens(self._tokens, self._token_file)
+                    saved = True
+                except ImportError:
+                    logger.warning("⚠️ AuthGrok: encryption module unavailable; falling back to UNENCRYPTED JSON storage")
+                except Exception as exc:
+                    logger.warning("⚠️ AuthGrok token encryption failed (%s); saving plain JSON", type(exc).__name__)
+                if not saved:
+                    with open(self._token_file, "w", encoding="utf-8") as handle:
+                        json.dump(self._tokens, handle, indent=2)
+                    logger.warning("🔓 AuthGrok: credentials saved WITHOUT ENCRYPTION (plain JSON fallback)")
+            except Exception as exc:
+                logger.warning("Failed to save AuthGrok tokens: %s", exc)
+        self._fire_change_callbacks()
+
+    def load_tokens(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            if self._tokens is None:
+                self._load_from_disk()
+            return self._tokens
+
+    def clear_tokens(self) -> None:
+        with self._lock:
+            self._tokens = None
+            try:
+                if os.path.isfile(self._token_file):
+                    os.remove(self._token_file)
+            except OSError as exc:
+                logger.warning("Failed to remove AuthGrok token file: %s", exc)
+        self._fire_change_callbacks()
+
+    @staticmethod
+    def _is_token_expired(tokens: Dict[str, Any]) -> bool:
+        expires_at = tokens.get("expires_at", 0)
+        return not isinstance(expires_at, (int, float)) or time.time() >= expires_at - TOKEN_REFRESH_MARGIN_SECONDS
+
+    def _try_refresh(self, tokens: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        refresh_token = str(tokens.get("refresh_token") or "")
+        if not refresh_token:
+            return None
+        try:
+            refreshed = refresh_access_token(refresh_token)
+            merged = {**tokens, **refreshed}
+            if not refreshed.get("refresh_token"):
+                merged["refresh_token"] = refresh_token
+            self.save_tokens(merged)
+            return merged
+        except Exception as exc:
+            logger.warning("AuthGrok token refresh failed: %s", exc)
+            return None
+
+    def get_valid_access_token(self, auto_login: bool = True, force_refresh: bool = False) -> str:
+        """Return a usable access token, refreshing or opening login as needed."""
+        with self._lock:
+            tokens = self.load_tokens()
+
+            if tokens and tokens.get("access_token") and not force_refresh and not self._is_token_expired(tokens):
+                return str(tokens["access_token"])
+            if tokens and tokens.get("refresh_token"):
+                refreshed = self._try_refresh(tokens)
+                if refreshed and refreshed.get("access_token"):
+                    return str(refreshed["access_token"])
+
+            # Default account may reuse an official Grok CLI login read-only.
+            if self._account_id == 0:
+                cli_tokens = load_grok_cli_credentials()
+                if cli_tokens:
+                    if self._is_token_expired(cli_tokens) and cli_tokens.get("refresh_token"):
+                        cli_tokens = self._try_refresh(cli_tokens) or cli_tokens
+                    if cli_tokens.get("access_token") and not self._is_token_expired(cli_tokens):
+                        self.save_tokens(cli_tokens)
+                        return str(cli_tokens["access_token"])
+
+            env_access = os.environ.get("AUTHGROK_ACCESS_TOKEN", "").strip()
+            env_refresh = os.environ.get("AUTHGROK_REFRESH_TOKEN", "").strip()
+            if env_access:
+                env_tokens: Dict[str, Any] = {
+                    "access_token": env_access,
+                    "expires_at": time.time() + 3600,
+                    "_source": "environment",
+                }
+                if env_refresh:
+                    env_tokens["refresh_token"] = env_refresh
+                self.save_tokens(env_tokens)
+                return env_access
+            if env_refresh:
+                refreshed = refresh_access_token(env_refresh)
+                if not refreshed.get("refresh_token"):
+                    refreshed["refresh_token"] = env_refresh
+                self.save_tokens(refreshed)
+                return str(refreshed["access_token"])
+
+            if not auto_login:
+                raise RuntimeError("AuthGrok has no valid token; run the Grok OAuth login first")
+
+            is_headless = (
+                os.environ.get("SPACE_ID") is not None
+                or os.environ.get("HF_SPACES") == "true"
+                or os.environ.get("DOCKER_CONTAINER") == "true"
+                or os.environ.get("KUBERNETES_SERVICE_HOST") is not None
+            )
+            if is_headless:
+                raise RuntimeError(
+                    "AuthGrok browser login is unavailable in this headless environment. "
+                    "Set AUTHGROK_ACCESS_TOKEN and optionally AUTHGROK_REFRESH_TOKEN."
+                )
+
+            # Always clear the regular xAI website session before an interactive
+            # login. The saved OAuth token for an existing slot is independent
+            # of that browser session, and this prevents silent account reuse.
+            tokens = run_oauth_flow(force_account_selection=True)
+            validate_account_slot_tokens(self._account_id, tokens)
+            self.save_tokens(tokens)
+            return str(tokens["access_token"])
+
+    @property
+    def has_tokens(self) -> bool:
+        tokens = self.load_tokens()
+        return bool(tokens and tokens.get("access_token"))
+
+    @property
+    def account_info(self) -> Dict[str, str]:
+        tokens = self.load_tokens() or {}
+        account = tokens.get("account") if isinstance(tokens.get("account"), dict) else {}
+        claims = _decode_jwt_part(str(tokens.get("id_token") or ""), 1)
+        return {
+            "email": str(account.get("email") or claims.get("email") or ""),
+            "name": str(account.get("name") or claims.get("name") or ""),
+            "source": str(tokens.get("_source") or "glossarion"),
+        }
+
+    @property
+    def account_id(self) -> int:
+        return self._account_id
+
+
+_default_store: Optional[AuthGrokTokenStore] = None
+_default_store_lock = threading.Lock()
+_account_stores: Dict[int, AuthGrokTokenStore] = {}
+_account_stores_lock = threading.Lock()
+_pool_rotation_lock = threading.Lock()
+_pool_rotation_cursor = 0
+
+
+def get_default_store() -> AuthGrokTokenStore:
+    global _default_store
+    if _default_store is None:
+        with _default_store_lock:
+            if _default_store is None:
+                _default_store = AuthGrokTokenStore()
+    return _default_store
+
+
+def get_store(account_id: Optional[int] = None) -> AuthGrokTokenStore:
+    account_id = int(account_id or 0)
+    if account_id == 0:
+        return get_default_store()
+    with _account_stores_lock:
+        if account_id not in _account_stores:
+            token_file = os.path.join(_DEFAULT_TOKEN_DIR, f"authgrok_tokens_{account_id}.json")
+            _account_stores[account_id] = AuthGrokTokenStore(token_file, account_id)
+        return _account_stores[account_id]
+
+
+def _numbered_account_ids() -> List[int]:
+    """Return locally known numbered AuthGrok slots without opening login."""
+    with _account_stores_lock:
+        account_ids = set(_account_stores)
+    try:
+        for filename in os.listdir(_DEFAULT_TOKEN_DIR):
+            match = re.fullmatch(r"authgrok_tokens_(\d{1,4})\.json", filename)
+            if match:
+                account_ids.add(int(match.group(1)))
+    except OSError:
+        pass
+    account_ids.discard(0)
+    return sorted(account_ids)
+
+
+def _store_has_reusable_credentials(store: AuthGrokTokenStore) -> bool:
+    tokens = store.load_tokens() or {}
+    if tokens.get("access_token") or tokens.get("refresh_token"):
+        return True
+    if store.account_id != 0:
+        return False
+    if os.environ.get("AUTHGROK_ACCESS_TOKEN", "").strip():
+        return True
+    if os.environ.get("AUTHGROK_REFRESH_TOKEN", "").strip():
+        return True
+    try:
+        return load_grok_cli_credentials() is not None
+    except Exception:
+        return False
+
+
+def _tokens_account_identity(tokens: Dict[str, Any]) -> Optional[str]:
+    """Return a stable non-secret identity from an xAI token response."""
+    account = tokens.get("account") if isinstance(tokens.get("account"), dict) else {}
+    claims = _decode_jwt_part(str(tokens.get("id_token") or ""), 1)
+    email = str(account.get("email") or claims.get("email") or "").strip().casefold()
+    if email:
+        return f"email:{email}"
+    subject = str(account.get("subject") or claims.get("sub") or "").strip()
+    if subject:
+        return f"subject:{subject}"
+    return None
+
+
+def _store_account_identity(store: AuthGrokTokenStore) -> Optional[str]:
+    """Return a non-secret identity used to avoid pooling duplicate emails."""
+    return _tokens_account_identity(store.load_tokens() or {})
+
+
+def get_saved_account_ids() -> List[int]:
+    """Return every slot that currently has reusable local credentials."""
+    saved: List[int] = []
+    for account_id in [0, *_numbered_account_ids()]:
+        if _store_has_reusable_credentials(get_store(account_id)):
+            saved.append(account_id)
+    return saved
+
+
+def validate_account_slot_tokens(account_id: int, tokens: Dict[str, Any]) -> None:
+    """Reject a numbered login that returned an account saved in another slot."""
+    account_id = int(account_id or 0)
+    if account_id <= 0:
+        return
+    identity = _tokens_account_identity(tokens)
+    if not identity:
+        return
+    for saved_id in get_saved_account_ids():
+        if saved_id == account_id:
+            continue
+        if _store_account_identity(get_store(saved_id)) != identity:
+            continue
+        account = tokens.get("account") if isinstance(tokens.get("account"), dict) else {}
+        label = str(account.get("email") or account.get("name") or "This xAI account")
+        raise RuntimeError(
+            f"{label} is already saved in Grok account slot #{saved_id}. "
+            "Retry this numbered slot and choose a different xAI/Google account."
+        )
+
+
+def get_next_account_id(reserved_ids=()) -> int:
+    """Return the first free positive numbered slot for a new login."""
+    used = {int(value) for value in reserved_ids if str(value).isdigit()}
+    used.update(get_saved_account_ids())
+    for account_id in range(1, 10000):
+        if account_id not in used:
+            return account_id
+    raise RuntimeError("AuthGrok account slots 1-9999 are already in use")
+
+
+def get_account_pool() -> List[Tuple[int, AuthGrokTokenStore]]:
+    """Return saved AuthGrok accounts in stable slot order.
+
+    The default account is slot 0. Duplicate saved slots for the same known
+    email/subject are collapsed so ``authgrok0/`` rotates actual accounts, not
+    multiple copies of the same browser login.
+    """
+    candidates = [
+        (account_id, get_store(account_id))
+        for account_id in get_saved_account_ids()
+    ]
+
+    unique: List[Tuple[int, AuthGrokTokenStore]] = []
+    seen_identities = set()
+    for account_id, store in candidates:
+        identity = _store_account_identity(store)
+        if identity and identity in seen_identities:
+            continue
+        if identity:
+            seen_identities.add(identity)
+        unique.append((account_id, store))
+    return unique
+
+
+def get_rotating_account_pool() -> List[Tuple[int, AuthGrokTokenStore]]:
+    """Return the saved account pool with a thread-safe round-robin start."""
+    global _pool_rotation_cursor
+    candidates = get_account_pool()
+    if not candidates:
+        return []
+    with _pool_rotation_lock:
+        start = _pool_rotation_cursor % len(candidates)
+        _pool_rotation_cursor = (start + 1) % len(candidates)
+    return candidates[start:] + candidates[:start]
+
+
+# ---------------------------------------------------------------------------
+# Model discovery and Responses request construction
+# ---------------------------------------------------------------------------
+
+
+def _client_mode() -> str:
+    if (
+        os.environ.get("SPACE_ID") is not None
+        or os.environ.get("DOCKER_CONTAINER") == "true"
+        or os.environ.get("KUBERNETES_SERVICE_HOST") is not None
+    ):
+        return "headless"
+    return "interactive"
+
+
+def _proxy_headers(
+    access_token: str,
+    model: str,
+    session_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    streaming: bool = True,
+) -> Dict[str, str]:
+    session_id = session_id or str(uuid.uuid4())
+    request_id = request_id or str(uuid.uuid4())
+    normalized_model = str(model or DEFAULT_MODEL).lower().split("/")[-1]
+    return {
+        "Accept": "text/event-stream" if streaming else "application/json",
+        "Accept-Encoding": "identity",
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "User-Agent": XAI_USER_AGENT,
+        "X-XAI-Token-Auth": "xai-grok-cli",
+        "x-authenticateresponse": "authenticate-response",
+        "x-grok-client-identifier": XAI_CLIENT_IDENTIFIER,
+        "x-grok-client-version": XAI_CLIENT_VERSION,
+        "x-grok-client-mode": _client_mode(),
+        "x-grok-conv-id": session_id,
+        "x-grok-req-id": request_id,
+        "x-grok-model-override": normalized_model,
+        "x-grok-session-id": session_id,
+    }
+
+
+def fetch_available_models(access_token: str, timeout: int = 15) -> List[str]:
+    """Return model IDs visible to the authenticated xAI account."""
+    headers = _proxy_headers(access_token, DEFAULT_MODEL, streaming=False)
+    for name in ("Content-Type", "x-grok-conv-id", "x-grok-req-id", "x-grok-model-override", "x-grok-session-id"):
+        headers.pop(name, None)
+    response = requests.get(
+        XAI_CLI_MODELS_URL,
+        headers=headers,
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    if response.is_redirect or response.is_permanent_redirect:
+        raise RuntimeError("xAI model catalog unexpectedly redirected")
+    if response.status_code >= 400:
+        raise RuntimeError(f"AuthGrok model catalog failed with HTTP {response.status_code}")
+    data = response.json()
+    entries = data.get("models", data.get("data", [])) if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        return []
+    result: List[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            model_id = entry
+        elif isinstance(entry, dict):
+            model_id = entry.get("id") or entry.get("model") or entry.get("name")
+        else:
+            model_id = None
+        if isinstance(model_id, str) and model_id and model_id not in result:
+            result.append(model_id)
+    return result
+
+
+def _text_from_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+    chunks: List[str] = []
+    for part in content:
+        if isinstance(part, str):
+            chunks.append(part)
+        elif isinstance(part, dict) and part.get("text") is not None:
+            chunks.append(str(part.get("text") or ""))
+    return "\n".join(chunks)
+
+
+def _convert_content_parts(content: Any, role: str) -> List[Dict[str, Any]]:
+    text_type = "output_text" if role == "assistant" else "input_text"
+    if isinstance(content, str):
+        return [{"type": text_type, "text": content}]
+    if not isinstance(content, list):
+        return [{"type": text_type, "text": str(content)}]
+    result: List[Dict[str, Any]] = []
+    for part in content:
+        if isinstance(part, str):
+            result.append({"type": text_type, "text": part})
+            continue
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get("type") or "")
+        if part_type in ("text", "input_text", "output_text"):
+            result.append({"type": text_type, "text": str(part.get("text") or "")})
+        elif part_type in ("image_url", "input_image") and role != "assistant":
+            image = part.get("image_url")
+            url = image.get("url", "") if isinstance(image, dict) else image
+            if url:
+                result.append({"type": "input_image", "image_url": str(url), "detail": part.get("detail", "auto")})
+    return result or [{"type": text_type, "text": ""}]
+
+
+def _build_responses_body(
+    messages: List[Dict[str, Any]],
+    model: str,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    reasoning: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    instructions: List[str] = []
+    input_items: List[Dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "user").lower()
+        content = message.get("content", "")
+        if role in ("system", "developer"):
+            text = _text_from_content(content).strip()
+            if text:
+                instructions.append(text)
+            continue
+        if role not in ("user", "assistant"):
+            role = "user"
+        input_items.append({
+            "type": "message",
+            "role": role,
+            "content": _convert_content_parts(content, role),
+        })
+
+    body: Dict[str, Any] = {
+        "model": model or DEFAULT_MODEL,
+        "input": input_items,
+        "store": False,
+        "stream": True,
+        "include": ["reasoning.encrypted_content"],
+    }
+    if instructions:
+        body["instructions"] = "\n\n".join(instructions)
+    if max_tokens is not None:
+        body["max_output_tokens"] = int(max_tokens)
+    if temperature is not None:
+        body["temperature"] = float(temperature)
+
+    effort = str((reasoning or {}).get("effort") or "").strip().lower()
+    if effort in ("minimal", "none"):
+        effort = "low"
+    if effort == "xhigh" and "multi-agent" not in str(model).lower():
+        effort = "high"
+    allowed_efforts = {"low", "medium", "high"}
+    if "multi-agent" in str(model).lower():
+        allowed_efforts.add("xhigh")
+    if effort in allowed_efforts:
+        body["reasoning"] = {"effort": effort}
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Responses SSE parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_responses_result(data: Dict[str, Any]) -> Dict[str, Any]:
+    content_parts: List[str] = []
+    for item in data.get("output", []) if isinstance(data.get("output"), list) else []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for part in item.get("content", []) if isinstance(item.get("content"), list) else []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                content_parts.append(str(part.get("text") or ""))
+    status = str(data.get("status") or "")
+    finish_reason = "stop"
+    if status == "incomplete":
+        detail = data.get("incomplete_details") or {}
+        reason = str(detail.get("reason") or "") if isinstance(detail, dict) else ""
+        finish_reason = "length" if "token" in reason else reason or "incomplete"
+    elif status == "failed":
+        finish_reason = "error"
+    raw_usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+    usage = None
+    if raw_usage:
+        usage = {
+            "prompt_tokens": raw_usage.get("input_tokens", 0),
+            "completion_tokens": raw_usage.get("output_tokens", 0),
+            "total_tokens": raw_usage.get("total_tokens", 0),
+        }
+    result: Dict[str, Any] = {
+        "content": "".join(content_parts),
+        "finish_reason": finish_reason,
+        "conversation_id": data.get("id"),
+        "message_id": data.get("id"),
+        "usage": usage,
+    }
+    if data.get("error"):
+        result["error_details"] = data["error"]
+    return result
+
+
+def _parse_sse_responses(raw_text: str) -> Dict[str, Any]:
+    stripped = raw_text.strip()
+    if stripped.startswith("{"):
+        try:
+            return _parse_responses_result(json.loads(stripped))
+        except (ValueError, TypeError):
+            pass
+    deltas: List[str] = []
+    last_data: Optional[Dict[str, Any]] = None
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        last_data = data
+        event_type = str(data.get("type") or "")
+        if event_type == "response.output_text.delta":
+            deltas.append(str(data.get("delta") or ""))
+        elif event_type in ("response.completed", "response.incomplete"):
+            response = data.get("response") if isinstance(data.get("response"), dict) else data
+            result = _parse_responses_result(response)
+            if not result["content"]:
+                result["content"] = "".join(deltas)
+            if event_type == "response.incomplete" and result["finish_reason"] == "stop":
+                result["finish_reason"] = "length"
+            return result
+        elif event_type in ("response.failed", "error"):
+            response = data.get("response") if isinstance(data.get("response"), dict) else data
+            result = _parse_responses_result(response)
+            result["content"] = ""
+            result["finish_reason"] = "error"
+            result["error_details"] = response.get("error") or data.get("error") or {"type": event_type}
+            if deltas:
+                result["partial_content"] = "".join(deltas)
+            return result
+    if deltas:
+        return {
+            "content": "".join(deltas),
+            "finish_reason": "stop",
+            "conversation_id": None,
+            "message_id": None,
+            "usage": None,
+        }
+    if last_data:
+        return _parse_responses_result(last_data)
+    return {
+        "content": "",
+        "finish_reason": "error",
+        "conversation_id": None,
+        "message_id": None,
+        "usage": None,
+    }
+
+
+def _safe_error_detail(response_body: str) -> str:
+    value = str(response_body or "")[:16_384]
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            error = parsed.get("error", parsed.get("detail", parsed))
+            if isinstance(error, dict):
+                return str(error.get("message") or error.get("type") or "request failed")[:1000]
+            return str(error)[:1000]
+    except ValueError:
+        pass
+    return value.strip()[:1000] or "request failed"
+
+
+_SAFETY_CHECK_TYPE_PATTERN = re.compile(r"\bSAFETY_CHECK_TYPE_[A-Z0-9_]+\b", re.IGNORECASE)
+_SAFETY_ERROR_CODE_MARKERS = {
+    "censorship_blocked",
+    "content_filter",
+    "content_filtered",
+    "content_policy_violation",
+    "prohibited_content",
+    "safety_check_failed",
+    "safety_violation",
+}
+_ERROR_METADATA_FIELDS = (
+    "message",
+    "code",
+    "type",
+    "reason",
+    "failed_check",
+    "failedCheck",
+    "safety_check",
+    "safetyCheck",
+)
+
+
+def _http_error_metadata(response_body: str) -> Dict[str, Any]:
+    """Extract only provider-owned error metadata from a failed HTTP response.
+
+    Deliberately ignore request, prompt, input, and output fields. Providers may
+    echo those fields in diagnostics, and treating their text as an error signal
+    would make story content capable of producing a false safety classification.
+    """
+    value = str(response_body or "")[:16_384]
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {
+            "structured": False,
+            "message": value.strip()[:1000] or "request failed",
+            "metadata_text": value.strip()[:4000],
+        }
+
+    if not isinstance(parsed, dict):
+        return {
+            "structured": False,
+            "message": _safe_error_detail(value),
+            "metadata_text": "",
+        }
+
+    containers: List[Dict[str, Any]] = []
+    error_value = parsed.get("error")
+    detail_value = parsed.get("detail")
+    if isinstance(error_value, dict):
+        containers.append(error_value)
+    if isinstance(detail_value, dict):
+        containers.append(detail_value)
+    containers.append(parsed)
+
+    metadata_values: List[str] = []
+    for container in containers:
+        for field in _ERROR_METADATA_FIELDS:
+            field_value = container.get(field)
+            if isinstance(field_value, (str, int, float)):
+                metadata_values.append(str(field_value))
+
+    # A common xAI shape is {"code": "permission-denied", "error": "..."}.
+    if isinstance(error_value, (str, int, float)):
+        metadata_values.append(str(error_value))
+    if isinstance(detail_value, (str, int, float)):
+        metadata_values.append(str(detail_value))
+
+    def _first_scalar(field: str) -> Optional[str]:
+        for container in containers:
+            candidate = container.get(field)
+            if isinstance(candidate, (str, int, float)):
+                return str(candidate)
+        return None
+
+    message = _first_scalar("message")
+    if not message and isinstance(error_value, (str, int, float)):
+        message = str(error_value)
+    if not message and isinstance(detail_value, (str, int, float)):
+        message = str(detail_value)
+
+    return {
+        "structured": True,
+        "message": (message or _safe_error_detail(value))[:1000],
+        "code": _first_scalar("code"),
+        "type": _first_scalar("type"),
+        "metadata_text": " ".join(metadata_values)[:4000],
+    }
+
+
+class AuthGrokHTTPError(RuntimeError):
+    """A failed AuthGrok HTTP response with parsed xAI error metadata."""
+
+    def __init__(self, status_code: int, response_body: str):
+        self.status_code = int(status_code)
+        metadata = _http_error_metadata(response_body)
+        self.error_detail = str(metadata.get("message") or "request failed")[:1000]
+        self.provider_code = metadata.get("code")
+        self.provider_error_type = metadata.get("type")
+
+        metadata_text = str(metadata.get("metadata_text") or "")
+        safety_match = _SAFETY_CHECK_TYPE_PATTERN.search(metadata_text)
+        self.safety_check = safety_match.group(0).upper() if safety_match else None
+
+        code_markers = {
+            str(value).strip().lower().replace("-", "_")
+            for value in (self.provider_code, self.provider_error_type)
+            if value is not None
+        }
+        structured_guideline_block = (
+            bool(metadata.get("structured"))
+            and self.status_code == 403
+            and "content violates usage guidelines" in metadata_text.lower()
+        )
+        self.is_safety_error = bool(
+            self.safety_check
+            or code_markers.intersection(_SAFETY_ERROR_CODE_MARKERS)
+            or structured_guideline_block
+        )
+        super().__init__(f"AuthGrok HTTP {self.status_code}: {self.error_detail}")
+
+
+def _is_terminal_sse_line(line: str) -> bool:
+    payload = line[5:].strip() if line.startswith("data:") else ""
+    if payload == "[DONE]":
+        return True
+    if not payload:
+        return False
+    try:
+        event = json.loads(payload)
+    except ValueError:
+        return False
+    return isinstance(event, dict) and event.get("type") in {
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+        "error",
+    }
+
+
+def _append_stream_log_delta(
+    text_buffer: List[str],
+    delta: str,
+    log_fn,
+    log_stream: bool = True,
+) -> None:
+    """Log streamed text in readable lines without changing response content."""
+    if not log_stream or not delta:
+        return
+    text_buffer.append(str(delta).replace("\r", ""))
+    combined = "".join(text_buffer)
+    for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+        combined = combined.replace(tag, tag + "\n")
+    if "\n" in combined:
+        parts = combined.split("\n")
+        for part in parts[:-1]:
+            log_fn(part.replace("\x1f", "\\x1F"))
+        text_buffer[:] = [parts[-1]]
+    elif len(combined) >= 160:
+        log_fn(combined.replace("\x1f", "\\x1F"))
+        text_buffer.clear()
+
+
+def _flush_stream_log_buffer(text_buffer: List[str], log_fn, log_stream: bool = True) -> None:
+    if not log_stream or not text_buffer:
+        return
+    remainder = "".join(text_buffer).rstrip("\n")
+    if remainder:
+        log_fn(remainder.replace("\x1f", "\\x1F"))
+    text_buffer.clear()
+
+
+_REASONING_DELTA_EVENT_TYPES = {
+    "response.reasoning_text.delta",
+    "response.reasoning_summary_text.delta",
+}
+
+
+def _stream_thinking_logging_enabled(log_stream: bool = True) -> bool:
+    # AuthGrok is a forced-stream provider. Outside batch translation, always
+    # show any reasoning summary events exposed by xAI. Batch mode remains
+    # opt-in so concurrent summaries do not flood or interleave in the log.
+    if os.getenv("BATCH_TRANSLATION", "0") != "1":
+        return True
+    return log_stream and os.getenv("STREAM_THINKING_LOGS", "0").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+
+
+def _new_stream_display_state() -> Dict[str, Any]:
+    return {
+        "text_buffer": [],
+        "thinking_buffer": "",
+        "thinking_parts": [],
+        "thinking_chunks": 0,
+        "thinking_start_ts": None,
+        "thinking_phase_complete": False,
+        "text_started": False,
+        "display_phase": None,
+    }
+
+
+def _flush_thinking_display_buffer(
+    state: Dict[str, Any],
+    log_fn,
+    force: bool = False,
+) -> None:
+    buf = str(state.get("thinking_buffer") or "")
+    if not buf:
+        return
+
+    def emit(value: str) -> None:
+        for item in value.splitlines():
+            safe = item.replace("\x1f", "\\x1F").strip()
+            if safe:
+                log_fn(f"    {safe}")
+
+    while "\n" in buf:
+        line, buf = buf.split("\n", 1)
+        emit(line)
+
+    if force:
+        emit(buf)
+        state["thinking_buffer"] = ""
+        return
+
+    # Keep reasoning summaries readable instead of printing token fragments.
+    max_buffer = 220
+    while len(buf) >= max_buffer:
+        boundary = max(buf.rfind(mark, 0, max_buffer) for mark in (". ", "? ", "! ", "; ", ": "))
+        if boundary >= 80:
+            cut = boundary + 1
+        else:
+            cut = buf.rfind(" ", 0, max_buffer)
+            if cut < 120:
+                cut = max_buffer
+        emit(buf[:cut])
+        buf = buf[cut:].lstrip()
+    state["thinking_buffer"] = buf
+
+
+def _finish_thinking_display(state: Dict[str, Any], log_fn) -> None:
+    if state.get("display_phase") != "thinking":
+        return
+    _flush_thinking_display_buffer(state, log_fn, force=True)
+    if not state.get("thinking_phase_complete"):
+        started = state.get("thinking_start_ts") or time.time()
+        log_fn(
+            f"🧠 [authgrok] Thinking summary complete "
+            f"({state.get('thinking_chunks', 0)} chunks, {time.time() - started:.1f}s)"
+        )
+        state["thinking_phase_complete"] = True
+
+
+def _process_stream_event(
+    event: Dict[str, Any],
+    state: Dict[str, Any],
+    log_fn,
+    log_stream: bool,
+) -> None:
+    event_type = str(event.get("type") or "")
+    if event_type in _REASONING_DELTA_EVENT_TYPES:
+        delta = str(event.get("delta") or "").replace("\\n", "\n")
+        if not delta:
+            return
+        if state.get("thinking_start_ts") is None:
+            state["thinking_start_ts"] = time.time()
+        state["thinking_parts"].append(delta)
+        state["thinking_chunks"] += 1
+
+        if not _stream_thinking_logging_enabled(log_stream):
+            return
+        if state.get("display_phase") != "thinking":
+            _flush_stream_log_buffer(state["text_buffer"], log_fn, log_stream)
+            if state.get("text_started"):
+                log_fn("─" * 50)
+            log_fn("🧠 [authgrok] Thinking...")
+            state["display_phase"] = "thinking"
+            state["thinking_phase_complete"] = False
+        state["thinking_buffer"] += delta
+        _flush_thinking_display_buffer(state, log_fn)
+        return
+
+    if event_type != "response.output_text.delta":
+        return
+    delta = str(event.get("delta") or "")
+    if not delta:
+        return
+    if state.get("display_phase") == "thinking":
+        _finish_thinking_display(state, log_fn)
+        if log_stream:
+            log_fn("─" * 50)
+            log_fn("📡 AuthGrok: Text streaming...")
+        state["display_phase"] = "text"
+    state["text_started"] = True
+    _append_stream_log_delta(state["text_buffer"], delta, log_fn, log_stream)
+
+
+def _finalize_stream_result(
+    lines: List[str],
+    state: Dict[str, Any],
+    log_fn,
+    log_stream: bool,
+) -> Dict[str, Any]:
+    if log_stream and state.get("display_phase") == "thinking":
+        _finish_thinking_display(state, log_fn)
+    _flush_stream_log_buffer(state["text_buffer"], log_fn, log_stream)
+    result = _parse_sse_responses("\n".join(lines))
+    if state.get("thinking_parts"):
+        result["thinking_text"] = "".join(state["thinking_parts"])
+        result["thinking_chunks"] = state["thinking_chunks"]
+        started = state.get("thinking_start_ts")
+        if started is not None:
+            result["thinking_duration"] = max(0.0, time.time() - started)
+    return result
+
+
+def _stream_with_httpx(
+    httpx_module,
+    url: str,
+    body: Dict[str, Any],
+    headers: Dict[str, str],
+    timeout: int,
+    connect_timeout: Optional[float],
+    log_fn,
+    log_stream: bool = True,
+) -> Dict[str, Any]:
+    lines: List[str] = []
+    state = _new_stream_display_state()
+    http_timeout = httpx_module.Timeout(timeout, connect=connect_timeout)
+    with httpx_module.stream(
+        "POST",
+        url,
+        json=body,
+        headers=headers,
+        timeout=http_timeout,
+        follow_redirects=False,
+    ) as response:
+        if response.status_code >= 400:
+            response_body = response.read().decode("utf-8", errors="replace")
+            raise AuthGrokHTTPError(response.status_code, response_body)
+        for line in response.iter_lines():
+            if is_cancelled():
+                response.close()
+                raise RuntimeError("AuthGrok stream cancelled by user")
+            lines.append(line)
+            if line.startswith("data:") and line[5:].strip() not in ("", "[DONE]"):
+                try:
+                    event = json.loads(line[5:].strip())
+                except ValueError:
+                    event = None
+                if isinstance(event, dict):
+                    _process_stream_event(event, state, log_fn, log_stream)
+            if _is_terminal_sse_line(line):
+                break
+    return _finalize_stream_result(lines, state, log_fn, log_stream)
+
+
+def _stream_with_requests(
+    url: str,
+    body: Dict[str, Any],
+    headers: Dict[str, str],
+    timeout: int,
+    log_fn,
+    log_stream: bool = True,
+) -> Dict[str, Any]:
+    response = requests.post(
+        url,
+        json=body,
+        headers=headers,
+        timeout=timeout,
+        stream=True,
+        allow_redirects=False,
+    )
+    if response.is_redirect or response.is_permanent_redirect:
+        raise RuntimeError("AuthGrok Responses endpoint unexpectedly redirected")
+    if response.status_code >= 400:
+        raise AuthGrokHTTPError(response.status_code, response.text)
+    lines: List[str] = []
+    state = _new_stream_display_state()
+    for raw_line in response.iter_lines(chunk_size=1):
+        if is_cancelled():
+            response.close()
+            raise RuntimeError("AuthGrok stream cancelled by user")
+        if raw_line is None:
+            continue
+        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+        lines.append(line)
+        if line.startswith("data:") and line[5:].strip() not in ("", "[DONE]"):
+            try:
+                event = json.loads(line[5:].strip())
+            except ValueError:
+                event = None
+            if isinstance(event, dict):
+                _process_stream_event(event, state, log_fn, log_stream)
+        if _is_terminal_sse_line(line):
+            break
+    return _finalize_stream_result(lines, state, log_fn, log_stream)
+
+
+def _stream_logging_enabled() -> bool:
+    """Return whether forced AuthGrok stream chunks should be shown in the log."""
+    enabled = os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+        enabled = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").strip().lower() not in (
+            "0", "false", "no", "off"
+        )
+    return enabled
+
+
+def send_chat_completion(
+    access_token: str,
+    messages: List[Dict[str, Any]],
+    model: str = DEFAULT_MODEL,
+    temperature: Optional[float] = 0.7,
+    max_tokens: Optional[int] = None,
+    timeout: int = 600,
+    base_url: Optional[str] = None,
+    log_fn: Optional[Any] = None,
+    connect_timeout: Optional[float] = None,
+    reasoning: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Send OpenAI-style messages through xAI's OAuth Responses proxy."""
+    effective_base = (base_url or os.environ.get("AUTHGROK_BASE_URL") or XAI_CLI_BASE_URL).rstrip("/")
+    url = effective_base if effective_base.endswith("/responses") else f"{effective_base}/responses"
+    body = _build_responses_body(messages, model, temperature, max_tokens, reasoning)
+    session_id = str(uuid.uuid4())
+    headers = _proxy_headers(access_token, model, session_id=session_id, streaming=True)
+    output = log_fn or print
+    logger.info("AuthGrok: POST %s model=%s", url, model)
+    reset_cancel()
+    log_stream = _stream_logging_enabled()
+
+    try:
+        import httpx
+        return _stream_with_httpx(
+            httpx, url, body, headers, timeout, connect_timeout, output, log_stream
+        )
+    except ImportError:
+        return _stream_with_requests(url, body, headers, timeout, output, log_stream)

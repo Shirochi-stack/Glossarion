@@ -1,0 +1,1262 @@
+# splash_utils.py - PySide6 Version
+import sys
+import os
+import time
+import atexit
+import threading
+import importlib
+import concurrent.futures
+from app_version import APP_DISPLAY_NAME, APP_USER_MODEL_ID
+
+# Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
+# DPI scaling must be disabled BEFORE importing PySide6 so Qt reads the env vars
+try:
+    import dpi_setup
+    dpi_setup.configure()
+except Exception as e:
+    print(f"⚠️ DPI setup failed: {e}")
+
+def _cpu_worker_cap():
+    """Return the user's logical CPU count as a safe worker ceiling."""
+    try:
+        return max(1, int(os.cpu_count() or 1))
+    except Exception:
+        return 1
+
+
+def _load_pyside6_modules():
+    module_names = ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets")
+    if os.environ.get("GLOSSARION_SERIAL_QT_IMPORTS", "0").strip().lower() in ("1", "true", "yes", "on"):
+        print(f"[SPLASH] PySide6 import workers: serial mode (cpu_cap={_cpu_worker_cap()}, modules={len(module_names)})")
+        return {name: importlib.import_module(name) for name in module_names}
+
+    try:
+        modules = {}
+        cpu_cap = _cpu_worker_cap()
+        workers = min(len(module_names), cpu_cap)
+        print(f"[SPLASH] PySide6 import workers: {workers} (cpu_cap={cpu_cap}, modules={len(module_names)})")
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="qt-import",
+        ) as pool:
+            future_to_name = {
+                pool.submit(importlib.import_module, name): name
+                for name in module_names
+            }
+            for future in concurrent.futures.as_completed(future_to_name):
+                name = future_to_name[future]
+                modules[name] = future.result()
+        return modules
+    except Exception:
+        return {name: importlib.import_module(name) for name in module_names}
+
+
+_qt_modules = _load_pyside6_modules()
+_QtCore = _qt_modules["PySide6.QtCore"]
+_QtGui = _qt_modules["PySide6.QtGui"]
+_QtWidgets = _qt_modules["PySide6.QtWidgets"]
+
+QApplication = _QtWidgets.QApplication
+QWidget = _QtWidgets.QWidget
+QLabel = _QtWidgets.QLabel
+QProgressBar = _QtWidgets.QProgressBar
+QVBoxLayout = _QtWidgets.QVBoxLayout
+
+Qt = _QtCore.Qt
+QTimer = _QtCore.QTimer
+QEventLoop = _QtCore.QEventLoop
+QObject = _QtCore.QObject
+Signal = _QtCore.Signal
+QMetaObject = _QtCore.QMetaObject
+Q_ARG = _QtCore.Q_ARG
+
+QFont = _QtGui.QFont
+QPalette = _QtGui.QPalette
+QColor = _QtGui.QColor
+QPixmap = _QtGui.QPixmap
+QFontMetrics = _QtGui.QFontMetrics
+
+class SplashManager(QObject):
+    """PySide6 splash screen manager - thread-safe with signals"""
+    
+    # Qt signals for thread-safe UI updates
+    _status_update_signal = Signal(str)
+    _progress_update_signal = Signal(int)
+    
+    def __init__(self):
+        super().__init__()
+        self.splash_window = None
+        self.app = None
+        self._status_text = "Initializing..."
+        self.progress_value = 0  # Track actual progress 0-100
+        self._progress_target = 0
+        self.timer = None
+        self.status_label = None
+        self.progress_bar = None
+        self.progress_label = None
+        # Scale factor for low-res/HiDPI displays (computed in start_splash)
+        self._ui_scale = 1.0
+        self._icon_logical_px = 110
+        self._main_thread_id = threading.current_thread().ident
+        self._closed = False
+        self._manual_progress_auto_cap = None
+        self._manual_progress_auto_boost = 1.0
+        self._startup_manga_available = None
+        
+        # Connect signals to slots
+        self._status_update_signal.connect(self._do_update_status)
+        self._progress_update_signal.connect(self._do_set_progress)
+    
+    def _set_windows_taskbar_icon(self):
+        """Set Windows taskbar icon early, before any windows are created"""
+        try:
+            import os
+            import ctypes
+            import platform
+            from PySide6.QtGui import QIcon
+            
+            if platform.system() != 'Windows':
+                return
+            
+            # Get icon path
+            if getattr(sys, 'frozen', False):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            
+            if os.path.isfile(ico_path):
+                # Set app user model ID immediately
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+                
+                # Set app-level icon
+                if self.app:
+                    icon = QIcon(ico_path)
+                    self.app.setWindowIcon(icon)
+                
+                print("✅ Windows taskbar icon set")
+        except Exception as e:
+            print(f"⚠️ Could not set early taskbar icon: {e}")
+    
+    def _set_win32_icon(self, ico_path):
+        """Set window icon using Win32 API directly - called after window is shown"""
+        try:
+            import ctypes
+            import platform
+            
+            if platform.system() != 'Windows' or not self.splash_window:
+                return
+            
+            # Get window handle
+            hwnd = int(self.splash_window.winId())
+            
+            # Constants for WM_SETICON
+            ICON_SMALL = 0
+            ICON_BIG = 1
+            WM_SETICON = 0x0080
+            
+            # Load icon using Win32 API
+            hicon = ctypes.windll.shell32.ExtractIconW(ctypes.windll.kernel32.GetModuleHandleW(None), ico_path, 0)
+            if hicon and hicon != -1:
+                ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                print("✅ Win32 taskbar icon set on splash window")
+            else:
+                print("⚠️ Failed to extract icon from file")
+        except Exception as e:
+            print(f"⚠️ Could not set Win32 icon: {e}")
+        
+    def start_splash(self):
+        """Create splash window with PySide6"""
+        try:
+            print("🎨 Starting PySide6 splash screen...")
+            
+            # Create QApplication if it doesn't exist
+            if not QApplication.instance():
+                self.app = QApplication(sys.argv)
+            else:
+                self.app = QApplication.instance()
+            
+            # CRITICAL: On macOS, Qt quits the app when the last visible window closes.
+            # Since the splash closes BEFORE the main window is created, macOS triggers
+            # app.quit() during that gap, causing the GUI to exit on launch.
+            # Disable this behaviour during startup; re-enabled after main window shows.
+            self.app.setQuitOnLastWindowClosed(False)
+            
+            # Set Windows taskbar icon IMMEDIATELY (before creating any windows)
+            self._set_windows_taskbar_icon()
+            
+            # Create main splash widget
+            self.splash_window = QWidget()
+            self.splash_window.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+            self.splash_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+
+            # Screen geometry and responsive UI scale
+            screen = self.app.primaryScreen().availableGeometry()
+            try:
+                # Scale down on low-res displays so text + icon don't collide.
+                # Clamp so normal screens keep current sizes.
+                self._ui_scale = max(0.72, min(1.0, screen.height() / 900.0, screen.width() / 900.0))
+            except Exception:
+                self._ui_scale = 1.0
+            self._icon_logical_px = int(max(72, min(110, 110 * self._ui_scale)))
+
+            # Initial target size (we'll finalize after building widgets using sizeHint)
+            width = int(screen.width() * 0.24)
+            height = int(screen.height() * 0.27)
+            self.splash_window.resize(max(320, width), max(240, height))
+            
+            # Set dark background with border
+            palette = self.splash_window.palette()
+            palette.setColor(QPalette.ColorRole.Window, QColor('#2b2b2b'))
+            self.splash_window.setPalette(palette)
+            self.splash_window.setAutoFillBackground(True)
+            
+            # Add border using stylesheet (only to main window, not children)
+            self.splash_window.setStyleSheet("""
+                QWidget#splash_main {
+                    background-color: #2b2b2b;
+                    border: 1px solid #3d4450;
+                    border-radius: 8px;
+                }
+            """)
+            self.splash_window.setObjectName("splash_main")
+            
+            # Main layout with tighter spacing
+            layout = QVBoxLayout()
+            m = int(max(10, 15 * self._ui_scale))
+            layout.setContentsMargins(m, m, m, m)
+            layout.setSpacing(int(max(4, 8 * self._ui_scale)))
+            
+            # Get icon path early
+            import os
+            if getattr(sys, 'frozen', False):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            self.ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            
+            # Load and add icon
+            self._load_icon(layout)
+            
+            # Title
+            title_label = QLabel(APP_DISPLAY_NAME)
+            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title_font = QFont("Arial", int(max(14, 20 * self._ui_scale)), QFont.Weight.Bold)
+            title_label.setFont(title_font)
+            title_label.setStyleSheet("color: #4a9eff; background: transparent;")
+            layout.addWidget(title_label)
+            
+            # Subtitle
+            subtitle_label = QLabel("Advanced AI Translation Suite")
+            subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            subtitle_font = QFont("Arial", int(max(9, 12 * self._ui_scale)))
+            subtitle_label.setFont(subtitle_font)
+            subtitle_label.setStyleSheet("color: #cccccc; background: transparent;")
+            layout.addWidget(subtitle_label)
+            
+            layout.addSpacing(int(max(2, 6 * self._ui_scale)))
+            
+            # Status label: keep single line and elide to fit width (prevents overlap on small screens)
+            self.status_label = QLabel(self._status_text)
+            self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            status_font = QFont("Arial", int(max(9, 11 * self._ui_scale)))
+            self.status_label.setFont(status_font)
+            self.status_label.setWordWrap(False)
+            self.status_label.setFixedHeight(int(max(22, 30 * self._ui_scale)))
+            self.status_label.setStyleSheet("color: #ffffff; background: transparent;")
+            layout.addWidget(self.status_label)
+            
+            # Progress bar
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setMinimum(0)
+            self.progress_bar.setMaximum(100)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setTextVisible(False)
+            self.progress_bar.setFixedHeight(int(max(26, 36 * self._ui_scale)))
+            self.progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 2px solid #666666;
+                    border-radius: 5px;
+                    background-color: #1a1a1a;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                                      stop:0 #6bb6ff, stop:1 #4a9eff);
+                    border-radius: 3px;
+                }
+            """)
+            layout.addWidget(self.progress_bar)
+            
+            # Progress percentage label (overlaid on progress bar)
+            self.progress_label = QLabel("0%", self.progress_bar)
+            self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            progress_font = QFont("Montserrat", int(max(10, 12 * self._ui_scale)), QFont.Weight.Bold)
+            self.progress_label.setFont(progress_font)
+            self.progress_label.setStyleSheet("""
+                color: #ffffff;
+                background: transparent;
+                border: none;
+            """)
+            # Position label to match progress bar size dynamically
+            # Use a timer to ensure the progress bar has been laid out first
+            def position_progress_label():
+                if self.progress_bar and self.progress_label:
+                    bar_width = self.progress_bar.width()
+                    bar_height = self.progress_bar.height()
+                    self.progress_label.setGeometry(0, 0, bar_width, bar_height)
+            QTimer.singleShot(0, position_progress_label)
+            self.progress_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            
+            layout.addSpacing(3)  # Reduced from 5 to 3
+            
+            # Version info
+            version_label = QLabel("Starting up...")
+            version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            version_font = QFont("Arial", int(max(8, 9 * self._ui_scale)))
+            version_label.setFont(version_font)
+            version_label.setStyleSheet("color: #888888; background: transparent;")
+            layout.addWidget(version_label)
+            
+            layout.addStretch()
+            
+            self.splash_window.setLayout(layout)
+
+            # Finalize splash size: never smaller than its content's sizeHint.
+            try:
+                layout.activate()
+                hint = self.splash_window.sizeHint()
+                target_w = max(self.splash_window.width(), hint.width())
+                target_h = max(self.splash_window.height(), hint.height())
+                # Clamp to screen to avoid going off-screen
+                target_w = min(target_w, int(screen.width() * 0.92))
+                target_h = min(target_h, int(screen.height() * 0.92))
+                self.splash_window.setFixedSize(int(target_w), int(target_h))
+            except Exception:
+                pass
+            
+            # Center the window
+            x = (screen.width() - self.splash_window.width()) // 2
+            y = (screen.height() - self.splash_window.height()) // 2
+            self.splash_window.move(x, y)
+            
+            # Show splash
+            self.splash_window.show()
+            
+            # Process events to ensure window is fully created
+            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            
+            # Set Win32 taskbar icon IMMEDIATELY after window is shown
+            self._set_win32_icon(self.ico_path)
+            
+            # Start progress animation
+            self._animate_progress()
+            
+            # Process events again
+            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            
+            # Register cleanup
+            atexit.register(self.close_splash)
+            
+            print("✅ PySide6 splash screen displayed")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Could not start splash: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _load_icon(self, layout):
+        """Load the Halgakos.ico icon"""
+        try:
+            import os
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            
+            if getattr(sys, 'frozen', False):
+                # Running as .exe
+                base_dir = sys._MEIPASS
+            else:
+                # Running as .py files
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            
+            if os.path.isfile(ico_path):
+                # Set window icon for taskbar
+                icon = QIcon(ico_path)
+                self.splash_window.setWindowIcon(icon)
+                # Also set as application icon for taskbar on Windows
+                if self.app:
+                    self.app.setWindowIcon(icon)
+                
+                # For Windows: Set taskbar icon via Win32 API (works when running as .py script)
+                try:
+                    import ctypes
+                    import platform
+                    if platform.system() == 'Windows':
+                        # Set app user model ID
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+                        
+                        # Load icon from file and set it on the window
+                        hwnd = int(self.splash_window.winId())
+                        # Constants for WM_SETICON
+                        ICON_SMALL = 0
+                        ICON_BIG = 1
+                        WM_SETICON = 0x0080
+                        
+                        # Load icon using Win32 API
+                        hicon = ctypes.windll.shell32.ExtractIconW(ctypes.windll.kernel32.GetModuleHandleW(None), ico_path, 0)
+                        if hicon:
+                            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                except Exception as e:
+                    print(f"⚠️ Could not set Windows taskbar icon: {e}")
+                
+                # HiDPI-aware, high-quality scaling
+                try:
+                    dpr = self.splash_window.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                
+                # Logical size (how big it appears on screen)
+                target_logical = int(getattr(self, '_icon_logical_px', 110) or 110)
+                # Physical pixels (actual pixels in the image for HiDPI)
+                target_dev_px = int(target_logical * dpr)
+                
+                # Load and scale the icon at device pixel resolution
+                raw = QPixmap(ico_path)
+                if not raw.isNull():
+                    # Scale to device pixels with smooth transformation, keeping aspect ratio
+                    scaled = raw.scaled(
+                        target_dev_px, target_dev_px,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    
+                    # Set device pixel ratio so Qt knows this is a HiDPI image
+                    scaled.setDevicePixelRatio(dpr)
+                    
+                    # Create label with logical size
+                    icon_label = QLabel()
+                    icon_label.setPixmap(scaled)
+                    icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    icon_label.setStyleSheet("background: transparent;")
+                    # Fixed size in logical pixels (Qt will automatically use HiDPI pixmap)
+                    icon_label.setFixedSize(target_logical, target_logical)
+                    icon_label.setScaledContents(False)
+                    layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignCenter)
+                    return
+        except Exception as e:
+            print(f"⚠️ Could not load icon: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Fallback emoji if icon loading fails
+        icon_label = QLabel("📚")
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_font = QFont("Arial", int(max(36, 56 * getattr(self, '_ui_scale', 1.0))))
+        icon_label.setFont(icon_font)
+        icon_label.setStyleSheet("background: #4a9eff; color: white; border-radius: 10px;")
+        sz = int(getattr(self, '_icon_logical_px', 110) or 110)
+        icon_label.setFixedSize(sz, sz)
+        layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def _animate_progress(self):
+        """Animate progress bar filling up"""
+        if not self.timer:
+            self.timer = QTimer()
+            self.timer.timeout.connect(self._update_progress)
+            self.timer.start(10)  # Update every 10ms for smooth animation
+    
+    def _update_progress(self):
+        """Update progress animation"""
+        try:
+            manual_auto_cap = getattr(self, '_manual_progress_auto_cap', None)
+            progress_target = getattr(self, '_progress_target', self.progress_value)
+
+            # Manual mode normally means real milestones own progress. During
+            # heavy imports, allow a capped crawl so the splash stays alive.
+            if (
+                getattr(self, '_manual_progress', False)
+                and manual_auto_cap is None
+                and progress_target <= self.progress_value
+            ):
+                return
+                
+            if self.splash_window and self.progress_value < 100:
+                if progress_target > self.progress_value:
+                    self.progress_value = min(progress_target, self.progress_value + 1.4)
+                    if self.progress_bar:
+                        self.progress_bar.setValue(int(self.progress_value))
+                    if self.progress_label:
+                        self.progress_label.setText(f"{int(self.progress_value)}%")
+                    if self.app:
+                        self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    return
+
+                if manual_auto_cap is not None:
+                    if self.progress_value < manual_auto_cap:
+                        if self.progress_value < 70:
+                            step = 0.14
+                        elif self.progress_value < 82:
+                            step = 0.06
+                        else:
+                            step = 0.03
+                        step *= getattr(self, '_manual_progress_auto_boost', 1.0)
+                        self.progress_value = min(manual_auto_cap, self.progress_value + step)
+                    if self.progress_bar:
+                        self.progress_bar.setValue(int(self.progress_value))
+                    if self.progress_label:
+                        self.progress_label.setText(f"{int(self.progress_value)}%")
+                    if self.app:
+                        self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    return
+
+                # Auto-increment progress for visual effect during startup
+                # Rates are tuned so the bar takes ~12-15s to reach 90%,
+                # matching real-world loading time.  Actual progress_map
+                # messages will jump ahead when real milestones are hit.
+                if self.progress_value < 20:
+                    self.progress_value += 0.3
+                elif self.progress_value < 50:
+                    self.progress_value += 0.18
+                elif self.progress_value < 75:
+                    self.progress_value += 0.12
+                elif self.progress_value < 99:
+                    self.progress_value += 0.08
+                # else: freeze at 99 — only "Ready!" pushes to 100%
+                
+                # Cap at 99% — only explicit "Ready!" reaches 100
+                if self.progress_value >= 99:
+                    self.progress_value = 99
+                
+                # Update progress bar
+                if self.progress_bar:
+                    self.progress_bar.setValue(int(self.progress_value))
+                
+                # Update percentage text
+                if self.progress_label:
+                    self.progress_label.setText(f"{int(self.progress_value)}%")
+                
+                # Process events
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except Exception:
+            pass
+    
+    def _elide_status(self, message: str) -> str:
+        try:
+            if not self.status_label:
+                return message
+            w = int(self.status_label.width() or 0)
+            if w <= 20:
+                return message
+            fm = QFontMetrics(self.status_label.font())
+            # Keep a little padding
+            return fm.elidedText(str(message), Qt.TextElideMode.ElideRight, max(20, w - 10))
+        except Exception:
+            return message
+
+    def update_status(self, message):
+        """Update splash status and progress - thread-safe"""
+        if self._closed:
+            return
+            
+        self._status_text = message
+
+        if "Loading QA scanner" in message:
+            no_manga_startup = getattr(self, '_startup_manga_available', None) is False
+            self._manual_progress_auto_cap = 62 if no_manga_startup else 38
+            self._manual_progress_auto_boost = 1.0
+        elif "QA scanner loaded" in message:
+            self._manual_progress_auto_cap = 95
+            self._manual_progress_auto_boost = 1.0
+        elif (
+            "Finalizing module initialization" in message
+            or "Creating main window" in message
+            or message == "Ready!"
+        ):
+            self._manual_progress_auto_cap = None
+            self._manual_progress_auto_boost = 1.0
+        
+        # Enhanced progress mapping
+        progress_map = {
+            "Loading theme framework...": 5,
+            "Loading UI framework...": 8,
+            
+            # Script validation phase - 10-25%
+            "Scanning Python modules...": 10,
+            "Validating": 12,  # Partial match for "Validating X Python scripts..."
+            "✅ All scripts validated": 25,
+            
+            # Startup module loading is weighted around the core imports:
+            # TransateKRtoEN/unified API setup, glossary, EPUB, and QA scanning.
+            "⚙️ Initializing startup modules...": 25,
+            "Loading startup modules...": 25,
+            "Loading translation modules...": 25,
+            "⚙️ Initializing module system...": 25,
+            "Initializing module system...": 25,
+            "Loading translation engine...": 25,
+            "Validating translation engine...": 32,
+            "✅ translation engine loaded": 70,
+            "Loading glossary extractor...": 25,
+            "Validating glossary extractor...": 32,
+            "✅ glossary extractor loaded": 42,
+            "Loading EPUB converter...": 25,
+            "✅ EPUB converter loaded": 34,
+            "Loading QA scanner...": 25,
+            "🔍 QA scanner loaded": 38,
+            "✅ QA scanner loaded": 38,
+            "Finalizing module initialization...": 91,
+            "✅ All modules loaded successfully": 92,
+            "All startup modules loaded successfully": 92,
+            "All core modules loaded successfully": 92,
+
+            "🪟 Creating main window...": 94,
+            "Creating main window...": 94,
+            "Ready!": 100
+        }
+
+        if getattr(self, '_startup_manga_available', None) is False:
+            progress_map.update({
+                "⚙️ Initializing startup modules...": 50,
+                "Loading startup modules...": 50,
+                "Loading translation modules...": 50,
+                "⚙️ Initializing module system...": 50,
+                "Initializing module system...": 50,
+                "Loading translation engine...": 50,
+                "Validating translation engine...": 56,
+                "✅ translation engine loaded": 90,
+                "Loading glossary extractor...": 50,
+                "Validating glossary extractor...": 56,
+                "✅ glossary extractor loaded": 68,
+                "Loading EPUB converter...": 50,
+                "✅ EPUB converter loaded": 58,
+                "Loading QA scanner...": 50,
+                "🔍 QA scanner loaded": 62,
+                "✅ QA scanner loaded": 62,
+                "Finalizing module initialization...": 94,
+                "✅ All modules loaded successfully": 96,
+                "All startup modules loaded successfully": 96,
+                "All core modules loaded successfully": 96,
+                "🪟 Creating main window...": 98,
+                "Creating main window...": 98,
+            })
+        
+        # Use thread-safe signal to update UI
+        try:
+            self._status_update_signal.emit(message)
+        except Exception:
+            pass
+        
+        # Check for progress updates
+        try:
+            # Check for exact matches first
+            if message in progress_map:
+                self.set_progress(progress_map[message], immediate=(message == "Ready!"))
+            else:
+                # Check for partial matches
+                for key, value in progress_map.items():
+                    if key in message:
+                        self.set_progress(value)
+                        break
+        except Exception:
+            pass
+    
+    def _do_update_status(self, message):
+        """Internal method to update status - called on main thread via signal"""
+        try:
+            if self.splash_window and self.status_label and not self._closed:
+                self.status_label.setText(self._elide_status(message))
+                
+                # Process events
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except (RuntimeError, AttributeError):
+            # Widget deleted or not available
+            pass
+    
+    def set_progress(self, value, immediate=False):
+        """Move progress toward a new target (0-100), never backwards."""
+        if self._closed:
+            return
+        
+        value = max(0, min(100, value))
+        current_target = max(getattr(self, '_progress_target', self.progress_value), self.progress_value)
+        if value <= current_target and value <= self.progress_value and not immediate:
+            return
+        self._progress_target = max(current_target, value)
+
+        timer_active = False
+        try:
+            timer_active = bool(self.timer and self.timer.isActive())
+        except Exception:
+            timer_active = False
+
+        if timer_active and self.splash_window and not immediate:
+            return
+
+        # Validation mode stops the timer; "Ready!" also needs one immediate
+        # paint so users see 100% before the main window takes over.
+        self.progress_value = value if immediate else self._progress_target
+        try:
+            self._progress_update_signal.emit(int(self.progress_value))
+        except Exception:
+            pass
+
+    def show_ready_frame(self, minimum_ms=45):
+        """Paint the final Ready/100% state briefly before showing the main UI."""
+        try:
+            self.update_status("Ready!")
+            deadline = time.time() + max(0.0, float(minimum_ms) / 1000.0)
+            while time.time() < deadline:
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                time.sleep(0.005)
+        except Exception:
+            pass
+    
+    def _do_set_progress(self, value):
+        """Internal method to set progress - called on main thread via signal"""
+        try:
+            if not self._closed:
+                if self.progress_bar:
+                    self.progress_bar.setValue(value)
+                if self.progress_label:
+                    self.progress_label.setText(f"{value}%")
+                
+                # Process events to ensure smooth UI updates
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except (RuntimeError, AttributeError):
+            # Widget deleted or not available
+            pass
+
+    @staticmethod
+    def _configured_model_uses_vertex():
+        """Sniff config.json for a Vertex AI model without importing the GUI.
+
+        Mirrors unified_api_client's detection: 'vertex/' prefix, an '@' in
+        the model name, or the authgem-vertex flavor.
+        """
+        override = os.environ.get("GLOSSARION_PRELOAD_VERTEX", "").strip().lower()
+        if override in ("1", "true", "yes", "on"):
+            return True
+        if override in ("0", "false", "no", "off"):
+            return False
+        candidates = []
+        try:
+            if getattr(sys, 'frozen', False):
+                candidates.append(os.path.dirname(sys.executable))
+            candidates.append(os.path.dirname(os.path.abspath(__file__)))
+            candidates.append(os.getcwd())
+        except Exception:
+            pass
+        for base in candidates:
+            try:
+                cfg_path = os.path.join(base, "config.json")
+                if not os.path.isfile(cfg_path):
+                    continue
+                import json
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                model = str(cfg.get('model', '') or '').lower()
+                return (
+                    model.startswith('vertex/')
+                    or model.startswith('authgem-vertex')
+                    or '@' in model
+                )
+            except Exception:
+                continue
+        return False
+
+    def _preload_optional_startup_modules(self):
+        """Warm optional heavy modules without blocking the main startup path."""
+        try:
+            import metadata_batch_translator  # noqa: F401
+        except Exception:
+            pass
+        # Pre-load heavy SDLXLIFF / lxml chain so the first click on any
+        # retranslation or glossary-progress feature doesn't freeze the GUI.
+        # lxml in particular is slow to load from PyInstaller archives.
+        # Also warm everything Run Translation touches lazily on its worker
+        # thread (bs4/lxml.html re-renders, fitz, markdown, enhanced text
+        # extraction, free-translate fallback). In frozen onefile builds these
+        # first-time imports take seconds and starve the GUI thread mid-run.
+        for _mod_name in (
+            "lxml",
+            "lxml.etree",
+            "lxml.html",
+            "bs4",
+            "sdlxliff_extractor",
+            "sdlxliff_converter",
+            "sdlxliff_extraction_manager",
+            "sdlxliff_sidecar_writer",
+            "Retranslation_GUI",
+            "enhanced_text_extractor",
+            "google_free_translate",
+            "markdown",
+            "fitz",
+        ):
+            try:
+                importlib.import_module(_mod_name)
+            except Exception:
+                pass
+        # Warm the tiktoken encoder cache (BPE ranks load lazily on first use,
+        # which otherwise lands in the middle of the first translation run).
+        try:
+            import tiktoken
+            tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            pass
+        # Vertex AI chain is enormous (1,265+ proto submodules, ~215 MB RAM),
+        # so only warm it when the configured model actually targets Vertex —
+        # the first API call would import it anyway; doing it here moves the
+        # 10-20s frozen-build import off the Run Translation click.
+        if self._configured_model_uses_vertex():
+            for _mod_name in (
+                "google.cloud.aiplatform",
+                "vertexai",
+                "vertexai.generative_models",
+            ):
+                try:
+                    importlib.import_module(_mod_name)
+                except Exception:
+                    pass
+
+    def _preload_epub_webengine(self):
+        """Warm Qt WebEngine imports while the splash is still visible."""
+        try:
+            importlib.import_module("PySide6.QtWebEngineCore")
+            importlib.import_module("PySide6.QtWebEngineWidgets")
+        except Exception:
+            pass
+        return True
+
+    def _is_startup_module_available(self, module_name):
+        try:
+            return importlib.util.find_spec(module_name) is not None
+        except (ImportError, ValueError, AttributeError):
+            return False
+
+    def _settle_startup_progress_before_finalizing(self, deadline=0.45) -> None:
+        """Let a capped startup crawl visibly advance before final status jumps."""
+        if self._closed or getattr(self, '_manual_progress_auto_cap', None) is None:
+            return
+        try:
+            end_time = time.time() + max(0.0, float(deadline))
+        except Exception:
+            end_time = time.time() + 0.45
+        while (
+            not self._closed
+            and getattr(self, '_manual_progress_auto_cap', None) is not None
+            and self.progress_value < min(float(getattr(self, '_manual_progress_auto_cap') or 0), 91.5)
+            and time.time() < end_time
+        ):
+            self._update_progress()
+            if self.app:
+                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            time.sleep(0.01)
+
+    def load_startup_modules_parallel(self, max_workers=None):
+        """Load core startup modules concurrently while keeping the splash responsive."""
+        self._manual_progress = True
+        self._manual_progress_auto_cap = None
+        self._manual_progress_auto_boost = 1.0
+        manga_available = self._is_startup_module_available("manga_integration")
+        self._startup_manga_available = manga_available
+        results = {}
+        specs = [
+            {
+                "key": "translation",
+                "module": "TransateKRtoEN",
+                "display": "translation engine",
+                "loading": "Loading translation engine...",
+                "loaded": "✅ translation engine loaded",
+                "required": ("main", "set_stop_flag"),
+                "result": lambda mod: (
+                    mod.main,
+                    mod.set_stop_flag,
+                    getattr(mod, "is_stop_requested", None),
+                ),
+            },
+            {
+                "key": "glossary",
+                "module": "extract_glossary_from_epub",
+                "display": "glossary extractor",
+                "loading": "Loading glossary extractor...",
+                "loaded": "✅ glossary extractor loaded",
+                "required": ("main", "set_stop_flag"),
+                "result": lambda mod: (
+                    mod.main,
+                    mod.set_stop_flag,
+                    getattr(mod, "is_stop_requested", None),
+                ),
+            },
+            {
+                "key": "epub",
+                "module": "epub_converter",
+                "display": "EPUB converter",
+                "loading": "Loading EPUB converter...",
+                "loaded": "✅ EPUB converter loaded",
+                "required": ("fallback_compile_epub",),
+                "result": lambda mod: mod.fallback_compile_epub,
+            },
+            {
+                "key": "scan",
+                "module": "scan_html_folder",
+                "display": "QA scanner",
+                "loading": "Loading QA scanner...",
+                "loaded": "🔍 QA scanner loaded",
+                "required": ("scan_html_folder",),
+                "result": lambda mod: mod.scan_html_folder,
+            },
+        ]
+        if os.environ.get("GLOSSARION_PRELOAD_QT_WEBENGINE", "1").strip().lower() not in ("0", "false", "no", "off"):
+            specs.append({
+                "key": "qt_webengine",
+                "loader": self._preload_epub_webengine,
+                "display": "Qt WebEngine",
+                "loading": "Loading Qt WebEngine...",
+                "loaded": "🌐 Qt WebEngine loaded",
+                "required": (),
+                "result": lambda loaded: loaded,
+                "optional": True,
+            })
+        results["manga_available"] = manga_available
+        if manga_available:
+            specs.append({
+                "key": "manga",
+                "module": "manga_integration",
+                "display": "manga translator",
+                "loading": "Loading manga translator...",
+                "loaded": "🖼️ Manga translator loaded",
+                "required": ("MangaTranslationTab",),
+                "result": lambda mod: mod.MangaTranslationTab,
+                "optional": True,
+            })
+
+        def _load_spec(spec):
+            loader = spec.get("loader")
+            module = loader() if callable(loader) else importlib.import_module(spec["module"])
+            missing = [name for name in spec["required"] if not hasattr(module, name)]
+            if missing:
+                module_name = spec.get("module") or spec.get("display") or spec.get("key") or "startup module"
+                raise ImportError(f"{module_name} missing required attribute(s): {', '.join(missing)}")
+            return spec["key"], spec["result"](module), spec["loaded"]
+
+        if os.environ.get("GLOSSARION_SERIAL_SPLASH_IMPORTS", "0").strip().lower() in ("1", "true", "yes", "on"):
+            print(f"[SPLASH] Startup import workers: serial mode (cpu_cap={_cpu_worker_cap()}, modules={len(specs)})")
+            for spec in specs:
+                self.update_status(spec["loading"])
+                try:
+                    key, value, loaded_message = _load_spec(spec)
+                    results[key] = value
+                    self.update_status(loaded_message)
+                except Exception as e:
+                    if spec.get("optional"):
+                        if spec.get("key") == "manga":
+                            self._manual_progress_auto_cap = None
+                            self._manual_progress_auto_boost = 1.0
+                            results["manga_available"] = False
+                        print(f"Optional startup module unavailable ({spec.get('module') or spec.get('display') or spec['key']}): {e}")
+                    else:
+                        print(f"Warning: Could not import {spec['module']}: {e}")
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            if manga_available and results.get("manga") is None:
+                results["manga_available"] = False
+            return results
+
+        cpu_cap = _cpu_worker_cap()
+        workers = max_workers
+        if workers is None:
+            workers = min(len(specs), cpu_cap)
+        workers = max(1, min(int(workers), len(specs), cpu_cap))
+        preload_enabled = workers < cpu_cap
+        print(
+            f"[SPLASH] Startup import workers: {workers} "
+            f"(cpu_cap={cpu_cap}, modules={len(specs)}, "
+            f"optional_preload={'on' if preload_enabled else 'off'})"
+        )
+
+        try:
+            threading.Thread(
+                target=self._preload_optional_startup_modules,
+                daemon=True,
+                name="optional-startup-preload",
+            ).start()
+        except Exception:
+            pass
+
+        self.update_status("⚙️ Initializing startup modules...")
+        for spec in specs:
+            self.update_status(spec["loading"])
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="splash-import",
+        ) as pool:
+            future_to_spec = {
+                pool.submit(_load_spec, spec): spec
+                for spec in specs
+            }
+            while future_to_spec:
+                done = [future for future in future_to_spec if future.done()]
+                for future in done:
+                    spec = future_to_spec.pop(future)
+                    try:
+                        key, value, loaded_message = future.result()
+                        results[key] = value
+                        self.update_status(loaded_message)
+                    except Exception as e:
+                        if spec.get("optional"):
+                            if spec.get("key") == "manga":
+                                self._manual_progress_auto_cap = None
+                                self._manual_progress_auto_boost = 1.0
+                                results["manga_available"] = False
+                            print(f"Optional startup module unavailable ({spec.get('module') or spec.get('display') or spec['key']}): {e}")
+                        else:
+                            print(f"Warning: Could not import {spec['module']}: {e}")
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                if future_to_spec:
+                    time.sleep(0.01)
+
+        self._settle_startup_progress_before_finalizing()
+        if manga_available and results.get("manga") is None:
+            results["manga_available"] = False
+
+        # Pre-cache QA Scanner optional dependency checks (instant find_spec,
+        # no actual imports) so the settings dialog never has to probe at all.
+        try:
+            from QA_Scanner_GUI import _probe_truncation_deps_fast
+            _probe_truncation_deps_fast()
+        except Exception:
+            pass
+
+        return results
+
+    def validate_all_scripts(self, base_dir=None):
+        """Validate that all Python scripts in the project compile without syntax errors
+        
+        Args:
+            base_dir: Directory to scan for Python files. Defaults to script directory.
+            
+        Returns:
+            tuple: (success_count, total_count, failed_scripts)
+        """
+        import os
+        import py_compile
+        
+        # Enable manual progress control and stop auto-animation timer
+        self._manual_progress = True
+        if self.timer:
+            self.timer.stop()
+        
+        if base_dir is None:
+            if getattr(sys, 'frozen', False):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        self.update_status("Scanning Python modules...")
+        self.set_progress(10)  # Explicitly set starting progress
+        
+        # Find all Python files
+        python_files = []
+        try:
+            for file in os.listdir(base_dir):
+                if file.endswith('.py') and not file.startswith('.'):
+                    python_files.append(os.path.join(base_dir, file))
+        except Exception as e:
+            print(f"⚠️ Could not scan directory: {e}")
+            return (0, 0, [])
+            
+        # Define optional scripts that might be missing in Lite version
+        optional_scripts = [
+            'manga_translator.py', 'manga_integration.py', 'manga_settings_dialog.py',
+            'manga_image_preview.py', 'bubble_detector.py', 'local_inpainter.py',
+            'ocr_manager.py', 'ImageRenderer.py'
+        ]
+        
+        # Identify which optional scripts are actually missing
+        missing_optional = []
+        existing_basenames = {os.path.basename(p) for p in python_files}
+        for script in optional_scripts:
+            if script not in existing_basenames:
+                missing_optional.append(script)
+        
+        total_count = len(python_files) + len(missing_optional)
+        success_count = 0
+        failed_scripts = []
+        
+        if total_count == 0:
+            return (0, 0, [])
+        
+        self.update_status(f"Validating {total_count} Python scripts...")
+        print(f"🔍 Validating {total_count} Python scripts for compilation errors...")
+        
+        current_idx = 0
+        
+        # Check each existing file
+        for filepath in python_files:
+            current_idx += 1
+            filename = os.path.basename(filepath)
+            
+            # Log progress for debugging hangs
+            print(f"📂 Scanning files: [{current_idx}/{total_count}] {filename}")
+            
+            try:
+                # Try to compile the file
+                py_compile.compile(filepath, doraise=True)
+                success_count += 1
+                print(f"✅ Validated {current_idx}/{total_count}: {filename}")
+                
+                # Update progress based on validation progress
+                # Map 0-100% of files to 15-25% of total progress
+                progress_pct = 15 + int((current_idx / total_count) * 10)
+                # Only update if progress actually changed (avoid animation churn)
+                if progress_pct != self.progress_value:
+                    self.set_progress(progress_pct)
+                
+            except SyntaxError as e:
+                failed_scripts.append((filename, str(e)))
+                print(f"❌ Syntax error in {filename}: {e}")
+                import traceback
+                print(f"Full traceback:\n{traceback.format_exc()}")
+            except Exception as e:
+                failed_scripts.append((filename, str(e)))
+                print(f"⚠️ Could not validate {filename}: {e}")
+                import traceback
+                print(f"Full traceback:\n{traceback.format_exc()}")
+            
+            # Process events to keep UI responsive
+            if self.app:
+                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+        # Simulate missing optional scripts
+        for script in missing_optional:
+            current_idx += 1
+            print(f"📂 Scanning files: [{current_idx}/{total_count}] {script} (Simulated)")
+            
+            # Simulate validation delay
+            time.sleep(0.05) # 50ms delay
+            
+            success_count += 1 # Count as success
+            print(f"✅ Validated {current_idx}/{total_count}: {script} (Simulated)")
+            
+            progress_pct = 15 + int((current_idx / total_count) * 10)
+            if progress_pct != self.progress_value:
+                self.set_progress(progress_pct)
+            
+            if self.app:
+                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        
+        # Report results
+        if failed_scripts:
+            self.update_status(f"⚠️ {success_count}/{total_count} scripts valid")
+            print(f"\n⚠️ Validation complete: {success_count}/{total_count} scripts compiled successfully")
+            print(f"Failed scripts:")
+            for script, error in failed_scripts:
+                print(f"  • {script}: {error}")
+        else:
+            self.update_status("✅ All scripts validated")
+            print(f"✅ All {total_count} Python scripts validated successfully")
+        
+        # Re-enable auto-animation after validation completes
+        self._manual_progress = False
+        
+        return (success_count, total_count, failed_scripts)
+    
+    def simulate_validation(self):
+        """Simulate validation progress smoothly when skipping validation"""
+        # Stop auto-animation to prevent fighting
+        if self.timer:
+            self.timer.stop()
+        self._manual_progress = True
+
+        self.update_status("Scanning Python modules...")
+        
+        # Ensure we don't go backwards
+        start = self.progress_value
+        target = 25
+        
+        if start < target:
+            # Animate quickly to target over ~0.5 seconds
+            steps = target - start
+            delay = 0.5 / steps if steps > 0 else 0.05
+            
+            self.update_status("Validating scripts (Skipped)...")
+            
+            for i in range(1, steps + 1):
+                self.set_progress(start + i)
+                time.sleep(delay)
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        
+        self.update_status("✅ All scripts validated")
+        
+        # Re-enable auto-animation flag (though timer needs restart if desired)
+        self._manual_progress = False
+    
+    def close_splash(self):
+        """Close the splash screen"""
+        try:
+            # Mark as closed to prevent any further updates from worker threads
+            self._closed = True
+            
+            # Stop timer first
+            if self.timer:
+                self.timer.stop()
+                self.timer = None
+            
+            # Update progress to 100% before closing (only if window still exists)
+            if self.splash_window:
+                try:
+                    self.progress_value = 100
+                    if self.progress_bar:
+                        self.progress_bar.setValue(100)
+                    if self.progress_label:
+                        self.progress_label.setText("100%")
+                    
+                    # Process events one last time
+                    if self.app:
+                        self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    
+                except RuntimeError:
+                    # Widget already deleted by Qt, that's okay
+                    pass
+                
+                # Close splash window
+                try:
+                    self.splash_window.close()
+                except RuntimeError:
+                    # Already deleted
+                    pass
+                
+                self.splash_window = None
+            
+            print("✅ Splash screen closed")
+            
+        except Exception as e:
+            print(f"⚠️ Error closing splash: {e}")
+        finally:
+            # Ensure cleanup
+            self.timer = None
+            self.splash_window = None
+            self.progress_bar = None
+            self.progress_label = None
+            self.status_label = None

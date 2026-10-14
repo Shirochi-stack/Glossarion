@@ -1,0 +1,1206 @@
+# 📚 Glossarion — The Complete, Monkey-Proof User Guide
+
+**Version 9.6.10 · Updated September 10, 2026**
+
+This guide explains **every button, box, and toggle** in Glossarion in plain English. You do **not** need to know anything about coding, AI, or computers beyond clicking, typing, and dragging files. If you can use a web browser, you can use this guide.
+
+> **How to read this guide:** Follow it top to bottom the first time. After that, jump to the section you need using the table of contents. Anything marked **⚠️ DON'T** is a common mistake — read those carefully. Anything marked **✅ DO** is the safe, recommended choice.
+
+---
+
+## 📑 Table of Contents
+
+1. [Words you need to know (read this first)](#1-words-you-need-to-know-read-this-first)
+2. [Installing and starting Glossarion](#2-installing-and-starting-glossarion)
+3. [Your very first translation (the 7-step golden path)](#3-your-very-first-translation-the-7-step-golden-path)
+4. [The main window, explained piece by piece](#4-the-main-window-explained-piece-by-piece)
+5. [Getting an API key and choosing a model](#5-getting-an-api-key-and-choosing-a-model)
+6. [Main settings (the middle of the window)](#6-main-settings-the-middle-of-the-window)
+7. [Other Settings (the ⚙️ Other Setting button)](#7-other-settings-the-️-other-setting-button)
+8. [The Glossary system (read this — it matters a lot)](#8-the-glossary-system-read-this--it-matters-a-lot)
+9. [Local AI and custom endpoints](#9-local-ai-and-custom-endpoints)
+10. [Manga & comic translation](#10-manga--comic-translation)
+11. [Retranslation (fixing single chapters)](#11-retranslation-fixing-single-chapters)
+12. [EPUB Converter (building your finished book)](#12-epub-converter-building-your-finished-book)
+13. [QA Scanner (checking quality)](#13-qa-scanner-checking-quality)
+14. [Multiple API keys (rotation)](#14-multiple-api-keys-rotation)
+15. [Refinement & output modes](#15-refinement--output-modes)
+16. [Translation editing & review (.sdlxliff and formats)](#16-translation-editing--review-sdlxliff-and-supported-formats)
+17. [How to translate for free](#17-how-to-translate-for-free)
+18. [Antigravity and OcAgy setup for compiled `.exe` builds](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)
+19. [When things go wrong (troubleshooting)](#19-when-things-go-wrong-troubleshooting)
+20. [One-page cheat sheet](#20-one-page-cheat-sheet)
+21. [Arena proxy setup, accounts, and streaming](#21-arena-proxy-setup-accounts-and-streaming)
+
+---
+
+## 1. Words you need to know (read this first)
+
+Glossarion uses a few words over and over. Learn these five and the rest of the guide will make sense.
+
+| Word | What it actually means | Real example |
+|------|------------------------|--------------|
+| **API key** | A secret password that lets Glossarion talk to an AI company's computers on your behalf. You usually pay the AI company, not Glossarion. Treat it like a credit card number. | `sk-abc123...` from OpenAI |
+| **Model** | The specific "AI brain" doing the translating. Smarter models cost more and are slower. | `gpt-5.5`, `gemini-3.5-flash`, `claude-opus-4-8` |
+| **Provider** | The company that makes the model. | OpenAI, Google, Anthropic, DeepSeek |
+| **Profile** | A saved set of instructions telling the AI *how* to translate (which language, what tone, what rules). Glossarion comes with ready-made profiles for Korean, Japanese, and Chinese. | `Korean`, `Japanese`, `korean_OCR` |
+| **Glossary** | A name list that keeps the AI consistent — so the hero is "Kim Dokja" in chapter 1 *and* chapter 90, not "Reader Kim" halfway through. | A `.csv` or `.json` file |
+
+A few more you'll bump into:
+
+- **EPUB** — the most common e-book file (`.epub`). Glossarion's favorite input.
+- **Token** — a chunk of text (roughly ¾ of a word). AI companies bill per token and limit how many you can send at once. You don't have to count them; just know "token limit" = "how much text at a time."
+- **Chunk** — when an EPUB chapter or PDF section is too big, Glossarion splits it into smaller pieces. Each piece can be saved, resumed, checked, and retranslated independently.
+- **OCR** — "reading" text out of an image (used for manga and scanned pages).
+- **Inpainting** — erasing the original text from a manga bubble so the translation can be drawn in its place.
+
+> **✅ DO:** If a setting confuses you, hover your mouse over it. Almost every box in Glossarion shows a yellow help bubble (a *tooltip*) explaining what it does. This guide is built from those same explanations.
+
+---
+
+## 2. Installing and starting Glossarion
+
+There are two kinds of users. Pick the one that matches you.
+
+### A) You downloaded a ready-made `.exe` (most people)
+
+1. Find the Glossarion `.exe` file you downloaded (for example a file whose name contains `Glossarion` and a version number).
+2. **Double-click it.** That's it. A splash screen with a spinning flower logo appears while it loads (this can take 10–60 seconds the first time — be patient).
+3. The main window opens. Skip to [Section 3](#3-your-very-first-translation-the-7-step-golden-path).
+
+> **Which build should I download?** There are several `.exe` packages. Here's what each one is:
+>
+> | Package | What it is |
+> |---------|------------|
+> | **`L_Glossarion.v9.5.3.exe`** ⭐ | **The standard build — recommended for most people.** Full-featured translation (everything *except* manga). Most optimal build for **novel** translation. Includes the **EPUB Library/Reader**. |
+> | `L_Glossarion_Lite.v9.5.3.exe` | Same, but **excludes the EPUB Reader and `authnd/` prefix routing**. |
+> | `L_Glossarion_TurboLite.v9.5.3.exe` | Excludes the EPUB Reader, `authnd/` routing, Vertex AI SDK, and PDF generation. Smallest/fastest to start. |
+> | `N_Glossarion_NoCuda.v9.5.3.exe` | **Full build *with* manga translation** plus some experimental novel features (silent-truncation detection, Argos-translate fallback to Google Translate). Most optimal build for **manga**. Doesn't need an NVIDIA GPU. |
+> | `N_Glossarion_Heavy.v9.5.3.exe` | Adds CUDA (NVIDIA GPU) support for the manga translator. ⚠️ May be unstable. |
+>
+> **✅ Recommended: the standard `L_Glossarion.v9.5.3.exe`.** It keeps the built-in **EPUB Library**, which is what powers **browser-based requests using the `authnd/` provider** (e.g. `authnd/...` models). The `Lite` and `TurboLite` builds drop the EPUB Library *and* `authnd/` routing, so choose the standard build if you want those. Only pick a `N_` build if you specifically need **manga** translation.
+
+### B) You have the source code and Python (advanced)
+
+1. Install Python 3.10 or newer.
+2. Open a terminal in the `Glossarion` folder and install the requirements once:
+   ```bash
+   pip install -r requirements.txt        # Windows
+   pip install -r requirements-macos.txt  # macOS
+   ```
+3. Start the program. **The entry point is `translator_gui.py`.**
+   ```bash
+   cd src
+   python translator_gui.py
+   ```
+   On Windows you can instead **double-click `src/launch_Glossarion.bat`**, which does the same thing and pauses to show any errors.
+
+> **⚠️ DON'T** double-click `START_Glosarion.bat` expecting the translator — that file starts the optional **Discord bot**, not the GUI. Use `launch_Glossarion.bat` or run `translator_gui.py`.
+
+> **⚠️ DON'T** edit or run `app.py`. It is not the program you want; the real app is `translator_gui.py`.
+
+---
+
+## 3. Your very first translation (the 7-step golden path)
+
+Do exactly this the first time. Don't touch anything not mentioned. You'll have a translated book in a few minutes (plus however long the AI takes).
+
+1. **Pick your file.** Next to **Input File(s)**, click **🔍 Browse ▼** and choose your `.epub` (or `.txt` / `.pdf`).
+2. **Choose a Profile.** In the **Profile** dropdown pick the *source* language of the book — `Korean`, `Japanese`, or `Chinese`. (The profile is just instructions for the AI; it works the same whether your input is an EPUB, PDF, or plain `.txt`.)
+3. **Pick a Model.** In the **Model** box choose or type a model, e.g. `gemini-3.5-flash` (cheap and fast to start with).
+4. **Paste your API key.** In the **API Key** box, paste the key from your AI provider. Click **Show** to make sure you pasted it correctly, then **Hide** again.
+5. **Set the Target Language.** Type the language you want to *read*, e.g. `English`.
+6. **Press `Run Translation`.** The big start button. Watch the log at the bottom — it tells you exactly what's happening.
+7. **Wait, then open the output.** When it finishes, click **Open Output Folder 📁**. Your translated chapters (and a finished EPUB, if you let it build one) are there.
+
+> **✅ DO start small and cheap.** For your first run, set **Chapter range** to `1-2` (see [Section 6](#6-main-settings-the-middle-of-the-window)) so you only translate two chapters. Check they look good *before* spending money on the whole book.
+
+> **🛑 The Stop button is safe.** `Stop Translation` finishes the current piece and stops cleanly. Your already-translated chapters are saved. For a split EPUB chapter or PDF section, its successfully finished chunks are saved too, so the next run sends only the unfinished chunks.
+
+---
+
+## 4. The main window, explained piece by piece
+
+The top of the window is the control strip you'll use every time.
+
+- **Input File(s):** The book(s) or folder you want to translate. Click **🔍 Browse ▼** to pick a file or a whole folder. It shows **No file selected** until you choose something. The same menu also contains **📚 Glossary Parallel EPUB Pair**, a glossary-only tool for cross-checking an original EPUB against an existing translation (see Section 8.3).
+- **Model:** The AI brain. **The Model box is NOT a fixed dropdown — it's a free text field.** You can pick a suggestion *or just type any model name yourself*. Any model a routing prefix supports will work if you type it in (e.g. `or/deepseek/deepseek-v4-flash:free`, `nd/moonshotai/kimi-k2-thinking`, `authnd/z-ai/glm-5.1`). Next to it:
+  - **Manage Models** (gear/list button) — opens the **Model Manager**, where you add your own models, rearrange the list, create **custom prefixes**, and click **🌐 Poll Providers** to fetch current provider catalogs (see [Section 5](#keeping-the-model-list-current-provider-polling) and [Section 9](#9-local-ai-and-custom-endpoints)).
+  - **Right-click the Model box → 🌐 Refresh Online Models** — manually refresh every provider catalog Glossarion can safely access. Progress and detailed results appear in the bottom log; there is no popup.
+  - **ℹ️** — "Show API provider information and shortcuts," a quick reference of which models belong to which provider.
+- **Login buttons (🔐):** If you'd rather use a subscription than an API key, you can log in with your browser:
+  - **🔐 ChatGPT Login** — "Log in with your ChatGPT Plus/Pro subscription via browser. No API key needed."
+  - **🔐 Claude Login** — "Log in with your Claude Pro/Max subscription via browser. No API key needed."
+  - **🔐 Gemini Login** — "Log in with your Google account via browser. No API key needed – uses your Google Cloud project."
+  - **🔐 OCAGY Login** — opens OpenCode's interactive Google OAuth flow for OcAgy models. Choose **Google → OAuth with Google (Antigravity)** in the terminal, then use **📊** to check the plugin and linked accounts.
+  - **🔐 Antigravity Login** — "Log in with your Google account for `antigravity/...` models." See [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds) for the extra `.exe` requirements.
+  - **Arena Login** — installs the Arena proxy and opens its own browser for sign-in. Available beside Arena models in the main window and Multi API Key Manager; no API key needed. See [Section 21](#21-arena-proxy-setup-accounts-and-streaming).
+  - Each has an account-slot dropdown so you can keep several accounts.
+- **Profile:** The instruction set (language + rules). Use the dropdown to switch.
+  - **+ New Profile** — make a blank one.
+  - **Save Profile** — save your edits to the system prompt.
+  - **Delete Profile** — remove a custom profile.
+  - **Manage Profiles** — reorder, rename, undo/redo, move up/down/top/bottom.
+  - **Name tags:** putting **`_beautifulsoup`** or **`_html2text`** in a profile's name forces that extraction mode (see [Section 7](#7-other-settings-the-️-other-setting-button)).
+- **API Key:** Your secret password for the chosen provider. **Show** reveals it; **Hide** masks it again.
+- **Target Language:** The language you want to read (e.g., `English`). This fills in the `{target_lang}` blank inside the AI's instructions.
+- **Asst. Prompt:** Opens the **Assistant Prompt (Optional)** window. This adds a short *assistant-role* prefill message before each chunk you translate. Most users should leave it empty; use it only when you want to gently prime the model's response style or format.
+- **Run Translation:** Start. While running it changes to **Stop Translation**.
+- **Open Output Folder 📁:** Jump straight to your translated files.
+- **📚 Library:** Opens the EPUB Library browser to read/manage your translated files.
+- **⚙️ Other Setting:** Opens the big advanced-settings window ([Section 7](#7-other-settings-the-️-other-setting-button)).
+- **Save Config:** "Save all settings to config.json." Click this after you set things up the way you like, so they're remembered next time.
+
+There are also buttons to open the other tools — **Manga**, **Glossary**, **EPUB Converter**, **QA Scan**, **Retranslation**, **Multi Key Manager**, **Progress Manager** — each covered in its own section below.
+
+> **✅ DO press `Save Config` once you're happy with your setup.** Otherwise you may have to re-enter settings next launch.
+
+---
+
+## 5. Getting an API key and choosing a model
+
+Glossarion doesn't translate by itself — it sends your text to an AI company and reads back the translation. So you need **one** of these:
+
+### Option 1 — A normal API key (simplest to understand)
+
+1. Make an account with a provider (OpenAI, Google AI Studio, Anthropic, DeepSeek, etc.).
+2. Find their "API keys" page and create a key.
+3. Copy it and paste it into Glossarion's **API Key** box.
+4. Type or pick that provider's model in the **Model** box.
+
+**How Glossarion knows which provider you mean:** it looks at the **start of the model name**. Examples:
+
+| If the model starts with… | It goes to… |
+|---|---|
+| `gpt-`, `o3` | OpenAI |
+| `gemini-` | Google Gemini |
+| `claude-` | Anthropic Claude |
+| `deepseek-` | DeepSeek |
+| `grok-` | xAI |
+| `eh/...` | ElectronHub (one key, many providers) |
+| `or/...` | OpenRouter |
+| `oc/...` | OpenCode (paid subscription — full model catalog) |
+| `ocz/...` | OpenCode free tier (only works from the official OpenCode app) |
+| `authnd/...` | AuthND (browser/token routing — needs the EPUB Library build) |
+| `ocagy0/...`, `ocagy/...`, `ocagy1/...`, ... | OpenCode plus `opencode-antigravity-auth` — no API key; supports pooled or pinned OAuth accounts |
+| `antigravity/...` | Local Antigravity proxy — needs a Google login; Glossarion installs Bun automatically if no runtime is available |
+| `autharena/...`, `autharena0/...`, `autharena1/...`, ... | Local Arena proxy — use **Arena Login**; `autharena0/` rotates accounts, `autharena/` selects account **#0**, and `autharena1/` selects account **#1** |
+
+> Glossarion supports **40+ providers**. If yours isn't obvious, open **Manage Models → ℹ️ Model Provider Information** for the full list and the exact prefixes.
+
+### Keeping the model list current (provider polling)
+
+The built-in model list is a safety net, not a promise that every entry is still current. Glossarion can ask supported providers for their latest model catalog and merge the answer into the Model dropdown. This is called **provider polling**.
+
+**Automatic polling:**
+
+- After you stop typing in the **Model** or **API Key** box, Glossarion identifies the provider belonging to the selected model and polls **only that provider**.
+- Typing `grok-...` checks xAI, `gemini-...` checks native Gemini, `groq/...` checks Groq, and `or/...` checks OpenRouter. An OpenRouter-hosted Gemini such as `or/google/gemini-...` checks OpenRouter, not Google.
+- Automatic polling is limited to **one attempt per provider every 24 hours**, including failed attempts. The timer is saved across restarts, so repeatedly opening Glossarion or editing the field does not hammer the provider.
+- Startup follows the same provider-specific 24-hour rule. Polling runs in the background and does not freeze the interface.
+
+**Manual polling:**
+
+- Right-click the main **Model** box and choose **🌐 Refresh Online Models**, or open **Manage Models** and click **🌐 Poll Providers**.
+- When the selected route is `authnd/` (including numbered account prefixes), **Poll Providers** explicitly polls that AuthND catalog first and then continues with the remaining provider sweep.
+- A manual refresh bypasses the 24-hour automatic-poll limit. Use it when you know a provider just released or removed a model.
+- The bottom log immediately says polling has started, then lists which catalogs responded, which used static fallbacks, which lacked credentials, and the exact safe HTTP error returned by failed providers.
+
+**Credentials and privacy:**
+
+- Public catalogs such as OpenRouter are checked without a key.
+- For a private catalog, the key in the **API Key** box is used **only for the provider selected in the Model box**. Glossarion never tries that key against every provider.
+- Example: select `grok-3-mini`, paste an xAI key, then poll to check xAI. Select an unprefixed `gemini-...` model with a Gemini key to check Google Gemini.
+- Provider-specific environment variables such as `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `GROQ_API_KEY` may also authorize their matching catalogs.
+- Subscription/OAuth and project-specific routes may stay static when their backend has no safe general catalog endpoint. AuthGrok is queried only when an `authgrok.../` model for an existing signed-in account is selected. For `authgrok0/...`, Glossarion uses an existing account from the saved pool without opening login.
+
+**How to read the result:**
+
+- A subtle green **✓** in **Manage Models**, the main Model search, and Multi API Key Manager model searches means that entry comes from a fresh successful online provider poll. The checkmark is visual only and is not part of the model ID. Entries currently supplied by a static fallback never receive the checkmark, even if that provider succeeded on an older poll.
+- **Hide unpolled models** filters all of those lists and searches to confirmed entries without deleting models or changing a currently typed/selected model ID.
+- Deleting a model in **Manage Models** removes it from the main and Multi API Key Manager searches immediately, even while the non-modal manager remains open. **Cancel** restores the original search list; **Save** commits the draft. Later default-catalog updates or provider polls do not restore an explicitly deleted model; add it again in **Manage Models** if you want it back.
+- If `config.json` cannot be written, Manage Models remains open and reports the save failure instead of closing with a false success message.
+- **Static fallback** means Glossarion kept its built-in list because the online catalog could not be queried. Translation can still work if the model ID and credentials are valid.
+- `authgem-key/` model IDs are explicitly configured and are not included in provider catalog polling.
+- **No provider credential** means the catalog supports polling, but Glossarion had no key it could safely send to that provider. Select one of that provider's models and enter its key, then poll again.
+- **Not pollable by design** means that route has no stable, safe general model-list endpoint. Glossarion intentionally keeps its curated static entries.
+
+> **💰 Catalog polling is not an AI translation request.** It downloads model-name metadata and does not send a prompt or generate tokens. Some providers still block all authenticated API endpoints when an account has no credits. For example, xAI may return a `403` saying the team exhausted its credits or spending limit even for `GET /v1/models`; that does **not** mean Glossarion's poll ran a model or consumed translation tokens. Glossarion simply keeps the static xAI list.
+
+### Option 2 — Log in with a subscription (no key)
+
+If you have a **ChatGPT Plus/Pro**, **Claude Pro/Max**, or free/paid **Grok** account—or a **Google** account—use the **🔐 login buttons** on the main window instead of an API key. Pick the matching `authgpt/...`, `authcd/...`, `authgrok/...`, OcAgy, or `antigravity/...` model. AuthGrok works with xAI's confirmed free tier; a paid Grok subscription is not required. OcAgy login opens an interactive OpenCode terminal instead of a browser directly. For both Antigravity routes, also read [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds).
+
+**AuthGrok account slots and rotation:** Use `authgrok/...` for the default saved xAI account. When `authgrok0/...` is selected in the main model field or entered in the Multi API Key Manager, an account-slot dropdown appears beside **Grok Login**. Choose **+ N** to create the next free numbered slot and complete a fresh xAI sign-in for another email; repeat **+ N** for additional accounts without typing or using numbered model prefixes. Glossarion uses xAI's device-authorization flow in your regular default browser. Before each numbered login, it signs out the previous xAI website session without signing out Google or invalidating the OAuth tokens already saved by Glossarion. Sign in with the next account and approve access; Glossarion polls for completion and saves its tokens automatically, so nothing needs to be copied from the browser. If the returned email is already saved in another slot, Glossarion rejects it and asks for a different account. The `#N` entries select a specific account for login/logout management, while translation requests made through `authgrok0/...` rotate distinct emails round-robin. The pool advances to another saved account when an account cannot authenticate, is rate-limited/out of quota, or its request fails.
+
+### Option 3 — Translate for free
+
+**💸 Don't want to pay anything at all?** You don't have to. See **[Section 17 — How to translate for free](#17-how-to-translate-for-free)** for every no-cost option (the AuthGrok free tier, free NVIDIA routing, free Google AI Studio keys, free OpenRouter models, your own local AI, and more).
+
+> **⚠️ DON'T paste a key from one provider and a model from another.** An OpenAI key with a `claude-` model will fail. Key and model must match the same provider (the multi-provider hubs `eh/`, `or/` are the exception — one key, many models).
+
+---
+
+## 6. Main settings (the middle of the window)
+
+These are the everyday knobs. **The defaults are sensible — you can ignore most of these at first.** Here's what each does, with the safe value.
+
+- **Threading delay (s)** — tiny pause between internal tasks. **Leave at `0.5`.**
+- **API call delay (s)** — pause between requests to the AI. **Increase this (e.g., to `2` or more) if you get "rate limit" / "429" errors.** This is the #1 fix for "too many requests."
+- **Chapter range** — which chapters to do. `1-10` = chapters 1 through 10. `5,7,9` = just those three. **Empty = the whole book.** Use `1-2` for a cheap test run.
+- **Input Token limit** — the most text sent to the AI at once. There's a toggle button:
+  - **Enable Input Token Limit** (green) sets a safe cap (e.g., `200000`). **Recommended.**
+  - **Disable Input Token Limit** (red) removes the cap — risky for giant chapters.
+- **Output Token limit** — "Maximum tokens the model may generate in responses." If the AI keeps cutting off mid-sentence, raise this.
+- **Assistant Prompt (Optional)** — opened with the **Asst. Prompt** button. This is sent as an `assistant` message before your chapter text. It can help prime the model to continue in a certain style or output shape, but it is **not** the main place for translation rules. Put rules in the **Profile/System Prompt** instead. **Leave it empty to disable it** (the default), and keep it short because it is sent with every request.
+- **Context Mode** — how much the AI "remembers" from earlier chapters (huge for consistency):
+  - **Off** — translate each request with no memory of previous chapters (cheapest, least consistent).
+  - **Contextual History** — include recent translated chapters as conversation history (good consistency).
+  - **Rolling Summary (Replace)** — keep one running summary that gets updated.
+  - **Rolling Summary (Append)** — keep adding summaries and retain the most recent ones.
+- **Temperature** — AI creativity. "Lower (0.1–0.3) = literal/stable. Higher (0.7+) = creative/random." **For faithful translation, keep it low (around `0.3`).**
+- **Batch Translation** — send several chapters in parallel to go faster.
+  - **Batch Size** — how many at once (`0` = simultaneous handling). Bigger = faster but more likely to hit rate limits and costs add up quicker.
+
+> **✅ The beginner-safe recipe:** Threading delay `0.5`, API call delay `2`, Input Token Limit **enabled** at `200000`, Context Mode **Contextual History**, Temperature `0.3`, Batch off until you're comfortable.
+
+> **⚠️ DON'T crank Batch Size high on your first book.** If something's wrong with your settings, a big batch just means a bigger, more expensive mistake.
+
+---
+
+## 7. Other Settings (the ⚙️ Other Setting button)
+
+Click **⚙️ Other Setting** to open the advanced window. **You can translate a whole book without ever touching this.** Open it only when you want to fix a specific problem. Settings are grouped; here are the ones that matter, by group.
+
+### Context, memory & summaries
+
+- **Include previous source text in history** — also send the *original* foreign text back as context. **⚠️ Not recommended** — "the translated text is already included; enabling this hurts token efficiency" (costs more for little gain).
+- **Rolling Summary settings** — when you use a Rolling Summary context mode, these control how often it summarizes, how it's sent (`system` is best), and how many summaries to keep. **Configure Memory Prompts** lets you edit the summary instructions.
+
+### Response handling & retries (these save failed runs)
+
+- **Auto-retry Truncated Responses** — "Auto-retry logic for clear cases of truncation the API doesn't report" (when the AI silently cuts off). **✅ Keep on.**
+- **Preserve Original Text on Failure** — if a translation fails for any reason, save the original foreign text verbatim instead of an empty, partial, truncated, or blocked result. This takes priority over the blocked/prohibited and truncated-output save settings. The chapter remains marked as QA failed so you can find and fix it later.
+- **Save blocked/prohibited responses** — save blocked, prohibited, and API-error output for inspection. When streaming is enabled, text received before the failure is saved instead of an empty file.
+- **Save partial/stopped chapters as QA-failed** — chapters you interrupt with Stop are saved and marked failed (instead of vanishing), so you can retry just them.
+- **Streaming** — "Streams tokens as they're generated to reduce wait time. Some providers (e.g. Google Gemini) may truncate streams silently — turn streaming off if you see incomplete output."
+- **Show thinking logs** — show the AI's 🧠 reasoning in the log for models that support it.
+
+### Resuming incomplete EPUB/PDF chapters from saved chunks
+
+**Resume incomplete EPUB/PDF chapters from saved chunks** is enabled by default. It prevents a stopped or partially failed large chapter from starting over at chunk 1.
+
+Here is what happens:
+
+1. **Glossarion calculates a safe chunk size.** It starts with your Output Token Limit and compression factor, then uses the safest applicable limit across the global setting, individual limits assigned to enabled Multi API Key Manager routes, model/provider caps, and any lower limit learned and cached by the Unified API Client. A small safety margin is kept for the response.
+2. **Every successful chunk is recorded immediately.** For a genuinely split chapter or PDF section, `translation_progress.json` stores the chunk count, translated result, status, model/API-key identity, and the chunk-budget fingerprints. The output HTML also gets invisible chunk markers so Glossarion can later replace one chunk without deleting its siblings.
+3. **A resumed run validates the old split before reusing it.** Glossarion compares the saved chunk count plus both the original/configured and API-cached chunk sizes with the current values. If they still match, completed chunks are loaded from the progress file and only pending, failed, or interrupted chunks are sent again.
+4. **A changed split is invalidated safely.** If either chunk size or the number of chunks changed — for example after changing the Output Token Limit, compression factor, per-key limit, active model/key pool, or after discovering a lower provider limit — all saved chunks for that incomplete chapter are discarded and the chapter is split again. This avoids joining results made from incompatible boundaries.
+
+> **Batch mode is supported.** Missing chunks may be sent by parallel API requests. Each request still knows its own `Chunk X/Y` boundary and records its actual model separately. Already completed chunks are reused; missing chunks are translated normally and are **not** silently replaced with untranslated source text.
+
+> **One chunk means one whole document.** If a chapter or PDF section fits in a single request, Glossarion does not create redundant `Chunk 1/1` progress data, chunk markers, or a collapsible child row.
+
+Turn this setting off only if you want every incomplete multi-chunk EPUB/PDF chapter to restart from scratch. Click **Save Config** after changing it.
+
+### Reasoning / "thinking" models
+
+- **GPT-5 / OR Thinking, Gemini Thinking Mode, DeepSeek Thinking Mode** — turn on a model's deep-reasoning mode. **Effort/Budget** controls how hard it thinks (higher = better but slower & pricier; Gemini budget `-1` = automatic).
+- **Force adaptive thinking (Claude)** — "⚠️ Not all models support this; enabling it on unsupported models causes API errors." Leave off unless you know your model supports it.
+
+### Extraction mode (how the book's text is pulled out)
+
+- **BS4 (Traditional)** — keeps all the HTML formatting. Best for layout, but uses more tokens.
+- **Text (html2text)** — strips formatting to clean text (cheaper, cleaner), then re-adds tags at the end. Good for token savings when exact layout doesn't matter.
+- **Render PDF as HTML** — for PDF inputs, convert pages to HTML text before translating.
+
+> **⚠️ The profile name can override this setting.** Profile names carry case-insensitive tags that **hardcode** the extraction mode, ignoring the choice above:
+> - a profile whose name contains **`_beautifulsoup`** (e.g. `Korean_BeautifulSoup`) forces **BS4** extraction;
+> - a profile whose name contains **`_html2text`** (e.g. `Japanese_html2text`) forces **html2text** extraction.
+>
+> When you press Run, Glossarion auto-switches and logs `🔄 Auto-switched to … extraction (profile: …)`. So if extraction won't change no matter what you pick here, **check your profile's name** — the tag is winning. (To control extraction with this dropdown instead, use a profile name *without* either tag.)
+
+### Book title and metadata translation
+
+The **Meta Data** group controls translation of the EPUB's descriptive information — its title, author/creator, description, subject, publisher, and any other selected fields found in the source book.
+
+- **Translate Book Title / Metadata** — the master switch. When enabled, Glossarion translates the selected metadata fields and tracks the work in the Progress Manager. When disabled, no metadata API calls are made. `metadata.json` then behaves like a skipped special file and appears only when **Show special files** is enabled.
+- **Configure All** — opens the metadata setup window described below.
+- **Custom Metadata** — chooses which fields are eligible for translation. The book title is configurable here too. A checked field is translated only when that field actually exists and is non-empty in the source metadata.
+
+#### Metadata translation modes
+
+| Mode | API-call behavior | Progress Manager entries | Best use |
+|------|-------------------|--------------------------|----------|
+| **Translate together (single API call)** | Sends the title and all other enabled, present metadata fields in one request. | One combined **Metadata** entry. | **Recommended default.** It gives the AI all metadata context at once and uses the fewest requests. |
+| **Translate Metadata separately (2 API calls)** | Translates the book title with its dedicated title prompt, then sends all remaining enabled metadata fields together in a second request. | **Metadata: Book Title** and **Metadata: Other Fields**. | Use when the title needs its specialized prompt but the remaining fields should still share context. |
+| **Translate separately (parallel API calls)** | Gives every enabled, non-empty source field its own request. Independent field requests run in parallel where possible. | One entry per field, such as **Metadata: Book Title**, **Metadata: Creator**, and **Metadata: Description**. The number of entries depends on which selected fields are present in that book. | Use when fields need their own custom prompts or one problematic field should be retried independently. This mode makes the most API calls. |
+
+The currently selected mode also controls how `metadata.json` is represented inside `translation_progress.json`. Changing the mode or Custom Metadata selection refreshes an open Progress Manager so the rows match the calls Glossarion will actually make.
+
+#### Retrying or regenerating metadata
+
+All metadata rows write to the same physical `metadata.json`, but each row keeps its own translation status:
+
+- In **Translate separately** mode, selecting **Retranslate Selected** on one field marks only that field pending and keeps the other completed fields intact.
+- In **Translate Metadata separately** mode, retrying **Book Title** affects only the title; retrying **Other Fields** regenerates that grouped second request.
+- Selecting every metadata row for retranslation deletes `metadata.json` and regenerates the complete metadata phase.
+- Manually deleting `metadata.json` also marks every metadata row pending, so the next translation run rebuilds it.
+- A successful translation is considered complete even when the translated value is identical to the source value. Glossarion does not repeatedly retranslate unchanged metadata.
+
+Active metadata rows are always visible while **Translate Book Title / Metadata** is enabled. **Show special files** controls only the disabled/skipped metadata row.
+
+### Image & PDF output
+
+- **Process Web Novel Images** — also translate text found *inside* the book's images.
+- **Create PDF after EPUB** — additionally build a PDF (with images, optional table of contents, page numbers).
+- **Image compression / WebP / quality** — shrink images in the output to make smaller files.
+
+### Anti-duplicate (AI Hunter) — a prose-quality & consistency tool
+
+This is **not** mainly about catching an "AI bug." It's a quality tool: it compares each new chapter's output against others and, when two come back too similar, re-runs the chapter so you get **better prose and more consistent results** across the book.
+
+- **Auto-retry Duplicate Content** — when output is too similar to other chapters, retry to improve it. **Detection Method:** `Basic` (fast) or `AI Hunter` (smarter ML-based similarity, slower).
+- **Lookback chapters, Similarity Threshold** — how far back to compare and how similar counts as a match (`0.85` = 85% similar).
+
+> **✅ DO use "Save Config" inside Other Settings too**, or your changes here may not stick.
+
+> **⚠️ DON'T turn on every toggle "just in case."** Many options trade money or speed for a niche benefit. Change one thing at a time and re-test.
+
+---
+
+## 8. The Glossary system (read this — it matters a lot)
+
+**What a glossary does:** it's a name list that forces the AI to translate names and terms the *same way every time*. Without it, the same character can be "Seo-yeon," "Seoyeon," and "Lady Seo" across three chapters. With it, she's always "Seo-yeon." For any book longer than a few chapters, **a glossary is the single biggest quality upgrade you can make.**
+
+A glossary is just a table (saved as `.csv` or `.json`) with columns like *raw name* (the original), *translated name* (what it should become), *gender*, and optional *description*.
+
+### 8.1 The Glossary Mode dropdown — the master switch
+
+On the main window there's a **Glossary Mode** dropdown (also mirrored inside the glossary settings). It has **eight** choices. This one dropdown decides *whether* and *how* Glossarion builds and uses a glossary while translating. Here is exactly what each does:
+
+| Mode | What happens | When to use it |
+|------|--------------|----------------|
+| **Off** | **No** automatic glossary extraction during translation, **but Auto-Mapping is turned ON.** | You built your glossary yourself ahead of time and want Glossarion to auto-attach it by filename. **(See 8.2 — this is the workflow you'll likely want.)** |
+| **Off (Fuzzy Mapping)** | Same as Off, but Auto-Mapping also matches *similar* filenames, not just exact ones. | Same as above, but your glossary file's name doesn't exactly match the book's name. |
+| **Manual Glossary Only** | No extraction **and Auto-Mapping is OFF.** You must load a glossary by hand with the editor's **Load Glossary** button. | You want full manual control over which glossary file is used. |
+| **No Glossary** | Translate with no glossary at all. (Doesn't change your toggle.) | Quick throwaway translations where consistency doesn't matter. |
+| **Minimal** | Lightweight extraction *during* translation, run **in-process by `GlossaryManager.py`**. | You want some consistency without much extra cost or setup. |
+| **Balanced** ✅ | Smarter extraction using the **same "Extract Glossary" engine**, with request-merging and chapter-splitting, plus **hardcoded settings that push the output-token limit as high as possible** to fit more entries per request. **Recommended of the auto modes.** | A hands-off all-rounder. |
+| **Full** | Same **"Extract Glossary" engine** as Balanced, but chapter-by-chapter for maximum context. **Most expensive.** | Big, name-heavy series where you want maximum context and don't mind the cost. |
+| **Single Pass** | Extract the glossary inline during each translation request. | Advanced; combines extraction and translation in one step. |
+
+> **Two different engines (worth understanding):**
+> - **Minimal** uses the **in-process `GlossaryManager.py`** pipeline — light, fast, runs quietly during translation.
+> - **Balanced** and **Full** use the **same engine as the "Extract Glossary" button** (the full extraction pipeline) with request-merging and chapter-splitting. **Balanced** additionally ships with **hardcoded settings that maximize the output token limit**, so each request asks the model to return as many entries as it can.
+
+> **✅ If you just want it to work:** choose **Balanced**. Glossarion will build and apply a glossary as it goes.
+
+### 8.2 ⭐ The recommended power-user workflow: "Off" + Auto-Mapping + manual *Extract Glossary*
+
+This is the workflow many experienced users prefer, and the one you specifically want to understand. The idea: **build the glossary once, by hand, before translating — then let Glossarion attach it automatically.** This gives you a clean, reviewed name list and avoids paying to re-extract names on every run.
+
+**Step by step:**
+
+1. **Set Glossary Mode to `Off`.** Counter-intuitive, but remember: `Off` means *"don't auto-extract during translation, but DO keep Auto-Mapping turned on."* That second half is the important part.
+2. **Build the glossary yourself first.** Click **Extract Glossary** (or open the **Glossary Manager**). This scans your book *now* and produces a glossary file. Review and clean it (fix any wrong romanizations, merge duplicates, delete junk). See 8.5 for the manager.
+3. **Name the glossary so it matches your book.** Auto-Mapping pairs files by name. If your book is `MyNovel.epub`, name the glossary something like `MyNovel_glossary.csv`. Glossarion creates these names for you automatically when you extract, so usually you don't have to rename anything.
+4. **Make sure "Append Glossary to System Prompt" is on.** This is what actually *sends* the glossary to the AI: *"Send the current glossary to the model with every request. Improves consistency across chapters."* When this is on **and** Auto-Mapping is on, Glossarion **auto-fills the glossary for you if none is loaded.**
+5. **Press Run Translation.** Because Mode is `Off`, Glossarion does **not** waste money re-extracting names mid-translation. Because Auto-Mapping is on, it **finds and attaches your prepared glossary by filename automatically.** Best of both worlds.
+
+> **Why not just use Balanced?** The real catch is **AI output bias**: language models tend to return *short* outputs no matter how much input you give them. Even though Balanced cranks the output-token limit to the maximum, the model will still under-produce — so a single auto-extraction pass often **misses names** and leaves your glossary incomplete. The "Off + pre-built glossary" workflow sidesteps this: you extract and **review the names once** until the list is actually complete, then reuse that clean, finished glossary on every future run (re-translations, refinements, sequels) for free.
+
+> **If the filenames don't line up**, switch to **`Off (Fuzzy Mapping)`** so similar names match (e.g. `MyNovel_v2.epub` → `MyNovel_glossary.csv`). There's a similarity slider — drag it toward strict if it's grabbing the wrong file, toward loose if it's missing the right one.
+
+> **To force one exact file instead of auto-matching:** set Mode to **`Manual Glossary Only`**, open the editor, browse to your glossary, and click **Load Glossary**. *(The Load Glossary button only takes effect in Manual Glossary Only mode.)* When active, that glossary is also copied into the book's output folder as `glossary.csv`.
+
+### 8.3 Cross-check a raw EPUB against an existing translation
+
+Use **📚 Glossary Parallel EPUB Pair** when you have both:
+
+- the original, source-language EPUB; and
+- an existing translated EPUB whose established names and terminology you want to preserve.
+
+Glossarion aligns their HTML chapters and sends each mapped raw/translated pair through the normal **Extract Glossary** pipeline. The raw side supplies the original spellings; the translated side helps the AI copy the translator's established renderings instead of inventing new ones. This is especially useful when continuing an unfinished translation or rebuilding an incomplete glossary.
+
+> **This is glossary extraction only.** It does not combine the two books and it is not a translation input. After preparing the pair, use **Extract Glossary**, not **Run Translation**.
+
+**Step by step:**
+
+1. Open the **🔍 Browse ▼** menu beside **Input File(s)** and choose **📚 Glossary Parallel EPUB Pair**.
+2. Drag the original EPUB onto **RAW EPUB** on the left, or click **Browse Raw EPUB…**.
+3. Drag the existing translation onto **TRANSLATED EPUB** on the right, or click **Browse Translated EPUB…**. The drop zones highlight while an EPUB is hovering over them. Large books are read in the background, so the window remains usable while files load.
+4. Review **HTML File Mapping** in the right-hand pane. Glossarion first matches exact filenames and positive chapter numbers. It then aligns the remaining positive-numbered files in reading order without letting unnumbered or zero-only (`000`, `0000`, etc.) files shift the real chapters. While **Auto Offset** is enabled, every unnumbered/zero-only raw file starts as **— Unmapped —** and every such translated file remains **translated unused**, even if their names match. You can still select one manually. Any inferred displacement is labeled **Auto offset**.
+5. Correct any questionable row with its **Translated HTML** dropdown. The mouse wheel scrolls the table without accidentally changing a dropdown; click the dropdown when you actually want to change it.
+6. Click **Use Mapped Pair**. The main window will show the two EPUB names and the number of mapped HTML files.
+7. Click **Extract Glossary** and use the normal glossary extraction settings.
+8. While extraction is running, **Progress Manager** remains available. It opens the original raw EPUB as the source, while **Glossary Progress** reads the paired extraction's progress and shows only mapped raw HTML files. Intentionally unmapped raw files and unused translated files remain skipped. Glossary files and progress use the same normal `Glossary/<raw EPUB name>/` subfolder that a regular extraction from the raw EPUB would use; no `_parallel_epub_pair` output folder is created.
+
+After **Use Mapped Pair**, Glossarion saves the two real EPUB paths and the filename-to-filename mapping in `config.json` and as `<raw EPUB name>_parallel_epub_mapping.json` inside `Glossary/<raw EPUB name>/`. The glossary-folder copy keeps the mapping with the book's other extraction files. On the next launch Glossarion reloads it into the **Parallel EPUB Pair** dialog, restores manual and intentionally unmapped rows, and recreates the temporary working EPUB in the background. Extracted chapter text and temporary file paths are never stored in either record. If either source EPUB was moved or deleted, the log explains why the saved pair could not be restored.
+
+Closing or cancelling the **Parallel EPUB Pair** dialog hides it for the current Glossarion session instead of deleting it. Opening the same Browse option again restores the dialog with its loaded EPUBs, mapping edits, prompts, geometry, and scroll position intact.
+
+Choosing **Browse > Clear Selection**, selecting another input file or folder, loading an EPUB from the Library, or starting a different single-chapter input explicitly clears both EPUBs and the mapping table from the persistent dialog as well as the main input. It also clears the current-pair pointers so reopening the dialog stays empty. The mapping JSON already stored in the book's glossary subfolder is retained as glossary data and is not deleted.
+
+While a Parallel EPUB Pair is selected, the main **Open Output Folder** button opens `Glossary/<raw EPUB name>/`. Glossarion creates that book-specific glossary folder first if it does not exist, and respects the configured output-directory override.
+
+**Mapping controls:**
+
+| Control | What it does |
+|---------|--------------|
+| **Auto Offset** | Checked by default. Keeps extra unnumbered and zero-only files unmapped so they cannot shift positive-numbered chapters. They remain available for manual selection. Uncheck it to restore exact-name and plain reading-order fallback for those files. The choice is saved. |
+| **Auto-map Again** | Discards manual/offset changes and rebuilds the automatic map from offset zero. |
+| **− Offset** | Moves every automatic mapped entry one raw row up per click. |
+| **+ Offset** | Moves every automatic mapped entry one raw row down per click. |
+| **Translated HTML dropdown** | Manually chooses a translated file for one raw file, or sets the row to **— Unmapped —**. |
+
+To unmap several raw files together, select their rows, right-click a selected cell in the **Raw HTML** column, and choose **Set Selected Rows as Unmapped**. Right-clicking a raw row outside the current selection selects and unmaps only that row.
+
+The offset is cumulative and shown beside the mapping count. For example, pressing **+ Offset** twice applies `+2`. A shifted match that falls before the first or after the last translated file becomes unmapped instead of wrapping around to the wrong chapter.
+
+**What is included and skipped:**
+
+- Files matching the **special-file substring** or **exact-match** patterns in **Other Settings** are removed before mapping on both sides. This keeps title pages, navigation, copyright pages, glossaries, and other configured non-chapter files out of the request.
+- A raw row set to **— Unmapped —** is skipped. Glossarion asks for confirmation if any raw HTML files remain unmatched.
+- A translated HTML file that no raw row uses is also skipped; the status line reports it as **translated unused**.
+- Only the displayed mapped pairs enter the temporary paired EPUB. Duplicate use of one translated file is blocked.
+
+Before continuing, the confirmation dialog reports three separate values: mapped pairs, unmatched raw HTML files, and unused translated HTML files. Its headline total is the number of individual HTML documents excluded from the paired EPUB, so it includes translated files that overflow beyond the available raw rows—not only the unmatched raw count.
+
+> **✅ Check the first and last few rows before extracting.** EPUB editions often contain different front matter, so a one-step **− Offset** or **+ Offset** may fix the whole book. Use individual dropdowns for isolated differences.
+
+**Prompts and profiles:**
+
+- **Pair Wrapper Prompt** controls how each raw/translated chapter pair is labeled. Its available placeholders are `{raw_text}`, `{translated_text}`, `{raw_filename}`, and `{translated_filename}`. Keep both text placeholders or Glossarion will refuse to continue.
+- **Parallel EPUB Glossary System Prompt** controls the extraction instructions. Its default profile starts with pair-specific cross-checking rules and then includes the normal **Extract Glossary from EPUB** system prompt. It only permits entries whose established rendering can be verified in the translated EPUB; missing renderings are skipped, and the AI is told never to invent one itself.
+- Use **+ New Profile**, **Save Profile**, and **Reset Profile** to maintain specialized pair-extraction instructions without changing the ordinary glossary prompt.
+
+### 8.4 Auto-Mapping vs. Auto-Fill (don't mix these up)
+
+- **Auto-Mapping** = automatically choosing *which glossary file* goes with *which book*, by filename. Controlled by the modes above.
+- **Auto-Fill / Map Glossaries to EPUBs** = the button you click to do that matching manually if you didn't let it happen automatically.
+- **Fuzzy** = allow *close* name matches, not just exact ones.
+
+### 8.5 The Glossary Manager
+
+Open it with **Glossary Manager** / **Extract Glossary**.
+
+**Tab 1 — General Settings (the glossary mode, and everything that applies to every mode):**
+
+*These switches used to open the Automatic Generation tab. None of them is specific to one generation mode, so they now have the first tab to themselves, in the same order as before.*
+
+- **Automatic Glossary Generation** (dropdown) — the glossary mode from 8.1: Off, Off (Fuzzy Mapping), Manual Glossary Only, No Glossary, Minimal, Balanced, Full or Single Pass. It is the same setting as the glossary mode dropdown on the main window.
+- **Append Glossary to System Prompt** — sends the terms to the AI every request (the consistency switch).
+- **Auto-Mapping (Auto-Fill)** and **Fuzzy Auto-Mapping** (with its **Similarity** slider) — pick the book's glossary file by filename (see 8.4). The **Automatic Glossary Generation** mode above decides these three: a 🔒 and purple text mean the current mode has locked the switch on or off.
+- **Add Additional Glossary** — always include an extra external glossary file (CSV/JSON/TXT/PDF/MD).
+- **Enable Unified Glossary** — keep one deduplicated `glossary_unified.csv` shared by *all* your novels (per source and target language) and send it alongside the book's own glossary. Described below. Default OFF.
+- **Generate Unified Glossary** — rebuild that shared glossary from every book folder at the start of the next glossary run. Skipped automatically when nothing changed. Default OFF.
+- **Unified Glossary Settings** (button) — pick the source language (Auto reuses the one detected during extraction) or tick **Combine all languages** if detection fails for a book.
+- **Compress Glossary Prompt** ✅ — "Only send glossary entries that appear in the current text. Saves tokens and cost; recommended ON."
+- **Consider Translated Column** — also keeps an entry when the *translated* name appears in the source text, not just the original. Default OFF.
+- **Precise Term Matching** ✅ — the smarter matcher described just below, with a **Whole term for** dropdown beside it (**All** by default). Default ON; turn it OFF to go back to the old plain-substring check. *The old **Strict Gender Entry Matching** checkbox is gone — it was folded into this dropdown.*
+- **Multipass: Exclude Already-Applied Entries** ✅ — for the refinement pass (every mode: Full, Full + raw, Failed, Partial, Partial.b, Partial.b2). Multipass always compresses the glossary against the **raw** chapter, so Consider Translated Column is not needed for it; with this ON, entries whose translated name is already in the translated output are dropped as well, so each request only carries the entries the translation still needs. Default ON. *This changed the default refinement prompts — click **Reset to Default** on them once to pick up the new wording.*
+- **Log Match Differences** — with Precise Term Matching OFF, preview what it *would* change, without changing anything. Default OFF.
+- **Save Glossary Backup in Output** — also saves duplicate glossary files in an output-side `Glossary_Backup` folder. The glossary Glossarion actually uses stays where it is. Default OFF.
+- **Skip Gender Tracking**, **Ignore rare gender flips** and **Bias** — the gender tracker controls, described under *The gender tracker* below.
+- **Glossary Append Format** (text box) — the line written in front of the glossary when it is appended to the system prompt. It must not be empty; **Reset to Default** restores the original wording.
+- **Single Pass Header Prompt** (text box) — the wrapper used by **Single Pass** mode, where one request both extracts the glossary and translates. Keep the `{glossary_prompt}` and `{translation_prompt}` placeholders.
+
+**Tab 2 — Manual Extraction (build a master glossary before translating):**
+- **Entry Type Configuration** — what to look for: Characters, Terms, and your own **Custom Types** (e.g. "Skill," "Location").
+- **Custom Fields** — extra columns (e.g. "Description," "Age").
+- **Duplicate Detection** — merges names that are really the same person:
+  - **Algorithm:** `Auto` (recommended, tries everything), `Strict` (only near-identical, 95%+), `Balanced` (handles word order like "Park Ji-sung" = "Ji-sung Park"), `Aggressive` (catches "Catherine" vs "Katherine" but may over-merge), `Basic Only` (fast, simple).
+  - **Fuzzy Matching Threshold:** "0.90 = very similar (recommended); 1.0 = exact match." Slide right for stricter.
+  - **Disable honorifics filtering** — if checked, "Kim-nim" and "Kim" are treated as *different* people.
+- **Temperature / Context Limit / Merge Count** — keep temperature low for accurate name-pulling.
+
+**Tab 3 — Automatic Generation (the glossary built *during* translation):**
+- **Include Gender Context** — expands snippets with surrounding sentences so the AI can infer each character's gender (costs more; it's the master switch that unlocks the gender-nuance and description options).
+- **Enable Gender Nuance Analysis** — an extra pronoun/honorific-aware scoring pass that prioritizes sentences which reveal gender (slightly higher CPU/time).
+- **Include Description Column** — adds a description/context field to every entry (only available while Gender Context is on).
+- **Disable Smart Filtering** — "Bypass all filtering and send the entire novel to the extractor. Extremely expensive; debugging only." **⚠️ Leave OFF.**
+
+**Tab 4 — Glossary Refinement:** an optional cleanup pass that runs after automatic glossary generation.
+
+#### Precise Term Matching (a narrower, more accurate glossary)
+
+**The problem it fixes.** To decide whether a glossary entry belongs in this chapter, Glossarion checks whether the term appears in the text. The original check is a plain "is this string anywhere in the chapter" search, which has no idea where words begin and end. In languages written without spaces that is very loose:
+
+| Glossary entry | Chapter actually says | Old result |
+|---|---|---|
+| `유리` (a character) | `유리병` — "glass bottle" | ✅ kept (wrong) |
+| `아린` (a character) | `아린다` — "it stings" | ✅ kept (wrong) |
+| `白` (a surname) | `白天` — "daytime" | ✅ kept (wrong) |
+| `Al` (a character) | `Already` | ✅ kept (wrong) |
+
+It is looser still for names stored with a space. `신 라이언` is kept whenever the single character `신` turns up anywhere — and `신` also means "god," so in a fantasy novel that is every chapter. Each wrong entry is wasted tokens and one more chance for the AI to use a name that isn't in the scene.
+
+**What the toggle changes.** Precise Term Matching understands where words end:
+
+- **English and other Latin text** — whole words only, so `Al` stops matching inside `Already`.
+- **Korean** — knows what can be glued onto a word without making it a different word: particles (`루나는`, `루나가`, `루나에게`), the copula (`아논입니다`, `아논인가?`, `소녀였다`), and bound nouns (`로켓같은`, `펄스때문에`, `수장끼리`). For non-character terms it also accepts verb forms built on the term (`오염된`, `록온하고`) and a short, measured list of one-syllable affixes (`중장갑`, `장갑판`). It still rejects a term buried in an unrelated word (`유` in `자유`, `노트` in `노트북`), and never lets a verb ending attach to a *name* — `유리한` ("favourable") is not the character `유리`.
+- **Japanese** — uses the kana/kanji change as a word edge, and the hiragana/katakana change too, so `太郎は`, `リンは` and `太郎達` count while `リン` inside `リング` and `大地` inside `大地震` do not. A kanji name followed by a kanji form of address counts (`大地先輩`, `王女殿下`), and the `・` / `＝` in a transliterated name is a separator: `アリス・リデル` is found as `アリスリデル`, as `ｱﾘｽ･ﾘﾃﾞﾙ`, and by `アリス` alone.
+- **Chinese** — uses grammatical particles (`宋家的人` counts), surnames (`小明` inside `王小明` counts) and the words that normally follow a subject (`小明说道`, `小明忽然`, `小明脸色一变` count), while `天下` inside `天下第一楼` does not. Kinship and rank words after a name count (`萧炎哥哥`, `萧炎师兄`), `哈利·波特` is found as `哈利波特` or by `哈利` alone, and a one-character *name* needs a real left edge, so the surname `白` is not found in `明白` or `白天`.
+
+It also **finds terms the old check missed**: half-width `ｱﾘｽ` when your glossary says `アリス`, full-width or differently-capitalised Latin, a glossary name written `미샤 랄토스` when the chapter runs it together as `미샤랄토스`, and `루나님` when the chapter just says `루나`.
+
+**Whole term for** — *which entries must appear as the whole term, not just one word of it.* This is the biggest saving of all. A glossary is full of multi-word entries (`모노크롬 넥서스`, `넥서스 신권`, `넥서스 파일럿 양성 프로그램` …), and if one word is enough, the common word `넥서스` keeps every one of them in nearly every chapter. The dropdown uses the same control as **Emergency Glossary Compliance**:
+
+- **All** (default) — every entry must appear whole. Spacing, full/half-width, particles and honorifics still count as the whole term (`미샤랄토스` for `미샤 랄토스`, `루나님` for `루나`).
+- **Gender Entries** — only entries whose type has gender enabled. That means *any* such type, including custom entry types you created, and any row that carries a gender — not just `character`.
+- **Custom** — the entry types you tick under **Configure…** (the same checklist Emergency Glossary Compliance uses, read from the selected book's glossary). Nothing ticked behaves like All.
+- **None** — one word of a multi-word entry is enough, for every entry.
+
+*People are the exception.* A gender-enabled entry is a person, and people are called by part of their name: the chapter says `미샤`, the glossary says `미샤 랄토스`. So for those entries one part still counts — **if it is a name and not a title.** Glossarion tells them apart with your own translation column: a name is *transliterated* (`카인` → **Kain**, `리즈` → **Liz**, `アリス` → **Alice**), a title is *translated* (`마법사` → Mage, `엄마` → Mother, `선배` → Senior). So `카인` keeps `카인 에렌하이츠`, while `마법사` does not keep `3서클 마법사`. A part that already has a glossary row of its own (`피엘` next to `피엘 메스`) is left to that row. Chinese characters cannot be read off the page, so there the rule falls back to: a part counts unless three or more entries share it.
+
+Measured end to end on three Korean novels (entries sent per chapter):
+
+| Glossary | Old matcher | Precise, Whole term: None | Precise, Whole term: All (default) |
+|---|---|---|---|
+| 704 entries | 93 | 81 | **26** |
+| 373 entries | 50 | 43 | **19** |
+| 2,971 entries | 377 | 276 | **39** |
+
+No chapter ended up with an empty glossary, and checked against eight novels every name the rule let go of was either covered by its own row or was a title word (`선배`, `여인`, `마법사`, `제국`). If a chapter would otherwise get *no* glossary at all, the whole-term requirement is relaxed for that chapter first.
+
+**It isn't perfect, and here's where it slips.** Korean can build a new word by sticking another noun on a noun (`루키` → `슈퍼루키`, `순애` → `순애충`). Beyond the short affix list above, Glossarion can't tell that apart from a coincidental match, so if a term *only ever* appears inside such a compound in a chapter, it gets dropped. Measured across a 237-chapter Korean novel, that is roughly one wrongly dropped entry every ten chapters, against about twelve wrongly *kept* entries per chapter with the old check. If the word also appears on its own anywhere in that chapter, it's kept. This is the trade for correctly rejecting `유리` inside `유리병` — and the reason for the preview toggle below.
+
+#### Log Match Differences (try it before you trust it)
+
+Precise Term Matching is on by default. If you would rather check it against your own book first, turn it OFF, turn this on, and translate as normal. Nothing about your translation changes — Glossarion just runs both the old and new check side by side and writes down every entry they disagree about.
+
+Look in your **logs** folder (the same one that holds `run.log`), in `glossary_match_shadow`:
+
+- **`report.md`** — the one to read. Every changed entry grouped by term, with a snippet of the surrounding text so you can judge it without opening the chapter, plus which rule made the call.
+- **`verdicts.csv`** — the same list with an empty **verdict** column.
+- `*.jsonl` — the raw data the other two are built from; you can ignore it.
+
+If the report looks right, tick **Precise Term Matching** again and carry on.
+
+**Overruling a decision.** If you disagree with a call, open `verdicts.csv`, type `keep` or `drop` in the **verdict** column next to that term, save, and run:
+
+```
+python tools/glossary_match_report.py --apply-verdicts
+```
+
+That writes a small `<glossary>_match_allowlist.json` next to your glossary. Terms listed there are forced from then on, so a decision you make once isn't argued again on every later chapter. Rows you leave blank change nothing, so you can review a handful of terms at a time. The file is plain text and safe to edit by hand.
+
+#### Unified Glossary (one glossary across all your novels)
+
+Every book gets its own glossary in `Glossary/<book>/`. **Enable Unified Glossary** keeps a second, shared one on top of that: every book's entries merged and deduplicated into
+
+```
+Glossary/Unified Glossary/<source>-<target>/glossary_unified.csv
+```
+
+so terms you already settled in one novel (a recurring sect name, a system message, a title) carry over to the next. There is one file per language pair (`korean-english`, `japanese-english`, …); the target is your Output Language, the source is detected for each book.
+
+**How it stays current.** Deduplication is the slow part, so it only runs twice per glossary run: once at the start (fold this book in, or rebuild) and once at the end (fold in what the run found). It is never run per chapter. The file is written with your Anti-Duplicate settings, so the same fuzzy threshold and algorithm apply.
+
+**What gets sent to the AI.** The unified glossary is never copied into a book's folder or its output folder — the file above is the only one. When a request is built, Glossarion reads it and skips every entry whose name the book's own glossary already has, so nothing is sent twice. (Older builds wrote a `glossary_unified.csv` next to each book glossary; those leftovers are deleted automatically the next time that book's glossary phase runs.) What remains goes through **Compress Glossary Prompt** and all of its sub-toggles (Consider Translated Column, Precise Term Matching, Log Match Differences) exactly like the main glossary and the Additional Glossary do. In the log it shares the glossary line: `🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens`.
+
+**Generate Unified Glossary** rebuilds the shared file from *every* folder under `Glossary/` instead of just the current book — useful the first time you turn the feature on, or after editing several old glossaries by hand. The files are read in parallel using the **Parallel Extraction** worker count from Other Settings, and the rebuild is fingerprinted: it only happens when a book glossary actually changed since the last one, so you can leave the toggle on.
+
+**Unified Glossary Settings** holds the language controls. **Source language** is `Auto` by default and reuses the language Glossarion already detected for the book; set it only when that detection is wrong. **Combine all languages** is the escape hatch if detection keeps failing — everything goes into one `all-<target>` glossary instead.
+
+**Exclude gendered active entries** ✅ (in the same dialog, default ON) keeps people out of the shared glossary. A name can belong to a woman in one novel and a man in the next — across one real library of Korean novels, 216 names were `male` in one book and `female` in another. If the unified glossary carried those rows, a new book whose own glossary has not met *its* `루나` yet would be handed the other novel's gender. So by default the unified glossary holds no entry whose type has **gender enabled** — `character`, `titles`, `nicknames` out of the box, plus any custom entry type you switched gender on for — and no row that carries a gender. Terms, locations, skills and the like are shared as before; in that library about 29% of the unified entries were gendered. Turning the toggle ON takes effect on the very next request (gendered rows are never *sent* from the unified glossary, whatever an older file still contains), and the file itself is cleaned at the next glossary run. After turning it OFF, press **Rebuild Now** to bring the other novels' gendered entries back. Your book's own glossary and the Additional Glossary are never affected.
+
+#### Entry types are kept exactly as extracted
+
+Whatever type an extractor gives an entry is the type the glossary keeps — in the default token-efficient format just as in legacy CSV. If the Minimal pass (on its own, or added in front of Balanced / Full / Single Pass) returns `Ability`, `Special Ability`, `special-ability`, `무공` or `Items & Materials`, the entry is stored under a section of that name (`=== ABILITY ===`, `=== SPECIAL ABILITY ===` …) and reads back with that type. It is **not** moved into `TERMS` just because the type isn't in your Custom Entry Types list, and the **Entry Type Filter** (None / Loose / Strict) only ever applies to what the AI returns during a Balanced/Full extraction — never to entries merged in from the Minimal pass or to a glossary being loaded from disk.
+
+Two details worth knowing. Types you *have* configured keep their familiar plural headers (`CHARACTERS`, `TERMS`, `SKILLS`); only types the configuration doesn't know are written verbatim, which is what makes the round trip exact (`class` stays `class`). And a type must still look like a type: one or two words (any script, digits, hyphens, underscores), optionally joined by `&`, `/`, `+`, `and`, `or`, `of`, up to 30 characters. That check exists to throw away a stray sentence from the AI that happens to contain commas — `Note that Luna, the hero, …` is rejected, `Items & Materials` is not. Gender is only written for types that have gender enabled, so add a type to Custom Entry Types (with gender on) if its entries need one.
+
+#### The gender tracker (`*_gender_tracker.json`)
+
+When gender features are on, Glossarion keeps a small sidecar file next to your glossary named **`<glossary>_gender_tracker.json`**. It retains each chapter/file gender observation while the glossary itself keeps one row for the name. The plain `Male` or `Female` value saved in that row is the most frequently observed gender; a tie keeps the existing value. Gender values are always written and shown with a capital first letter (`male`, `MALE` and `m` all become `Male`), so a Gender column never mixes spellings and the editor's Gender filter finds every row; older files are tidied the next time they are saved. Glossary compression still selects the chapter-appropriate gender from the sidecar, so the one-row format does not remove automatic gender tracking.
+
+- There's a setting to **not create/use the gender tracker** ("Do not create or use the `*_gender_tracker.json` sidecar"). When it is enabled, tracked conflict consolidation and chapter-aware gender selection are disabled.
+- A **gender-bias preference** (No Bias / Prefer Female / Prefer Male) controls whether rare gender readings get suppressed: *No Bias* suppresses a rare variant below the flip threshold; *Prefer Female/Male* never suppresses that side's rare readings.
+- In the **Glossary Editor**, an unresolved tracked conflict is shown with a translucent pink row. `Male*` or `Female*` means Auto suppressed the rarer reading under the current threshold and bias; `Male / Female` means both readings remain viable. These decorations are display-only and are never written to the glossary or sent to the model.
+- Double-click the **Gender** cell, or right-click the row and choose **Resolve Gender…**, to review observation counts, first/last chapters, and recent flips. Choose **Auto** to retain chapter-aware behavior, or lock the name globally to **Male** or **Female**. Tracker frequency counts unique chapter/file observations, not every textual mention of the name.
+
+> **✅ Leave the gender tracker ON for character-heavy novels** — it's the thing that keeps a character's gender (and pronouns) consistent from chapter 1 to the end.
+
+**Tab 5 — Glossary Editor (view & clean a file):**
+- **Load / Browse** a `.csv` or `.json`.
+- **Clean Empty Fields** — drop empty columns.
+- **Remove Duplicates** — run the merge algorithm on the loaded file.
+- **Load Glossary** — set the browsed file as the active manual glossary (only works in *Manual Glossary Only* mode).
+
+> **✅ DO review your glossary before a big run.** Five minutes fixing names now saves hours of inconsistent output later.
+
+> **⚠️ DON'T enable "Disable Smart Filtering"** unless you're debugging — it sends the *entire book* to the extractor and can be extremely expensive.
+
+> **There's a backup safety net:** use **Restore Glossary** on the main window to bring back the most recent glossary backup if you mess one up.
+
+---
+
+## 9. Local AI and custom endpoints
+
+You can run Glossarion against a **local AI** on your own computer using **Ollama** or **LM Studio**, or against another OpenAI-compatible server. The built-in local routes below work without configuring a custom endpoint. Three custom endpoint methods remain available for other servers and special setups.
+
+| Model field | Connects to | What Glossarion does |
+|-------------|-------------|----------------------|
+| `ollamapull/model-name` | Local Ollama native API | Installs and starts Ollama if needed, downloads a missing model, and provides **🦙 Ollama Settings**. |
+| `ollama/model-name` | `http://localhost:11434/v1` | Uses your running Ollama server and a model already installed there. |
+| `lmstudio/model-name` | `http://localhost:1234/v1` | Uses your running LM Studio server and a model already downloaded there. |
+
+Type any of these in the main Model field or Multi API Key Manager. The model list has 50 local model suggestions under each prefix. A poll also adds the exact models exposed by a running server. LM Studio often uses a different model ID than Ollama for the same model; select its polled entry or type the ID shown by LM Studio. The `ollama/` and `lmstudio/` routes do not install software or download models.
+
+With `ollamapull/`, if Ollama is missing, click **🦙 Download Ollama** beside the model field to install and start it with visible progress. The button becomes **🦙 Ollama Settings** once Ollama is available. Settings include context size, multi-token prediction, other native request options, local status, and an automatic Ollama application update switch. Stop interrupts a model download in progress.
+
+> **First, what's an "endpoint"?** It's just the web address where the AI lives. A cloud provider's endpoint is on the internet. A local AI's endpoint is on your own machine, usually:
+> - **Ollama:** `http://localhost:11434/v1`
+> - **LM Studio:** `http://localhost:1234/v1`
+> - **vLLM:** `http://localhost:8000/v1`
+
+### Method 1 — Custom OpenAI Endpoint (GLOBAL — affects everything)
+
+**What it is:** one address that *all* translation requests use. Set it once and the whole app talks to your local/custom server.
+
+**How to set it:**
+1. Open **⚙️ Other Setting → Custom API Endpoints**.
+2. Check **Enable Custom OpenAI Endpoint**.
+3. In **Override API Endpoint**, type your URL (or **double-click the Ollama / LM Studio shortcut** to fill it in).
+4. In the main window's **Model** box, type your local model's exact name (e.g. `llama3`, `mistral:instruct`).
+5. For **API Key**, a local server usually accepts any dummy text (e.g. `sk-local`); a private server uses its real key.
+
+**Use it when:** you do *all* your translating on one local model. Simple and global.
+
+### Method 2 — Individual (per-key) Endpoint (applies to ONE key only)
+
+**What it is:** an endpoint attached to a *single API key* inside the **Multi API Key Manager**. Only requests using *that key* go to *that endpoint*. This requires **Multi-Key Mode** (Section 14).
+
+**How to set it:**
+1. Open the **Multi API Key Manager** (the **Multi Key Manager** button, or Other Settings → Configure API Keys).
+2. Add or select a key, then open **Configure Individual Endpoint** for that key.
+3. Tick **Enable**, and type the **Endpoint Base URL** (again, Ollama/LM Studio shortcuts are right there; Azure OpenAI is also supported, with an **Azure API Version** picker).
+4. **Save.**
+
+**Use it when:** you want to mix sources in one run — e.g. one key pointing at a local Ollama model *and* another key pointing at a cloud provider, rotating between them.
+
+> **⭐ Precedence rule (important):** A key's **Individual Endpoint OVERRIDES the global Custom OpenAI Endpoint.** So if Method 1 is set globally but a particular key has its own Method-2 endpoint enabled, that key uses *its own* endpoint and ignores the global one. (For any key *without* an individual endpoint, the global one still applies.)
+
+### Method 3 — Custom Prefix routing (route ANY OpenAI-compatible model)
+
+**What it is:** you invent a short **prefix** and tell Glossarion which server it points to. Then any model name you type starting with that prefix is routed there. This is the most flexible — you can have several different OpenAI-compatible servers available at once, each with its own prefix.
+
+**How to set it:**
+1. Open **Manage Models** (the Model Manager).
+2. Find the **Custom prefixes** table (columns: **Prefix**, **Base URL**, **Endpoint Type**) and click **Add Prefix**.
+   - **Prefix** — your made-up label, e.g. `mylocal`.
+   - **Base URL** — the provider root (the server address).
+   - **Endpoint Type** — the "path shape" (which must be an absolute path like `/v1/chat/completions`).
+3. Now type a model in the form **`prefix/model-name`** — e.g. `mylocal/llama3` — in the main **Model** box. Glossarion routes it to that server.
+
+**Use it when:** you regularly switch between several custom/OpenAI-compatible endpoints and want to pick one just by typing a prefix, without changing any global setting.
+
+### Which method should I use? (and who wins)
+
+| You want… | Use | Notes |
+|-----------|-----|-------|
+| Use an existing Ollama server | `ollama/model-name` | Start Ollama and install the model first. |
+| Use an existing LM Studio server | `lmstudio/model-name` | Start its local server and use its served model ID. |
+| Let Glossarion install and manage Ollama | `ollamapull/model-name` | Includes downloads, updates, and settings. |
+| One local model for everything | **Method 1** (global) | Simplest. |
+| Different endpoints per key, rotating | **Method 2** (per-key) | Needs Multi-Key Mode. |
+| Switch endpoints by typing a prefix | **Method 3** (prefix) | Most flexible. |
+
+**Order of precedence when more than one applies:**
+
+> **Individual per-key endpoint (Method 2)  ▶  beats  ▶  Global Custom OpenAI Endpoint (Method 1).**
+>
+> **Built-in local routes and custom prefixes (Method 3)** are chosen by the *model name* you type (`prefix/model`), so they route independently. The built-in `ollama/`, `lmstudio/`, and `ollamapull/` prefixes take precedence over custom routes with the same names.
+
+> **⚠️ DON'T forget Method 2 needs Multi-Key Mode turned on.** A per-key endpoint does nothing if you're in single-key mode.
+
+> **✅ DO test a local model with a 1-chapter run first.** Local models vary a lot in quality; confirm output is readable before translating a whole book.
+
+---
+
+## 10. Manga & comic translation
+
+*(Available in NoCuda/Heavy builds — not in Lite.)* This panel translates comics, manga, and manhwa images.
+
+1. **Open the Manga Translator** — click **Open the manga panel translator** on the main window. (First open shows "Loading Manga Translator…" — wait for it.)
+2. **Load images** — pick a folder of images or a `.cbz`/`.zip`/`.epub`.
+3. **Settings (left panel):**
+   - **Translator** — the AI model that does the translating.
+   - **OCR Provider** — the tool that *reads* text off the image:
+     - `manga-ocr` — best for Japanese.
+     - `rapidocr` / `PaddleOCR` / `EasyOCR` — fast, general, run locally.
+     - `google-vision` / `azure` — cloud OCR (need their own credentials — set the JSON key path; use **GCloud Creds** button).
+   - **Source Language** — the language of the manga.
+4. **The translation pipeline (buttons, in order):**
+   - **Detect Text** — find the speech bubbles.
+   - **OCR** — read the text inside them.
+   - **Translate** — translate that text.
+   - **Inpaint** — erase the original text from the bubbles.
+   - **Render Text** — draw the translation into the bubbles.
+   - **Batch Translation** — do the whole folder automatically, start to finish.
+5. **Inpainting (erasing original text):**
+   - **Skip inpainting** — "render translated text over the original image" (no erasing).
+   - **Local inpainting** — runs on your machine (recommended: pick `anime_onnx`).
+   - **Cloud (Replicate)** — "Not recommended; performed poorly in tests."
+6. **Mask expansion / safe area** — how far past the detected text to erase. `0%` = exact text only; higher = more breathing room around text.
+
+> **Manual editing & preview:** There's a dual-viewer preview (📄 Source / ✨ Translated Output) with drawing tools. **Manual editing is OFF by default for safety** — turn on **Enable Manual Editing** to draw/adjust bubbles yourself. You can cycle a view between translated / cleaned / original by clicking it.
+
+> **⚠️ Cloud OCR (Google/Azure) costs money and needs a credentials file.** Local OCR (`manga-ocr`, `rapidocr`) is free and fine for most jobs — start there.
+
+---
+
+## 11. Retranslation (fixing single chapters)
+
+Don't redo a whole 200-chapter book — or even a whole split chapter — because one piece came out badly. Use the **Progress Manager** retranslation controls.
+
+1. **Open the Retranslation tab** and **Select Folder** — pick your translated output folder.
+2. **Read the status colors:**
+   - ✅ Green = success
+   - ❌ Red = failed (or failed a QA check)
+   - ⬜ White = not translated yet
+   - 🔄 Spinning = in progress
+3. **Tick a chapter or a specific `Chunk X/Y` row** you want to redo. Split PDF bookmark sections use the same chunk wording instead of confusing decimal section names.
+4. **Retranslate Selected** — a whole-chapter selection deletes and rebuilds that chapter. For an API-split chapter, a chunk selection removes only that marker-delimited segment from the shared HTML output, deletes only its cached result, and marks only that chunk pending. For a PDF bookmark section split into separate source parts, the selected part has its own stable progress row and output, so only that part is reset. In both cases, completed sibling chunks stay intact. **Refresh** updates the icons.
+
+The parent chapter cannot show **Completed** while any child chunk is pending or in progress. Every chunk records its own model information because parallel requests or key rotation can use different models for different chunks. The Progress Manager and EPUB Library details page both display those per-chunk statuses and models for EPUB and PDF jobs. Chapters that were never split stay as a single normal row.
+
+> Handy extras here: **Show special files** reveals files the pipeline normally hides; **Show Model Info** displays the model used for each chapter or chunk; **🔍 Edit Translation** opens the side-by-side source/output editor; and **Glossary Progress** shows glossary extraction progress.
+
+---
+
+## 12. EPUB Converter (building your finished book)
+
+After translating, this stitches your translated HTML chapters into a real `.epub` you can read on any e-reader.
+
+1. **Open EPUB Converter** and select the folder of translated HTML files.
+2. **Options worth knowing:**
+   - **Attach CSS** — keep the book's styling (fonts, margins). Usually leave on.
+   - **Force NCX only** — make an old-style, maximally-compatible table of contents. Turn on only if your e-reader chokes on modern EPUBs.
+   - **EPUB structure (Auto / EPUB2 / EPUB3)** — leave on **Auto** unless you have a reason; it copies the source layout.
+   - **Retain source extension** — keep `.xhtml` if the original used it (helps compatibility).
+   - **Bundle fonts** — embed `.ttf`/`.otf`/`.woff` font files into the EPUB.
+3. **Convert** — produces `[YourBook]_translated.epub` in the folder.
+
+> **If conversion fails:** run **Validate EPUB Structure** (in Other Settings) — it checks for missing pieces and tells you what's wrong.
+
+---
+
+## 13. QA Scanner (checking quality)
+
+Scans finished translations for problems and produces a clickable report.
+
+1. **Pick a mode:** `Quick` (fast), `Strict` (thorough), or `Custom` (choose rules).
+2. **Point it at your files:** the **Source** (original) and the **Translated Folder** (your output). **Auto-search** tries to find the folder for you.
+3. **It checks for:**
+   - **Word-count mismatch** — did the AI skip a big chunk?
+   - **Broken HTML** — broken tags.
+   - **Untranslated text** — leftover Korean/Japanese/Chinese.
+   - **Duplicates** — accidentally repeated chapters.
+4. **Run Scan** — makes `qa_report.html`. Anything that fails is marked ❌ in the Retranslation tab, so your fix-it list is ready.
+
+For marker-delimited EPUB/PDF output, the scanner maps a localized problem to the affected `Chunk X/Y` row instead of failing the entire chapter. Separately stored PDF bookmark chunks are scanned and tracked by their own stable progress rows. That lets **Select QA Failed** and **Retranslate Selected** repair just the bad chunks. Findings that genuinely apply to the whole document can still remain chapter-level.
+
+> **The natural workflow:** Translate → **QA Scan** → open the Retranslation tab → redo the ❌ chapters → QA Scan again.
+
+---
+
+## 14. Multiple API keys (rotation)
+
+If you hit rate limits a lot, or have several keys, let Glossarion juggle them.
+
+1. Open **Other Settings → Configure API Keys** (or the **Multi Key Manager** button).
+2. **Add Key** — enter each key and pick its provider/model.
+3. **Enable Multi-Key Mode** — tick the box.
+4. **What it does:** rotates through your keys; if one hits a limit (error 429), it instantly switches to the next. You can set fallback keys for specific models, and (as in Section 9) give individual keys their own endpoints.
+
+> **Remember:** the per-key **Individual Endpoint** feature (Section 9, Method 2) lives here and **only works when Multi-Key Mode is on.**
+
+---
+
+## 15. Refinement & output modes
+
+### Output Mode (what kind of output you want)
+
+A small selector (also synced into Other Settings → Image Translation) chooses what Glossarion produces:
+
+- **📝 Text** — normal text translation (the default). Most users stay here.
+- **👁️ Vision** — **OCR mode.** Reads text *out of images*. Point it at loose images and it OCRs them to text. **Point it at an EPUB and it OCRs every image inside the EPUB and then translates that OCR'd text**, giving you a translated EPUB built from the image text. You can optionally set it to return **only the raw OCR'd text as an EPUB** (no translation). Fine-tune all of this in **Other Settings → the Output Mode section**.
+- **🖼️ Image** — **direct image translation / editing.** Use it to translate standalone images, or feed it an **EPUB** and it returns **the same raw EPUB but with every image re-drawn by an image-edit model** (e.g. Nano Banana 2) — handy for translating text baked into illustrations.
+- **🎬 Video** — video-generation output.
+- **🔊 Audio** — generate text-to-speech audio from your translated text.
+- **✨ Refinement** — improve *existing* translated output without using the raw source again.
+
+> **✅ Quick rule:** **Vision** = "turn pictures into translated words." **Image** = "give me the book back with the pictures themselves translated." Detailed knobs for both live in **Other Settings → Output Mode**.
+
+### Refinement (a polish pass after translating)
+
+Turn on a second pass that re-reads and improves your finished translation:
+
+- **Full** — refine *all* translated chapters.
+- **Failed** — run a quick QA scan first, then only refine the chapters still marked failed.
+- **Partial / Partial.b / Partial.b2** — increasingly targeted/batched passes that fix only the specific problem spots (e.g. chapters with leftover foreign characters), bundling them efficiently to save requests.
+
+> **✅ DO try `Partial.b` refinement** as a cheap cleanup: it only uses requests on chapters with leftover raw characters.
+
+**The glossary during refinement.** Every mode compresses the glossary against the *raw* chapter (not the translated HTML), then — with **Multipass: Exclude Already-Applied Entries** on (Section 8, default ON) — leaves out every entry whose translation is already in the output. What the model receives is the short list of terms the translation still gets wrong or missing; the log line shows how many were excluded as already applied. The default refinement prompts tell the model to treat that list exactly that way; if you customized yours, click **Reset to Default** to pick up the new wording.
+
+### Review generator
+
+**Generate Review** produces an AI-written summary/review of a selected EPUB or other supported text file. **Full Review Mode** reviews the whole book in chunks, while **50/50 Split Mode** samples both the beginning and ending. **Volume Mode** treats every selected file as one continuous book and creates one combined review. Volume files start in numerical filename order; use **File Order…** to reorder them with drag and drop, Move Up/Down/Top/Bottom controls, or Numerical, Alphabetical, and Date Modified (newest-first) sorting from the buttons or right-click menu. The combined token total appears beside the controls. The same combined review is saved inside every volume at `review/combined_review/review.md`, leaving each volume's individual `review/review.md` untouched. A ✓ shows when a review already exists for the selected book.
+
+> **⚠️ You must enable an Input Token Limit to use the Review Generator.** Turn on **Enable Input Token Limit** (Section 6) first — with the limit disabled, the review won't run. Set a sensible cap (e.g. `200000`) and try again.
+
+---
+
+## 16. Translation editing & review (.sdlxliff and supported formats)
+
+Besides translating from scratch, Glossarion can **edit and review existing translations**, including projects from professional CAT tools.
+
+### What files can Glossarion translate?
+
+| Format | Notes |
+|--------|-------|
+| **EPUB** (`.epub`) | The main, best-supported format. Structure, cover, and images preserved. |
+| **TXT** (`.txt`, `.md`) | Plain text with chapter detection. (Any profile works — there's no special "text profile.") |
+| **PDF** (`.pdf`) | Text extracted automatically; can be re-rendered to a PDF afterward. |
+| **HTML** | Translate/scan folders of HTML chapters. |
+| **CBZ / images** | Manga & comics (in the `N_` builds). |
+| **SDLXLIFF** (`.sdlxliff`) | Professional bilingual translation files (see below). |
+| **Subtitles and synchronized lyrics** (`.srt`, `.ass`, `.lrc`) | Translates dialogue or lyrics while preserving cue timing, numbering, ASS styles/event fields, LRC timestamps/metadata, line endings, and inline formatting tags. |
+
+### Subtitle and synchronized-lyrics ZIPs
+
+Subtitle ZIP archives are also accepted through **Input File(s)**. Glossarion safely extracts every `.srt`, `.ass`, and `.lrc` member into one combined translation job while ignoring unrelated archive contents, allowing subtitle files to use the normal parallel batch pool. Each valid subtitle or synchronized-lyrics file is written under its original filename as soon as its own API batches finish, and all translated files from one ZIP are placed in a single output folder named after the archive alongside file-level `translation_progress.json` tracking. Incomplete or malformed subtitle batches do not produce a misleading final file. Changing to ZIP/subtitle input clears a stale automatically selected EPUB glossary while preserving a glossary the user explicitly loaded. A built-in **Subtitle Translation** prompt profile is available for concise, natural dialogue and lyrics.
+
+ZIPs may place their subtitle files beneath a wrapper subfolder. EPUB-formatted ZIPs continue through the EPUB workflow, while encrypted entries, unsafe paths, and archives beyond the extraction limits are rejected. Duplicate subtitle basenames receive stable numeric suffixes, and Glossarion does not create a new translated ZIP.
+
+**Extract Glossary** also accepts direct `.srt`, `.ass`, and `.lrc` files plus nested subtitle ZIPs. Only visible dialogue or lyrics are analyzed; timestamps, cue numbers, ASS headers/styles, LRC metadata, drawing commands, and formatting tags are excluded. A subtitle ZIP creates one archive-level glossary while its member files remain independently batchable glossary chapters.
+
+### The SDLXLIFF reviewer / editor
+
+`.sdlxliff` is the bilingual file format used by professional CAT tools like SDL Trados Studio. Glossarion includes a **source-to-output reviewer workflow** for these files (contributed by community member OMORIO). It lets you translate the file's text units and then **check the result side by side** before delivering.
+
+What it gives you:
+
+- **Side-by-side source vs. output review.** Open the **Review source/output text analysis** view to compare each segment. If needed, Glossarion **generates SDLXLIFF sidecar files from your completed entries** automatically.
+- **Machine-translation previews.** Generate a quick machine-translation of each source row to sanity-check meaning. **Right-click the button to choose which provider** does the preview.
+- **Accuracy flagging.** **Mark rows that fall below a machine-translation accuracy threshold**, so you can jump straight to the segments most likely to be wrong.
+- **Structure checks.** Glossarion compares the source and output `<p>` and `<h1>`–`<h6>` tag counts from the matching SDLXLIFF sidecars and **flags files where those text wrappers were dropped or added** (a common source of broken formatting).
+- **Auto-refresh.** Press **F5** (or the refresh button) to re-run the SDLXLIFF check after you've made changes.
+
+> The SDLXLIFF tools live alongside the **Retranslation** view, since both are about reviewing and fixing finished translations rather than producing them from scratch.
+
+> **✅ Use this if you receive `.sdlxliff` files** from a client or CAT tool and want Glossarion to translate and review them while keeping the original segment structure intact.
+
+---
+
+## 17. How to translate for free
+
+Yes — you can run Glossarion **without spending a cent.** There are several free routes, from "totally free, no setup" to "free but you host the AI yourself." Pick whichever fits.
+
+> **🔑 The one thing to remember:** the **Model box is a plain text field, not a locked dropdown.** For every option below you just **type the model name in** (including its routing prefix like `authnd/…` or `or/…`). If the routing supports a model, typing it works — you are not limited to the suggestions in the list.
+
+### The free options at a glance
+
+| Method | What you type in **Model** | What you need | The catch |
+|--------|----------------------------|---------------|-----------|
+| **NVIDIA browser routing** | `authnd/...` (e.g. `authnd/z-ai/glm-5.1`) | **Nothing** — no key, no login | Routes through the built-in NVIDIA browser; needs the **standard `L_Glossarion` build** (has the EPUB Library). |
+| **NVIDIA API (free tier)** | `nd/...` (e.g. `nd/deepseek-ai/deepseek-v4-flash`) | A **[free NVIDIA API key](https://build.nvidia.com/explore/discover?api-key=true)** | Free, but **only available in certain regions**. |
+| **ChatGPT login** | `authgpt/...` | A **ChatGPT login** (🔐 button) | Only **a few free requests**. |
+| **Grok login (free tier)** | `authgrok/...` or `authgrok0/...` | A **free xAI/Grok account** (🔐 button) | No API key or paid Grok subscription required; xAI's free allowance and rate limits apply. |
+| **Google AI Studio key (Gemini)** | `gemini-...` (e.g. `gemini-3.1-flash-lite`) | A **[free Google AI Studio key](https://aistudio.google.com/apikey)** | A few free requests on most models — but **~500 free requests/day when used with Gemini 3.1 Flash Lite**. |
+| **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login**; Glossarion installs Bun automatically when needed | Free Cloud Code routing through a local proxy on `localhost:3000` using `Shirochi-stack/antigravity-proxy`; see [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
+| **OcAgy login** | `ocagy0/...` or a pinned OcAgy prefix | A **Google login**; Glossarion installs OpenCode and the auth plugin automatically when needed | Uses `opencode-antigravity-auth`; supports pooled and deterministic numbered-account routing. See [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
+| **OpenCode free models** | `ocz/...` (e.g. `ocz/deepseek-v4-flash-free`) | The **official OpenCode app** | Free models can only be used from the genuine OpenCode binary. |
+| **OpenRouter free models** | `or/...:free` (e.g. `or/deepseek/deepseek-v4-flash:free`) | A **[free OpenRouter key](https://openrouter.ai/settings/keys)** | Limited to OpenRouter's **free-tier models** (the ones ending in `:free`). |
+| **Google Translate (free)** | `google-translate-free` | **Nothing** | It's plain **machine translation**, not an AI — fast and free, but lower quality / no context. |
+| **Your own local AI** | your model name (e.g. `llama3`) | **LM Studio or Ollama** on your PC | Free and private, but quality and speed depend on your computer. |
+
+### The options explained
+
+**1. `authnd/` — NVIDIA browser routing (easiest free option).**
+Type a model like `authnd/z-ai/glm-5.1` and Glossarion routes the request **through NVIDIA's browser** for you. **No API key and no login required.** Because this uses the embedded browser, you need the **standard `Glossarion` build** (the one with the EPUB Library — the `Lite`/`TurboLite` builds remove it). This is the closest thing to "free translation with zero setup."
+
+**2. `nd/` — NVIDIA's free API tier.**
+If you create a **free NVIDIA API key**, you can use `nd/...` models (e.g. `nd/deepseek-ai/deepseek-v4-flash`, `nd/moonshotai/kimi-k2-thinking`). It's free, but **availability is limited to specific regions** — if it won't connect, your region may not be supported.
+
+**3. `authgpt/` — free requests via ChatGPT login.**
+Click the **🔐 ChatGPT Login** button (Section 4), log in with your browser, and use an `authgpt/...` model. You get **a small number of free requests** this way — handy for testing a chapter or two without an API key.
+
+**4. `authgrok/` — Grok's confirmed free tier.**
+Select an `authgrok/...` model and click **🔐 Grok Login**, then sign in with a free xAI/Grok account. No xAI API key or paid Grok subscription is required. Use `authgrok/...` to pin the default saved account, numbered routes such as `authgrok1/...` to pin other saved accounts, or `authgrok0/...` to rotate the saved account pool. Choose **+ N** in the Grok account-slot dropdown to add another account without typing a numbered prefix. xAI controls the free allowance and rate limits, so availability can be lower than on a paid account and may change over time.
+
+**5. Free Google AI Studio key (for use with Gemini).**
+Go to Google AI Studio, create a **free API key** (this is a *Google AI Studio key*, not a model-specific one), paste it into the API Key box, and use a `gemini-...` model. The free tier gives **a few requests on most models**, but the lightweight **Gemini 3.1 Flash Lite** model allows **around 500 free requests per day** — enough to translate a lot of chapters for free. Type `gemini-3.1-flash-lite` in the Model box.
+
+**6. `antigravity/` — Antigravity through the local proxy.**
+Click the **🔐 Antigravity Login** button, log in with Google, and type a model like `antigravity/gemini-3.5-flash-low`. This is a free no-API-key route that runs through the local **Antigravity proxy** on `http://localhost:3000`. Glossarion uses the `Shirochi-stack/antigravity-proxy` runtime for that helper server; compiled `.exe` builds need **Node.js LTS** or **Bun** available so Glossarion can start it. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
+
+**7. OcAgy — OpenCode Antigravity OAuth, including Gemini 3.1 Pro High.**
+Click **🔐 OCAGY Login**. Glossarion installs the **OpenCode terminal CLI** and `opencode-antigravity-auth` automatically when needed. In the terminal, choose **Google → OAuth with Google (Antigravity)** and finish signing in. Use `ocagy0/gemini-3.1-pro-high` for the plugin-managed shared account pool, or use a pinned prefix such as `ocagy/gemini-3.1-pro-high` (account #1) or `ocagy1/gemini-3.1-pro-high` (account #2). This route does **not** use the local port-3000 proxy and needs no API key. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
+
+**8. `or/` — free models on OpenRouter.**
+Make a **free OpenRouter key** and type an OpenRouter model with the `:free` suffix, e.g. `or/deepseek/deepseek-v4-flash:free`. OpenRouter rotates which models are free, so check their site for the current `:free` list.
+
+**9. `google-translate-free` — free machine translation.**
+Type exactly `google-translate-free` in the Model box. This is **classic machine translation** (like the Google Translate website), not an AI model — so it needs no key and costs nothing, but it won't follow your profile/glossary or keep long-range context. Good for a rough, instant draft.
+
+**10. Host your own local AI (totally free, fully private).**
+Install **LM Studio** or **Ollama**, download a model, and point Glossarion at it. Nothing leaves your computer and there's no usage cost — the only "price" is your own hardware doing the work. The built-in local routes and custom endpoint methods are in **[Section 9](#9-local-ai-and-custom-endpoints)**.
+
+> **✅ Best free starting point:** try **`authgrok/`** with a free xAI/Grok login, **`authnd/`** for zero setup, or a **free Google AI Studio key** used with **Gemini 3.1 Flash Lite** (~500/day). If you have a decent PC and care about privacy, set up a **local model** instead.
+
+> **⚠️ Free tiers are slow or capped on purpose.** Expect rate limits and allowance limits, including xAI's `authgrok/` free tier and `authgpt/`'s few requests. Increase your **API call delay** (Section 6) and translate a small **Chapter range** at a time so you don't burn through a daily quota in one shot.
+
+---
+
+## 18. Antigravity and OcAgy setup for compiled `.exe` builds
+
+Glossarion has two separate Google Antigravity routes. Their prefixes are not aliases:
+
+| Prefix | Request path | Runtime setup | Notable model |
+|--------|--------------|------------------|---------------|
+| `antigravity/...` | Glossarion's local `Shirochi-stack/antigravity-proxy` server on `localhost:3000` | Bun is installed automatically if Bun/Node.js is missing | `antigravity/gemini-3.1-pro-low` |
+| OcAgy (`ocagy0/...`, `ocagy/...`, `ocagy1/...`, ...) | OpenCode with `opencode-antigravity-auth` | OpenCode and the plugin are installed automatically when needed | `ocagy0/gemini-3.1-pro-high` |
+
+### `antigravity/`: local proxy setup
+
+Antigravity models use a **local helper server** called the **Antigravity proxy**, based on the `Shirochi-stack/antigravity-proxy` repository. When you type a model such as `antigravity/gemini-3.5-flash-low`, Glossarion starts that proxy on your computer, logs you in with Google, and sends requests through `http://localhost:3000`.
+
+### Automatic runtime setup
+
+If you are running a ready-made compiled `.exe`, you do **not** need:
+
+- Python
+- Git
+- the Glossarion source code
+- a manual checkout of the Antigravity proxy repository
+
+If Bun or Node.js/npm is already available, Glossarion uses it. Otherwise, clicking **Antigravity Login** automatically runs Bun's official user-local installer and continues starting the proxy without requiring an app restart.
+
+The installer is user-local and normally does not require administrator privileges. An existing runtime is still supported:
+
+| Existing runtime | What Glossarion uses it for |
+|------------------|-----------------------------|
+| **Node.js LTS** | Provides `npm` / `npx`. Glossarion can run `npx --yes --package bun@latest bun run ...` to fetch Bun and start the proxy. |
+| **Bun** | Lets Glossarion start the proxy directly with `bun run ...`. |
+
+### What happens automatically
+
+Glossarion handles the rest:
+
+1. It downloads the supported `Shirochi-stack/antigravity-proxy` runtime into your user config folder.
+2. If Bun and Node.js/npm are both missing, it installs Bun for the current user using Bun's official installer.
+3. It updates that local runtime when the cached copy is too old or needs a Glossarion patch.
+4. It starts the proxy locally, usually with a command like:
+   ```text
+   npx --yes --package bun@latest bun run C:\Users\<you>\.config\antigravity-proxy\runtime\...\src\server.ts
+   ```
+5. It opens the Google login flow when an Antigravity account is not linked yet.
+6. It stores the proxy cache and account data under:
+   ```text
+   C:\Users\<you>\.config\antigravity-proxy
+   ```
+
+### Other requirements
+
+- **Internet access** is needed on first setup to download/update the proxy runtime and, if using Node.js, to fetch `bun@latest` through `npx`.
+- **Internet access** is also needed every time you actually use Antigravity models, because the proxy talks to Google/Antigravity services.
+- **A normal web browser** must be available for the Google login redirect.
+- **Port `3000` must be free** on your computer. If another app is already using `localhost:3000`, close it or restart the computer before trying again.
+- **Windows Firewall / antivirus** may ask about the proxy. Allow local/private network access if prompted.
+- The Windows user account must be able to write to:
+  ```text
+  C:\Users\<you>\.config\antigravity-proxy
+  ```
+
+### Account slots and model prefixes
+
+Antigravity account routing is based on the model prefix:
+
+| Model prefix | Account used |
+|--------------|--------------|
+| `antigravity/...` | account #1 |
+| `antigravity1/...` | account #2 |
+| `antigravity2/...` | account #3 |
+
+So if you have two Google accounts linked in the Antigravity proxy, type `antigravity/...` for the first one and `antigravity1/...` for the second one.
+
+The log will show the account actually being used, for example:
+
+```text
+🚀 Auto-launching Antigravity proxy with: ...
+🟢 Antigravity proxy process started (PID 12345).
+✅ Antigravity proxy is now running.
+🧭 Antigravity: using account slot #2 (your-email@gmail.com)
+```
+
+### OcAgy: OpenCode setup and numbered accounts
+
+OcAgy bypasses Glossarion's local port-3000 proxy. Glossarion launches OpenCode in an isolated, tool-disabled workspace, while `opencode-antigravity-auth` owns Google OAuth and token refresh.
+
+1. Select an OcAgy route and model. The API Key box is not required.
+2. Click **🔐 OCAGY Login**. If OpenCode is missing, Glossarion installs it automatically. On Windows it also attempts to install Node.js LTS first when npm is unavailable.
+3. Glossarion writes its isolated OpenCode configuration and asks OpenCode to download and verify `opencode-antigravity-auth@latest`.
+4. In the terminal, select **Google → OAuth with Google (Antigravity)** and complete the sign-in flow.
+5. Back in Glossarion, click **📊** beside the login button. The log should show the OpenCode executable, plugin models, and linked OAuth-account count.
+6. Run a one- or two-chapter test before starting a full book.
+
+If automatic installation fails, the error log includes the failed command and installer output. Only then does Glossarion show the copyable manual OpenCode and Node.js commands as a fallback. Advanced users may still set `OCAGY_CLI_PATH` to a custom executable.
+
+Useful model examples:
+
+- `ocagy/gemini-3.1-pro-high` — Gemini 3.1 Pro with the plugin's High thinking variant.
+- `ocagy/gemini-3.1-pro-low` — the corresponding Low variant.
+- `ocagy/gemini-3-flash-high` — Gemini 3 Flash with High thinking.
+- `ocagy/claude-sonnet-4-6` — Claude Sonnet 4.6 through the same plugin.
+
+The prefix selects the account behavior:
+
+| Prefix | Account behavior |
+|---|---|
+| `ocagy0/...` | Current/default plugin behavior: use the shared account pool and let the plugin rotate accounts. |
+| `ocagy/...` | Pin saved OAuth account #1. |
+| `ocagy1/...` | Pin saved OAuth account #2. |
+| `ocagy2/...` | Pin saved OAuth account #3. Continue the same pattern for later accounts. |
+
+For parallel batch translation, add the same model with different prefixes to the Multi API Key Provider dialog—for example `ocagy/gemini-3.1-pro-high`, `ocagy1/gemini-3.1-pro-high`, and `ocagy2/gemini-3.1-pro-high`. Each worker is then tied to its assigned account. Pinned routes deliberately do not fall through to another saved account: a missing, disabled, or exhausted slot reports an error. Use `ocagy0/...` when automatic plugin rotation is preferable.
+
+You do **not** need Glossarion's local proxy, port `3000`, or an API key when using any OcAgy prefix. OpenCode and the plugin still need internet access, and automatic first-time installation may take longer than later requests.
+
+### Quick fixes
+
+- **"Automatic Bun installation failed"** — check the installer details in the log, confirm internet access or security software is not blocking the command, and retry **Antigravity Login**.
+- **Login opens but account is not detected** — finish the Google login in the browser, then click the Antigravity status/refresh button or restart Glossarion.
+- **Proxy says unsupported version** — Glossarion should auto-update the cached proxy runtime. If it keeps happening, close Glossarion, delete `C:\Users\<you>\.config\antigravity-proxy\runtime`, then start Glossarion again so it can download a fresh copy.
+- **Port 3000 error** — another local server is using the Antigravity proxy port. Close that program or restart Windows.
+- **"Glossarion could not install OpenCode automatically"** — check the logged installer output. If retrying does not work, use the copyable fallback commands shown by Glossarion or set `OCAGY_CLI_PATH` to an existing OpenCode executable.
+- **"Could not install or verify opencode-antigravity-auth automatically"** — check network/security restrictions and retry **OCAGY Login**. The error includes the manual `opencode models google` fallback.
+- **OcAgy login finished but 📊 shows no accounts** — repeat **OCAGY Login**, make sure you chose **Google → OAuth with Google (Antigravity)**, then click **📊** again.
+- **OcAgy plugin models are not detected** — confirm internet access, run the login flow once so OpenCode can load the plugin, and retry the status check.
+
+---
+
+## 19. When things go wrong (troubleshooting)
+
+| Symptom | Most likely cause | Fix |
+|---------|------------------|-----|
+| **"Rate limit" / error 429** | Sending requests too fast | Raise **API call delay** to `2`+ (Section 6). If you have several keys, enable **Multi-Key Mode** (Section 14). |
+| **Output is cut off mid-sentence** | Output token limit too low, or silent truncation | Raise **Output Token limit**; keep **Auto-retry Truncated Responses** on. For Gemini, try turning **Streaming OFF**. |
+| **A resumed chapter starts over instead of reusing chunks** | Its original/cached chunk size or chunk count changed, so the old boundaries are no longer safe | This is intentional invalidation. Keep the new limits and let Glossarion rebuild the chapter, or restore the prior Output Token Limit, compression factor, model/key pool, and per-key limits before retrying. |
+| **An output HTML file exists but its chapter is still Pending** | One or more saved chunk rows are pending or in progress | The file can contain only the chunks completed so far. Expand the chapter in Progress Manager, then resume or retranslate the missing `Chunk X/Y` rows. |
+| **Translation fails / "invalid model" / auth error** | Key and model are from different providers, or wrong key | Make the **Model** prefix match the **API Key**'s provider (Section 5). Re-paste the key and click **Show** to check it. |
+| **Polling says "no provider credential"** | The API-key field belongs to another selected provider, or no matching environment variable exists | Select a model owned by the provider you want to check, enter that provider's key, and poll again. Glossarion will not send one company's key to another company. |
+| **Polling uses a static fallback** | The catalog needs credentials, is offline, rejected the request, or has no pollable endpoint | Read the detailed polling lines in the bottom log. The built-in list remains available, and you can still type a valid model ID manually. |
+| **xAI polling reports exhausted credits / spending limit** | xAI blocks its authenticated metadata endpoint when the team has no spending capacity | Polling itself did not run a model or consume translation tokens. Continue with Glossarion's static xAI list, or change the xAI team's billing limit if you require its live catalog. |
+| **Names keep changing between chapters** | No glossary, or it isn't being sent | Build a glossary and turn on **Append Glossary to System Prompt** (Section 8). |
+| **A character's gender/pronouns flip mid-book** | Gender tracker is off | Turn **Include Gender Context** on and keep the `*_gender_tracker.json` sidecar (Section 8.5). |
+| **The glossary sent to the AI is full of names that aren't in the chapter** | The default matcher searches for the term anywhere in the text, so short names match inside unrelated words | Turn on **Precise Term Matching** (Section 8.5). Preview it first with **Log Match Differences**. |
+| **A term you expected went missing after turning on Precise Term Matching** | In that chapter the word only appears inside a longer compound | Check `report.md` in the `glossary_match_shadow` logs folder, then force it back with a `keep` verdict (Section 8.5). |
+| **The unified glossary landed in the wrong language folder** (e.g. `other-english`) | Language detection had nothing to go on for that book | Open **Unified Glossary Settings** and set **Source language**, or tick **Combine all languages**; then turn on **Generate Unified Glossary** for one run to rebuild. |
+| **EPUB won't build** | Missing/broken files in the folder | Run **Validate EPUB Structure** in Other Settings (Section 12). |
+| **`authnd/` model won't work** | Using a `Lite`/`TurboLite` build | Those builds drop the EPUB Library and `authnd/` routing — use the standard `L_Glossarion` build (Section 2). |
+| **`antigravity/...` model won't launch** | Node/npm or Bun is not installed, login is unfinished, or port `3000` is busy | Install **Node.js LTS** or **Bun**, finish **🔐 Antigravity Login**, and check [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
+| **OcAgy model won't launch** | Automatic OpenCode/plugin setup failed, the Google OAuth flow is unfinished, the numbered account slot is unavailable, or the plugin has not loaded | Retry **🔐 OCAGY Login** and inspect the installation log. Use the manual commands only if automatic setup fails, then click **📊**, verify the requested account slot, and check [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
+| **Local model isn't used** | Server stopped, model ID differs, or endpoint setting conflicts | For `ollama/` and `lmstudio/`, start the local server and choose the exact model ID it reports. For custom endpoints, check the method in Section 9; per-key endpoints need **Multi-Key Mode**. |
+| **The window seems frozen during a big job** | It's just working hard | Watch the bottom log — if lines are still appearing, it's fine. **GUI Yield** (Other Settings) reduces freezing. |
+| **Settings reset after restart** | Didn't save | Click **Save Config** (Section 4). |
+
+> **The log at the bottom is your best friend.** It says, in plain text, exactly what Glossarion is doing and what failed. Read the last few red lines before asking for help.
+
+> **Still stuck?** Glossarion has a community **Discord** and a **GitHub Issues** page (links are in the project's README). When reporting a problem, **click inside the log, press `Ctrl + A` to select everything, then `Ctrl + C` to copy the *entire* log** — not just the last few lines. The full log usually contains the real cause higher up, so paste the whole thing.
+
+---
+
+## 20. One-page cheat sheet
+
+**To translate a book, every time:**
+
+1. **🔍 Browse ▼** → pick file
+2. **Profile** → source language (same profile works for EPUB, PDF, or txt)
+3. **Model** → e.g. `gemini-3.5-flash`
+4. **API Key** → paste it (or use a 🔐 login)
+5. **Target Language** → `English`
+6. **Chapter range** → `1-2` for a test, empty for all
+7. **Run Translation** → wait → **Open Output Folder 📁**
+
+**Safe starting settings:** API call delay `2` · Input Token Limit **enabled** · Context Mode **Contextual History** · Temperature `0.3` · Batch **off** at first.
+
+**Glossary, the easy way:** Mode **Balanced** = hands-off. Mode **Off** + **Append Glossary** on = use a glossary you built and reviewed yourself (cheaper, cleaner — see 8.2).
+
+**Local AI, pick one:**
+- Existing Ollama server → type `ollama/model-name`
+- Existing LM Studio server → type `lmstudio/model-name`
+- Managed Ollama → type `ollamapull/model-name`
+- All requests → **Other Settings → Enable Custom OpenAI Endpoint** (global)
+- Just one key → **Multi Key Manager → Configure Individual Endpoint** (beats the global one)
+- Route by typing `prefix/model` → **Manage Models → Add Prefix**
+
+**Golden rules:**
+- ✅ Test 1–2 chapters before committing money to a whole book.
+- ✅ Press **Save Config** when you like your setup.
+- ✅ Use a **glossary** for anything longer than a few chapters.
+- ✅ Want `authnd/` + the EPUB Library? Use the **standard `L_Glossarion` build**, not Lite/TurboLite.
+- ✅ Want Gemini 3.1 Pro High through Antigravity OAuth? Use `ocagy/gemini-3.1-pro-high` after completing **OCAGY Login**.
+- ⚠️ Match your **model** to your **API key**'s provider.
+- ⚠️ Don't run `app.py` — the program is **`translator_gui.py`**.
+
+---
+
+## 21. Arena proxy setup, accounts, and streaming
+
+The **Arena proxy** lets Glossarion send translation requests through your signed-in Arena account without an API key. It uses an adapted LMArenaBridge runtime and Arena browser sessions; this is not an official Arena OAuth integration.
+
+### First login
+
+1. Enter an Arena model using `autharena/` followed by its model name. The green **Arena Login** button appears beside the model field, including in the **Multi API Key Manager**.
+2. Click **Arena Login**. On first use, Glossarion automatically downloads uv, an isolated Python runtime, the pinned LMArenaBridge dependencies, and Chromium. Watch the app log for setup progress. A system Python installation is not needed, including when launching a Windows onefile `.exe`.
+3. Glossarion opens installed Chrome with a fresh regular profile owned by the app, at Arena's homepage. If Chrome is unavailable, it uses the downloaded Chromium browser. It automatically opens the sidebar when needed and clicks **Log In** as soon as the control is available. No extension or personal Chrome debugging setup is needed. The temporary login profile is removed after the login browser closes.
+4. Complete sign-in and any website challenge in that window. Glossarion detects the signed-in session and saves the account automatically.
+5. The model catalog refreshes after successful startup/login. Choose an available Arena model, leave the API key empty for this route, and start with a small translation.
+
+Successful installations are cached under `~/.glossarion/autharena_proxy` (on Windows, `C:\Users\<you>\.glossarion\autharena_proxy`). These files remain outside the application, so a onefile executable can reuse them. Account credentials use Glossarion's encrypted storage. Each account has an isolated browser context; your personal browser profiles are not used.
+
+### Account numbers and rotation
+
+Account labels match AuthGPT: the bare prefix selects **#0**, and a positive suffix selects the same numbered account. **`autharena0/`** is reserved for rotation:
+
+| Prefix | What it selects |
+| --- | --- |
+| `autharena/` | First saved account, labelled **#0** |
+| `autharena0/` | Rotate all saved accounts |
+| `autharena1/` | Second saved account, labelled **#1** |
+| `autharena2/` | Third saved account, labelled **#2** |
+| `autharenaN/` | Saved account labelled **#N**, for N ≥ 1 |
+
+**`autharena0/` is rotation, never account #0.** Bare `autharena/` and pooled `autharena0/` hide the inline account dropdown but keep **Arena Login** visible. Explicit numbered routes show **#0**, **#1**, etc., and **+ New**. Choose **+ New** to sign into another account. In rotation mode, **Arena Login** opens account management so you can add or reconnect an account.
+
+Login stays attached to the account and Multi API Key Manager row that started it, even if you change another model while sign-in is open. Every translation request starts a fresh Arena conversation.
+
+### Real-time output
+
+Arena always receives responses as a stream. These controls affect what appears in the log, rather than turning Arena's streaming transport off:
+
+- **Outside batch mode:** `LOG_STREAM_CHUNKS` controls visible incremental output.
+- **During batch mode:** use **Other Settings → Real-time Translation (Streaming) → Allow forced-stream batch log**, whose provider list includes Arena. This is the same control used by Antigravity (`ALLOW_AUTHGPT_BATCH_STREAM_LOGS`).
+- **Reasoning:** when a forced stream is visible, reasoning is shown with it, matching Antigravity. The separate **Stream thinking/reasoning logs** toggle does not independently hide Arena reasoning.
+
+The general **Enable streaming responses** and **Allow streaming logs during batch mode** toggles do not override Arena's forced-stream behavior. **Stop** cancels an active request. An interrupted stream is reported as an error rather than treated as a completed translation or silently replayed as a new successful request.
+
+### Platform status and troubleshooting
+
+- **Windows:** automatic runtime installation, Chromium launch, and a minimal onefile executable startup have been tested.
+- **macOS and Linux:** installation paths are implemented but have not been tested on those platforms. Linux needs a desktop session and Chromium's system libraries; setup does not currently install those operating-system packages automatically.
+- **Live Arena login and generation:** the complete signed-in flow still needs live validation. Website changes or challenges can require interaction in the internal browser.
+- **Session expired:** click **Arena Login** for the affected account and sign in again.
+- **Google says the browser or app may not be secure:** Google rejected this sign-in session. The regular-profile login flow does not guarantee Google acceptance; try another sign-in method offered by Arena if available.
+- **Download/setup failed:** check the app log and internet access, then retry **Arena Login**. Successful cached installations are reused.
+
+For runtime details and standalone commands, see [Arena proxy documentation](autharena_proxy.md).
+
+---
+
+*Made with 🌸 for the translation community. This guide reflects Glossarion v9.6.10 as of September 10, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*

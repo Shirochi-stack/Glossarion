@@ -1,0 +1,1816 @@
+# review_generator.py
+"""
+EPUB Review Generator — Extracts text from an EPUB using html2text,
+fits as many complete chapters as possible within the input token limit,
+and sends a single API call to generate a review/summary.
+"""
+
+import os
+import sys
+import platform
+import json
+import time
+import zipfile
+import threading
+import queue
+from typing import List, Tuple, Optional, Callable, Sequence, Union
+
+import tiktoken
+
+try:
+    import html2text
+except ImportError:
+    html2text = None
+
+try:
+    import ebooklib
+    from ebooklib import epub
+except ImportError:
+    ebooklib = None
+
+from bs4 import BeautifulSoup
+from epub_package import find_epub_opf_member
+
+
+# ─── tokenizer setup ────────────────────────────────────────────────────
+_enc = None
+_enc_lock = threading.Lock()
+
+def _get_encoder():
+    global _enc
+    if _enc is not None:
+        return _enc
+    with _enc_lock:
+        if _enc is not None:
+            return _enc
+        try:
+            # Use cl100k_base directly — it works well for token estimation
+            # and avoids hangs from tiktoken trying to download BPE files
+            # for unrecognized model names (e.g. gemini-2.0-flash)
+            _enc = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _enc = None
+    return _enc
+
+
+def count_tokens(text: str) -> int:
+    """Count tokens using tiktoken, with a crude fallback."""
+    enc = _get_encoder()
+    if enc:
+        return len(enc.encode(text))
+    return max(1, len(text) // 4)
+
+
+# ─── EPUB reading helpers ───────────────────────────────────────────────
+
+# Default special file patterns — can be overridden via SPECIAL_FILE_KEYWORDS env var
+_DEFAULT_SPECIAL_PATTERNS = [
+    'title', 'toc', 'copyright', 'preface', 'nav',
+    'message', 'notice', 'colophon', 'dedication', 'epigraph',
+    'foreword', 'acknowledgment', 'author', 'appendix',
+    'bibliography', 'titlepage', 'halftitle', 'frontmatter', 'backmatter',
+]
+_DEFAULT_SPECIAL_EXACT = ['index', 'glossary', 'glossary_extension', 'glossary_unified']
+
+
+def _get_special_keywords():
+    """Read special file keywords from environment or use defaults."""
+    kw_env = os.environ.get('SPECIAL_FILE_KEYWORDS', '')
+    if kw_env:
+        return [k.strip().lower() for k in kw_env.split(',') if k.strip()]
+    return _DEFAULT_SPECIAL_PATTERNS
+
+
+def _get_special_exact():
+    """Read exact-match special file keywords from environment or use defaults."""
+    exact_env = os.environ.get('SPECIAL_FILE_EXACT', '')
+    if exact_env:
+        return [k.strip().lower() for k in exact_env.split(',') if k.strip()]
+    return _DEFAULT_SPECIAL_EXACT
+
+
+def _is_special_file(filename: str) -> bool:
+    """Check if a filename is a special/metadata file that should be skipped.
+    Uses configurable keyword lists from SPECIAL_FILE_KEYWORDS / SPECIAL_FILE_EXACT env vars.
+    1) Known keyword patterns (substring match)
+    2) Exact basename matches
+    3) Filenames with no digits (e.g. 'info.xhtml', 'about.xhtml')
+    """
+    import re
+    base = os.path.splitext(os.path.basename(filename))[0].lower()
+    # Check known special-file keywords (substring match)
+    if any(pat in base for pat in _get_special_keywords()):
+        return True
+    # Exact match only
+    if base in _get_special_exact():
+        return True
+    # Heuristic: filenames with no digits are often special/metadata files
+    if not re.search(r'\d', base):
+        return True
+    return False
+
+
+def _html_to_plaintext(html_content: str) -> str:
+    """Convert HTML to plain text using html2text."""
+    if html2text:
+        h = html2text.HTML2Text()
+        h.body_width = 0
+        h.unicode_snob = True
+        h.images_as_html = False
+        h.images_to_alt = True
+        h.ignore_images = True
+        h.ignore_links = True
+        h.protect_links = False
+        return h.handle(html_content)
+    else:
+        # Fallback: strip tags with BeautifulSoup
+        soup = BeautifulSoup(html_content, 'html.parser')
+        return soup.get_text(separator='\n')
+
+
+def _get_spine_ordered_html_files(epub_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+    """
+    Read an EPUB and return a list of (filename, html_content) tuples
+    in spine reading order, filtering out special files unless
+    TRANSLATE_SPECIAL_FILES is enabled.
+    """
+    results = []
+    # Respect the translate_special_files toggle — when ON, include special files
+    include_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
+
+    try:
+        # Try ebooklib first
+        if ebooklib:
+            book = epub.read_epub(epub_path, options={'ignore_ncx': True})
+            spine_ids = [item_id for item_id, _ in book.spine]
+            id_to_item = {item.get_id(): item for item in book.get_items()}
+
+            for item_id in spine_ids:
+                item = id_to_item.get(item_id)
+                if item is None:
+                    continue
+                fname = item.get_name()
+                if not include_special and _is_special_file(fname):
+                    log_fn(f"⏭️ Skipping special file: {fname}")
+                    continue
+                try:
+                    content = item.get_content().decode('utf-8', errors='replace')
+                except Exception:
+                    continue
+                results.append((fname, content))
+
+            if results:
+                return results
+    except Exception:
+        pass
+
+    # Fallback: manual zipfile + OPF parsing
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Find OPF
+            opf_name = find_epub_opf_member(zf)
+
+            if not opf_name:
+                # No OPF — just grab all xhtml/html files in order
+                html_files = sorted(
+                    n for n in zf.namelist()
+                    if n.lower().endswith(('.xhtml', '.html', '.htm'))
+                    and (include_special or not _is_special_file(n))
+                )
+                # Log skipped special files
+                if not include_special:
+                    for n in zf.namelist():
+                        if n.lower().endswith(('.xhtml', '.html', '.htm')) and _is_special_file(n):
+                            log_fn(f"⏭️ Skipping special file: {n}")
+                for fname in html_files:
+                    content = zf.read(fname).decode('utf-8', errors='replace')
+                    results.append((fname, content))
+                return results
+
+            # Parse OPF for spine order
+            opf_content = zf.read(opf_name).decode('utf-8', errors='replace')
+            opf_dir = os.path.dirname(opf_name)
+
+            try:
+                soup = BeautifulSoup(opf_content, 'xml')
+            except Exception:
+                soup = BeautifulSoup(opf_content, 'html.parser')
+
+            # Build manifest id → href map
+            manifest = {}
+            for item in soup.find_all('item'):
+                item_id = item.get('id', '')
+                href = item.get('href', '')
+                if item_id and href:
+                    manifest[item_id] = href
+
+            # Read spine order
+            spine_refs = []
+            spine_tag = soup.find('spine')
+            if spine_tag:
+                for itemref in spine_tag.find_all('itemref'):
+                    idref = itemref.get('idref', '')
+                    if idref and idref in manifest:
+                        spine_refs.append(manifest[idref])
+
+            for href in spine_refs:
+                # Resolve path relative to OPF
+                full_path = os.path.normpath(os.path.join(opf_dir, href)).replace('\\', '/')
+                if not include_special and _is_special_file(href):
+                    log_fn(f"⏭️ Skipping special file: {href}")
+                    continue
+                try:
+                    content = zf.read(full_path).decode('utf-8', errors='replace')
+                    results.append((href, content))
+                except KeyError:
+                    # Try without OPF dir prefix
+                    try:
+                        content = zf.read(href).decode('utf-8', errors='replace')
+                        results.append((href, content))
+                    except KeyError:
+                        continue
+
+    except Exception as e:
+        print(f"⚠️ Failed to read EPUB: {e}")
+
+    return results
+
+
+def _extract_epub_chapters(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+    """
+    Extract all chapters from an EPUB as plain text.
+    Returns list of (chapter_name, plain_text) tuples in spine order.
+    """
+    html_files = _get_spine_ordered_html_files(file_path, log_fn=log_fn)
+    chapters = []
+
+    for fname, html_content in html_files:
+        text = _html_to_plaintext(html_content).strip()
+        if text:
+            chapters.append((fname, text))
+
+    log_fn(f"📖 Extracted {len(chapters)} chapters from EPUB")
+    return chapters
+
+
+def _extract_text_file(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+    """Read a plain text or HTML file and return as a single-chapter list."""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+    except Exception as e:
+        log_fn(f"⚠️ Failed to read file: {e}")
+        return []
+
+    # If it looks like HTML, convert it
+    if content.strip().startswith('<') and ('<html' in content.lower() or '<body' in content.lower()):
+        content = _html_to_plaintext(content)
+
+    if content.strip():
+        log_fn(f"📄 Read text file: {os.path.basename(file_path)}")
+        return [(os.path.basename(file_path), content.strip())]
+    return []
+
+
+def _extract_pdf_file(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+    """Extract text from a PDF file using fast sequential extraction."""
+    # Use fitz (PyMuPDF) directly in sequential mode to avoid ProcessPoolExecutor
+    # overhead that extract_text_from_pdf uses for large PDFs (spawning 8+ worker
+    # processes on Windows is very slow and causes log spam).
+    try:
+        import fitz
+        doc = fitz.open(file_path)
+        text_parts = []
+        for page in doc:
+            text = page.get_text()
+            if text.strip():
+                text_parts.append(text)
+        doc.close()
+        text = "\n\n".join(text_parts)
+        if text.strip():
+            log_fn(f"📄 Extracted text from PDF: {os.path.basename(file_path)}")
+            return [(os.path.basename(file_path), text.strip())]
+    except ImportError:
+        pass
+    except Exception as e:
+        log_fn(f"⚠️ Failed to extract PDF with PyMuPDF: {e}")
+
+    # Fallback to pdf_extractor (may use ProcessPoolExecutor for large files)
+    try:
+        from pdf_extractor import extract_text_from_pdf
+        text = extract_text_from_pdf(file_path)
+        if text and text.strip():
+            log_fn(f"📄 Extracted text from PDF: {os.path.basename(file_path)}")
+            return [(os.path.basename(file_path), text.strip())]
+    except ImportError:
+        log_fn("⚠️ No PDF library available (install PyMuPDF, pypdf, or pdfplumber)")
+    except Exception as e:
+        log_fn(f"⚠️ Failed to extract PDF text: {e}")
+    return []
+
+
+def extract_chapter_texts(file_path: str, log_fn: Callable = print) -> List[Tuple[str, str]]:
+    """
+    Extract text content from any supported file type.
+    Returns list of (section_name, plain_text) tuples.
+    Supported: .epub, .txt, .html, .htm, .xhtml, .pdf, .md
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == '.epub':
+        return _extract_epub_chapters(file_path, log_fn)
+    elif ext == '.pdf':
+        return _extract_pdf_file(file_path, log_fn)
+    else:
+        # Text-based files: .txt, .html, .htm, .xhtml, .md, etc.
+        return _extract_text_file(file_path, log_fn)
+
+
+ReviewInput = Union[str, os.PathLike, Sequence[Union[str, os.PathLike]]]
+
+
+def _normalise_review_paths(review_input: ReviewInput) -> List[str]:
+    """Return one or more review input paths as a concrete list."""
+    if isinstance(review_input, (str, os.PathLike)):
+        return [os.fspath(review_input)]
+    return [os.fspath(path) for path in review_input]
+
+
+def extract_review_chapters(
+    review_input: ReviewInput,
+    log_fn: Callable = print,
+) -> List[Tuple[str, str]]:
+    """Extract an ordered file set as one continuous, volume-aware book.
+
+    A single path preserves the historical chapter names. For multiple paths,
+    every section name is prefixed with its volume number and filename so chunk
+    logs and model input retain the boundary between books.
+    """
+    paths = _normalise_review_paths(review_input)
+    if len(paths) == 1:
+        return extract_chapter_texts(paths[0], log_fn=log_fn)
+
+    chapters: List[Tuple[str, str]] = []
+    total = len(paths)
+    for index, path in enumerate(paths, start=1):
+        basename = os.path.basename(path)
+        log_fn(f"Extracting volume {index}/{total}: {basename}")
+        sections = extract_chapter_texts(path, log_fn=log_fn)
+        for section_name, text in sections:
+            name = f"Volume {index}/{total}: {basename} / {section_name}"
+            chapters.append((name, text))
+    return chapters
+
+
+# ─── Token counting ─────────────────────────────────────────────────────
+
+def count_epub_tokens(epub_path: str, log_fn: Callable = print) -> int:
+    """
+    Count total tokens in a file using html2text + tiktoken.
+    Uses parallel threading for speed on large files.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
+
+    print(f"[TokenCount] Starting for: {os.path.basename(epub_path)}")
+    t0 = time.time()
+
+    print(f"[TokenCount] Extracting chapters...")
+    chapters = extract_chapter_texts(epub_path, log_fn=lambda *_: None)
+    print(f"[TokenCount] Extracted {len(chapters)} chapters in {time.time() - t0:.1f}s")
+    if not chapters:
+        return 0
+
+    # Eagerly initialize encoder before threading
+    print(f"[TokenCount] Initializing encoder...")
+    enc = _get_encoder()
+    if enc is None:
+        print(f"[TokenCount] WARNING: tiktoken encoder is None, using fallback")
+    print(f"[TokenCount] Encoder ready in {time.time() - t0:.1f}s")
+
+    # Count tokens in parallel across chapters
+    print(f"[TokenCount] Counting tokens across {len(chapters)} chapters...")
+    with ThreadPoolExecutor(max_workers=min(8, len(chapters))) as pool:
+        futures = [pool.submit(count_tokens, text) for _, text in chapters]
+        total = sum(f.result() for f in as_completed(futures))
+
+    print(f"[TokenCount] Done: {total:,} tokens in {time.time() - t0:.1f}s")
+    return total
+
+
+def count_review_tokens(review_input: ReviewInput, log_fn: Callable = print) -> int:
+    """Count tokens across an ordered group of files treated as one book."""
+    paths = _normalise_review_paths(review_input)
+    if len(paths) == 1:
+        return count_epub_tokens(paths[0], log_fn=log_fn)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    started = time.time()
+    print(f"[TokenCount] Starting volume count for {len(paths)} files")
+    chapters = extract_review_chapters(paths, log_fn=lambda *_: None)
+    if not chapters:
+        return 0
+
+    _get_encoder()
+    with ThreadPoolExecutor(max_workers=min(8, len(chapters))) as pool:
+        futures = [pool.submit(count_tokens, text) for _, text in chapters]
+        total = sum(future.result() for future in as_completed(futures))
+
+    print(
+        f"[TokenCount] Volume total: {total:,} tokens across "
+        f"{len(paths)} files in {time.time() - started:.1f}s"
+    )
+    return total
+
+
+def _save_review_text(
+    review_text: str,
+    output_dir: str,
+    log_fn: Callable,
+    review_output_paths: Optional[Sequence[Union[str, os.PathLike]]] = None,
+) -> List[str]:
+    """Save a review to its default path or to every explicitly requested path."""
+    if review_output_paths is None:
+        paths = [os.path.join(output_dir, "review", "review.md")]
+    else:
+        paths = list(dict.fromkeys(os.fspath(path) for path in review_output_paths))
+
+    for review_path in paths:
+        os.makedirs(os.path.dirname(os.path.abspath(review_path)), exist_ok=True)
+        with open(review_path, 'w', encoding='utf-8') as file:
+            file.write(review_text.strip())
+
+    if len(paths) == 1:
+        log_fn(f"💾 Review saved to: {paths[0]}")
+    else:
+        log_fn(f"💾 Combined review saved inside all {len(paths)} volume folders")
+    return paths
+
+
+# ─── Chapter chunking helper ────────────────────────────────────────────
+
+import re
+
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+
+
+def _chunk_chapter(name: str, text: str, budget: int) -> Tuple[str, str]:
+    """
+    Truncate a single chapter's text so it fits within *budget* tokens.
+
+    Strategy:
+      1. Split on sentence boundaries and greedily accumulate.
+      2. If even the first sentence exceeds the budget, fall back to a raw
+         character slice (~4 chars per token heuristic, then trim to budget).
+
+    Returns (name_with_suffix, truncated_text).
+    """
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    accumulated = []
+    used = 0
+    for sent in sentences:
+        t = count_tokens(sent)
+        if used + t > budget:
+            break
+        accumulated.append(sent)
+        used += t
+
+    if accumulated:
+        return (name, " ".join(accumulated))
+
+    # Even the first sentence is too large — hard-truncate by characters
+    approx_chars = budget * 4  # rough estimate
+    chunk = text[:approx_chars]
+    # Trim to fit exactly
+    while count_tokens(chunk) > budget and len(chunk) > 10:
+        chunk = chunk[:int(len(chunk) * 0.9)]
+    return (name, chunk)
+
+
+# ─── Chapter fitting logic ──────────────────────────────────────────────
+
+def _fit_chapters(
+    chapters: List[Tuple[str, str]],
+    token_budget: int,
+    spoiler_mode: bool,
+) -> Tuple[List[Tuple[str, str]], str]:
+    """
+    Select which chapters to include based on the token budget.
+
+    If no whole chapter fits, falls back to chunking:
+      - Normal mode:  chunk the first chapter.
+      - Spoiler mode:  chunk the first AND last chapter (each gets half budget).
+
+    Returns:
+        (selected_chapters, info_message)
+    """
+    # Count tokens per chapter
+    chapter_tokens = [(name, text, count_tokens(text)) for name, text in chapters]
+    total_chapters = len(chapter_tokens)
+
+    if not spoiler_mode:
+        # Normal mode: greedily include chapters from the start
+        selected = []
+        used = 0
+        for name, text, tokens in chapter_tokens:
+            if used + tokens > token_budget:
+                break
+            selected.append((name, text))
+            used += tokens
+
+        if not selected:
+            # Fallback: chunk the first chapter to fit
+            name, text, _ = chapter_tokens[0]
+            chunked_name, chunked_text = _chunk_chapter(name, text, token_budget)
+            chunked_tokens = count_tokens(chunked_text)
+            info = (
+                f"📊 Budget too small for whole chapters — using partial first chapter "
+                f"({chunked_tokens:,} tokens, budget: {token_budget:,})"
+            )
+            return [(chunked_name, chunked_text)], info
+
+        info = f"📊 Fitted {len(selected)}/{total_chapters} chapters ({used:,} tokens, budget: {token_budget:,})"
+        return selected, info
+
+    else:
+        # Spoiler mode: split budget 50/50 between first and last chapters
+        half_budget = token_budget // 2
+
+        # Single-chapter content (1-chapter EPUB, .txt, .pdf, etc.)
+        # If the whole thing fits, just use it all — no split needed.
+        if total_chapters == 1:
+            name, text, tokens = chapter_tokens[0]
+            if tokens <= token_budget:
+                info = f"📊 Spoiler mode: entire file included ({tokens:,} tokens, budget: {token_budget:,})"
+                return [(name, text)], info
+            # Doesn't fit whole — split the TEXT into first-half and last-half portions.
+            mid = len(text) // 2
+            first_text = text[:mid]
+            last_text = text[mid:]
+            fn, ft = _chunk_chapter(f"{name} [first half]", first_text, half_budget)
+            ln, lt = _chunk_chapter(f"{name} [last half]", last_text, half_budget)
+            tok_first = count_tokens(ft)
+            tok_last = count_tokens(lt)
+            tok = tok_first + tok_last
+            info = (
+                f"📊 Spoiler mode (single file): first half ({tok_first:,}) + last half ({tok_last:,}) "
+                f"= {tok:,} tokens (budget: {token_budget:,})"
+            )
+            return [(fn, ft), (ln, lt)], info
+
+        # Multi-chapter: greedy from start
+        first_half = []
+        used_first = 0
+        for name, text, tokens in chapter_tokens:
+            if used_first + tokens > half_budget:
+                break
+            first_half.append((name, text))
+            used_first += tokens
+
+        # Last half: greedy from end (reversed)
+        last_half = []
+        used_last = 0
+        first_count = len(first_half)
+        # Only pick from chapters AFTER the first half to avoid overlap
+        remaining = chapter_tokens[first_count:]
+        for name, text, tokens in reversed(remaining):
+            if used_last + tokens > half_budget:
+                break
+            last_half.insert(0, (name, text))  # Maintain order
+            used_last += tokens
+
+        # Fallback: if either half is empty, chunk the relevant chapter
+        if not first_half and not last_half:
+            # Nothing fits at all — chunk both first and last
+            n1, t1, _ = chapter_tokens[0]
+            n2, t2, _ = chapter_tokens[-1]
+            cn1, ct1 = _chunk_chapter(n1, t1, half_budget)
+            cn2, ct2 = _chunk_chapter(n2, t2, half_budget)
+            tok = count_tokens(ct1) + count_tokens(ct2)
+            info = (
+                f"📊 Spoiler mode: partial first + partial last chapter "
+                f"({tok:,} tokens, budget: {token_budget:,})"
+            )
+            return [(cn1, ct1), (cn2, ct2)], info
+        elif not first_half:
+            # Only the first half couldn't fit — chunk the first chapter
+            n, t, _ = chapter_tokens[0]
+            cn, ct = _chunk_chapter(n, t, half_budget)
+            first_half = [(cn, ct)]
+            used_first = count_tokens(ct)
+        elif not last_half and remaining:
+            # Only the last half couldn't fit — chunk the last chapter
+            n, t, _ = chapter_tokens[-1]
+            cn, ct = _chunk_chapter(n, t, half_budget)
+            last_half = [(cn, ct)]
+            used_last = count_tokens(ct)
+
+        selected = first_half + last_half
+        total_used = used_first + used_last
+        skipped = total_chapters - len(selected)
+        info = (
+            f"📊 Spoiler mode: {len(first_half)} first + {len(last_half)} last chapters "
+            f"({total_used:,} tokens, {skipped} middle chapters skipped, budget: {token_budget:,})"
+        )
+        return selected, info
+
+
+# ─── Default system prompt ──────────────────────────────────────────────
+
+DEFAULT_REVIEW_PROMPT = """You are a literary critic and book reviewer. You will be given the text content of a novel (or part of it).
+
+Write a comprehensive review ENTIRELY in {target_lang} that includes:
+1. **Summary** — A concise plot summary covering the main storyline
+2. **Characters** — Key characters and their roles
+3. **Themes** — Major themes explored in the work
+4. **Writing Style** — Assessment of the author's writing style, pacing, and narrative technique
+5. **Strengths & Weaknesses** — What the work does well and where it falls short
+6. **Originality Score** — Create a markdown comparison table scoring how unique vs generic the novel is across these categories: Plot, Setting/World-Building, Characters, Power System/Magic, Themes, Prose Style, and Overall. Use a 1-10 scale (1 = completely generic/derivative, 10 = highly original/unique). Include a brief note for each score explaining your reasoning. Example format:
+
+| Category | Score | Notes |
+|----------|:-----:|-------|
+| Plot | 6/10 | ... |
+
+7. **Overall Assessment** — Your overall rating and recommendation
+
+Use markdown ### headers for each section title (e.g. ### 1. Summary) to make them stand out. Use **bold** for emphasis within sections.
+
+IMPORTANT: Your entire output must be in {target_lang}. Do NOT include any raw/untranslated text from the source language. All character names, place names, titles, and terms must be transliterated or translated into {target_lang}. Write in a professional but engaging tone. Be specific with examples from the text when possible."""
+
+DEFAULT_CHUNK_PROMPT = DEFAULT_REVIEW_PROMPT  # Per-chunk prompt is the same as the main review prompt
+
+DEFAULT_FINAL_REVIEW_PROMPT = """You are an expert literary critic and book reviewer. Below you will find multiple individual review segments, each covering a different section (chunk) of the same novel. These chunk reviews were generated independently by reviewing consecutive chapter ranges.
+
+Your task is to synthesize ALL of the chunk reviews below into a single, comprehensive, cohesive, and polished final review. Follow these guidelines carefully:
+
+1. **Merge and Deduplicate** — Combine overlapping information. If multiple chunks mention the same characters, themes, or plot points, merge them into unified descriptions rather than repeating.
+2. **Resolve Contradictions** — If chunk reviews disagree on quality assessments or interpretations, weigh the evidence and provide a balanced final judgment. Note significant shifts in quality across the novel if relevant.
+3. **Maintain Chronological Awareness** — Since chunks cover sequential portions of the novel, your summary should reflect the full narrative arc from beginning to end.
+4. **Comprehensive Coverage** — Ensure no significant plot points, characters, or themes from any chunk review are lost in the synthesis.
+
+Your final review MUST include these sections, using markdown ### headers:
+
+### 1. Summary
+A complete plot summary covering the entire novel's storyline from start to finish, synthesized from all chunk summaries.
+
+### 2. Characters
+All key characters mentioned across all chunks, with their roles and development throughout the story.
+
+### 3. Themes
+All major themes explored across the entire work, noting how they evolve or deepen across different sections.
+
+### 4. Writing Style
+A holistic assessment of the author's writing style, pacing, and narrative technique across the full novel. Note any changes in quality or style between early and later sections.
+
+### 5. Strengths & Weaknesses
+A consolidated list of what the work does well and where it falls short, drawn from all chunk assessments.
+
+### 6. Originality Score
+Create a markdown comparison table scoring how unique vs generic the novel is across these categories: Plot, Setting/World-Building, Characters, Power System/Magic, Themes, Prose Style, and Overall. Use a 1-10 scale (1 = completely generic/derivative, 10 = highly original/unique). Include a brief note for each score explaining your reasoning.
+
+| Category | Score | Notes |
+|----------|:-----:|-------|
+| Plot | ?/10 | ... |
+| Setting/World-Building | ?/10 | ... |
+| Characters | ?/10 | ... |
+| Power System/Magic | ?/10 | ... |
+| Themes | ?/10 | ... |
+| Prose Style | ?/10 | ... |
+| **Overall** | ?/10 | ... |
+
+### 7. Overall Assessment
+Your final rating and recommendation for the novel as a whole, considering all sections reviewed.
+
+IMPORTANT: Your entire output must be in {target_lang}. Do NOT include any raw/untranslated text. All names, places, and terms must be transliterated or translated into {target_lang}. Write in a professional but engaging tone. Be specific with examples from the text when possible."""
+
+
+# ─── Main review generation ─────────────────────────────────────────────
+
+def generate_review(
+    epub_path: ReviewInput,
+    output_dir: str,
+    api_key: str,
+    model: str,
+    endpoint: str,
+    system_prompt: str,
+    input_token_limit: int,
+    spoiler_mode: bool,
+    temperature: float,
+    config: dict,
+    log_fn: Callable = print,
+    stop_check_fn: Callable = None,
+    review_output_paths: Optional[Sequence[Union[str, os.PathLike]]] = None,
+) -> Optional[str]:
+    """
+    Generate a review of an EPUB by sending content in a single API call.
+    
+    Args:
+        epub_path: Path to one file, or ordered paths treated as one book
+        output_dir: Output directory (review saved under review/ subfolder)
+        api_key: API key for the model
+        model: Model name
+        endpoint: API endpoint URL
+        system_prompt: System prompt for the review
+        input_token_limit: Maximum input tokens
+        spoiler_mode: If True, split 50/50 between first and last chapters
+        temperature: API temperature
+        config: Full config dict (for multi-key support etc.)
+        log_fn: Logging callback
+        stop_check_fn: Stop check callback
+        review_output_paths: Optional explicit paths that all receive the review
+        
+    Returns:
+        The generated review text, or None on failure.
+    """
+    if stop_check_fn and stop_check_fn():
+        return None
+
+    # 1. Extract chapters
+    input_paths = _normalise_review_paths(epub_path)
+    if not input_paths:
+        log_fn("❌ No input files were provided")
+        return None
+    if len(input_paths) > 1:
+        log_fn(f"📚 Extracting one volume from {len(input_paths)} ordered files...")
+    else:
+        log_fn(f"📖 Extracting content from {os.path.basename(input_paths[0])}...")
+    chapters = extract_review_chapters(input_paths, log_fn=log_fn)
+
+    if not chapters:
+        log_fn("❌ No text content found in file")
+        return None
+
+    # 2. Count system prompt tokens
+    prompt_tokens = count_tokens(system_prompt)
+    available_budget = input_token_limit - prompt_tokens
+    if available_budget <= 0:
+        log_fn(f"❌ System prompt ({prompt_tokens:,} tokens) exceeds input token limit ({input_token_limit:,})")
+        return None
+
+    log_fn(f"📊 Input token limit: {input_token_limit:,} | System prompt: {prompt_tokens:,} tokens | Available for content: {available_budget:,} tokens")
+
+    # 3. Fit chapters
+    selected_chapters, fit_info = _fit_chapters(chapters, available_budget, spoiler_mode)
+    log_fn(fit_info)
+
+    if not selected_chapters:
+        log_fn("❌ No chapters fit within the token budget")
+        return None
+
+    if stop_check_fn and stop_check_fn():
+        log_fn("🛑 Stopped by user")
+        return None
+
+    # 4. Build the concatenated content
+    content_parts = []
+    for i, (name, text) in enumerate(selected_chapters):
+        content_parts.append(f"--- Chapter: {name} ---\n{text}")
+
+    full_content = "\n\n".join(content_parts)
+    content_tokens = count_tokens(full_content)
+
+    # 5. Build messages
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": full_content},
+    ]
+
+    # 6. Make API call via UnifiedClient
+    try:
+        from unified_api_client import UnifiedClient
+        from extract_glossary_from_epub import create_client_with_multi_key_support
+
+        # Set environment variables for the client
+        if endpoint:
+            os.environ['ENDPOINT'] = endpoint
+        os.environ['MODEL'] = model
+
+        client = create_client_with_multi_key_support(api_key, model, output_dir, config, context='review')
+        client.context = 'review'  # Override 'glossary' default to avoid stale glossary stop flags
+
+        # Show token/key info (model is logged by UnifiedClient after key selection)
+        is_multi = getattr(client, '_multi_key_mode', False)
+        key_count = 1
+        if is_multi:
+            try:
+                pool = getattr(client, '_api_key_pool', None) or client.__class__._api_key_pool
+                if pool and hasattr(pool, 'keys'):
+                    key_count = len(pool.keys)
+                elif pool and hasattr(pool, '_keys'):
+                    key_count = len(pool._keys)
+            except Exception:
+                key_count = 2
+        if is_multi:
+            log_fn(
+                f"🔑 Review key source: Translation Keys (Main Pool; "
+                f"{key_count} key{'s' if key_count != 1 else ''} available)"
+            )
+            log_fn(f"📤 Sending {content_tokens:,} tokens via Translation Keys...")
+        else:
+            log_fn(f"🔑 Review key source: Main GUI key ({model})")
+            log_fn(f"📤 Sending {content_tokens:,} tokens to {model}...")
+
+        log_fn("🚀 Sending API request (single call)...")
+        start_time = time.time()
+
+        try:
+            from TransateKRtoEN import send_with_interrupt
+            result_tuple = send_with_interrupt(
+                messages, client, temperature=temperature, max_tokens=None,
+                stop_check_fn=stop_check_fn, context='review',
+            )
+            elapsed = time.time() - start_time
+            if isinstance(result_tuple, tuple) and len(result_tuple) == 3:
+                review_text, finish_reason, raw_obj = result_tuple
+            elif isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                review_text, finish_reason = result_tuple
+            else:
+                review_text = result_tuple
+                finish_reason = 'stop'
+        except ImportError:
+            result = client.send(messages, temperature=temperature, max_tokens=None, context='review')
+            elapsed = time.time() - start_time
+            if isinstance(result, tuple):
+                review_text, finish_reason = result
+            else:
+                review_text = result
+                finish_reason = 'stop'
+
+        # Check if force-stopped while waiting for API
+        if stop_check_fn and stop_check_fn():
+            log_fn("🛑 Stopped by user — discarding API response")
+            return None
+
+        if not review_text or not review_text.strip():
+            log_fn("❌ Empty response from API")
+            return None
+
+        log_fn(f"✅ Review generated in {elapsed:.1f}s (finish_reason: {finish_reason})")
+
+        # 7. Save review
+        _save_review_text(
+            review_text,
+            output_dir,
+            log_fn,
+            review_output_paths=review_output_paths,
+        )
+        return review_text.strip()
+
+    except Exception as e:
+        # Silently handle user-initiated cancellation / stop
+        err_str = str(e).lower()
+        if 'cancelled' in err_str or 'canceled' in err_str or 'stopped by user' in err_str:
+            log_fn("🛑 Review stopped by user")
+            return None
+        log_fn(f"❌ API call failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+# ─── Chunked review generation ──────────────────────────────────────────
+
+
+def _split_text_into_segments(
+    name: str, text: str, token_budget: int
+) -> List[Tuple[str, str]]:
+    """Split a single oversized chapter/text into sequential segments
+    that each fit within the token budget. Splits on sentence boundaries."""
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    segments: List[Tuple[str, str]] = []
+    current_sents: List[str] = []
+    current_tokens = 0
+
+    for sent in sentences:
+        t = count_tokens(sent)
+        if current_tokens + t > token_budget and current_sents:
+            # Flush the current segment
+            seg_idx = len(segments) + 1
+            seg_text = " ".join(current_sents)
+            segments.append((f"{name} [part {seg_idx}]", seg_text))
+            current_sents = []
+            current_tokens = 0
+        # If a single sentence exceeds budget, hard-truncate it
+        if t > token_budget and not current_sents:
+            approx_chars = token_budget * 4
+            chunk = sent[:approx_chars]
+            while count_tokens(chunk) > token_budget and len(chunk) > 10:
+                chunk = chunk[:int(len(chunk) * 0.9)]
+            seg_idx = len(segments) + 1
+            segments.append((f"{name} [part {seg_idx}]", chunk))
+            continue
+        current_sents.append(sent)
+        current_tokens += t
+
+    # Flush remaining
+    if current_sents:
+        seg_idx = len(segments) + 1
+        seg_text = " ".join(current_sents)
+        segments.append((f"{name} [part {seg_idx}]", seg_text))
+
+    # If only 1 segment, return without part suffix
+    if len(segments) == 1:
+        segments = [(name, segments[0][1])]
+
+    return segments
+
+def _split_into_chunks(
+    chapters: List[Tuple[str, str]],
+    token_budget: int,
+    spoiler_mode: bool,
+) -> List[List[Tuple[str, str]]]:
+    """
+    Split a full chapter list into multiple chunk groups, each fitting
+    within the token budget. In spoiler mode, each chunk applies 50/50
+    first/last splitting logic.
+
+    Returns a list of chunk groups, where each group is a list of
+    (chapter_name, chapter_text) tuples.
+    """
+    if not chapters:
+        return []
+
+    # Count tokens per chapter
+    chapter_tokens = [(name, text, count_tokens(text)) for name, text in chapters]
+
+    chunks = []
+    remaining = list(chapter_tokens)
+
+    while remaining:
+        current_chunk = []
+        used = 0
+
+        if not spoiler_mode:
+            # Greedy: pack as many consecutive chapters as possible
+            while remaining:
+                name, text, tokens = remaining[0]
+                if used + tokens > token_budget and current_chunk:
+                    break  # This chapter doesn't fit, start a new chunk
+                if used + tokens > token_budget and not current_chunk:
+                    # Single chapter too large — split into sequential segments
+                    remaining.pop(0)
+                    segments = _split_text_into_segments(name, text, token_budget)
+                    # First segment goes into current_chunk
+                    current_chunk.append(segments[0])
+                    # Remaining segments become new "chapters" at the front of remaining
+                    for seg_name, seg_text in reversed(segments[1:]):
+                        seg_tokens = count_tokens(seg_text)
+                        remaining.insert(0, (seg_name, seg_text, seg_tokens))
+                    break
+                current_chunk.append((name, text))
+                used += tokens
+                remaining.pop(0)
+        else:
+            # Spoiler mode: take chapters from front and back of remaining
+            half_budget = token_budget // 2
+
+            # Front half
+            front = []
+            front_used = 0
+            while remaining:
+                name, text, tokens = remaining[0]
+                if front_used + tokens > half_budget and front:
+                    break
+                if front_used + tokens > half_budget and not front:
+                    cn, ct = _chunk_chapter(name, text, half_budget)
+                    front.append((cn, ct))
+                    remaining.pop(0)
+                    break
+                front.append((name, text))
+                front_used += tokens
+                remaining.pop(0)
+
+            # Back half (from end of remaining)
+            back = []
+            back_used = 0
+            while remaining:
+                name, text, tokens = remaining[-1]
+                if back_used + tokens > half_budget and back:
+                    break
+                if back_used + tokens > half_budget and not back:
+                    cn, ct = _chunk_chapter(name, text, half_budget)
+                    back.insert(0, (cn, ct))
+                    remaining.pop()
+                    break
+                back.insert(0, (name, text))
+                back_used += tokens
+                remaining.pop()
+
+            current_chunk = front + back
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+    return chunks
+
+
+def generate_chunked_review(
+    epub_path: ReviewInput,
+    output_dir: str,
+    api_key: str,
+    model: str,
+    endpoint: str,
+    system_prompt: str,
+    final_review_prompt: str,
+    input_token_limit: int,
+    spoiler_mode: bool,
+    wrap_chunks: bool,
+    temperature: float,
+    config: dict,
+    batch_size: int = 1,
+    log_fn: Callable = print,
+    stop_check_fn: Callable = None,
+    review_output_paths: Optional[Sequence[Union[str, os.PathLike]]] = None,
+) -> Optional[str]:
+    """
+    Generate a review by splitting content into chunks, reviewing each
+    chunk separately, then synthesizing all chunk reviews into one final review.
+
+    Args:
+        epub_path: Path to one file, or ordered paths treated as one book
+        output_dir: Output directory
+        api_key: API key
+        model: Model name
+        endpoint: API endpoint URL
+        system_prompt: System prompt for per-chunk reviews
+        final_review_prompt: System prompt for the final synthesis review
+        input_token_limit: Maximum input tokens per API call
+        spoiler_mode: If True, apply 50/50 first/last logic per chunk
+        wrap_chunks: If True, wrap chunk reviews with header/footer markers
+        temperature: API temperature
+        config: Full config dict
+        batch_size: Number of parallel chunk workers (1 = sequential)
+        log_fn: Logging callback
+        stop_check_fn: Stop check callback
+        review_output_paths: Optional explicit paths that all receive the review
+
+    Returns:
+        The final synthesized review text, or None on failure.
+    """
+    if stop_check_fn and stop_check_fn():
+        return None
+
+    # 1. Extract chapters
+    input_paths = _normalise_review_paths(epub_path)
+    if not input_paths:
+        log_fn("❌ No input files were provided")
+        return None
+    if len(input_paths) > 1:
+        log_fn(f"📚 Extracting one volume from {len(input_paths)} ordered files...")
+    else:
+        log_fn(f"📖 Extracting content from {os.path.basename(input_paths[0])}...")
+    chapters = extract_review_chapters(input_paths, log_fn=log_fn)
+
+    if not chapters:
+        log_fn("❌ No text content found in file")
+        return None
+
+    # 2. Compute token budget for content (subtract system prompt tokens)
+    prompt_tokens = count_tokens(system_prompt)
+    available_budget = input_token_limit - prompt_tokens
+    if available_budget <= 0:
+        log_fn(f"❌ System prompt ({prompt_tokens:,} tokens) exceeds input token limit ({input_token_limit:,})")
+        return None
+
+    log_fn(f"📊 Input token limit: {input_token_limit:,} | System prompt: {prompt_tokens:,} tokens | Available per chunk: {available_budget:,} tokens")
+
+    # 3. Split into chunks
+    chunk_groups = _split_into_chunks(chapters, available_budget, spoiler_mode)
+    total_chunks = len(chunk_groups)
+
+    if total_chunks == 0:
+        log_fn("❌ No chunks could be created from the content")
+        return None
+
+    # If only 1 chunk, fall back to normal single-call review
+    if total_chunks == 1:
+        log_fn("📦 Only 1 chunk needed — falling back to single-call review")
+        return generate_review(
+            epub_path=epub_path,
+            output_dir=output_dir,
+            api_key=api_key,
+            model=model,
+            endpoint=endpoint,
+            system_prompt=system_prompt,
+            input_token_limit=input_token_limit,
+            spoiler_mode=spoiler_mode,
+            temperature=temperature,
+            config=config,
+            log_fn=log_fn,
+            stop_check_fn=stop_check_fn,
+            review_output_paths=review_output_paths,
+        )
+
+    log_fn(f"📦 Chunk Mode: splitting into {total_chunks} chunks (batch_size={batch_size})")
+
+    if stop_check_fn and stop_check_fn():
+        log_fn("🛑 Stopped by user")
+        return None
+
+    # 4. Client factory — each thread creates its own for true parallelism
+    def _make_client():
+        from unified_api_client import UnifiedClient
+        from extract_glossary_from_epub import create_client_with_multi_key_support
+
+        if endpoint:
+            os.environ['ENDPOINT'] = endpoint
+        os.environ['MODEL'] = model
+
+        client = create_client_with_multi_key_support(api_key, model, output_dir, config, context='review')
+        client.context = 'review'  # Override 'glossary' default to avoid stale glossary stop flags
+        return client
+
+    # Verify we can create at least one client before spawning threads
+    try:
+        _test_client = _make_client()
+        del _test_client
+    except Exception as e:
+        log_fn(f"❌ Failed to create API client: {e}")
+        return None
+
+    # 5. Send chunk API calls (parallel when batch_size > 1)
+    import threading as _threading
+    _log_lock = _threading.Lock()
+
+    def _safe_log(msg):
+        with _log_lock:
+            log_fn(msg)
+
+    def _review_chunk(ci, chunk_chapters):
+        """Process a single chunk — returns (index, review_text_or_None, elapsed)."""
+        if stop_check_fn and stop_check_fn():
+            return ci, None, 0.0
+
+        # Per-thread client for true parallelism
+        try:
+            thread_client = _make_client()
+        except Exception as e:
+            _safe_log(f"❌ Chunk {ci+1}: Failed to create API client: {e}")
+            return ci, None, 0.0
+
+        first_ch = chunk_chapters[0][0]
+        last_ch = chunk_chapters[-1][0]
+        range_label = first_ch if first_ch == last_ch else f"{first_ch} → {last_ch}"
+
+        _safe_log(f"\n{'─'*40}\n📄 Chunk {ci+1}/{total_chunks}: {range_label} ({len(chunk_chapters)} chapter(s))\n{'─'*40}")
+
+        content_parts = [f"--- Chapter: {name} ---\n{text}" for name, text in chunk_chapters]
+        full_content = "\n\n".join(content_parts)
+        content_tokens = count_tokens(full_content)
+
+        _safe_log(f"📤 Chunk {ci+1}: Sending {content_tokens:,} tokens...")
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": full_content},
+        ]
+
+        try:
+            start_time = time.time()
+
+            try:
+                from TransateKRtoEN import send_with_interrupt
+                result_tuple = send_with_interrupt(
+                    messages, thread_client, temperature=temperature, max_tokens=None,
+                    stop_check_fn=stop_check_fn, context='review',
+                )
+                elapsed = time.time() - start_time
+                if isinstance(result_tuple, tuple) and len(result_tuple) == 3:
+                    chunk_text, finish_reason, _ = result_tuple
+                elif isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                    chunk_text, finish_reason = result_tuple
+                else:
+                    chunk_text = result_tuple
+                    finish_reason = 'stop'
+            except ImportError:
+                result = thread_client.send(messages, temperature=temperature, max_tokens=None, context='review')
+                elapsed = time.time() - start_time
+                if isinstance(result, tuple):
+                    chunk_text, finish_reason = result
+                else:
+                    chunk_text = result
+                    finish_reason = 'stop'
+
+            if not chunk_text or not chunk_text.strip():
+                _safe_log(f"⚠️ Chunk {ci+1}: Empty response, skipping")
+                return ci, None, elapsed
+
+            _safe_log(f"✅ Chunk {ci+1} done in {elapsed:.1f}s (finish_reason: {finish_reason})")
+
+            chunk_review = chunk_text.strip()
+            if wrap_chunks:
+                header = f"=== CHUNK REVIEW: {range_label} ==="
+                footer = f"=== END CHUNK REVIEW: {range_label} ==="
+                chunk_review = f"{header}\n\n{chunk_review}\n\n{footer}"
+
+            return ci, chunk_review, elapsed
+
+        except Exception as e:
+            err_str = str(e).lower()
+            if 'cancelled' in err_str or 'canceled' in err_str or 'stopped by user' in err_str:
+                return ci, '__CANCELLED__', 0.0
+            _safe_log(f"⚠️ Chunk {ci+1} failed: {e}")
+            return ci, None, 0.0
+
+    # Use ThreadPoolExecutor for parallel chunk processing
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    workers = max(1, batch_size)
+    chunk_results = [None] * total_chunks  # Preserve order
+    total_elapsed = 0.0
+    cancelled = False
+
+    # Signal batch mode to the API client so streaming log toggles are respected
+    _prev_batch_translation = os.environ.get('BATCH_TRANSLATION')
+    if workers > 1:
+        os.environ['BATCH_TRANSLATION'] = '1'
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ChunkReview") as pool:
+        futures = {
+            pool.submit(_review_chunk, ci, chunk_chapters): ci
+            for ci, chunk_chapters in enumerate(chunk_groups)
+        }
+        for future in as_completed(futures):
+            ci = futures[future]
+            try:
+                idx, review_text, elapsed = future.result()
+                total_elapsed += elapsed
+
+                if review_text == '__CANCELLED__':
+                    log_fn("🛑 Chunk review cancelled by user")
+                    cancelled = True
+                    # Cancel remaining futures
+                    for f in futures:
+                        f.cancel()
+                    break
+
+                chunk_results[idx] = review_text
+            except Exception as e:
+                log_fn(f"⚠️ Chunk {ci+1} future failed: {e}")
+
+            if stop_check_fn and stop_check_fn():
+                log_fn("🛑 Stopped by user")
+                cancelled = True
+                for f in futures:
+                    f.cancel()
+                break
+
+    # Restore BATCH_TRANSLATION env var
+    if _prev_batch_translation is None:
+        os.environ.pop('BATCH_TRANSLATION', None)
+    else:
+        os.environ['BATCH_TRANSLATION'] = _prev_batch_translation
+
+    if cancelled:
+        return None
+
+    # Filter out None results (failed/empty chunks) while preserving order
+    chunk_reviews = [r for r in chunk_results if r is not None]
+
+    if not chunk_reviews:
+        log_fn("❌ No chunk reviews were generated")
+        return None
+
+    log_fn(f"\n{'═'*40}\n📊 {len(chunk_reviews)}/{total_chunks} chunk reviews collected ({total_elapsed:.1f}s total)\n{'═'*40}")
+
+    if stop_check_fn and stop_check_fn():
+        log_fn("🛑 Stopped by user")
+        return None
+
+    # 6. Final synthesis call
+    log_fn(f"\n🔄 Sending Final Review synthesis prompt...")
+    combined_chunks = "\n\n".join(chunk_reviews)
+    combined_tokens = count_tokens(combined_chunks)
+    log_fn(f"📤 Sending {combined_tokens:,} tokens of chunk reviews for synthesis...")
+
+    final_messages = [
+        {"role": "system", "content": final_review_prompt},
+        {"role": "user", "content": combined_chunks},
+    ]
+
+    try:
+        synthesis_client = _make_client()
+        start_time = time.time()
+
+        try:
+            from TransateKRtoEN import send_with_interrupt
+            result_tuple = send_with_interrupt(
+                final_messages, synthesis_client, temperature=temperature, max_tokens=None,
+                stop_check_fn=stop_check_fn, context='review',
+            )
+            elapsed = time.time() - start_time
+            if isinstance(result_tuple, tuple) and len(result_tuple) == 3:
+                final_text, finish_reason, _ = result_tuple
+            elif isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                final_text, finish_reason = result_tuple
+            else:
+                final_text = result_tuple
+                finish_reason = 'stop'
+        except ImportError:
+            result = synthesis_client.send(final_messages, temperature=temperature, max_tokens=None, context='review')
+            elapsed = time.time() - start_time
+            if isinstance(result, tuple):
+                final_text, finish_reason = result
+            else:
+                final_text = result
+                finish_reason = 'stop'
+
+        if not final_text or not final_text.strip():
+            log_fn("❌ Empty response from final synthesis")
+            # Fall back to concatenated chunk reviews
+            final_text = combined_chunks
+            log_fn("📝 Using concatenated chunk reviews as fallback")
+
+        log_fn(f"✅ Final review synthesized in {elapsed:.1f}s (finish_reason: {finish_reason})")
+
+    except Exception as e:
+        err_str = str(e).lower()
+        if 'cancelled' in err_str or 'canceled' in err_str or 'stopped by user' in err_str:
+            log_fn("🛑 Final review stopped by user")
+            return None
+        log_fn(f"⚠️ Final synthesis failed: {e}")
+        log_fn("📝 Using concatenated chunk reviews as fallback")
+        final_text = combined_chunks
+
+    # 7. Save
+    _save_review_text(
+        final_text,
+        output_dir,
+        log_fn,
+        review_output_paths=review_output_paths,
+    )
+    return final_text.strip()
+
+
+# ─── Review run orchestration (U7: moved from review_dialog.ReviewDialog) ──
+# ReviewDialog._on_start_review / _on_generate_all used to gather the run
+# parameters, reset the stop flags, apply the streaming toggle, route the log
+# and call generate_review / generate_chunked_review inline in the Qt dialog.
+# Those steps live here, so the desktop dialog and the mobile Review job run
+# the same code. The dialog keeps its widgets, confirmation boxes, the
+# append_log / stdout redirection bookkeeping, its queue and its poll timer.
+
+
+def review_app_dir() -> str:
+    """Return the application's base directory (Windows-safe)."""
+    if platform.system() == 'Windows':
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
+
+def review_output_dir_for_file(file_path, config) -> str:
+    """Return the normal per-file output directory on every supported OS."""
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    override_dir = os.environ.get('OUTPUT_DIRECTORY') or \
+                   config.get('output_directory')
+    if override_dir:
+        return os.path.join(os.path.abspath(os.path.expanduser(override_dir)), stem)
+    return os.path.join(review_app_dir(), stem)
+
+
+def review_paths_for(file_path, volume_paths, volume_mode, config) -> List[str]:
+    """Return every path that should contain the active review."""
+    if volume_mode:
+        paths = [
+            os.path.join(
+                review_output_dir_for_file(path, config),
+                "review",
+                "combined_review",
+                "review.md",
+            )
+            for path in volume_paths
+        ]
+    else:
+        paths = [
+            os.path.join(
+                review_output_dir_for_file(file_path, config),
+                "review",
+                "review.md",
+            )
+        ]
+    return list(dict.fromkeys(paths))
+
+
+# ─── 🗑️ Delete / ↩️ Restore (ReviewDialog._on_delete / _on_restore, U7 integration) ─────────
+# The file moves of the two buttons; the dialog keeps its button feedback, the overwrite
+# question box and the UI reload, and Glossarion Mobile's Review screen calls the same helpers.
+
+
+def review_backups_dir(review_path):
+    """``ReviewDialog._get_backups_dir``: the ``backups`` folder next to the primary review."""
+    if not review_path:
+        return None
+    return os.path.join(os.path.dirname(review_path), "backups")
+
+
+def review_backups(backups_dir) -> List[str]:
+    """The ``.md`` backups in ``backups_dir``, newest first (the Restore order)."""
+    return sorted(
+        [f for f in os.listdir(backups_dir) if f.endswith('.md')],
+        reverse=True
+    )
+
+
+def move_review_to_backups(review_paths, timestamp=None) -> str:
+    """🗑️ Delete: move every review file to ``<its folder>/backups/review_<timestamp>.md``.
+
+    ``review_paths`` are the existing review files; returns the backup file name.
+    """
+    import shutil
+    from datetime import datetime
+
+    # Timestamped backup filename
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup_name = f"review_{timestamp}.md"
+    for review_path in review_paths:
+        review_dir = os.path.dirname(review_path)
+        backups_dir = os.path.join(review_dir, "backups")
+        os.makedirs(backups_dir, exist_ok=True)
+        backup_path = os.path.join(backups_dir, backup_name)
+        shutil.move(review_path, backup_path)
+    return backup_name
+
+
+def review_restore_question(backup_name) -> str:
+    """↩️ Restore's warning when a current review would be overwritten."""
+    return (
+        "Your current review will be overwritten.\n\n"
+        "Restoring will replace it with the previous backup:\n"
+        f"{backup_name}\n\n"
+        "Are you sure you want to restore?"
+    )
+
+
+def copy_review_backup(latest, review_paths) -> str:
+    """↩️ Restore: copy the backup ``latest`` over every review path; returns the restored text."""
+    import shutil
+
+    for review_path in review_paths:
+        os.makedirs(os.path.dirname(review_path), exist_ok=True)
+        shutil.copy2(latest, review_path)
+
+    # Load restored content into UI
+    with open(review_paths[0], 'r', encoding='utf-8') as f:
+        content = f.read()
+    return content
+
+
+def latest_review_backup(review_paths):
+    """``(backups_dir, name)`` of the newest backup of the primary review, or None."""
+    backups_dir = review_backups_dir(review_paths[0] if review_paths else None)
+    if not backups_dir or not os.path.isdir(backups_dir):
+        return None
+    backups = review_backups(backups_dir)
+    if not backups:
+        return None
+    return backups_dir, backups[0]
+
+
+def restore_review_backup(review_paths):
+    """↩️ Restore without the dialog (mobile; it asks ``review_restore_question`` first when a review
+    exists): the newest backup over every review path. Returns the text, or False without a backup."""
+    found = latest_review_backup(review_paths)
+    if not found:
+        return False
+    backups_dir, name = found
+    return copy_review_backup(os.path.join(backups_dir, name), review_paths)
+
+
+class ReviewRunParams:
+    """The parameters one review run freezes from the GUI state (both Start paths)."""
+
+    __slots__ = ("api_key", "model", "endpoint", "temperature", "config", "token_limit",
+                 "system_prompt", "output_lang", "spoiler_mode", "final_review_prompt")
+
+    def __init__(self, **values):
+        for name in self.__slots__:
+            setattr(self, name, values[name])
+
+    def as_dict(self) -> dict:
+        return {name: getattr(self, name) for name in self.__slots__}
+
+
+def review_run_params(gui, prompt: str, spoiler_mode: bool,
+                      final_review_prompt: str = DEFAULT_FINAL_REVIEW_PROMPT) -> ReviewRunParams:
+    """Gather the run parameters from the GUI (``prompt`` is the prompt editor's text)."""
+    # Gather parameters from the GUI
+    api_key = gui.api_key_entry.text().strip() if hasattr(gui, 'api_key_entry') else ''
+    model = getattr(gui, 'model_var', os.getenv('MODEL', 'gemini-2.0-flash'))
+    endpoint = os.environ.get('ENDPOINT', '') or gui.config.get('endpoint', '')
+    temperature = float(gui.config.get('translation_temperature', 0.3))
+    config = dict(gui.config)
+    # The non-modal key manager and settings controls update live GUI state.
+    # Freeze that effective state for this run instead of relying on a
+    # potentially older config snapshot.
+    config['use_multi_api_keys'] = bool(
+        gui.config.get('use_multi_api_keys', False)
+    )
+
+    # Get input token limit
+    try:
+        token_limit = int(gui.token_limit_entry.text().replace(',', '').strip())
+    except (ValueError, AttributeError):
+        token_limit = 200000
+
+    system_prompt = prompt.strip()
+    # Replace {target_lang} placeholder with the selected target language
+    output_lang = getattr(gui, 'lang_var', 'English')
+    system_prompt = system_prompt.replace('{target_lang}', output_lang)
+    # Replace {target_lang} in final prompt too
+    final_review_prompt = final_review_prompt.replace('{target_lang}', output_lang)
+    return ReviewRunParams(
+        api_key=api_key, model=model, endpoint=endpoint, temperature=temperature, config=config,
+        token_limit=token_limit, system_prompt=system_prompt, output_lang=output_lang,
+        spoiler_mode=spoiler_mode, final_review_prompt=final_review_prompt,
+    )
+
+
+def single_review_batch_size(gui, chunk_mode: bool) -> int:
+    """Parallel chunk workers of one review (Start Review): batch size in chunk mode with batch translation on."""
+    # Compute batch size for parallel chunk processing
+    chunk_batch_size = 1
+    if chunk_mode:
+        batch_on = bool(getattr(gui, 'batch_translation_var', False))
+        if batch_on:
+            try:
+                chunk_batch_size = int(getattr(gui, 'batch_size_var', 1))
+                if chunk_batch_size < 1:
+                    chunk_batch_size = 1
+            except (ValueError, TypeError):
+                chunk_batch_size = 1
+    return chunk_batch_size
+
+
+def review_all_batch_size(gui) -> int:
+    """Reviews run in parallel by Generate All (and each one's chunk workers): batch size when batch translation is on."""
+    # Respect batch mode toggle for parallelism
+    # batch_translation_var is the on/off toggle; batch_size_var is the worker count
+    batch_on = bool(getattr(gui, 'batch_translation_var', False))
+    if batch_on:
+        try:
+            batch_size = int(getattr(gui, 'batch_size_var', 1))
+            if batch_size < 1:
+                batch_size = 1
+        except (ValueError, TypeError):
+            batch_size = 1
+    else:
+        batch_size = 1  # Sequential when batch mode is OFF
+    return batch_size
+
+
+def reset_review_stop_flags():
+    """Clear any lingering cancellation from a previous force stop."""
+    try:
+        from unified_api_client import UnifiedClient
+        UnifiedClient.set_global_cancellation(False)
+    except Exception:
+        pass
+    try:
+        import unified_api_client
+        unified_api_client.global_stop_flag = False
+    except Exception:
+        pass
+    try:
+        import extract_glossary_from_epub
+        extract_glossary_from_epub.set_stop_flag(False)
+    except Exception:
+        pass
+    try:
+        import TransateKRtoEN
+        TransateKRtoEN.set_stop_flag(False)
+    except Exception:
+        pass
+
+
+def apply_review_streaming_env(gui) -> bool:
+    """Respect the streaming toggle from settings (``ENABLE_STREAMING`` for this run)."""
+    # ── Respect the streaming toggle from settings ──
+    stream_on = bool(getattr(
+        gui,
+        'enable_streaming_var',
+        gui.config.get('enable_streaming', False),
+    ))
+    os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
+    return stream_on
+
+
+def review_log_fn(gui) -> Callable:
+    """The run's log function: ``[Review]``-prefixed lines through ``gui.append_log`` (print on failure)."""
+    def _log(msg):
+        # Send through the hijacked append_log (reaches both main GUI and review dialog)
+        # Prefix each line with [Review], but skip separator-only and blank lines
+        lines = str(msg).split('\n')
+        prefixed = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or all(c in '─═' for c in stripped):
+                prefixed.append(line)
+            else:
+                prefixed.append(f"[Review] {line}")
+        full = '\n'.join(prefixed)
+        try:
+            gui.append_log(full)
+        except Exception:
+            print(full)
+    return _log
+
+
+class ReviewStdoutWriter:
+    """``sys.stdout`` while a review runs: non-blank print() output goes to the run's queue as ('log', text)."""
+
+    def __init__(self, review_queue, active_flag):
+        self._review_queue_ref = review_queue
+        self._active_flag = active_flag  # reference to the owner of ``_review_log_active``
+
+    def write(self, text):
+        if text and text.strip() and getattr(self._active_flag, '_review_log_active', False):
+            self._review_queue_ref.put(('log', text.strip()))
+
+    def flush(self):
+        pass
+
+
+def run_review(params: ReviewRunParams, review_input, output_dir, *, chunk_mode: bool, wrap_chunks: bool,
+               batch_size: int, log_fn: Callable, stop_check_fn: Callable, review_output_paths=None):
+    """One review: ``generate_chunked_review`` in chunk mode, else ``generate_review``."""
+    if chunk_mode:
+        result = generate_chunked_review(
+            epub_path=review_input,
+            output_dir=output_dir,
+            api_key=params.api_key,
+            model=params.model,
+            endpoint=params.endpoint,
+            system_prompt=params.system_prompt,
+            final_review_prompt=params.final_review_prompt,
+            input_token_limit=params.token_limit,
+            spoiler_mode=params.spoiler_mode,
+            wrap_chunks=wrap_chunks,
+            temperature=params.temperature,
+            config=params.config,
+            batch_size=batch_size,
+            log_fn=log_fn,
+            stop_check_fn=stop_check_fn,
+            review_output_paths=review_output_paths,
+        )
+    else:
+        result = generate_review(
+            epub_path=review_input,
+            output_dir=output_dir,
+            api_key=params.api_key,
+            model=params.model,
+            endpoint=params.endpoint,
+            system_prompt=params.system_prompt,
+            input_token_limit=params.token_limit,
+            spoiler_mode=params.spoiler_mode,
+            temperature=params.temperature,
+            config=params.config,
+            log_fn=log_fn,
+            stop_check_fn=stop_check_fn,
+            review_output_paths=review_output_paths,
+        )
+    return result
+
+
+def review_all_output_dir(epub_path, config) -> str:
+    """Output folder of one input in Generate All (``OUTPUT_DIRECTORY`` / ``output_directory``, else the app folder)."""
+    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+    override_dir = os.environ.get('OUTPUT_DIRECTORY') or config.get('output_directory')
+    if override_dir:
+        return os.path.join(os.path.abspath(override_dir), epub_base)
+    return os.path.join(review_app_dir(), epub_base)
+
+
+def run_all_reviews(params: ReviewRunParams, all_paths, *, chunk_mode: bool, wrap_chunks: bool, batch_size: int,
+                    put: Callable, stop_check: Callable):
+    """Generate All: one review per input, sequential or ``batch_size`` at a time.
+
+    ``put((kind, data))`` receives what the dialog's queue carried: ``('log', text)``,
+    ``('nav', index)`` (the input being reviewed) and finally ``('all_done', None)``.
+    ``stop_check()`` is the Stop flag. Returns ``(completed, errors)``.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    all_paths = list(all_paths)
+    total = len(all_paths)
+    config = params.config
+
+    def _generate_single(idx, epub_path):
+        basename = os.path.basename(epub_path)
+        put(('log', f"\n{'═'*50}\n📖 [{idx+1}/{total}] {basename}\n{'═'*50}"))
+        put(('nav', idx))  # Navigate dropdown to this EPUB
+
+        if stop_check():
+            put(('log', f"⏹️ Skipped (stopped): {basename}"))
+            return idx, None, None
+
+        out_dir = review_all_output_dir(epub_path, config)
+        try:
+            _log_single = lambda msg, _bn=basename: put(('log', f"[{_bn}] {msg}"))
+            # (Generate All never passes review_output_paths: one review per input)
+            if chunk_mode:
+                result = generate_chunked_review(
+                    epub_path=epub_path,
+                    output_dir=out_dir,
+                    api_key=params.api_key,
+                    model=params.model,
+                    endpoint=params.endpoint,
+                    system_prompt=params.system_prompt,
+                    final_review_prompt=params.final_review_prompt,
+                    input_token_limit=params.token_limit,
+                    spoiler_mode=params.spoiler_mode,
+                    wrap_chunks=wrap_chunks,
+                    temperature=params.temperature,
+                    config=params.config,
+                    batch_size=batch_size,
+                    log_fn=_log_single,
+                    stop_check_fn=stop_check,
+                )
+            else:
+                result = generate_review(
+                    epub_path=epub_path,
+                    output_dir=out_dir,
+                    api_key=params.api_key,
+                    model=params.model,
+                    endpoint=params.endpoint,
+                    system_prompt=params.system_prompt,
+                    input_token_limit=params.token_limit,
+                    spoiler_mode=params.spoiler_mode,
+                    temperature=params.temperature,
+                    config=params.config,
+                    log_fn=_log_single,
+                    stop_check_fn=stop_check,
+                )
+            put(('log', f"✅ Done: {basename}"))
+            return idx, result, None
+        except Exception as e:
+            put(('log', f"❌ Error [{basename}]: {e}"))
+            return idx, None, str(e)
+
+    workers = min(batch_size, total)
+    completed = 0
+    errors = 0
+
+    if workers <= 1:
+        # Sequential
+        for i, path in enumerate(all_paths):
+            if stop_check():
+                break
+            idx, result, err = _generate_single(i, path)
+            completed += 1
+            if err:
+                errors += 1
+    else:
+        # Parallel
+        put(('log', f"🔄 Running {workers} reviews in parallel...\n"))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_generate_single, i, p): i for i, p in enumerate(all_paths)}
+            for future in as_completed(futures):
+                if stop_check():
+                    break
+                try:
+                    idx, result, err = future.result()
+                    completed += 1
+                    if err:
+                        errors += 1
+                except Exception as e:
+                    completed += 1
+                    errors += 1
+                    put(('log', f"❌ Future error: {e}"))
+
+    put(('log', f"\n{'═'*50}\n📊 Finished: {completed}/{total} reviews ({errors} errors)\n{'═'*50}"))
+    put(('all_done', None))
+    return completed, errors
+
+
+def run_review_session(gui, *, prompt: str, spoiler_mode: bool = False, chunk_mode: bool = False,
+                       wrap_chunks: bool = True, final_review_prompt: str = DEFAULT_FINAL_REVIEW_PROMPT,
+                       file_path=None, volume_paths=None, volume_mode: bool = False,
+                       stop_check_fn: Callable = None, log_fn: Callable = None):
+    """Start Review without Qt (Glossarion Mobile): the dialog's steps in its order.
+
+    ``gui`` is the desktop-shaped owner (``headless_owner.HeadlessOwner`` on mobile); the
+    single input is ``file_path``, Volume Mode reviews ``volume_paths`` as one book. The log
+    goes through ``review_log_fn(gui)`` unless ``log_fn`` is given. Returns the review text
+    (None when stopped or empty), like the dialog's 'done' message.
+    """
+    params = review_run_params(gui, prompt, spoiler_mode, final_review_prompt)
+    review_input = list(volume_paths or []) if volume_mode else file_path
+    config = getattr(gui, 'config', {})
+    primary = (list(volume_paths or []) or [file_path])[0] if volume_mode else file_path
+    output_dir = review_output_dir_for_file(primary, config)
+    review_output_paths = review_paths_for(file_path, list(volume_paths or []), True, config) if volume_mode else None
+    reset_review_stop_flags()
+    apply_review_streaming_env(gui)
+    return run_review(
+        params, review_input, output_dir,
+        chunk_mode=chunk_mode,
+        wrap_chunks=wrap_chunks,
+        batch_size=single_review_batch_size(gui, chunk_mode),
+        log_fn=log_fn or review_log_fn(gui),
+        stop_check_fn=stop_check_fn or (lambda: False),
+        review_output_paths=review_output_paths,
+    )

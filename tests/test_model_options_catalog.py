@@ -1,0 +1,3553 @@
+import base64
+import io
+import inspect
+import sys
+import types
+import urllib.error
+from types import SimpleNamespace
+
+import model_options
+import pytest
+from unified_api_client import UnifiedClient, UnifiedClientError
+
+
+def test_zen_catalog_uses_cli_instead_of_http(monkeypatch):
+    import ocagy_cli
+    calls = []
+    monkeypatch.setattr(ocagy_cli, 'poll_zen_models',
+                        lambda timeout: calls.append(timeout) or ['ocz/mimo-v2.6-flash-free'])
+    monkeypatch.setattr(model_options.urllib.request, 'urlopen',
+                        lambda *args, **kwargs: pytest.fail('Zen polling must use the CLI'))
+    spec = next(spec for spec in model_options.PROVIDER_CATALOG_SPECS if spec.name == 'opencode-zen')
+    assert model_options._fetch_provider_catalog(spec, timeout=8) == ['ocz/mimo-v2.6-flash-free']
+    assert calls == [8]
+
+
+def test_zen_http_cache_cannot_supply_poll_checkmarks(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    record = {'fetched_at': model_options.time.time(), 'models': ['ocz/deepseek-v4-flash-free']}
+    model_options._write_model_catalog_cache({
+        'version': model_options._MODEL_CATALOG_CACHE_VERSION,
+        'providers': {'opencode-zen': record},
+        'last_successful': {'opencode-zen': record},
+    })
+    assert 'opencode-zen' not in model_options.get_current_polled_provider_models()
+    assert 'opencode-zen' not in model_options._cached_provider_models()
+    record['variant'] = 'opencode_cli_free_v1'
+    model_options._write_model_catalog_cache({
+        'version': model_options._MODEL_CATALOG_CACHE_VERSION,
+        'providers': {'opencode-zen': record},
+        'last_successful': {'opencode-zen': record},
+    })
+    assert model_options.get_current_polled_provider_models()['opencode-zen'] == record['models']
+
+
+def test_prepared_poll_catalog_is_not_rescanned_per_model_row():
+    class NoIteration(model_options.PolledModelKeys):
+        def __iter__(self):
+            raise AssertionError('Prepared catalog was rebuilt during a row lookup')
+    keys = NoIteration([' AUTHARENA/Model-A ', 'AUTHGPT/GPT-TEST'])
+    assert model_options.PolledModelKeys(keys) is keys
+    for _ in range(100):
+        assert model_options.model_has_polled_marker('autharena0/model-a', keys)
+        assert model_options.model_has_polled_marker('authgpt4/gpt-test', keys)
+        assert not model_options.model_has_polled_marker('autharena/missing', keys)
+
+
+def test_unprepared_poll_catalog_still_normalizes_and_observes_changes():
+    keys = {' AUTHARENA/Model-A '}
+    assert model_options.model_has_polled_marker('autharena1/model-a', keys)
+    keys.clear()
+    assert not model_options.model_has_polled_marker('autharena1/model-a', keys)
+
+
+def _isolated_cache(tmp_path, monkeypatch):
+    import autharena_proxy
+    import ocagy_cli
+    # Catalog tests must not inspect real accounts or start the installed CLI.
+    monkeypatch.setattr(autharena_proxy, 'list_accounts', lambda: [])
+    monkeypatch.setattr(ocagy_cli, 'poll_zen_models', lambda timeout: [])
+    cache_path = tmp_path / "model_catalog_cache.json"
+    monkeypatch.setenv("GLOSSARION_MODEL_CATALOG_CACHE", str(cache_path))
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    # Never let catalog tests discover or invoke the developer's real OcAgy
+    # account. Individual OcAgy tests explicitly opt into a fake account.
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "empty-opencode-config"))
+    for spec in model_options.PROVIDER_CATALOG_SPECS:
+        for env_name in spec.api_key_envs:
+            monkeypatch.delenv(env_name, raising=False)
+        if spec.base_url_env:
+            monkeypatch.delenv(spec.base_url_env, raising=False)
+    return cache_path
+
+
+@pytest.mark.parametrize(
+    ("needs_api_key", "expected_timeout"),
+    [
+        (False, 60),
+        (True, 30),
+    ],
+)
+def test_multi_key_test_timeout_uses_optional_api_key_classification(
+    monkeypatch,
+    needs_api_key,
+    expected_timeout,
+):
+    import multi_api_key_manager
+
+    monkeypatch.setattr(
+        multi_api_key_manager,
+        "_model_needs_api_key",
+        lambda _model: needs_api_key,
+    )
+
+    assert multi_api_key_manager._api_key_test_timeout_seconds("example/model") == expected_timeout
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["autharena/model", "autharena2/model", "authgpt/model", "authnd/model"],
+)
+def test_browser_backed_models_allow_blank_pool_api_keys(model):
+    entry = {"api_key": "", "model": model, "enabled": True}
+
+    assert UnifiedClient._model_needs_api_key(model) is False
+    assert UnifiedClient._key_data_is_usable(entry) is True
+
+
+def test_direct_pool_entry_rejects_disabled_keyless_model():
+    entry = {"api_key": "", "model": "autharena/model", "enabled": False}
+
+    assert UnifiedClient._key_data_is_usable(entry) is False
+
+
+def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
+    import multi_api_key_manager
+
+    dialog = multi_api_key_manager.MultiAPIKeyDialog
+    qt = multi_api_key_manager.Qt
+    window_flags = dialog._standard_manager_window_flags(
+        qt.Dialog
+        | qt.WindowCloseButtonHint
+        | qt.WindowContextHelpButtonHint
+        | qt.WindowStaysOnTopHint
+    )
+    assert not window_flags & qt.WindowMinimizeButtonHint
+    assert window_flags & qt.WindowMaximizeButtonHint
+    assert window_flags & qt.WindowCloseButtonHint
+    assert window_flags & qt.WindowSystemMenuHint
+    assert (window_flags & qt.WindowType_Mask) == qt.Window
+    assert not window_flags & qt.WindowContextHelpButtonHint
+    assert not window_flags & qt.WindowStaysOnTopHint
+
+    assert dialog._bounded_api_key_tree_font_size(1) == 8
+    assert dialog._bounded_api_key_tree_font_size(18) == 18
+    assert dialog._bounded_api_key_tree_font_size(99) == 32
+    assert dialog._bounded_api_key_tree_height(20) == 150
+    assert dialog._bounded_api_key_tree_height(500) == 500
+    assert dialog._bounded_api_key_tree_height(5000) == 1200
+    assert dialog._proportional_api_key_tree_column_widths(
+        (100, 200, 50),
+        700,
+    ) == (200, 400, 100)
+    assert dialog._proportional_api_key_tree_column_widths(
+        (100, 200, 50),
+        300,
+    ) == (86, 171, 43)
+    assert sum(dialog._proportional_api_key_tree_column_widths(
+        (116, 220, 42, 105, 100, 90, 100, 42, 42, 80),
+        965,
+    )) == 965
+
+    source = inspect.getsource(dialog)
+    assert source.count("self._enable_api_key_tree_font_zoom(") == 4
+    assert source.count("self._add_api_key_tree_height_resizer(") == 4
+    assert source.count("self._enable_api_key_tree_responsive_columns(") == 4
+    assert 'QKeySequence("Ctrl++")' in source
+    assert 'QKeySequence("Ctrl+-")' in source
+    assert "event.modifiers() & Qt.ControlModifier" in source
+    assert "multi_api_key_tree_font_size" in source
+    assert "multi_api_key_tree_heights" in source
+    assert "Qt.SizeVerCursor" in source
+    assert "handle.mouseDoubleClickEvent = mouse_double_click_event" in source
+    assert "_reset_api_key_tree_height" in source
+    assert "header.setStretchLastSection(False)" in source
+    assert "font-size: {point_size}pt" in source
+    assert "header.style().polish(header)" in source
+    assert "manager_handle.setTransientParent(owner_handle)" in source
+    assert "GWLP_HWNDPARENT" in source
+
+
+def test_multi_key_manager_detects_live_authgrok_pool_route():
+    import multi_api_key_manager
+
+    class FakeCombo:
+        def __init__(self, text):
+            self._text = text
+
+        def currentText(self):
+            return self._text
+
+    dialog = SimpleNamespace(model_combo=FakeCombo("  AUTHGROK0/grok-4.5  "))
+    check = multi_api_key_manager.MultiAPIKeyDialog._has_pending_authgrok_pool_model
+
+    assert check(dialog) is True
+    dialog.model_combo = FakeCombo("authgrok2/grok-4.5")
+    assert check(dialog) is False
+
+
+@pytest.mark.parametrize(
+    ("typed", "canonical", "expected"),
+    [
+        ("authgrok0/grok-4", "authgrok/grok-4.5", "authgrok0/grok-4.5"),
+        ("authgpt12/gpt-5", "authgpt/gpt-5.6", "authgpt12/gpt-5.6"),
+        ("authcd3/claude", "authcd/claude-sonnet", "authcd3/claude-sonnet"),
+        ("authgem7/gemini", "authgem/gemini-3", "authgem7/gemini-3"),
+        (
+            "authgem-vertex27/gemini",
+            "authgem-vertex/gemini-3",
+            "authgem-vertex27/gemini-3",
+        ),
+        ("authnd4/nemotron", "authnd/nemotron-3", "authnd4/nemotron-3"),
+        ("authza2/glm", "authza/glm-5", "authza2/glm-5"),
+        ("ocagy0", "ocagy/gemini-3.1-pro-high", "ocagy0/gemini-3.1-pro-high"),
+        (
+            "antigravity42/gemini",
+            "antigravity/gemini-3.1-pro-high",
+            "antigravity42/gemini-3.1-pro-high",
+        ),
+    ],
+)
+def test_numbered_model_completion_preserves_typed_account_prefix(
+    typed,
+    canonical,
+    expected,
+):
+    values = [canonical, "openai/gpt-5"]
+
+    rendered = model_options.numbered_model_completion_values(values, typed)
+
+    assert rendered == [expected, "openai/gpt-5"]
+
+
+def test_ordinary_model_completion_values_are_unchanged():
+    values = ["authgrok/grok-4.5", "authgrok/grok-4.6"]
+
+    assert model_options.numbered_model_completion_values(
+        values,
+        "authgrok/grok-4",
+    ) == values
+
+
+def test_polled_marker_matches_exact_and_rendered_numbered_models():
+    confirmed = {"AUTHND/deepseek-ai/deepseek-v4-flash-0731"}
+
+    assert model_options.model_has_polled_marker(
+        "authnd/deepseek-ai/deepseek-v4-flash-0731",
+        confirmed,
+    )
+    assert model_options.model_has_polled_marker(
+        "authnd7/deepseek-ai/deepseek-v4-flash-0731",
+        confirmed,
+    )
+    assert not model_options.model_has_polled_marker(
+        "authnd/deepseek-ai/deepseek-v4-pro",
+        confirmed,
+    )
+
+
+def test_saved_model_merge_adds_new_entries_without_restoring_removed_ones():
+    assert model_options.merge_saved_model_options(
+        ["provider/kept"],
+        [
+            "PROVIDER/KEPT",
+            "provider/deleted",
+            "provider/new-model",
+            "provider/new-model",
+        ],
+        ["PROVIDER/DELETED"],
+    ) == [
+        "provider/kept",
+        "provider/new-model",
+    ]
+
+
+def test_explicit_manual_model_entry_clears_tombstone_and_persists_choice(monkeypatch):
+    import translator_gui
+
+    saved = []
+    refreshed = []
+    gui = SimpleNamespace(
+        config={
+            "custom_model_list": ["provider/kept"],
+            "model_manager_removed_models": [
+                "provider/deleted",
+                "gemini-3.7-flash",
+            ],
+        },
+        save_config=lambda show_message=False: saved.append(show_message) or True,
+        _refresh_model_combo_catalog=lambda models: refreshed.append(list(models)),
+        _refresh_model_search_poll_state=lambda: None,
+    )
+    monkeypatch.setattr(
+        translator_gui,
+        "get_model_options",
+        lambda: ["provider/kept", "gemini-3.7-flash"],
+    )
+
+    assert translator_gui.TranslatorGUI._restore_removed_model_choices(
+        gui,
+        ["gemini-3.7-flash"],
+        add_to_saved=True,
+        refresh=True,
+    )
+
+    assert gui.config["model_manager_removed_models"] == ["provider/deleted"]
+    assert gui.config["custom_model_list"] == [
+        "provider/kept",
+        "gemini-3.7-flash",
+    ]
+    assert refreshed[-1] == ["provider/kept", "gemini-3.7-flash"]
+    assert saved == [False]
+
+
+def test_explicit_poll_restores_confirmed_model_but_not_other_tombstones():
+    import translator_gui
+
+    displayed = ["provider/kept"]
+    saved = []
+    gui = SimpleNamespace(
+        config={
+            "custom_model_list": list(displayed),
+            "model_manager_removed_models": [
+                "gemini-3.7-flash",
+                "provider/still-deleted",
+            ],
+        },
+        model_combo=SimpleNamespace(
+            count=lambda: len(displayed),
+            itemText=lambda index: displayed[index],
+        ),
+        _refresh_model_combo_catalog=lambda models: displayed.__setitem__(
+            slice(None), list(models)
+        ),
+        _ensure_polled_model_marker_state=lambda: {},
+        save_config=lambda show_message=False: saved.append(show_message) or True,
+        append_log=lambda _message: None,
+    )
+    gui._restore_removed_model_choices = types.MethodType(
+        translator_gui.TranslatorGUI._restore_removed_model_choices,
+        gui,
+    )
+    result = SimpleNamespace(
+        models=["provider/kept", "gemini-3.7-flash"],
+        statuses={"gemini": "online (1 models)"},
+        provider_models={"gemini": ["gemini-3.7-flash"]},
+        requested_provider=None,
+        restore_removed_models=True,
+    )
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
+
+    assert gui.config["model_manager_removed_models"] == [
+        "provider/still-deleted"
+    ]
+    assert displayed == ["provider/kept", "gemini-3.7-flash"]
+    assert gui._polled_online_model_ids == {"gemini-3.7-flash"}
+    assert saved == [False]
+
+
+def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):
+    cache_path = _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        assert "openrouter.ai/api/v1/models" in url
+        assert "Authorization" not in headers
+        return {"data": [{"id": "vendor/new-model"}, {"id": "openrouter/free"}]}
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+
+    result = model_options.refresh_provider_model_catalogs(timeout=0.1)
+
+    assert result.provider_models["openrouter"] == [
+        "or/vendor/new-model",
+        "or/openrouter/free",
+    ]
+    assert "or/vendor/new-model" in result.models
+    assert "or/openai/gpt-5" not in result.models
+    assert result.statuses["openrouter"] == "online (2 models)"
+    assert cache_path.is_file()
+
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    assert "or/vendor/new-model" in model_options.get_model_options()
+
+
+def test_nanogpt_poll_combines_text_image_and_video_catalogs(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    assert not model_options._catalog_record_matches_variant(
+        "nanogpt", {"fetched_at": 1, "models": ["nan/openai/gpt-latest"]}
+    )
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, dict(headers)))
+        if url.endswith("/image-models"):
+            return {"data": [{"id": "wan-2.6-image-edit"}, {"id": "gpt-image-2"}]}
+        if url.endswith("/video-models"):
+            return {"data": [{"id": "wan-2.7-video"}]}
+        if url.endswith("/models"):
+            return {"data": [{"id": "openai/gpt-latest"}]}
+        raise AssertionError(f"unexpected NanoGPT catalog: {url}")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="nan/openai/gpt-latest",
+        active_api_key="nano-test-key",
+        only_provider="nanogpt",
+        timeout=0.1,
+    )
+
+    expected = [
+        "nan/openai/gpt-latest",
+        "nan/wan-2.6-image-edit",
+        "nan/gpt-image-2",
+        "nan/wan-2.7-video",
+    ]
+    assert result.provider_models["nanogpt"] == expected
+    assert result.statuses["nanogpt"] == "online (4 models)"
+    assert model_options.get_current_polled_provider_models()["nanogpt"] == expected
+    assert (
+        model_options._load_model_catalog_cache()["providers"]["nanogpt"]["variant"]
+        == "text_image_video_v1"
+    )
+    assert [url for url, _headers in calls] == [
+        "https://nano-gpt.com/api/v1/models",
+        "https://nano-gpt.com/api/v1/image-models",
+        "https://nano-gpt.com/api/v1/video-models",
+    ]
+    assert all(headers["Authorization"] == "Bearer nano-test-key" for _, headers in calls)
+
+
+def test_antigravity_catalog_retains_local_tier_aliases():
+    merged = model_options._merge_dynamic_model_options(
+        ["gemini-3.5-flash", "antigravity/obsolete-model"],
+        {"antigravity": ["antigravity/gemini-3.5-flash-low"]},
+    )
+
+    assert "antigravity/obsolete-model" not in merged
+    assert "antigravity/gemini-3.5-flash-low" in merged
+    assert "antigravity/gemini-3.5-flash-medium" in merged
+    assert "antigravity/gemini-3.5-flash-high" in merged
+    assert "antigravity/gemini-3.7-flash-low" in merged
+    assert "antigravity/gemini-3.7-flash-medium" in merged
+    assert "antigravity/gemini-3.7-flash-high" in merged
+    assert "antigravity/gemini-3.1-pro-high" in merged
+
+
+def test_failed_online_catalog_uses_corrected_static_openrouter_list(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fail_get(_url, _headers, _timeout):
+        raise OSError("offline")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fail_get)
+
+    result = model_options.refresh_provider_model_catalogs(timeout=0.1)
+
+    assert result.statuses["openrouter"] == "static fallback (OSError — offline)"
+    assert "or/openrouter/free" in result.models
+    assert "or/openai/gpt-5.4-nano" in result.models
+    assert "or/google/gemini-2.5-pro" in result.models
+    assert "or/openai/gpt-5.4-nanoor/google/gemini-2.5-pro" not in result.models
+
+
+def test_generic_key_is_sent_only_to_the_selected_provider(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, dict(headers)))
+        if "groq.com" in url:
+            return {"data": [{"id": "llama-new"}]}
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "router/new"}]}
+        raise AssertionError(f"unexpected provider request: {url}")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="groq/llama-old",
+        active_api_key="groq-secret",
+        timeout=0.1,
+    )
+
+    groq_call = next(call for call in calls if "groq.com" in call[0])
+    router_call = next(call for call in calls if "openrouter.ai" in call[0])
+    assert groq_call[1]["Authorization"] == "Bearer groq-secret"
+    assert "Authorization" not in router_call[1]
+    assert result.provider_models["groq"] == ["groq/llama-new"]
+    assert result.provider_models["openrouter"] == ["or/router/new"]
+
+
+def test_public_openrouter_catalog_does_not_send_api_key(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+
+    assert model_options.provider_model_catalog_supports_anonymous_poll(
+        "or/openrouter/free"
+    )
+    assert not model_options.provider_model_catalog_supports_anonymous_poll(
+        "grok-3-mini"
+    )
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, dict(headers)))
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "router/new"}]}
+        raise OSError("local proxy is not running")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    model_options.refresh_provider_model_catalogs(
+        active_model="or/router/old",
+        active_api_key="openrouter-secret",
+        timeout=0.1,
+    )
+
+    router_call = next(call for call in calls if "openrouter.ai" in call[0])
+    assert "Authorization" not in router_call[1]
+
+
+def test_selected_custom_openai_route_can_poll_its_models(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, dict(headers)))
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        if "localhost:9999" in url:
+            return {"data": [{"id": "local-current"}]}
+        raise AssertionError(f"unexpected provider request: {url}")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="lab/local-current",
+        active_api_key="local-key",
+        custom_routes=[{
+            "prefix": "lab/",
+            "routing": "http://localhost:9999/v1",
+            "endpoint_type": "/chat/completions",
+        }],
+        timeout=0.1,
+    )
+
+    assert "lab/local-current" in result.models
+    local_call = next(call for call in calls if "localhost:9999" in call[0])
+    assert local_call[0] == "http://localhost:9999/v1/models"
+    assert local_call[1]["Authorization"] == "Bearer local-key"
+
+
+def test_running_antigravity_proxy_replaces_its_static_catalog(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        if "localhost:3000/v1/models" in url:
+            return {"data": [{"id": "gemini-live"}, {"id": "claude-live"}]}
+        raise AssertionError(f"unexpected provider request: {url}")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(timeout=0.1)
+
+    assert result.provider_models["antigravity"] == [
+        "antigravity/gemini-live",
+        "antigravity/claude-live",
+    ]
+    assert "antigravity/gemini-3-flash" not in result.models
+
+
+def test_selecting_antigravity_does_not_poll_before_proxy_start(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    assert model_options.catalog_provider_for_model(
+        "antigravity/gemini-3-flash"
+    ) == "antigravity"
+    assert model_options.provider_model_catalog_refresh_due("antigravity")
+    assert model_options.due_provider_catalog_for_model(
+        "antigravity/gemini-3-flash"
+    ) is None
+
+
+def test_selected_authgrok_uses_existing_session_without_login(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    token_calls = []
+
+    class FakeStore:
+        def get_valid_access_token(self, auto_login=True):
+            token_calls.append(auto_login)
+            return "oauth-token"
+
+    fake_authgrok = types.SimpleNamespace(
+        get_store=lambda account_id: FakeStore(),
+        fetch_available_models=lambda token, timeout: ["grok-live", "grok-build"],
+    )
+    monkeypatch.setitem(sys.modules, "authgrok_auth", fake_authgrok)
+
+    def fake_get(url, headers, timeout):
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        raise OSError("local proxy is not running")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgrok2/grok-old",
+        timeout=0.1,
+    )
+
+    assert token_calls == [False]
+    assert result.provider_models["authgrok:2"] == [
+        "authgrok2/grok-live",
+        "authgrok2/grok-build",
+    ]
+
+
+def test_selected_authgrok_zero_catalog_uses_pool_without_login(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    token_calls = []
+
+    class FakeStore:
+        def get_valid_access_token(self, auto_login=True):
+            token_calls.append(auto_login)
+            return "pooled-oauth-token"
+
+    fake_authgrok = types.SimpleNamespace(
+        get_account_pool=lambda: [(3, FakeStore())],
+        get_store=lambda account_id: pytest.fail("authgrok0 must use the account pool"),
+        fetch_available_models=lambda token, timeout: ["grok-live", "grok-build"],
+    )
+    monkeypatch.setitem(sys.modules, "authgrok_auth", fake_authgrok)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgrok0/grok-old",
+        timeout=0.1,
+    )
+
+    assert token_calls == [False]
+    assert result.provider_models["authgrok"] == [
+        "authgrok0/grok-live",
+        "authgrok0/grok-build",
+    ]
+
+
+def test_logged_in_ocagy_catalog_replaces_its_static_section(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(model_options, "_ocagy_has_account", lambda: True)
+    monkeypatch.setattr(
+        model_options,
+        "_fetch_ocagy_catalog",
+        lambda timeout: calls.append(timeout) or [
+            "ocagy/gemini-3.1-pro-high",
+            "ocagy/future-live-model",
+        ],
+    )
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="ocagy/gemini-3.1-pro-high",
+        only_provider="ocagy",
+        timeout=0.25,
+    )
+
+    assert calls == [0.25]
+    assert result.statuses["ocagy"] == "online (2 models)"
+    assert result.provider_models["ocagy"] == [
+        "ocagy/gemini-3.1-pro-high",
+        "ocagy/future-live-model",
+    ]
+    assert "ocagy/future-live-model" in result.models
+    assert "ocagy/gemini-3.1-pro-low" not in result.models
+
+
+def test_ocagy_poll_requires_a_logged_in_account(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(model_options, "_ocagy_has_account", lambda: False)
+    monkeypatch.setattr(
+        model_options,
+        "_fetch_ocagy_catalog",
+        lambda _timeout: (_ for _ in ()).throw(AssertionError("OcAgy should not be polled")),
+    )
+
+    assert model_options.due_provider_catalog_for_model(
+        "ocagy/gemini-3.1-pro-high"
+    ) is None
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="ocagy/gemini-3.1-pro-high",
+        only_provider="ocagy",
+        timeout=0.1,
+    )
+
+    assert result.statuses["ocagy"] == "static fallback (no provider credential)"
+    assert result.provider_models == {}
+    assert "ocagy/gemini-3.1-pro-high" in result.models
+
+
+def test_logged_in_ocagy_is_eligible_for_automatic_polling(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(model_options, "_ocagy_has_account", lambda: True)
+
+    assert model_options.catalog_provider_for_model(
+        "ocagy/gemini-3.1-pro-high"
+    ) == "ocagy"
+    assert model_options.catalog_provider_for_model(
+        "ocagy2/gemini-3.1-pro-high"
+    ) == "ocagy"
+    assert model_options.due_provider_catalog_for_model(
+        "ocagy2/gemini-3.1-pro-high"
+    ) == "ocagy"
+
+
+def test_signed_in_authgpt_numbered_account_polls_codex_manifest(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    token_calls = []
+    fetch_calls = []
+
+    class FakeStore:
+        has_tokens = True
+
+        def get_valid_access_token(self, auto_login=True):
+            token_calls.append(auto_login)
+            return "chatgpt-oauth"
+
+    fake_authgpt = types.SimpleNamespace(
+        get_store=lambda account_id: FakeStore(),
+        fetch_available_models=lambda token, timeout: (
+            fetch_calls.append((token, timeout))
+            or ["gpt-live", "gpt-next"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "authgpt_auth", fake_authgpt)
+
+    assert model_options.catalog_provider_for_model("authgpt2/gpt-old") == "authgpt:2"
+    assert model_options.due_provider_catalog_for_model(
+        "authgpt2/gpt-old"
+    ) == "authgpt:2"
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgpt2/gpt-old",
+        only_provider="authgpt:2",
+        timeout=0.25,
+    )
+
+    assert token_calls == [False]
+    assert fetch_calls == [("chatgpt-oauth", 1)]
+    assert result.provider_models["authgpt:2"] == [
+        "authgpt2/gpt-live",
+        "authgpt2/gpt-next",
+    ]
+
+
+def test_authgem_poll_uses_selected_account_quota_catalog(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fetch_calls = []
+
+    class FakeStore:
+        has_tokens = True
+
+        def get_valid_access_token(self, auto_login=True):
+            assert auto_login is False
+            return "google-oauth"
+
+    fake_authgem = types.SimpleNamespace(
+        get_store=lambda account_id: FakeStore(),
+        fetch_available_models=lambda token, timeout, account_id: (
+            fetch_calls.append((token, timeout, account_id))
+            or ["gemini-account-live"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "authgem_auth", fake_authgem)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgem7/gemini-old",
+        only_provider="authgem:7",
+        timeout=0.1,
+    )
+
+    assert fetch_calls == [("google-oauth", 1, 7)]
+    assert result.provider_models["authgem:7"] == [
+        "authgem7/gemini-account-live",
+    ]
+
+
+def test_authnd_poll_uses_complete_compatible_build_catalog_without_static_intersection(
+    tmp_path, monkeypatch
+):
+    _isolated_cache(tmp_path, monkeypatch)
+    fake_authnd = types.SimpleNamespace(
+        fetch_available_models=lambda timeout: [
+            "deepseek-ai/deepseek-v4-flash-0731",
+            "z-ai/glm-5.2",
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "authnd_auth", fake_authnd)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authnd/nvidia/old",
+        only_provider="authnd",
+        timeout=0.1,
+    )
+
+    assert result.provider_models["authnd"] == [
+        "authnd/deepseek-ai/deepseek-v4-flash-0731",
+        "authnd/z-ai/glm-5.2",
+    ]
+    assert "authnd/deepseek-ai/deepseek-v4-flash-0731" in result.models
+    assert "authnd/z-ai/glm-5.2" in result.models
+
+
+def test_authnd_catalog_failure_preserves_last_successful_markers_and_static_fallback(
+    tmp_path, monkeypatch
+):
+    _isolated_cache(tmp_path, monkeypatch)
+    live_model = "deepseek-ai/deepseek-v4-flash-0731"
+    fake_authnd = types.SimpleNamespace(
+        fetch_available_models=lambda timeout: [live_model],
+    )
+    monkeypatch.setitem(sys.modules, "authnd_auth", fake_authnd)
+
+    successful = model_options.refresh_provider_model_catalogs(
+        active_model="authnd/deepseek-ai/old",
+        only_provider="authnd",
+        timeout=0.1,
+    )
+    assert successful.provider_models["authnd"] == [f"authnd/{live_model}"]
+
+    def offline(timeout):
+        assert timeout == 1
+        raise OSError("offline")
+
+    fake_authnd.fetch_available_models = offline
+    failed = model_options.refresh_provider_model_catalogs(
+        active_model="authnd/deepseek-ai/old",
+        only_provider="authnd",
+        timeout=0.1,
+    )
+
+    assert failed.provider_models == {}
+    assert failed.statuses["authnd"] == "static fallback (OSError — offline)"
+    assert f"authnd/{live_model}" not in failed.models
+    assert "authnd/nvidia/nemotron-3-ultra-550b-a55b" in failed.models
+    assert model_options.get_last_successful_provider_models()["authnd"] == [
+        f"authnd/{live_model}"
+    ]
+
+
+def test_numbered_authnd_poll_preserves_selected_route_prefix(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fake_authnd = types.SimpleNamespace(
+        fetch_available_models=lambda timeout: ["z-ai/glm-5.2"],
+    )
+    monkeypatch.setitem(sys.modules, "authnd_auth", fake_authnd)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authnd4/z-ai/glm-old",
+        only_provider="authnd:4",
+        timeout=0.1,
+    )
+
+    assert result.provider_models["authnd:4"] == ["authnd4/z-ai/glm-5.2"]
+
+
+def test_authza_poll_reads_existing_selector_without_login(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fetch_calls = []
+
+    fake_authza = types.SimpleNamespace(
+        has_credentials=lambda account_id: True,
+        fetch_available_models=lambda account_id, timeout: (
+            fetch_calls.append((account_id, timeout)) or ["GLM-5", "GLM-4.7"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "glm_proxy", fake_authza)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authza3/GLM-4.7",
+        only_provider="authza:3",
+        timeout=0.1,
+    )
+
+    assert fetch_calls == [(3, 1)]
+    assert result.provider_models["authza:3"] == [
+        "authza3/GLM-5",
+        "authza3/GLM-4.7",
+    ]
+
+
+def test_authza_models_are_in_the_static_dropdown_fallback():
+    models = model_options.get_model_options()
+
+    assert "authza/glm-5.3" in models
+    assert "authza/glm-5.2" in models
+    assert "authza/glm-4.5-air" in models
+    assert "authza/glm-4.7-flash" in models
+    assert "authza/glm-4.5-flash" in models
+
+
+def test_authza_account_auto_poll_is_credentialed_and_ttl_scoped(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+    fetch_calls = []
+    fake_authza = types.SimpleNamespace(
+        has_credentials=lambda account_id: account_id == 3,
+        fetch_available_models=lambda account_id, timeout: (
+            fetch_calls.append((account_id, timeout)) or ["glm-5.3", "glm-5.2"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "glm_proxy", fake_authza)
+
+    assert model_options.due_provider_catalog_for_model("authza3/glm-5.3") == "authza:3"
+    assert model_options.due_provider_catalog_for_model("authza4/glm-5.3") is None
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authza3/glm-5.3",
+        only_provider="authza:3",
+        timeout=0.1,
+    )
+
+    assert fetch_calls == [(3, 1)]
+    assert result.provider_models["authza:3"] == [
+        "authza3/glm-5.3",
+        "authza3/glm-5.2",
+    ]
+    assert model_options.due_provider_catalog_for_model("authza3/glm-5.3") is None
+
+
+def test_authza_catalog_cache_isolated_by_access_mode(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    state = {"general": False}
+    fetch_calls = []
+
+    def fetch_available_models(account_id, timeout):
+        variant = "general" if state["general"] else "login"
+        fetch_calls.append((variant, account_id, timeout))
+        return [f"glm-{variant}"]
+
+    fake_authza = types.SimpleNamespace(
+        has_credentials=lambda _account_id: True,
+        uses_general_api=lambda: state["general"],
+        fetch_available_models=fetch_available_models,
+    )
+    monkeypatch.setitem(sys.modules, "glm_proxy", fake_authza)
+
+    login_result = model_options.refresh_provider_model_catalogs(
+        active_model="authza/glm-login",
+        only_provider="authza",
+        timeout=0.1,
+    )
+    assert login_result.provider_models["authza"] == ["authza/glm-login"]
+    assert model_options.due_provider_catalog_for_model("authza/glm-login") is None
+
+    state["general"] = True
+    assert model_options.due_provider_catalog_for_model("authza/glm-general") == "authza"
+    assert "authza" not in model_options.get_current_polled_provider_models()
+    assert "authza" not in model_options.get_last_successful_provider_models()
+
+    general_result = model_options.refresh_provider_model_catalogs(
+        active_model="authza/glm-general",
+        only_provider="authza",
+        timeout=0.1,
+    )
+    assert general_result.provider_models["authza"] == ["authza/glm-general"]
+    assert "authza/glm-4.7-flash" in general_result.models
+    assert "authza/glm-4.7-flash" not in general_result.provider_models["authza"]
+    assert fetch_calls == [
+        ("login", 0, 1),
+        ("general", 0, 1),
+    ]
+    cache = model_options._load_model_catalog_cache(force_disk=True)
+    assert cache["providers"]["authza"]["variant"] == "general_api"
+    assert cache["attempt_variants"]["authza"] == "general_api"
+
+
+def test_authza_general_auto_poll_can_start_api_key_provisioning(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fetch_calls = []
+    fake_authza = types.SimpleNamespace(
+        has_credentials=lambda _account_id: False,
+        can_auto_provision_general_api_key=lambda account_id: account_id == 2,
+        fetch_available_models=lambda account_id, timeout: (
+            fetch_calls.append((account_id, timeout)) or ["glm-5.3-flash"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "glm_proxy", fake_authza)
+
+    assert model_options.due_provider_catalog_for_model(
+        "authza2/glm-5.3-flash"
+    ) == "authza:2"
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authza2/glm-5.3-flash",
+        only_provider="authza:2",
+        timeout=0.1,
+    )
+    assert fetch_calls == [(2, 1)]
+    assert result.provider_models["authza:2"] == ["authza2/glm-5.3-flash"]
+
+
+def test_only_vertex_style_routes_remain_static_by_design():
+    static_routes = model_options.STATIC_ONLY_PROVIDER_PREFIXES
+
+    assert "authgpt/" not in static_routes
+    assert "authcd/" not in static_routes
+    assert "authgem/" not in static_routes
+    assert "authnd/" not in static_routes
+    assert "authza/" not in static_routes
+    assert "authgem-key/" not in static_routes
+    assert "authgem-vertex*/" in static_routes
+
+
+def test_provider_poll_log_omits_authgem_key_from_nonpollable_routes():
+    import translator_gui
+
+    logs = []
+    gui = SimpleNamespace(append_log=logs.append)
+    result = SimpleNamespace(statuses={}, provider_models={})
+
+    translator_gui.TranslatorGUI._log_provider_model_catalog_feedback(
+        gui,
+        result,
+        total_model_count=0,
+        online_model_count=0,
+    )
+
+    assert "Not pollable by design: 4 routes" in logs[0]
+    assert "authgem-key" not in logs[0]
+
+
+def test_authgem_key_is_excluded_from_polling_and_legacy_cache(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    legacy_model = "authgem-key/gemini-legacy-cached"
+    legacy_record = {"fetched_at": 9_999_999_999, "models": [legacy_model]}
+    monkeypatch.setattr(
+        model_options,
+        "_MODEL_CATALOG_MEMORY_CACHE",
+        {
+            "version": model_options._MODEL_CATALOG_CACHE_VERSION,
+            "providers": {"authgem_key": legacy_record},
+            "last_successful": {"authgem_key": legacy_record},
+            "attempts": {"authgem_key": 9_999_999_999},
+        },
+    )
+
+    assert model_options.catalog_provider_for_model(
+        "authgem-key/gemini-current"
+    ) is None
+    assert model_options.due_provider_catalog_for_model(
+        "authgem-key/gemini-current",
+        active_api_key="gemini-secret",
+    ) is None
+    assert legacy_model not in model_options.get_model_options()
+    assert "authgem_key" not in model_options.get_last_successful_provider_models()
+
+    fetch_calls = []
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda *args, **kwargs: fetch_calls.append((args, kwargs)),
+    )
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgem-key/gemini-current",
+        active_api_key="gemini-secret",
+        only_provider="authgem_key",
+        timeout=0.1,
+    )
+
+    assert fetch_calls == []
+    assert result.provider_models == {}
+
+
+def test_gemini_catalog_keeps_native_video_and_lyria_music_models(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        assert "generativelanguage.googleapis.com" in url
+        assert "key=gemini-secret" in url
+        return {
+            "models": [
+                {
+                    "name": "models/gemini-current",
+                    "supportedGenerationMethods": ["generateContent"],
+                },
+                {
+                    "name": "models/veo-3.1-generate-preview",
+                    "supportedGenerationMethods": ["predictLongRunning"],
+                },
+                {
+                    "name": "models/gemini-omni-flash-preview",
+                    "supportedGenerationMethods": ["interactionsOnly"],
+                },
+                {
+                    "name": "models/lyria-3-clip-preview",
+                    "supportedGenerationMethods": ["interactionsOnly"],
+                },
+                {
+                    "name": "models/lyria-realtime-exp",
+                    "supportedGenerationMethods": ["bidiGenerateContent"],
+                },
+                {
+                    "name": "models/text-embedding-current",
+                    "supportedGenerationMethods": ["embedContent"],
+                },
+            ]
+        }
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="veo-3.1-generate-preview",
+        active_api_key="gemini-secret",
+        only_provider="gemini",
+        timeout=0.1,
+    )
+
+    assert model_options.catalog_provider_for_model("veo-3.1-generate-preview") == "gemini"
+    assert model_options.catalog_provider_for_model("lyria-3-pro-preview") == "gemini"
+    assert result.provider_models["gemini"] == [
+        "gemini-current",
+        "veo-3.1-generate-preview",
+        "gemini-omni-flash-preview",
+        "lyria-3-clip-preview",
+        "lyria-realtime-exp",
+    ]
+    assert "text-embedding-current" not in result.models
+
+
+def _bare_gemini_video_client(tmp_path, monkeypatch):
+    client = UnifiedClient.__new__(UnifiedClient)
+    client.output_dir = str(tmp_path)
+    client.request_timeout = 36000
+    client._actual_output_filename = None
+    client._get_image_output_aspect_ratio = lambda default="auto": "auto"
+    client._extract_generation_prompt_and_image_url = lambda _messages: (
+        "A cinematic waterfall",
+        None,
+    )
+    client._get_thread_local_client = lambda: SimpleNamespace()
+    client._should_abort_retry = lambda: False
+    client._sleep_with_cancel = lambda *_args, **_kwargs: True
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    return client
+
+
+def test_veo_and_omni_are_detected_as_native_video_models():
+    assert UnifiedClient._is_video_gen_model("veo-3.1-generate-preview")
+    assert UnifiedClient._is_video_gen_model("gemini-omni-flash-preview")
+    assert UnifiedClient._gemini_video_model_kind("veo-3.1-fast-generate-preview") == "veo"
+    assert UnifiedClient._gemini_video_model_kind("gemini-omni-flash-preview") == "omni"
+    assert UnifiedClient._provider_from_model_name("veo-3.1-generate-preview") == "gemini"
+
+
+def test_lyria_is_detected_as_native_gemini_music():
+    assert UnifiedClient._is_music_gen_model("lyria-3-clip-preview")
+    assert UnifiedClient._is_music_gen_model("models/lyria-realtime-exp")
+    assert UnifiedClient._gemini_music_model_kind("lyria-3-pro-preview") == "interactions"
+    assert UnifiedClient._gemini_music_model_kind("lyria-realtime-exp") == "realtime"
+    assert UnifiedClient._provider_from_model_name("lyria-3-clip-preview") == "gemini"
+
+
+def test_lyria_interactions_saves_mp3_and_returns_audio_marker(tmp_path, monkeypatch):
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    client._extract_generation_prompt_and_image_url = lambda _messages: (
+        "Upbeat orchestral game music",
+        None,
+    )
+    expected_audio = b"fake-lyria-mp3"
+    calls = []
+
+    class FakeInteractions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                status="completed",
+                output_audio=SimpleNamespace(
+                    data=base64.b64encode(expected_audio).decode("ascii"),
+                    mime_type="audio/mpeg",
+                ),
+            )
+
+    client._get_gemini_native_client = lambda _api_key: SimpleNamespace(
+        interactions=FakeInteractions()
+    )
+    response = client._send_gemini_native_music(
+        [{"role": "user", "content": "Upbeat orchestral game music"}],
+        "response.txt",
+        "lyria-3-clip-preview",
+        "gemini-secret",
+    )
+
+    output_path = tmp_path / "response.mp3"
+    assert output_path.read_bytes() == expected_audio
+    assert response.content == f"[GENERATED_AUDIO:{output_path}]"
+    assert calls[0]["model"] == "lyria-3-clip-preview"
+    assert calls[0]["input"] == "Upbeat orchestral game music"
+    assert calls[0]["timeout"] is None
+
+
+def test_gemini_omni_uses_interactions_and_saves_mp4(tmp_path, monkeypatch):
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    calls = []
+    expected_video = b"omni-mp4-bytes"
+
+    class FakeInteractions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                status="completed",
+                output_video=SimpleNamespace(
+                    data=base64.b64encode(expected_video).decode("ascii"),
+                    mime_type="video/mp4",
+                ),
+            )
+
+    fake_sdk = SimpleNamespace(interactions=FakeInteractions())
+    response = client._send_gemini_omni_video(
+        fake_sdk,
+        [{"role": "user", "content": "A cinematic waterfall"}],
+        "response.txt",
+        "gemini-omni-flash-preview",
+    )
+
+    output_path = tmp_path / "response.mp4"
+    assert output_path.read_bytes() == expected_video
+    assert response.content == f"[GENERATED_VIDEO:{output_path}]"
+    assert calls[0]["model"] == "gemini-omni-flash-preview"
+    assert calls[0]["response_format"] == {"type": "video", "delivery": "uri"}
+    assert calls[0]["timeout"] is None
+
+
+def test_veo_uses_long_running_operation_polling_and_saves_mp4(tmp_path, monkeypatch):
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    expected_video = b"veo-mp4-bytes"
+    submitted = []
+    pending = SimpleNamespace(done=False)
+    finished = SimpleNamespace(
+        done=True,
+        error=None,
+        response=SimpleNamespace(
+            generated_videos=[SimpleNamespace(video=SimpleNamespace(uri="video-result"))],
+            rai_media_filtered_count=0,
+            rai_media_filtered_reasons=[],
+        ),
+    )
+
+    class FakeModels:
+        def generate_videos(self, **kwargs):
+            submitted.append(kwargs)
+            return pending
+
+    class FakeOperations:
+        def get(self, operation):
+            assert operation is pending
+            return finished
+
+    class FakeFiles:
+        def download(self, *, file):
+            assert file == "video-result"
+            return expected_video
+
+    fake_sdk = SimpleNamespace(
+        models=FakeModels(),
+        operations=FakeOperations(),
+        files=FakeFiles(),
+    )
+    response = client._send_gemini_veo_video(
+        fake_sdk,
+        [{"role": "user", "content": "A cinematic waterfall"}],
+        "response.txt",
+        "veo-3.1-generate-preview",
+    )
+
+    output_path = tmp_path / "response.mp4"
+    assert output_path.read_bytes() == expected_video
+    assert response.content == f"[GENERATED_VIDEO:{output_path}]"
+    assert submitted[0]["model"] == "veo-3.1-generate-preview"
+    assert submitted[0]["prompt"] == "A cinematic waterfall"
+
+
+def test_gemini_video_provider_safety_error_is_prohibited_content(tmp_path, monkeypatch):
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    with pytest.raises(UnifiedClientError) as raised:
+        client._raise_gemini_video_error(
+            "Veo generation failed",
+            UnifiedClientError(
+                "Veo operation failed: response blocked by provider safety filter",
+                error_type="api_error",
+                http_status=400,
+            ),
+        )
+    assert raised.value.error_type == "prohibited_content"
+    assert raised.value.http_status == 400
+
+
+def test_http_catalog_failure_reports_status_and_safe_response_detail(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        if "api.x.ai" in url:
+            raise urllib.error.HTTPError(
+                url,
+                403,
+                "Forbidden",
+                {},
+                io.BytesIO(b'{"error":{"message":"Missing ListModels permission"}}'),
+            )
+        raise OSError("local proxy is not running")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret-that-must-not-appear",
+        timeout=0.1,
+    )
+
+    status = result.statuses["xai"]
+    assert status == "static fallback (HTTP 403 — Missing ListModels permission)"
+    assert "xai-secret" not in status
+    assert model_options.due_provider_catalog_for_model(
+        "grok-3-mini", "xai-secret-that-must-not-appear"
+    ) is None
+
+
+def test_scoped_auto_poll_contacts_only_selected_provider_once_per_day(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        assert url == "https://api.x.ai/v1/models"
+        assert headers["Authorization"] == "Bearer xai-secret"
+        return {"data": [{"id": "grok-current"}]}
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    assert model_options.due_provider_catalog_for_model(
+        "grok-3-mini", "xai-secret"
+    ) == "xai"
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret",
+        only_provider="xai",
+        timeout=0.1,
+    )
+
+    assert calls == ["https://api.x.ai/v1/models"]
+    assert result.requested_provider == "xai"
+    assert result.provider_models["xai"] == ["grok-current"]
+    assert model_options.due_provider_catalog_for_model(
+        "grok-3-mini", "xai-secret"
+    ) is None
+
+    monkeypatch.setattr(
+        model_options.time,
+        "time",
+        lambda: now + model_options._MODEL_CATALOG_CACHE_TTL_SECONDS + 1,
+    )
+    assert model_options.due_provider_catalog_for_model(
+        "grok-3-mini", "xai-secret"
+    ) == "xai"
+
+
+def test_proxy_start_poll_ignores_failed_attempt_but_reuses_fresh_success(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda _url, _headers, _timeout: (_ for _ in ()).throw(
+            OSError("local proxy is not running")
+        ),
+    )
+    model_options.refresh_provider_model_catalogs(
+        active_model="antigravity/gemini-3-flash",
+        only_provider="antigravity",
+        timeout=0.1,
+    )
+
+    assert not model_options.provider_model_catalog_refresh_due("antigravity")
+    assert model_options.provider_model_catalog_refresh_due(
+        "antigravity", successful_only=True
+    )
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda _url, _headers, _timeout: {
+            "data": [{"id": "gemini-3-flash"}]
+        },
+    )
+    model_options.refresh_provider_model_catalogs(
+        active_model="antigravity/gemini-3-flash",
+        only_provider="antigravity",
+        timeout=0.1,
+    )
+
+    assert not model_options.provider_model_catalog_refresh_due(
+        "antigravity", successful_only=True
+    )
+
+
+@pytest.mark.parametrize('saved', [True, False])
+def test_arena_catalog_restores_saved_login_when_proxy_stopped(tmp_path, monkeypatch, saved):
+    import autharena_proxy as arena
+    _isolated_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(arena, 'list_accounts', lambda: [{'slot': 0}] if saved else [])
+    monkeypatch.setattr(arena, 'check_proxy_health', lambda: {'running': False})
+    starts = []
+    def start():
+        starts.append(True)
+        return {'url': 'http://arena.test', 'key': 'test-only'}
+    monkeypatch.setattr(arena, 'ensure_proxy_running', start)
+    monkeypatch.setattr(arena.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+        ok=True, json=lambda: {'data': [{'id': 'test-model'}]},
+    ))
+    result = model_options.refresh_provider_model_catalogs(
+        active_model='autharena/test-model', only_provider='autharena',
+    )
+    assert len(starts) == int(saved)
+    assert result.statuses['autharena'] == ('online (1 models)' if saved else 'waiting for Arena Login')
+
+
+def test_arena_startup_respects_persisted_successful_cache(tmp_path, monkeypatch):
+    import autharena_proxy
+    import translator_gui
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+    monkeypatch.setattr(autharena_proxy, "list_accounts", lambda: [{"slot": 0}])
+    monkeypatch.setattr(autharena_proxy, "check_proxy_health", lambda: {"running": True})
+    monkeypatch.setattr(autharena_proxy, "list_models", lambda **kwargs: [{"id": "test-model"}])
+    model_options.refresh_provider_model_catalogs(active_model="autharena/test-model", only_provider="autharena")
+    # Discard process memory to exercise the on-disk cache used after restart.
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    monkeypatch.setattr(translator_gui, "provider_model_catalog_refresh_due", model_options.provider_model_catalog_refresh_due)
+    starts = []
+    gui = SimpleNamespace(_start_provider_model_catalog_refresh=lambda **kwargs: starts.append(kwargs) or True)
+    for _ in range(3):
+        translator_gui.TranslatorGUI._autharena_catalog_after_login(gui)
+    assert starts == []
+    monkeypatch.setattr(model_options.time, "time", lambda: now + 24 * 3600 + 1)
+    translator_gui.TranslatorGUI._autharena_catalog_after_login(gui)
+    assert starts == [{"only_provider": "autharena", "automatic": True}]
+
+
+def test_model_catalog_cache_uses_macos_caches_directory(monkeypatch):
+    monkeypatch.delenv("GLOSSARION_MODEL_CATALOG_CACHE", raising=False)
+    monkeypatch.setattr(model_options.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(model_options.os.path, "expanduser", lambda _path: "/Users/tester")
+
+    assert model_options._model_catalog_cache_path().replace("\\", "/") == (
+        "/Users/tester/Library/Caches/Glossarion/model_catalog_cache.json"
+    )
+
+
+def test_seven_day_markers_survive_failure_and_restart_without_extending_daily_catalog_cache(
+    tmp_path,
+    monkeypatch,
+):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda url, headers, timeout: {"data": [{"id": "grok-confirmed"}]},
+    )
+    model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret",
+        only_provider="xai",
+        timeout=0.1,
+    )
+    assert model_options.get_last_successful_provider_models()["xai"] == [
+        "grok-confirmed"
+    ]
+    assert model_options.get_current_polled_provider_models()["xai"] == [
+        "grok-confirmed"
+    ]
+
+    now += 24 * 60 * 60 + 1
+    assert model_options.provider_model_catalog_refresh_due("xai")
+    assert "xai" not in model_options._cached_provider_models()
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-confirmed"]
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda url, headers, timeout: (_ for _ in ()).throw(OSError("offline")),
+    )
+    failed = model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret",
+        only_provider="xai",
+        timeout=0.1,
+    )
+    assert failed.provider_models == {}
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-confirmed"]
+
+    # The last success survives restart; a failed poll does not renew its age.
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    assert model_options.get_last_successful_provider_models()["xai"] == [
+        "grok-confirmed"
+    ]
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-confirmed"]
+    now = 1_800_000_000.0 + 7 * 24 * 60 * 60 - 1
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-confirmed"]
+    now += 1
+    assert "xai" not in model_options.get_current_polled_provider_models()
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda url, headers, timeout: {"data": [{"id": "grok-replacement"}]},
+    )
+    model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret",
+        only_provider="xai",
+        timeout=0.1,
+    )
+    assert model_options.get_last_successful_provider_models()["xai"] == [
+        "grok-replacement"
+    ]
+    assert model_options.get_current_polled_provider_models()["xai"] == ["grok-replacement"]
+
+
+def test_successful_poll_immediately_removes_omitted_model_markers(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    ids = ['grok-old', 'grok-kept']
+    monkeypatch.setattr(model_options, '_http_get_json', lambda *args, **kwargs: {
+        'data': [{'id': value} for value in ids],
+    })
+    def refresh():
+        return model_options.refresh_provider_model_catalogs(
+            active_model='grok-kept', active_api_key='fake', only_provider='xai', timeout=0.1,
+        )
+    refresh()
+    assert model_options.get_current_polled_provider_models()['xai'] == ids
+    ids = ['grok-kept']
+    refresh()
+    monkeypatch.setattr(model_options, '_MODEL_CATALOG_MEMORY_CACHE', None)
+    assert model_options.get_current_polled_provider_models()['xai'] == ['grok-kept']
+
+
+def test_successful_markers_remain_in_memory_if_cache_write_fails(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(model_options, '_http_get_json', lambda *args, **kwargs: {
+        'data': [{'id': 'grok-confirmed'}],
+    })
+    def fail_replace(*args):
+        raise OSError('simulated read-only cache')
+    monkeypatch.setattr(model_options.os, 'replace', fail_replace)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model='grok-confirmed', active_api_key='fake', only_provider='xai', timeout=0.1,
+    )
+    assert result.statuses['cache'].startswith('memory only')
+    assert model_options.get_current_polled_provider_models()['xai'] == ['grok-confirmed']
+
+
+def test_open_session_marker_expiry_only_refreshes_when_state_changes(tmp_path, monkeypatch):
+    import translator_gui
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, 'time', lambda: now)
+    cache = model_options._empty_model_catalog_cache()
+    cache['last_successful'] = {'xai': {'fetched_at': now, 'models': ['grok-confirmed']}}
+    model_options._write_model_catalog_cache(cache)
+    refreshed = []
+    gui = SimpleNamespace()
+    gui._ensure_polled_model_marker_state = lambda: translator_gui.TranslatorGUI._ensure_polled_model_marker_state(gui)
+    gui._refresh_model_search_poll_state = lambda: refreshed.append(set(gui._polled_online_model_ids))
+    gui._ensure_polled_model_marker_state()
+    translator_gui.TranslatorGUI._expire_polled_model_markers(gui)
+    assert not refreshed
+    now += 7 * 24 * 60 * 60
+    translator_gui.TranslatorGUI._expire_polled_model_markers(gui)
+    assert refreshed == [set()]
+    translator_gui.TranslatorGUI._expire_polled_model_markers(gui)
+    assert refreshed == [set()]
+
+
+def test_gui_catalog_refresh_updates_stealthily_while_model_editor_is_active(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    class ModelComboHarness:
+        _schedule_current_provider_catalog_refresh = lambda *_args, **_kwargs: None
+        setup_model_combobox_bindings = (
+            translator_gui.TranslatorGUI.setup_model_combobox_bindings
+        )
+        _install_model_completer = translator_gui.TranslatorGUI._install_model_completer
+        _model_editor_or_popup_is_active = (
+            translator_gui.TranslatorGUI._model_editor_or_popup_is_active
+        )
+        _replace_model_combo_catalog = (
+            translator_gui.TranslatorGUI._replace_model_combo_catalog
+        )
+        _update_active_model_combo_catalog = (
+            translator_gui.TranslatorGUI._update_active_model_combo_catalog
+        )
+        _refresh_model_combo_catalog = (
+            translator_gui.TranslatorGUI._refresh_model_combo_catalog
+        )
+        _apply_model_combo_catalog_now = (
+            translator_gui.TranslatorGUI._apply_model_combo_catalog_now
+        )
+        _finish_model_editor_typing = (
+            translator_gui.TranslatorGUI._finish_model_editor_typing
+        )
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    window = qt_widgets.QWidget()
+    layout = qt_widgets.QVBoxLayout(window)
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    old_models = ["authnd/old-model", "authgpt/existing-model"]
+    combo.addItems(old_models)
+    other_field = qt_widgets.QLineEdit()
+    layout.addWidget(combo)
+    layout.addWidget(other_field)
+
+    harness = ModelComboHarness()
+    harness.model_combo = combo
+    harness._model_all_values = list(old_models)
+    harness.setup_model_combobox_bindings()
+
+    completer_popup = combo.completer().popup()
+    combo_popup = combo.view()
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    assert completer_popup.objectName() == "modelCompleterPopup"
+    assert combo_popup.objectName() == "modelComboPopup"
+    assert completer_popup.iconSize() == qt_core.QSize(14, 14)
+    assert combo_popup.iconSize() == qt_core.QSize(14, 14)
+    assert "background-color: #2d2d2d" in completer_popup.styleSheet()
+    assert "background-color: #2d2d2d" in combo_popup.styleSheet()
+    assert "QAbstractItemView::item {\n        min-height" not in (
+        completer_popup.styleSheet()
+    )
+    assert "height: 21px" in completer_popup.styleSheet()
+    assert "padding: 0px 4px" in completer_popup.styleSheet()
+    assert "min-height: 28px" not in completer_popup.styleSheet()
+    assert "selection-background-color: #3d3d3d" in (
+        completer_popup.styleSheet()
+    )
+    assert "background-color: #3d5268" not in completer_popup.styleSheet()
+    assert (
+        completer_popup.palette().color(qt_gui.QPalette.Base).name()
+        == "#2d2d2d"
+    )
+    assert completer_popup.palette().color(qt_gui.QPalette.Text).name() == "#f0f0f0"
+    assert (
+        completer_popup.palette().color(qt_gui.QPalette.Highlight).name()
+        == "#3d3d3d"
+    )
+
+    window.show()
+    window.activateWindow()
+    editor = combo.lineEdit()
+    editor.setFocus()
+    editor.setText("authnd/partially-typed")
+    editor.setCursorPosition(len("authnd/partially"))
+    app.processEvents()
+    assert editor.hasFocus()
+
+    new_models = ["authnd/new-model", "authnd/newer-model"]
+    original_completer = combo.completer()
+    harness._model_editor_typing = True
+    assert harness._refresh_model_combo_catalog(new_models)
+    assert [combo.itemText(index) for index in range(combo.count())] == old_models
+    assert harness._pending_model_combo_catalog == new_models
+
+    harness._finish_model_editor_typing()
+    assert [combo.itemText(index) for index in range(combo.count())] == new_models
+    assert editor.text() == "authnd/partially-typed"
+    assert editor.cursorPosition() == len("authnd/partially")
+    assert editor.hasFocus()
+    assert combo.completer() is original_completer
+    assert harness._model_completer_proxy._base_model_values == new_models
+    harness._model_completer_proxy.set_search_text("old-model")
+    assert harness._model_completer_proxy.stringList() == []
+
+    # An actual selected model survives catalog additions and reordering too.
+    combo.setCurrentText("authnd/new-model")
+    editor.setSelection(0, len("authnd/new"))
+    app.processEvents()
+    reordered_models = [
+        "authnd/newer-model",
+        "authnd/new-model",
+        "authnd/latest-model",
+    ]
+    assert harness._refresh_model_combo_catalog(reordered_models)
+    assert combo.currentText() == "authnd/new-model"
+    assert combo.currentIndex() == 1
+    assert editor.selectedText() == "authnd/new"
+    assert editor.hasFocus()
+
+    # A Manage Models save is authoritative even if a typing debounce happens
+    # to still be active when the user clicks Save.
+    harness._model_editor_typing = True
+    saved_models = ["authnd/new-model"]
+    assert harness._refresh_model_combo_catalog(saved_models, force=True)
+    assert [combo.itemText(index) for index in range(combo.count())] == saved_models
+    harness._model_completer_proxy.set_search_text("newer-model")
+    assert harness._model_completer_proxy.stringList() == []
+    assert harness._pending_model_combo_catalog is None
+
+    # Moving on to the next field does not trigger another catalog rebuild.
+    other_field.setFocus()
+    app.processEvents()
+    app.processEvents()
+
+    assert [combo.itemText(index) for index in range(combo.count())] == saved_models
+    assert editor.text() == "authnd/new-model"
+    assert other_field.hasFocus()
+
+    window.close()
+
+
+def test_model_completer_ranks_matches_without_python_sort_proxy(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    models = [
+        "or/vendor/alpha-model",
+        "alpha-model",
+        "x/alpha-model",
+        "authgrok/grok-4.6",
+        "unrelated-model",
+    ]
+    combo.addItems(models)
+    harness = SimpleNamespace(model_combo=combo)
+
+    translator_gui.TranslatorGUI._install_model_completer(harness, models)
+    completion_model = harness._model_completer_proxy
+
+    assert not isinstance(completion_model, qt_core.QSortFilterProxyModel)
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == [
+        "alpha-model",
+        "or/vendor/alpha-model",
+        "x/alpha-model",
+    ]
+
+    completion_model.set_search_text("authgrok12/grok")
+    assert completion_model.stringList() == ["authgrok12/grok-4.6"]
+    app.processEvents()
+
+
+def test_translator_model_arrow_shows_full_catalog_and_jumps_to_match(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_test = pytest.importorskip("PySide6.QtTest")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    models = [
+        "or/deepseek/deepseek-v4-flash-latest",
+        "authnd/z-ai/glm-5-3-flash",
+        "or/google/gemini-3.6-flash",
+    ]
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo.addItems(models)
+    combo.resize(420, 32)
+    harness = SimpleNamespace(model_combo=combo)
+    translator_gui.TranslatorGUI._install_model_completer(harness, models)
+    # Match the Edit Model dialog: its initial text is assigned
+    # programmatically, without any textEdited signal.
+    combo.setCurrentText("gemini-3.6")
+    combo.show()
+    app.processEvents()
+
+    qt_test.QTest.mouseClick(
+        combo,
+        qt_core.Qt.LeftButton,
+        pos=qt_core.QPoint(combo.width() - 4, combo.height() // 2),
+    )
+    app.processEvents()
+
+    assert combo.insertPolicy() == qt_widgets.QComboBox.NoInsert
+    assert combo.count() == len(models)
+    assert combo.findText("gemini-3.6") == -1
+    assert harness._model_completer_proxy.stringList() == sorted(models)
+    assert combo.completer().popup().isVisible()
+    assert not combo.view().isVisible()
+    assert combo.completer().popup().model().rowCount() == len(models)
+    assert combo.completer().popup().currentIndex().data() == (
+        "or/google/gemini-3.6-flash"
+    )
+    qt_test.QTest.mouseClick(
+        combo,
+        qt_core.Qt.LeftButton,
+        pos=qt_core.QPoint(combo.width() - 4, combo.height() // 2),
+    )
+    app.processEvents()
+    assert not combo.completer().popup().isVisible()
+    assert not combo._model_completion_popup_filter._arrow_popup_open
+
+
+def test_model_field_check_survives_focus_and_catalog_changes(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit
+    import translator_gui
+
+    app = QApplication.instance() or QApplication([])
+    combo = QComboBox()
+    combo.setEditable(True)
+    models = ["provider/unpolled", "authgpt/confirmed"]
+    combo.addItems(models)
+    combo.setCurrentIndex(1)
+    harness = SimpleNamespace(
+        model_combo=combo, config={},
+        _polled_online_model_ids={"authgpt/confirmed"},
+        _model_polled_icon=translator_gui.TranslatorGUI._create_polled_model_icon(),
+    )
+    harness._install_model_completer = lambda values: translator_gui.TranslatorGUI._install_model_completer(harness, values)
+    harness._install_model_completer(models)
+    combo.show()
+    marker = combo._model_poll_marker_label
+    assert not marker.isHidden()
+
+    # Moving focus to Manage Models must not change the indicator, including
+    # when a pending catalog refresh rebuilds the now-unfocused model field.
+    manager = QDialog()
+    QLineEdit(manager).setFocus()
+    manager.show()
+    manager.activateWindow()
+    app.processEvents()
+    translator_gui.TranslatorGUI._replace_model_combo_catalog(harness, models)
+    assert combo.currentIndex() == 1
+    assert combo.currentText() == "authgpt/confirmed"
+    assert not marker.isHidden()
+    manager.close()
+    app.processEvents()
+    assert not marker.isHidden()
+
+    # Editable text and numbered-account aliases need not have a matching row.
+    combo.setCurrentIndex(0)
+    combo.setEditText("authgpt4/confirmed")
+    assert not marker.isHidden()
+    combo.setEditText("provider/unpolled")
+    assert marker.isHidden()
+    combo.setEditText("authgpt/confirmed")
+    assert not marker.isHidden()
+    translator_gui.TranslatorGUI._apply_polled_model_combo_rows(
+        combo, set(), harness._model_polled_icon, False,
+    )
+    assert marker.isHidden()
+    combo.close()
+    combo.deleteLater()
+    manager.deleteLater()
+
+
+def test_local_model_poll_check_explains_it_is_not_a_loaded_model(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo._model_poll_marker_keys = {"ollamapull/qwen3.5-9b:latest"}
+    combo.setEditText("ollamapull/qwen3.5-9b:latest")
+    translator_gui._install_model_field_poll_marker(combo, qt_gui.QIcon())
+
+    assert "local Ollama model catalog" in combo.lineEdit().toolTip()
+    assert "does not confirm the model is loaded" in combo.lineEdit().toolTip()
+    combo.setEditText("ollamapull/other")
+    assert combo.lineEdit().toolTip() == ""
+    combo.close()
+
+
+def test_multi_key_local_model_poll_check_explains_it_is_not_loaded(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo.addItem("ollamapull/qwen3.5-9b:latest")
+    combo.setItemData(0, True, multi_api_key_manager._MODEL_POLL_MARKER_ROLE)
+    multi_api_key_manager._install_model_field_poll_marker(combo, qt_gui.QIcon())
+
+    assert "local Ollama model catalog" in combo.lineEdit().toolTip()
+    assert "does not confirm the model is loaded" in combo.lineEdit().toolTip()
+    combo.close()
+
+
+def test_ollama_stream_logs_enter_and_finish_request_card():
+    import translator_gui
+
+    dialog_type = translator_gui._InputOutputDialog
+    segment = {"phase": "processing", "complete": False}
+
+    class Harness:
+        _DIRECT_RESPONSE_PAYLOAD_PREFIX = dialog_type._DIRECT_RESPONSE_PAYLOAD_PREFIX
+        _DIRECT_GLOSSARY_STREAM_START_PREFIX = dialog_type._DIRECT_GLOSSARY_STREAM_START_PREFIX
+        _HIDDEN_STREAM_START_LOG_PHRASES = dialog_type._HIDDEN_STREAM_START_LOG_PHRASES
+        _STREAM_END_LOG_PHRASES = dialog_type._STREAM_END_LOG_PHRASES
+        _PIPELINE_LOG_PHRASES = dialog_type._PIPELINE_LOG_PHRASES
+        _STATUS_FIRST_CHARS = dialog_type._STATUS_FIRST_CHARS
+        _stream_phase_by_thread = {}
+        _in_thinking = False
+        _streaming_text = False
+        starts = []
+
+        def _begin_request_segment(self, line, source_thread=None):
+            self.starts.append((line, source_thread))
+            return segment
+
+        def _request_segment_for_thread(self, source_thread=None, create=True):
+            return segment
+
+        def _looks_like_pipeline_status(self, line):
+            return dialog_type._looks_like_pipeline_status(line)
+
+    harness = Harness()
+    classify = dialog_type._classify_line
+    worker = "Thread-34 (api_call)"
+
+    assert classify(harness, "📤 [Thread-34 (api_call)] Chapter 25 (translation) Preparing Ollama request", worker) == "log"
+    assert harness.starts and "Chapter 25" in harness.starts[0][0]
+    assert classify(harness, "🧠 [Ollama] Thinking...", worker) == "log"
+    assert classify(harness, "    Checking wording", worker) == "thinking"
+    assert classify(harness, "🧠 [Ollama] Thinking complete.", worker) == "log"
+    assert classify(harness, "📡 [Ollama] Text streaming...", worker) == "log"
+    assert classify(harness, "Translated sentence", worker) == "content"
+    assert classify(harness, "Ollama: Ollama stream complete (3 generated tokens).", worker) == "log"
+    assert segment["complete"] is True
+
+
+def test_main_model_search_marks_polled_rows_and_hides_unpolled_without_changing_ids(
+    monkeypatch,
+):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    models = [
+        "provider/confirmed",
+        "provider/unpolled",
+        "authnd/deepseek-ai/deepseek-v4-flash-0731",
+    ]
+    combo.addItems(models)
+    checked_icon = translator_gui.TranslatorGUI._create_polled_model_icon()
+    harness = SimpleNamespace(
+        model_combo=combo,
+        config={"model_manager_hide_unpolled_models": False},
+        _polled_online_model_ids={
+            "PROVIDER/CONFIRMED",
+            "authnd/deepseek-ai/deepseek-v4-flash-0731",
+        },
+        _model_polled_icon=checked_icon,
+    )
+
+    translator_gui.TranslatorGUI._install_model_completer(harness, models)
+    completion_model = harness._model_completer_proxy
+    completion_model.set_search_text("provider/")
+    confirmed_row = completion_model.stringList().index("provider/confirmed")
+    unpolled_row = completion_model.stringList().index("provider/unpolled")
+
+    assert not completion_model.data(
+        completion_model.index(confirmed_row, 0), qt_core.Qt.DecorationRole
+    ).isNull()
+    assert completion_model.data(
+        completion_model.index(unpolled_row, 0), qt_core.Qt.DecorationRole
+    ).isNull()
+    assert completion_model.data(
+        completion_model.index(confirmed_row, 0), qt_core.Qt.EditRole
+    ) == "provider/confirmed"
+    assert combo.itemIcon(0).isNull()
+    assert combo.itemIcon(1).isNull()
+    assert combo.itemData(0, translator_gui._MODEL_POLL_MARKER_ROLE) is True
+    assert combo.itemData(1, translator_gui._MODEL_POLL_MARKER_ROLE) is False
+    combo.setCurrentIndex(0)
+    app.processEvents()
+    assert combo.lineEdit().textMargins().left() == 11
+    assert not combo._model_poll_marker_label.isHidden()
+    assert combo._model_poll_marker_label.autoFillBackground() is False
+    assert "background-color: transparent" in (
+        combo._model_poll_marker_label.styleSheet()
+    )
+    marker_image = combo._model_poll_marker_label.pixmap().toImage()
+    assert marker_image.pixelColor(0, 0).alpha() == 0
+    assert isinstance(
+        combo.view().itemDelegate(),
+        translator_gui._ModelPollMarkerDelegate,
+    )
+    assert isinstance(
+        combo.completer().popup().itemDelegate(),
+        translator_gui._ModelPollMarkerDelegate,
+    )
+    assert completion_model.data(
+        completion_model.index(confirmed_row, 0),
+        translator_gui._MODEL_POLL_MARKER_ROLE,
+    ) is True
+    combo.setCurrentIndex(1)
+    app.processEvents()
+    assert combo.lineEdit().textMargins().left() == 0
+    assert combo._model_poll_marker_label.isHidden()
+
+    combo.setCurrentText("provider/unpolled")
+    harness.config["model_manager_hide_unpolled_models"] = True
+    translator_gui.TranslatorGUI._refresh_model_search_poll_state(
+        harness,
+        notify_multi_key_managers=False,
+    )
+    completion_model.set_search_text("provider/")
+
+    assert completion_model.stringList() == ["provider/confirmed"]
+    assert combo.currentText() == "provider/unpolled"
+    assert not combo.view().isRowHidden(0)
+    assert combo.view().isRowHidden(1)
+
+    completion_model.set_search_text("authnd7/")
+    assert completion_model.stringList() == [
+        "authnd7/deepseek-ai/deepseek-v4-flash-0731"
+    ]
+    assert not completion_model.data(
+        completion_model.index(0, 0), qt_core.Qt.DecorationRole
+    ).isNull()
+    assert "✓" not in completion_model.data(
+        completion_model.index(0, 0), qt_core.Qt.EditRole
+    )
+
+    harness.config["model_manager_hide_unpolled_models"] = False
+    translator_gui.TranslatorGUI._refresh_model_search_poll_state(
+        harness,
+        notify_multi_key_managers=False,
+    )
+    completion_model.set_search_text("provider/")
+    assert completion_model.stringList() == [
+        "provider/confirmed",
+        "provider/unpolled",
+    ]
+    assert not combo.view().isRowHidden(1)
+    assert combo.currentText() == "provider/unpolled"
+
+    manager_refreshes = []
+    harness._multi_api_key_dialog = SimpleNamespace(
+        _refresh_model_catalog_choices=lambda: manager_refreshes.append(True)
+    )
+    translator_gui.TranslatorGUI._refresh_model_search_poll_state(harness)
+    assert manager_refreshes == [True]
+    app.processEvents()
+
+
+def test_multi_key_dropdown_icon_has_compact_click_target(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo.resize(400, 32)
+    owner = SimpleNamespace(_halgakos_icon_path=lambda: "Halgakos.ico")
+
+    multi_api_key_manager.MultiAPIKeyDialog._apply_combobox_icon(owner, combo)
+    combo.show()
+    app.processEvents()
+
+    assert "padding-right: 0px" in combo.styleSheet()
+    assert "width: 32px" in combo.styleSheet()
+    editor_right = combo.lineEdit().x() + combo.lineEdit().width()
+    dropdown_left = combo.width() - 32
+    assert 0 <= dropdown_left - editor_right <= 3
+
+
+def test_multi_key_arrow_shows_full_catalog_and_jumps_to_matching_area(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    qt_test = pytest.importorskip("PySide6.QtTest")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    models = [
+        "or/deepseek/deepseek-v4-flash-latest",
+        "authnd/z-ai/glm-5-3-flash",
+        "or/google/gemini-3.6-flash",
+    ]
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    combo.addItems(models)
+    combo.resize(420, 32)
+    translator = SimpleNamespace(
+        config={"model_manager_hide_unpolled_models": False},
+        _polled_online_model_ids=set(),
+        _model_polled_icon=qt_gui.QIcon(),
+    )
+    owner = SimpleNamespace(translator_gui=translator)
+    multi_api_key_manager.MultiAPIKeyDialog._attach_model_autofill(
+        owner,
+        combo,
+        model_values=models,
+    )
+    # Match startup: the saved value is assigned without user typing.
+    combo.setCurrentText("gemini-3.6")
+    combo.show()
+    app.processEvents()
+
+    qt_test.QTest.mouseClick(
+        combo,
+        qt_core.Qt.LeftButton,
+        pos=qt_core.QPoint(combo.width() - 4, combo.height() // 2),
+    )
+    app.processEvents()
+
+    assert combo.insertPolicy() == qt_widgets.QComboBox.NoInsert
+    assert combo.count() == len(models)
+    assert combo.findText("gemini-3.6") == -1
+    assert combo._model_completer_proxy.stringList() == sorted(models)
+    assert combo.completer().popup().isVisible()
+    assert not combo.view().isVisible()
+    assert combo.completer().popup().model().rowCount() == len(models)
+    assert combo.completer().popup().currentIndex().data() == (
+        "or/google/gemini-3.6-flash"
+    )
+    qt_test.QTest.mouseClick(
+        combo,
+        qt_core.Qt.LeftButton,
+        pos=qt_core.QPoint(combo.width() - 4, combo.height() // 2),
+    )
+    app.processEvents()
+    assert not combo.completer().popup().isVisible()
+    assert not combo._model_completion_popup_filter._arrow_popup_open
+
+
+def test_multi_key_model_poll_border_animates_and_stops(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.resize(420, 32)
+    combo.show()
+    app.processEvents()
+
+    multi_api_key_manager.MultiAPIKeyDialog._set_combo_model_poll_border_active(
+        combo, True,
+    )
+    app.processEvents()
+    border = combo._model_catalog_poll_border
+    assert border.isAnimating()
+    assert border.geometry() == combo.rect()
+
+    multi_api_key_manager.MultiAPIKeyDialog._set_combo_model_poll_border_active(
+        combo, False,
+    )
+    assert not border.isAnimating()
+
+
+def test_multi_key_manager_model_fields_use_lightweight_ranked_completer(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    qt_test = pytest.importorskip("PySide6.QtTest")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import multi_api_key_manager
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    models = [
+        "or/vendor/alpha-model",
+        "alpha-model",
+        "x/alpha-model",
+        "antigravity/gemini-3.7-flash-medium",
+        "ocagy/gemini-3.1-pro-high",
+        "authgrok/grok-4.6",
+        "authgpt/gpt-5.6",
+        "authza/glm-5.3",
+        "unrelated-model",
+    ]
+    combo.addItems(models)
+
+    icon_pixmap = qt_gui.QPixmap(2, 2)
+    icon_pixmap.fill(qt_core.Qt.green)
+    checked_icon = qt_gui.QIcon(icon_pixmap)
+    translator = SimpleNamespace(
+        config={"model_manager_hide_unpolled_models": False},
+        _polled_online_model_ids={"authgpt/gpt-5.6"},
+        _model_polled_icon=checked_icon,
+        _model_all_values=list(models),
+    )
+    owner = SimpleNamespace(translator_gui=translator)
+
+    multi_api_key_manager.MultiAPIKeyDialog._attach_model_autofill(
+        owner,
+        combo,
+        model_values=models,
+    )
+    completion_model = combo._model_completer_proxy
+
+    assert combo._model_context_menu_installed is True
+    assert combo.contextMenuPolicy() == qt_core.Qt.CustomContextMenu
+    assert combo.lineEdit().contextMenuPolicy() == qt_core.Qt.CustomContextMenu
+    assert not isinstance(completion_model, qt_core.QSortFilterProxyModel)
+    assert combo.completer().popup().iconSize() == qt_core.QSize(14, 14)
+    assert combo.iconSize() == qt_core.QSize(14, 14)
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == [
+        "alpha-model",
+        "or/vendor/alpha-model",
+        "x/alpha-model",
+    ]
+    numbered_aliases = {
+        "antigravity1": "antigravity1/gemini-3.7-flash-medium",
+        "ocagy1": "ocagy1/gemini-3.1-pro-high",
+        "authgrok1": "authgrok1/grok-4.6",
+        "authgpt1": "authgpt1/gpt-5.6",
+        "authza2": "authza2/glm-5.3",
+    }
+    for typed, expected in numbered_aliases.items():
+        editor = combo.lineEdit()
+        editor.selectAll()
+        qt_test.QTest.keyClicks(editor, typed)
+        app.processEvents()
+        assert expected in completion_model.stringList()
+        assert all(
+            value.startswith(typed + "/")
+            for value in completion_model.stringList()
+        )
+
+    editor = combo.lineEdit()
+    editor.selectAll()
+    qt_test.QTest.keyClicks(editor, "authza2/glm-5.3")
+    app.processEvents()
+    login_button = combo._authza_login_button
+    assert not login_button.isHidden()
+    assert login_button.property("authzaAccountId") == 2
+    assert login_button.text() in {"🔐", "✅"}
+    assert editor.textMargins().right() == 28
+
+    editor.selectAll()
+    qt_test.QTest.keyClicks(editor, "openai/gpt-5")
+    app.processEvents()
+    assert login_button.isHidden()
+    assert editor.textMargins().right() == 0
+
+
+    completion_model.set_search_text("authgpt1")
+    marked_index = completion_model.stringList().index("authgpt1/gpt-5.6")
+    assert not completion_model.data(
+        completion_model.index(marked_index, 0), qt_core.Qt.DecorationRole
+    ).isNull()
+    assert completion_model.data(
+        completion_model.index(marked_index, 0),
+        multi_api_key_manager._MODEL_POLL_MARKER_ROLE,
+    ) is True
+    assert completion_model.data(
+        completion_model.index(marked_index, 0), qt_core.Qt.EditRole
+    ) == "authgpt1/gpt-5.6"
+    assert combo.itemIcon(models.index("authgpt/gpt-5.6")).isNull()
+    assert combo.itemData(
+        models.index("authgpt/gpt-5.6"),
+        multi_api_key_manager._MODEL_POLL_MARKER_ROLE,
+    ) is True
+    combo.setCurrentIndex(models.index("authgpt/gpt-5.6"))
+    app.processEvents()
+    assert combo.lineEdit().textMargins().left() == 11
+    assert not combo._model_poll_marker_label.isHidden()
+    assert combo._model_poll_marker_label.autoFillBackground() is False
+    combo.setCurrentIndex(models.index("alpha-model"))
+    app.processEvents()
+    assert combo.lineEdit().textMargins().left() == 0
+    assert combo._model_poll_marker_label.isHidden()
+
+    translator.config["model_manager_hide_unpolled_models"] = True
+    multi_api_key_manager.MultiAPIKeyDialog._refresh_model_poll_markers(owner)
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == []
+    completion_model.set_search_text("authgpt1")
+    assert completion_model.stringList() == ["authgpt1/gpt-5.6"]
+    assert combo.view().isRowHidden(models.index("alpha-model"))
+    assert not combo.view().isRowHidden(models.index("authgpt/gpt-5.6"))
+    assert combo.itemText(models.index("authgpt/gpt-5.6")) == "authgpt/gpt-5.6"
+
+    translator.config["model_manager_hide_unpolled_models"] = False
+    multi_api_key_manager.MultiAPIKeyDialog._refresh_model_poll_markers(owner)
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == [
+        "alpha-model",
+        "or/vendor/alpha-model",
+        "x/alpha-model",
+    ]
+    assert not combo.view().isRowHidden(models.index("alpha-model"))
+
+    # Already-open manager fields must drop a saved deletion from their combo
+    # rows and from their separate completion source immediately.
+    combo.setCurrentText("alpha-model")
+    translator._model_all_values = ["authgpt/gpt-5.6"]
+    multi_api_key_manager.MultiAPIKeyDialog._refresh_model_catalog_choices(owner)
+    assert [combo.itemText(index) for index in range(combo.count())] == [
+        "authgpt/gpt-5.6"
+    ]
+    completion_model.set_search_text("alpha")
+    assert completion_model.stringList() == []
+    assert combo.currentText() == "alpha-model"
+    app.processEvents()
+
+
+def test_translator_authza_pool_and_account_helpers():
+    import translator_gui
+
+    class FakeButton:
+        def __init__(self):
+            self.visible = False
+
+        def show(self):
+            self.visible = True
+
+        def hide(self):
+            self.visible = False
+
+    models = [
+        ("multi_api_keys", "use_multi_api_keys", "openai/gpt-5"),
+        ("fallback_keys", "use_fallback_keys", "authza7/glm-5.3"),
+    ]
+    gui = SimpleNamespace(
+        model_combo=SimpleNamespace(currentText=lambda: "openai/gpt-5"),
+        _iter_enabled_key_pool_models=lambda: iter(models),
+        authza_login_btn=FakeButton(),
+        _has_authza_in_key_pools=lambda: True,
+        _update_authza_login_status=lambda: None,
+    )
+
+    assert translator_gui.TranslatorGUI._has_authza_in_key_pools(gui) is True
+    assert translator_gui.TranslatorGUI._selected_authza_account_id(gui) == 7
+
+    gui.model_combo = SimpleNamespace(currentText=lambda: "authza3/glm-5.2")
+    assert translator_gui.TranslatorGUI._selected_authza_account_id(gui) == 3
+    assert translator_gui.TranslatorGUI._refresh_authza_login_visibility(
+        gui, "authza3/glm-5.2"
+    ) is True
+    assert gui.authza_login_btn.visible is True
+
+    gui._has_authza_in_key_pools = lambda: False
+    assert translator_gui.TranslatorGUI._refresh_authza_login_visibility(
+        gui, "openai/gpt-5"
+    ) is False
+    assert gui.authza_login_btn.visible is False
+
+
+def test_multi_key_authza_login_completion_polls_the_logged_in_account():
+    import multi_api_key_manager
+
+    starts = []
+    logs = []
+    parent_refreshes = []
+    owner = SimpleNamespace(
+        _authza_login_account_id=4,
+        _authza_login_url="http://127.0.0.1:18874",
+        _model_search_combos=[],
+        translator_gui=SimpleNamespace(
+            append_log=logs.append,
+            _start_provider_model_catalog_refresh=(
+                lambda **kwargs: starts.append(kwargs) or True
+            ),
+        ),
+        _refresh_parent_model_requirements=(
+            lambda save_config=False: parent_refreshes.append(save_config)
+        ),
+    )
+
+    multi_api_key_manager.MultiAPIKeyDialog._authza_manager_login_finished(owner)
+
+    assert starts == [{"only_provider": "authza:4", "automatic": True}]
+    assert parent_refreshes == [False]
+    assert "account #4" in logs[-1]
+
+
+def test_model_manager_save_tracks_deletions_and_forces_completer_refresh():
+    import translator_gui
+
+    class FakeList:
+        def __init__(self, values):
+            self.values = values
+
+        def count(self):
+            return len(self.values)
+
+        def item(self, index):
+            return SimpleNamespace(text=lambda: self.values[index])
+
+    old_models = ["provider/kept", "provider/deleted", "provider/readded"]
+    refreshes = []
+    notifications = []
+    gui = SimpleNamespace(
+        config={
+            "model_manager_removed_models": [
+                "provider/readded",
+                "older/deleted",
+            ]
+        },
+        _model_all_values=list(old_models),
+        model_combo=SimpleNamespace(
+            count=lambda: len(old_models),
+            itemText=lambda index: old_models[index],
+        ),
+        _refresh_model_combo_catalog=lambda models, force=False: refreshes.append(
+            (list(models), force)
+        ),
+        _refresh_model_search_poll_state=lambda: notifications.append(True),
+        save_config=lambda show_message=False: None,
+        append_log=lambda _message: None,
+    )
+    # The live preview has already changed _model_all_values; deletion
+    # tracking must still compare against the dialog's original baseline.
+    gui._model_all_values = ["provider/kept", "provider/readded"]
+    dialog = SimpleNamespace(
+        accept=lambda: None,
+        _model_manager_original_models=list(old_models),
+    )
+
+    translator_gui.TranslatorGUI._save_model_order(
+        gui,
+        FakeList(["provider/kept", "provider/readded"]),
+        dialog,
+    )
+
+    assert gui.config["custom_model_list"] == [
+        "provider/kept",
+        "provider/readded",
+    ]
+    assert gui.config["model_manager_removed_models"] == [
+        "older/deleted",
+        "provider/deleted",
+    ]
+    assert refreshes == [(["provider/kept", "provider/readded"], True)]
+    assert notifications == [True]
+    assert dialog._model_manager_saved is True
+    assert model_options.merge_saved_model_options(
+        gui.config["custom_model_list"],
+        ["provider/deleted", "provider/new-after-restart"],
+        gui.config["model_manager_removed_models"],
+    ) == [
+        "provider/kept",
+        "provider/readded",
+        "provider/new-after-restart",
+    ]
+
+
+def test_model_manager_failed_config_write_keeps_dialog_open_and_does_not_claim_save(
+    monkeypatch,
+):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    class FakeList:
+        def count(self):
+            return 1
+
+        def item(self, _index):
+            return SimpleNamespace(text=lambda: "provider/kept")
+
+    critical_messages = []
+    monkeypatch.setattr(
+        qt_widgets.QMessageBox,
+        "critical",
+        lambda _parent, title, message: critical_messages.append((title, message)),
+    )
+    accepted = []
+    logs = []
+    dialog = SimpleNamespace(
+        _model_manager_original_models=["provider/kept", "provider/deleted"],
+        _model_manager_saved=False,
+        accept=lambda: accepted.append(True),
+    )
+    gui = SimpleNamespace(
+        config={
+            "custom_model_list": ["provider/kept", "provider/deleted"],
+            "model_manager_removed_models": [],
+        },
+        _model_all_values=["provider/kept"],
+        model_combo=SimpleNamespace(count=lambda: 0, itemText=lambda _index: ""),
+        _refresh_model_combo_catalog=lambda _models, force=False: None,
+        _refresh_model_search_poll_state=lambda: None,
+        save_config=lambda show_message=False: False,
+        append_log=logs.append,
+    )
+
+    translator_gui.TranslatorGUI._save_model_order(gui, FakeList(), dialog)
+
+    assert gui.config["custom_model_list"] == [
+        "provider/kept",
+        "provider/deleted",
+    ]
+    assert gui.config["model_manager_removed_models"] == []
+    assert accepted == []
+    assert dialog._model_manager_saved is False
+    assert critical_messages and critical_messages[0][0] == "Model List Not Saved"
+    assert logs == ["❌ Model list was not saved; config.json write failed"]
+
+
+def test_model_manager_draft_updates_search_immediately_and_cancel_restores_it():
+    import translator_gui
+
+    class FakeList:
+        def __init__(self, values):
+            self.values = values
+
+        def count(self):
+            return len(self.values)
+
+        def item(self, index):
+            return SimpleNamespace(text=lambda: self.values[index])
+
+    refreshes = []
+    notifications = []
+    gui = SimpleNamespace(
+        _model_all_values=["provider/kept", "provider/deleted"],
+        _refresh_model_combo_catalog=lambda models, force=False: refreshes.append(
+            (list(models), force)
+        ),
+        _refresh_model_search_poll_state=lambda: notifications.append(True),
+    )
+    dialog = SimpleNamespace(
+        _model_manager_original_models=["provider/kept", "provider/deleted"],
+        _model_manager_saved=False,
+        _model_manager_draft_active=True,
+    )
+    gui._model_manager_dialog = dialog
+
+    translator_gui.TranslatorGUI._preview_model_manager_order(
+        gui,
+        FakeList(["provider/kept"]),
+        dialog,
+    )
+    assert refreshes == [(["provider/kept"], True)]
+    assert notifications == [True]
+
+    translator_gui.TranslatorGUI._finish_model_manager_dialog(gui, dialog)
+    assert refreshes == [
+        (["provider/kept"], True),
+        (["provider/kept", "provider/deleted"], True),
+    ]
+    assert notifications == [True, True]
+    assert dialog._model_manager_draft_active is False
+    assert gui._model_manager_dialog is None
+
+
+def test_background_catalog_poll_does_not_restore_models_deleted_in_open_draft():
+    import translator_gui
+
+    class FakeItem:
+        def __init__(self, text):
+            self._text = text
+
+        def text(self):
+            return self._text
+
+        def setIcon(self, _icon):
+            pass
+
+        def setHidden(self, _hidden):
+            pass
+
+        def setToolTip(self, _tooltip):
+            pass
+
+    class FakeList:
+        def __init__(self, values):
+            self.items = [FakeItem(value) for value in values]
+
+        def count(self):
+            return len(self.items)
+
+        def item(self, index):
+            return self.items[index]
+
+    draft_models = ["provider/kept"]
+    refreshed = []
+    manager = SimpleNamespace(
+        _model_manager_draft_active=True,
+        _model_list_widget=FakeList(draft_models),
+        _catalog_poll_pending=False,
+    )
+    displayed = ["provider/kept", "provider/deleted"]
+    gui = SimpleNamespace(
+        config={"custom_model_list": list(displayed)},
+        model_combo=SimpleNamespace(
+            count=lambda: len(displayed),
+            itemText=lambda index: displayed[index],
+        ),
+        _model_manager_dialog=manager,
+        _refresh_model_combo_catalog=lambda models: refreshed.append(list(models)),
+        _ensure_polled_model_marker_state=lambda: {},
+        _apply_polled_model_icons=lambda _manager, _models: None,
+        append_log=lambda _message: None,
+    )
+    result = SimpleNamespace(
+        models=[*displayed, "or/router/new"],
+        statuses={"openrouter": "online (1 models)"},
+        provider_models={"openrouter": ["or/router/new"]},
+        requested_provider=None,
+    )
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
+
+    assert refreshed == [draft_models]
+
+
+def test_model_text_provider_refresh_is_debounced(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_core = pytest.importorskip("PySide6.QtCore")
+    qt_test = pytest.importorskip("PySide6.QtTest")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+
+    class DebounceHarness(qt_core.QObject):
+        _on_model_text_changed = translator_gui.TranslatorGUI._on_model_text_changed
+        _on_model_editor_text_edited = (
+            translator_gui.TranslatorGUI._on_model_editor_text_edited
+        )
+        _finish_model_editor_typing = (
+            translator_gui.TranslatorGUI._finish_model_editor_typing
+        )
+        _apply_pending_model_text_change = (
+            translator_gui.TranslatorGUI._apply_pending_model_text_change
+        )
+
+        def __init__(self):
+            super().__init__()
+            self.model_var = ""
+            self.provider_refreshes = 0
+            self.poe_checks = 0
+            self.output_checks = 0
+            self.catalog_poll_schedules = 0
+
+        def on_model_change(self):
+            self.provider_refreshes += 1
+
+        def _check_poe_model(self):
+            self.poe_checks += 1
+
+        def _enforce_image_output_dependency(self):
+            self.output_checks += 1
+
+        def _schedule_current_provider_catalog_refresh(self):
+            self.catalog_poll_schedules += 1
+
+        def _update_ollama_settings_button(self, _text):
+            pass
+
+        def _apply_model_combo_catalog_now(self, _models):
+            raise AssertionError("no catalog should be queued in this test")
+
+    harness = DebounceHarness()
+    harness._on_model_text_changed("a")
+    harness._on_model_text_changed("au")
+    harness._on_model_text_changed("authnd/")
+
+    assert harness.model_var == "authnd/"
+    assert harness.provider_refreshes == 0
+    qt_test.QTest.qWait(225)
+    app.processEvents()
+    assert harness.provider_refreshes == 1
+    assert harness.poe_checks == 1
+    assert harness.output_checks == 1
+
+    harness._on_model_editor_text_edited("authnd/")
+    assert harness._model_editor_typing is True
+    assert harness.catalog_poll_schedules == 1
+    qt_test.QTest.qWait(325)
+    app.processEvents()
+    assert harness._model_editor_typing is False
+
+
+@pytest.mark.parametrize(
+    ("model", "api_key", "should_poll"),
+    [
+        ("grok-3-mini", "", False),
+        ("or/openrouter/free", "", True),
+        ("or/openrouter/free", "openrouter-key", True),
+        ("authnd/nvidia/model", "", True),
+        ("authza/glm-5.3", "", True),
+    ],
+)
+def test_gui_auto_poll_respects_unified_client_optional_key_models(
+    monkeypatch,
+    model,
+    api_key,
+    should_poll,
+):
+    import translator_gui
+
+    due_calls = []
+    poll_calls = []
+
+    def fake_due_provider(active_model, active_api_key, custom_routes):
+        due_calls.append((active_model, active_api_key, custom_routes))
+        return "selected-provider"
+
+    monkeypatch.setattr(
+        translator_gui,
+        "due_provider_catalog_for_model",
+        fake_due_provider,
+    )
+
+    gui = SimpleNamespace(
+        model_combo=SimpleNamespace(currentText=lambda: model),
+        api_key_entry=SimpleNamespace(text=lambda: api_key),
+        config={},
+        custom_prefix_routes=[],
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _start_provider_model_catalog_refresh=(
+            lambda **kwargs: poll_calls.append(kwargs) or True
+        ),
+    )
+
+    translator_gui.TranslatorGUI._auto_poll_current_provider_catalog(gui)
+
+    if should_poll:
+        assert due_calls == [(model, api_key, [])]
+        assert poll_calls == [{
+            "only_provider": "selected-provider",
+            "automatic": True,
+        }]
+    else:
+        assert due_calls == []
+        assert poll_calls == []
+
+
+@pytest.mark.parametrize(
+    ("displayed_models", "expected_new_label"),
+    [
+        (["electronhub/model-a"], "1 new model found"),
+        (
+            ["electronhub/model-a", "ELECTRONHUB/MODEL-B"],
+            "0 new models found",
+        ),
+    ],
+)
+def test_gui_auto_poll_log_counts_models_not_already_displayed(
+    displayed_models,
+    expected_new_label,
+):
+    import translator_gui
+
+    logs = []
+    combo = SimpleNamespace(
+        count=lambda: len(displayed_models),
+        itemText=lambda index: displayed_models[index],
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=combo,
+        _refresh_model_combo_catalog=lambda _models: True,
+        _ensure_polled_model_marker_state=lambda: {},
+        append_log=logs.append,
+    )
+    result = SimpleNamespace(
+        models=["electronhub/model-a", "electronhub/model-b"],
+        statuses={"electronhub": "online (2 models)"},
+        provider_models={
+            "electronhub": [
+                "electronhub/model-a",
+                "electronhub/model-b",
+                "ELECTRONHUB/MODEL-B",
+            ],
+        },
+        requested_provider="electronhub",
+    )
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
+
+    assert logs == [
+        f"✅ Auto-poll complete: electronhub — 3 models · {expected_new_label}"
+    ]
+
+
+def test_model_field_border_tracks_automatic_and_manual_catalog_polls(monkeypatch):
+    import translator_gui
+
+    border_states = []
+
+    class FakeSignal:
+        def connect(self, _callback):
+            pass
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(
+        translator_gui,
+        "start_provider_model_catalog_refresh",
+        lambda *_args, **_kwargs: FakeThread(),
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "electronhub/model-a"),
+        api_key_entry=SimpleNamespace(text=lambda: "key"),
+        custom_prefix_routes=[],
+        model_catalog_updated_signal=FakeSignal(),
+        _provider_model_catalog_signal_connected=True,
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _set_model_poll_border_active=border_states.append,
+        append_log=lambda _message: None,
+    )
+
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui,
+        only_provider="electronhub",
+        automatic=True,
+    )
+    assert border_states == [True]
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(
+        gui,
+        SimpleNamespace(models=[]),
+    )
+    assert border_states == [True, False]
+
+    gui._provider_model_catalog_thread = None
+    border_states.clear()
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(gui)
+    assert border_states == [True]
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(
+        gui,
+        SimpleNamespace(models=[]),
+    )
+    assert border_states == [True, False]
+
+
+def test_automatic_poll_scope_is_always_resolved_from_current_model(monkeypatch):
+    import translator_gui
+
+    worker_calls = []
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(
+        translator_gui,
+        "start_provider_model_catalog_refresh",
+        lambda *_args, **kwargs: worker_calls.append(kwargs) or FakeThread(),
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "electronhub/model-a"),
+        api_key_entry=SimpleNamespace(text=lambda: "key"),
+        custom_prefix_routes=[],
+        model_catalog_updated_signal=SimpleNamespace(connect=lambda _callback: None),
+        _provider_model_catalog_signal_connected=True,
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _set_model_poll_border_active=lambda _active: None,
+        append_log=lambda _message: None,
+    )
+
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui,
+        only_provider="openrouter",
+        automatic=True,
+    )
+    assert worker_calls[0]["only_provider"] == "electronhub"
+
+    gui._provider_model_catalog_thread = None
+    gui.model_combo = SimpleNamespace(currentText=lambda: "fixed-local-model")
+    assert not translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui,
+        automatic=True,
+    )
+    assert len(worker_calls) == 1
+
+
+def test_uninstalled_ollama_auto_poll_stops_before_log_or_worker(monkeypatch):
+    import translator_gui
+
+    logs = []
+    worker_calls = []
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(translator_gui, "ollamapull_installed", lambda: False)
+    monkeypatch.setattr(
+        translator_gui,
+        "start_provider_model_catalog_refresh",
+        lambda *_args, **kwargs: worker_calls.append(kwargs) or FakeThread(),
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "ollamapull/llama3.2"),
+        api_key_entry=SimpleNamespace(text=lambda: ""),
+        custom_prefix_routes=[],
+        model_catalog_updated_signal=SimpleNamespace(connect=lambda _callback: None),
+        _provider_model_catalog_signal_connected=True,
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _set_model_poll_border_active=lambda _active: None,
+        append_log=logs.append,
+    )
+
+    assert not translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui, automatic=True
+    )
+    assert logs == []
+    assert worker_calls == []
+
+    # A user-requested refresh remains available even without a local install.
+    assert translator_gui.TranslatorGUI._start_provider_model_catalog_refresh(
+        gui, only_provider="ollamapull"
+    )
+    assert len(worker_calls) == 1
+
+
+def test_model_catalog_poll_border_animation_starts_and_stops(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    combo = qt_widgets.QComboBox()
+    combo.resize(320, 34)
+    combo.show()
+    border = translator_gui._ModelCatalogPollBorder(combo)
+
+    border.start()
+    app.processEvents()
+    assert border.isAnimating()
+    assert border.geometry() == combo.rect()
+
+    border.stop()
+    app.processEvents()
+    assert not border.isAnimating()
+    assert not border.isVisible()
+
+    combo.deleteLater()
+    app.processEvents()
+
+
+def test_glm_proxy_ready_auto_polls_the_selected_numbered_account(monkeypatch):
+    import translator_gui
+
+    due_calls = []
+    starts = []
+    monkeypatch.setattr(
+        translator_gui,
+        "provider_model_catalog_refresh_due",
+        lambda provider, **kwargs: due_calls.append((provider, kwargs)) or True,
+    )
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "authza3/glm-5.3"),
+        custom_prefix_routes=[],
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _glm_proxy_post_start_poll_account_id=3,
+        _glm_proxy_post_start_poll_pending=True,
+        _start_provider_model_catalog_refresh=(
+            lambda **kwargs: starts.append(kwargs) or True
+        ),
+    )
+
+    translator_gui.TranslatorGUI._poll_glm_catalog_after_proxy_start(gui)
+
+    assert due_calls == [("authza:3", {"successful_only": True})]
+    assert starts == [{"only_provider": "authza:3", "automatic": True}]
+    assert gui._glm_proxy_post_start_poll_pending is False
+
+
+def test_glm_proxy_ready_does_not_poll_a_different_selected_account(monkeypatch):
+    import translator_gui
+
+    starts = []
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: "authza2/glm-5.3"),
+        custom_prefix_routes=[],
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _glm_proxy_post_start_poll_account_id=3,
+        _glm_proxy_post_start_poll_pending=True,
+        _start_provider_model_catalog_refresh=(
+            lambda **kwargs: starts.append(kwargs) or True
+        ),
+    )
+
+    translator_gui.TranslatorGUI._poll_glm_catalog_after_proxy_start(gui)
+
+    assert starts == []
+    assert gui._glm_proxy_post_start_poll_pending is False
+
+
+@pytest.mark.parametrize(
+    ("active_model", "expected_provider"),
+    [
+        ("authnd/", "authnd"),
+        ("authnd4/z-ai/glm-5.2", "authnd:4"),
+    ],
+)
+def test_manage_models_poll_explicitly_polls_selected_authnd_before_full_refresh(
+    active_model,
+    expected_provider,
+):
+    import translator_gui
+
+    starts = []
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: active_model),
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _start_provider_model_catalog_refresh=lambda **kwargs: starts.append(kwargs) or True,
+    )
+
+    assert translator_gui.TranslatorGUI._start_selected_provider_then_full_catalog_refresh(
+        gui
+    )
+    assert gui._provider_model_catalog_full_refresh_pending is True
+    assert starts == [{"show_feedback": False, "only_provider": expected_provider}]
+
+
+@pytest.mark.parametrize(
+    "active_model",
+    ("or/openai/gpt-5", "authza/glm-5.3", "authza4/glm-5.2"),
+)
+def test_manage_models_poll_uses_one_full_refresh_for_non_authnd_selection(active_model):
+    import translator_gui
+
+    starts = []
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(currentText=lambda: active_model),
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _start_provider_model_catalog_refresh=lambda **kwargs: starts.append(kwargs) or True,
+    )
+
+    assert translator_gui.TranslatorGUI._start_selected_provider_then_full_catalog_refresh(
+        gui,
+        show_feedback=True,
+    )
+    assert not hasattr(gui, '_provider_model_catalog_full_refresh_pending')
+    assert starts == [{"show_feedback": True}]
+
+
+@pytest.mark.parametrize('requested_provider', [None, 'xai'])
+def test_gui_static_fallback_keeps_unexpired_checkmarks(requested_provider):
+    import translator_gui
+
+    displayed_models = ["or/router/current", "grok-static-fallback"]
+    gui = SimpleNamespace(
+        config={},
+        model_combo=SimpleNamespace(
+            count=lambda: len(displayed_models),
+            itemText=lambda index: displayed_models[index],
+        ),
+        _refresh_model_combo_catalog=lambda models: displayed_models.__setitem__(
+            slice(None), list(models)
+        ),
+        _ensure_polled_model_marker_state=lambda: {
+            "openrouter": {"or/router/older"},
+            "xai": {"grok-static-fallback"},
+        },
+        append_log=lambda _message: None,
+    )
+    result = SimpleNamespace(
+        models=["or/router/current", "grok-static-fallback"],
+        statuses={
+            "openrouter": "online (1 models)",
+            "xai": "static fallback (OSError — offline)",
+        },
+        provider_models={"openrouter": ["or/router/current"]},
+        requested_provider=requested_provider,
+    )
+
+    translator_gui.TranslatorGUI._apply_provider_model_catalog_refresh(gui, result)
+
+    assert gui._polled_online_models_by_provider == {
+        "openrouter": {"or/router/current"},
+        "xai": {"grok-static-fallback"},
+    }
+    assert gui._polled_online_model_ids == {"or/router/current", "grok-static-fallback"}
+
+
+def test_model_manager_unpolled_filter_is_off_by_default_and_reversible(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    qt_gui = pytest.importorskip("PySide6.QtGui")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    list_widget = qt_widgets.QListWidget()
+    list_widget.addItems(["provider/confirmed", "provider/unpolled"])
+    toggle = qt_widgets.QCheckBox("Hide unpolled models")
+    manager = SimpleNamespace(
+        _model_list_widget=list_widget,
+        _polled_model_icon=qt_gui.QIcon(),
+        _hide_unpolled_models_toggle=toggle,
+    )
+    confirmed = {"PROVIDER/CONFIRMED"}
+
+    assert not toggle.isChecked()
+    translator_gui.TranslatorGUI._apply_polled_model_icons(manager, confirmed)
+    assert not list_widget.item(0).isHidden()
+    assert not list_widget.item(1).isHidden()
+
+    toggle.setChecked(True)
+    translator_gui.TranslatorGUI._apply_polled_model_icons(manager, confirmed)
+    assert not list_widget.item(0).isHidden()
+    assert list_widget.item(1).isHidden()
+
+    toggle.setChecked(False)
+    translator_gui.TranslatorGUI._apply_polled_model_icons(manager, confirmed)
+    assert not list_widget.item(0).isHidden()
+    assert not list_widget.item(1).isHidden()
+    app.processEvents()
+
+
+def test_model_manager_save_persists_hide_unpolled_preference():
+    import translator_gui
+
+    saved_orders = []
+    gui = SimpleNamespace(
+        config={},
+        _collect_custom_prefix_routes_from_table=lambda _table, _dialog: [],
+        _sync_custom_prefix_routes_env=lambda: None,
+        _save_model_order=lambda list_widget, dialog: saved_orders.append(
+            (list_widget, dialog)
+        ),
+    )
+    toggle = SimpleNamespace(isChecked=lambda: True)
+    dialog = SimpleNamespace(_hide_unpolled_models_toggle=toggle)
+    list_widget = object()
+    prefix_table = object()
+
+    translator_gui.TranslatorGUI._save_model_manager_state(
+        gui, list_widget, prefix_table, dialog
+    )
+
+    assert gui.config['model_manager_hide_unpolled_models'] is True
+    assert saved_orders == [(list_widget, dialog)]
+
+
+def test_model_preflight_rejects_live_empty_field_even_with_stale_model_var(
+    monkeypatch,
+):
+    import translator_gui
+
+    warnings = []
+    log = []
+
+    class FakeEditor:
+        def __init__(self):
+            self.focused = False
+            self.selected = False
+
+        def setFocus(self):
+            self.focused = True
+
+        def selectAll(self):
+            self.selected = True
+
+    class FakeCombo:
+        def __init__(self):
+            self.editor = FakeEditor()
+
+        def currentText(self):
+            return "   "
+
+        def lineEdit(self):
+            return self.editor
+
+    class Harness:
+        _current_model_field_text = (
+            translator_gui.TranslatorGUI._current_model_field_text
+        )
+        _require_model_selection = (
+            translator_gui.TranslatorGUI._require_model_selection
+        )
+
+    class FakeMessageBox:
+        def exec(self):
+            warnings.append("executed")
+
+    gui = Harness()
+    gui.model_combo = FakeCombo()
+    gui.model_var = "gemini-2.0-flash"
+    gui.append_log = log.append
+    gui._create_model_selection_required_message_box = (
+        lambda message, parent=None: (
+            warnings.append((message, parent)) or FakeMessageBox()
+        )
+    )
+
+    assert gui._require_model_selection("starting translation") == ""
+    assert warnings == [
+        ("Select or enter a model before starting translation.", None),
+        "executed",
+    ]
+    assert log == ["❌ Select or enter a model before starting translation."]
+    assert gui.model_combo.editor.focused is True
+    assert gui.model_combo.editor.selected is True
+
+
+def test_model_preflight_normalizes_and_synchronizes_live_model_field(monkeypatch):
+    import translator_gui
+
+    warnings = []
+
+    class Harness:
+        _current_model_field_text = (
+            translator_gui.TranslatorGUI._current_model_field_text
+        )
+        _require_model_selection = (
+            translator_gui.TranslatorGUI._require_model_selection
+        )
+
+    gui = Harness()
+    gui.model_combo = SimpleNamespace(
+        currentText=lambda: "  authnd/deepseek-ai/deepseek-v4  "
+    )
+    gui.model_var = "old/model"
+    gui.append_log = lambda _message: None
+    monkeypatch.setattr(
+        translator_gui.QMessageBox,
+        "warning",
+        lambda *args: warnings.append(args),
+    )
+
+    assert (
+        gui._require_model_selection("extracting a glossary")
+        == "authnd/deepseek-ai/deepseek-v4"
+    )
+    assert gui.model_var == "authnd/deepseek-ai/deepseek-v4"
+    assert warnings == []
+
+
+def test_no_model_warning_centers_and_widens_ok_button(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    parent = qt_widgets.QWidget()
+    message_box = (
+        translator_gui.TranslatorGUI._create_model_selection_required_message_box(
+            SimpleNamespace(),
+            "Select or enter a model before refining glossary entries.",
+            parent=parent,
+        )
+    )
+    button_box = message_box.findChild(qt_widgets.QDialogButtonBox)
+    ok_button = message_box.button(qt_widgets.QMessageBox.Ok)
+
+    assert button_box is not None
+    assert button_box.centerButtons() is True
+    assert ok_button.minimumWidth() >= 160
+    assert ok_button.minimumHeight() >= 44
+
+    message_box.deleteLater()
+    parent.deleteLater()
+    app.processEvents()
+
+
+def _isolated_ollamapull_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "GLOSSARION_MODEL_CATALOG_CACHE", str(tmp_path / "model_catalog_cache.json")
+    )
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+
+
+def test_local_tags_are_normalized_cached_and_pollable(tmp_path, monkeypatch):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    import ollamapull
+    monkeypatch.setattr(ollamapull, "_ollama_executable", lambda: "ollama")
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, headers, timeout))
+        return {
+            "models": [
+                {"name": "llama3.2:latest", "model": "llama3.2:latest"},
+                {"name": "namespace/custom:7b"},
+                {"name": "llama3.2:latest"},
+                {"name": "bad name"},
+            ]
+        }
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+
+    assert model_options.catalog_provider_for_model("OLLAMAPULL/llama3.2") == "ollamapull"
+    assert model_options.provider_model_catalog_supports_anonymous_poll(
+        "ollamapull/llama3.2"
+    )
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") == "ollamapull"
+
+    result = model_options.refresh_ollamapull_model_catalog(timeout=0.25)
+
+    assert calls == [(
+        "http://127.0.0.1:11434/api/tags",
+        {"Accept": "application/json", "User-Agent": "Glossarion/ModelCatalog"},
+        0.25,
+    )]
+    assert result.requested_provider == "ollamapull"
+    assert result.provider_models["ollamapull"] == [
+        "ollamapull/llama3.2:latest",
+        "ollamapull/namespace/custom:7b",
+    ]
+    assert result.statuses["ollamapull"] == "online (2 models)"
+    assert "ollamapull/llama3.2:latest" in result.models
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") is None
+
+    # A later GUI process can populate its model dropdown from the disk cache.
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    assert "ollamapull/namespace/custom:7b" in model_options.get_model_options()
+
+
+def test_local_connection_failure_retries_soon_without_starting_server(
+    tmp_path, monkeypatch
+):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    import ollamapull
+    monkeypatch.setattr(ollamapull, "_ollama_executable", lambda: "ollama")
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(model_options.time, "time", lambda: now[0])
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        raise OSError("local Ollama server is stopped")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    failed = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+
+    assert calls == ["http://127.0.0.1:11434/api/tags"]
+    assert failed.provider_models == {}
+    assert failed.statuses["ollamapull"].startswith("static fallback (OSError")
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") is None
+
+    now[0] += model_options._OLLAMAPULL_OFFLINE_RETRY_SECONDS + 1
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") == "ollamapull"
+
+
+def test_absent_ollama_skips_auto_poll_without_spending_attempt_ttl(
+    tmp_path, monkeypatch
+):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    import ollamapull
+
+    installed = [False]
+    monkeypatch.setattr(
+        ollamapull, "_ollama_executable",
+        lambda: "ollama" if installed[0] else None,
+    )
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda *_args: pytest.fail("auto-poll contacted an absent Ollama server"),
+    )
+
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") is None
+    assert "ollamapull" not in model_options._load_model_catalog_cache()["attempts"]
+
+    # Installation makes the first automatic catalog refresh immediately due.
+    installed[0] = True
+    assert model_options.due_provider_catalog_for_model("ollamapull/llama3.2") == "ollamapull"
+
+
+def test_empty_local_catalog_clears_old_models_and_pull_hook_refreshes_early(
+    tmp_path, monkeypatch
+):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    installed = ["old:latest"]
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda _url, _headers, _timeout: {
+            "models": [{"name": name} for name in installed]
+        },
+    )
+
+    first = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+    assert first.provider_models["ollamapull"] == ["ollamapull/old:latest"]
+    assert model_options.due_provider_catalog_for_model("ollamapull/new:latest") is None
+
+    installed[:] = ["new:latest"]
+    after_pull = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+    assert after_pull.provider_models["ollamapull"] == ["ollamapull/new:latest"]
+    assert "ollamapull/old:latest" not in model_options.get_model_options()
+    assert "ollamapull/new:latest" in model_options.get_model_options()
+
+    installed.clear()
+    empty = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+    assert empty.provider_models["ollamapull"] == []
+    assert empty.statuses["ollamapull"] == "online (0 models)"
+    assert "ollamapull/new:latest" not in model_options.get_model_options()
+    assert "ollamapull" not in model_options.get_current_polled_provider_models()
+
+
+def test_invalid_tags_are_not_treated_as_an_empty_catalog(tmp_path, monkeypatch):
+    _isolated_ollamapull_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda _url, _headers, _timeout: {"data": []},
+    )
+
+    result = model_options.refresh_ollamapull_model_catalog(timeout=0.1)
+
+    assert result.provider_models == {}
+    assert "invalid model list" in result.statuses["ollamapull"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "port"),
+    [("ollama", 11434), ("lmstudio", 1234)],
+)
+def test_local_openai_catalog_routes_poll_running_server(
+    tmp_path, monkeypatch, provider, port,
+):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, headers, timeout))
+        return {"data": [
+            {"id": "publisher/model:latest"},
+            {"id": "another-model"},
+            {"id": "bad model"},
+            {"id": "publisher/model:latest"},
+        ]}
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    monkeypatch.setattr(model_options, "local_catalog_available", lambda _name: True)
+    model = f"{provider}/publisher/model:latest"
+
+    assert model_options.catalog_provider_for_model(model) == provider
+    assert model_options.provider_model_catalog_supports_anonymous_poll(model)
+    assert model_options.due_provider_catalog_for_model(model) == provider
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model=model, only_provider=provider, timeout=0.25,
+    )
+
+    assert calls == [(
+        f"http://localhost:{port}/v1/models",
+        {"Accept": "application/json", "User-Agent": "Glossarion/ModelCatalog"},
+        0.25,
+    )]
+    assert result.provider_models[provider] == [
+        model, f"{provider}/another-model",
+    ]
+    assert result.statuses[provider] == "online (2 models)"
+    assert f"{provider}/qwen3:4b" in result.models
+    assert result.models.count(model) == 1
+    assert model_options.get_current_polled_provider_models()[provider] == [
+        model, f"{provider}/another-model",
+    ]
+    assert model_options.due_provider_catalog_for_model(model) is None
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    assert model in model_options.get_model_options()
+
+
+def test_local_route_static_suggestions_share_50_model_tags():
+    assert len(model_options.LOCAL_CHAT_MODEL_TAGS) == 50
+    assert len(set(model_options.LOCAL_CHAT_MODEL_TAGS)) == 50
+    choices = model_options._get_static_model_options()
+    for prefix in ("ollamapull/", "ollama/", "lmstudio/"):
+        local_choices = [model for model in choices if model.startswith(prefix)]
+        assert local_choices == [
+            f"{prefix}{tag}" for tag in model_options.LOCAL_CHAT_MODEL_TAGS
+        ]
+
+
+@pytest.mark.parametrize("provider", ["ollama", "lmstudio"])
+def test_local_openai_catalog_auto_poll_skips_absent_server_without_ttl(
+    tmp_path, monkeypatch, provider,
+):
+    _isolated_cache(tmp_path, monkeypatch)
+    available = [False]
+    monkeypatch.setattr(
+        model_options, "local_catalog_available", lambda _name: available[0],
+    )
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda *_args: pytest.fail("auto-poll contacted an absent local server"),
+    )
+    model = f"{provider}/example"
+
+    assert model_options.due_provider_catalog_for_model(model) is None
+    assert provider not in model_options._load_model_catalog_cache()["attempts"]
+    available[0] = True
+    assert model_options.due_provider_catalog_for_model(model) == provider
+
+
+def test_local_catalog_readiness_checks_local_port_without_cli(monkeypatch):
+    checked = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        model_options, "ollamapull_installed",
+        lambda: pytest.fail("plain local routes must not require Ollama CLI"),
+    )
+    monkeypatch.setattr(
+        model_options.socket, "create_connection",
+        lambda address, timeout: checked.append((address, timeout)) or Connection(),
+    )
+
+    assert model_options.local_catalog_available("OLLAMA")
+    assert checked == [(('localhost', 11434), 0.1)]
+    assert model_options.local_catalog_available("lmstudio")
+    assert checked[-1] == (('localhost', 1234), 0.1)
+
+
+def test_authgpt_catalog_upgrade_invalidates_old_manifest_cache(monkeypatch):
+    assert model_options._provider_catalog_variant('authgpt') == 'account_models_v1'
+    assert model_options._provider_catalog_variant('authgpt:2') == 'account_models_v1'
+    assert not model_options._catalog_record_matches_variant(
+        'authgpt', {'fetched_at': 1, 'models': ['authgpt/gpt-old']}
+    )
+    now = model_options.time.time()
+    monkeypatch.setattr(model_options, '_load_model_catalog_cache', lambda: {
+        'attempts': {'authgpt': now},
+        'attempt_variants': {},
+        'providers': {'authgpt': {'fetched_at': now, 'models': ['authgpt/gpt-old']}},
+    })
+    assert model_options.provider_model_catalog_refresh_due('authgpt')

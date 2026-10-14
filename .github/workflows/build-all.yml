@@ -1,0 +1,843 @@
+name: Build All Platforms
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  # ============================================================================
+  # Windows Lite Build
+  # ============================================================================
+  build-windows-lite:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install MSYS2 for WeasyPrint
+        uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-cairo
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-fribidi
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-freetype
+      
+      - name: Find and set MSYS2 paths
+        shell: pwsh
+        run: |
+          # Find MSYS2 installation
+          $msysRoot = "${{ steps.msys2.outputs.msys2-location }}"
+          if (-not $msysRoot) {
+            # Fallback: search common locations
+            $possiblePaths = @("D:\a\_temp\msys64", "C:\msys64", "$env:RUNNER_TEMP\msys64")
+            foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\mingw64\bin") {
+                $msysRoot = $p
+                break
+              }
+            }
+          }
+          echo "MSYS2 root: $msysRoot"
+          echo "MSYS2_ROOT=$msysRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "$msysRoot\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "GTK_FOLDER=$msysRoot\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      
+      - name: Verify MSYS2 DLLs
+        shell: pwsh
+        run: |
+          echo "=== Checking MSYS2 installation ==="
+          echo "MSYS2_ROOT=$env:MSYS2_ROOT"
+          echo "GTK_FOLDER=$env:GTK_FOLDER"
+          $binPath = "$env:MSYS2_ROOT\mingw64\bin"
+          if (Test-Path $binPath) {
+            echo "MSYS2 bin directory exists at $binPath"
+            $dlls = Get-ChildItem "$binPath\*.dll" -ErrorAction SilentlyContinue | Measure-Object
+            echo "Found $($dlls.Count) DLLs in MSYS2 bin"
+            # Check for key WeasyPrint dependencies
+            $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
+            foreach ($dll in $keyDlls) {
+              if (Test-Path "$binPath\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+            }
+          } else {
+            echo "ERROR: MSYS2 bin directory not found at $binPath!"
+            # List what directories exist
+            echo "Searching for MSYS2..."
+            Get-ChildItem -Path "D:\a\_temp" -Directory -ErrorAction SilentlyContinue | ForEach-Object { echo $_.FullName }
+            exit 1
+          }
+      
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+      
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          cd src
+          pyinstaller translator_lite.spec
+      
+      - name: Upload Windows Lite artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Lite-Windows
+          path: src/dist/*.exe
+          if-no-files-found: error
+
+  # ============================================================================
+  # Windows NoCuda Build
+  # ============================================================================
+  build-windows-nocuda:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install MSYS2 for WeasyPrint
+        uses: msys2/setup-msys2@v2
+        id: msys2-nocuda
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-cairo
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-fribidi
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-freetype
+      
+      - name: Find and set MSYS2 paths
+        shell: pwsh
+        run: |
+          # Find MSYS2 installation
+          $msysRoot = "${{ steps.msys2-nocuda.outputs.msys2-location }}"
+          if (-not $msysRoot) {
+            # Fallback: search common locations
+            $possiblePaths = @("D:\a\_temp\msys64", "C:\msys64", "$env:RUNNER_TEMP\msys64")
+            foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\mingw64\bin") {
+                $msysRoot = $p
+                break
+              }
+            }
+          }
+          echo "MSYS2 root: $msysRoot"
+          echo "MSYS2_ROOT=$msysRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "$msysRoot\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "GTK_FOLDER=$msysRoot\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      
+      - name: Verify MSYS2 DLLs
+        shell: pwsh
+        run: |
+          echo "=== Checking MSYS2 installation ==="
+          echo "MSYS2_ROOT=$env:MSYS2_ROOT"
+          echo "GTK_FOLDER=$env:GTK_FOLDER"
+          $binPath = "$env:MSYS2_ROOT\mingw64\bin"
+          if (Test-Path $binPath) {
+            echo "MSYS2 bin directory exists at $binPath"
+            $dlls = Get-ChildItem "$binPath\*.dll" -ErrorAction SilentlyContinue | Measure-Object
+            echo "Found $($dlls.Count) DLLs in MSYS2 bin"
+            # Check for key WeasyPrint dependencies
+            $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
+            foreach ($dll in $keyDlls) {
+              if (Test-Path "$binPath\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+            }
+          } else {
+            echo "ERROR: MSYS2 bin directory not found at $binPath!"
+            # List what directories exist
+            echo "Searching for MSYS2..."
+            Get-ChildItem -Path "D:\a\_temp" -Directory -ErrorAction SilentlyContinue | ForEach-Object { echo $_.FullName }
+            exit 1
+          }
+      
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements_NoCuda.txt
+      
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          cd src
+          pyinstaller translator_NoCuda.spec
+      
+      - name: Upload Windows NoCuda artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-Windows
+          path: src/dist/*.exe
+          if-no-files-found: error
+
+  # ============================================================================
+  # Windows TurboLite Build
+  # ============================================================================
+  build-windows-turbolite:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install MSYS2 for WeasyPrint
+        uses: msys2/setup-msys2@v2
+        id: msys2-turbo
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-cairo
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-fribidi
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-freetype
+      
+      - name: Find and set MSYS2 paths
+        shell: pwsh
+        run: |
+          # Find MSYS2 installation
+          $msysRoot = "${{ steps.msys2-turbo.outputs.msys2-location }}"
+          if (-not $msysRoot) {
+            # Fallback: search common locations
+            $possiblePaths = @("D:\a\_temp\msys64", "C:\msys64", "$env:RUNNER_TEMP\msys64")
+            foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\mingw64\bin") {
+                $msysRoot = $p
+                break
+              }
+            }
+          }
+          echo "MSYS2 root: $msysRoot"
+          echo "MSYS2_ROOT=$msysRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "$msysRoot\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "GTK_FOLDER=$msysRoot\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      
+      - name: Verify MSYS2 DLLs
+        shell: pwsh
+        run: |
+          echo "=== Checking MSYS2 installation ==="
+          echo "MSYS2_ROOT=$env:MSYS2_ROOT"
+          echo "GTK_FOLDER=$env:GTK_FOLDER"
+          $binPath = "$env:MSYS2_ROOT\mingw64\bin"
+          if (Test-Path $binPath) {
+            echo "MSYS2 bin directory exists at $binPath"
+            $dlls = Get-ChildItem "$binPath\*.dll" -ErrorAction SilentlyContinue | Measure-Object
+            echo "Found $($dlls.Count) DLLs in MSYS2 bin"
+            # Check for key WeasyPrint dependencies
+            $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
+            foreach ($dll in $keyDlls) {
+              if (Test-Path "$binPath\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+            }
+          } else {
+            echo "ERROR: MSYS2 bin directory not found at $binPath!"
+            # List what directories exist
+            echo "Searching for MSYS2..."
+            Get-ChildItem -Path "D:\a\_temp" -Directory -ErrorAction SilentlyContinue | ForEach-Object { echo $_.FullName }
+            exit 1
+          }
+      
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+      
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          cd src
+          pyinstaller translator_TurboLite.spec
+      
+      - name: Upload Windows TurboLite artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-TurboLite-Windows
+          path: src/dist/*.exe
+          if-no-files-found: error
+
+  # ============================================================================
+  # Windows Main Build
+  # ============================================================================
+  build-windows-main:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install MSYS2 for WeasyPrint
+        uses: msys2/setup-msys2@v2
+        id: msys2-main
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-cairo
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-fribidi
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-freetype
+      
+      - name: Find and set MSYS2 paths
+        shell: pwsh
+        run: |
+          # Find MSYS2 installation
+          $msysRoot = "${{ steps.msys2-main.outputs.msys2-location }}"
+          if (-not $msysRoot) {
+            # Fallback: search common locations
+            $possiblePaths = @("D:\a\_temp\msys64", "C:\msys64", "$env:RUNNER_TEMP\msys64")
+            foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\mingw64\bin") {
+                $msysRoot = $p
+                break
+              }
+            }
+          }
+          echo "MSYS2 root: $msysRoot"
+          echo "MSYS2_ROOT=$msysRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "$msysRoot\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "GTK_FOLDER=$msysRoot\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      
+      - name: Verify MSYS2 DLLs
+        shell: pwsh
+        run: |
+          echo "=== Checking MSYS2 installation ==="
+          echo "MSYS2_ROOT=$env:MSYS2_ROOT"
+          echo "GTK_FOLDER=$env:GTK_FOLDER"
+          $binPath = "$env:MSYS2_ROOT\mingw64\bin"
+          if (Test-Path $binPath) {
+            echo "MSYS2 bin directory exists at $binPath"
+            $dlls = Get-ChildItem "$binPath\*.dll" -ErrorAction SilentlyContinue | Measure-Object
+            echo "Found $($dlls.Count) DLLs in MSYS2 bin"
+            # Check for key WeasyPrint dependencies
+            $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
+            foreach ($dll in $keyDlls) {
+              if (Test-Path "$binPath\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+            }
+          } else {
+            echo "ERROR: MSYS2 bin directory not found at $binPath!"
+            # List what directories exist
+            echo "Searching for MSYS2..."
+            Get-ChildItem -Path "D:\a\_temp" -Directory -ErrorAction SilentlyContinue | ForEach-Object { echo $_.FullName }
+            exit 1
+          }
+      
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+      
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          cd src
+          pyinstaller translator.spec
+      
+      - name: Upload Windows Main artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Main-Windows
+          path: src/dist/*.exe
+          if-no-files-found: error
+
+  # ============================================================================
+  # Windows Heavy CUDA Build
+  # ============================================================================
+  build-windows-heavy:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install MSYS2 for WeasyPrint
+        uses: msys2/setup-msys2@v2
+        id: msys2-heavy
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-cairo
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-fribidi
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-freetype
+
+      - name: Find and set MSYS2 paths
+        shell: pwsh
+        run: |
+          # Find MSYS2 installation
+          $msysRoot = "${{ steps.msys2-heavy.outputs.msys2-location }}"
+          if (-not $msysRoot) {
+            # Fallback: search common locations
+            $possiblePaths = @("D:\a\_temp\msys64", "C:\msys64", "$env:RUNNER_TEMP\msys64")
+            foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\mingw64\bin") {
+                $msysRoot = $p
+                break
+              }
+            }
+          }
+          echo "MSYS2 root: $msysRoot"
+          echo "MSYS2_ROOT=$msysRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "$msysRoot\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "GTK_FOLDER=$msysRoot\mingw64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify MSYS2 DLLs
+        shell: pwsh
+        run: |
+          echo "=== Checking MSYS2 installation ==="
+          echo "MSYS2_ROOT=$env:MSYS2_ROOT"
+          echo "GTK_FOLDER=$env:GTK_FOLDER"
+          $binPath = "$env:MSYS2_ROOT\mingw64\bin"
+          if (Test-Path $binPath) {
+            echo "MSYS2 bin directory exists at $binPath"
+            $dlls = Get-ChildItem "$binPath\*.dll" -ErrorAction SilentlyContinue | Measure-Object
+            echo "Found $($dlls.Count) DLLs in MSYS2 bin"
+            # Check for key WeasyPrint dependencies
+            $keyDlls = @('libpango-1.0-0.dll', 'libcairo-2.dll', 'libgobject-2.0-0.dll', 'libglib-2.0-0.dll', 'libharfbuzz-0.dll', 'libfontconfig-1.dll')
+            foreach ($dll in $keyDlls) {
+              if (Test-Path "$binPath\$dll") { echo "  OK: $dll" } else { echo "  MISSING: $dll" }
+            }
+          } else {
+            echo "ERROR: MSYS2 bin directory not found at $binPath!"
+            # List what directories exist
+            echo "Searching for MSYS2..."
+            Get-ChildItem -Path "D:\a\_temp" -Directory -ErrorAction SilentlyContinue | ForEach-Object { echo $_.FullName }
+            exit 1
+          }
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements_Cuda.txt
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          cd src
+          pyinstaller translator_Heavy.spec
+
+      - name: Upload Windows Heavy artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Heavy-Windows
+          path: src/dist/*.exe
+          if-no-files-found: error
+
+  # ============================================================================
+  # macOS ARM Build (Apple Silicon)
+  # ============================================================================
+  build-macos-arm:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+          brew install pango cairo libffi gdk-pixbuf gobject-introspection
+          brew install pkg-config cmake
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
+      
+      - name: Build ARM (Apple Silicon)
+        run: pyinstaller translator_lite_mac.spec --noconfirm
+        working-directory: src
+      
+      - name: Upload macOS ARM DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Lite-macOS-ARM
+          path: src/dist/*.dmg
+          if-no-files-found: warn
+      
+      - name: Upload macOS ARM app artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Lite-macOS-ARM-App
+          path: src/dist/*.app
+          if-no-files-found: warn
+
+  # ============================================================================
+  # macOS ARM NoCuda Build (Apple Silicon)
+  # ============================================================================
+  build-macos-arm-nocuda:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+          brew install pango cairo libffi gdk-pixbuf gobject-introspection
+          brew install pkg-config cmake
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
+
+      - name: Build ARM NoCuda (Apple Silicon)
+        run: pyinstaller translator_lite_mac_NoCuda.spec --noconfirm
+        working-directory: src
+
+      - name: Upload macOS ARM NoCuda DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-ARM
+          path: src/dist/*NoCuda*MAC.dmg
+          if-no-files-found: warn
+
+      - name: Upload macOS ARM NoCuda app artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-ARM-App
+          path: src/dist/*NoCuda*MAC.app
+          if-no-files-found: warn
+
+  # ============================================================================
+  # macOS Intel Build (x86_64 - for VMware, older Macs, Hackintosh)
+  # ============================================================================
+  build-macos-intel:
+    runs-on: macos-15-intel
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+          brew install pango cairo libffi gdk-pixbuf gobject-introspection
+          brew install pkg-config cmake
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
+      
+      - name: Build Intel (x86_64)
+        run: pyinstaller translator_lite_mac_intel.spec --noconfirm
+        working-directory: src
+      
+      - name: Upload macOS Intel DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Lite-macOS-Intel
+          path: src/dist/*.dmg
+          if-no-files-found: warn
+      
+      - name: Upload macOS Intel app artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-Lite-macOS-Intel-App
+          path: src/dist/*.app
+          if-no-files-found: warn
+
+  # ============================================================================
+  # macOS Intel NoCuda Build (x86_64 - for VMware, older Macs, Hackintosh)
+  # ============================================================================
+  build-macos-intel-nocuda:
+    runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+          brew install pango cairo libffi gdk-pixbuf gobject-introspection
+          brew install pkg-config cmake
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
+
+      - name: Build Intel NoCuda (x86_64)
+        run: pyinstaller translator_lite_mac_intel_NoCuda.spec --noconfirm
+        working-directory: src
+
+      - name: Upload macOS Intel NoCuda DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-Intel
+          path: src/dist/*NoCuda*MAC_Intel.dmg
+          if-no-files-found: warn
+
+      - name: Upload macOS Intel NoCuda app artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-Intel-App
+          path: src/dist/*NoCuda*MAC_Intel.app
+          if-no-files-found: warn
+
+  # ============================================================================
+  # Linux Build
+  # ============================================================================
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            python3-dev \
+            pkg-config \
+            cmake \
+            zip \
+            libpango1.0-dev \
+            libpangocairo-1.0-0 \
+            libcairo2-dev \
+            libgdk-pixbuf-2.0-dev \
+            libffi-dev \
+            libgirepository1.0-dev \
+            gir1.2-pango-1.0 \
+            libgl1 \
+            libegl1 \
+            libnss3 \
+            libasound2t64 \
+            libgbm1 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libxtst6 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-keysyms1 \
+            libxcb-shape0 \
+            libxcb-xinerama0 \
+            libxcb-image0 \
+            libxcb-render-util0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # NoCuda requirements pin CPU-only PyTorch; RapidOCR supplies bundled OCR models.
+          python -m pip install --no-cache-dir -r requirements_NoCuda.txt rapidocr-onnxruntime
+
+      - name: Check NoCuda dependencies and Qt WebEngine
+        run: |
+          python - <<'PY'
+          import torch
+          from torchvision.ops import nms
+          import numpy as np
+          from onnx import TensorProto, helper
+          import onnxruntime
+          import rapidocr_onnxruntime
+          from PySide6 import QtWebEngineCore, QtWebEngineWidgets, QtWebChannel
+
+          if torch.version.cuda is not None:
+              raise SystemExit('NoCuda requires CPU-only PyTorch')
+          if 'CPUExecutionProvider' not in onnxruntime.get_available_providers():
+              raise SystemExit('ONNX Runtime CPU provider is missing')
+          if {'CUDAExecutionProvider', 'TensorrtExecutionProvider'} & set(onnxruntime.get_available_providers()):
+              raise SystemExit('NoCuda requires CPU ONNX Runtime')
+          boxes = torch.tensor([[0.0, 0.0, 1.0, 1.0]])
+          if nms(boxes, torch.tensor([1.0]), 0.5).tolist() != [0]:
+              raise SystemExit('CPU Torchvision operation failed')
+          graph = helper.make_graph(
+              [helper.make_node('Identity', ['input'], ['output'])], 'cpu-check',
+              [helper.make_tensor_value_info('input', TensorProto.FLOAT, [1])],
+              [helper.make_tensor_value_info('output', TensorProto.FLOAT, [1])],
+          )
+          model = helper.make_model(graph, opset_imports=[helper.make_opsetid('', 13)], ir_version=8)
+          session = onnxruntime.InferenceSession(model.SerializeToString(), providers=['CPUExecutionProvider'])
+          value = np.array([1.0], dtype=np.float32)
+          if not np.array_equal(session.run(None, {'input': value})[0], value):
+              raise SystemExit('ONNX Runtime CPU inference failed')
+          print('CPU PyTorch', torch.__version__)
+          print('Qt WebEngine', QtWebEngineCore.qWebEngineVersion())
+          PY
+
+      - name: Build with PyInstaller
+        run: pyinstaller translator_linux_NoCuda.spec --noconfirm
+        working-directory: src
+
+      - name: Verify bundled NoCuda and Qt WebEngine
+        working-directory: src
+        run: |
+          python - <<'PY'
+          import fnmatch
+          from pathlib import Path
+          from PyInstaller.archive.readers import CArchiveReader
+          from app_version import get_spec_app_name
+
+          binary = Path('dist') / get_spec_app_name('translator_linux_NoCuda.spec')
+          archive = CArchiveReader(str(binary))
+          members = [name.replace('\\', '/') for name in archive.toc]
+          required = [
+              'torch/_C*.so',
+              'torch/lib/libtorch_cpu.so',
+              'torch/lib/libtorch_python.so',
+              'torch/lib/libc10.so',
+              'onnxruntime/capi/onnxruntime_pybind11_state*.so',
+              'rapidocr_onnxruntime/models/*.onnx',
+              'PySide6/QtWebEngineCore*.so',
+              'PySide6/QtWebEngineWidgets*.so',
+              'PySide6/QtWebChannel*.so',
+              '*libQt6WebEngineCore.so*',
+              '*libQt6WebEngineWidgets.so*',
+              'PySide6/Qt/libexec/QtWebEngineProcess',
+              'PySide6/Qt/libexec/qt.conf',
+              'PySide6/Qt/resources/icudtl.dat',
+              'PySide6/Qt/resources/qtwebengine_resources.pak',
+              'PySide6/Qt/resources/qtwebengine_resources_100p.pak',
+              'PySide6/Qt/resources/qtwebengine_resources_200p.pak',
+              'PySide6/Qt/resources/qtwebengine_devtools_resources.pak',
+              'PySide6/Qt/resources/v8_context_snapshot*.bin',
+              'PySide6/Qt/translations/qtwebengine_locales/en-US.pak',
+          ]
+          missing = [pattern for pattern in required if not any(fnmatch.fnmatchcase(name, pattern) for name in members)]
+          if missing:
+              raise SystemExit('Missing bundled NoCuda/Qt WebEngine files: ' + ', '.join(missing))
+          python_modules = set()
+          for name, entry in archive.toc.items():
+              if entry[-1] == 'z':
+                  python_modules.update(archive.open_embedded_archive(name).toc)
+          required_modules = ['torch', 'transformers', 'diffusers', 'ultralytics', 'onnxruntime', 'rapidocr_onnxruntime']
+          missing_modules = [module for module in required_modules if module not in python_modules and f'{module}/__init__.py' not in members]
+          if missing_modules:
+              raise SystemExit('Missing NoCuda Python modules: ' + ', '.join(missing_modules))
+          gpu_libraries = [
+              '*libtorch_cuda*.so*', '*libc10_cuda*.so*', '*libcudart.so*',
+              '*libcudnn*.so*', '*libcublas*.so*', '*libcufft*.so*',
+              '*libcurand*.so*', '*libcusolver*.so*', '*libcusparse*.so*',
+              '*libnvrtc*.so*', '*libnvjitlink*.so*', '*libnccl*.so*',
+              '*onnxruntime_providers_cuda.so', '*onnxruntime_providers_tensorrt.so',
+          ]
+          unexpected = [name for name in members if any(fnmatch.fnmatchcase(name.lower(), pattern) for pattern in gpu_libraries)]
+          if unexpected:
+              raise SystemExit('Unexpected CUDA libraries in NoCuda build: ' + ', '.join(unexpected))
+          print(f'Verified CPU PyTorch, ONNX Runtime, RapidOCR, and Qt WebEngine in {binary.name}')
+          PY
+
+      - name: Create Linux ZIP
+        id: package
+        working-directory: src
+        run: |
+          LINUX_BINARY="$(python -c 'from app_version import get_spec_app_name; print(get_spec_app_name("translator_linux_NoCuda.spec"))')"
+          LINUX_PACKAGE="${LINUX_BINARY/#N_/Z_}"
+          cd dist
+          chmod +x "$LINUX_BINARY"
+          zip -9 "${LINUX_PACKAGE}.zip" "$LINUX_BINARY"
+          echo "name=$LINUX_PACKAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: src/dist/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  # Mobile (Android + iOS) is intentionally not built here: desktop release runs must never build
+  # the mobile app. Run build-mobile.yml manually, or push a v* tag (it updates that tag's existing release).

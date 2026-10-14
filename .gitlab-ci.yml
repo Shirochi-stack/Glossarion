@@ -1,0 +1,77 @@
+# GitLab alternatives; the GitHub Actions workflows remain authoritative and unchanged.
+# Only a user-created web pipeline runs. Pushing/mirroring a branch or tag starts nothing.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+stages: [check, wheels, build, device, release]
+
+variables:
+  GIT_DEPTH: "0"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  GLOSSARION_TASK:
+    value: "source-check"
+    options: [source-check, desktop-tests, mobile-check, desktop, windows, linux, macos, android, android-signed, ios, ios-signed, ios-simulator, android-ui, android-smoke, wheels-android, wheels-ios]
+    description: "Opt-in task; see docs/gitlab_ci.md for runner prerequisites and expected outputs."
+  GLOSSARION_PUBLISH:
+    value: "false"
+    options: ["false", "true"]
+    description: "Expose a blocking manual upload job for an existing release on a protected version tag."
+  GLOSSARION_SIGNING_APPROVED:
+    value: "false"
+    options: ["false", "true"]
+    description: "Explicit approval for the separately selected signed mobile job; protected ref required."
+
+default:
+  interruptible: true
+  before_script:
+    - python -m pip install -r .gitlab/requirements.txt
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - artifacts/
+      - src/mobile/build/*report*.md
+      - src/mobile/build/*smoke*.json
+      - src/mobile/build/e2e_result.json
+      - mobile-smoke-logs/
+
+include:
+  - local: .gitlab/desktop.yml
+  - local: .gitlab/mobile.yml
+
+source-check:
+  stage: check
+  tags: [glossarion-linux-py312]
+  rules:
+    - if: '$GLOSSARION_TASK == "source-check"'
+  script:
+    - python .gitlab/ci.py source-check
+    - python tests/test_gitlab_ci.py
+
+desktop-tests:
+  stage: check
+  tags: [glossarion-linux-py310]
+  timeout: 2 hours
+  rules:
+    - if: '$GLOSSARION_TASK == "desktop-tests"'
+  script:
+    - python .gitlab/ci.py desktop-tests
+
+publish-existing-release:
+  stage: release
+  resource_group: glossarion-release
+  tags: [glossarion-linux-py312]
+  interruptible: false
+  rules:
+    - if: '$GLOSSARION_PUBLISH == "true" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+      when: manual
+      allow_failure: false
+    - when: never
+  manual_confirmation: "Upload verified build artifacts to this existing GitLab release?"
+  environment:
+    name: gitlab-release
+  script:
+    - python .gitlab/release.py

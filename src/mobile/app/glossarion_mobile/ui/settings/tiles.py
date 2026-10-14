@@ -1,0 +1,1220 @@
+"""Schema-bound setting tiles (UI_SPEC §5.7).
+
+One tile per ``SettingSpec``; ``make_tile`` picks the class from
+``model.tile_kind``: SwitchTile · NumberTile · SliderTile · SegmentedTile ·
+DropdownTile · TextTile · PromptTile (opens ``PromptEditor``) · SecretTile ·
+PathTile · ListSettingTile · JsonTile; ``active_profile`` is a ProfileTile (the desktop
+profile combo over the shared profile listing).
+
+Common anatomy: label + "modified" dot, one help line, the effective value
+(the stored value, else the schema default marked "· default"; defaults are
+display-only and never written), badges (locked purple 🔒 reason, a
+``ReasonChip`` when ``is_available`` says no, "not used" when a
+``visible_if`` rule is off), ⓘ opening an ``InfoSheet`` with the full help,
+key, env names, default and recorded desktop discrepancies; long-press resets
+to default (removes the key, with Undo). The outer ``Container`` carries
+``key=ft.ScrollKey(<config key>)`` so search can ``scroll_to`` it.
+
+Edits go through ``SchemaAccess.coerce`` and ``MobileConfigStore.set``; a
+validation error is shown under the tile and nothing is stored.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from typing import Any, Iterator, Optional
+
+import flet as ft
+
+from glossarion_mobile.state.config_store import MISSING, MobileConfigStore
+from glossarion_mobile.state.setting_writes import (
+    CONTEXT_MODE_KEY,
+    CONTEXT_MODE_WRITES,
+    MOBILE_STREAMING_DEFAULT,
+    PROFILE_KEY,
+    RULE_KEYS,
+    STREAMING_KEY,
+    STREAMING_KEYS,
+    STREAMING_WRITES,
+    context_mode_of,
+    effective_streaming_values,
+    reset_streaming,
+    streaming_states,
+    streaming_summary,
+    with_mobile_streaming_defaults,
+    write_setting,
+)
+from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.info_sheet import InfoSheet
+from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.settings.editors import (
+    EntryTypePickerEditor,
+    EntryTypesEditor,
+    JsonEditor,
+    ListEditor,
+    MultiplierEditor,
+    PathEditor,
+    PromptEditor,
+    SecretEditor,
+)
+from glossarion_mobile.ui.settings.model import (
+    choice_options,
+    config_path,
+    env_names,
+    help_line,
+    label_for,
+    plain_text,
+    slider_params,
+    spec_attr,
+    spec_type,
+    summarize,
+    tile_kind,
+)
+from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic
+
+__all__ = [
+    "DropdownTile",
+    "EffectiveConfig",
+    "IMPLIED_WRITES",
+    "JsonTile",
+    "ListSettingTile",
+    "MIRRORS",
+    "MOBILE_READONLY_REASONS",
+    "listed_setting",
+    "MultiplierGridTile",
+    "NumberTile",
+    "PathTile",
+    "ProfileTile",
+    "PromptTile",
+    "SecretTile",
+    "SegmentedTile",
+    "SettingTile",
+    "SliderTile",
+    "StreamingTile",
+    "SwitchTile",
+    "TILE_CLASSES",
+    "TextTile",
+    "make_tile",
+]
+
+log = logging.getLogger("glossarion.settings")
+
+HIGHLIGHT = ft.Colors.with_opacity(0.14, ft.Colors.PRIMARY)
+
+
+class EffectiveConfig(Mapping):
+    """Read-only mapping of effective values (stored, else display default) for rule evaluation."""
+
+    def __init__(self, store: MobileConfigStore) -> None:
+        self.store = store
+
+    def __getitem__(self, key: str) -> Any:
+        if self.store.has(key):
+            return self.store.get(key)
+        value = self.store.default_for(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.store.keys())
+
+    def __len__(self) -> int:
+        return len(self.store)
+
+
+def _parse_number(raw: Any, kind: str) -> Any:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return int(raw) if kind == "int" and float(raw).is_integer() else raw
+    text = str(raw or "").strip().replace(",", "")
+    if not text:
+        raise ValueError("Enter a number")
+    try:
+        if kind == "int":
+            number = float(text)
+            if not number.is_integer():
+                raise ValueError
+            return int(number)
+        return float(text)
+    except ValueError:
+        raise ValueError("Enter a whole number" if kind == "int" else "Enter a number") from None
+
+
+_POOL_SLUGS: dict = {}
+
+#: Keys the desktop writes together with another one (other_settings ``_on_use_toc_ncx_toggle``:
+#: translate_toc_ncx always mirrors use_toc_ncx; ``_on_skip_title_tag_toggle`` keeps the inverse
+#: legacy ``use_title``). key -> ((mirror key, transform), ...); the mirrors are read-only tiles.
+MIRRORS: dict = {
+    "use_toc_ncx": (("translate_toc_ncx", bool),),
+    "skip_title_tag_translation": (("use_title", lambda value: not bool(value)),),
+}
+
+
+def _tts_endpoint_follows(value: Any) -> dict:
+    """other_settings ``_on_openai_url_changed``: an Override API Endpoint ending in ``/audio/speech`` is
+    also the TTS endpoint (OPENAI_TTS_ENDPOINT, which run_env prefers for TTS)."""
+    text = str(value or "")
+    return {"openai_tts_endpoint": text} if text.rstrip("/").endswith("/audio/speech") else {}
+
+
+#: Keys whose desktop control conditionally writes another key with the value: key -> fn(value) ->
+#: ``{other key: value}`` (written in the same store write; ``SettingTile.implied_writes``).
+IMPLIED_WRITES: dict = {
+    "openai_base_url": _tts_endpoint_follows,
+}
+
+
+def pool_slug_for(key: str) -> Optional[str]:
+    """Route slug of the API-key pool stored under config ``key`` (``key_pool_service`` POOL_SPECS:
+    multi_api_keys, fallback_keys, glossary_keys, ...), else None. Those lists hold keys: their
+    tiles never show or edit them as raw JSON / plain strings (the Multi-Key Manager masks and
+    validates them)."""
+    mapping = _POOL_SLUGS.get("map")
+    if mapping is None:
+        mapping = {}
+        try:
+            from glossarion_mobile.ui.screens.keys import KeyBackend
+
+            for spec in KeyBackend().pool_specs():
+                config_key = str(getattr(spec, "config_key", "") or "")
+                if config_key:
+                    mapping[config_key] = spec.slug
+        except Exception:
+            log.debug("key pool lookup failed", exc_info=True)
+        if mapping:  # cached once the shared pool list is known (retried otherwise)
+            _POOL_SLUGS["map"] = mapping
+    return mapping.get(str(key or ""))
+
+
+#: Keys another mobile page edits with the desktop semantics, shown read-only here (mobile display only; the
+#: desktop-shared list is ``settings_schema.READONLY_REASONS``): the raw JSON would bypass the desktop
+#: ``save_profiles`` and could drop built-ins the desktop start-up does not re-add (Manga_*, Original, ...).
+MOBILE_READONLY_REASONS = {"prompt_profiles": "Edited in Settings › Profiles & prompts"}
+
+
+def listed_setting(ctx: Any, spec: Any) -> bool:
+    """A setting the Settings pages and search list: available on mobile and something the user can
+    change here. Informational read-only tiles ("Follows Output mode", "Edited in Chat settings",
+    the desktop's own disabled flags) are not listed (owner 2026-10-13: they only bloated the pages);
+    an API-key pool tile stays (it opens its pool page)."""
+    key = str(spec_attr(spec, "key", ""))
+    if not ctx.schema.availability(key)[0]:
+        return False
+    if pool_slug_for(key):
+        return True
+    return not (spec_attr(spec, "readonly", "") or (len(config_path(spec)) == 1 and key in MOBILE_READONLY_REASONS))
+
+
+class SettingTile:
+    kind = "text"
+
+    def __init__(self, spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> None:
+        self.spec = spec
+        self.ctx = ctx
+        self.key = str(spec_attr(spec, "key", ""))
+        self.path = config_path(spec)  # nested settings live inside their parent object
+        self.label = label_for(spec)
+        self.help = help_line(spec)
+        self.config = config if config is not None else EffectiveConfig(ctx.store)
+        self.available, self.unavailable_reason = ctx.schema.availability(self.key)
+        partial = getattr(ctx.schema, "partial_reason", None)
+        self.partial_reason: Optional[str] = partial(self.key) if callable(partial) else None
+        self.readonly_reason: Optional[str] = self.readonly()
+        self.lock_reason: Optional[str] = None
+        self.hidden_reason: Optional[str] = None
+        self.error: Optional[str] = None
+        self.highlighted = False
+        self.editor: Any = None
+        self._build()
+        self.refresh(push=False)
+
+    def readonly(self) -> Optional[str]:
+        """Reason this tile only displays its value: the schema's ``readonly`` (a store another
+        surface edits, a mirror the backend derives), an API-key pool (Settings › API keys), or a
+        stored value whose type this tile cannot write back (a dict under a text tile)."""
+        reason = str(spec_attr(self.spec, "readonly", "") or "")
+        if reason:
+            return reason
+        if pool_slug_for(self.key):
+            return "Edited in API keys"
+        if len(self.path) == 1 and self.key in MOBILE_READONLY_REASONS:
+            return MOBILE_READONLY_REASONS[self.key]
+        return None
+
+    # ---- value -------------------------------------------------------------------------
+
+    @property
+    def store(self) -> MobileConfigStore:
+        return self.ctx.store
+
+    def value(self) -> Any:
+        return self.store.effective(self.path)
+
+    def default(self) -> Any:
+        return self.store.default_for(self.path)
+
+    @property
+    def stored(self) -> bool:
+        return self.store.has(self.path)
+
+    @property
+    def editable(self) -> bool:
+        return self.available and self.lock_reason is None and self.readonly_reason is None
+
+    def default_note(self) -> Optional[str]:
+        note = getattr(self.ctx.schema, "default_note", None)
+        return note(self.key) if note is not None else None
+
+    def summary(self) -> str:
+        value = self.value()
+        if value is None and not self.stored:
+            note = self.default_note()
+            if note:
+                return note[:1].upper() + note[1:]
+        return summarize(value, self.kind, self.spec)
+
+    # ---- building ------------------------------------------------------------------------
+
+    def build_control(self) -> Optional[ft.Control]:
+        """Trailing inline control (e.g. a Switch)."""
+        return None
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        """Inline editor below the title (numbers, sliders, choices, text)."""
+        return None
+
+    def _build(self) -> None:
+        self.title_text = ft.Text(self.label, theme_style=ft.TextThemeStyle.BODY_MEDIUM, weight=ft.FontWeight.W_500)
+        self.modified_dot = ft.Container(width=8, height=8, border_radius=4, bgcolor=ft.Colors.PRIMARY, visible=False,
+                                         tooltip="Modified")
+        self.help_text = ft.Text(self.help, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                 max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, visible=bool(self.help))
+        self.value_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2,
+                                  overflow=ft.TextOverflow.ELLIPSIS)
+        self.badges = ft.Row([], spacing=6, wrap=True, run_spacing=4)
+        self.error_text = ft.Text("", color=ft.Colors.ERROR, theme_style=ft.TextThemeStyle.BODY_SMALL, visible=False)
+        self.info_button = ft.IconButton(icon=ft.Icons.INFO_OUTLINE, tooltip="About this setting",
+                                         on_click=self.open_help, size_constraints=HIT_TARGET, icon_size=18)
+        self.inline = self.build_control()
+        self.editor_row = self.build_editor_row()
+        trailing = [c for c in (self.inline, self.info_button) if c is not None]
+        self.list_tile = ft.ListTile(
+            title=ft.Row([ft.Container(content=self.title_text, expand=True), self.modified_dot], spacing=6,
+                         vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            subtitle=ft.Column([self.help_text, self.value_text, self.badges], spacing=2, tight=True),
+            trailing=ft.Row(trailing, spacing=0, tight=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            on_click=self._on_tap,
+            on_long_press=self._on_long_press,
+            min_height=tokens.SIZES["hit_target"],
+            content_padding=ft.Padding.only(left=12, right=4),
+        )
+        body: list[ft.Control] = [self.list_tile]
+        if self.editor_row is not None:
+            body.append(ft.Container(content=self.editor_row, padding=ft.Padding.only(left=12, right=12, bottom=8)))
+        body.append(ft.Container(content=self.error_text, padding=ft.Padding.only(left=12, right=12)))
+        self.control = ft.Container(
+            key=ft.ScrollKey(self.key),
+            content=ft.Column(body, spacing=0, tight=True),
+            border_radius=tokens.RADII["tile"],
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+        )
+
+    # ---- state ---------------------------------------------------------------------------
+
+    def _evaluate_rules(self) -> None:
+        try:
+            self.lock_reason = self.ctx.schema.lock_reason(self.spec, self.config)
+            self.hidden_reason = self.ctx.schema.hidden_reason(self.spec, self.config)
+        except Exception:
+            log.debug("rule evaluation failed for %s", self.key, exc_info=True)
+            self.lock_reason = self.hidden_reason = None
+
+    def _badge_controls(self) -> list[ft.Control]:
+        out: list[ft.Control] = []
+        if not self.available:
+            out.append(ReasonChip(reason=self.unavailable_reason or "Not available on mobile",
+                                  detail=f"{self.label}: {self.unavailable_reason or 'not available on mobile'}. "
+                                         "Its config.json value is kept untouched."))
+        if self.lock_reason:
+            color = semantic("locked", False)
+            out.append(
+                ft.Container(
+                    content=ft.Row([ft.Icon(ft.Icons.LOCK, size=12, color=color),
+                                    ft.Text(self.lock_reason, theme_style=ft.TextThemeStyle.LABEL_SMALL, color=color)],
+                                   spacing=4, tight=True),
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                    border=ft.Border.all(1, color),
+                    border_radius=tokens.RADII["chip"],
+                    tooltip=self.lock_reason,
+                )
+            )
+        if self.readonly_reason and self.available:
+            out.append(ReasonChip(reason=self.readonly_reason))
+        if self.partial_reason and self.available:
+            out.append(ReasonChip(reason=self.partial_reason,
+                                  detail=f"{self.label}: {self.partial_reason}. The desktop value is kept untouched."))
+        if self.hidden_reason and self.available:
+            out.append(ReasonChip(reason=self.hidden_reason))
+        return out
+
+    def refresh_value(self) -> None:
+        """Kind-specific: copy the effective value into the inline control."""
+
+    def refresh(self, push: bool = True) -> None:
+        self._evaluate_rules()
+        editable = self.editable
+        text = self.summary()
+        stored = self.stored
+        noted = not stored and self.value() is None and bool(self.default_note())
+        self.value_text.value = text if (stored or noted) else f"{text} · default"
+        self.value_text.color = ft.Colors.PRIMARY if stored else ft.Colors.ON_SURFACE_VARIANT
+        self.modified_dot.visible = self.store.is_modified(self.path)
+        self.title_text.color = ft.Colors.ON_SURFACE if editable else ft.Colors.ON_SURFACE_VARIANT
+        self.badges.controls = self._badge_controls()
+        self.badges.visible = bool(self.badges.controls)
+        for control in (self.inline, self.editor_row):
+            if control is not None:
+                control.disabled = not editable
+        self.refresh_value()
+        if push:
+            self.ctx.push(self.control)
+
+    def set_error(self, message: Optional[str]) -> None:
+        self.error = message or None
+        self.error_text.value = message or ""
+        self.error_text.visible = bool(message)
+        self.ctx.push(self.error_text)
+
+    def set_highlight(self, on: bool) -> None:
+        self.highlighted = on
+        self.control.bgcolor = HIGHLIGHT if on else ft.Colors.SURFACE_CONTAINER_LOW
+        self.ctx.push(self.control)
+
+    # ---- editing ---------------------------------------------------------------------------
+
+    def parse(self, raw: Any) -> Any:
+        return raw
+
+    def apply(self, raw: Any) -> bool:
+        """Coerce and store ``raw``; returns False (and shows the error) when invalid or not editable."""
+        if not self.editable:
+            return False
+        try:
+            value = self.ctx.schema.coerce(self.key, self.parse(raw))
+        except ValueError as exc:
+            self.set_error(str(exc) or "Invalid value")
+            self.refresh_value()
+            self.ctx.push(self.control)
+            return False
+        if self.error:
+            self.set_error(None)
+        try:
+            extra = self.implied_writes(value)
+            if extra:  # keys the desktop control writes together with this one, in one store write
+                self.store.set_many({self.path: value, **extra})
+            elif len(self.path) == 1 and (self.key in RULE_KEYS or self.key == PROFILE_KEY):
+                # the desktop control's side effects (output-mode flags, glossary-mode toggles,
+                # thoughts lock, target-language fan-out, profile extraction method)
+                write_setting(self.store, self.key, value)
+            else:
+                self.store.set(self.path, value)
+        except ValueError as exc:  # e.g. the parent of a nested setting is not an object
+            self.set_error(str(exc))
+            return False
+        for mirror, transform in MIRRORS.get(self.key, ()):
+            try:
+                self.store.set((mirror,), transform(value))
+            except Exception:
+                log.debug("mirroring %s -> %s failed", self.key, mirror, exc_info=True)
+        self.refresh()
+        return True
+
+    def implied_writes(self, value: Any) -> dict:
+        """Other config keys this tile's control writes with ``value`` (``IMPLIED_WRITES``; none by default)."""
+        rule = IMPLIED_WRITES.get(self.key) if len(self.path) == 1 else None
+        return dict(rule(value) or {}) if rule is not None else {}
+
+    def save_from_editor(self, value: Any) -> Optional[str]:
+        return None if self.apply(value) else (self.error or "Invalid value")
+
+    def reset(self) -> bool:
+        if not self.editable or not self.stored:
+            return False
+        old = self.store.get(self.path, MISSING)
+        self.store.unset(self.path)
+        self.refresh()
+        if old is not MISSING:
+            self.ctx.say(f"{self.label} reset to default", "Undo", lambda: (self.store.set(self.path, old), self.refresh()))
+        return True
+
+    def activate(self) -> Any:
+        """Tap on an editable tile (kind-specific)."""
+        return None
+
+    def _on_tap(self, e: Any = None) -> Any:
+        if not self.editable:
+            return self.open_help()
+        return self.activate()
+
+    def _on_long_press(self, e: Any = None) -> None:
+        if self.stored and self.editable:
+            self.reset()
+        else:
+            self.open_help()
+
+    def help_body(self) -> str:
+        lines: list[str] = []
+        tooltip = plain_text(spec_attr(self.spec, "tooltip", ""))
+        if tooltip:
+            lines.append(tooltip)
+        lines.append("Config key: " + (" › ".join(self.path) if len(self.path) > 1 else self.key))
+        names = env_names(self.spec)
+        if names:
+            lines.append("Environment: " + ", ".join(names))
+        default = self.default()
+        if self.kind != "secret" and default is not None:
+            lines.append("Default: " + summarize(default, self.kind, self.spec))
+        elif default is None and self.default_note():
+            lines.append(f"Default: {self.default_note()}.")
+        if not self.stored:
+            lines.append("Not stored in config.json yet: the default applies, exactly like a fresh desktop install.")
+        if not self.available:
+            lines.append(f"Unavailable: {self.unavailable_reason or 'not available on mobile'}.")
+        if self.readonly_reason:
+            lines.append(f"{self.readonly_reason}.")
+        if self.lock_reason:
+            lines.append(f"Locked: {self.lock_reason}.")
+        for note in spec_attr(self.spec, "discrepancies", ()) or ():
+            lines.append(f"Desktop note: {note}")
+        return "\n\n".join(lines)
+
+    def open_help(self, e: Any = None) -> InfoSheet:
+        actions: list[ft.Control] = []
+        if self.stored and self.editable:
+            actions.append(ft.TextButton(content="Reset to default", icon=ft.Icons.RESTART_ALT,
+                                         on_click=lambda ev: (sheet.close(), self.reset())))
+        sheet = InfoSheet(title=self.label, body=self.help_body(), actions=actions)
+        if self.ctx.page is not None:
+            sheet.show(self.ctx.page)
+        return sheet
+
+
+class SwitchTile(SettingTile):
+    kind = "switch"
+
+    def build_control(self) -> Optional[ft.Control]:
+        self.switch = ft.Switch(value=False, on_change=self._on_switch)
+        return self.switch
+
+    def refresh_value(self) -> None:
+        self.switch.value = bool(self.value())
+
+    def _on_switch(self, e: Any = None) -> None:
+        value = bool(getattr(getattr(e, "control", None), "value", self.switch.value))
+        self.apply(value)
+
+    def activate(self) -> Any:
+        return self.apply(not bool(self.value()))
+
+
+class NumberTile(SettingTile):
+    kind = "number"
+
+    @property
+    def number_kind(self) -> str:
+        return "int" if spec_type(self.spec) == "int" else "float"
+
+    def bounds(self) -> tuple[Optional[float], Optional[float]]:
+        def num(v: Any) -> Optional[float]:
+            try:
+                return None if v is None or isinstance(v, bool) else float(v)
+            except (TypeError, ValueError):
+                return None
+
+        return num(spec_attr(self.spec, "minimum", None)), num(spec_attr(self.spec, "maximum", None))
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        low, high = self.bounds()
+        hint = " · ".join(p for p in (f"min {summarize(low, 'number')}" if low is not None else "",
+                                      f"max {summarize(high, 'number')}" if high is not None else "") if p)
+        self.field = ft.TextField(
+            color=ft.Colors.ON_SURFACE,
+            value="", dense=True, width=150, keyboard_type=number_keyboard(),
+            border_radius=tokens.RADII["field"], on_submit=self._on_submit, on_blur=self._on_submit,
+        )
+        self.minus = ft.IconButton(icon=ft.Icons.REMOVE, tooltip="Decrease", on_click=lambda e: self.step(-1),
+                                   size_constraints=HIT_TARGET)
+        self.plus = ft.IconButton(icon=ft.Icons.ADD, tooltip="Increase", on_click=lambda e: self.step(1),
+                                  size_constraints=HIT_TARGET)
+        controls: list[ft.Control] = [self.minus, self.field, self.plus]
+        if hint:
+            controls.append(ft.Text(hint, theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
+        return ft.Row(controls, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True)
+
+    def refresh_value(self) -> None:
+        value = self.value()
+        self.field.value = "" if value is None else summarize(value, "number")
+
+    def parse(self, raw: Any) -> Any:
+        value = _parse_number(raw, self.number_kind)
+        low, high = self.bounds()
+        if low is not None and value < low:
+            raise ValueError(f"Must be at least {summarize(low, 'number')}")
+        if high is not None and value > high:
+            raise ValueError(f"Must be at most {summarize(high, 'number')}")
+        return value
+
+    def step(self, direction: int) -> bool:
+        current = self.value()
+        try:
+            base = _parse_number(current, self.number_kind) if current not in (None, "") else 0
+        except ValueError:
+            base = 0
+        delta = 1 if self.number_kind == "int" else 0.1
+        value = base + direction * delta
+        if self.number_kind == "float":
+            value = round(value, 6)
+        low, high = self.bounds()
+        if low is not None:
+            value = max(low, value)
+        if high is not None:
+            value = min(high, value)
+        if self.number_kind == "int":
+            value = int(value)
+        return self.apply(value)
+
+    def _on_submit(self, e: Any = None) -> None:
+        text = self.field.value or ""
+        if text.strip() == summarize(self.value(), "number") and not self.error:
+            return
+        self.apply(text)
+
+
+class SliderTile(NumberTile):
+    kind = "slider"
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        low, high, divisions = slider_params(self.spec) or (0.0, 1.0, 10)
+        self.slider = ft.Slider(min=low, max=high, divisions=divisions, value=low, label="{value}",
+                                on_change=self._on_slide, on_change_end=self._on_slide_end, expand=True)
+        self.slider_value = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, width=56,
+                                    text_align=ft.TextAlign.END)
+        return ft.Row([self.slider, self.slider_value], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+    def refresh_value(self) -> None:
+        value = self.value()
+        low, high, _divisions = slider_params(self.spec) or (0.0, 1.0, 10)
+        try:
+            number = float(value) if value is not None and not isinstance(value, bool) else low
+        except (TypeError, ValueError):
+            number = low
+        self.slider.value = min(high, max(low, number))
+        self.slider_value.value = summarize(value, "number") if value is not None else ""
+
+    def _slider_number(self, raw: Any) -> Any:
+        number = float(raw)
+        return int(round(number)) if self.number_kind == "int" else round(number, 4)
+
+    def _on_slide(self, e: Any = None) -> None:
+        raw = getattr(getattr(e, "control", None), "value", self.slider.value)
+        self.slider_value.value = summarize(self._slider_number(raw), "number")
+        self.ctx.push(self.slider_value)
+
+    def _on_slide_end(self, e: Any = None) -> None:
+        raw = getattr(getattr(e, "control", None), "value", self.slider.value)
+        self.apply(self._slider_number(raw))
+
+    def step(self, direction: int) -> bool:  # no steppers on sliders
+        return False
+
+
+class _ChoiceTile(SettingTile):
+    def options(self) -> list[tuple[Any, str]]:
+        options = choice_options(self.spec)
+        value = self.value()
+        if value is not None and value != "" and not any(o == value or str(o) == str(value) for o, _l in options):
+            options = options + [(value, f"{value} (custom)")]
+        return options
+
+    def index_of(self, value: Any) -> Optional[int]:
+        for index, (option, _label) in enumerate(self.options()):
+            if option == value and type(option) is type(value):
+                return index
+        for index, (option, _label) in enumerate(self.options()):
+            if str(option) == str(value):
+                return index
+        return None
+
+    def choose(self, index: int) -> bool:
+        options = self.options()
+        if not 0 <= index < len(options):
+            return False
+        value = options[index][0]
+        checker = getattr(self.ctx.schema, "value_availability", None)
+        ok, reason = checker(self.key, value) if callable(checker) else (True, None)
+        if not ok:  # e.g. a torch-only manga option on mobile: listed, never stored
+            self.set_error(reason or "Not available on this device")
+            self.refresh_value()
+            self.ctx.push(self.control)
+            return False
+        return self.apply(value)
+
+
+class SegmentedTile(_ChoiceTile):
+    kind = "segmented"
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        self.segmented = ft.SegmentedButton(
+            segments=[ft.Segment(value=str(i), label=ft.Text(label)) for i, (_v, label) in enumerate(self.options())],
+            selected=[],
+            allow_empty_selection=True,
+            allow_multiple_selection=False,
+            show_selected_icon=False,
+            on_change=self._on_segment,
+        )
+        return ft.Row([self.segmented], scroll=ft.ScrollMode.AUTO)
+
+    def refresh_value(self) -> None:
+        options = self.options()
+        if len(self.segmented.segments) != len(options):
+            self.segmented.segments = [ft.Segment(value=str(i), label=ft.Text(label)) for i, (_v, label) in enumerate(options)]
+        index = self.index_of(self.value())
+        self.segmented.selected = [str(index)] if index is not None else []
+
+    def _on_segment(self, e: Any = None) -> None:
+        selected = list(getattr(getattr(e, "control", None), "selected", None) or self.segmented.selected or [])
+        if selected:
+            self.choose(int(selected[0]))
+
+
+class DropdownTile(_ChoiceTile):
+    kind = "dropdown"
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        self.dropdown = ft.Dropdown(
+            color=ft.Colors.ON_SURFACE,
+            options=[], value=None, dense=True, expand=True, enable_filter=True, editable=False,
+            border_radius=tokens.RADII["field"], on_select=self._on_dropdown,
+        )
+        return ft.Row([self.dropdown])
+
+    def refresh_value(self) -> None:
+        self.dropdown.options = [ft.DropdownOption(key=str(i), text=label) for i, (_v, label) in enumerate(self.options())]
+        index = self.index_of(self.value())
+        self.dropdown.value = str(index) if index is not None else None
+
+    def _on_dropdown(self, e: Any = None) -> None:
+        value = getattr(getattr(e, "control", None), "value", None) or self.dropdown.value
+        if value is not None:
+            self.choose(int(value))
+
+
+class ContextModeTile(DropdownTile):
+    """U9: the desktop Context Mode combo (Off · Contextual History · Rolling Summary (Replace) · Rolling
+    Summary (Append)): not a config key - it shows ``settings_rules.context_mode`` of the stored flags and
+    writes them through ``setting_writes`` (``apply_context_mode``: the three flags as one choice plus the
+    batching constraint). The flags' own tiles are read-only ("Follows Context mode")."""
+
+    kind = "dropdown"
+
+    def readonly(self) -> Optional[str]:
+        return None
+
+    def _snapshot(self) -> dict:
+        snapshot = getattr(self.store, "snapshot", None)
+        try:
+            return dict(snapshot() or {}) if callable(snapshot) else {}
+        except Exception:
+            return {}
+
+    def value(self) -> Any:
+        return context_mode_of(self._snapshot())
+
+    def default(self) -> Any:
+        return "off"
+
+    @property
+    def stored(self) -> bool:
+        return any(self.store.has(key) for key in ("contextual", "use_rolling_summary"))
+
+    def apply(self, raw: Any) -> bool:
+        if not self.editable:
+            return False
+        if self.error:
+            self.set_error(None)
+        write_setting(self.store, CONTEXT_MODE_KEY, raw)
+        self.refresh()
+        return True
+
+    def reset(self) -> bool:
+        """Long-press / Reset: the flags back to their defaults (the combo then shows what they represent)."""
+        if not self.editable or not self.stored:
+            return False
+        for key in CONTEXT_MODE_WRITES[:3]:
+            if self.store.has(key):
+                self.store.unset(key)
+        self.refresh()
+        return True
+
+
+class ProfileTile(DropdownTile):
+    """Profile & System Prompt › Profile (``active_profile``): the desktop profile combo - every profile of
+    the shared listing (``ProfileService.listing``: desktop order, the built-ins the desktop start-up adds);
+    a choice is "Use this profile" (``setting_writes`` -> ``ProfileService.select``, the extraction-method
+    switch included). A stored name that is not a profile (or none) shows the profile the desktop start-up
+    runs instead; the tile never stores a name that is not a profile."""
+
+    kind = "dropdown"
+
+    def _listing(self) -> Any:
+        try:
+            from glossarion_mobile.ui.screens.profiles import ProfileService
+
+            return ProfileService(self.store).listing()
+        except Exception:
+            log.debug("prompt profile listing failed", exc_info=True)
+            return None
+
+    def options(self) -> list[tuple[Any, str]]:
+        listing = self._listing()
+        names = list(listing.names) if listing is not None and listing.names else []
+        if not names:
+            return super().options()
+        return [(name, name) for name in names]
+
+    def value(self) -> Any:
+        stored = super().value()
+        listing = self._listing()
+        if listing is not None and listing.active and stored not in listing.texts:
+            return listing.active  # what the desktop start-up runs for a missing / unset name
+        return stored
+
+
+def _settings_rules() -> Any:
+    try:
+        import settings_rules  # shared, GUI-free (U4)
+
+        return settings_rules
+    except Exception:
+        log.debug("settings_rules unavailable", exc_info=True)
+        return None
+
+
+#: Enable thoughts, the key the stream-thinking lock drives (``setting_writes.STREAMING_WRITES``).
+_THOUGHTS_KEY = STREAMING_WRITES[-1]
+#: The toggle whose routes mobile only partly has (the schema's partial-route chip moves onto the switch).
+_FORCED_STREAM_KEY = "allow_authgpt_batch_stream_logs"
+
+
+class StreamingTile(SwitchTile):
+    """Glossarion Mobile's one Streaming switch (owner 2026-10-08) for the desktop "Real-time Translation
+    (Streaming)" group - Enable streaming responses, Stream thinking/reasoning logs, Allow streaming logs
+    during batch mode, Allow forced-stream batch log - and Enable thoughts, which the stream-thinking lock
+    drives. Not a config key: it reads the four toggles (absent = ON on mobile) and writes them through
+    ``setting_writes`` (``settings_rules.apply_streaming``: only the keys that change, the desktop thoughts
+    lock). Toggles that differ (an imported desktop config) show "Custom · N of 4 on" with the switch
+    following Enable streaming responses; one tap sets all four. Under it: the desktop's silent-truncation
+    warning (``settings_rules``, the text other_settings shows)."""
+
+    kind = "switch"
+
+    def readonly(self) -> Optional[str]:
+        return None
+
+    def states(self) -> dict:
+        return streaming_states(self.store)
+
+    def value(self) -> Any:
+        states = self.states()
+        if all(states.values()) or not any(states.values()):
+            return all(states.values())
+        return bool(states.get("enable_streaming"))  # custom: whether requests stream
+
+    def default(self) -> Any:
+        return MOBILE_STREAMING_DEFAULT
+
+    @property
+    def stored(self) -> bool:
+        """A toggle is stored - or Enable thoughts is stored off (the U8/U9 builds' own tile): the lock keeps
+        thoughts on while stream thinking is on, so that value is stale, and Reset removes it
+        (``reset_streaming``)."""
+        if any(self.store.has(key) for key in STREAMING_KEYS):
+            return True
+        return bool(MOBILE_STREAMING_DEFAULT and self.store.has(_THOUGHTS_KEY)
+                    and not bool(self.store.get(_THOUGHTS_KEY)))
+
+    def run_values(self) -> dict:
+        """``STREAMING_WRITES`` as a run uses them: the stored values, the mobile default for absent ones and
+        the desktop thoughts lock (``with_mobile_streaming_defaults``, what a job's config gets)."""
+        return with_mobile_streaming_defaults(dict(effective_streaming_values(self.store)))
+
+    def summary(self) -> str:
+        return streaming_summary(self.store)
+
+    def _label(self, key: str) -> str:
+        spec = self.ctx.schema.spec(key)
+        return label_for(spec) if spec is not None else key
+
+    def _texts(self) -> tuple:
+        """(the desktop dialog's silent-truncation warning,). The desktop's forced-stream note (the list of
+        routes that always stream) is not shown on mobile (owner 2026-10-14: noise on a phone)."""
+        rules = _settings_rules()
+        return (str(getattr(rules, "STREAMING_TRUNCATION_WARNING", "") or ""),)
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        (warning,) = self._texts()
+        self.warning_text = ft.Text(warning, theme_style=ft.TextThemeStyle.BODY_SMALL, color=semantic("warning", False),
+                                    visible=bool(warning))
+        return ft.Column([self.warning_text], spacing=2, tight=True)
+
+    def refresh(self, push: bool = True) -> None:
+        super().refresh(push=False)
+        self.modified_dot.visible = any(self.store.is_modified(key) for key in STREAMING_WRITES)
+        if push:
+            self.ctx.push(self.control)
+
+    def _badge_controls(self) -> list[ft.Control]:
+        out = super()._badge_controls()
+        states = self.states()
+        if 0 < sum(1 for on in states.values() if on) < len(states):
+            rows = " · ".join(f"{self._label(key)}: {'On' if on else 'Off'}" for key, on in states.items())
+            out.append(ReasonChip(
+                reason=self.summary(),
+                detail=(f"The desktop streaming toggles differ: {rows}. Requests stream while "
+                        f"{self._label('enable_streaming')} is on. Tap the switch to set all four.")))
+        partial = getattr(self.ctx.schema, "partial_reason", None)
+        reason = partial(_FORCED_STREAM_KEY) if callable(partial) else None
+        if reason and self.available:
+            out.append(ReasonChip(reason=reason, detail=f"{self._label(_FORCED_STREAM_KEY)}: {reason}."))
+        return out
+
+    def apply(self, raw: Any) -> bool:
+        if not self.editable:
+            return False
+        if self.error:
+            self.set_error(None)
+        write_setting(self.store, STREAMING_KEY, bool(raw))
+        self.refresh()
+        return True
+
+    def reset(self) -> bool:
+        """Long-press / Reset: the toggles back to the default (their keys removed: ON), with Undo."""
+        if not self.editable or not self.stored:
+            return False
+        old = reset_streaming(self.store)
+        self.refresh()
+        if old:
+            self.ctx.say(f"{self.label} reset to default", "Undo",
+                         lambda: (self.store.set_many(dict(old)), self.refresh()))
+        return bool(old)
+
+    def help_body(self) -> str:
+        lines: list[str] = []
+        tooltip = plain_text(spec_attr(self.spec, "tooltip", ""))
+        if tooltip:
+            lines.append(tooltip)
+        values = self.run_values()
+        rows = []
+        for key in STREAMING_WRITES:
+            spec = self.ctx.schema.spec(key)
+            names = env_names(spec) if spec is not None else []
+            state = "On" if bool(values[key]) else "Off"
+            if not self.store.has(key):
+                stored = " (default)"
+            elif bool(self.store.get(key)) != bool(values[key]):  # a stale Enable thoughts off, under the lock
+                stored = " (locked by stream thinking)"
+            else:
+                stored = ""
+            rows.append(f"• {self._label(key)}{' · ' + ', '.join(names) if names else ''}: {state}{stored}")
+        lines.append("Desktop settings it sets:\n" + "\n".join(rows))
+        lines.append(f"{self._label(_THOUGHTS_KEY)} stays on while {self._label('stream_thinking_logs')} is on "
+                     "(the desktop lock); turning Streaming off turns it off too.")
+        lines.extend(text for text in self._texts() if text)
+        spec = self.ctx.schema.spec(_FORCED_STREAM_KEY)
+        for note in (spec_attr(spec, "discrepancies", ()) or ()) if spec is not None else ():
+            lines.append(f"Desktop note: {note}")
+        lines.append("Default on Glossarion Mobile: On (the desktop default is off). "
+                     + ("" if self.stored else "Not stored in config.json yet: the default applies."))
+        return "\n\n".join(line.strip() for line in lines if line.strip())
+
+
+def _foreign_value_reason(tile: "SettingTile") -> Optional[str]:
+    """A text / prompt tile over a stored value that is not text (a dict the profile bar wrote, a
+    number a spin box stored): writing the field back would replace it with a string."""
+    stored = tile.store.get(tile.path, MISSING) if tile.store.has(tile.path) else MISSING
+    if stored is MISSING or stored is None or isinstance(stored, str):
+        return None
+    kind = "a list" if isinstance(stored, (list, tuple)) else "an object" if isinstance(stored, dict) else (
+        "a switch value" if isinstance(stored, bool) else "a number")
+    return f"Stored as {kind}; edited on its own screen"
+
+
+class TextTile(SettingTile):
+    kind = "text"
+
+    def readonly(self) -> Optional[str]:
+        return super().readonly() or _foreign_value_reason(self)
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        self.field = ft.TextField(color=ft.Colors.ON_SURFACE, value="", dense=True, expand=True,
+                                  border_radius=tokens.RADII["field"], on_submit=self._on_submit,
+                                  on_blur=self._on_submit)
+        return ft.Row([self.field])
+
+    def refresh_value(self) -> None:
+        value = self.value()
+        self.field.value = "" if value is None else str(value)
+
+    def _on_submit(self, e: Any = None) -> None:
+        text = self.field.value or ""
+        current = self.value()
+        if text == ("" if current is None else str(current)) and not self.error:
+            return
+        self.apply(text)
+
+
+class PromptTile(SettingTile):
+    kind = "prompt"
+
+    def readonly(self) -> Optional[str]:
+        return super().readonly() or _foreign_value_reason(self)
+
+    def activate(self) -> PromptEditor:
+        default = self.default()
+        self.editor = PromptEditor(
+            self.ctx, title=self.label, subtitle=self.key, value=self.value() or "",
+            default=None if default is None else str(default), on_save=self.save_from_editor,
+        ).show()
+        return self.editor
+
+
+class SecretTile(SettingTile):
+    kind = "secret"
+
+    def activate(self) -> SecretEditor:
+        current = self.store.get(self.path, "")
+        self.editor = SecretEditor(self.ctx, title=self.label, subtitle=self.key,
+                                   value="" if str(current or "").startswith("ENC:") else (current or ""),
+                                   on_save=self.save_from_editor).show()
+        return self.editor
+
+
+def _google_credentials_problem(path: str) -> Optional[str]:
+    from glossarion_mobile.ui.screens.key_editor import google_credentials_problem
+
+    return google_credentials_problem(path)
+
+
+#: Path settings whose file the desktop picker checks before storing it: key -> problem(path) -> message.
+PATH_CHECKS = {"google_cloud_credentials": _google_credentials_problem}
+
+
+class PathTile(SettingTile):
+    kind = "path"
+
+    def activate(self) -> PathEditor:
+        self.editor = PathEditor(
+            self.ctx, title=self.label, subtitle=self.key, value=self.value() or "", on_save=self.save_path,
+            import_dir=self.ctx.extras.get("import_dir"),
+        ).show()
+        return self.editor
+
+    def save_path(self, value: Any) -> Optional[str]:
+        """The editor's save: the desktop picker's file check first (U9: Google Cloud credentials must be a
+        service-account JSON), then the plain store write."""
+        check = PATH_CHECKS.get(self.key)
+        path = str(value or "").strip()
+        if check is not None and path:
+            problem = check(path)
+            if problem:
+                return problem
+        return self.save_from_editor(value)
+
+
+class ListSettingTile(SettingTile):
+    kind = "list"
+
+    def activate(self) -> ListEditor:
+        value = self.value()
+        self.editor = ListEditor(self.ctx, title=self.label, subtitle=self.key,
+                                 value=list(value) if isinstance(value, (list, tuple)) else [],
+                                 on_save=self.save_from_editor).show()
+        return self.editor
+
+
+class CustomFieldsTile(ListSettingTile):
+    """Glossary › Custom Fields (``custom_glossary_fields``): removing "description" sets
+    ``custom_field_description_removed`` and adding it back clears it (the desktop Add / Remove
+    buttons, ``glossary_document.description_removed_flag``), in the same store write."""
+
+    def implied_writes(self, value: Any) -> dict:
+        try:
+            import glossary_document
+
+            return dict(glossary_document.custom_fields_flag_updates(self.value() or [], value or []))
+        except Exception:
+            log.debug("custom fields flag rule unavailable", exc_info=True)
+            return {}
+
+
+def configured_entry_type_names(store: Any) -> list:
+    """The configured entry types in the desktop list order (``custom_entry_types``, legacy names
+    normalised, built-in first)."""
+    value = store.effective("custom_entry_types") if store is not None else None
+    types = dict(value) if isinstance(value, Mapping) else {}
+    try:
+        import glossary_document
+
+        glossary_document.normalize_legacy_entry_types(types)
+        return [name for name, _config in glossary_document.sorted_entry_types(types)]
+    except Exception:
+        return sorted(types)
+
+
+class EntryTypesTile(SettingTile):
+    """``custom_entry_types``: the Entry Type Configuration editor instead of raw JSON."""
+
+    kind = "json"
+
+    def summary(self) -> str:
+        value = self.value()
+        if not isinstance(value, Mapping) or not value:
+            return "No entry types"
+        enabled = sum(1 for config in value.values() if not isinstance(config, Mapping) or config.get("enabled", True))
+        return f"{len(value)} types · {enabled} enabled"
+
+    def activate(self) -> EntryTypesEditor:
+        self.editor = EntryTypesEditor(self.ctx, title=self.label, subtitle=self.key, value=self.value(),
+                                       on_save=self.save_from_editor).show()
+        return self.editor
+
+
+class EntryTypePickerTile(ListSettingTile):
+    """A list of entry types (Emergency Glossary Compliance / Strict Precise Matching "Configure…",
+    Refinement "Selected Entry Types"): a checkbox per configured entry type, not free text."""
+
+    def activate(self) -> EntryTypePickerEditor:
+        value = self.value()
+        self.editor = EntryTypePickerEditor(
+            self.ctx, title=self.label, subtitle=self.key, value=list(value) if isinstance(value, (list, tuple)) else [],
+            options=configured_entry_type_names(self.store), on_save=self.save_from_editor,
+            prompt="Select the entry types this applies to.").show()
+        return self.editor
+
+
+#: Settings with a dedicated editor (picked by key in ``make_tile``).
+ENTRY_TYPES_KEY = "custom_entry_types"
+ENTRY_TYPE_PICKER_KEYS = frozenset({"glossary_refinement_selected_types", "emergency_glossary_compliance_custom_types",
+                                    "compress_glossary_strict_matching_custom_types"})
+CUSTOM_FIELDS_KEY = "custom_glossary_fields"
+
+
+class JsonTile(SettingTile):
+    kind = "json"
+
+    def readonly(self) -> Optional[str]:
+        # Key-pool lists hold API keys: never shown or edited as raw JSON here.
+        if spec_type(self.spec) in ("secret", "password"):
+            return "Edited in API keys"
+        return super().readonly()
+
+    def summary(self) -> str:
+        if spec_type(self.spec) in ("secret", "password") or self.pool_slug():
+            value = self.value()
+            count = len(value) if isinstance(value, (list, dict)) else 0
+            return f"{count} key{'s' if count != 1 else ''}" if count else "No keys"
+        return super().summary()
+
+    def pool_slug(self) -> Optional[str]:
+        """Route slug of the API-key pool stored under this key (``key_pool_service.POOL_SPECS``)."""
+        return pool_slug_for(self.key)
+
+    def _on_tap(self, e: Any = None) -> Any:
+        slug = self.pool_slug()
+        if slug:  # a key pool opens its page in Settings › API keys (KeyPoolTile, UI_SPEC §5.7)
+            return self.ctx.go("settings.keys.pool", {"pool": slug})
+        return super()._on_tap(e)
+
+    def activate(self) -> Optional[JsonEditor]:
+        if self.readonly_reason:
+            return None
+        value = self.value()
+        sample = value if value is not None else self.default()
+        expect = dict if isinstance(sample, dict) or spec_type(self.spec) in ("dict", "object", "map", "mapping") else (
+            list if isinstance(sample, (list, tuple)) or spec_type(self.spec) in ("list", "tuple", "array") else None
+        )
+        self.editor = JsonEditor(self.ctx, title=self.label, subtitle=self.key, value=value, expect=expect,
+                                 on_save=self.save_from_editor).show()
+        return self.editor
+
+
+#: Settings that are a per-language multiplier grid on the desktop (QA Scanner › Word count).
+MULTIPLIER_KEYS = frozenset({"qa_scanner_settings.word_count_multipliers"})
+
+
+def _factory_multipliers() -> dict:
+    try:
+        from qa_scan_runtime import CANONICAL_WORD_COUNT_MULTIPLIERS
+
+        return dict(CANONICAL_WORD_COUNT_MULTIPLIERS)
+    except Exception:
+        log.debug("qa_scan_runtime unavailable for the multiplier grid", exc_info=True)
+        return {"english": 1.0}
+
+
+class MultiplierGridTile(SettingTile):
+    """The desktop word-count multiplier grid: one number per language (factory values from the shared
+    ``qa_scan_runtime.CANONICAL_WORD_COUNT_MULTIPLIERS``, the stored dict merged over them)."""
+
+    kind = "json"  # a JSON dict setting with its own editor (make_tile picks it by key)
+
+    def summary(self) -> str:
+        value = self.value()
+        if isinstance(value, dict) and value:
+            return f"{len(value)} language{'s' if len(value) != 1 else ''} customised"
+        return "Recommended multipliers (factory values)"
+
+    def activate(self) -> MultiplierEditor:
+        self.editor = MultiplierEditor(self.ctx, title=self.label, subtitle=self.key, value=self.value(),
+                                       defaults=_factory_multipliers(), on_save=self.save_from_editor).show()
+        return self.editor
+
+
+TILE_CLASSES: dict[str, type] = {
+    "switch": SwitchTile,
+    "number": NumberTile,
+    "slider": SliderTile,
+    "segmented": SegmentedTile,
+    "dropdown": DropdownTile,
+    "text": TextTile,
+    "prompt": PromptTile,
+    "secret": SecretTile,
+    "path": PathTile,
+    "list": ListSettingTile,
+    "json": JsonTile,
+}
+
+
+def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> SettingTile:
+    key = str(spec_attr(spec, "key", ""))
+    if key in MULTIPLIER_KEYS:
+        cls: type = MultiplierGridTile
+    elif key == ENTRY_TYPES_KEY:
+        cls = EntryTypesTile
+    elif key in ENTRY_TYPE_PICKER_KEYS:
+        cls = EntryTypePickerTile
+    elif key == CUSTOM_FIELDS_KEY:
+        cls = CustomFieldsTile
+    elif pool_slug_for(key):  # an API-key pool: count + tap opens Settings › API keys › <pool>
+        cls = JsonTile
+    elif key == CONTEXT_MODE_KEY and getattr(spec, "virtual", "") == "context_mode":
+        cls = ContextModeTile
+    elif key == STREAMING_KEY and getattr(spec, "virtual", "") == "streaming":
+        cls = StreamingTile
+    elif key == PROFILE_KEY and len(config_path(spec)) == 1:
+        cls = ProfileTile
+    else:
+        cls = TILE_CLASSES.get(tile_kind(spec, ctx.store.get(config_path(spec))), TextTile)
+    return cls(spec, ctx, config=config)

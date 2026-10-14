@@ -1,0 +1,109 @@
+mobile-check:
+  stage: check
+  tags: [glossarion-linux-mobile-py313]
+  timeout: 2 hours
+  rules:
+    - if: '$GLOSSARION_TASK == "mobile-check"'
+  script:
+    - python .gitlab/ci.py mobile-check
+
+wheels-android:
+  stage: wheels
+  tags: [glossarion-linux-mobile-py313]
+  timeout: 2 hours
+  rules:
+    - if: '$GLOSSARION_TASK =~ /^(android|android-signed|android-ui|android-smoke|wheels-android)$/'
+  script:
+    - python .gitlab/ci.py wheels --platform android
+
+wheels-ios:
+  stage: wheels
+  tags: [glossarion-macos-mobile-py313]
+  timeout: 2 hours
+  rules:
+    - if: '$GLOSSARION_TASK =~ /^(ios|ios-signed|ios-simulator|wheels-ios)$/'
+  script:
+    - python .gitlab/ci.py wheels --platform ios
+
+android-apk:
+  stage: build
+  tags: [glossarion-linux-mobile-py313]
+  needs: [wheels-android]
+  timeout: 4 hours
+  rules:
+    - if: '$GLOSSARION_TASK == "android" || $GLOSSARION_TASK == "android-smoke"'
+  script:
+    - python .gitlab/ci.py mobile --target apk
+
+android-signed:
+  stage: build
+  tags: [glossarion-linux-mobile-py313]
+  needs: [wheels-android]
+  timeout: 4 hours
+  interruptible: false
+  rules:
+    - if: '$GLOSSARION_TASK == "android-signed"'
+      when: manual
+      allow_failure: false
+  manual_confirmation: "Use the provisioned Android signing key to build APK/AAB artifacts?"
+  environment:
+    name: android-signing
+  script:
+    - python .gitlab/ci.py mobile --target apk --signed
+    - python .gitlab/ci.py mobile --target aab --signed
+
+ios-unsigned:
+  stage: build
+  tags: [glossarion-macos-mobile-py313]
+  needs: [wheels-ios]
+  timeout: 4 hours
+  rules:
+    - if: '$GLOSSARION_TASK == "ios"'
+  script:
+    - python .gitlab/ci.py mobile --target ipa
+
+ios-signed:
+  stage: build
+  tags: [glossarion-macos-mobile-py313]
+  needs: [wheels-ios]
+  timeout: 4 hours
+  interruptible: false
+  rules:
+    - if: '$GLOSSARION_TASK == "ios-signed"'
+      when: manual
+      allow_failure: false
+  manual_confirmation: "Use the pre-provisioned Apple signing identity and profile to build this IPA?"
+  environment:
+    name: ios-signing
+  script:
+    - python .gitlab/ci.py mobile --target ipa --signed
+
+ios-simulator:
+  stage: build
+  tags: [glossarion-macos-mobile-py313]
+  needs: [wheels-ios]
+  timeout: 4 hours
+  rules:
+    - if: '$GLOSSARION_TASK == "ios-simulator"'
+  script:
+    - python .gitlab/ci.py mobile --target ios-simulator
+
+android-ui:
+  stage: device
+  tags: [glossarion-android-emulator-py313]
+  needs: [wheels-android]
+  timeout: 4 hours
+  rules:
+    - if: '$GLOSSARION_TASK == "android-ui"'
+  script:
+    - python .gitlab/ci.py android-ui
+
+android-smoke:
+  stage: device
+  tags: [glossarion-android-emulator-py313]
+  needs: [android-apk]
+  timeout: 1 hour
+  rules:
+    - if: '$GLOSSARION_TASK == "android-smoke"'
+  script:
+    - python .gitlab/ci.py android-smoke

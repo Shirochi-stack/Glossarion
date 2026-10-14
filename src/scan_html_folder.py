@@ -1,0 +1,12874 @@
+"""
+Enhanced QA Scanner for HTML Translation Files
+
+This module provides comprehensive quality assurance scanning for translated HTML files,
+including duplicate detection, foreign character detection, and translation artifact detection.
+
+PERFORMANCE IMPROVEMENTS:
+- Added detailed progress indicators for all slow operations
+- Shows estimated time remaining for long operations  
+- Displays current file being scanned
+- Provides progress updates every 5-10%
+- Added timing information for each phase
+- MinHash optimization status messages
+- Debug output for stop functionality
+
+OPTIMIZATION TIPS:
+- For datasets > 100 files, avoid AI Hunter mode (use aggressive instead)
+- Install 'datasketch' package for 2-10x faster duplicate detection: pip install datasketch
+- Use 'summary' report format for faster completion
+- Disable checks you don't need in QA Scanner Settings
+"""
+
+
+import os
+import hashlib
+import json
+import zipfile
+import csv
+from bs4 import BeautifulSoup, Comment, NavigableString
+from bs4.element import CData, RubyTextString, RubyParenthesisString
+from _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags
+from langdetect import detect, LangDetectException
+from difflib import SequenceMatcher
+from collections import Counter, defaultdict
+from tqdm import tqdm
+import threading
+import re
+import unicodedata
+import time
+import html as html_lib
+import xml.etree.ElementTree as ET
+from typing import Dict, List, Tuple, Set, Optional
+import warnings
+from functools import lru_cache
+import concurrent.futures
+import multiprocessing
+from threading import Lock
+import mobile_runtime
+from translation_artifacts import (
+    QA_TRANSLATION_ARTIFACT_FILENAMES,
+    translation_artifact_qa_text,
+    translation_artifact_spec_for_filename,
+)
+from emoticon_patterns import (
+    DEFAULT_EMOTICON_PATTERNS,
+    mask_whitelisted_emoticons,
+)
+from epub_package import find_epub_opf_member
+from title_tag_translation import should_translate_title_tags
+from qa_scan_runtime import is_html_like_path
+from chapter_chunk_progress import (
+    chunk_failure_summary,
+    ensure_chunk_entry_schema,
+    extract_marked_chunks_for_entry,
+    find_chunk_entry_for_output,
+    is_multi_chunk_entry,
+    set_chunk_qa,
+)
+
+# Optional: psutil for process priority and CPU affinity control
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
+
+# Add a global lock for thread-safe operations
+merge_lock = Lock()
+
+# Global variable for text samples mapping
+_global_text_samples = {}
+
+warnings.filterwarnings('ignore')
+
+# Try to import optional dependencies
+try:
+    from datasketch import MinHash, MinHashLSH
+    MINHASH_AVAILABLE = True
+except ImportError:
+    MINHASH_AVAILABLE = False
+    #"Note: Install 'datasketch' package for faster duplicate detection on large datasets if running it as a script
+
+# Global flag to allow stopping the scan externally
+_stop_flag = False
+
+def stop_scan():
+    """Set the stop flag to True
+    
+    This function should be called by the GUI to stop a running scan.
+    The GUI code needs to:
+    1. Import this function: from scan_html_folder import stop_scan
+    2. Call it in the stop_qa_scan method: stop_scan()
+    3. Update the QA button to show "Stop Scan" when scan is running
+    """
+    global _stop_flag
+    _stop_flag = True
+    print("🛑 STOP SCAN CALLED - Global flag set to True")  # More visible debug
+    return True  # Return True to confirm it was called
+
+def _is_vision_output_mode(qa_settings=None):
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    mode = (
+        settings.get('_output_mode')
+        or settings.get('output_mode')
+        or os.getenv('OUTPUT_MODE', '')
+    )
+    return str(mode).strip().lower() == 'vision'
+
+
+def _is_truncation_qa_context(qa_settings=None):
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    context = (
+        settings.get('_qa_context')
+        or settings.get('qa_context')
+        or settings.get('context')
+        or settings.get('_context')
+        or ''
+    )
+    if str(context).strip().lower() in ('truncation', 'qa_truncation'):
+        return True
+    return False
+
+
+def _should_use_vision_ocr_qa_source(qa_settings=None):
+    return _is_vision_output_mode(qa_settings) or _is_truncation_qa_context(qa_settings)
+
+
+def _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings=None):
+    """Use the selected book output's generated OCR EPUB for Vision/truncation QA when present."""
+    if not _should_use_vision_ocr_qa_source(qa_settings):
+        return epub_path
+    if not epub_path or not str(epub_path).lower().endswith('.epub'):
+        return epub_path
+
+    candidates = []
+    try:
+        stem, ext = os.path.splitext(os.path.basename(os.path.abspath(epub_path)))
+        if stem.lower().endswith('_ocr'):
+            stem = stem[:-4]
+        output_dir = os.getenv('EPUB_OUTPUT_DIR', '').strip()
+        if output_dir:
+            output_abs = os.path.abspath(output_dir)
+            if os.path.basename(output_abs) == stem:
+                candidates.append(os.path.join(output_abs, 'OCR', f"{stem}_OCR{ext or '.epub'}"))
+            else:
+                candidates.append(os.path.join(output_abs, stem, 'OCR', f"{stem}_OCR{ext or '.epub'}"))
+        override_dir = os.getenv('OUTPUT_DIRECTORY') or os.getenv('OUTPUT_DIR')
+        if override_dir:
+            candidates.append(os.path.join(os.path.abspath(override_dir), stem, 'OCR', f"{stem}_OCR{ext or '.epub'}"))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), stem, 'OCR', f"{stem}_OCR{ext or '.epub'}"))
+    except Exception:
+        pass
+
+    # Env values are useful when the prepass just ran, but they can be stale
+    # across GUI sessions. Only accept them after validating the selected book stem.
+    candidates.extend([
+        os.getenv('QA_VISION_OCR_SOURCE_EPUB', '').strip(),
+        os.getenv('VISION_OCR_SOURCE_EPUB', '').strip(),
+    ])
+
+    try:
+        source_abs = os.path.normcase(os.path.abspath(epub_path))
+    except Exception:
+        source_abs = None
+
+    seen_candidates = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            candidate_abs = os.path.normcase(os.path.abspath(candidate))
+            if candidate_abs in seen_candidates:
+                continue
+            seen_candidates.add(candidate_abs)
+            if source_abs is not None:
+                source_stem = os.path.splitext(os.path.basename(source_abs))[0]
+                candidate_stem = os.path.splitext(os.path.basename(candidate_abs))[0]
+                if source_stem.endswith('_ocr'):
+                    source_stem = source_stem[:-4]
+                if candidate_stem.endswith('_ocr'):
+                    candidate_stem = candidate_stem[:-4]
+                if candidate_stem != source_stem:
+                    continue
+            if os.path.basename(os.path.dirname(candidate_abs)).lower() != 'ocr':
+                continue
+            if (
+                os.path.isfile(candidate)
+                and candidate.lower().endswith('.epub')
+                and (source_abs is None or candidate_abs != source_abs)
+            ):
+                return candidate
+        except Exception:
+            continue
+
+    return epub_path
+
+
+# Configuration class for duplicate detection
+class DuplicateDetectionConfig:
+    def __init__(self, mode='quick-scan', custom_settings=None):
+        self.mode = mode
+        self.custom_settings = custom_settings
+        self.thresholds = {
+            'aggressive': {
+                'similarity': 0.75,
+                'semantic': 0.70,
+                'structural': 0.80,
+                'consecutive_chapters': 3,
+                'word_overlap': 0.65,
+                'minhash_threshold': 0.70,
+                'min_duplicate_word_count': 500
+            },
+            'quick-scan': {  # Optimized for speed
+                'similarity': 0.85,
+                'semantic': 0.80,
+                'structural': 0.90,
+                'consecutive_chapters': 1,  # Only check adjacent chapters
+                'word_overlap': 0.75,
+                'minhash_threshold': 0.80,
+                'skip_semantic': True,  # Skip expensive calculations
+                'skip_structural': True,
+                'skip_minhash': True,
+                'sample_size': 1000,  # Smaller sample
+                'disable_duplicate_check': False,
+                'check_all_pairs': False,  # Never check all pairs
+                'min_duplicate_word_count': 500
+            },
+            'custom': {
+                'similarity': 0.85,
+                'semantic': 0.80,
+                'structural': 0.90,
+                'consecutive_chapters': 2,
+                'word_overlap': 0.75,
+                'minhash_threshold': 0.80,
+                'check_all_pairs': False,
+                'sample_size': 3000,
+                'min_text_length': 500,
+                'min_duplicate_word_count': 500
+            },
+            'ai-hunter': {
+                'similarity': 0.30, 
+                'semantic': 0.65,
+                'structural': 0.80,
+                'consecutive_chapters': 5,
+                'word_overlap': 0.50,
+                'minhash_threshold': 0.60,
+                'check_all_pairs': True,
+                # Guardrail: don't flag AI/structural duplicates if the raw text overlap is essentially zero
+                # (prevents false positives where structure/semantics match but actual text does not)
+                'min_text_similarity': 0.05,
+                'min_duplicate_word_count': 500
+            }
+        }
+        
+        # Override with custom settings if mode is 'custom'
+        if mode == 'custom' and custom_settings:
+            self.thresholds['custom'].update(custom_settings.get('thresholds', {}))
+            for key in ['consecutive_chapters', 'check_all_pairs', 'sample_size', 'min_text_length', 'min_duplicate_word_count']:
+                if key in custom_settings:
+                    self.thresholds['custom'][key] = custom_settings[key]
+    
+    def get_threshold(self, key):
+        return self.thresholds[self.mode].get(key, 0.8)
+
+# Constants
+DASH_CHARS = {
+    '-', '–', '—', '―', '⸺', '⸻', '﹘', '﹣', '－', '⁃', '‐', '‑', '‒',
+    '_', '━', '─', '═', '╌', '╍', '┄', '┅', '┈', '┉', '⎯', '⏤', '＿',
+    '＊', '*', '~', '～', '∼', '〜', 'ㅡ'  # Added Korean dash character
+}
+
+COMMON_WORDS = {
+    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+    'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'after',
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+    'do', 'does', 'did', 'will', 'would', 'should', 'could', 'may', 'might',
+    'chapter', 'each', 'person', 'persons', 'he', 'she', 'it', 'they', 'them',
+    'his', 'her', 'their', 'this', 'that', 'these', 'those', 'which', 'who',
+    'what', 'where', 'when', 'why', 'how', 'all', 'some', 'any', 'no', 'not'
+}
+
+# Korean dash patterns to EXCLUDE from detection
+KOREAN_DASH_PATTERNS = [
+    r'[ㅡ―—–\-]+',  # Korean dashes and similar
+    r'[\u2014\u2015\u2500-\u257F]+',  # Box drawing characters often used in Korean text
+    r'[\u3161\u3163\u3164]+',  # Korean filler characters
+]
+
+# Extended Korean separator characters to exclude from non-English detection
+KOREAN_SEPARATOR_CHARS = {
+    'ㅡ',  # Korean dash/separator (U+3161)
+    'ー',  # Katakana-Hiragana prolonged sound mark (U+30FC) - used as dash
+    'ㄴ',  # Korean consonant nieun (U+3134) - used as bullet/marker
+    '―',   # Horizontal bar (U+2015)
+    '—',   # Em dash (U+2014)
+    '–',   # En dash (U+2013)
+    '［', '］',  # Full-width brackets
+    '【', '】',  # Black lenticular brackets
+    '〔', '〕',  # Tortoise shell brackets
+    '《', '》',  # Double angle brackets
+    '「', '」',  # Corner brackets
+    '『', '』',  # White corner brackets
+}
+
+# Translation artifacts patterns
+TRANSLATION_ARTIFACTS = {
+    # Exact marker for hard failures
+    'translation_failed_marker': re.compile(r'\[TRANSLATION FAILED\]'),
+    'machine_translation': re.compile(r'(MTL note|TN:|Translator:|T/N:|TL note:|Translator\'s note:)', re.IGNORECASE),
+    'encoding_issues': re.compile(r'[�□◇]{2,}'),
+    'repeated_watermarks': re.compile(r'(\[[\w\s]+\.(?:com|net|org)\])\s*\1{2,}', re.IGNORECASE),
+    # Only flag system/translator markers, not authorial choices
+    # Catches: "***Continued from previous***", "Note: Continuation of chapter", "[Continues in next]"
+    # Does NOT catch: "To be continued" (authorial), "The story continued" (prose)
+    'chapter_continuation': re.compile(
+        r'(^|\n|\[|\*{2,}|\-{2,}|note:|TN:)\s*(continued from previous|continuation of chapter|continues? in next)',
+        re.IGNORECASE | re.MULTILINE
+    ),
+    # Only match explicit artificial split language that's unlikely to be authorial intent
+    # Catches: "split 1 of 2", "chunk 3 of 5", "section 1/3" (with slash)
+    # Also catches leaked request merge markers that should have been stripped
+    # Includes both raw HTML and escaped HTML entity versions of split markers
+    # Also catches any element with id="split-N" attribute (even if marker text was translated)
+    'split_indicators': re.compile(
+        r'(split\s+\d+\s+of\s+\d+|chunk\s+\d+\s+of\s+\d+|section\s+\d+/\d+|'
+        r'id\s*=\s*["\']split-\d+["\']|'
+        r'id\s*=\s*split-\d+|'
+        r'&lt;h1[^&]*split-\d+[^&]*&gt;)',
+        re.IGNORECASE | re.DOTALL
+    ),
+    'api_response_unavailable': re.compile(r'\[AI RESPONSE UNAVAILABLE\]|\[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED\]|\[IMAGE TRANSLATION FAILED\]', re.IGNORECASE),
+    
+    'glossary_leakage_csv': re.compile(
+        r'(?:type|raw_name|translated_name|gender|description)\s*,\s*(?:type|raw_name|translated_name|gender|description)',
+        re.IGNORECASE
+    ),
+    'glossary_leakage_json': re.compile(
+        r'"(?:type|raw_name|translated_name|gender|description)"\s*:\s*"[^"]+"\s*,?\s*"(?:type|raw_name|translated_name|gender|description)"',
+        re.IGNORECASE
+    ),
+    # NOTE: 'empty_attribute_tags' detection is done separately against the
+    # raw HTML file content (see the per-file loop below). It cannot live in
+    # this dict because ``detect_translation_artifacts`` is called on the
+    # *extracted* plain text, which has its HTML tags already stripped by
+    # BeautifulSoup. The shared implementation lives in ``_empty_attr_fix``.
+}
+
+# User-editable phrases checked at the start of the first non-empty line.
+# Structural patterns, thinking tags and JSON detection remain separate so the
+# phrase editor can be useful without exposing implementation regexes.
+DEFAULT_AI_ARTIFACT_PATTERNS = (
+    'Sure',
+    'Okay',
+    'Understood',
+    'Of course',
+    'Got it',
+    'Alright',
+    'Certainly',
+    "Here's",
+    'Here is',
+    "I'll translate",
+    'I will translate',
+    'Let me translate',
+    'System:',
+    'Assistant:',
+    'AI:',
+    'User:',
+    'Human:',
+    'Model:',
+    'Translation note',
+    'Note',
+    "Here's the translation",
+    "I've translated",
+)
+
+# Non-phrase structural patterns that should always be recognized while the
+# main AI-artifact check is enabled. A normal HTML doctype is intentionally
+# absent: it is document markup, not an AI artifact.
+AI_ARTIFACT_FIRSTLINE_PATTERNS = [
+    # "I'll help/assist" ONLY when followed by translation-specific context.
+    # Bare "I'll help you ..." is far too common in normal prose / dialogue /
+    # chapter titles (e.g. "I'll Help You ...") and must NOT be flagged.
+    re.compile(
+        r'^(?:I\'ll|I will|Let me)\s+(?:help|assist)\s+'
+        r'(?:you\s+)?'
+        r'(?:translate|'
+        r'with\s+(?:the\s+|this\s+|your\s+)?(?:translation|text|chapter|passage|novel|korean|chinese|japanese)'
+        r')\b',
+        re.IGNORECASE
+    ),
+    re.compile(r'^\[PART\s+\d+/\d+\]', re.IGNORECASE),
+    re.compile(r'^Translated\\s*[:;]\\s*$', re.IGNORECASE),
+    re.compile(r'^(?:I\s+couldn\'t|I\s+couldn’t|I\s+could\s+not|I\s+can\'t|I\s+can’t)\s+translate\b', re.IGNORECASE),
+    re.compile(r'^(?:Please\s+provide|Please\s+paste)\s+.*\btranslate\b', re.IGNORECASE),
+    re.compile(r'^(?:Please\s+provide|Please\s+paste)\s+.*\btext\b', re.IGNORECASE),
+    re.compile(r'^Please\s+provide\s+the\s+text\s+you\s+would\s+like\s+me\s+to\s+translate\b', re.IGNORECASE),
+    re.compile(r'^(?:I\s+couldn\'t|I\s+can\'t)\s+translate.*\bimage\b', re.IGNORECASE),
+    re.compile(r'^Please\s+paste\s+the\s+\w+\s+text\b', re.IGNORECASE),
+    re.compile(r'^```(?:html|xml|text)?\s*$', re.IGNORECASE),
+]
+
+AI_SINGLE_WORD_HEADERS = {
+    'html', 'text', 'content', 'translation', 'output'
+}
+
+# First lines that look like AI artifacts but should NOT be flagged.
+# Compared after lowercasing and stripping punctuation/apostrophes, so e.g.
+# "Okay, I've Got It" -> "okay ive got it".
+AI_ARTIFACT_FIRSTLINE_EXCLUSIONS = {
+    'okay ive got it',
+}
+
+THINKING_TAG_PATTERNS = [
+    (re.compile(r'<thinking>.*?</thinking>', re.IGNORECASE | re.DOTALL), 'thinking'),
+    (re.compile(r'<think>.*?</think>', re.IGNORECASE | re.DOTALL), 'think'),
+    (re.compile(r'<thoughts>.*?</thoughts>', re.IGNORECASE | re.DOTALL), 'thoughts'),
+    (re.compile(r'<reasoning>.*?</reasoning>', re.IGNORECASE | re.DOTALL), 'reasoning'),
+    (re.compile(r'<analysis>.*?</analysis>', re.IGNORECASE | re.DOTALL), 'analysis'),
+    (re.compile(r'<reflection>.*?</reflection>', re.IGNORECASE | re.DOTALL), 'reflection'),
+    (re.compile(r'<\|thinking\|>.*?</\|thinking\|>', re.IGNORECASE | re.DOTALL), 'o1-thinking'),
+    (re.compile(r'\[thinking\].*?\[/thinking\]', re.IGNORECASE | re.DOTALL), 'claude-thinking'),
+    (re.compile(r'\[THINKING\].*?\[/THINKING\]', re.IGNORECASE | re.DOTALL), 'bracketed-thinking'),
+    (re.compile(r'\[ANALYSIS\].*?\[/ANALYSIS\]', re.IGNORECASE | re.DOTALL), 'bracketed-analysis'),
+]
+
+AI_CODE_FENCE_LINE = re.compile(r'^```(?:\w+)?\s*$', re.IGNORECASE | re.MULTILINE)
+
+AI_JSON_LINE_MARKERS = [
+    '"role":', '"content":', '"messages":',
+    '{"role"', '{"content"', '[{', '}]'
+]
+
+# Default AI refusal patterns: RefusalPatternsDialog's defaults, the single list in
+# key_pool_service (same strings, same order as the copy that used to live here)
+from key_pool_service import DEFAULT_REFUSAL_PATTERNS
+
+def _config_json_in(base_dir):
+    """``<base_dir>/config.json``; Glossarion Mobile resolves it through mobile_runtime.
+
+    Only the mobile app honours ``CONFIG_FILE`` / ``GLOSSARION_DATA_DIR`` here;
+    desktop always reads the config.json in ``base_dir``.
+    """
+    if mobile_runtime.is_mobile():
+        return mobile_runtime.config_file(base_dir)
+    return os.path.join(base_dir, 'config.json')
+
+
+def _get_refusal_patterns_for_scan():
+    """Load refusal patterns from config.json or return defaults."""
+    try:
+        config_path = _config_json_in(os.path.dirname(os.path.abspath(__file__)))
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                patterns = config.get('refusal_patterns')
+                if patterns and isinstance(patterns, list):
+                    return patterns
+    except Exception:
+        pass
+    return DEFAULT_REFUSAL_PATTERNS
+# Cache configuration - will be updated by configure_qa_cache()
+_cache_config = {
+    "enabled": True,
+    "sizes": {
+        "normalize_text": 10000,
+        "similarity_ratio": 20000,
+        "content_hashes": 5000,
+        "semantic_fingerprint": 2000,
+        "structural_signature": 2000,
+        "semantic_similarity": 5000,
+        "structural_similarity": 5000,
+        "file_extraction": 200
+    }
+}
+
+def configure_qa_cache(config):
+    """Update cache configuration"""
+    global _cache_config
+    _cache_config.update(config)
+    # Clear existing caches after configuration
+    clear_qa_caches()
+    # Re-apply caches with new sizes
+    _apply_caches()
+
+def get_cache_size(func_name):
+    """Get configured cache size for a function"""
+    if not _cache_config.get("enabled", True):
+        return 0  # Disable cache
+    
+    size = _cache_config.get("sizes", {}).get(func_name, 1000)
+    return None if size == -1 else size
+
+# Define functions WITHOUT decorators first
+def extract_semantic_fingerprint_impl(text):
+    """Extract semantic fingerprint and signature from text"""
+    # For cache efficiency with long texts
+    cache_text = text[:50000] if len(text) > 50000 else text
+    
+    # Extract features for semantic analysis
+    words = cache_text.lower().split()
+    
+    # Character names (words starting with capital letters, appearing multiple times)
+    potential_names = re.findall(r'\b[A-Z][a-z]+\b', cache_text)
+    name_freq = Counter(potential_names)
+    characters = [name for name, count in name_freq.items() 
+                  if count >= 3 and name not in COMMON_WORDS]
+    
+    # Dialogue analysis
+    dialogue_matches = re.findall(r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]', cache_text)
+    dialogue_count = len(dialogue_matches)
+    dialogue_density = dialogue_count / max(1, len(words)) if words else 0
+    dialogue_lengths = [len(d) for d in dialogue_matches[:30]]  # First 30 dialogue lengths
+    
+    # Character frequencies (sorted list)
+    character_frequencies = [count for _, count in name_freq.most_common()]
+    
+    # Speaker sequence extraction
+    speaker_patterns = re.findall(r'(\w+)\s+(?:said|asked|replied|shouted|whispered|spoke)', cache_text.lower())
+    speaker_sequence = speaker_patterns[:50]  # First 50 speakers
+    
+    # Paragraph structure (lengths of each paragraph)
+    paragraphs = [p for p in cache_text.split('\n\n') if p.strip()]
+    paragraph_structure = [len(p) for p in paragraphs[:50]]  # First 50 paragraph lengths
+    
+    # Action words density
+    action_words = len(re.findall(r'\b(\w+ed|spoke|says?|asks?|replies?|shouts?|screams?|whispers?)\b', cache_text))
+    action_density = action_words / max(1, len(words)) if words else 0
+    
+    # Numbers in text
+    numbers = re.findall(r'\b\d+\b', cache_text)
+    
+    # Create fingerprint string
+    fingerprint = f"chars:{len(characters)}_dial:{dialogue_density:.2f}_act:{action_density:.2f}_nums:{len(numbers)}_words:{len(words)}"
+    
+    # Create signature dict
+    signature = {
+        'characters': characters[:20],  # Top 20 characters
+        'dialogue_density': dialogue_density,
+        'dialogue_count': dialogue_count,
+        'dialogue_lengths': dialogue_lengths,
+        'character_frequencies': character_frequencies,
+        'speaker_sequence': speaker_sequence,
+        'paragraph_structure': paragraph_structure,
+        'total_words': len(words),
+        'action_density': action_density,
+        'numbers': numbers[:50],  # First 50 numbers
+        'text_length': len(cache_text)
+    }
+    
+    return fingerprint, signature
+
+def extract_structural_signature_impl(text):
+    """Extract structural patterns from text"""
+    # For cache efficiency with long texts
+    cache_text = text[:50000] if len(text) > 50000 else text
+    
+    lines = cache_text.split('\n')
+    
+    # Count different types of lines
+    para_count = len([l for l in lines if len(l.strip()) > 50])
+    short_lines = len([l for l in lines if 0 < len(l.strip()) < 20])
+    empty_lines = len([l for l in lines if not l.strip()])
+    
+    # Dialogue patterns
+    dialogue_lines = len(re.findall(r'["\"\'""''『』「」].*?["\"\'""''『』「」]', cache_text))
+    
+    # Create pattern string (first letter of each line type)
+    pattern = ''
+    for line in lines[:100]:  # First 100 lines
+        if not line.strip():
+            pattern += 'E'  # Empty
+        elif len(line.strip()) < 20:
+            pattern += 'S'  # Short
+        elif re.search(r'["\"\'""''『』「」]', line):
+            pattern += 'D'  # Dialogue
+        else:
+            pattern += 'P'  # Paragraph
+    
+    # Calculate average paragraph length
+    paragraphs = [l for l in lines if len(l.strip()) > 50]
+    avg_para_length = sum(len(p) for p in paragraphs) / max(1, len(paragraphs)) if paragraphs else 0
+    
+    # Dialogue ratio
+    dialogue_ratio = dialogue_lines / max(1, len(lines))
+    
+    signature = {
+        'pattern': pattern,
+        'paragraph_count': para_count,
+        'avg_paragraph_length': avg_para_length,
+        'dialogue_ratio': dialogue_ratio,
+        'short_lines': short_lines,
+        'empty_lines': empty_lines
+    }
+    
+    return signature
+
+def extract_content_fingerprint_impl(text):
+    """Extract key sentences that can identify duplicate content"""
+    lines = [line.strip() for line in text.split('\n') 
+             if len(line.strip()) > 50 and not is_dash_separator_line(line)]
+    
+    if len(lines) < 5:
+        return ""
+    
+    # Take first, middle, and last substantial sentences
+    fingerprint_lines = []
+    if len(lines) >= 3:
+        fingerprint_lines = [lines[0], lines[len(lines)//2], lines[-1]]
+    else:
+        fingerprint_lines = lines[:3]
+    
+    return ' '.join(fingerprint_lines).lower()
+
+# Initialize cached versions
+extract_semantic_fingerprint = None
+extract_structural_signature = None
+extract_content_fingerprint = None
+
+def _apply_caches():
+    """Apply LRU cache to functions with current configuration"""
+    global extract_semantic_fingerprint, extract_structural_signature, extract_content_fingerprint
+    
+    # Apply caching with current sizes
+    extract_semantic_fingerprint = lru_cache(maxsize=get_cache_size("semantic_fingerprint") or 2000)(extract_semantic_fingerprint_impl)
+    extract_structural_signature = lru_cache(maxsize=get_cache_size("structural_signature") or 2000)(extract_structural_signature_impl)
+    extract_content_fingerprint = lru_cache(maxsize=get_cache_size("content_fingerprint") or 2000)(extract_content_fingerprint_impl)
+
+# Apply initial caches
+_apply_caches()
+
+def clear_qa_caches():
+    """Clear all QA scanner caches"""
+    # Clear directly cached functions
+    if hasattr(normalize_text, 'cache_clear'):
+        normalize_text.cache_clear()
+    
+    if hasattr(generate_content_hashes, 'cache_clear'):
+        generate_content_hashes.cache_clear()
+    
+    if hasattr(calculate_similarity_ratio, 'cache_clear'):
+        calculate_similarity_ratio.cache_clear()
+    
+    # Clear the actual cached implementations
+    if hasattr(_calculate_semantic_similarity_cached, 'cache_clear'):
+        _calculate_semantic_similarity_cached.cache_clear()
+    
+    if hasattr(_calculate_structural_similarity_cached, 'cache_clear'):
+        _calculate_structural_similarity_cached.cache_clear()
+    
+    if hasattr(calculate_semantic_fingerprint_similarity, 'cache_clear'):
+        calculate_semantic_fingerprint_similarity.cache_clear()
+    
+    if hasattr(extract_semantic_fingerprint, 'cache_clear'):
+        extract_semantic_fingerprint.cache_clear()
+    
+    if hasattr(extract_structural_signature, 'cache_clear'):
+        extract_structural_signature.cache_clear()
+    
+    if hasattr(extract_content_fingerprint, 'cache_clear'):
+        extract_content_fingerprint.cache_clear()
+    
+    if hasattr(_extract_text_from_html_cached, 'cache_clear'):
+        _extract_text_from_html_cached.cache_clear()
+    
+def get_cache_info():
+    """Get cache statistics for all cached functions"""
+    cache_info = {}
+    
+    # For functions that are directly cached
+    if hasattr(normalize_text, 'cache_info'):
+        cache_info['normalize_text'] = normalize_text.cache_info()
+    
+    if hasattr(generate_content_hashes, 'cache_info'):
+        cache_info['content_hashes'] = generate_content_hashes.cache_info()
+    
+    if hasattr(calculate_similarity_ratio, 'cache_info'):
+        cache_info['similarity_ratio'] = calculate_similarity_ratio.cache_info()
+    
+    # For wrapper functions, use the actual cached implementation
+    if hasattr(_calculate_semantic_similarity_cached, 'cache_info'):
+        cache_info['semantic_similarity'] = _calculate_semantic_similarity_cached.cache_info()
+    
+    if hasattr(_calculate_structural_similarity_cached, 'cache_info'):
+        cache_info['structural_similarity'] = _calculate_structural_similarity_cached.cache_info()
+    
+    if hasattr(calculate_semantic_fingerprint_similarity, 'cache_info'):
+        cache_info['semantic_fingerprint_similarity'] = calculate_semantic_fingerprint_similarity.cache_info()
+    
+    if hasattr(extract_semantic_fingerprint, 'cache_info'):
+        cache_info['semantic_fingerprint'] = extract_semantic_fingerprint.cache_info()
+    
+    if hasattr(extract_structural_signature, 'cache_info'):
+        cache_info['structural_signature'] = extract_structural_signature.cache_info()
+    
+    if hasattr(extract_content_fingerprint, 'cache_info'):
+        cache_info['content_fingerprint'] = extract_content_fingerprint.cache_info()
+    
+    if hasattr(_extract_text_from_html_cached, 'cache_info'):
+        cache_info['file_extraction'] = _extract_text_from_html_cached.cache_info()
+    
+    return cache_info
+
+# For very long texts, we'll use a hash as cache key
+def _get_cache_key(text, max_length=10000):
+    """Generate a cache key for text, using hash for long texts"""
+    if len(text) > max_length:
+        return hashlib.sha256(text.encode('utf-8')).hexdigest()
+    return text
+
+# Pre-compiled regex patterns for performance
+_ENTITY_PATTERN = re.compile(r'&[A-Za-z0-9#]+;')
+# Translation table to remove whitespace (much faster than regex or iteration)
+_WHITESPACE_TRANSLATE = str.maketrans('', '', ' \t\n\r\f\v\xa0')
+
+# Precompiled token regex for word counting (legacy)
+_TOKEN_RE = re.compile(r"[0-9A-Za-z\u00C0-\uFFFF']+")
+
+def _count_words(text: str) -> int:
+    """
+    Legacy word counting - normalize text before counting words:
+      - Remove HTML entities (e.g., &nbsp;, &#123;) as whitespace
+      - Decode remaining entities
+      - Collapse whitespace
+      - Count unicode word tokens (letters/numbers/apostrophes)
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    # First strip entities completely to avoid counting them
+    text = re.sub(r'&[A-Za-z0-9#]+;', ' ', text)
+    # Decode any remaining entities defensively
+    text = html_lib.unescape(text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    if not text:
+        return 0
+    tokens = _TOKEN_RE.findall(text)
+    return len(tokens)
+
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _count_small_file_words(text: str) -> int:
+    """Approximate words for the small-file skip threshold, independent of count mode."""
+    if not isinstance(text, str) or not text:
+        return 0
+
+    if '&' in text:
+        text = _ENTITY_PATTERN.sub(' ', text)
+        text = html_lib.unescape(text)
+
+    # Estimate CJK content as words so source chapters without spaces are not
+    # accidentally treated as tiny files.
+    cjk_units = 0
+    chinese_segments = re.findall(r'[\u4e00-\u9fff]+', text)
+    for segment in chinese_segments:
+        cjk_units += max(1, int(len(segment) / 1.7))
+    cjk_units += len(re.findall(r'[\u3040-\u309f]+', text))
+    cjk_units += len(re.findall(r'[\u30a0-\u30ff]+', text))
+    cjk_units += len(re.findall(r'[\uac00-\ud7af]+', text))
+
+    non_cjk = re.sub(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+', ' ', text)
+    return cjk_units + _count_words(non_cjk)
+
+def _get_small_file_word_threshold(qa_settings=None, config=None, mode=None, default=500) -> int:
+    """Resolve the shared small-file threshold used by QA skip checks."""
+    sentinel = object()
+    value = sentinel
+
+    if isinstance(qa_settings, dict):
+        if 'min_duplicate_word_count' in qa_settings:
+            value = qa_settings.get('min_duplicate_word_count')
+        else:
+            custom = qa_settings.get('custom_mode_settings')
+            if isinstance(custom, dict) and 'min_duplicate_word_count' in custom:
+                value = custom.get('min_duplicate_word_count')
+
+    if value is sentinel and config is not None:
+        try:
+            mode_name = mode or getattr(config, 'mode', None)
+            value = config.thresholds.get(mode_name, {}).get('min_duplicate_word_count', sentinel)
+        except Exception:
+            value = sentinel
+
+    if value is sentinel:
+        env_value = os.getenv('QA_MIN_DUPLICATE_WORD_COUNT')
+        if env_value is not None:
+            value = env_value
+
+    if value is sentinel:
+        value = default
+
+    return max(0, _safe_int(value, default))
+
+def _source_word_count_value(source_info, default=0) -> int:
+    if isinstance(source_info, dict):
+        for key in ('word_count', 'small_file_word_count', 'threshold_word_count'):
+            if key in source_info:
+                return max(0, _safe_int(source_info.get(key), default))
+        return default
+    return max(0, _safe_int(source_info, default))
+
+def _source_small_file_word_count(source_info, default=0) -> int:
+    if isinstance(source_info, dict):
+        for key in ('small_file_word_count', 'threshold_word_count', 'word_count'):
+            if key in source_info:
+                return max(0, _safe_int(source_info.get(key), default))
+        return default
+    return max(0, _safe_int(source_info, default))
+
+def _sum_source_word_counts(source_counts) -> int:
+    return sum(
+        _source_word_count_value(info)
+        for info in (source_counts or {}).values()
+        if not (isinstance(info, dict) and info.get('_qa_pdf_source_alias'))
+    )
+
+def _small_file_word_count_result(original_wc, translated_wc, original_file, threshold):
+    ratio = translated_wc / max(1, original_wc)
+    return {
+        'found_match': True,
+        'chapter_num': original_file,
+        'original_wc': original_wc,
+        'translated_wc': translated_wc,
+        'ratio': ratio,
+        'normalized_ratio': ratio,
+        'multiplier': 1.0,
+        'percentage': ratio * 100,
+        'is_reasonable': True,
+        'is_typical': True,
+        'original_file': original_file,
+        'warning': 'small_file_skipped',
+        'warning_desc': f'Source file below {threshold} words; word count check skipped'
+    }
+
+def _count_chars_exact(text: str) -> int:
+    """
+    Count characters exactly (excluding whitespace and HTML artifacts).
+    Slower but precise.
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    
+    # Fast path: if no & character, skip entity processing entirely
+    if '&' in text:
+        text = _ENTITY_PATTERN.sub('', text)
+        text = html_lib.unescape(text)
+    
+    return len(text.translate(_WHITESPACE_TRANSLATE))
+
+def _count_chars_sampled(text: str) -> int:
+    """
+    Count characters using sampling for large texts.
+    Fast and accurate enough for QA ratio comparisons.
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    
+    text_len = len(text)
+    
+    # For texts over 2KB, use sampling to estimate character count
+    if text_len > 2000:
+        # Sample ~1.5KB from beginning, middle, and end
+        sample_size = 500
+        mid = text_len // 2
+        sample = text[:sample_size] + text[mid - sample_size//2:mid + sample_size//2] + text[-sample_size:]
+        
+        # Fast path: if no & character, skip entity processing
+        if '&' in sample:
+            sample = _ENTITY_PATTERN.sub('', sample)
+            sample = html_lib.unescape(sample)
+        
+        # Count non-whitespace in sample
+        sample_chars = len(sample.translate(_WHITESPACE_TRANSLATE))
+        # Extrapolate to full text
+        ratio = sample_chars / len(sample) if sample else 0
+        return int(text_len * ratio)
+    
+    # For smaller texts, count exactly
+    return _count_chars_exact(text)
+
+def _count_chars_normalized(text: str) -> int:
+    """
+    Main counting function - dispatches based on environment settings.
+    
+    Environment variables:
+      QA_USE_WORD_COUNT=1  - Use fast word counting (default: off)
+      QA_EXACT_CHAR_COUNT=1 - Use exact character counting (default: off, uses sampling)
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    
+    # Check for word counting mode (fastest)
+    if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+        return _count_words(text)
+    
+    # Check for exact character counting mode (slowest but precise)
+    if os.getenv('QA_EXACT_CHAR_COUNT', '0') == '1':
+        return _count_chars_exact(text)
+    
+    # Default: sampled character counting (balanced speed/accuracy)
+    return _count_chars_sampled(text)
+
+_charcount_cache = {}
+
+def _count_chars_cached(text: str) -> int:
+    """
+    Cached wrapper around _count_chars_normalized.
+    Uses hash of full text for accurate caching.
+    """
+    if not isinstance(text, str):
+        return 0
+    
+    # Use length + hash of sample for fast cache key generation
+    # This avoids hashing the entire text while still being accurate
+    text_len = len(text)
+    if text_len == 0:
+        return 0
+    
+    # Include counting mode in cache key to prevent stale results when mode changes
+    mode_prefix = 'W' if os.getenv('QA_USE_WORD_COUNT', '0') == '1' else ('E' if os.getenv('QA_EXACT_CHAR_COUNT', '0') == '1' else 'S')
+    
+    # For short texts, use text itself as key (faster than hashing)
+    if text_len <= 1000:
+        key = f"{mode_prefix}:L{text_len}:{text}"
+    else:
+        # Sample from beginning, middle, and end for better collision avoidance
+        sample = text[:2000] + text[text_len//2:text_len//2+1000] + text[-2000:]
+        key = f"{mode_prefix}:L{text_len}:{hashlib.md5(sample.encode('utf-8', errors='ignore')).hexdigest()}"
+    
+    cached = _charcount_cache.get(key)
+    if cached is not None:
+        return cached
+    
+    cc = _count_chars_normalized(text)
+    _charcount_cache[key] = cc
+    return cc
+
+# Backwards compatibility aliases
+_count_words_normalized = _count_chars_normalized
+_count_words_cached = _count_chars_cached
+    
+def extract_text_from_html(file_path, include_headers=False):
+    """Extract text, optionally returning heading text from the same parse."""
+    # Get file modification time as part of cache key
+    try:
+        mtime = os.path.getmtime(file_path)
+        cache_key = f"{file_path}:{mtime}"
+    except OSError:
+        cache_key = file_path
+    
+    text, header_text = _extract_text_from_html_cached(cache_key, file_path)
+    return (text, header_text) if include_headers else text
+
+
+def _scan_should_translate_title_tags(qa_settings=None):
+    """Resolve the live title-tag policy for QA scanner workers."""
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    if "skip_title_tag_translation" in settings:
+        value = settings.get("skip_title_tag_translation")
+        if isinstance(value, str):
+            value = value.strip().lower() in ("1", "true", "yes", "on")
+        return not bool(value)
+    return should_translate_title_tags()
+
+
+RUBY_ANNOTATION_TAGS = ("ruby", "rb", "rt", "rp", "rtc")
+
+
+def _scan_should_exclude_ruby_tags(qa_settings=None):
+    """Whether ruby annotation tags are ignored by foreign-character QA."""
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    value = settings.get("exclude_ruby_tags", False)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _foreign_character_qa_text(
+    fallback_text,
+    html_content,
+    qa_settings=None,
+    *,
+    headers_only=False,
+):
+    """Return text eligible for foreign-character QA under the title/ruby policy."""
+    translate_titles = _scan_should_translate_title_tags(qa_settings)
+    exclude_ruby = _scan_should_exclude_ruby_tags(qa_settings)
+    # BeautifulSoup's default get_text() omits RubyTextString (<rt>) and
+    # RubyParenthesisString (<rp>), even when their content is untranslated.
+    has_ruby = bool(re.search(r'<(?:ruby|rb|rt|rp|rtc)\b', str(html_content or ''), re.I))
+    if translate_titles and not has_ruby:
+        return str(fallback_text or "")
+    if not isinstance(html_content, str) or not html_content.strip():
+        return str(fallback_text or "")
+
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        if exclude_ruby and has_ruby:
+            # Ruby annotations legitimately keep source-script readings next
+            # to the translated base text; the user opted to ignore them.
+            for ruby_tag in soup.find_all(list(RUBY_ANNOTATION_TAGS)):
+                ruby_tag.decompose()
+        text_types = (NavigableString, CData, RubyTextString, RubyParenthesisString)
+        if headers_only:
+            return "\n".join(
+                tag.get_text(" ", strip=True, types=text_types)
+                for tag in soup.find_all(
+                    ["h1", "h2", "h3", "h4", "h5", "h6"]
+                    + (["title"] if translate_titles else [])
+                )
+                if tag.get_text(" ", strip=True, types=text_types)
+            ).strip()
+        if not translate_titles:
+            for title_tag in soup.find_all("title"):
+                title_tag.decompose()
+        return soup.get_text(separator="\n", strip=True, types=text_types)
+    except Exception:
+        return str(fallback_text or "")
+
+def _extract_text_from_html_cached(cache_key, file_path):
+    """Cached implementation of extract_text_from_html"""
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+        
+    # Check if it's a .txt file
+    if file_path.lower().endswith('.txt'):
+        # For .txt files, just return the content directly
+        return content, ""
+    
+    # For HTML files, parse with BeautifulSoup
+    soup = BeautifulSoup(content, "html.parser")
+    text = soup.get_text(separator='\n', strip=True)
+    header_text = '\n'.join(
+        tag.get_text(" ", strip=True)
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
+        if tag.get_text(" ", strip=True)
+    ).strip()
+    
+    # For backwards compatibility, we'll handle the HTML tag check separately
+    # in the scan function rather than always returning a tuple
+    return text, header_text
+
+# Configure cache size dynamically
+_extract_text_from_html_cached = lru_cache(maxsize=get_cache_size("file_extraction") or 200)(_extract_text_from_html_cached)
+
+import re
+
+def check_html_structure(file_path):
+    """Check if an HTML file has proper HTML tags"""
+    if not is_html_like_path(file_path):
+        return True
+        
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+    
+    html_tags = [
+        '<html', '<head', '<title', '<body', '<h1', '<h2', '<h3', '<h4', '<h5', '<h6',
+        '<p>', '<p ', '<br', '<div', '<span', '<a ', '<img', '<ul', '<ol', '<li',
+        '<table', '<tr', '<td', '<th', '<form', '<input', '<button', '<meta',
+        '<link', '<script', '<style', '<nav', '<header', '<footer', '<main',
+        '<article', '<section', '<aside'
+    ]
+    
+    content_lower = content.lower()
+    has_html_tags = any(tag in content_lower for tag in html_tags)
+    
+    # DEBUG: Print what we found
+    print(f"\nChecking file: {file_path}")
+    print(f"First 100 chars: {content[:100]}")
+    print(f"Has HTML tags: {has_html_tags}")
+    
+    return has_html_tags
+
+def is_dash_separator_line(line):
+    """Check if a line consists only of dash-like punctuation characters"""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    
+    # Check if it's a Korean dash pattern (should NOT be flagged)
+    for pattern in KOREAN_DASH_PATTERNS:
+        if re.match(f'^{pattern}$', stripped):
+            return False
+    
+    # Check if all non-space characters are in our dash set
+    non_space_chars = [c for c in stripped if not c.isspace()]
+    if not non_space_chars:
+        return False
+    
+    # Check various dash patterns
+    if all(c in DASH_CHARS for c in non_space_chars):
+        return True
+    
+    # Check for repeated patterns
+    if re.match(r'^[\s\-–—―_*~ㅡ]+$', stripped):
+        return True
+    
+    # Check for patterns like "---", "***", "___", "~~~" (3 or more)
+    if re.match(r'^(\-{3,}|_{3,}|\*{3,}|~{3,}|–{2,}|—{2,}|―{2,}|ㅡ{2,})$', stripped):
+        return True
+    
+    # Check for spaced patterns like "- - -", "* * *"
+    if re.match(r'^([\-–—―_*~ㅡ]\s*){3,}$', stripped):
+        return True
+    
+    return False
+
+def filter_dash_lines(text):
+    """Filter out dash separator lines from text"""
+    lines = text.split('\n')
+    return '\n'.join(line for line in lines if not is_dash_separator_line(line))
+
+def has_no_spacing_or_linebreaks(text, space_threshold=0.01, min_text_length=100):
+    filtered_text = filter_dash_lines(text)
+    
+    # Skip check for very short text (e.g., cover pages with just image + title)
+    if len(filtered_text) < min_text_length:
+        return False
+    
+    space_ratio = filtered_text.count(" ") / max(1, len(filtered_text))
+    newline_count = filtered_text.count("\n")
+    # Flag as issue only if both conditions are met:
+    # - very few spaces (minified/malformed) AND
+    # - no linebreaks (compacted content)
+    # A single-line file with proper spacing is valid
+    return space_ratio < space_threshold and newline_count == 0
+
+def _repeating_sentence_counts(text, min_repeats=10, min_sentence_length=50,
+                               ignore_reporting_verbs=False):
+    """Return repetition counts for each sentence that crosses the threshold."""
+    if not isinstance(text, str) or not text:
+        return []
+
+    filtered_text = filter_dash_lines(text)
+    # Include CJK sentence terminators so Japanese/Chinese source chapters can
+    # provide the same repetition allowance as an English translation. Line
+    # breaks (block boundaries) also end a sentence, so an unterminated line
+    # such as "^^" doesn't merge into the next repeated sentence.
+    sentences = []
+    for sentence in re.split(r'[.!?\u3002\uff01\uff1f]+|\n+', filtered_text):
+        normalized = re.sub(r'\s+', ' ', sentence).strip()
+        if len(normalized) >= min_sentence_length:
+            # Count ignoring whitespace: Korean spacing is often inconsistent
+            # ("님," vs " 님,") while translations normalize it.
+            sentences.append(re.sub(r'\s+', '', normalized))
+
+    if len(sentences) < min_repeats:
+        return []
+
+    counts = []
+    for sentence, count in Counter(sentences).items():
+        if count < min_repeats:
+            continue
+        if ignore_reporting_verbs and any(
+                pattern in sentence.lower()
+                for pattern in ('said', 'asked', 'replied', 'thought')):
+            continue
+        counts.append(count)
+    return sorted(counts, reverse=True)
+
+
+def has_repeating_sentences(text, min_repeats=10, source_text=None):
+    """Detect excessive translated repetition relative to the source chapter.
+
+    Each qualifying repeated sentence in the source can account for one
+    repeated sentence in the translation with an equal or lower count. This
+    keeps intentional author repetition from being reported while still
+    catching repetition introduced (or amplified) by the translation.
+
+    If no matching source text is available, the original translation-only
+    behavior is retained.
+    """
+    translated_counts = _repeating_sentence_counts(
+        text,
+        min_repeats=min_repeats,
+        min_sentence_length=51,
+        ignore_reporting_verbs=True,
+    )
+    if not translated_counts:
+        return False
+    if not source_text:
+        return True
+
+    # Source-language sentences, especially Korean/CJK sentences, are often
+    # much shorter than their translated equivalents. Scale the translated
+    # 51-character floor by this chapter's source/translation length ratio,
+    # never above the historical 21-character floor and never below 10.
+    source_chars = len(re.sub(r'\s+', '', source_text))
+    translated_chars = max(1, len(re.sub(r'\s+', '', text)))
+    source_min_length = max(10, min(21, int(51 * source_chars / translated_chars)))
+    source_counts = _repeating_sentence_counts(
+        source_text,
+        min_repeats=min_repeats,
+        min_sentence_length=source_min_length,
+    )
+    unmatched_source_counts = list(source_counts)
+    for translated_count in translated_counts:
+        matching_index = next(
+            (
+                index
+                for index, source_count in enumerate(unmatched_source_counts)
+                if source_count >= translated_count
+            ),
+            None,
+        )
+        if matching_index is None:
+            return True
+        unmatched_source_counts.pop(matching_index)
+    return False
+
+def is_korean_separator_pattern(text, excluded_chars=None):
+    """Check if text is a Korean separator pattern like [ㅡㅡㅡㅡㅡ]"""
+    if excluded_chars is None:
+        excluded_chars = KOREAN_SEPARATOR_CHARS
+    
+    # Remove brackets and spaces
+    cleaned = text.strip().strip('[]').strip()
+    
+    if not cleaned:
+        return False
+    
+    # Check if all characters are separators or excluded characters
+    return all(c in excluded_chars or c.isspace() for c in cleaned)
+
+def detect_non_english_content(text, qa_settings=None):
+    """Detect content not in the target language.
+    
+    For Latin-based languages (English, Spanish, French, etc.): Uses language detection
+    to identify if the text is in the wrong language.
+    
+    For non-Latin scripts (Korean, Japanese, Chinese, etc.): Checks for characters
+    from scripts not matching the target language.
+    
+    Args:
+        text: The text content to check
+        qa_settings: Dictionary with 'foreign_char_threshold', 'excluded_characters',
+                    'target_language', and optional emoticon-whitelist keys
+    
+    Returns:
+        tuple: (has_issues, list_of_issues)
+    """
+    if qa_settings is None:
+        qa_settings = {
+            'foreign_char_threshold': 0,
+            'excluded_characters': '',
+            'whitelist_emoticon_patterns': False,
+            'emoticon_patterns': list(DEFAULT_EMOTICON_PATTERNS),
+            'emoticon_patterns_are_regex': False,
+            'target_language': 'english',
+        }
+    
+    # Get threshold, excluded characters, and target language
+    threshold = qa_settings.get('foreign_char_threshold', 0)
+    target_language = qa_settings.get('target_language', 'english').lower()
+    excluded_chars = set()
+    if qa_settings.get('excluded_characters'):
+        raw_excluded = qa_settings['excluded_characters']
+        # Space-separated tokens (original behavior)
+        excluded_chars = set(raw_excluded.split())
+        # Also add every individual non-whitespace character. Foreign-char
+        # detection compares ONE character at a time (see loop below), so a
+        # multi-character token like "ㅇㅇ" would never match a single 'ㅇ'.
+        # Adding the characters individually makes the exclusion work
+        # regardless of how the user spaced their entry.
+        excluded_chars.update(ch for ch in raw_excluded if not ch.isspace())
+
+    # Combine with existing separator chars
+    all_excluded_chars = KOREAN_SEPARATOR_CHARS.copy()
+    all_excluded_chars.update(excluded_chars)
+    
+    issues = []
+    filtered_text = filter_dash_lines(text)
+    if qa_settings.get('whitelist_emoticon_patterns', False):
+        filtered_text = mask_whitelisted_emoticons(
+            filtered_text,
+            qa_settings.get('emoticon_patterns', DEFAULT_EMOTICON_PATTERNS),
+            qa_settings.get('emoticon_patterns_are_regex', False),
+        )
+    
+    # LANGUAGE DETECTION FOR LATIN-BASED LANGUAGES
+    # Map language codes to full names
+    lang_code_mapping = {
+        'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German',
+        'pt': 'Portuguese', 'it': 'Italian', 'ru': 'Russian', 'ja': 'Japanese',
+        'ko': 'Korean', 'zh-cn': 'Chinese', 'zh-tw': 'Chinese', 'ar': 'Arabic',
+        'he': 'Hebrew', 'th': 'Thai'
+    }
+    
+    # Latin-based languages that need language detection
+    latin_languages = ['english', 'spanish', 'french', 'german', 'portuguese', 'italian']
+    if target_language in latin_languages:
+        # Accepted Cyrillic lookalikes: Latin o, a, e, c, p, x, y.
+        # This is a QA whitelist only; the saved text remains unchanged.
+        all_excluded_chars.update('\u043e\u0430\u0435\u0441\u0440\u0445\u0443')
+    
+    if target_language in latin_languages and len(filtered_text.strip()) > 100:
+        # Try to detect the actual language of the text
+        try:
+            from langdetect import detect_langs
+            # Use full text for language detection to catch issues anywhere in file
+            # Set recursion limit temporarily to catch issues
+            import sys
+            old_limit = sys.getrecursionlimit()
+            try:
+                sys.setrecursionlimit(1000)  # Reasonable limit to catch recursion early
+                # Use detect_langs to get confidence scores
+                lang_probabilities = detect_langs(filtered_text)
+            finally:
+                sys.setrecursionlimit(old_limit)  # Restore original limit
+            
+            # Map target language to expected code and acceptable variants
+            target_code_mapping = {
+                'english': 'en', 'spanish': 'es', 'french': 'fr', 'german': 'de',
+                'portuguese': 'pt', 'italian': 'it'
+            }
+            expected_code = target_code_mapping.get(target_language, 'en')
+            
+            # Define acceptable language variants (closely related languages)
+            # These won't be flagged as mismatches
+            acceptable_variants = {
+                'es': ['ca', 'gl'],  # Spanish accepts Catalan and Galician
+                'pt': ['gl'],        # Portuguese accepts Galician
+                'en': ['cy'],        # English accepts Welsh (rare but possible)
+            }
+            
+            # Get top detected language and its confidence
+            if lang_probabilities:
+                top_detection = lang_probabilities[0]
+                detected_lang = top_detection.lang
+                confidence = top_detection.prob
+                
+                detected_name = lang_code_mapping.get(detected_lang, detected_lang.upper())
+                
+                # Only flag as mismatch if:
+                # 1. Detected language is different from target
+                # 2. Confidence is reasonably high (>= 0.7)
+                # 3. The detected language is not an acceptable variant
+                # 4. The expected language is not in top 2 detections with reasonable probability
+                if detected_lang != expected_code and confidence >= 0.7:
+                    # Check if detected language is an acceptable variant
+                    is_acceptable_variant = detected_lang in acceptable_variants.get(expected_code, [])
+                    
+                    if not is_acceptable_variant:
+                        # Check if expected language is in top detections with decent probability
+                        expected_in_top = any(
+                            det.lang == expected_code and det.prob >= 0.3 
+                            for det in lang_probabilities[:2]
+                        )
+                        
+                        if not expected_in_top:
+                            # Add language mismatch as an issue
+                            issues.append(f"Language_mismatch_detected_{detected_name}_expected_{target_language.capitalize()}")
+                            # Return early since we found a language mismatch
+                            return len(issues) > 0, issues
+        except (LangDetectException, RecursionError, RuntimeError) as e:
+            # Language detection failed (not enough text, ambiguous, or recursion error)
+            # Fall through to script-based detection
+            if isinstance(e, RecursionError):
+                # Log recursion error but don't crash
+                pass  # Silently continue to script-based detection
+            pass
+    
+    # Define all script ranges
+    all_script_ranges = [
+        (0xAC00, 0xD7AF, 'Korean'), (0x1100, 0x11FF, 'Korean'),
+        (0x3130, 0x318F, 'Korean'), (0xA960, 0xA97F, 'Korean'),
+        (0xD7B0, 0xD7FF, 'Korean'), (0x3040, 0x309F, 'Japanese'),
+        (0x30A0, 0x30FF, 'Japanese'), (0x31F0, 0x31FF, 'Japanese'),
+        (0xFF65, 0xFF9F, 'Japanese'), (0x4E00, 0x9FFF, 'Chinese'),
+        (0x3400, 0x4DBF, 'Chinese'), (0x20000, 0x2A6DF, 'Chinese'),
+        (0x2A700, 0x2B73F, 'Chinese'), (0x0590, 0x05FF, 'Hebrew'),
+        (0x0600, 0x06FF, 'Arabic'), (0x0700, 0x074F, 'Syriac'),
+        (0x0750, 0x077F, 'Arabic'), (0x0E00, 0x0E7F, 'Thai'),
+        (0x0400, 0x04FF, 'Cyrillic'), (0x0500, 0x052F, 'Cyrillic'),
+    ]
+    
+    # Define which scripts are allowed for each target language
+    # Latin-based languages allow basic Latin + extensions
+    language_script_mapping = {
+        'english': [],  # Only Latin (default - everything else is foreign)
+        'spanish': [],  # Latin with Spanish diacritics
+        'french': [],   # Latin with French diacritics  
+        'german': [],   # Latin with German diacritics
+        'portuguese': [],  # Latin with Portuguese diacritics
+        'italian': [],  # Latin with Italian diacritics
+        'russian': ['Cyrillic'],  # Cyrillic only
+        'japanese': ['Japanese', 'Chinese'],  # Japanese uses kanji too
+        'korean': ['Korean'],
+        'chinese': ['Chinese'],
+        'arabic': ['Arabic', 'Syriac'],
+        'hebrew': ['Hebrew'],
+        'thai': ['Thai'],
+    }
+    
+    # Get allowed scripts for target language (empty means Latin-based)
+    allowed_scripts = language_script_mapping.get(target_language, [])
+    
+    # Filter to only check scripts NOT in the target language
+    non_target_ranges = [
+        (start, end, script) for start, end, script in all_script_ranges
+        if script not in allowed_scripts
+    ]
+    
+    script_chars = {}
+    total_non_target = 0
+    
+    # Split text into potential separator patterns and other content
+    separator_pattern = r'\[[ㅡ\s―—–\-［］【】〔〕《》「」『』]+\]'
+    parts = re.split(f'({separator_pattern})', filtered_text)
+    
+    for part in parts:
+        # Skip if this part is a Korean separator pattern
+        if is_korean_separator_pattern(part, all_excluded_chars):
+            continue
+        
+        # Check characters in this part
+        for char in part:
+            # Skip characters in excluded set
+            if char in all_excluded_chars:
+                continue
+            
+            # Unicode blocks also contain punctuation (e.g. Japanese ・/･).
+            # Punctuation is not evidence of untranslated language.
+            if char.isspace() or unicodedata.category(char).startswith('P'):
+                continue
+                
+            code_point = ord(char)
+            for start, end, script_name in non_target_ranges:
+                if start <= code_point <= end:
+                    total_non_target += 1
+                    if script_name not in script_chars:
+                        script_chars[script_name] = {'count': 0, 'examples': []}
+                    script_chars[script_name]['count'] += 1
+                    if len(script_chars[script_name]['examples']) < 10:
+                        script_chars[script_name]['examples'].append(char)
+                    break
+    
+    # Check against threshold
+    if total_non_target > threshold:
+        for script, data in script_chars.items():
+            examples = ''.join(data['examples'][:5])
+            count = data['count']
+            issues.append(f"{script}_text_found_{count}_chars_[{examples}]")
+    
+    return len(issues) > 0, issues
+
+def detect_translation_artifacts(text):
+    """Detect common translation/OCR artifacts"""
+    artifacts_found = []
+    
+    for artifact_type, pattern in TRANSLATION_ARTIFACTS.items():
+        matches = pattern.findall(text)
+        if matches:
+            artifacts_found.append({
+                'type': artifact_type,
+                'count': len(matches),
+                'examples': list(set(matches))[:3]
+            })
+    
+    return artifacts_found
+
+DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = (
+    'The user wants a ',
+    'The user wants me to ',
+    'I need to translate',
+    'I need to analyze',
+    'I need to verify',
+    'Let me translate',
+    'Let me analyze',
+    'Let me verify',
+)
+
+
+def detect_ai_artifacts(
+    text,
+    ai_artifact_patterns=None,
+    ai_artifact_patterns_are_regex=False,
+    check_ai_thinking_preamble=False,
+    ai_thinking_preamble_patterns=None,
+    ai_thinking_preamble_patterns_are_regex=False,
+    ai_thinking_preamble_sample_size=500,
+):
+    """Detect AI response artifacts, with optional thinking-preamble detection."""
+    artifacts_found = []
+    if not isinstance(text, str) or not text.strip():
+        return artifacts_found
+
+    lines = text.splitlines()
+    first_line = ""
+    for line in lines:
+        if line.strip():
+            first_line = line.strip()
+            break
+
+    if first_line:
+        # Skip phrases the user has whitelisted (compare without punctuation)
+        _normalized_first = re.sub(r'\s+', ' ', re.sub(r'[^a-z\s]', '', first_line.lower())).strip()
+        if _normalized_first in AI_ARTIFACT_FIRSTLINE_EXCLUSIONS:
+            first_line = ""
+
+    if first_line:
+        # Guard against false positives like "Sure enough, ..." in normal prose
+        if re.search(r'^(sure|okay|understood|of course|got it|alright|certainly|here\'s|here is)\b', first_line, re.IGNORECASE):
+            word_count = len(first_line.split())
+            if word_count > 6 and not re.search(r'\b(translation|translate|here\'s|here is|i\'ll|i will|let me)\b', first_line, re.IGNORECASE):
+                # Looks like regular narrative, not an AI preface
+                first_line = ""
+        artifact_patterns = ai_artifact_patterns
+        if artifact_patterns is None:
+            artifact_patterns = DEFAULT_AI_ARTIFACT_PATTERNS
+        if isinstance(artifact_patterns, str):
+            artifact_patterns = artifact_patterns.splitlines()
+
+        matched_leading_artifact = False
+        for pattern in artifact_patterns:
+            pattern = str(pattern).strip()
+            if not pattern:
+                continue
+            try:
+                if ai_artifact_patterns_are_regex:
+                    matched_leading_artifact = re.match(
+                        pattern, first_line, re.IGNORECASE
+                    ) is not None
+                else:
+                    folded_line = first_line.casefold()
+                    folded_pattern = pattern.casefold()
+                    matched_leading_artifact = folded_line.startswith(folded_pattern)
+                    if (
+                        matched_leading_artifact
+                        and folded_pattern[-1].isalnum()
+                        and len(folded_line) > len(folded_pattern)
+                        and folded_line[len(folded_pattern)].isalnum()
+                    ):
+                        matched_leading_artifact = False
+            except re.error:
+                # Invalid expressions should not abort a scan when a config was
+                # edited manually; the GUI validates expressions before save.
+                continue
+            if matched_leading_artifact:
+                break
+
+        if not matched_leading_artifact:
+            matched_leading_artifact = any(
+                pattern.search(first_line)
+                for pattern in AI_ARTIFACT_FIRSTLINE_PATTERNS
+            )
+
+        if matched_leading_artifact:
+            artifacts_found.append({
+                'type': 'ai_artifact_leading_line',
+                'count': 1,
+                'examples': [first_line],
+                'severity': 'medium'
+            })
+
+        if first_line.lower() in AI_SINGLE_WORD_HEADERS:
+            artifacts_found.append({
+                'type': 'ai_artifact_single_word',
+                'count': 1,
+                'examples': [first_line],
+                'severity': 'low'
+            })
+
+    # Thinking tags anywhere in the content
+    thinking_count = 0
+    thinking_examples = []
+    for pattern, label in THINKING_TAG_PATTERNS:
+        matches = pattern.findall(text)
+        if matches:
+            thinking_count += len(matches)
+            if label not in thinking_examples:
+                thinking_examples.append(label)
+
+    if thinking_count > 0:
+        artifacts_found.append({
+            'type': 'ai_thinking_tags',
+            'count': thinking_count,
+            'examples': thinking_examples[:3],
+            'severity': 'high'
+        })
+
+    # Code fence markers left in output
+    code_fence_matches = AI_CODE_FENCE_LINE.findall(text)
+    if code_fence_matches:
+        artifacts_found.append({
+            'type': 'ai_code_fence_markers',
+            'count': len(code_fence_matches),
+            'examples': list(set(code_fence_matches))[:3],
+            'severity': 'low'
+        })
+
+    # JSON artifacts at start of output
+    json_lines = []
+    for line in lines[:5]:
+        if line.strip() and any(marker in line for marker in AI_JSON_LINE_MARKERS):
+            json_lines.append(line.strip())
+        else:
+            break
+    if json_lines:
+        artifacts_found.append({
+            'type': 'ai_json_artifacts',
+            'count': len(json_lines),
+            'examples': json_lines[:3],
+            'severity': 'medium'
+        })
+
+    # AI refusal patterns (full-text substring match, short responses only)
+    try:
+        refusal_limit = 900  # Match default refusal length limit
+        try:
+            config_path = _config_json_in(os.path.dirname(os.path.abspath(__file__)))
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    _cfg = json.load(f)
+                    refusal_limit = int(_cfg.get('refusal_pattern_length_limit', 900))
+        except Exception:
+            pass
+        if len(text) <= refusal_limit:
+            text_lower = text.lower()
+            refusal_patterns = _get_refusal_patterns_for_scan()
+            matched_refusals = [p for p in refusal_patterns if p in text_lower]
+            if matched_refusals:
+                artifacts_found.append({
+                    'type': 'ai_refusal_pattern',
+                    'count': len(matched_refusals),
+                    'examples': matched_refusals[:3],
+                    'severity': 'high'
+                })
+    except Exception:
+        pass
+
+    # Leaked translation rules block — "Rules:" followed by numbered
+    # instructions containing translation-specific keywords.
+    # Only triggers when the rules lines mention translation concepts,
+    # NOT on in-world rules (game rules, guild rules, etc.).
+    _translation_keywords = (
+        'translat', 'glossary', 'korean', 'chinese', 'japanese',
+        'romaniz', 'honorific', 'localize', 'profanity', 'onomatop',
+        'quotation', 'markdown', 'source text', 'target lang',
+        'pronoun', 'romanji', 'romaji', 'hangul', 'kanji',
+    )
+    rules_match = re.search(
+        r'Rules:\s*\n((?:\s*\d+\.\s*.+\n){3,})',
+        text, re.IGNORECASE
+    )
+    if rules_match:
+        rules_block_lower = rules_match.group(1).lower()
+        kw_hits = sum(1 for kw in _translation_keywords if kw in rules_block_lower)
+        if kw_hits >= 2:
+            artifacts_found.append({
+                'type': 'ai_leaked_translation_rules',
+                'count': kw_hits,
+                'examples': [rules_match.group(0)[:200]],
+                'severity': 'critical'
+            })
+
+    if check_ai_thinking_preamble:
+        # Restrict this optional, higher-false-positive check to the beginning
+        # of the document, where leaked model reasoning normally appears.
+        try:
+            sample_size = max(1, int(ai_thinking_preamble_sample_size))
+        except (TypeError, ValueError):
+            sample_size = 500
+        preamble_zone = text[:sample_size]
+        thinking_hits = []
+        patterns = ai_thinking_preamble_patterns
+        if patterns is None:
+            patterns = DEFAULT_AI_THINKING_PREAMBLE_PATTERNS
+        if isinstance(patterns, str):
+            patterns = patterns.splitlines()
+        for pattern in patterns:
+            pattern = str(pattern).strip()
+            if not pattern:
+                continue
+            search_pattern = pattern if ai_thinking_preamble_patterns_are_regex else re.escape(pattern)
+            try:
+                match = re.search(search_pattern, preamble_zone, re.IGNORECASE)
+            except re.error:
+                # GUI validation normally prevents invalid expressions, but a
+                # manually edited config must not abort an entire QA scan.
+                continue
+            if match:
+                thinking_hits.append(match.group(0).strip()[:80])
+        if thinking_hits:
+            artifacts_found.append({
+                'type': 'ai_thinking_preamble',
+                'count': len(thinking_hits),
+                'examples': thinking_hits[:3],
+                'severity': 'high'
+            })
+
+    # Leaked prompt section headers (translation system prompt leaked into output)
+    _prompt_section_headers = [
+        'Glossary Check:',
+        'Glossary:',
+        'Text Analysis:',
+        'Specific Character Conversions',
+        'Character Conversions',
+        'Translation Notes:',
+        'Translation Rules:',
+    ]
+    _found_headers = [h for h in _prompt_section_headers if h.lower() in text.lower()]
+    if len(_found_headers) >= 2:
+        artifacts_found.append({
+            'type': 'ai_prompt_section_headers',
+            'count': len(_found_headers),
+            'examples': _found_headers[:4],
+            'severity': 'critical'
+        })
+
+    return artifacts_found
+    
+def detect_glossary_leakage(text, threshold=2):
+    """
+    Detect if translated text contains raw glossary entries or leaked prompts/thinking.
+    
+    Args:
+        text: The translated text to check
+        threshold: Minimum number of glossary-like patterns to flag as leakage
+    
+    Returns:
+        tuple: (has_leakage, details)
+    """
+    import re
+    
+    issues_found = []
+    
+    # Check for CSV-style glossary headers
+    csv_header_pattern = re.compile(
+        r'type\s*,\s*raw_name\s*,\s*translated_name\s*,\s*gender\s*,\s*description',
+        re.IGNORECASE
+    )
+    if csv_header_pattern.search(text):
+        issues_found.append({
+            'type': 'csv_header',
+            'severity': 'critical',
+            'description': 'Found CSV glossary header in translation'
+        })
+    
+    # Check for multiple structured entries
+    entry_patterns = [
+        # JSON-like entries
+        (r'\{\s*"type"\s*:\s*"[^"]+"\s*,\s*"raw_name"\s*:\s*"[^"]+"\s*,', 'json_entry'),
+        # CSV-like entries with Korean/Chinese characters
+        (r'(?:character|term)\s*,\s*[' + chr(0xAC00) + '-' + chr(0xD7A3) + chr(0x4e00) + '-' + chr(0x9fff) + r']+\s*,\s*[A-Za-z\s]+\s*,', 'csv_entry'),
+        # Tab-separated entries
+        (r'(?:character|term)\t[' + chr(0xAC00) + '-' + chr(0xD7A3) + chr(0x4e00) + '-' + chr(0x9fff) + r']+\t[A-Za-z\s]+\t', 'tsv_entry'),
+    ]
+    
+    for pattern_str, pattern_type in entry_patterns:
+        pattern = re.compile(pattern_str, re.IGNORECASE)
+        matches = pattern.findall(text)
+        if len(matches) >= threshold:
+            issues_found.append({
+                'type': pattern_type,
+                'severity': 'high',
+                'count': len(matches),
+                'examples': matches[:3],
+                'description': f'Found {len(matches)} {pattern_type} glossary entries'
+            })
+    
+    # Check for repeated glossary field names
+    field_names = ['type', 'raw_name', 'translated_name', 'gender', 'description']
+    field_count = sum(1 for field in field_names if text.lower().count(field) >= 3)
+    if field_count >= 3:
+        issues_found.append({
+            'type': 'repeated_field_names',
+            'severity': 'medium',
+            'description': f'Found {field_count} repeated glossary field names'
+        })
+    
+    # Check for specific character/term patterns
+    char_term_pattern = re.compile(
+        r'(?:^|\n)\s*(?:character|term)\s*[,:\t]\s*[^\n]+(?:Male|Female|A\s+historical|Former\s+mayor|Character\s+from)',
+        re.IGNORECASE | re.MULTILINE
+    )
+    char_matches = char_term_pattern.findall(text)
+    if len(char_matches) >= 2:
+        issues_found.append({
+            'type': 'character_definitions',
+            'severity': 'high',
+            'count': len(char_matches),
+            'examples': char_matches[:2],
+            'description': f'Found {len(char_matches)} character/term definitions'
+        })
+    
+    
+    # Detect bullet-pointed glossary entries: "- Name (Korean/CJK)" pattern
+    # e.g., "- Pope (교황)", "- Lucas Argent (루카스 아르겐트)"
+    # Build pattern with chr() to avoid escape issues
+    bullet_glossary_pattern = re.compile(
+        r'(?:^|\n)\s*[-*]\s*[A-Za-z][\w\s]*\([' + chr(0xAC00) + '-' + chr(0xD7A3) + chr(0x4e00) + '-' + chr(0x9fff) + chr(0x3040) + '-' + chr(0x309F) + chr(0x30A0) + '-' + chr(0x30FF) + r'\s]+\)',
+        re.MULTILINE
+    )
+    bullet_matches = bullet_glossary_pattern.findall(text)
+    if len(bullet_matches) >= 3:
+        issues_found.append({
+            'type': 'bullet_glossary_entries',
+            'severity': 'critical',
+            'count': len(bullet_matches),
+            'examples': [m.strip() for m in bullet_matches[:3]],
+            'description': f'Found {len(bullet_matches)} bullet-pointed glossary entries with CJK in parentheses'
+        })
+    
+
+    
+    has_leakage = len(issues_found) > 0
+    
+    return has_leakage, issues_found
+
+def extract_epub_image_info(epub_path, log=print):
+    """Extract image information for each chapter from the original EPUB using spine order.
+    
+    Key: Uses content.opf SPINE ORDER (reading order) as the authoritative chapter sequence.
+    This matches the word count reference logic exactly.
+    
+    Returns a dict mapping spine index to image info:
+    {
+        spine_index: {
+            'image_count': int,
+            'image_srcs': [list of img src attributes],
+            'filename': str
+        }
+    }
+    """
+    try:
+        import zipfile
+        from bs4 import BeautifulSoup
+        import os
+        
+        image_info = {}
+        spine_files = {}  # Maps spine index to file info
+        
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Step 1: Read and parse content.opf to get SPINE ORDER
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}  # Maps item id to href
+            
+            try:
+                content_opf_path = find_epub_opf_member(zf)
+                if content_opf_path:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
+            except Exception as e:
+                log(f"⚠️ Could not read OPF package: {e}")
+            
+            # Parse manifest and spine from content.opf
+            if content_opf_data:
+                try:
+                    soup_opf = BeautifulSoup(content_opf_data, 'xml')
+                    
+                    # Build manifest map (id -> href)
+                    manifest = soup_opf.find('manifest')
+                    if manifest:
+                        for item in manifest.find_all('item'):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            if item_id and href:
+                                manifest_map[item_id] = href
+                    
+                    # Process spine in order
+                    spine = soup_opf.find('spine')
+                    if spine:
+                        spine_index = 1  # Start from 1 for chapter numbering
+                        for itemref in spine.find_all('itemref'):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest_map:
+                                href = manifest_map[idref]
+                                spine_files[spine_index] = {
+                                    'href': href,
+                                    'idref': idref
+                                }
+                                spine_index += 1
+                        
+                        if spine_files:
+                            log(f"📚 Found {len(spine_files)} chapters in EPUB spine order.")
+                except Exception as e:
+                    log(f"⚠️ Could not parse content.opf: {e}")
+            
+            # Step 2: Process files in spine order
+            if spine_files:
+                # Determine the base directory from content.opf location
+                base_dir = ''
+                if content_opf_path:
+                    # content.opf is often in OEBPS/ or similar
+                    base_dir = os.path.dirname(content_opf_path)
+                    if base_dir:
+                        base_dir = base_dir + '/'
+                
+                extracted_count = 0
+                for spine_index, file_info in sorted(spine_files.items()):
+                    try:
+                        file_path = file_info['href']
+                        
+                        # Try multiple path resolutions
+                        possible_paths = [
+                            file_path,                          # As-is from manifest
+                            base_dir + file_path,               # Relative to content.opf
+                            'OEBPS/' + file_path,               # Common EPUB structure
+                            'OPS/' + file_path,                 # Alternative structure
+                        ]
+                        
+                        content = None
+                        for try_path in possible_paths:
+                            try:
+                                content = zf.read(try_path).decode('utf-8', errors='ignore')
+                                break
+                            except KeyError:
+                                continue
+                        
+                        if content is None:
+                            continue
+                        
+                        # Parse HTML and extract images
+                        soup = BeautifulSoup(content, 'html.parser')
+                        images = soup.find_all('img')
+                        
+                        if images:  # Only store if chapter has images
+                            image_info[spine_index] = {
+                                'image_count': len(images),
+                                'image_srcs': [img.get('src', '') for img in images],
+                                'filename': os.path.basename(file_path),
+                                'spine_index': spine_index
+                            }
+                            extracted_count += 1
+                        
+                    except Exception as e:
+                        continue
+                
+                if extracted_count > 0:
+                    log(f"   Found images in {extracted_count} chapters")
+            else:
+                # Fallback: No spine found, scan all HTML files
+                log("⚠️ Could not read spine order, falling back to file extraction")
+                
+                html_files = [f for f in zf.namelist() 
+                             if f.lower().endswith(('.html', '.xhtml', '.htm')) 
+                             and not f.startswith('__MACOSX')
+                             and 'cover' not in f.lower()]
+                
+                html_files.sort()
+                
+                for idx, file_path in enumerate(html_files, start=1):
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                        soup = BeautifulSoup(content, 'html.parser')
+                        images = soup.find_all('img')
+                        
+                        if images:
+                            image_info[idx] = {
+                                'image_count': len(images),
+                                'image_srcs': [img.get('src', '') for img in images],
+                                'filename': os.path.basename(file_path)
+                            }
+                    except Exception as e:
+                        continue
+                
+                if image_info:
+                    log(f"   Found images in {len(image_info)} chapters (fallback mode)")
+        
+        return image_info
+        
+    except Exception as e:
+        log(f"❌ Error extracting image info from EPUB: {e}")
+        return {}
+
+def detect_missing_images(
+        translated_html,
+        chapter_num,
+        original_image_info,
+        image_rename_map=None):
+    """
+    Detect missing or extra images by comparing translated HTML with original EPUB image info.
+    
+    Args:
+        translated_html: The translated HTML content (string)
+        chapter_num: The chapter number to check
+        original_image_info: Dict from extract_epub_image_info()
+    
+    Returns:
+        tuple: (has_issues, details)
+    """
+    try:
+        from bs4 import BeautifulSoup
+        
+        # If no original image info for this chapter, skip check
+        if chapter_num not in original_image_info:
+            return False, []
+        
+        orig_info = original_image_info[chapter_num]
+        orig_img_count = orig_info['image_count']
+        
+        # If no images in original, nothing to check
+        if orig_img_count == 0:
+            return False, []
+        
+        # Parse translated HTML
+        soup_trans = BeautifulSoup(translated_html, 'html.parser')
+        trans_images = soup_trans.find_all('img')
+        trans_img_count = len(trans_images)
+        
+        details = []
+        
+        # Check if translated has fewer images than original
+        if trans_img_count < orig_img_count:
+            missing_count = orig_img_count - trans_img_count
+            
+            # Get list of missing image sources
+            trans_srcs = set(img.get('src', '') for img in trans_images)
+            missing_srcs = []
+            for src in orig_info['image_srcs']:
+                if src and src not in trans_srcs:
+                    missing_srcs.append(src)
+            
+            details.append({
+                'type': 'missing_images',
+                'severity': 'high',
+                'count': missing_count,
+                'original_count': orig_img_count,
+                'translated_count': trans_img_count,
+                'missing_srcs': missing_srcs[:5],  # First 5 missing images
+                'description': f'Translation has {missing_count} fewer images than original ({trans_img_count}/{orig_img_count})'
+            })
+        
+        # Check if translated has more images than original
+        elif trans_img_count > orig_img_count:
+            extra_count = trans_img_count - orig_img_count
+            
+            details.append({
+                'type': 'extra_images',
+                'severity': 'medium',
+                'count': extra_count,
+                'original_count': orig_img_count,
+                'translated_count': trans_img_count,
+                'description': f'Translation has {extra_count} extra images compared to original ({trans_img_count}/{orig_img_count})'
+            })
+
+        # Equal counts are not sufficient: one missing image can be replaced by
+        # an unrelated reference. Compare canonical references while honoring
+        # extraction's image_rename_map.json and path-only differences.
+        orig_srcs = orig_info.get('image_srcs') or []
+        if orig_srcs and trans_img_count == orig_img_count:
+            normalized_map = {
+                os.path.basename(str(old_name).replace('\\', '/')).casefold():
+                os.path.basename(str(new_name).replace('\\', '/')).casefold()
+                for old_name, new_name in (image_rename_map or {}).items()
+                if old_name and new_name
+            }
+            source_refs = Counter(
+                ref for ref in (
+                    _normalize_preserved_reference(src, normalized_map, image=True)
+                    for src in orig_srcs
+                ) if ref
+            )
+            output_refs = Counter(
+                ref for ref in (
+                    _normalize_preserved_reference(
+                        image.get('src', ''),
+                        normalized_map,
+                        image=True,
+                    )
+                    for image in trans_images
+                ) if ref
+            )
+            missing_refs = source_refs - output_refs
+            unexpected_refs = output_refs - source_refs
+            if missing_refs or unexpected_refs:
+                changed_count = max(
+                    sum(missing_refs.values()),
+                    sum(unexpected_refs.values()),
+                )
+                details.append({
+                    'type': 'changed_image_references',
+                    'severity': 'high',
+                    'count': changed_count,
+                    'original_count': orig_img_count,
+                    'translated_count': trans_img_count,
+                    'missing_srcs': list(missing_refs.elements())[:5],
+                    'unexpected_srcs': list(unexpected_refs.elements())[:5],
+                    'description': (
+                        'Translation image references differ from the source '
+                        f'({sum(missing_refs.values())} missing, '
+                        f'{sum(unexpected_refs.values())} unexpected)'
+                    ),
+                })
+        
+        return len(details) > 0, details
+        
+    except Exception as e:
+        # Silent failure - if we can't check, don't report false positives
+        return False, []
+
+def extract_epub_punctuation_info(epub_path, log=print):
+    """Extract question mark and exclamation mark counts for each chapter from the original EPUB.
+    
+    Uses content.opf SPINE ORDER (reading order) as the authoritative chapter sequence.
+    This matches the image extraction logic.
+    
+    Returns a dict mapping spine index to punctuation info:
+    {
+        spine_index: {
+            'question_marks': int,
+            'exclamation_marks': int,
+            'filename': str
+        }
+    }
+    """
+    try:
+        import zipfile
+        from bs4 import BeautifulSoup
+        import os
+        
+        punct_info = {}
+        spine_files = {}  # Maps spine index to file info
+        
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Step 1: Read and parse content.opf to get SPINE ORDER
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}  # Maps item id to href
+            
+            try:
+                content_opf_path = find_epub_opf_member(zf)
+                if content_opf_path:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
+            except Exception as e:
+                log(f"⚠️ Could not read OPF package: {e}")
+            
+            # Parse manifest and spine from content.opf
+            if content_opf_data:
+                try:
+                    soup_opf = BeautifulSoup(content_opf_data, 'xml')
+                    
+                    # Build manifest map (id -> href)
+                    manifest = soup_opf.find('manifest')
+                    if manifest:
+                        for item in manifest.find_all('item'):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            if item_id and href:
+                                manifest_map[item_id] = href
+                    
+                    # Process spine in order
+                    spine = soup_opf.find('spine')
+                    if spine:
+                        spine_index = 1  # Start from 1 for chapter numbering
+                        for itemref in spine.find_all('itemref'):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest_map:
+                                href = manifest_map[idref]
+                                spine_files[spine_index] = {
+                                    'href': href,
+                                    'idref': idref
+                                }
+                                spine_index += 1
+                        
+                        if spine_files:
+                            log(f"📚 Found {len(spine_files)} chapters for punctuation extraction.")
+                except Exception as e:
+                    log(f"⚠️ Could not parse content.opf: {e}")
+            
+            # Step 2: Process files in spine order
+            if spine_files:
+                # Determine the base directory from content.opf location
+                base_dir = ''
+                if content_opf_path:
+                    base_dir = os.path.dirname(content_opf_path)
+                    if base_dir:
+                        base_dir = base_dir + '/'
+                
+                extracted_count = 0
+                for spine_index, file_info in sorted(spine_files.items()):
+                    try:
+                        file_path = file_info['href']
+                        
+                        # Try multiple path resolutions
+                        possible_paths = [
+                            file_path,
+                            base_dir + file_path,
+                            'OEBPS/' + file_path,
+                            'OPS/' + file_path,
+                        ]
+                        
+                        content = None
+                        for try_path in possible_paths:
+                            try:
+                                content = zf.read(try_path).decode('utf-8', errors='ignore')
+                                break
+                            except KeyError:
+                                continue
+                        
+                        if content is None:
+                            continue
+                        
+                        # Parse HTML and extract ONLY VISIBLE text
+                        soup = BeautifulSoup(content, 'html.parser')
+                        # Remove non-visible tags before extracting text
+                        for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                            tag.decompose()
+                        text = soup.get_text()
+                        
+                        # Count punctuation
+                        question_count = text.count('?')
+                        exclamation_count = text.count('!')
+                        
+                        # Store if chapter has any punctuation
+                        if question_count > 0 or exclamation_count > 0:
+                            punct_info[spine_index] = {
+                                'question_marks': question_count,
+                                'exclamation_marks': exclamation_count,
+                                'filename': os.path.basename(file_path),
+                                'spine_index': spine_index
+                            }
+                            extracted_count += 1
+                        
+                    except Exception as e:
+                        continue
+                
+                if extracted_count > 0:
+                    total_questions = sum(info['question_marks'] for info in punct_info.values())
+                    total_exclamations = sum(info['exclamation_marks'] for info in punct_info.values())
+                    log(f"   Found ?! punctuation in {extracted_count} chapters ({total_questions}? + {total_exclamations}!)")
+            else:
+                # Fallback: No spine found, scan all HTML files
+                log("⚠️ Could not read spine order, falling back to file extraction")
+                
+                html_files = [f for f in zf.namelist() 
+                             if f.lower().endswith(('.html', '.xhtml', '.htm')) 
+                             and not f.startswith('__MACOSX')
+                             and 'cover' not in f.lower()]
+                
+                html_files.sort()
+                
+                for idx, file_path in enumerate(html_files, start=1):
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                        soup = BeautifulSoup(content, 'html.parser')
+                        # Remove non-visible tags before extracting text
+                        for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                            tag.decompose()
+                        text = soup.get_text()
+                        
+                        question_count = text.count('?')
+                        exclamation_count = text.count('!')
+                        
+                        if question_count > 0 or exclamation_count > 0:
+                            punct_info[idx] = {
+                                'question_marks': question_count,
+                                'exclamation_marks': exclamation_count,
+                                'filename': os.path.basename(file_path),
+                                'spine_index': idx  # Add for consistency with spine mode
+                            }
+                    except Exception as e:
+                        continue
+                
+                if punct_info:
+                    total_questions = sum(info['question_marks'] for info in punct_info.values())
+                    total_exclamations = sum(info['exclamation_marks'] for info in punct_info.values())
+                    log(f"   Found ?! punctuation in {len(punct_info)} chapters (fallback mode) ({total_questions}? + {total_exclamations}!)")
+        
+        return punct_info
+        
+    except Exception as e:
+        log(f"❌ Error extracting punctuation info from EPUB: {e}")
+        return {}
+
+def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuation_info, threshold=0.5, qa_settings=None):
+    """
+    Detect significant punctuation mismatches by comparing translated text with original EPUB punctuation info.
+    
+    Args:
+        translated_text: The translated text content (string)
+        chapter_num: The chapter number to check
+        original_punctuation_info: Dict from extract_epub_punctuation_info()
+        threshold: Ratio threshold for flagging mismatches (0.5 = flag if 50% or more punctuation lost)
+        qa_settings: Optional dict with 'punctuation_loss_threshold' (0-100, default 50)
+                     and 'flag_excess_punctuation' (bool, default False) to flag when translation
+                     has MORE punctuation than source
+    
+    Returns:
+        tuple: (has_mismatch, details)
+    """
+    # Get threshold from settings if provided (convert from percentage to ratio)
+    if qa_settings and 'punctuation_loss_threshold' in qa_settings:
+        threshold = qa_settings['punctuation_loss_threshold'] / 100.0
+    
+    # Get excess punctuation flag and threshold from settings
+    flag_excess = qa_settings.get('flag_excess_punctuation', False) if qa_settings else False
+    # Excess threshold: only flag if excess exceeds this percentage (default 49% so 50%+ triggers)
+    excess_threshold = (qa_settings.get('excess_punctuation_threshold', 49) / 100.0) if qa_settings else 0.49
+    
+    try:
+        # If no original punctuation info for this chapter, skip check
+        if chapter_num not in original_punctuation_info:
+            return False, []
+        
+        orig_info = original_punctuation_info[chapter_num]
+        orig_question_count = orig_info['question_marks']
+        orig_exclamation_count = orig_info['exclamation_marks']
+        
+        # If no punctuation in original and we're not checking for excess, nothing to check
+        if orig_question_count == 0 and orig_exclamation_count == 0 and not flag_excess:
+            return False, []
+        
+        # Count punctuation in translated text
+        trans_question_count = translated_text.count('?')
+        trans_exclamation_count = translated_text.count('!')
+        
+        details = []
+        has_mismatch = False
+        
+        # Check question marks - loss detection
+        if orig_question_count > 0:
+            loss_ratio = 1.0 - (trans_question_count / orig_question_count)
+            if loss_ratio > threshold:
+                has_mismatch = True
+                details.append({
+                    'type': 'missing_question_marks',
+                    'severity': 'medium',
+                    'original_count': orig_question_count,
+                    'translated_count': trans_question_count,
+                    'loss_ratio': loss_ratio,
+                    'description': f'Lost {int(loss_ratio*100)}% of question marks ({trans_question_count}/{orig_question_count})'
+                })
+        
+        # Check question marks - excess detection (if enabled and exceeds threshold)
+        if flag_excess and trans_question_count > orig_question_count:
+            excess_count = trans_question_count - orig_question_count
+            excess_ratio = excess_count / max(1, orig_question_count)  # Avoid division by zero
+            if excess_ratio > excess_threshold:
+                has_mismatch = True
+                details.append({
+                    'type': 'excess_question_marks',
+                    'severity': 'medium',
+                    'original_count': orig_question_count,
+                    'translated_count': trans_question_count,
+                    'excess_count': excess_count,
+                    'excess_ratio': excess_ratio,
+                    'description': f'Excess question marks: +{int(excess_ratio*100)}% ({trans_question_count}/{orig_question_count})'
+                })
+        
+        # Check exclamation marks - loss detection
+        if orig_exclamation_count > 0:
+            loss_ratio = 1.0 - (trans_exclamation_count / orig_exclamation_count)
+            if loss_ratio > threshold:
+                has_mismatch = True
+                details.append({
+                    'type': 'missing_exclamation_marks',
+                    'severity': 'medium',
+                    'original_count': orig_exclamation_count,
+                    'translated_count': trans_exclamation_count,
+                    'loss_ratio': loss_ratio,
+                    'description': f'Lost {int(loss_ratio*100)}% of exclamation marks ({trans_exclamation_count}/{orig_exclamation_count})'
+                })
+        
+        # Check exclamation marks - excess detection (if enabled and exceeds threshold)
+        if flag_excess and trans_exclamation_count > orig_exclamation_count:
+            excess_count = trans_exclamation_count - orig_exclamation_count
+            excess_ratio = excess_count / max(1, orig_exclamation_count)  # Avoid division by zero
+            if excess_ratio > excess_threshold:
+                has_mismatch = True
+                details.append({
+                    'type': 'excess_exclamation_marks',
+                    'severity': 'medium',
+                    'original_count': orig_exclamation_count,
+                    'translated_count': trans_exclamation_count,
+                    'excess_count': excess_count,
+                    'excess_ratio': excess_ratio,
+                    'description': f'Excess exclamation marks: +{int(excess_ratio*100)}% ({trans_exclamation_count}/{orig_exclamation_count})'
+                })
+        
+        return has_mismatch, details
+        
+    except Exception as e:
+        # Silent failure - if we can't check, don't report false positives
+        return False, []
+
+
+# Quotation checking intentionally has its own extraction and comparison data.
+# Do not mix this with original_punctuation_info: the established ?! matcher
+# stores only chapters containing ? or !, while quotation comparison must also
+# retain zero-quotation chapters so excess marks can be detected accurately.
+_EXPLICIT_QUOTATION_MARKS = frozenset(
+    "\"'“”„‟‘’‚‛«»‹›〈〉《》「」『』〝〞〟﹁﹂﹃﹄＂＇"
+)
+_APOSTROPHE_LIKE_MARKS = frozenset("'‘’＇")
+_MISTYPED_HEX_APOSTROPHE_RE = re.compile(r"&(?:#x|x)39;", re.IGNORECASE)
+_STYLISTIC_SINGLE_QUOTE_RE = re.compile(r"(?<!\w)'[^'\r\n]+?'(?!\w)")
+_STYLISTIC_DOUBLE_QUOTE_RE = re.compile(r'(?<!\w)"[^"\r\n]+?"(?!\w)')
+_TRAILING_POSSESSIVE_APOSTROPHE_RE = re.compile(
+    r"\b[A-Za-z]{2,}['’](?=\s|[.,;:!?)}\]]|$)"
+)
+_MISSING_ENDING_QUOTATION_RE = re.compile(
+    r'(?s)<p[^>]*>(?:(?!</p>)[^"])*"(?:(?!</p>)[^"])*'
+    r'(?:"(?:(?!</p>)[^"])*"(?:(?!</p>)[^"])*)*</p>'
+)
+_DIRECTIONAL_QUOTATION_PAIRS = (
+    ('“', '”'),
+    ('‘', '’'),
+    ('「', '」'),
+    ('『', '』'),
+    ('«', '»'),
+    ('‹', '›'),
+    ('〈', '〉'),
+    ('《', '》'),
+)
+
+
+def _normalize_quotation_entities(text):
+    """Normalize quotation entities seen in source EPUB text.
+
+    Standard HTML references are decoded by ``html.unescape``.  Some source
+    EPUBs use ``&#x39;``/``&x39;`` for an apostrophe even though hexadecimal 39
+    formally represents the digit 9, so those common source forms are handled
+    explicitly as requested by the scanner option.
+    """
+    normalized = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(text or ""))
+    return html_lib.unescape(normalized)
+
+
+def _count_quotation_marks(
+    text,
+    skip_stylistic_single_quotes=False,
+    include_square_brackets=False,
+):
+    """Count quotation delimiters while ignoring ordinary word apostrophes."""
+    decoded = _normalize_quotation_entities(text)
+    skipped_stylistic_indexes = set()
+    if skip_stylistic_single_quotes:
+        for match in _STYLISTIC_SINGLE_QUOTE_RE.finditer(decoded):
+            skipped_stylistic_indexes.add(match.start())
+            skipped_stylistic_indexes.add(match.end() - 1)
+        for match in _STYLISTIC_DOUBLE_QUOTE_RE.finditer(decoded):
+            skipped_stylistic_indexes.add(match.start())
+            skipped_stylistic_indexes.add(match.end() - 1)
+        for match in _TRAILING_POSSESSIVE_APOSTROPHE_RE.finditer(decoded):
+            apostrophe_index = match.end() - 1
+            if decoded[apostrophe_index] == '’':
+                line_start = decoded.rfind('\n', 0, apostrophe_index) + 1
+                # If this line has a matching curly opening mark, retain the
+                # closing mark as a quotation delimiter rather than treating
+                # it as a possessive apostrophe.
+                if '‘' in decoded[line_start:apostrophe_index]:
+                    continue
+            skipped_stylistic_indexes.add(apostrophe_index)
+
+    count = 0
+    for index, char in enumerate(decoded):
+        is_square_bracket = include_square_brackets and char in '[]'
+        if (
+            not is_square_bracket
+            and char not in _EXPLICIT_QUOTATION_MARKS
+            and unicodedata.category(char) not in ('Pi', 'Pf')
+        ):
+            continue
+
+        if index in skipped_stylistic_indexes:
+            continue
+
+        if char in _APOSTROPHE_LIKE_MARKS:
+            previous_char = decoded[index - 1] if index > 0 else ''
+            next_char = decoded[index + 1] if index + 1 < len(decoded) else ''
+            if previous_char.isalnum() and next_char.isalnum():
+                continue
+        count += 1
+    return count
+
+
+def _visible_text_for_quotation_check(html_content, allow_plain_text=False):
+    """Extract all visible text without counting quotes in markup attributes."""
+    normalized_html = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(html_content or ""))
+    soup = BeautifulSoup(normalized_html, 'html.parser')
+    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+        tag.decompose()
+    return soup.get_text(separator='\n')
+
+
+def _missing_ending_quotation_paragraphs(
+    html_content,
+    allow_plain_text=False,
+    include_square_brackets=False,
+    ignore_consecutive=False,
+):
+    """Return paragraphs missing a straight, directional, or CJK closing quote.
+
+    When ``ignore_consecutive`` is enabled, findings in adjacent paragraphs are
+    treated as a multi-paragraph dialogue run and suppressed. Isolated findings
+    remain reportable.
+    """
+    normalized_html = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(html_content or ""))
+    soup = BeautifulSoup(normalized_html, 'html.parser')
+    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+        tag.decompose()
+
+    paragraph_texts = [
+        unit.get_text() for unit in soup.find_all(['p', 'li'])
+    ]
+    if not paragraph_texts and allow_plain_text and soup.find() is None:
+        paragraph_texts = [soup.get_text()]
+
+    missing = []
+    for paragraph_index, paragraph_text in enumerate(paragraph_texts, start=1):
+        # Run the requested regex on a tag-free synthetic paragraph so quotes
+        # in nested HTML attributes cannot create false positives.
+        synthetic_paragraph = f"<p>{html_lib.escape(paragraph_text, quote=False)}</p>"
+        missing_marks = []
+        if _MISSING_ENDING_QUOTATION_RE.fullmatch(synthetic_paragraph):
+            missing_marks.append('"')
+
+        decoded_text = _normalize_quotation_entities(paragraph_text)
+        directional_pairs = _DIRECTIONAL_QUOTATION_PAIRS
+        if include_square_brackets:
+            directional_pairs += (('[', ']'),)
+        for opening_mark, closing_mark in directional_pairs:
+            opening_count = 0
+            closing_count = 0
+            for index, char in enumerate(decoded_text):
+                if char not in (opening_mark, closing_mark):
+                    continue
+                if char in _APOSTROPHE_LIKE_MARKS:
+                    previous_char = decoded_text[index - 1] if index > 0 else ''
+                    next_char = decoded_text[index + 1] if index + 1 < len(decoded_text) else ''
+                    if previous_char.isalnum() and next_char.isalnum():
+                        continue
+                if char == opening_mark:
+                    opening_count += 1
+                else:
+                    closing_count += 1
+            if opening_count > closing_count:
+                missing_marks.extend([closing_mark] * (opening_count - closing_count))
+
+        if missing_marks:
+            missing.append({
+                'paragraph_index': paragraph_index,
+                'text': paragraph_text.strip(),
+                'missing_marks': missing_marks,
+            })
+
+    if ignore_consecutive and len(missing) > 1:
+        missing_indexes = {item['paragraph_index'] for item in missing}
+        consecutive_indexes = {
+            paragraph_index
+            for paragraph_index in missing_indexes
+            if (
+                paragraph_index - 1 in missing_indexes
+                or paragraph_index + 1 in missing_indexes
+            )
+        }
+        missing = [
+            item
+            for item in missing
+            if item['paragraph_index'] not in consecutive_indexes
+        ]
+    return missing
+
+
+def extract_epub_quotation_info(
+    epub_path,
+    log=print,
+    skip_stylistic_single_quotes=False,
+    include_square_brackets=False,
+):
+    """Extract quotation counts in EPUB spine order without changing ?! logic."""
+    quotation_info = {}
+    spine_files = {}
+
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}
+
+            try:
+                content_opf_path = find_epub_opf_member(zf)
+                if content_opf_path:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
+            except Exception as exc:
+                log(f"⚠️ Could not read OPF package for quotation extraction: {exc}")
+
+            if content_opf_data:
+                try:
+                    opf = BeautifulSoup(content_opf_data, 'xml')
+                    manifest = opf.find('manifest')
+                    if manifest:
+                        for item in manifest.find_all('item'):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            if item_id and href:
+                                manifest_map[item_id] = href
+
+                    spine = opf.find('spine')
+                    if spine:
+                        spine_index = 1
+                        for itemref in spine.find_all('itemref'):
+                            href = manifest_map.get(itemref.get('idref'))
+                            if href:
+                                spine_files[spine_index] = href
+                                spine_index += 1
+                except Exception as exc:
+                    log(f"⚠️ Could not parse content.opf for quotation extraction: {exc}")
+
+            if spine_files:
+                base_dir = os.path.dirname(content_opf_path or '')
+                if base_dir:
+                    base_dir += '/'
+
+                for spine_index, file_path in sorted(spine_files.items()):
+                    content = None
+                    for candidate in (file_path, base_dir + file_path, 'OEBPS/' + file_path, 'OPS/' + file_path):
+                        try:
+                            content = zf.read(candidate).decode('utf-8', errors='ignore')
+                            break
+                        except KeyError:
+                            continue
+                    if content is None:
+                        continue
+
+                    visible_text = _visible_text_for_quotation_check(content)
+                    quotation_info[spine_index] = {
+                        'quotation_marks': _count_quotation_marks(
+                            visible_text,
+                            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            include_square_brackets=include_square_brackets,
+                        ),
+                        'filename': os.path.basename(file_path),
+                        'spine_index': spine_index,
+                    }
+            else:
+                log("⚠️ Could not read spine order for quotation extraction; using HTML file order")
+                html_files = [
+                    filename for filename in zf.namelist()
+                    if filename.lower().endswith(('.html', '.xhtml', '.htm'))
+                    and not filename.startswith('__MACOSX')
+                    and 'cover' not in filename.lower()
+                ]
+                for index, file_path in enumerate(sorted(html_files), start=1):
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                    except Exception:
+                        continue
+                    quotation_info[index] = {
+                        'quotation_marks': _count_quotation_marks(
+                            _visible_text_for_quotation_check(content),
+                            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            include_square_brackets=include_square_brackets,
+                        ),
+                        'filename': os.path.basename(file_path),
+                        'spine_index': index,
+                    }
+
+        return quotation_info
+    except Exception as exc:
+        log(f"❌ Error extracting quotation info from EPUB: {exc}")
+        return {}
+
+
+def detect_quotation_mismatch(
+    translated_text,
+    chapter_key,
+    original_quotation_info,
+    ignore_excess=False,
+    skip_stylistic_single_quotes=False,
+    include_square_brackets=False,
+):
+    """Compare total source and translated quotation delimiters for one chapter."""
+    try:
+        if chapter_key not in original_quotation_info:
+            return False, []
+
+        original_count = int(original_quotation_info[chapter_key].get('quotation_marks', 0))
+        translated_count = _count_quotation_marks(
+            translated_text,
+            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+            include_square_brackets=include_square_brackets,
+        )
+        if translated_count == original_count:
+            return False, []
+        if ignore_excess and translated_count > original_count:
+            return False, []
+
+        missing = translated_count < original_count
+        difference = abs(original_count - translated_count)
+        issue_type = 'missing_quotation_marks' if missing else 'excess_quotation_marks'
+        direction = 'missing' if missing else 'excess'
+        return True, [{
+            'type': issue_type,
+            'severity': 'medium',
+            'original_count': original_count,
+            'translated_count': translated_count,
+            'difference': difference,
+            'description': (
+                f'{difference} quotation mark(s) {direction} '
+                f'({translated_count}/{original_count})'
+            ),
+        }]
+    except Exception:
+        return False, []
+    
+def extract_semantic_fingerprint(text):
+    """Extract semantic fingerprint and signature from text - CACHED VERSION"""
+    # For cache efficiency with long texts
+    cache_text = text[:50000] if len(text) > 50000 else text
+    
+    # Extract features for semantic analysis
+    words = cache_text.lower().split()
+    
+    # Character names (words starting with capital letters, appearing multiple times)
+    potential_names = re.findall(r'\b[A-Z][a-z]+\b', cache_text)
+    name_freq = Counter(potential_names)
+    characters = [name for name, count in name_freq.items() 
+                  if count >= 3 and name not in COMMON_WORDS]
+    
+    # Dialogue analysis
+    dialogue_matches = re.findall(r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]', cache_text)
+    dialogue_count = len(dialogue_matches)
+    dialogue_density = dialogue_count / max(1, len(words)) if words else 0
+    dialogue_lengths = [len(d) for d in dialogue_matches[:30]]  # First 30 dialogue lengths
+    
+    # Character frequencies (sorted list)
+    character_frequencies = [count for _, count in name_freq.most_common()]
+    
+    # Speaker sequence extraction
+    speaker_patterns = re.findall(r'(\w+)\s+(?:said|asked|replied|shouted|whispered|spoke)', cache_text.lower())
+    speaker_sequence = speaker_patterns[:50]  # First 50 speakers
+    
+    # Paragraph structure (lengths of each paragraph)
+    paragraphs = [p for p in cache_text.split('\n\n') if p.strip()]
+    paragraph_structure = [len(p) for p in paragraphs[:50]]  # First 50 paragraph lengths
+    
+    # Action words density
+    action_words = len(re.findall(r'\b(\w+ed|spoke|says?|asks?|replies?|shouts?|screams?|whispers?)\b', cache_text))
+    action_density = action_words / max(1, len(words)) if words else 0
+    
+    # Numbers in text
+    numbers = re.findall(r'\b\d+\b', cache_text)
+    
+    # Create fingerprint string
+    fingerprint = f"chars:{len(characters)}_dial:{dialogue_density:.2f}_act:{action_density:.2f}_nums:{len(numbers)}_words:{len(words)}"
+    
+    # Create signature dict
+    signature = {
+        'characters': characters[:20],  # Top 20 characters
+        'dialogue_density': dialogue_density,
+        'dialogue_count': dialogue_count,
+        'dialogue_lengths': dialogue_lengths,
+        'character_frequencies': character_frequencies,
+        'speaker_sequence': speaker_sequence,
+        'paragraph_structure': paragraph_structure,
+        'total_words': len(words),
+        'action_density': action_density,
+        'numbers': numbers[:50],  # First 50 numbers
+        'text_length': len(cache_text)
+    }
+    
+    return fingerprint, signature
+
+# Apply dynamic caching
+extract_semantic_fingerprint = lru_cache(maxsize=get_cache_size("semantic_fingerprint") or 2000)(extract_semantic_fingerprint)
+
+def extract_structural_signature(text):
+    """Extract structural patterns from text - CACHED VERSION"""
+    # For cache efficiency with long texts
+    cache_text = text[:50000] if len(text) > 50000 else text
+    
+    lines = cache_text.split('\n')
+    
+    # Count different types of lines
+    para_count = len([l for l in lines if len(l.strip()) > 50])
+    short_lines = len([l for l in lines if 0 < len(l.strip()) < 20])
+    empty_lines = len([l for l in lines if not l.strip()])
+    
+    # Dialogue patterns
+    dialogue_lines = len(re.findall(r'["\"\'""''『』「」].*?["\"\'""''『』「」]', cache_text))
+    
+    # Create pattern string (first letter of each line type)
+    pattern = ''
+    for line in lines[:100]:  # First 100 lines
+        if not line.strip():
+            pattern += 'E'  # Empty
+        elif len(line.strip()) < 20:
+            pattern += 'S'  # Short
+        elif re.search(r'["\"\'""''『』「」]', line):
+            pattern += 'D'  # Dialogue
+        else:
+            pattern += 'P'  # Paragraph
+    
+    # Calculate average paragraph length
+    paragraphs = [l for l in lines if len(l.strip()) > 50]
+    avg_para_length = sum(len(p) for p in paragraphs) / max(1, len(paragraphs)) if paragraphs else 0
+    
+    # Dialogue ratio
+    dialogue_ratio = dialogue_lines / max(1, len(lines))
+    
+    signature = {
+        'pattern': pattern,
+        'paragraph_count': para_count,
+        'avg_paragraph_length': avg_para_length,
+        'dialogue_ratio': dialogue_ratio,
+        'short_lines': short_lines,
+        'empty_lines': empty_lines
+    }
+    
+    return signature
+
+def extract_content_fingerprint(text):
+    """Extract key sentences that can identify duplicate content - CACHED VERSION"""
+    # For cache efficiency with very long texts, limit to first 100KB
+    cache_text = text[:100000] if len(text) > 100000 else text
+    
+    lines = [line.strip() for line in cache_text.split('\n') 
+             if len(line.strip()) > 50 and not is_dash_separator_line(line)]
+    
+    if len(lines) < 5:
+        return ""
+    
+    # Take first, middle, and last substantial sentences
+    fingerprint_lines = []
+    if len(lines) >= 3:
+        fingerprint_lines = [lines[0], lines[len(lines)//2], lines[-1]]
+    else:
+        fingerprint_lines = lines[:3]
+    
+    return ' '.join(fingerprint_lines).lower()
+
+# Configure cache size dynamically
+extract_content_fingerprint = lru_cache(maxsize=get_cache_size("content_fingerprint"))(extract_content_fingerprint)
+
+def roman_to_int(s):
+    """Convert Roman numerals to integer"""
+    try:
+        values = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
+        result = 0
+        for i in range(len(s)):
+            if i + 1 < len(s) and values[s[i]] < values[s[i + 1]]:
+                result -= values[s[i]]
+            else:
+                result += values[s[i]]
+        return result
+    except:
+        return None
+
+def extract_chapter_info(filename, text):
+    """Extract chapter number and title from filename and content - ENHANCED VERSION"""
+    chapter_num = None
+    chapter_title = ""
+    
+    # Enhanced filename patterns - try multiple approaches
+    filename_patterns = [
+        # Original patterns
+        (r"response_(\d+)_(.+?)\.html", 1, 2),
+        (r"response_chapter(\d+)\.html", 1, None),
+        (r"chapter[\s_-]*(\d+)", 1, None),
+        
+        # New patterns to catch more cases
+        (r"response_(\d{3,4})_", 1, None),  # Catches response_003_
+        (r"response_chapter(\d{4})\.html", 1, None),  # Catches response_chapter0002
+        
+        # Split file pattern — use the LAST split number (most specific).
+        # e.g., response_index_split_000_split13.html → 13, NOT 0.
+        # The greedy .* consumes up to the last _split, so we get the final number.
+        (r".*_split(\d+)(?:\.[^.]+)?$", 1, None),
+        
+        (r"(\d{3,4})[_\.]", 1, None),  # General 3-4 digit pattern
+        (r"No(\d+)Chapter", 1, None),
+        (r"ch[\s_-]*(\d+)", 1, None),
+        (r"_(\d+)_", 1, None),
+        (r"第(\d+)[章话回]", 1, None),  # Chinese chapter markers
+        (r"제(\d+)[장화회]", 1, None),  # Korean chapter markers
+    ]
+    
+    # Try each pattern
+    for pattern, num_group, title_group in filename_patterns:
+        m = re.search(pattern, filename, re.IGNORECASE)
+        if m:
+            try:
+                # Extract chapter number, removing leading zeros
+                chapter_num = int(m.group(num_group).lstrip('0') or '0')
+                if title_group and len(m.groups()) >= title_group:
+                    chapter_title = m.group(title_group)
+                break
+            except (ValueError, IndexError):
+                continue
+    
+    # If still no chapter number, try content-based extraction
+    if chapter_num is None and text:
+        content_patterns = [
+            r'Chapter\s+(\d+)',
+            r'第\s*(\d+)\s*章',
+            r'제\s*(\d+)\s*장',
+            r'Chapter\s+([IVXLCDM]+)',  # Roman numerals
+            r'\bCh\.?\s*(\d+)',
+            r'Episode\s+(\d+)',
+            r'Part\s+(\d+)',
+        ]
+        
+        for pattern in content_patterns:
+            m = re.search(pattern, text[:1000], re.IGNORECASE)
+            if m:
+                if m.group(1).isdigit():
+                    chapter_num = int(m.group(1))
+                else:
+                    # Try to convert Roman numerals
+                    num = roman_to_int(m.group(1))
+                    if num is not None:
+                        chapter_num = num
+                if chapter_num is not None:
+                    break
+    
+    return chapter_num, chapter_title
+
+def normalize_chapter_numbers(results):
+    """Normalize chapter numbers to handle different formats"""
+    def _extract_num_from_filename(name: str):
+        if not name:
+            return None
+        base = os.path.basename(name)
+        if base.startswith("response_"):
+            base = base[len("response_"):]
+        while True:
+            new_base, ext = os.path.splitext(base)
+            if not ext:
+                break
+            base = new_base
+        m_dec = re.match(r"^(\d{1,4})_(\d{1,2})$", base)
+        if m_dec:
+            major = int(m_dec.group(1).lstrip("0") or "0")
+            minor = int(m_dec.group(2))
+            return float(f"{major}.{minor:02d}")
+        nums = re.findall(r"(\d+)", base)
+        if nums:
+            return int(nums[-1])
+        return None
+
+    for result in results:
+        num = result.get('chapter_num')
+        if num is None:
+            num = _extract_num_from_filename(result.get('filename'))
+        else:
+            try:
+                num = int(num)
+            except Exception:
+                num = _extract_num_from_filename(result.get('filename'))
+        # Treat absurdly large numbers as invalid and fall back to filename
+        if isinstance(num, int) and num > 1_000_000:
+            alt = _extract_num_from_filename(result.get('filename'))
+            if alt is not None:
+                num = alt
+        if num is not None:
+            result['normalized_chapter_num'] = num
+
+def fuzzy_match_chapter_numbers(text1, text2, num1, num2):
+    """Check if chapter numbers might be the same despite OCR errors"""
+    if num1 == num2:
+        return True
+    
+    # Check if numbers are close (OCR might misread)
+    if abs(num1 - num2) <= 1:
+        # Look for chapter declarations in text
+        pattern = r'Chapter\s*(\d+|[IVXLCDM]+)'
+        matches1 = re.findall(pattern, text1[:500], re.IGNORECASE)
+        matches2 = re.findall(pattern, text2[:500], re.IGNORECASE)
+        
+        if matches1 and matches2:
+            # Try to normalize roman numerals
+            def roman_to_int(s):
+                try:
+                    values = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
+                    result = 0
+                    for i in range(len(s)):
+                        if i + 1 < len(s) and values[s[i]] < values[s[i + 1]]:
+                            result -= values[s[i]]
+                        else:
+                            result += values[s[i]]
+                    return result
+                except:
+                    return None
+            
+            for m1 in matches1:
+                for m2 in matches2:
+                    if m1.isdigit() and m2.isdigit():
+                        if abs(int(m1) - int(m2)) <= 1:
+                            return True
+                    elif not m1.isdigit() and not m2.isdigit():
+                        r1 = roman_to_int(m1.upper())
+                        r2 = roman_to_int(m2.upper())
+                        if r1 and r2 and abs(r1 - r2) <= 1:
+                            return True
+    
+    return False
+
+def create_minhash_index(results, config):
+    """Create LSH index for fast similarity lookups"""
+    if not MINHASH_AVAILABLE:
+        return None, None
+    
+    threshold = config.get_threshold('minhash_threshold')
+    lsh = MinHashLSH(threshold=threshold, num_perm=128)
+    minhashes = {}
+    
+    total = len(results)
+    for idx, result in enumerate(results):
+        if idx % 50 == 0 and idx > 0:
+            print(f"   Building MinHash index: {idx}/{total} files processed...")
+            
+        text = result.get('normalized_text', '')
+        if not text:
+            continue
+            
+        # Create MinHash
+        m = MinHash(num_perm=128)
+        for word in text.split():
+            m.update(word.encode('utf8'))
+        
+        minhashes[result['filename']] = m
+        lsh.insert(result['filename'], m)
+    
+    return lsh, minhashes
+
+def _normalize_text_cached(cache_key):
+    """Cached implementation of normalize_text"""
+    # This will be called with the actual text
+    return cache_key
+
+def normalize_text(text):
+    """Normalize text for comparison - CACHED VERSION"""
+    normalized = text.lower().strip()
+    
+    # Remove chapter indicators
+    patterns = [
+        r'chapter\s*\d+\s*:?\s*', r'第\s*\d+\s*章', r'제\s*\d+\s*장',
+        r'chapter\s+[ivxlcdm]+\s*:?\s*', r'\bch\.?\s*\d+\s*:?\s*',
+        r'^\s*\d+\s*\.?\s*', r'response_\d+_.*?\.html',
+        r'\d{4}-\d{2}-\d{2}', r'\d{2}:\d{2}:\d{2}', r'<[^>]+>'
+    ]
+    
+    for pattern in patterns:
+        normalized = re.sub(pattern, '', normalized, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Normalize whitespace and punctuation
+    normalized = re.sub(r'\s+', ' ', normalized)
+    normalized = re.sub(r'[^\w\s]', '', normalized)
+    
+    return normalized
+
+# Configure cache size dynamically
+normalize_text = lru_cache(maxsize=get_cache_size("normalize_text"))(normalize_text)
+
+@lru_cache(maxsize=5000)
+def _generate_content_hashes_cached(text_hash):
+    """Cached helper for generate_content_hashes"""
+    # This is just a placeholder - actual implementation is in the main function
+    return text_hash
+
+@lru_cache(maxsize=5000)
+def generate_content_hashes(text):
+    """Generate multiple hashes for better duplicate detection - CACHED VERSION"""
+    # For very long texts, use first 50KB for cache key
+    cache_key = _get_cache_key(text, 50000)
+    
+    normalized = normalize_text(text)
+    
+    # 1. Raw hash
+    raw_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()
+    
+    # 2. Normalized hash
+    normalized_hash = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+    
+    # 3. Content fingerprint
+    fingerprint = extract_content_fingerprint(text)
+    fingerprint_hash = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest() if fingerprint else None
+    
+    # 4. Word frequency hash
+    words = re.findall(r'\w+', normalized.lower())
+    word_freq = Counter(words)
+    significant_words = [(w, c) for w, c in word_freq.most_common(100) 
+                        if w not in COMMON_WORDS][:50]
+    word_sig = ' '.join([f"{w}:{c}" for w, c in significant_words])
+    word_hash = hashlib.sha256(word_sig.encode('utf-8')).hexdigest() if word_sig else None
+    
+    # 5. First chunk hash
+    first_chunk = normalized[:1000] if len(normalized) > 1000 else normalized
+    first_chunk_hash = hashlib.sha256(first_chunk.encode('utf-8')).hexdigest()
+    
+    # 6. Semantic fingerprint hash - FIXED
+    semantic_result = extract_semantic_fingerprint(text)
+    if semantic_result and isinstance(semantic_result, tuple) and len(semantic_result) >= 2:
+        semantic_str = semantic_result[0]
+        semantic_hash = hashlib.sha256(semantic_str.encode('utf-8')).hexdigest()
+    else:
+        # Fallback if function returns unexpected value
+        semantic_hash = hashlib.sha256(text[:1000].encode('utf-8')).hexdigest()
+    
+    # 7. Structural signature hash
+    structural_sig = extract_structural_signature(text)
+    if structural_sig:
+        structural_str = json.dumps(structural_sig, sort_keys=True)
+        structural_hash = hashlib.sha256(structural_str.encode('utf-8')).hexdigest()
+    else:
+        # Fallback
+        structural_hash = hashlib.sha256(text[:500].encode('utf-8')).hexdigest()
+    
+    return {
+        'raw': raw_hash,
+        'normalized': normalized_hash,
+        'fingerprint': fingerprint_hash,
+        'word_freq': word_hash,
+        'first_chunk': first_chunk_hash,
+        'semantic': semantic_hash,
+        'structural': structural_hash
+    }
+
+@lru_cache(maxsize=20000)
+def _calculate_similarity_ratio_cached(text1_hash, text2_hash):
+    """Cached helper for similarity ratio"""
+    return (text1_hash, text2_hash)
+
+@lru_cache(maxsize=20000)
+def calculate_similarity_ratio(text1, text2):
+    """Calculate similarity with optimizations for large texts - CACHED VERSION"""
+    # Ensure consistent ordering for cache
+    if text1 > text2:
+        text1, text2 = text2, text1
+    
+    len_ratio = len(text1) / max(1, len(text2))
+    if len_ratio < 0.7 or len_ratio > 1.3:
+        return 0.0
+    
+    if len(text1) > 10000:
+        sample_size = 3000
+        samples1 = [
+            text1[:sample_size],
+            text1[len(text1)//2 - sample_size//2:len(text1)//2 + sample_size//2],
+            text1[-sample_size:]
+        ]
+        samples2 = [
+            text2[:sample_size],
+            text2[len(text2)//2 - sample_size//2:len(text2)//2 + sample_size//2],
+            text2[-sample_size:]
+        ]
+        similarities = [SequenceMatcher(None, s1, s2).ratio() for s1, s2 in zip(samples1, samples2)]
+        return sum(similarities) / len(similarities)
+    else:
+        return SequenceMatcher(None, text1, text2).ratio()
+
+# Configure cache size dynamically
+calculate_similarity_ratio = lru_cache(maxsize=get_cache_size("similarity_ratio"))(calculate_similarity_ratio)
+
+# This function should NOT be cached directly
+def calculate_semantic_similarity(sig1, sig2):
+    """Calculate similarity between two semantic signatures
+    This wrapper handles dict inputs and calls the cached implementation
+    """
+    # Convert dicts to JSON strings
+    if isinstance(sig1, dict):
+        sig1_json = json.dumps(sig1, sort_keys=True)
+    else:
+        sig1_json = sig1
+        
+    if isinstance(sig2, dict):
+        sig2_json = json.dumps(sig2, sort_keys=True)
+    else:
+        sig2_json = sig2
+    
+    # Call the cached implementation with JSON strings
+    return _calculate_semantic_similarity_cached(sig1_json, sig2_json)
+
+# This function IS cached because it only receives JSON strings
+def _calculate_semantic_similarity_cached(sig1_json, sig2_json):
+    """Cached implementation that works with JSON strings"""
+    sig1 = json.loads(sig1_json)
+    sig2 = json.loads(sig2_json)
+    
+    # Character overlap
+    chars1 = set(sig1.get('characters', []))
+    chars2 = set(sig2.get('characters', []))
+    char_overlap = len(chars1 & chars2) / max(1, len(chars1 | chars2))
+    
+    # Dialogue density similarity
+    dial_sim = 1 - abs(sig1.get('dialogue_density', 0) - sig2.get('dialogue_density', 0))
+    
+    # Action density similarity
+    act_sim = 1 - abs(sig1.get('action_density', 0) - sig2.get('action_density', 0))
+    
+    # Number overlap
+    nums1 = set(sig1.get('numbers', []))
+    nums2 = set(sig2.get('numbers', []))
+    num_overlap = len(nums1 & nums2) / max(1, len(nums1 | nums2)) if nums1 or nums2 else 1
+    
+    # Length similarity
+    len_ratio = min(sig1.get('text_length', 1), sig2.get('text_length', 1)) / max(1, max(sig1.get('text_length', 1), sig2.get('text_length', 1)))
+    
+    # Weighted average
+    return (char_overlap * 0.4 + dial_sim * 0.2 + act_sim * 0.2 + num_overlap * 0.1 + len_ratio * 0.1)
+
+# Apply caching ONLY to the implementation function, NOT the wrapper
+_calculate_semantic_similarity_cached = lru_cache(maxsize=get_cache_size("semantic_similarity") or 5000)(_calculate_semantic_similarity_cached)
+
+# Make sure calculate_semantic_similarity is NOT cached
+# If there's any line like this, REMOVE IT:
+# calculate_semantic_similarity = lru_cache(...)(calculate_semantic_similarity)
+
+
+def calculate_semantic_fingerprint_similarity(text1, text2):
+    """Calculate similarity based on semantic structure rather than exact wording - CACHED VERSION"""
+    # For very long texts, truncate for cache efficiency
+    cache_text1 = text1[:100000] if len(text1) > 100000 else text1
+    cache_text2 = text2[:100000] if len(text2) > 100000 else text2
+    
+    fingerprint1, sig1 = extract_semantic_fingerprint(cache_text1)
+    fingerprint2, sig2 = extract_semantic_fingerprint(cache_text2)
+    
+    similarities = []
+    
+    # Compare dialogue structure (very reliable indicator)
+    if sig1['dialogue_count'] > 0 and sig2['dialogue_count'] > 0:
+        dialogue_ratio = min(sig1['dialogue_count'], sig2['dialogue_count']) / max(sig1['dialogue_count'], sig2['dialogue_count'])
+        similarities.append(dialogue_ratio)
+        
+        # Compare dialogue length patterns
+        if sig1['dialogue_lengths'] and sig2['dialogue_lengths']:
+            len_similarity = SequenceMatcher(None, sig1['dialogue_lengths'][:30], sig2['dialogue_lengths'][:30]).ratio()
+            similarities.append(len_similarity)
+    
+    # Compare character lists (names should mostly match)
+    if sig1['characters'] and sig2['characters']:
+        char_set1 = set(sig1['characters'])
+        char_set2 = set(sig2['characters'])
+        char_overlap = len(char_set1 & char_set2) / max(len(char_set1), len(char_set2))
+        similarities.append(char_overlap)
+        
+        # Compare character frequency patterns
+        freq_similarity = SequenceMatcher(None, sig1['character_frequencies'], sig2['character_frequencies']).ratio()
+        similarities.append(freq_similarity * 0.8)  # Slightly less weight
+    
+    # Compare numbers (very reliable - numbers rarely change)
+    if sig1['numbers'] and sig2['numbers']:
+        num_set1 = set(sig1['numbers'])
+        num_set2 = set(sig2['numbers'])
+        num_overlap = len(num_set1 & num_set2) / max(len(num_set1), len(num_set2))
+        similarities.append(num_overlap)
+    
+    # Compare speaker sequences
+    if len(sig1['speaker_sequence']) >= 5 and len(sig2['speaker_sequence']) >= 5:
+        seq_similarity = SequenceMatcher(None, sig1['speaker_sequence'], sig2['speaker_sequence']).ratio()
+        similarities.append(seq_similarity)
+    
+    # Compare paragraph structure
+    if len(sig1['paragraph_structure']) >= 10 and len(sig2['paragraph_structure']) >= 10:
+        # Allow for some variation in lengths (±20%)
+        para_similarities = []
+        for i in range(min(len(sig1['paragraph_structure']), len(sig2['paragraph_structure']))):
+            len1 = sig1['paragraph_structure'][i]
+            len2 = sig2['paragraph_structure'][i]
+            if len1 > 0 and len2 > 0:
+                ratio = min(len1, len2) / max(len1, len2)
+                para_similarities.append(1.0 if ratio > 0.8 else ratio)
+        
+        if para_similarities:
+            similarities.append(sum(para_similarities) / len(para_similarities))
+    
+    # Word count ratio (should be similar)
+    word_ratio = min(sig1['total_words'], sig2['total_words']) / max(sig1['total_words'], sig2['total_words'])
+    similarities.append(word_ratio * 0.5)  # Less weight
+    
+    # Calculate weighted average
+    if similarities:
+        return sum(similarities) / len(similarities)
+    else:
+        return 0.0
+
+# Configure cache size dynamically
+calculate_semantic_fingerprint_similarity = lru_cache(maxsize=get_cache_size("semantic_fingerprint"))(calculate_semantic_fingerprint_similarity)
+
+# This function should NOT be cached directly - it's the wrapper
+def calculate_structural_similarity(struct1, struct2):
+    """Calculate similarity between two structural signatures
+    This wrapper handles dict inputs and calls the cached implementation
+    """
+    # Convert dicts to JSON strings
+    if isinstance(struct1, dict):
+        struct1_json = json.dumps(struct1, sort_keys=True)
+    else:
+        struct1_json = struct1
+        
+    if isinstance(struct2, dict):
+        struct2_json = json.dumps(struct2, sort_keys=True)
+    else:
+        struct2_json = struct2
+    
+    # Call the cached implementation with JSON strings
+    return _calculate_structural_similarity_cached(struct1_json, struct2_json)
+
+# This function IS cached because it only receives JSON strings
+def _calculate_structural_similarity_cached(struct1_json, struct2_json):
+    """Cached implementation that works with JSON strings"""
+    # Convert JSON strings back to dictionaries
+    struct1 = json.loads(struct1_json)
+    struct2 = json.loads(struct2_json)
+    
+    # Pattern similarity
+    pattern_sim = SequenceMatcher(None, struct1.get('pattern', ''), struct2.get('pattern', '')).ratio()
+    
+    # Paragraph count similarity
+    para_ratio = min(struct1.get('paragraph_count', 1), struct2.get('paragraph_count', 1)) / \
+                 max(1, max(struct1.get('paragraph_count', 1), struct2.get('paragraph_count', 1)))
+    
+    # Average paragraph length similarity
+    len_ratio = min(struct1.get('avg_paragraph_length', 1), struct2.get('avg_paragraph_length', 1)) / \
+                max(1, max(struct1.get('avg_paragraph_length', 1), struct2.get('avg_paragraph_length', 1)))
+    
+    # Dialogue ratio similarity
+    dial_sim = 1 - abs(struct1.get('dialogue_ratio', 0) - struct2.get('dialogue_ratio', 0))
+    
+    # Weighted average
+    return (pattern_sim * 0.5 + para_ratio * 0.2 + len_ratio * 0.15 + dial_sim * 0.15)
+
+# Apply caching ONLY to the implementation function, NOT the wrapper
+_calculate_structural_similarity_cached = lru_cache(maxsize=get_cache_size("structural_similarity") or 5000)(_calculate_structural_similarity_cached)
+
+# Note: cache configurations are already applied earlier in the file
+
+def extract_chapter_title(text):
+    """Extract chapter title from text"""
+    patterns = [
+        r'Chapter\s+\d+\s*:\s*([^\n\r]+)',
+        r'Chapter\s+\d+\s+([^\n\r]+)',
+        r'第\s*\d+\s*章\s*[:：]?\s*([^\n\r]+)',
+        r'제\s*\d+\s*장\s*[:：]?\s*([^\n\r]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text[:500], re.IGNORECASE)
+        if match:
+            title = match.group(1).strip()
+            title = re.sub(r'\s+', ' ', title)
+            title = title.split('.')[0].split('The')[0].strip()
+            return title[:100] if len(title) > 100 else title
+    
+    return None
+
+def merge_duplicate_groups(duplicate_groups, filename1, filename2):
+    """Intelligently merge duplicate groups when new connections are found
+    
+    Note: When called from parallel processing, should be wrapped with a lock
+    """
+    group1 = duplicate_groups.get(filename1)
+    group2 = duplicate_groups.get(filename2)
+    
+    if group1 is None and group2 is None:
+        # Create new group
+        new_group = max(duplicate_groups.values(), default=-1) + 1
+        duplicate_groups[filename1] = new_group
+        duplicate_groups[filename2] = new_group
+    elif group1 is not None and group2 is None:
+        # Add to existing group
+        duplicate_groups[filename2] = group1
+    elif group1 is None and group2 is not None:
+        # Add to existing group
+        duplicate_groups[filename1] = group2
+    elif group1 != group2:
+        # Merge two groups
+        min_group = min(group1, group2)
+        max_group = max(group1, group2)
+        for filename, group in duplicate_groups.items():
+            if group == max_group:
+                duplicate_groups[filename] = min_group
+
+
+def process_enhance_duplicate_batch(args):
+    """Process a batch of enhanced duplicate detection - MUST BE AT MODULE LEVEL"""
+    batch_type, batch_data, worker_data = args
+    batch_results = []
+    
+    # Import what we need
+    from difflib import SequenceMatcher
+    import hashlib
+    
+    # Local caches for this worker
+    similarity_cache = {}
+    preview_cache = {}
+    
+    if batch_type == 'chapter_comparison':
+        # Process chapter number group comparisons
+        comparisons = batch_data
+        text_data = worker_data['text_data']
+        threshold = worker_data['similarity_threshold']
+        
+        for idx1, idx2, file1, file2, chapter_num in comparisons:
+            # Get text data
+            data1 = text_data[idx1]
+            data2 = text_data[idx2]
+            
+            # Create cache key (handle None hashes)
+            if data1['hash'] is None or data2['hash'] is None:
+                continue  # Skip if either file is empty
+            
+            cache_key = (min(data1['hash'], data2['hash']), max(data1['hash'], data2['hash']))
+            
+            if cache_key in similarity_cache:
+                similarity = similarity_cache[cache_key]
+            else:
+                # Check if hashes are identical
+                if data1['hash'] == data2['hash']:
+                    similarity = 1.0
+                else:
+                    # Calculate similarity
+                    similarity = calculate_similarity_ratio(data1['text'], data2['text'])
+                
+                similarity_cache[cache_key] = similarity
+            
+            if similarity >= threshold:
+                batch_results.append({
+                    'type': 'chapter_duplicate',
+                    'file1': file1,
+                    'file2': file2,
+                    'chapter': chapter_num,
+                    'similarity': similarity,
+                    'preview1': data1['text'][:100],
+                    'preview2': data2['text'][:100]
+                })
+    
+    elif batch_type == 'preview_comparison':
+        # Process preview-based comparisons
+        comparisons = batch_data
+        text_data = worker_data['text_data']
+        preview_data = worker_data['preview_data']
+        threshold = worker_data['similarity_threshold']
+        preview_threshold = worker_data['preview_threshold']
+        
+        for idx1, idx2, file1, file2 in comparisons:
+            # First check preview similarity
+            preview1 = preview_data[idx1]
+            preview2 = preview_data[idx2]
+            
+            # Normalize previews (first 50 words)
+            norm_preview1 = ' '.join(preview1['text'].split()[:50])
+            norm_preview2 = ' '.join(preview2['text'].split()[:50])
+            
+            # Check preview similarity (handle None hashes)
+            if preview1['hash'] is None or preview2['hash'] is None:
+                continue  # Skip if either preview is empty
+            
+            preview_cache_key = (min(preview1['hash'], preview2['hash']), 
+                               max(preview1['hash'], preview2['hash']))
+            
+            if preview_cache_key in preview_cache:
+                preview_sim = preview_cache[preview_cache_key]
+            else:
+                preview_sim = calculate_similarity_ratio(norm_preview1[:500], norm_preview2[:500])
+                preview_cache[preview_cache_key] = preview_sim
+            
+            # If previews are similar enough, check full text
+            if preview_sim >= preview_threshold:
+                # Get full text data
+                data1 = text_data[idx1]
+                data2 = text_data[idx2]
+                
+                # Check full text similarity (handle None hashes)
+                if data1['hash'] is None or data2['hash'] is None:
+                    continue  # Skip if either file is empty
+                
+                cache_key = (min(data1['hash'], data2['hash']), max(data1['hash'], data2['hash']))
+                
+                if cache_key in similarity_cache:
+                    similarity = similarity_cache[cache_key]
+                else:
+                    if data1['hash'] == data2['hash']:
+                        similarity = 1.0
+                    else:
+                        similarity = calculate_similarity_ratio(data1['text'], data2['text'])
+                    
+                    similarity_cache[cache_key] = similarity
+                
+                if similarity >= threshold:
+                    batch_results.append({
+                        'type': 'misnamed_duplicate',
+                        'file1': file1,
+                        'file2': file2,
+                        'chapter': f"misnamed_{data1.get('chapter_num', '?')}_vs_{data2.get('chapter_num', '?')}",
+                        'similarity': similarity,
+                        'preview_similarity': preview_sim
+                    })
+    
+    return batch_results
+
+
+def _scan_config_json_path():
+    """Path to the REAL config.json: next to the frozen exe, or this script.
+
+    ``__file__`` alone is wrong in frozen builds (PyInstaller temp dir).
+    Glossarion Mobile resolves it through mobile_runtime (``CONFIG_FILE``).
+    """
+    import sys as _sys
+    if getattr(_sys, 'frozen', False):
+        base_dir = os.path.dirname(os.path.abspath(_sys.executable))
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return _config_json_in(base_dir)
+
+
+def _resolve_scan_max_workers_config(extra_sections=()):
+    """Resolve the configured QA-scan parallel worker limit.
+
+    Resolution order:
+      1. ``AI_HUNTER_MAX_WORKERS`` env var — kept current by the QA
+         scanner settings GUI, works in frozen builds too.
+      2. ``config.json`` next to the frozen exe (``sys.executable``) or,
+         when running from source, next to this script. The old code
+         only looked next to ``__file__``, which in a frozen build is
+         the PyInstaller temp extraction dir — config.json never exists
+         there, so the limit silently fell back to 0 (= ALL cores) no
+         matter what the user configured.
+
+    Returns 0 for "use all cores".
+    """
+    env_raw = os.getenv('AI_HUNTER_MAX_WORKERS', '').strip()
+    if env_raw:
+        try:
+            return max(0, int(env_raw))
+        except ValueError:
+            pass
+    try:
+        config_path = _scan_config_json_path()
+        if not os.path.exists(config_path):
+            return 0
+        with open(config_path, 'r', encoding='utf-8') as f:
+            full_config = json.load(f)
+        for section in list(extra_sections) + ['qa_scanner_config']:
+            sec = full_config.get(section, {})
+            if isinstance(sec, dict) and 'max_workers' in sec:
+                return max(0, int(sec['max_workers']))
+        # Default: half the CPU cores (balanced speed vs responsiveness)
+        return max(0, int(full_config.get('ai_hunter_config', {})
+                          .get('ai_hunter_max_workers',
+                               max(1, (os.cpu_count() or 4) // 2))))
+    except Exception:
+        return 0
+
+
+def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
+    """Additional duplicate detection - PROCESSPOOLEXECUTOR VERSION"""
+
+    log("🔍 Enhanced duplicate detection (different naming formats)...")
+
+    # Determine number of workers
+    cpu_count = multiprocessing.cpu_count()
+    max_workers_config = _resolve_scan_max_workers_config()
+    
+    if max_workers_config > 0:
+        max_workers = min(max_workers_config, cpu_count)
+        log(f"   🖥️ Using {max_workers} parallel workers (configured limit)")
+    else:
+        max_workers = cpu_count
+        log(f"   🚀 Using ALL {max_workers} CPU cores for enhanced detection")
+        if cpu_count > 8:
+            log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
+
+    try:
+        _load_path = _scan_config_json_path()
+        _cfg_use_threads = False
+        if os.path.exists(_load_path):
+            with open(_load_path, 'r', encoding='utf-8') as _cf:
+                _cfg_use_threads = bool(
+                    json.load(_cf).get('qa_scanner_settings', {}).get('use_thread_executor', False)
+                )
+    except Exception:
+        _cfg_use_threads = False
+    _use_thread_pool_enh = bool(
+        _cfg_use_threads or os.environ.get('QA_USE_THREAD_EXECUTOR', '0') == '1'
+        or not mobile_runtime.processes_available()
+    )
+    if _use_thread_pool_enh:
+        _ExecCls = concurrent.futures.ThreadPoolExecutor
+        _kw = {'max_workers': max_workers}
+        log("⚡ ThreadPoolExecutor enabled for enhanced duplicate detection")
+    else:
+        _ExecCls = concurrent.futures.ProcessPoolExecutor
+        _kw = {'max_workers': max_workers, 'initializer': _init_worker_process}
+        log("⚡ ProcessPoolExecutor enabled for enhanced duplicate detection")
+    
+    # Pre-compute all data
+    log("   📊 Pre-computing text and preview data...")
+    
+    text_data = {}
+    preview_data = {}
+    
+    for i, result in enumerate(results):
+        # Text data (first 5000 chars)
+        base_text = result.get('dup_text') if isinstance(result, dict) else None
+        if not isinstance(base_text, str):
+            base_text = result.get('raw_text', '')
+        text = base_text[:5000]
+        text_data[i] = {
+            'text': text,
+            'hash': hashlib.sha256(text.encode()).hexdigest() if text else None,
+            'length': len(text),
+            'chapter_num': result.get('chapter_num')
+        }
+        
+        # Preview data (first 1000 chars)
+        preview = base_text[:1000].strip()
+        preview_data[i] = {
+            'text': preview,
+            'hash': hashlib.sha256(preview.encode()).hexdigest() if preview else None
+        }
+    
+    # First, normalize all chapter numbers
+    normalize_chapter_numbers(results)
+    
+    # PART 1: Group by normalized chapter number
+    log("   📚 Checking files with same chapter numbers...")
+    
+    chapter_groups = {}
+    for i, result in enumerate(results):
+        if result.get('normalized_chapter_num') is not None:
+            num = result['normalized_chapter_num']
+            if num not in chapter_groups:
+                chapter_groups[num] = []
+            chapter_groups[num].append((i, result))
+    
+    # Create comparison tasks for chapter groups
+    chapter_comparisons = []
+    for chapter_num, group in chapter_groups.items():
+        if len(group) > 1:
+            log(f"   └─ Found {len(group)} files for chapter {chapter_num}")
+            
+            # Create all pair comparisons for this group
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    idx1, result1 = group[i]
+                    idx2, result2 = group[j]
+                    chapter_comparisons.append((
+                        idx1, idx2, 
+                        result1['filename'], result2['filename'],
+                        chapter_num
+                    ))
+    
+    # Process chapter comparisons in batches
+    duplicates_found = []
+    
+    if chapter_comparisons:
+        log(f"   📋 Processing {len(chapter_comparisons)} chapter comparisons...")
+        
+        # Prepare worker data
+        worker_data = {
+            'text_data': text_data,
+            'similarity_threshold': config.get_threshold('similarity')
+        }
+        
+        # Create batches
+        batch_size = max(100, len(chapter_comparisons) // max_workers)
+        batches = []
+        
+        for i in range(0, len(chapter_comparisons), batch_size):
+            batch = chapter_comparisons[i:i + batch_size]
+            batches.append(('chapter_comparison', batch, worker_data))
+        
+        with _ExecCls(**_kw) as executor:
+            futures = []
+            
+            for batch_args in batches:
+                if should_stop and should_stop():
+                    log("⛔ Enhanced detection interrupted by user.")
+                    executor.shutdown(wait=True)
+                    return duplicates_found
+                
+                future = executor.submit(process_enhance_duplicate_batch, batch_args)
+                futures.append(future)
+            
+            # Collect results
+            for future in concurrent.futures.as_completed(futures):
+                batch_results = future.result()
+                
+                # Process results
+                for result in batch_results:
+                    if result['type'] == 'chapter_duplicate':
+                        # Update duplicate groups
+                        with merge_lock:
+                            merge_duplicate_groups(duplicate_groups, 
+                                                 result['file1'], 
+                                                 result['file2'])
+                            pair = tuple(sorted([result['file1'], result['file2']]))
+                            duplicate_confidence[pair] = max(
+                                duplicate_confidence.get(pair, 0), 
+                                result['similarity']
+                            )
+                        
+                        duplicates_found.append(result)
+                        
+                        log(f"      ✓ DUPLICATE: {result['file1']} ≈ {result['file2']} "
+                            f"({int(result['similarity']*100)}%)")
+                        log(f"      Preview 1: {result['preview1']}...")
+                        log(f"      Preview 2: {result['preview2']}...")
+    
+    # PART 2: Check for misnamed files
+    log("🔍 Checking for misnamed chapters (content vs filename mismatch)...")
+    
+    # Create preview-based comparison tasks
+    preview_comparisons = []
+    total_files = len(results)
+    
+    # We need to check all pairs, but we can filter some obvious non-matches
+    for i in range(total_files):
+        if i % 100 == 0 and i > 0:
+            log(f"   📊 Creating preview comparisons: {i}/{total_files} files...")
+        
+        for j in range(i + 1, total_files):
+            # Skip if:
+            # 1. Already in same duplicate group
+            if (results[i]['filename'] in duplicate_groups and 
+                results[j]['filename'] in duplicate_groups and
+                duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                continue
+            
+            # 2. Both have same chapter number (already checked above)
+            if (results[i].get('normalized_chapter_num') is not None and 
+                results[j].get('normalized_chapter_num') is not None and
+                results[i]['normalized_chapter_num'] == results[j]['normalized_chapter_num']):
+                continue
+            
+            # 3. Text lengths are very different (handle None/empty texts)
+            len1 = text_data[i]['length']
+            len2 = text_data[j]['length']
+            if len1 == 0 or len2 == 0:
+                continue  # Skip empty files
+            
+            len_ratio = min(len1, len2) / max(len1, len2)
+            if len_ratio < 0.7:  # Skip if lengths differ by more than 30%
+                continue
+            
+            preview_comparisons.append((i, j, results[i]['filename'], results[j]['filename']))
+    
+    if preview_comparisons:
+        log(f"   📋 Processing {len(preview_comparisons)} preview comparisons...")
+        
+        # Prepare worker data
+        worker_data = {
+            'text_data': text_data,
+            'preview_data': preview_data,
+            'similarity_threshold': config.get_threshold('similarity'),
+            'preview_threshold': 0.9  # High threshold for preview matching
+        }
+        
+        # Create batches
+        batch_size = max(500, len(preview_comparisons) // (max_workers * 10))
+        batches = []
+        
+        for i in range(0, len(preview_comparisons), batch_size):
+            batch = preview_comparisons[i:i + batch_size]
+            batches.append(('preview_comparison', batch, worker_data))
+        
+        with _ExecCls(**_kw) as executor:
+            futures = []
+            
+            for batch_args in batches:
+                if should_stop and should_stop():
+                    log("⛔ Enhanced detection interrupted by user.")
+                    executor.shutdown(wait=True)
+                    return duplicates_found
+                
+                future = executor.submit(process_enhance_duplicate_batch, batch_args)
+                futures.append(future)
+            
+            # Collect results with progress
+            completed = 0
+            for future in concurrent.futures.as_completed(futures):
+                completed += 1
+                if completed % 10 == 0:
+                    log(f"   📊 Preview comparison progress: {completed}/{len(futures)} batches")
+                
+                batch_results = future.result()
+                
+                # Process results
+                for result in batch_results:
+                    if result['type'] == 'misnamed_duplicate':
+                        # Update duplicate groups
+                        with merge_lock:
+                            merge_duplicate_groups(duplicate_groups, 
+                                                 result['file1'], 
+                                                 result['file2'])
+                            pair = tuple(sorted([result['file1'], result['file2']]))
+                            duplicate_confidence[pair] = max(
+                                duplicate_confidence.get(pair, 0), 
+                                result['similarity']
+                            )
+                        
+                        duplicates_found.append(result)
+                        
+                        log(f"      ✓ Found misnamed duplicate: {result['file1']} ≈ {result['file2']} "
+                            f"({int(result['similarity']*100)}%)")
+    
+    log(f"✅ Enhanced detection complete! Found {len(duplicates_found)} duplicates")
+    
+    return duplicates_found
+    
+def detect_duplicates(results, log, should_stop, config):
+    """Detect duplicates using multiple strategies with enhanced methods - PERFORMANCE OPTIMIZED"""
+    duplicate_groups = {}
+    near_duplicate_groups = {}
+    duplicate_confidence = defaultdict(float)
+
+    # Allow modes to disable duplicate detection explicitly
+    if config.thresholds.get(config.mode, {}).get('disable_duplicate_check'):
+        if config.mode == 'quick-scan':
+            log("⚡ Quick Scan: duplicate detection disabled (sample size set to 0)")
+        elif config.mode == 'custom':
+            log("⚙️ Custom: duplicate detection disabled (sample size set to 0)")
+        else:
+            log(f"⚡ Duplicate detection disabled for mode: {config.mode}")
+        return duplicate_groups, near_duplicate_groups, duplicate_confidence
+    
+    total_files = len(results)
+    dup_start_time = time.time()  # Track timing for progress estimates
+    # Initialize comparisons_done at the function level
+    comparisons_done = 0
+    
+    # Get minimum word count threshold for small-file QA skips (default 500).
+    # This prevents section/notice files from being flagged as duplicates.
+    min_dup_words = _get_small_file_word_threshold(config=config)
+    
+    # Filter out files that are too small for duplicate detection
+    # These are likely section headers, notices, or metadata files
+    results_for_dup_check = []
+    skipped_small_files = []
+    
+    for result in results:
+        text = result.get('raw_text', '')
+        word_count = _count_small_file_words(text)
+        
+        if word_count < min_dup_words:
+            skipped_small_files.append(result['filename'])
+        else:
+            results_for_dup_check.append(result)
+    
+    if skipped_small_files:
+        log(f"⏭️  Skipping {len(skipped_small_files)} files with <{min_dup_words} words for duplicate checks")
+    
+    # Use filtered results for duplicate detection
+    total_files = len(results_for_dup_check)
+    if total_files == 0:
+        log("⚠️ No files with sufficient word count for duplicate detection")
+        return duplicate_groups, near_duplicate_groups, duplicate_confidence
+    
+    # Create local cached functions for this detection run
+    @lru_cache(maxsize=10000)
+    def compare_texts_cached(text1_hash, text2_hash, max_length=2000):
+        """Cached text comparison"""
+        # Find texts by hash
+        text1, text2 = None, None
+        for result in results_for_dup_check:
+            base_text = result.get('dup_text') if isinstance(result, dict) else None
+            if not isinstance(base_text, str):
+                base_text = result.get('raw_text', '')
+            text = base_text[:max_length]
+            text_hash = hashlib.sha256(text.encode()).hexdigest()
+            if text_hash == text1_hash:
+                text1 = text
+            if text_hash == text2_hash:
+                text2 = text
+        
+        if text1 and text2:
+            return calculate_similarity_ratio(text1, text2)
+        return 0.0
+    
+    # Pre-compute text hashes for caching
+    text_hashes = {}
+    for idx, result in enumerate(results_for_dup_check):
+        base_text = result.get('dup_text') if isinstance(result, dict) else None
+        if not isinstance(base_text, str):
+            base_text = result.get('raw_text', '')
+        text_hashes[idx] = {
+            'hash_2k': hashlib.sha256(base_text[:2000].encode()).hexdigest() if len(base_text) >= 2000 else None,
+            'hash_5k': hashlib.sha256(base_text[:5000].encode()).hexdigest() if len(base_text) >= 5000 else None,
+            'full_text': base_text
+        }
+    
+    # Extract additional signatures for filtered results
+    log("🔍 Extracting semantic and structural signatures...")
+    for idx, result in enumerate(results_for_dup_check):
+        if should_stop():
+            log("⛔ Signature extraction interrupted by user.")
+            return duplicate_groups, near_duplicate_groups, duplicate_confidence
+            
+        if idx % 10 == 0:
+            progress = int((idx / total_files) * 100)
+            log(f"   📊 Progress: {idx}/{total_files} files ({progress}%)")
+            
+        base_text = result.get('dup_text') if isinstance(result, dict) else None
+        if not isinstance(base_text, str):
+            base_text = result.get('raw_text', '')
+        _, semantic_sig = extract_semantic_fingerprint(base_text)
+        structural_sig = extract_structural_signature(base_text)
+        result['semantic_sig'] = semantic_sig
+        result['structural_sig'] = structural_sig
+        result['normalized_text'] = normalize_text(base_text)
+    
+    # Create MinHash index if available
+    lsh, minhashes = None, None
+    if MINHASH_AVAILABLE and len(results_for_dup_check) > 50:  # Use MinHash for larger datasets
+        log("🔍 Building MinHash index for fast similarity detection...")
+        lsh, minhashes = create_minhash_index(results_for_dup_check, config)
+    
+    # 1. Hash-based detection (exact and near-exact matches)
+    content_hashes = defaultdict(lambda: defaultdict(list))
+    
+    for idx, result in enumerate(results_for_dup_check):
+        hashes = result['hashes']
+        file_info = {
+            'filename': result['filename'],
+            'idx': idx,
+            'chapter_num': result['chapter_num'],
+            'result': result
+        }
+        
+        for hash_type, hash_value in hashes.items():
+            if hash_value:
+                content_hashes[hash_type][hash_value].append(file_info)
+    
+    # Multiple levels of duplicate detection
+    duplicate_detection_levels = [
+        ("exact content", 'raw', 1.0),
+        ("normalized content", 'normalized', 0.95),
+        ("semantic fingerprint", 'semantic', 0.85),
+        ("structural pattern", 'structural', 0.80),
+        ("first 1000 characters", 'first_chunk', 0.90),
+        ("content fingerprints", 'fingerprint', 0.85),
+        ("word frequency patterns", 'word_freq', 0.75)
+    ]
+    
+    for level_name, hash_type, confidence in duplicate_detection_levels:
+        log(f"🔍 Checking {level_name}...")
+        for hash_value, files in content_hashes[hash_type].items():
+            if len(files) > 1:
+                for i in range(len(files)):
+                    for j in range(i + 1, len(files)):
+                        merge_duplicate_groups(duplicate_groups, 
+                                             files[i]['filename'], 
+                                             files[j]['filename'])
+                        duplicate_confidence[(files[i]['filename'], files[j]['filename'])] = max(
+                            duplicate_confidence[(files[i]['filename'], files[j]['filename'])],
+                            confidence
+                        )
+                log(f"   └─ Found {len(files)} files with identical {level_name}")
+    
+    # 2. Enhanced duplicate detection for different naming formats
+    log("🔍 Checking for same chapters with different naming...")
+    enhance_duplicate_detection(results_for_dup_check, duplicate_groups, duplicate_confidence, config, log, should_stop)
+    
+    # 3. MinHash-based detection (if available)
+    if lsh:
+        log("🔍 Performing MinHash similarity detection...")
+        for result in results_for_dup_check:
+            if result['filename'] in minhashes:
+                candidates = lsh.query(minhashes[result['filename']])
+                for candidate in candidates:
+                    if candidate != result['filename']:
+                        # Calculate exact Jaccard similarity
+                        jaccard = minhashes[result['filename']].jaccard(minhashes[candidate])
+                        if jaccard >= config.get_threshold('minhash_threshold'):
+                            merge_duplicate_groups(duplicate_groups, result['filename'], candidate)
+                            duplicate_confidence[(result['filename'], candidate)] = jaccard
+    
+    # 4. Semantic similarity check - OPTIMIZED
+    log("🔍 Checking semantic similarity...")
+    semantic_threshold = config.get_threshold('semantic')
+
+    # Use MinHash candidates for semantic checking if available
+    if lsh and config.mode != 'ai-hunter':
+        log("🚀 Using MinHash optimization for faster semantic checking...")
+        checked_count = 0
+        
+        # For non-AI Hunter modes, use MinHash to limit comparisons
+        for result in results_for_dup_check:
+            if should_stop():
+                log("⛔ Semantic check interrupted by user.")
+                break
+            
+            checked_count += 1
+            if checked_count % 10 == 0:
+                log(f"   📊 MinHash semantic check: {checked_count}/{len(results_for_dup_check)} files processed...")
+                
+            if result['filename'] in minhashes:
+                candidates = lsh.query(minhashes[result['filename']])
+                for candidate_filename in candidates:
+                    if candidate_filename == result['filename']:
+                        continue
+                    
+                    # Find the candidate result
+                    candidate_result = next((r for r in results_for_dup_check if r['filename'] == candidate_filename), None)
+                    if not candidate_result:
+                        continue
+                    
+                    # Skip if already in same group
+                    if (result['filename'] in duplicate_groups and 
+                        candidate_filename in duplicate_groups and
+                        duplicate_groups[result['filename']] == duplicate_groups[candidate_filename]):
+                        continue
+                    
+                    sem_sim = calculate_semantic_similarity(result['semantic_sig'], 
+                                                          candidate_result['semantic_sig'])
+                    if sem_sim >= semantic_threshold:
+                        struct_sim = calculate_structural_similarity(result['structural_sig'],
+                                                                    candidate_result['structural_sig'])
+                        
+                        if struct_sim >= config.get_threshold('structural'):
+                            merge_duplicate_groups(duplicate_groups, 
+                                                 result['filename'], 
+                                                 candidate_filename)
+                            confidence = (sem_sim + struct_sim) / 2
+                            duplicate_confidence[(result['filename'], candidate_filename)] = confidence
+                            log(f"   └─ Semantic match: {result['filename']} ≈ {candidate_filename} "
+                                f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
+    
+    # AI Hunter mode or fallback: check all pairs
+    # Skip AI Hunter in quick scan mode
+    if config.mode == 'quick-scan':
+        log("   ⚡ Skipping AI Hunter checks for quick scan mode")
+    else:
+        # AI Hunter mode or fallback: check all pairs
+        if config.mode == 'ai-hunter' or not lsh:
+            if config.mode == 'ai-hunter':
+                log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
+                log("   ⚠️ This will check ALL file pairs - may take several minutes for large datasets")
+                
+                total_comparisons = (len(results) * (len(results) - 1)) // 2
+                log(f"   [DEBUG] Total comparisons to perform: {total_comparisons:,}")
+                
+                ai_start_time = time.time()  # Use local timer for AI Hunter
+                
+                # Initialize last_progress HERE for AI Hunter mode
+                last_progress = 0  # ADD THIS LINE
+                
+                # Use parallel processing for AI Hunter
+                comparisons_done = parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, 
+                                                          config, log, should_stop)
+                
+                # Log AI Hunter completion stats
+                ai_time = time.time() - ai_start_time
+                log(f"   [DEBUG] AI Hunter took {ai_time:.2f} seconds")
+                if comparisons_done and comparisons_done > 0:
+                    log(f"   [DEBUG] Comparisons/second: {int(comparisons_done/max(ai_time, 1)):,}")
+                    
+                # AI HUNTER IS DONE - DO NOT CONTINUE TO SEQUENTIAL CODE
+                
+            else:
+                # Keep the original sequential code for when there's no LSH and not in AI Hunter mode
+                log("⚠️ No MinHash index available - checking all pairs (slower)")
+                
+                # IMPORTANT: signatures were extracted only for results_for_dup_check
+                # (files over the minimum word count), so all-pairs comparisons must use that list.
+                pair_results = results_for_dup_check
+                
+                total_comparisons = (len(pair_results) * (len(pair_results) - 1)) // 2
+                comparisons_done = 0
+                last_progress = 0  # This is already here for sequential mode
+                ai_start_time = time.time()  # Use local timer
+                
+                # MOVE ALL THE SEQUENTIAL CODE HERE - INDENTED UNDER THIS ELSE BLOCK
+                
+                # Create cached AI Hunter comparison
+                @lru_cache(maxsize=10000)
+                def ai_hunter_check_cached(idx1, idx2):
+                    """Cached AI Hunter check"""
+                    sem_sim = calculate_semantic_similarity(pair_results[idx1]['semantic_sig'], 
+                                                          pair_results[idx2]['semantic_sig'])
+                    struct_sim = calculate_structural_similarity(pair_results[idx1]['structural_sig'],
+                                                               pair_results[idx2]['structural_sig'])
+                    
+                    # Quick text check
+                    hash1 = text_hashes[idx1]['hash_2k']
+                    hash2 = text_hashes[idx2]['hash_2k']
+                    if hash1 and hash2:
+                        if hash1 > hash2:
+                            hash1, hash2 = hash2, hash1
+                        text_sim = compare_texts_cached(hash1, hash2, 2000)
+                    else:
+                        text_sim = 0.0
+                    
+                    return sem_sim, struct_sim, text_sim
+                
+                # Check EVERY pair of files
+                for i in range(len(pair_results)):
+                    if should_stop():
+                        log("⛔ Semantic check interrupted by user.")
+                        break
+                    
+                    for j in range(i + 1, len(pair_results)):
+                        comparisons_done += 1
+                        
+                        # Show progress every 5%
+                        progress = int((comparisons_done / total_comparisons) * 100)
+                        if progress >= last_progress + 5:
+                            elapsed = time.time() - ai_start_time
+                            if elapsed > 0 and comparisons_done > 0:
+                                rate = comparisons_done / elapsed
+                                remaining = (total_comparisons - comparisons_done) / rate
+                                log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%) - ~{int(remaining)}s remaining")
+                            else:
+                                log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%)")
+                            last_progress = progress
+                        
+                        # Skip if already in same group
+                        if (pair_results[i]['filename'] in duplicate_groups and 
+                            pair_results[j]['filename'] in duplicate_groups and
+                            duplicate_groups[pair_results[i]['filename']] == duplicate_groups[pair_results[j]['filename']]):
+                            continue
+                        
+                        # Get cached comparison results
+                        sem_sim, struct_sim, text_sim = ai_hunter_check_cached(i, j)
+                        
+                        # For AI Hunter, use a combination approach
+                        if config.mode == 'ai-hunter':
+                            min_text_sim = config.get_threshold('min_text_similarity')
+                            # High semantic + high structural = likely same content
+                            # Guardrail: require >2% raw text similarity before flagging as duplicate/retranslation
+                            if (sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural')
+                                    and text_sim > min_text_sim):
+                                # If text similarity is low but semantic/structural is high, it's likely a retranslation
+                                if text_sim < 0.6:  # Different enough text
+                                    log(f"   🎯 AI Hunter: Found potential retranslation")
+                                    log(f"      Files: {pair_results[i]['filename']} ≈ {pair_results[j]['filename']}")
+                                    log(f"      Text similarity: {int(text_sim*100)}% (low)")
+                                    log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
+                                    log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
+                                    
+                                    merge_duplicate_groups(duplicate_groups, 
+                                                         pair_results[i]['filename'], 
+                                                         pair_results[j]['filename'])
+                                    confidence = (sem_sim + struct_sim) / 2
+                                    duplicate_confidence[(pair_results[i]['filename'], pair_results[j]['filename'])] = confidence
+                                    log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
+                        else:
+                            # Normal semantic checking
+                            if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
+                                merge_duplicate_groups(duplicate_groups, 
+                                                     pair_results[i]['filename'], 
+                                                     pair_results[j]['filename'])
+                                confidence = (sem_sim + struct_sim) / 2
+                                duplicate_confidence[(pair_results[i]['filename'], pair_results[j]['filename'])] = confidence
+                                log(f"   └─ Semantic match: {pair_results[i]['filename']} ≈ {pair_results[j]['filename']} "
+                                    f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
+                
+                # Clear local cache
+                ai_hunter_check_cached.cache_clear()
+
+    # THIS CODE SHOULD BE OUTSIDE ALL THE IF/ELSE BLOCKS - IT RUNS AFTER DUPLICATE DETECTION
+    # 5. Deep similarity check (content-based) - Now uses cached function
+    if config.mode != 'quick-scan':
+        perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
+                                    config.get_threshold('similarity'), log, should_stop)
+    else:
+        log("   ⚡ Skipping deep similarity check for quick scan mode")
+
+    # 6. Consecutive chapter check with fuzzy matching - SKIP IN QUICK SCAN
+    if config.mode != 'quick-scan':
+        check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop)
+        
+        # 7. Specific pattern detection
+        check_specific_patterns(results, duplicate_groups, duplicate_confidence, log, should_stop)
+    
+    # Clear local caches
+    compare_texts_cached.cache_clear()
+    
+    # Summary of findings
+    unique_groups = len(set(duplicate_groups.values())) if duplicate_groups else 0
+    files_with_duplicates = len(duplicate_groups)
+    
+    if files_with_duplicates > 0:
+        log(f"\n📊 Duplicate Detection Summary:")
+        log(f"   Found {files_with_duplicates} files with duplicates")
+        log(f"   Grouped into {unique_groups} duplicate groups")
+    else:
+        log(f"\n✅ No duplicates found among {len(results)} files")
+    
+    return duplicate_groups, near_duplicate_groups, duplicate_confidence
+
+def process_deep_similarity_batch(args):
+    """Process a batch of deep similarity comparisons with enhanced error handling"""
+    try:
+        batch, data = args
+        batch_results = []
+        
+        text_samples = data['text_samples']
+        threshold = data['threshold']
+        
+        # Import what we need inside the worker with error handling
+        try:
+            from difflib import SequenceMatcher
+        except ImportError as e:
+            return [{'error': f'Import error in worker: {e}'}]
+        
+        # Local cache for this worker process
+        similarity_cache = {}
+        semantic_cache = {}
+        
+        for i, j, filename_i, filename_j in batch:
+            try:
+                # Get text samples
+                sample_i = text_samples.get(i)
+                sample_j = text_samples.get(j)
+                
+                if not sample_i or not sample_j:
+                    continue
+                
+                # Use hashes for similarity check with caching
+                hash1 = sample_i['hash_5k']
+                hash2 = sample_j['hash_5k']
+                
+                # Create cache key (ensure consistent ordering)
+                cache_key = (min(hash1, hash2), max(hash1, hash2))
+                
+                # Check cache first
+                if cache_key in similarity_cache:
+                    similarity = similarity_cache[cache_key]
+                else:
+                    # Check if hashes are identical
+                    if hash1 == hash2:
+                        similarity = 1.0
+                    else:
+                        # Calculate text similarity
+                        text1 = sample_i['sample_5k']
+                        text2 = sample_j['sample_5k']
+                        similarity = calculate_similarity_ratio(text1, text2)
+                    
+                    # Cache the result
+                    similarity_cache[cache_key] = similarity
+                
+                if similarity >= threshold:
+                    batch_results.append({
+                        'filename1': filename_i,
+                        'filename2': filename_j,
+                        'similarity': similarity,
+                        'is_variant': False,
+                        'semantic_sim': None
+                    })
+                # Check for translation variants if similarity is moderate
+                elif 0.5 <= similarity < threshold:
+                    # Check semantic similarity with caching
+                    hash1_10k = sample_i['hash_10k']
+                    hash2_10k = sample_j['hash_10k']
+                    
+                    # Create semantic cache key
+                    sem_cache_key = (min(hash1_10k, hash2_10k), max(hash1_10k, hash2_10k))
+                    
+                    if sem_cache_key in semantic_cache:
+                        semantic_sim = semantic_cache[sem_cache_key]
+                    else:
+                        if hash1_10k == hash2_10k:
+                            semantic_sim = 1.0
+                        else:
+                            text1_10k = sample_i['sample_10k']
+                            text2_10k = sample_j['sample_10k']
+                            semantic_sim = calculate_semantic_fingerprint_similarity(text1_10k, text2_10k)
+                        
+                        # Cache the result
+                        semantic_cache[sem_cache_key] = semantic_sim
+                    
+                    if semantic_sim >= 0.75:  # High semantic similarity threshold
+                        combined_score = (similarity * 0.4 + semantic_sim * 0.6)
+                        
+                        if combined_score >= threshold:
+                            batch_results.append({
+                                'filename1': filename_i,
+                                'filename2': filename_j,
+                                'similarity': combined_score,
+                                'is_variant': True,
+                                'semantic_sim': semantic_sim,
+                                'base_sim': similarity
+                            })
+                            
+            except Exception as e:
+                # Log individual comparison error but continue processing
+                import traceback
+                batch_results.append({
+                    'error': f'Error comparing {filename_i} vs {filename_j}: {str(e)}\n{traceback.format_exc()[:500]}'
+                })
+                continue
+        
+        return batch_results
+        
+    except Exception as e:
+        # Return error information for debugging
+        import traceback
+        return [{'error': f'{type(e).__name__}: {str(e)}\nTraceback:\n{traceback.format_exc()}'}]
+
+
+def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
+                                threshold, log, should_stop):
+    """Perform deep similarity analysis - PROCESSPOOLEXECUTOR VERSION with fallback"""
+    
+    log(f"🔍 Deep content similarity analysis (threshold: {int(threshold*100)}%)...")
+    
+    # Pre-cache text samples for all results
+    text_samples = {}
+    for idx, result in enumerate(results):
+        base_text = result.get('dup_text') if isinstance(result, dict) else None
+        if not isinstance(base_text, str):
+            base_text = result.get('raw_text', '')
+        if len(base_text) >= 500:
+            text_samples[idx] = {
+                'sample_5k': base_text[:5000],
+                'sample_10k': base_text[:10000],
+                'hash_5k': hashlib.sha256(base_text[:5000].encode()).hexdigest(),
+                'hash_10k': hashlib.sha256(base_text[:10000].encode()).hexdigest()
+            }
+    
+    # Determine number of workers
+    cpu_count = multiprocessing.cpu_count()
+    max_workers_config = 0
+    
+    # Priority: deep_check_config > qa_scanner_config > ai_hunter_config
+    max_workers_config = _resolve_scan_max_workers_config(('deep_check_config',))
+    
+    # Determine if we should use parallel processing
+    use_parallel = True
+    parallel_error = None
+    
+    if max_workers_config == 1:
+        use_parallel = False
+        log("   📝 Using sequential processing (configured for 1 worker)")
+    elif max_workers_config > 0:
+        max_workers = min(max_workers_config, cpu_count)
+    else:
+        max_workers = cpu_count
+    
+    # Create comparison tasks with smart filtering
+    comparison_tasks = []
+    checked_pairs = set()
+    
+    for i in range(len(results)):
+        for j in range(i + 1, len(results)):
+            # Skip if not in text_samples (too short)
+            if i not in text_samples or j not in text_samples:
+                continue
+                
+            pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
+            if pair in checked_pairs:
+                continue
+            checked_pairs.add(pair)
+            
+            # Skip if already in same group
+            if (results[i]['filename'] in duplicate_groups and 
+                results[j]['filename'] in duplicate_groups and
+                duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                continue
+            
+            comparison_tasks.append((i, j, results[i]['filename'], results[j]['filename']))
+    
+    total_comparisons = len(comparison_tasks)
+    log(f"   📋 Created {total_comparisons:,} comparison tasks")
+    
+    if total_comparisons == 0:
+        log("   ✅ No comparisons needed!")
+        return
+    
+    # Try parallel processing first
+    if use_parallel:
+        log("⚡ PROCESSPOOLEXECUTOR ENABLED - MAXIMUM PERFORMANCE!")
+        if max_workers_config > 0:
+            log(f"   🖥️ Using {max_workers} parallel processes (configured limit)")
+        else:
+            log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
+            if cpu_count > 8:
+                log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
+        
+        # Progress tracking
+        comparisons_done = 0
+        last_progress = 0
+        start_time = time.time()
+        found_duplicates = []
+        
+        # Prepare data for workers
+        worker_data = {
+            'text_samples': text_samples,
+            'threshold': threshold
+        }
+        
+        # Optimal batch size for ProcessPoolExecutor
+        optimal_batch_size = max(1000, total_comparisons // (max_workers * 5))
+        optimal_batch_size = min(optimal_batch_size, 10000)
+        
+        batches = []
+        for i in range(0, len(comparison_tasks), optimal_batch_size):
+            batch = comparison_tasks[i:i + optimal_batch_size]
+            batches.append(batch)
+        
+        log(f"   📦 Split into {len(batches)} batches of ~{optimal_batch_size} comparisons each")
+        
+        # Prepare batch arguments
+        batch_args = [(batch, worker_data) for batch in batches]
+        
+        try:
+            # Process with ProcessPoolExecutor
+            with mobile_runtime.make_pool_executor(max_workers) as executor:
+                # Submit all batches
+                futures = []
+                for args in batch_args:
+                    if should_stop():
+                        log("⛔ Deep similarity check interrupted by user.")
+                        executor.shutdown(wait=True)
+                        return
+                    
+                    future = executor.submit(process_deep_similarity_batch, args)
+                    futures.append(future)
+                
+                # Process results as they complete
+                for completed_future in concurrent.futures.as_completed(futures):
+                    if should_stop():
+                        log("⛔ Deep similarity check interrupted by user.")
+                        executor.shutdown(wait=True)
+                        return
+                    
+                    try:
+                        # NO TIMEOUT - let it run as long as needed
+                        batch_results = completed_future.result()
+                        
+                        # Check for worker errors in results
+                        if batch_results and isinstance(batch_results, list):
+                            # Check if first result contains an error
+                            if batch_results and isinstance(batch_results[0], dict) and 'error' in batch_results[0]:
+                                error_msg = batch_results[0]['error']
+                                log(f"   ⚠️ Worker error detected: {error_msg}")
+                                raise Exception(f"Worker error: {error_msg}")
+                        
+                        # Batch all updates
+                        updates = []
+                        for result in batch_results:
+                            if 'error' not in result:  # Skip error entries
+                                updates.append((
+                                    result['filename1'],
+                                    result['filename2'],
+                                    result
+                                ))
+                        
+                        # Apply all updates in one lock
+                        if updates:
+                            with merge_lock:
+                                for file1, file2, result in updates:
+                                    pair = tuple(sorted([file1, file2]))
+                                    
+                                    merge_duplicate_groups(duplicate_groups, file1, file2)
+                                    duplicate_confidence[pair] = max(
+                                        duplicate_confidence.get(pair, 0), 
+                                        result['similarity']
+                                    )
+                                    
+                                    # Store messages for logging
+                                    if result.get('is_variant', False):
+                                        msg = (f"   └─ Translation variant detected: {file1} ≈ {file2} "
+                                              f"(base: {int(result.get('base_sim', 0)*100)}%, "
+                                              f"semantic: {int(result['semantic_sim']*100)}%, "
+                                              f"combined: {int(result['similarity']*100)}%)")
+                                    else:
+                                        msg = (f"   └─ Content similarity: {file1} ≈ {file2} "
+                                              f"({int(result['similarity']*100)}%)")
+                                    
+                                    found_duplicates.append(msg)
+                        
+                        # Update progress
+                        comparisons_done += optimal_batch_size
+                        if comparisons_done > total_comparisons:
+                            comparisons_done = total_comparisons
+                        
+                        progress = int((comparisons_done / total_comparisons) * 100)
+                        
+                        # Update every 10% for less overhead
+                        if progress >= last_progress + 10 or progress == 100:
+                            elapsed = time.time() - start_time
+                            rate = comparisons_done / elapsed if elapsed > 0 else 0
+                            remaining = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
+                            
+                            log(f"   📊 Deep check progress: {comparisons_done:,}/{total_comparisons:,} "
+                                f"({progress}%) - ~{int(remaining)}s remaining - "
+                                f"Speed: {int(rate):,} comparisons/sec")
+                            
+                            # Log some found duplicates
+                            for dup_msg in found_duplicates[:5]:
+                                log(dup_msg)
+                            found_duplicates = found_duplicates[5:]
+                            
+                            last_progress = progress
+                        
+                    except Exception as e:
+                        log(f"   ⚠️ Error processing batch: {type(e).__name__}: {str(e)[:200]}")
+                        import traceback
+                        log(f"   Debug trace: {traceback.format_exc()[:500]}")
+                        parallel_error = f"{type(e).__name__}: {str(e)[:100]}"
+                        use_parallel = False
+                        executor.shutdown(wait=False)
+                        break
+                
+                # If we completed successfully
+                if use_parallel:
+                    # Final summary
+                    elapsed = time.time() - start_time
+                    log(f"✅ Deep similarity check complete! Processed {total_comparisons:,} comparisons in {elapsed:.1f}s")
+                    log(f"   ⚡ Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
+                    log(f"   🚀 ProcessPoolExecutor: ENABLED")
+                    
+                    # Log remaining duplicates
+                    for dup_msg in found_duplicates[-10:]:
+                        log(dup_msg)
+                    return  # Success - exit function
+                    
+        except Exception as e:
+            log(f"   ⚠️ Parallel processing failed: {type(e).__name__}: {str(e)[:200]}")
+            parallel_error = f"{type(e).__name__}: {str(e)[:100]}"
+            use_parallel = False
+    
+    # Fallback to sequential processing
+    if not use_parallel:
+        log(f"\n   📝 FALLBACK: Using sequential processing")
+        if parallel_error:
+            log(f"      Reason: {parallel_error}")
+        log(f"      This will be slower but more reliable")
+        
+        # Reset progress tracking for sequential mode
+        comparisons_done = 0
+        last_progress = 0
+        start_time = time.time()
+        found_duplicates = []
+        
+        # Import what we need for sequential processing
+        from difflib import SequenceMatcher
+        
+        for idx, task in enumerate(comparison_tasks):
+            if should_stop():
+                log("⛔ Deep similarity check interrupted by user.")
+                return
+            
+            i, j, filename_i, filename_j = task
+            comparisons_done += 1
+            
+            # Show progress every 5% or every 100 comparisons (whichever is less frequent)
+            progress = int((comparisons_done / total_comparisons) * 100)
+            if (comparisons_done % max(100, total_comparisons // 20) == 0 or 
+                comparisons_done == total_comparisons):
+                if progress >= last_progress + 5 or progress == 100:
+                    elapsed = time.time() - start_time
+                    rate = comparisons_done / elapsed if elapsed > 0 else 0
+                    remaining = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
+                    
+                    log(f"   📊 Sequential progress: {comparisons_done:,}/{total_comparisons:,} "
+                        f"({progress}%) - ~{int(remaining)}s remaining - "
+                        f"Speed: {int(rate):,} comparisons/sec")
+                    
+                    # Log found duplicates
+                    for dup_msg in found_duplicates[:3]:
+                        log(dup_msg)
+                    found_duplicates = found_duplicates[3:]
+                    
+                    last_progress = progress
+            
+            # Get text samples
+            sample_i = text_samples.get(i)
+            sample_j = text_samples.get(j)
+            
+            if not sample_i or not sample_j:
+                continue
+            
+            # Calculate similarity
+            if sample_i['hash_5k'] == sample_j['hash_5k']:
+                similarity = 1.0
+            else:
+                text1 = sample_i['sample_5k']
+                text2 = sample_j['sample_5k']
+                similarity = calculate_similarity_ratio(text1, text2)
+            
+            if similarity >= threshold:
+                merge_duplicate_groups(duplicate_groups, filename_i, filename_j)
+                pair = tuple(sorted([filename_i, filename_j]))
+                duplicate_confidence[pair] = max(
+                    duplicate_confidence.get(pair, 0), 
+                    similarity
+                )
+                msg = f"   └─ Content similarity: {filename_i} ≈ {filename_j} ({int(similarity*100)}%)"
+                found_duplicates.append(msg)
+                
+            elif 0.5 <= similarity < threshold:
+                # Check semantic similarity for translation variants
+                text1_10k = sample_i['sample_10k']
+                text2_10k = sample_j['sample_10k']
+                
+                if sample_i['hash_10k'] == sample_j['hash_10k']:
+                    semantic_sim = 1.0
+                else:
+                    semantic_sim = calculate_semantic_fingerprint_similarity(text1_10k, text2_10k)
+                
+                if semantic_sim >= 0.75:
+                    combined_score = (similarity * 0.4 + semantic_sim * 0.6)
+                    
+                    if combined_score >= threshold:
+                        merge_duplicate_groups(duplicate_groups, filename_i, filename_j)
+                        pair = tuple(sorted([filename_i, filename_j]))
+                        duplicate_confidence[pair] = max(
+                            duplicate_confidence.get(pair, 0), 
+                            combined_score
+                        )
+                        msg = (f"   └─ Translation variant detected: {filename_i} ≈ {filename_j} "
+                              f"(base: {int(similarity*100)}%, semantic: {int(semantic_sim*100)}%, "
+                              f"combined: {int(combined_score*100)}%)")
+                        found_duplicates.append(msg)
+        
+        # Final summary for sequential mode
+        elapsed = time.time() - start_time
+        log(f"✅ Deep similarity check complete! Processed {total_comparisons:,} comparisons in {elapsed:.1f}s")
+        if elapsed > 0:
+            log(f"   Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
+        log(f"   Mode: Sequential (fallback)")
+        
+        # Log remaining duplicates
+        for dup_msg in found_duplicates[-10:]:
+            log(dup_msg)
+        
+def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
+    """Check for consecutive chapters with same title using fuzzy matching"""
+    log("🔍 Checking consecutive same-titled chapters...")
+    
+    # Check for stop early
+    if should_stop and should_stop():
+        log("⛔ Consecutive chapter check interrupted by user.")
+        return
+    
+    # Extract chapter titles
+    for result in results:
+        result['chapter_title'] = extract_chapter_title(result['raw_text'])
+    
+    # Sort by chapter number
+    chapter_sorted = [r for r in results if r['chapter_num'] is not None]
+    chapter_sorted.sort(key=lambda x: x['chapter_num'])
+    
+    consecutive_threshold = config.get_threshold('consecutive_chapters')
+    
+    for i in range(len(chapter_sorted) - 1):
+        if should_stop and should_stop():
+            log("⛔ Consecutive chapter check interrupted by user.")
+            return
+            
+        current = chapter_sorted[i]
+        
+        for j in range(i + 1, min(i + consecutive_threshold + 1, len(chapter_sorted))):
+            next_chapter = chapter_sorted[j]
+            
+            # Check if chapter numbers might be the same (fuzzy match)
+            if fuzzy_match_chapter_numbers(current['raw_text'], next_chapter['raw_text'],
+                                         current['chapter_num'], next_chapter['chapter_num']):
+                # Compare content
+                similarity = calculate_similarity_ratio(current['raw_text'], next_chapter['raw_text'])
+                if similarity >= config.get_threshold('similarity'):
+                    merge_duplicate_groups(duplicate_groups, current['filename'], next_chapter['filename'])
+                    pair = tuple(sorted([current['filename'], next_chapter['filename']]))
+                    duplicate_confidence[pair] = similarity
+                    log(f"   └─ Fuzzy chapter match: {current['filename']} ≈ {next_chapter['filename']} ({int(similarity*100)}%)")
+                    continue
+            
+            # Check same title
+            if (current.get('chapter_title') and current['chapter_title'] == next_chapter.get('chapter_title') and
+                abs(current['chapter_num'] - next_chapter['chapter_num']) <= consecutive_threshold):
+                
+                # Compare content without chapter headers
+                text1 = re.sub(r'Chapter\s+\d+\s*:?\s*', '', current['raw_text'][:2000], flags=re.IGNORECASE)
+                text2 = re.sub(r'Chapter\s+\d+\s*:?\s*', '', next_chapter['raw_text'][:2000], flags=re.IGNORECASE)
+                
+                similarity = calculate_similarity_ratio(text1, text2)
+                
+                if similarity >= config.get_threshold('similarity') * 0.9:  # Slightly lower threshold for same title
+                    merge_duplicate_groups(duplicate_groups, current['filename'], next_chapter['filename'])
+                    pair = tuple(sorted([current['filename'], next_chapter['filename']]))
+                    duplicate_confidence[pair] = similarity
+                    log(f"   └─ Same-titled chapters {current['chapter_num']} & {next_chapter['chapter_num']} "
+                        f"({int(similarity*100)}% similar)")
+
+def check_specific_patterns(results, duplicate_groups, duplicate_confidence, log, should_stop=None):
+    """Check for specific known duplicate patterns"""
+    log("🔍 Checking for known duplicate patterns...")
+    
+    if should_stop and should_stop():
+        log("⛔ Pattern check interrupted by user.")
+        return
+    
+    # Known patterns that indicate duplicates
+    patterns = {
+        'chapel_scene': r"under the pretense of offering a prayer.*?visited the chapel.*?hiding while holding.*?breath.*?watching the scene",
+        'battle_scene': r"sword.*?clash.*?sparks.*?flew.*?metal.*?rang",
+        'magic_spell': r"mana.*?gathered.*?spell.*?formation.*?glowed",
+    }
+    
+    pattern_matches = defaultdict(list)
+    
+    for i, result in enumerate(results):
+        text_sample = result.get('preview', '') + result.get('raw_text', '')[:2000]
+        
+        for pattern_name, pattern in patterns.items():
+            if re.search(pattern, text_sample, re.IGNORECASE | re.DOTALL):
+                pattern_matches[pattern_name].append(i)
+    
+    # Group files with same patterns
+    for pattern_name, indices in pattern_matches.items():
+        if should_stop and should_stop():
+            log("⛔ Pattern check interrupted by user.")
+            return
+            
+        if len(indices) > 1:
+            log(f"   └─ Found {len(indices)} files with '{pattern_name}' pattern")
+            
+            for i in range(len(indices)):
+                for j in range(i + 1, len(indices)):
+                    idx1, idx2 = indices[i], indices[j]
+                    
+                    # Verify with content similarity
+                    similarity = calculate_similarity_ratio(
+                        results[idx1].get('raw_text', '')[:3000],
+                        results[idx2].get('raw_text', '')[:3000]
+                    )
+                    
+                    if similarity > 0.7:  # Lower threshold for known patterns
+                        merge_duplicate_groups(duplicate_groups, 
+                                             results[idx1]['filename'], 
+                                             results[idx2]['filename'])
+                        pair = tuple(sorted([results[idx1]['filename'], results[idx2]['filename']]))
+                        duplicate_confidence[pair] = similarity
+                        log(f"      Pattern match confirmed: {results[idx1]['filename']} ≈ {results[idx2]['filename']}")
+
+def generate_reports(results, folder_path, duplicate_confidence, log=print, qa_settings=None):
+    """Generate output reports with enhanced duplicate information based on settings"""
+    if qa_settings is None:
+        qa_settings = {'report_format': 'detailed', 'auto_save_report': True}
+    
+    report_format = qa_settings.get('report_format', 'detailed')
+    auto_save = qa_settings.get('auto_save_report', True)
+    
+    # Create output directory
+    output_dir = os.path.basename(folder_path.rstrip('/\\')) + "_Scan Report"
+    output_path = os.path.join(folder_path, output_dir)
+    os.makedirs(output_path, exist_ok=True)
+    
+    # Prepare confidence scores for report
+    for result in results:
+        result['duplicate_confidence'] = 0
+        for pair, confidence in duplicate_confidence.items():
+            if result['filename'] in pair:
+                result['duplicate_confidence'] = max(result['duplicate_confidence'], confidence)
+    
+    # Common function to save all reports
+    def save_all_reports():
+        # Save JSON report
+        with open(os.path.join(output_path, "validation_results.json"), "w", encoding="utf-8") as jf:
+            json.dump(results, jf, indent=2, ensure_ascii=False)
+        
+        # Save CSV report
+        with open(os.path.join(output_path, "validation_results.csv"), "w", encoding="utf-8", newline="") as cf:
+            writer = csv.DictWriter(cf, fieldnames=["file_index", "filename", "score", "issues", "duplicate_confidence"])
+            writer.writeheader()
+            for row in results:
+                writer.writerow({
+                    "file_index": row["file_index"],
+                    "filename": row["filename"],
+                    "score": row["score"],
+                    "issues": "; ".join(row["issues"]),
+                    "duplicate_confidence": f"{row.get('duplicate_confidence', 0):.2f}"
+                })
+        
+        # Generate HTML report
+        generate_html_report(results, output_path, duplicate_confidence)
+        
+        # Generate duplicate groups summary
+        generate_duplicate_summary(results, output_path, duplicate_confidence)
+    
+    # Generate reports based on format setting
+    if report_format == 'summary':
+        # Summary format - only key statistics
+        log(f"\n📊 QA Scan Summary:")
+        log(f"   Total files scanned: {len(results)}")
+        
+        issue_count = sum(1 for r in results if r['issues'])
+        log(f"   Files with issues: {issue_count}")
+        
+        # Count by issue type
+        issue_types = {}
+        for result in results:
+            for issue in result['issues']:
+                issue_type = issue.split('_')[0]
+                issue_types[issue_type] = issue_types.get(issue_type, 0) + 1
+        
+        log(f"\n   Issues by type:")
+        for issue_type, count in sorted(issue_types.items(), key=lambda x: x[1], reverse=True):
+            log(f"      - {issue_type}: {count}")
+        
+        # Save minimal summary file if auto-save enabled
+        if auto_save:
+            summary_file = os.path.join(output_path, "scan_summary.txt")
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write(f"QA Scan Summary\n")
+                f.write(f"===============\n\n")
+                f.write(f"Total files scanned: {len(results)}\n")
+                f.write(f"Files with issues: {issue_count}\n\n")
+                f.write(f"Issues by type:\n")
+                for issue_type, count in sorted(issue_types.items(), key=lambda x: x[1], reverse=True):
+                    f.write(f"  - {issue_type}: {count}\n")
+            log(f"\n📁 Summary saved to: {output_path}")
+    
+    elif report_format == 'verbose':
+        # Verbose format - include everything including raw text samples
+        if auto_save:
+            # Save detailed JSON with all data
+            verbose_results = []
+            for result in results.copy():
+                verbose_result = result.copy()
+                # Include first 1000 chars of raw text in verbose mode
+                if 'raw_text' in result:
+                    verbose_result['text_sample'] = result['raw_text'][:1000]
+                verbose_results.append(verbose_result)
+            
+            with open(os.path.join(output_path, "validation_results_verbose.json"), "w", encoding="utf-8") as jf:
+                json.dump(verbose_results, jf, indent=2, ensure_ascii=False)
+            
+            # Generate detailed text report
+            with open(os.path.join(output_path, "detailed_report.txt"), "w", encoding="utf-8") as tf:
+                tf.write("DETAILED QA SCAN REPORT\n")
+                tf.write("=" * 80 + "\n\n")
+                
+                for result in results:
+                    tf.write(f"File: {result['filename']}\n")
+                    tf.write(f"Chapter: {result.get('chapter_num', 'Unknown')}\n")
+                    tf.write(f"Issues: {len(result['issues'])}\n")
+                    if result['issues']:
+                        for issue in result['issues']:
+                            tf.write(f"  - {issue}\n")
+                    tf.write(f"Duplicate Confidence: {result.get('duplicate_confidence', 0):.2f}\n")
+                    tf.write(f"Preview: {result.get('preview', '')[:200]}...\n")
+                    tf.write("-" * 80 + "\n\n")
+        
+        # All existing reports (JSON, CSV, HTML)
+        save_all_reports()
+    
+    else:  # detailed (default)
+        # Current behavior - standard reports
+        if auto_save:
+            save_all_reports()
+        else:
+            log(f"\n✅ Scan complete! Reports not saved (auto-save disabled)")
+    
+    log(f"\n✅ Scan complete!")
+    if auto_save:
+        log(f"📁 Reports saved to: {output_path}")
+
+def generate_duplicate_summary(results, output_path, duplicate_confidence):
+    """Generate a summary of duplicate groups"""
+    # Collect duplicate groups
+    groups = defaultdict(list)
+    for result in results:
+        for issue in result.get('issues', []):
+            if issue.startswith('DUPLICATE:'):
+                # Extract group info
+                if 'part_of_' in issue:
+                    group_id = issue.split('part_of_')[1].split('_')[0]
+                    groups[f"group_{group_id}"].append(result['filename'])
+                elif 'exact_or_near_copy_of_' in issue:
+                    other = issue.split('exact_or_near_copy_of_')[1]
+                    groups[f"pair_{result['filename']}_{other}"].append(result['filename'])
+                    groups[f"pair_{result['filename']}_{other}"].append(other)
+    
+    # Create summary
+    summary = {
+        'total_files': len(results),
+        'files_with_duplicates': sum(1 for r in results if any('DUPLICATE' in i for i in r.get('issues', []))),
+        'duplicate_groups': len(groups),
+        'groups': {}
+    }
+    
+    for group_name, files in groups.items():
+        unique_files = list(set(files))
+        confidences = []
+        for i in range(len(unique_files)):
+            for j in range(i + 1, len(unique_files)):
+                pair = tuple(sorted([unique_files[i], unique_files[j]]))
+                if pair in duplicate_confidence:
+                    confidences.append(duplicate_confidence[pair])
+        
+        summary['groups'][group_name] = {
+            'files': unique_files,
+            'count': len(unique_files),
+            'avg_confidence': sum(confidences) / len(confidences) if confidences else 0
+        }
+    
+    with open(os.path.join(output_path, "duplicate_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+def generate_html_report(results, output_path, duplicate_confidence):
+    """Generate enhanced HTML report with duplicate confidence scores"""
+    issue_counts = {}
+    for r in results:
+        for issue in r['issues']:
+            issue_type = issue.split(':')[0] if ':' in issue else issue.split('_')[0]
+            issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
+    
+    html = f"""<html>
+<head>
+    <meta charset='utf-8'>
+    <title>Translation QA Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; margin-top: 20px; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .error {{ background-color: #ffcccc; }}
+        .warning {{ background-color: #fff3cd; }}
+        .preview {{ font-size: 0.9em; color: #666; max-width: 400px; }}
+        .issues {{ font-size: 0.9em; }}
+        .non-english {{ color: red; font-weight: bold; }}
+        .duplicate-group {{ background-color: #ffe6e6; }}
+        .confidence {{ font-size: 0.8em; color: #666; }}
+        .high-confidence {{ color: red; font-weight: bold; }}
+        .medium-confidence {{ color: orange; }}
+        .low-confidence {{ color: #666; }}
+    </style>
+</head>
+<body>
+    <h1>Translation QA Report</h1>
+    <p><strong>Total Files Scanned:</strong> {len(results)}</p>
+    <p><strong>Files with Issues:</strong> {sum(1 for r in results if r['issues'])}</p>
+    <p><strong>Clean Files:</strong> {sum(1 for r in results if not r['issues'])}</p>
+"""
+    
+    if issue_counts:
+        html += "<h2>Issues Summary</h2><ul>"
+        for issue_type, count in sorted(issue_counts.items()):
+            style = ' class="non-english"' if any(x in issue_type.lower() for x in ['korean', 'chinese', 'japanese']) else ''
+            html += f"<li{style}><strong>{issue_type}</strong>: {count} occurrence(s)</li>"
+        
+        # Count duplicate groups
+        duplicate_groups = set()
+        for result in results:
+            for issue in result.get('issues', []):
+                if issue.startswith('DUPLICATE:'):
+                    if 'part_of_' in issue:
+                        group_id = issue.split('part_of_')[1].split('_')[0]
+                        duplicate_groups.add(f"group_{group_id}")
+                    elif 'exact_or_near_copy_of_' in issue:
+                        other = issue.split('exact_or_near_copy_of_')[1]
+                        duplicate_groups.add(f"pair_{min(result['filename'], other)}_{max(result['filename'], other)}")
+        
+        if duplicate_groups:
+            html += f"<li><strong>Duplicate Groups Found</strong>: {len(duplicate_groups)}</li>"
+        
+        html += "</ul>"
+    
+    html += "<h2>Detailed Results</h2>"
+    html += "<table><tr><th>Index</th><th>Filename</th><th>Issues</th><th>Confidence</th><th>Preview</th></tr>"
+    
+    for row in results:
+        link = f"<a href='../{row['filename']}' target='_blank'>{row['filename']}</a>"
+        
+        formatted_issues = []
+        for issue in row["issues"]:
+            # Only HTML escape LLM token issues because they contain <tags>
+            if issue.startswith("LLM_token_issue:"):
+                # The issue itself contains "LLM_token_issue: '<tag>'"
+                # We need to escape the tag part
+                escaped_issue = issue.replace("<", "&lt;").replace(">", "&gt;")
+                formatted_issues.append(escaped_issue)
+            elif issue.startswith("DUPLICATE:"):
+                formatted_issues.append(f'<span style="color: red; font-weight: bold;">{issue}</span>')
+            elif issue.startswith("NEAR_DUPLICATE:"):
+                formatted_issues.append(f'<span style="color: darkorange; font-weight: bold;">{issue}</span>')
+            elif '_text_found_' in issue:
+                formatted_issues.append(f'<span class="non-english">{issue}</span>')
+            else:
+                formatted_issues.append(issue)
+        
+        issues_str = "<br>".join(formatted_issues) if formatted_issues else "None"
+        
+        # Add confidence score
+        confidence = row.get('duplicate_confidence', 0)
+        if confidence > 0:
+            conf_class = 'high-confidence' if confidence >= 0.9 else 'medium-confidence' if confidence >= 0.8 else 'low-confidence'
+            confidence_str = f'<span class="confidence {conf_class}">{int(confidence * 100)}%</span>'
+        else:
+            confidence_str = '-'
+        
+        row_class = 'duplicate-group' if any('DUPLICATE:' in issue for issue in row['issues']) else ''
+        if not row_class and any('NEAR_DUPLICATE:' in issue for issue in row['issues']):
+            row_class = 'warning'
+        if not row_class:
+            row_class = 'error' if row["score"] > 1 else 'warning' if row["score"] == 1 else ''
+        
+        preview_escaped = html_lib.escape(row['preview'][:300])
+        
+        html += f"""<tr class='{row_class}'>
+            <td>{row['file_index']}</td>
+            <td>{link}</td>
+            <td class='issues'>{issues_str}</td>
+            <td>{confidence_str}</td>
+            <td class='preview'>{preview_escaped}</td>
+        </tr>"""
+    
+    html += "</table></body></html>"
+    
+    with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
+        html_file.write(html)
+
+def _count_unwrapped_text_chars(html_content):
+    """Count visible text nodes that are direct children of an HTML container."""
+    try:
+        soup = BeautifulSoup(str(html_content or ""), "html.parser")
+        container = soup.find("body") or soup
+    except Exception:
+        return 0
+
+    total = 0
+    for element in container.children:
+        # Beautiful Soup comments inherit from NavigableString, but comments
+        # (including our chunk boundary markers) are not visible page content.
+        if not isinstance(element, NavigableString) or isinstance(element, Comment):
+            continue
+        text = str(element).strip()
+        if text:
+            total += len(text)
+    return total
+
+
+_FOREIGN_TEXT_ISSUE_RE = re.compile(
+    r"^(?P<script>[A-Za-z]+)_text_found_\d+_chars_", re.IGNORECASE
+)
+
+
+def _chunk_foreign_text_issues(chunk_html, chunk_text, qa_settings, chunk_cache=None):
+    """Per-script foreign text findings for one chunk, computed once per chunk.
+
+    The whole document already passed the configured threshold, so a chunk
+    is charged with a script as soon as it contains any character of that
+    script. Returns ``{script: chunk_issue_text}``; a ``"__mismatch__"`` key
+    means the chunk itself reads as the wrong language.
+    """
+    if isinstance(chunk_cache, dict) and "foreign_issues" in chunk_cache:
+        return chunk_cache["foreign_issues"]
+    chunk_settings = dict(qa_settings or {})
+    chunk_settings["foreign_char_threshold"] = 0
+    by_script = {}
+    try:
+        _flagged, chunk_issues = detect_non_english_content(
+            str(_foreign_character_qa_text(chunk_text, chunk_html, qa_settings) or ""),
+            chunk_settings,
+        )
+    except Exception:
+        chunk_issues = []
+    for chunk_issue in chunk_issues:
+        match = _FOREIGN_TEXT_ISSUE_RE.match(str(chunk_issue))
+        if match:
+            by_script[match.group("script").casefold()] = str(chunk_issue)
+        elif str(chunk_issue).startswith("Language_mismatch"):
+            by_script["__mismatch__"] = str(chunk_issue)
+    if isinstance(chunk_cache, dict):
+        chunk_cache["foreign_issues"] = by_script
+    return by_script
+
+
+def _chunk_local_issue_text(issue, chunk_cache):
+    """Record a foreign-script finding with the chunk's own count and sample."""
+    match = _FOREIGN_TEXT_ISSUE_RE.match(str(issue or ""))
+    if match and isinstance(chunk_cache, dict):
+        by_script = chunk_cache.get("foreign_issues") or {}
+        return by_script.get(match.group("script").casefold(), str(issue))
+    return str(issue)
+
+
+def _chunk_issue_matches(issue, chunk_html, chunk_text, source_text, qa_settings, chunk_cache=None):
+    """Best-effort deterministic localization of one file QA issue."""
+    issue_text = str(issue or "")
+    issue_lower = issue_text.lower()
+    foreign_match = _FOREIGN_TEXT_ISSUE_RE.match(issue_text)
+    if foreign_match:
+        # The sample in the issue text is a handful of characters gathered
+        # across the whole file, not a contiguous string, and an
+        # any-foreign-script fallback charged a chunk with Korean when it
+        # only contained Japanese. Test the chunk for that script itself.
+        by_script = _chunk_foreign_text_issues(
+            chunk_html, chunk_text, qa_settings, chunk_cache
+        )
+        return "__mismatch__" in by_script or (
+            foreign_match.group("script").casefold() in by_script
+        )
+    haystacks = (
+        str(chunk_html or "").casefold(),
+        str(chunk_text or "").casefold(),
+    )
+
+    # Most artifact/foreign-text issues carry the actual offending sample.
+    samples = []
+    for pattern in (
+        r"'([^']+)'",
+        r'"([^"]+)"',
+        r"\[([^\]]+)\]",
+    ):
+        samples.extend(re.findall(pattern, issue_text))
+    for sample in samples:
+        normalized = str(sample or "").strip().casefold()
+        if len(normalized) >= 2 and any(normalized in haystack for haystack in haystacks):
+            return True
+
+    if issue_lower == "no_spacing_or_linebreaks":
+        try:
+            return has_no_spacing_or_linebreaks(
+                chunk_text,
+                min_text_length=qa_settings.get("min_text_length_for_spacing", 100),
+            )
+        except Exception:
+            return False
+    if issue_lower == "unwrapped_text_content":
+        # The file-level detector decides whether the combined amount is large
+        # enough to report. Attribute it only to chunks that actually contain
+        # direct, visible text outside an element.
+        return _count_unwrapped_text_chars(chunk_html) > 0
+    if issue_lower == "excessive_repetition":
+        try:
+            source_visible = BeautifulSoup(
+                str(source_text or ""), "html.parser"
+            ).get_text("\n", strip=True)
+            return has_repeating_sentences(
+                chunk_text,
+                source_text=source_visible or None,
+            )
+        except Exception:
+            return False
+    if "potential_truncation" in issue_lower:
+        try:
+            return bool(check_potential_truncation(chunk_text).get("flagged"))
+        except Exception:
+            return False
+    if "word_count_mismatch" in issue_lower and source_text:
+        try:
+            source_visible = BeautifulSoup(
+                str(source_text), "html.parser"
+            ).get_text(" ", strip=True)
+            source_count = max(1, _count_words_cached(source_visible))
+            translated_count = _count_words_cached(chunk_text)
+            ratio = translated_count / source_count
+            return ratio < 0.6 or ratio > 2.5
+        except Exception:
+            return False
+    if any(token in issue_lower for token in ("missing_images", "extra_images", "changed_image_references")):
+        if not source_text:
+            return False
+        try:
+            source_soup = BeautifulSoup(str(source_text), "html.parser")
+            output_soup = BeautifulSoup(str(chunk_html), "html.parser")
+            source_refs = {
+                tag.get("src") for tag in source_soup.find_all(["img", "image"])
+                if tag.get("src")
+            }
+            output_refs = {
+                tag.get("src") for tag in output_soup.find_all(["img", "image"])
+                if tag.get("src")
+            }
+            if "extra_images" in issue_lower:
+                return bool(output_refs - source_refs)
+            return bool(source_refs - output_refs)
+        except Exception:
+            return False
+
+    try:
+        artifact_types = {
+            str(item.get("type") or "").lower()
+            for item in (
+                detect_translation_artifacts(chunk_text)
+                + detect_ai_artifacts(
+                    chunk_text,
+                    ai_artifact_patterns=qa_settings.get("ai_artifact_patterns"),
+                    ai_artifact_patterns_are_regex=qa_settings.get(
+                        "ai_artifact_patterns_are_regex", False
+                    ),
+                    check_ai_thinking_preamble=qa_settings.get(
+                        "check_ai_thinking_preamble", False
+                    ),
+                    ai_thinking_preamble_patterns=qa_settings.get(
+                        "ai_thinking_preamble_patterns"
+                    ),
+                    ai_thinking_preamble_patterns_are_regex=qa_settings.get(
+                        "ai_thinking_preamble_patterns_are_regex", False
+                    ),
+                    ai_thinking_preamble_sample_size=qa_settings.get(
+                        "ai_thinking_preamble_sample_size", 500
+                    ),
+                )
+            )
+        }
+        if any(kind and kind in issue_lower for kind in artifact_types):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _attach_chunk_results_to_scan(
+    folder_path,
+    results,
+    qa_settings,
+    log,
+    progress_path=None,
+):
+    """Attach marker-localized chunk QA results to scanned chapter rows."""
+    qa_settings = qa_settings if isinstance(qa_settings, dict) else {}
+    path = progress_path or os.path.join(folder_path, "translation_progress.json")
+    try:
+        with open(path, "r", encoding="utf-8") as progress_file:
+            progress = json.load(progress_file)
+    except (OSError, ValueError, TypeError):
+        return 0
+    chapter_chunks = progress.get("chapter_chunks", {})
+    if not isinstance(chapter_chunks, dict) or not chapter_chunks:
+        return 0
+
+    if not any(is_multi_chunk_entry(entry) for entry in chapter_chunks.values()):
+        return 0
+
+    by_output = {}
+    for chapter_key, chapter_info in progress.get("chapters", {}).items():
+        if not isinstance(chapter_info, dict):
+            continue
+        output_file = os.path.basename(str(chapter_info.get("output_file") or ""))
+        if not output_file:
+            continue
+        chunk_key = str(chapter_info.get("content_hash") or chapter_key)
+        if is_multi_chunk_entry(chapter_chunks.get(chunk_key)):
+            by_output[output_file.casefold()] = chunk_key
+        else:
+            by_output.setdefault(output_file.casefold(), chunk_key)
+
+    attached = 0
+    for result in results or []:
+        filename = os.path.basename(str(result.get("filename") or ""))
+        preferred_key = by_output.get(filename.casefold())
+        if preferred_key is None:
+            continue
+        try:
+            with open(result.get("filepath") or os.path.join(folder_path, filename), "r", encoding="utf-8", errors="replace") as output_file:
+                html_text = output_file.read()
+        except OSError:
+            html_text = ""
+        # The chapter's content hash normally keys its ledger. A marked
+        # document whose progress hash was rewritten (older refinement runs
+        # stored the output hash) is matched by its own marker key instead.
+        chunk_key, chunk_entry, marked = find_chunk_entry_for_output(
+            chapter_chunks, preferred_key, html_text
+        )
+        if not is_multi_chunk_entry(chunk_entry):
+            continue
+        ensure_chunk_entry_schema(chunk_entry)
+
+        all_issues = list(result.get("issues") or [])
+        previews = result.get("qa_issue_previews")
+        previews = previews if isinstance(previews, dict) else {}
+        chunk_results = []
+
+        if not marked:
+            # The output carries no chunk boundaries any more (refined,
+            # rewritten or hand-edited as one document), so nothing can be
+            # localized. Skipping the file here used to leave every chunk
+            # record frozen in whatever QA state the last localized scan
+            # wrote, no matter what the file contains now. Apply the
+            # whole-file verdict to every chunk that has one instead.
+            for index, record in _concrete_chunk_records(chunk_entry):
+                chunk_results.append({
+                    "chunk_index": index,
+                    "total_chunks": chunk_entry.get("total"),
+                    "issues": list(all_issues),
+                    "qa_issue_previews": {
+                        str(issue): previews[str(issue)]
+                        for issue in all_issues
+                        if previews.get(str(issue)) is not None
+                    },
+                })
+            if not chunk_results:
+                continue
+            result["chunk_progress_key"] = chunk_key
+            result["chunk_results"] = chunk_results
+            result["chunk_results_unlocalized"] = True
+            attached += 1
+            continue
+
+        unmatched = set(range(len(all_issues)))
+        for index, block in sorted(marked.items()):
+            chunk_html = block.get("content", "")
+            chunk_text = BeautifulSoup(chunk_html, "html.parser").get_text(
+                " ", strip=True
+            )
+            record = chunk_entry.get("entries", {}).get(str(index), {})
+            source_text = record.get("source") if isinstance(record, dict) else None
+            chunk_cache = {}
+            localized = []
+            local_previews = {}
+            for issue_index, issue in enumerate(all_issues):
+                if not _chunk_issue_matches(
+                    issue,
+                    chunk_html,
+                    chunk_text,
+                    source_text,
+                    qa_settings,
+                    chunk_cache,
+                ):
+                    continue
+                unmatched.discard(issue_index)
+                local_issue = _chunk_local_issue_text(issue, chunk_cache)
+                localized.append(local_issue)
+                if previews.get(str(issue)) is not None:
+                    local_previews[local_issue] = previews[str(issue)]
+            chunk_results.append({
+                "chunk_index": index,
+                "total_chunks": block.get("total") or chunk_entry.get("total"),
+                "issues": localized,
+                "qa_issue_previews": local_previews,
+            })
+
+        # If only some marker blocks remain, distinguish an intentional
+        # pending reset from an output file that silently lost a supposedly
+        # completed chunk.
+        marked_indices = set(marked)
+        for raw_index, record in sorted(
+            chunk_entry.get("entries", {}).items(),
+            key=lambda item: int(item[0])
+            if str(item[0]).isdigit()
+            else 10**9,
+        ):
+            if not isinstance(record, dict):
+                continue
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            if index in marked_indices:
+                continue
+            status = str(record.get("status") or "pending").lower()
+            if (
+                status not in {"completed", "qa_failed", "failed"}
+                or str(index) not in chunk_entry.get("chunks", {})
+            ):
+                continue
+            missing_issue = "missing_chunk_segment"
+            chunk_results.append({
+                "chunk_index": index,
+                "total_chunks": chunk_entry.get("total"),
+                "issues": [missing_issue],
+                "qa_issue_previews": {},
+            })
+            if missing_issue not in result.setdefault("issues", []):
+                result["issues"].append(missing_issue)
+
+        # Whole-document findings (duplicates, wrapper-level structure, etc.)
+        # cannot be localized further. Persist them on each concrete chunk
+        # rather than reverting to a chapter-level qa_failed state.
+        if unmatched:
+            shared = [all_issues[index] for index in sorted(unmatched)]
+            for chunk_result in chunk_results:
+                chunk_result["issues"].extend(shared)
+                for issue in shared:
+                    if previews.get(str(issue)) is not None:
+                        chunk_result["qa_issue_previews"][str(issue)] = previews[
+                            str(issue)
+                        ]
+
+        result["chunk_progress_key"] = chunk_key
+        result["chunk_results"] = chunk_results
+        attached += 1
+    if attached:
+        log(f"🧩 Localized QA state for {attached} marker-aware chapter file(s)")
+    return attached
+
+
+def _concrete_chunk_records(chunk_entry):
+    """Yield ``(index, record)`` for chunks that already hold a verdict."""
+    for raw_index, record in sorted(
+        chunk_entry.get("entries", {}).items(),
+        key=lambda item: int(item[0]) if str(item[0]).isdigit() else 10**9,
+    ):
+        if not isinstance(record, dict):
+            continue
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        status = str(record.get("status") or "pending").lower()
+        if status in {"completed", "qa_failed", "failed"}:
+            yield index, record
+
+
+def _apply_chunk_scan_to_progress(
+    prog,
+    chapter_key,
+    chapter_info,
+    scan_row,
+    log,
+):
+    """Apply one scan row to chunk records; return True when chunk-aware."""
+    chunk_results = scan_row.get("chunk_results")
+    if not isinstance(chunk_results, list) or not chunk_results:
+        return False
+    chunk_key = str(
+        scan_row.get("chunk_progress_key")
+        or chapter_info.get("content_hash")
+        or chapter_key
+    )
+    chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+    if not is_multi_chunk_entry(chunk_entry):
+        return False
+    ensure_chunk_entry_schema(chunk_entry)
+    for chunk_result in chunk_results:
+        set_chunk_qa(
+            chunk_entry,
+            chunk_result.get("chunk_index"),
+            chunk_result.get("issues", []),
+            previews=chunk_result.get("qa_issue_previews", {}),
+            confidence=scan_row.get("duplicate_confidence", 0),
+        )
+
+    summary = chunk_failure_summary(chunk_entry)
+    failed_indices = [
+        int(key)
+        for key, record in chunk_entry.get("entries", {}).items()
+        if isinstance(record, dict)
+        and str(record.get("status") or "").lower() in {"qa_failed", "failed"}
+    ]
+    chapter_info["chunk_qa_summary"] = {
+        **summary,
+        "failed_indices": sorted(failed_indices),
+        "last_scanned": time.time(),
+    }
+    chapter_info["has_chunk_qa_failures"] = bool(failed_indices)
+    chapter_info["chunk_qa_issues_found"] = {
+        key: list(record.get("qa_issues_found") or [])
+        for key, record in chunk_entry.get("entries", {}).items()
+        if isinstance(record, dict) and record.get("qa_issues_found")
+    }
+    existing_issues = chapter_info.get("qa_issues_found", []) or []
+    protected = {
+        "SPLIT_FAILED", "TRUNCATED", "PROHIBITED_CONTENT", "EMPTY_OUTPUT",
+        "API_ERROR", "TIMEOUT",
+    }
+    has_protected = any(
+        (issue.get("type") if isinstance(issue, dict) else str(issue)) in protected
+        for issue in existing_issues
+    )
+    unlocalized = bool(scan_row.get("chunk_results_unlocalized"))
+    if not has_protected:
+        previous_status = str(chapter_info.get("status") or "").lower()
+        chapter_info["qa_timestamp"] = time.time()
+        if unlocalized and summary["failed"] and not summary["pending"]:
+            # Without chunk boundaries the failure belongs to the whole
+            # document: only a full chapter retranslation can act on it, so
+            # the chapter carries the verdict. Every cached chunk was marked
+            # failed above so the translator cannot rebuild the same output
+            # from its cache, and a GUI chunk-row reset (which needs the
+            # missing boundary) is not the only way out.
+            chapter_info["status"] = "qa_failed"
+            chapter_info["qa_issues"] = True
+            chapter_info["qa_issues_found"] = list(scan_row.get("issues") or [])
+            incoming_previews = scan_row.get("qa_issue_previews")
+            chapter_info["qa_issue_previews"] = (
+                dict(incoming_previews) if isinstance(incoming_previews, dict) else {}
+            )
+            chapter_info["duplicate_confidence"] = scan_row.get("duplicate_confidence", 0)
+        else:
+            if summary["pending"]:
+                chapter_info["status"] = (
+                    previous_status
+                    if previous_status in {"pending", "in_progress"}
+                    else "pending"
+                )
+            else:
+                chapter_info["status"] = "completed"
+            chapter_info["qa_issues"] = False
+            chapter_info["qa_issues_found"] = []
+            chapter_info["qa_issue_previews"] = {}
+    # Keep refinement history even when a later QA scan fails. The chapter's
+    # qa_failed/chunk state already makes it eligible for multipass again, and
+    # deleting refinement/model-era metadata before a new request succeeds
+    # makes a stopped run erase valid history from the previous session.
+    log(
+        f"   └─ Updated chunks for chapter {chapter_info.get('actual_num')}: "
+        f"{summary['failed']} QA failed, {summary['completed']} completed"
+        + (
+            " (no chunk markers in output; whole-chapter verdict applied)"
+            if unlocalized
+            else ""
+        )
+    )
+    return True
+
+
+def _spine_display_numbers(folder_path):
+    """Map spine filename stems to the Progress Manager's display numbers."""
+    try:
+        from chapter_display_numbering import nonreset_chapter_display_numbers
+        opf_paths = [
+            os.path.join(folder_path, name) for name in os.listdir(folder_path)
+            if name.lower().endswith(".opf")
+        ]
+        if not opf_paths:
+            return {}
+        root = ET.parse(opf_paths[0]).getroot()
+        ns = {"opf": root.tag.split("}")[0].strip("{")} if root.tag.startswith("{") else {}
+        prefix = "opf:" if ns else ""
+        manifest = {
+            item.get("id"): os.path.basename(item.get("href") or "")
+            for item in root.iter(("{%s}item" % ns["opf"]) if ns else "item")
+        }
+        spine = root.find(f".//{prefix}spine", ns)
+        if spine is None:
+            return {}
+        names = [
+            manifest.get(ref.get("idref"), "")
+            for ref in spine.findall(f"{prefix}itemref", ns)
+        ]
+        names = [name for name in names if name]
+        raw = []
+        for name in names:
+            found = re.findall(r"\d+", os.path.splitext(name)[0])
+            raw.append(int(found[-1]) if found else 0)
+        return {
+            os.path.splitext(name)[0].casefold(): (position, number)
+            for position, (name, number) in enumerate(
+                zip(names, nonreset_chapter_display_numbers(raw)), start=1
+            )
+        }
+    except Exception:
+        return {}
+
+
+def update_progress_file(folder_path, results, log, progress_path=None):
+    """Update translation progress file"""
+    prog_path = progress_path or os.path.join(folder_path, "translation_progress.json")
+    
+    try:
+        with open(prog_path, "r", encoding="utf-8") as pf:
+            prog = json.load(pf)
+    except FileNotFoundError:
+        log("[INFO] No progress file found - nothing to update")
+        return
+    
+    faulty_chapters = [row for row in results if row["issues"]]
+    resolved_chapters = [row for row in results if not row["issues"]]
+    
+    if not faulty_chapters and not resolved_chapters:
+        log("✅ No changes to progress - no faulty or resolved chapters found")
+        return
+    
+    # Detect progress format version
+    is_new_format = "chapters" in prog and isinstance(prog.get("chapters"), dict)
+    
+    updated_nums_for_log = None
+    resolved_nums_for_log = None
+    if is_new_format:
+        updated_nums_for_log, resolved_nums_for_log = update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, folder_path)
+    else:
+        update_legacy_format_progress(prog, faulty_chapters, resolved_chapters, log)
+    
+    # Write back updated progress
+    try:
+        with open(prog_path, "w", encoding="utf-8") as pf:
+            json.dump(prog, pf, indent=2, ensure_ascii=False)
+        log(f"✅ Successfully wrote progress file: {prog_path}")
+    except Exception as e:
+        log(f"❌ ERROR: Failed to write progress file: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    
+    # Log affected chapters - use the already extracted chapter numbers
+    def _fmt_ch(num):
+        try:
+            if isinstance(num, float) and not num.is_integer():
+                return f"{num:.2f}"
+            return str(int(num))
+        except Exception:
+            return str(num)
+    def _extract_num_from_filename(fname: str):
+        """Best-effort chapter number from filename (mirrors GUI behavior)."""
+        if not fname:
+            return None
+        base = os.path.basename(fname)
+        if base.startswith("response_"):
+            base = base[len("response_"):]
+        # Strip all extensions, including double ones
+        while True:
+            new_base, ext = os.path.splitext(base)
+            if not ext:
+                break
+            base = new_base
+        # Decimal form like 003_02 -> 3.02
+        m_dec = re.match(r"^(\d{1,4})_(\d{1,2})$", base)
+        if m_dec:
+            major = int(m_dec.group(1).lstrip("0") or "0")
+            minor = int(m_dec.group(2))
+            return float(f"{major}.{minor:02d}")
+        # Last numeric run
+        nums = re.findall(r"(\d+)", base)
+        if nums:
+            return int(nums[-1])
+        # Special/no-digit files -> 0 to match GUI special-files convention
+        return 0
+
+    def _choose_log_num(chapter_info, fallback_num=None, filename=None):
+        """Prefer actual/raw numbers; then derive from filename; then fallback."""
+        for key in ("actual_num", "raw_chapter_num", "chapter_num"):
+            num = chapter_info.get(key)
+            if isinstance(num, (int, float)) and num != 0:
+                return num
+        if filename:
+            num = _extract_num_from_filename(filename)
+            if num is not None:
+                return num
+        if isinstance(fallback_num, (int, float)) and fallback_num != 0:
+            return fallback_num
+        return None
+
+    # Label rows the way the Progress Manager does: spine display numbers
+    # (Ch.014) and, for chunked chapters, which chunks actually failed.
+    display_map = _spine_display_numbers(folder_path)
+    if display_map:
+        def _row_label(row, failed_only):
+            fname = os.path.basename(str(row.get("filename") or ""))
+            stem = os.path.splitext(fname[9:] if fname.startswith("response_") else fname)[0].casefold()
+            spine_entry = display_map.get(stem)
+            if spine_entry is None:
+                return None
+            position, num = spine_entry
+            label = f"[{position:03d}] Ch.{num:03d}"
+            chunks = row.get("chunk_results")
+            if isinstance(chunks, list) and chunks and not row.get("chunk_results_unlocalized"):
+                total = chunks[0].get("total_chunks") or len(chunks)
+                picked = sorted(
+                    int(c.get("chunk_index") or 0) for c in chunks
+                    if bool(c.get("issues")) == failed_only
+                )
+                if failed_only and picked:
+                    label += f" (chunk{'s' if len(picked) > 1 else ''} {', '.join(str(i) for i in picked)} of {total})"
+            return (position, label)
+
+        faulty_labels = sorted({l for l in (_row_label(r, True) for r in faulty_chapters) if l})
+        if faulty_labels:
+            log(f"📝 Chapters marked for re-translation: {', '.join(l for _n, l in faulty_labels)}")
+            updated_nums_for_log = []
+
+    affected_chapters_for_log = []
+    if updated_nums_for_log is not None:
+        affected_chapters_for_log = updated_nums_for_log
+    else:
+        for faulty_row in faulty_chapters:
+            chapter_num = faulty_row.get("chapter_num")
+            if chapter_num is not None:
+                affected_chapters_for_log.append(chapter_num)
+            else:
+                fname = faulty_row.get("filename")
+                derived = _extract_num_from_filename(fname) if fname else None
+                if derived is None:
+                    derived = faulty_row.get("file_index", 0) + 1
+                affected_chapters_for_log.append(derived)
+
+    if affected_chapters_for_log:
+        log(f"📝 Chapters marked for re-translation: {', '.join(_fmt_ch(c) for c in sorted(set(affected_chapters_for_log)))}")
+    
+    # Log resolved chapters (those that had qa_failed but now pass)
+    if resolved_nums_for_log is None:
+        resolved_nums_for_log = []
+        for resolved_row in resolved_chapters:
+            chapter_num = resolved_row.get("chapter_num")
+            if chapter_num is not None:
+                resolved_nums_for_log.append(chapter_num)
+    if resolved_nums_for_log:
+        log(f"✅ Chapters cleared of QA issues: {', '.join(_fmt_ch(c) for c in sorted(set(resolved_nums_for_log)))}")
+
+def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, folder_path):
+    """Update new format progress file with content hash support.
+    Returns (faulty_nums, resolved_nums) for cleaner logging."""
+    log("[INFO] Detected new progress format")
+    def _extract_num_from_filename(fname: str):
+        import re
+        if not fname:
+            return None
+        base = os.path.basename(fname)
+        if base.startswith("response_"):
+            base = base[len("response_"):]
+        while True:
+            new_base, ext = os.path.splitext(base)
+            if not ext:
+                break
+            base = new_base
+        m_dec = re.match(r"^(\d{1,4})_(\d{1,2})$", base)
+        if m_dec:
+            major = int(m_dec.group(1).lstrip("0") or "0")
+            minor = int(m_dec.group(2))
+            return float(f"{major}.{minor:02d}")
+        nums = re.findall(r"(\d+)", base)
+        if nums:
+            return int(nums[-1])
+        return 0
+    
+    # Build multiple mappings to find chapters
+    output_file_to_chapter_key = {}
+    actual_num_to_chapter_key = {}
+    basename_to_chapter_key = {}
+    merged_child_to_parent = {}  # Maps merged child actual_num -> parent actual_num
+    
+    # Debug: Log first few output files to see what extensions are stored
+    debug_count = 0
+    for chapter_key, chapter_info in prog["chapters"].items():
+        if debug_count < 3:
+            output_file = chapter_info.get("output_file")
+            if output_file:
+                log(f"      DEBUG: Chapter {chapter_key} has output_file='{output_file}'")
+                debug_count += 1
+    
+    for chapter_key, chapter_info in prog["chapters"].items():
+        output_file = chapter_info.get("output_file")
+        status = chapter_info.get("status", "")
+        
+        if output_file:
+            # IMPORTANT: Only map non-merged chapters to output_file
+            # Merged children share parent's output_file, so we don't want them to overwrite
+            if status != "merged":
+                # Only set if not already mapped, OR if this is a completed/parent chapter
+                # This ensures parents take priority over any lingering mappings
+                existing_key = output_file_to_chapter_key.get(output_file)
+                if not existing_key or status == "completed":
+                    output_file_to_chapter_key[output_file] = chapter_key
+                
+                # Also map without response_ prefix for matching
+                if output_file.startswith("response_"):
+                    alt_name = output_file[9:]  # Remove "response_" prefix
+                    if alt_name not in output_file_to_chapter_key or status == "completed":
+                        output_file_to_chapter_key[alt_name] = chapter_key
+        
+        # Map by actual chapter number
+        actual_num = chapter_info.get("actual_num")
+        if actual_num is not None:
+            if actual_num not in actual_num_to_chapter_key:
+                actual_num_to_chapter_key[actual_num] = []
+            actual_num_to_chapter_key[actual_num].append(chapter_key)
+        
+        # Map by original basename
+        original_basename = chapter_info.get("original_basename")
+        if original_basename:
+            basename_to_chapter_key[original_basename] = chapter_key
+            # Also map response_ version
+            basename_to_chapter_key[f"response_{original_basename}"] = chapter_key
+        
+        # Track merged children -> parent mapping (Method 1: from child's merged status)
+        if chapter_info.get("status") == "merged":
+            child_num = actual_num
+            parent_num = chapter_info.get("merged_parent_chapter")
+            if child_num is not None and parent_num is not None:
+                merged_child_to_parent[child_num] = parent_num
+        
+        # Track merged children -> parent mapping (Method 2: from parent's merged_chapters list)
+        # This catches cases where child's status was corrupted but parent still has the list
+        merged_chapters_list = chapter_info.get("merged_chapters")
+        if merged_chapters_list and actual_num is not None:
+            for child_num in merged_chapters_list:
+                if child_num not in merged_child_to_parent:
+                    merged_child_to_parent[child_num] = actual_num
+
+    def find_chapter_key(filename):
+        """Map a filename to a chapter key, respecting merged-child redirects."""
+        chapter_key = None
+        is_merged_child = False
+        file_chapter_num = None
+        import re
+        num_matches = re.findall(r'(\d+)', filename)
+        if num_matches:
+            file_chapter_num = int(num_matches[-1])
+        
+        # MERGED CHILDREN HANDLING
+        if file_chapter_num is not None and file_chapter_num in merged_child_to_parent:
+            parent_num = merged_child_to_parent[file_chapter_num]
+            is_merged_child = True
+            log(f"   🔗 File {filename} (chapter {file_chapter_num}) is merged child of chapter {parent_num} - redirecting QA updates to parent")
+            if parent_num in actual_num_to_chapter_key:
+                parent_keys = actual_num_to_chapter_key[parent_num]
+                chapter_key = parent_keys[0]
+            return chapter_key, is_merged_child, file_chapter_num
+
+        # Method 1: Direct output file match
+        chapter_key = output_file_to_chapter_key.get(filename)
+        if not chapter_key:
+            filename_folded = os.path.basename(str(filename or '')).casefold()
+            chapter_key = next(
+                (
+                    key for output_name, key in output_file_to_chapter_key.items()
+                    if os.path.basename(str(output_name or '')).casefold()
+                    == filename_folded
+                ),
+                None,
+            )
+        if not chapter_key:
+            # Try swapping .html/.txt
+            if filename.endswith('.html'):
+                alt_filename = filename[:-5] + '.txt'
+                chapter_key = output_file_to_chapter_key.get(alt_filename)
+            elif filename.endswith('.txt'):
+                alt_filename = filename[:-4] + '.html'
+                chapter_key = output_file_to_chapter_key.get(alt_filename)
+
+        # Method 2: Try without response_ prefix
+        if not chapter_key and filename.startswith("response_"):
+            base_name = filename[9:]
+            chapter_key = basename_to_chapter_key.get(base_name)
+
+        # Method 3: Match by chapter number
+        if not chapter_key and file_chapter_num is not None:
+            if file_chapter_num in actual_num_to_chapter_key:
+                candidates = actual_num_to_chapter_key[file_chapter_num]
+                for candidate_key in candidates:
+                    candidate_info = prog["chapters"][candidate_key]
+                    candidate_output = candidate_info.get("output_file", "")
+                    if candidate_output and (candidate_output == filename or candidate_output.endswith(filename)):
+                        chapter_key = candidate_key
+                        break
+                if not chapter_key and candidates:
+                    chapter_key = candidates[0]
+
+        # Method 4: Fallback - scan chapters for matching output_file
+        if not chapter_key and os.path.exists(os.path.join(folder_path, filename)):
+            try:
+                for ch_key, ch_info in prog["chapters"].items():
+                    if ch_info.get("output_file") == filename:
+                        chapter_key = ch_key
+                        break
+            except Exception:
+                pass
+
+        return chapter_key, is_merged_child, file_chapter_num
+    
+    updated_count = 0
+    updated_nums_for_log = []
+
+    def _choose_log_num(chapter_info, fallback_num=None, filename=None):
+        for key in ("actual_num", "raw_chapter_num", "chapter_num"):
+            num = chapter_info.get(key)
+            if isinstance(num, (int, float)) and num != 0:
+                return num
+        if filename:
+            num = _extract_num_from_filename(filename)
+            if num is not None:
+                return num
+        if isinstance(fallback_num, (int, float)) and fallback_num != 0:
+            return fallback_num
+        return None
+    for faulty_row in faulty_chapters:
+        faulty_filename = faulty_row["filename"]
+        chapter_key, is_merged_child, file_chapter_num = find_chapter_key(faulty_filename)
+        
+        if chapter_key and chapter_key in prog["chapters"]:
+            chapter_info = prog["chapters"][chapter_key]
+            old_status = chapter_info.get("status", "unknown")
+            actual_num_being_updated = chapter_info.get("actual_num")
+            log(f"      DEBUG: Updating chapter_key='{chapter_key}', actual_num={actual_num_being_updated}, old_status={old_status}")
+
+            if _apply_chunk_scan_to_progress(
+                prog,
+                chapter_key,
+                chapter_info,
+                faulty_row,
+                log,
+            ):
+                updated_count += 1
+                chapter_num = _choose_log_num(
+                    chapter_info,
+                    faulty_row.get("chapter_num")
+                    or faulty_row.get("file_index", 0) + 1,
+                    faulty_filename,
+                )
+                updated_nums_for_log.append(chapter_num)
+                continue
+            
+            # MERGED CHILDREN FIX: Clear any merged children of this chapter before marking as qa_failed
+            merged_child_nums = chapter_info.get("merged_chapters", [])
+            if merged_child_nums:
+                log(f"      🔓 Clearing merged status from {len(merged_child_nums)} child chapters due to parent QA failure")
+                for child_chapter_key, child_info in list(prog["chapters"].items()):
+                    if child_info.get("status") == "merged" and child_info.get("merged_parent_chapter") == actual_num_being_updated:
+                        child_actual_num = child_info.get("actual_num")
+                        log(f"         🔓 Clearing merged status for chapter {child_actual_num}")
+                        del prog["chapters"][child_chapter_key]
+            
+            # Update status to qa_failed
+            chapter_info["status"] = "qa_failed"
+            chapter_info["qa_issues"] = True
+            chapter_info["qa_timestamp"] = time.time()
+            _incoming_issues = faulty_row.get("issues", [])
+            _incoming_previews = faulty_row.get("qa_issue_previews", {})
+            if not isinstance(_incoming_previews, dict):
+                _incoming_previews = {}
+            chapter_info["qa_issues_found"] = _incoming_issues
+            chapter_info["qa_issue_previews"] = dict(_incoming_previews)
+            chapter_info["duplicate_confidence"] = faulty_row.get("duplicate_confidence", 0)
+
+            # Ensure output_file is set (use faulty_filename if null)
+            if not chapter_info.get("output_file"):
+                chapter_info["output_file"] = faulty_filename
+
+            # DUPLICATE ENTRIES FIX: A progress file can end up with multiple
+            # entries pointing to the same output_file (e.g. ``'536'`` and
+            # ``'special_Chapter536'`` both pointing at ``Chapter536.xhtml``).
+            # Without this, updating one leaves the other with stale
+            # ``qa_issues_found`` from a previous scan. Mirror the current
+            # scan's QA fields onto every sibling entry that shares the
+            # output_file so the progress file can't disagree with itself.
+            _target_output = chapter_info.get("output_file")
+            if _target_output:
+                for _sib_key, _sib in prog["chapters"].items():
+                    if _sib_key == chapter_key or not isinstance(_sib, dict):
+                        continue
+                    if _sib.get("output_file") != _target_output:
+                        continue
+                    _sib["status"] = "qa_failed"
+                    _sib["qa_issues"] = True
+                    _sib["qa_timestamp"] = chapter_info["qa_timestamp"]
+                    _sib["qa_issues_found"] = list(_incoming_issues)
+                    _sib["qa_issue_previews"] = dict(_incoming_previews)
+                    _sib["duplicate_confidence"] = chapter_info["duplicate_confidence"]
+
+            updated_count += 1
+            
+            # Use chapter_num from faulty_row if available, otherwise fall back to actual_num
+            chapter_num = _choose_log_num(
+                chapter_info,
+                faulty_row.get("chapter_num") or faulty_row.get("file_index", 0) + 1,
+                faulty_filename,
+            )
+            log(f"   └─ Marked chapter {chapter_num} as qa_failed (was: {old_status})")
+            updated_nums_for_log.append(chapter_num)
+            
+            # IMPORTANT: Don't remove from content_hashes or chapter_chunks
+            # Just mark as qa_failed so it will be retranslated
+            # The translation process will handle cleanup when retranslating
+            
+            # Optional: Log what we're NOT removing for clarity
+            content_hash = chapter_info.get("content_hash")
+            if content_hash:
+                log(f"   └─ Keeping content hash {content_hash[:8]}... for retranslation")
+        else:
+            # For merged children where we couldn't find parent, skip creating new entries
+            if is_merged_child:
+                log(f"   ⚠️ Merged child {faulty_filename} - could not find parent chapter {merged_child_to_parent.get(file_chapter_num, '?')} to update")
+                continue
+            
+            # Log failure to find chapter
+            log(f"   ⚠️ Could not find chapter entry for {faulty_filename}")
+            
+            # Translation artifacts have stable non-chapter progress keys and
+            # must be tracked even though their filenames contain no number.
+            artifact_spec = translation_artifact_spec_for_filename(
+                faulty_filename
+            )
+            if artifact_spec:
+                artifact_path = os.path.join(folder_path, faulty_filename)
+                content_hash = None
+                try:
+                    with open(artifact_path, 'rb') as artifact_file:
+                        content_hash = hashlib.sha256(
+                            artifact_file.read()
+                        ).hexdigest()
+                except OSError:
+                    pass
+                chapter_key = artifact_spec['progress_key']
+                prog["chapters"][chapter_key] = {
+                    "actual_num": artifact_spec['actual_num'],
+                    "content_hash": content_hash,
+                    "output_file": faulty_filename,
+                    "original_basename": faulty_filename,
+                    "status": "qa_failed",
+                    "last_updated": time.time(),
+                    "is_special": True,
+                    "special_type": artifact_spec['kind'],
+                    "translation_artifact_progress_key": chapter_key,
+                    "translation_artifact_label": artifact_spec['label'],
+                    "qa_issues": True,
+                    "qa_timestamp": time.time(),
+                    "qa_issues_found": faulty_row.get("issues", []),
+                    "qa_issue_previews": dict(
+                        faulty_row.get("qa_issue_previews", {})
+                        if isinstance(faulty_row.get("qa_issue_previews"), dict)
+                        else {}
+                    ),
+                    "duplicate_confidence": faulty_row.get(
+                        "duplicate_confidence", 0
+                    ),
+                }
+                log(
+                    f"   └─ Created qa_failed entry for "
+                    f"{artifact_spec['label']} ({faulty_filename})"
+                )
+                updated_count += 1
+                updated_nums_for_log.append(artifact_spec['actual_num'])
+                continue
+
+            # Try to create a new entry if we can determine the chapter number
+            import re
+            matches = re.findall(r'(\d+)', faulty_filename)
+            if matches:
+                chapter_num = int(matches[-1])
+                
+                # Use actual_num as key
+                chapter_key = str(chapter_num)
+                
+                # Calculate content hash from the file if possible
+                content_hash = None
+                if os.path.exists(os.path.join(folder_path, faulty_filename)):
+                    try:
+                        with open(os.path.join(folder_path, faulty_filename), 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+                    except:
+                        pass
+                
+                # Create entry with proper field order matching regular entries
+                prog["chapters"][chapter_key] = {
+                    "actual_num": chapter_num,
+                    "content_hash": content_hash,  # Include if we could calculate it
+                    "output_file": faulty_filename,
+                    "status": "qa_failed",
+                    "last_updated": time.time(),  # Use same field name as regular entries
+                    "zero_adjusted": False,  # Default to False since we don't know
+                    # QA-specific fields come after the standard fields
+                    "qa_issues": True,
+                    "qa_timestamp": time.time(),
+                    "qa_issues_found": faulty_row.get("issues", []),
+                    "qa_issue_previews": dict(
+                        faulty_row.get("qa_issue_previews", {})
+                        if isinstance(faulty_row.get("qa_issue_previews", {}), dict)
+                        else {}
+                    ),
+                    "duplicate_confidence": faulty_row.get("duplicate_confidence", 0)
+                }
+                log(f"   └─ Created qa_failed entry for chapter {chapter_num}")
+                updated_count += 1
+                updated_nums_for_log.append(chapter_num)
+    
+    log(f"🔧 Updated {updated_count} chapters in new format")
+
+    # --- RESOLVED CHAPTERS: clear qa_failed back to completed ---
+    # Note: We do NOT clear qa_failed for protected issues because they
+    # require retranslation, not just QA re-scanning
+    PROTECTED_ISSUES = {"SPLIT_FAILED", "TRUNCATED", "PROHIBITED_CONTENT", "EMPTY_OUTPUT", "API_ERROR", "TIMEOUT"}
+    
+    resolved_count = 0
+    skipped_count = 0
+    resolved_nums_for_log = []
+    for resolved_row in resolved_chapters:
+        filename = resolved_row["filename"]
+        chapter_key, is_merged_child, file_chapter_num = find_chapter_key(filename)
+
+        if not chapter_key or chapter_key not in prog["chapters"]:
+            continue
+
+        chapter_info = prog["chapters"][chapter_key]
+        old_status = chapter_info.get("status", "")
+        was_qa_failed = old_status == "qa_failed" or chapter_info.get("qa_issues")
+
+        chunk_key = str(
+            resolved_row.get("chunk_progress_key")
+            or chapter_info.get("content_hash")
+            or chapter_key
+        )
+        existing_chunk_entry = prog.get("chapter_chunks", {}).get(chunk_key)
+        previous_chunk_failures = (
+            chunk_failure_summary(existing_chunk_entry)["failed"]
+            if isinstance(existing_chunk_entry, dict)
+            else 0
+        )
+        if _apply_chunk_scan_to_progress(
+            prog,
+            chapter_key,
+            chapter_info,
+            resolved_row,
+            log,
+        ):
+            if previous_chunk_failures:
+                resolved_count += 1
+                chapter_num = _choose_log_num(
+                    chapter_info,
+                    resolved_row.get("chapter_num") or file_chapter_num,
+                    filename,
+                )
+                resolved_nums_for_log.append(chapter_num)
+            continue
+
+        if was_qa_failed:
+            # Check if this chapter has any protected issues that should NOT be auto-cleared
+            existing_issues = chapter_info.get("qa_issues_found", [])
+            protected_found = []
+            for issue in existing_issues:
+                issue_type = issue.get("type") if isinstance(issue, dict) else str(issue)
+                if issue_type in PROTECTED_ISSUES:
+                    protected_found.append(issue_type)
+            
+            if protected_found:
+                # Do NOT clear - this chapter has issues that require manual retranslation
+                chapter_num = _choose_log_num(
+                    chapter_info,
+                    resolved_row.get("chapter_num") or file_chapter_num,
+                    filename,
+                )
+                log(f"   ⚠️ Skipping chapter {chapter_num} - has protected QA issues: {', '.join(protected_found)} (requires retranslation)")
+                skipped_count += 1
+                continue
+            
+            chapter_info["status"] = "completed"
+            chapter_info["qa_issues"] = False
+            chapter_info["qa_issues_found"] = []
+            chapter_info["qa_issue_previews"] = {}
+            chapter_info["qa_timestamp"] = time.time()
+            chapter_info["duplicate_confidence"] = resolved_row.get("duplicate_confidence", 0)
+            # Keep content_hash/output_file untouched
+
+            # DUPLICATE ENTRIES FIX: mirror the cleared QA fields onto any
+            # other progress entries that point at the same output_file
+            # (e.g. ``'536'`` + ``'special_Chapter536'``). Otherwise the
+            # duplicate keeps its stale ``qa_failed`` + ``qa_issues_found``
+            # and the GUI still shows the chapter as failed.
+            _target_output = chapter_info.get("output_file")
+            if _target_output:
+                for _sib_key, _sib in prog["chapters"].items():
+                    if _sib_key == chapter_key or not isinstance(_sib, dict):
+                        continue
+                    if _sib.get("output_file") != _target_output:
+                        continue
+                    # Respect protected issues on the sibling, same as above.
+                    _sib_issues = _sib.get("qa_issues_found", []) or []
+                    _sib_protected = any(
+                        (i.get("type") if isinstance(i, dict) else str(i)) in PROTECTED_ISSUES
+                        for i in _sib_issues
+                    )
+                    if _sib_protected:
+                        continue
+                    _sib["status"] = "completed"
+                    _sib["qa_issues"] = False
+                    _sib["qa_issues_found"] = []
+                    _sib["qa_issue_previews"] = {}
+                    _sib["qa_timestamp"] = chapter_info["qa_timestamp"]
+                    _sib["duplicate_confidence"] = chapter_info["duplicate_confidence"]
+
+            resolved_count += 1
+            chapter_num = _choose_log_num(
+                chapter_info,
+                resolved_row.get("chapter_num") or file_chapter_num,
+                filename,
+            )
+            log(f"   ✅ Marked chapter {chapter_num} as completed (QA issues resolved, was: {old_status})")
+            resolved_nums_for_log.append(chapter_num)
+
+    if resolved_count:
+        log(f"🔧 Cleared qa_failed status for {resolved_count} chapter(s)")
+    if skipped_count:
+        log(f"⚠️ Kept qa_failed status for {skipped_count} chapter(s) with protected issues")
+
+    # Preserve refinement history on QA failure. A qa_failed status takes
+    # precedence when choosing multipass candidates, so refinement_status does
+    # not need to be destroyed merely to make the chapter retryable.
+
+    return updated_nums_for_log, resolved_nums_for_log
+
+def update_legacy_format_progress(prog, faulty_chapters, resolved_chapters, log):
+    """Update legacy format progress file"""
+    log("[INFO] Detected legacy progress format")
+    
+    existing = prog.get("completed", [])
+    faulty_indices = [row["file_index"] for row in faulty_chapters]
+    updated = [idx for idx in existing if idx not in faulty_indices]
+    removed_count = len(existing) - len(updated)
+    
+    # Re-add resolved chapters to completed list
+    resolved_indices = [row["file_index"] for row in resolved_chapters]
+    combined = set(updated)
+    combined.update(resolved_indices)
+    prog["completed"] = sorted(combined)
+    
+    # Remove chunk data
+    if "chapter_chunks" in prog:
+        for faulty_idx in faulty_indices:
+            chapter_key = str(faulty_idx)
+            if chapter_key in prog["chapter_chunks"]:
+                del prog["chapter_chunks"][chapter_key]
+                log(f"   └─ Removed chunk data for chapter {faulty_idx + 1}")
+    
+    # Remove from content_hashes
+    if "content_hashes" in prog:
+        hashes_to_remove = []
+        for hash_val, hash_info in prog["content_hashes"].items():
+            if hash_info.get("completed_idx") in faulty_indices:
+                hashes_to_remove.append(hash_val)
+        
+        for hash_val in hashes_to_remove:
+            del prog["content_hashes"][hash_val]
+            log(f"   └─ Removed content hash entry")
+    
+    log(f"🔧 Removed {removed_count} chapters from legacy completed list")
+
+def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
+    """Extract word counts for each chapter from the original EPUB using spine order.
+    
+    Key: Uses content.opf SPINE ORDER (reading order) as the authoritative chapter sequence.
+    This ensures that files like 0001_chapter.xhtml and 0001_section.xhtml both get
+    correctly indexed by their actual position in the book, not just their filenames.
+    
+    Args:
+        epub_path: Path to the EPUB file
+        log: Logging function
+        min_file_length: Minimum character length to include a file (from qa_settings)
+    """
+    
+    def count_cjk_words(text):
+        """Count actual words in CJK text with better segmentation"""
+        word_count = 0
+        
+        # Chinese word counting (considering multi-character words)
+        # Most Chinese words are 2-4 characters
+        chinese_chars = re.findall(r'[\u4e00-\u9fff]+', text)
+        for segment in chinese_chars:
+            # Estimate words based on character count
+            # Average Chinese word length is ~1.7 characters
+            word_count += max(1, len(segment) / 1.7)
+        
+        # Japanese word counting
+        # Hiragana particles/endings (usually 1-3 chars each)
+        hiragana_segments = re.findall(r'[\u3040-\u309f]+', text)
+        word_count += len(hiragana_segments)
+        
+        # Katakana words (foreign words, usually one word per segment)
+        katakana_segments = re.findall(r'[\u30a0-\u30ff]+', text)
+        word_count += len(katakana_segments)
+        
+        # Korean word counting (words are typically space-separated)
+        korean_words = re.findall(r'[\uac00-\ud7af]+', text)
+        word_count += len(korean_words)
+        
+        # Also count non-CJK words (English mixed in)
+        non_cjk = re.sub(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+', ' ', text)
+        word_count += len(non_cjk.split())
+        
+        return int(word_count)
+    
+    try:
+        word_counts = {}
+        spine_files = {}  # Maps spine index to file info
+        
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Step 1: Read and parse content.opf to get SPINE ORDER
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}  # Maps item id to href
+            
+            try:
+                content_opf_path = find_epub_opf_member(zf)
+                if content_opf_path:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
+            except Exception as e:
+                log(f"⚠️ Could not read OPF package: {e}")
+            
+            # Parse manifest and spine from content.opf
+            if content_opf_data:
+                try:
+                    soup_opf = BeautifulSoup(content_opf_data, 'xml')
+                    
+                    # Build manifest map (id -> href)
+                    manifest = soup_opf.find('manifest')
+                    if manifest:
+                        for item in manifest.find_all('item'):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            if item_id and href:
+                                manifest_map[item_id] = href
+                    
+                    # Process spine in order
+                    spine = soup_opf.find('spine')
+                    if spine:
+                        spine_index = 1  # Start from 1 for chapter numbering
+                        for itemref in spine.find_all('itemref'):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest_map:
+                                href = manifest_map[idref]
+                                spine_files[spine_index] = {
+                                    'href': href,
+                                    'idref': idref
+                                }
+                                spine_index += 1
+                        
+                        if spine_files:
+                            log(f"📚 Found {len(spine_files)} chapters in EPUB spine order.")
+                except Exception as e:
+                    log(f"⚠️ Could not parse content.opf: {e}")
+            
+            # Step 2: Process files in spine order
+            if spine_files:
+                # Determine the base directory from content.opf location
+                base_dir = ''
+                if content_opf_path:
+                    # content.opf is often in OEBPS/ or similar
+                    base_dir = os.path.dirname(content_opf_path)
+                    if base_dir:
+                        base_dir = base_dir + '/'
+                
+                extracted_count = 0
+                for spine_index, file_info in sorted(spine_files.items()):
+                    try:
+                        file_path = file_info['href']
+                        
+                        # Try multiple path resolutions
+                        possible_paths = [
+                            file_path,                          # As-is from manifest
+                            base_dir + file_path,               # Relative to content.opf
+                            'OEBPS/' + file_path,               # Common EPUB structure
+                            'OPS/' + file_path,                 # Alternative structure
+                        ]
+                        
+                        content = None
+                        successful_path = None
+                        for try_path in possible_paths:
+                            try:
+                                content = zf.read(try_path).decode('utf-8', errors='ignore')
+                                successful_path = try_path
+                                break
+                            except KeyError:
+                                continue
+                        
+                        if content is None:
+                            log(f"⚠️ Could not find spine item {spine_index}: tried {possible_paths}")
+                            continue
+                        
+                        basename = os.path.basename(file_path)
+                        soup = BeautifulSoup(content, 'html.parser')
+                        text = soup.get_text(strip=True)
+                        
+                        # Skip files shorter than minimum length setting
+                        if len(text) < min_file_length:
+                            continue
+                        
+                        script_hint = detect_dominant_script(text)
+                        has_cjk = script_hint in ['cjk', 'japanese', 'korean']
+                        small_file_word_count = _count_small_file_words(text)
+                        
+                        # Use appropriate counting based on mode
+                        # Word count mode needs special CJK handling
+                        if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+                            if has_cjk:
+                                word_count = count_cjk_words(text)
+                            else:
+                                word_count = _count_words(text)
+                        else:
+                            # Character counting (sampled or exact)
+                            word_count = _count_chars_cached(text)
+                        
+                        # Check if source has header tags (h1-h6)
+                        has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                        # Count + sample of non-standard tag occurrences in the
+                        # source (either angle-bracket or HTML-entity form).
+                        # Used by the invalid-tag-mismatch check in the worker.
+                        custom_tags_count = _count_custom_tag_occurrences(content)
+                        custom_tag_names = _collect_custom_tag_names(content)
+                        
+                        # Store using spine index as the authoritative chapter number
+                        word_counts[spine_index] = {
+                            'word_count': word_count,
+                            'small_file_word_count': small_file_word_count,
+                            'filename': basename,
+                            'full_path': file_path,
+                            'is_cjk': has_cjk,
+                            'script': script_hint,
+                            'spine_index': spine_index,
+                            'has_headers': has_headers,
+                            'custom_tags_count': custom_tags_count,
+                            'custom_tag_names': custom_tag_names,
+                        }
+                        extracted_count += 1
+                        
+                    except Exception as e:
+                        log(f"⚠️ Error processing spine item {spine_index} ({file_info.get('href', 'unknown')}): {e}")
+                        import traceback
+                        log(f"   Traceback: {traceback.format_exc()}")
+                        continue
+            else:
+                # Fallback: No spine found, scan all HTML files directly
+                log("⚠️ Could not read spine order, falling back to file extraction")
+                
+                html_files = [f for f in zf.namelist() 
+                             if f.lower().endswith(('.html', '.xhtml', '.htm')) 
+                             and not f.startswith('__MACOSX')
+                             and 'cover' not in f.lower()]
+                
+                html_files.sort()
+                
+                for idx, file_path in enumerate(html_files, start=1):
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                        soup = BeautifulSoup(content, 'html.parser')
+                        text = soup.get_text(strip=True)
+                        
+                        # Skip files shorter than minimum length setting
+                        if len(text) < min_file_length:
+                            continue
+                        
+                        script_hint = detect_dominant_script(text)
+                        has_cjk = script_hint in ['cjk', 'japanese', 'korean']
+                        small_file_word_count = _count_small_file_words(text)
+                        
+                        # Use word or character counting based on mode
+                        if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+                            if has_cjk:
+                                word_count = count_cjk_words(text)
+                            else:
+                                word_count = _count_words(text)
+                        else:
+                            # Character counting (sampled or exact)
+                            word_count = _count_chars_cached(text)
+                        
+                        # Check if source has header tags (h1-h6)
+                        has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                        # Count + sample of non-standard tag occurrences used
+                        # by the invalid-tag-mismatch check in the worker.
+                        custom_tags_count = _count_custom_tag_occurrences(content)
+                        custom_tag_names = _collect_custom_tag_names(content)
+                        
+                        word_counts[idx] = {
+                            'word_count': word_count,
+                            'small_file_word_count': small_file_word_count,
+                            'has_headers': has_headers,
+                            'custom_tags_count': custom_tags_count,
+                            'custom_tag_names': custom_tag_names,
+                            'filename': os.path.basename(file_path),
+                            'full_path': file_path,
+                            'is_cjk': has_cjk,
+                            'script': script_hint
+                        }
+                    except Exception as e:
+                        continue
+                
+                if word_counts:
+                    log(f"   Found word counts for {len(word_counts)} chapters (fallback mode)")
+            
+            if spine_files and extracted_count == 0:
+                log(f"⚠️ Failed to extract any word counts from {len(spine_files)} spine items")
+                log(f"   First spine item path: {spine_files.get(1, {}).get('href', 'unknown')}")
+        
+        return word_counts
+        
+    except Exception as e:
+        log(f"❌ Error reading EPUB file: {e}")
+        return {}
+
+
+def extract_html_word_counts(html_path, log=print, min_file_length=0):
+    """Extract source metadata for one standalone HTML-family file.
+
+    The returned shape matches one entry from ``extract_epub_word_counts`` so
+    the regular filename-based EPUB comparison path can compare a translated
+    ``response_<name>.html`` (or the same basename with another HTML
+    extension) against this source file.
+    """
+    try:
+        with open(html_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+            content = source_file.read()
+
+        soup = BeautifulSoup(content, 'html.parser')
+        text = soup.get_text(separator='\n', strip=True)
+        if len(text) < min_file_length:
+            log(
+                f"⚠️ Standalone HTML source is below the minimum length "
+                f"({len(text)} < {min_file_length} characters)"
+            )
+            return {}
+
+        script_hint = detect_dominant_script(text)
+        has_cjk = script_hint in ['cjk', 'japanese', 'korean']
+        small_file_word_count = _count_small_file_words(text)
+        if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+            word_count = small_file_word_count if has_cjk else _count_words(text)
+        else:
+            word_count = _count_chars_cached(text)
+
+        basename = os.path.basename(html_path)
+        log(f"📄 Loaded standalone HTML source for word count: {basename}")
+        return {
+            1: {
+                'word_count': word_count,
+                'small_file_word_count': small_file_word_count,
+                'filename': basename,
+                'full_path': os.path.abspath(html_path),
+                'is_cjk': has_cjk,
+                'script': script_hint,
+                'spine_index': 1,
+                'has_headers': bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])),
+                'custom_tags_count': _count_custom_tag_occurrences(content),
+                'custom_tag_names': _collect_custom_tag_names(content),
+            }
+        }
+    except Exception as exc:
+        log(f"❌ Error reading standalone HTML source: {exc}")
+        return {}
+
+
+def extract_epub_html_content(epub_path, log=print):
+    """Extract raw HTML content for each chapter from the original EPUB using spine order.
+    
+    Used by source-aware QA checks to compare source chapters with translated output.
+    Follows the same spine-order pattern as extract_epub_word_counts / extract_epub_image_info.
+    
+    Returns:
+        Dict[int, dict]: {spine_index: {'html': raw_html_string, 'filename': basename}}
+    """
+    def _fallback_extract_html_files(zf):
+        log("⚠️ Could not read spine order, falling back to file extraction")
+        fallback_contents = {}
+        html_files = [
+            f for f in zf.namelist()
+            if f.lower().endswith(('.html', '.xhtml', '.htm'))
+            and not f.startswith('__MACOSX')
+            and 'cover' not in f.lower()
+        ]
+        html_files.sort()
+
+        for idx, file_path in enumerate(html_files, start=1):
+            try:
+                content = zf.read(file_path).decode('utf-8', errors='ignore')
+                fallback_contents[idx] = {
+                    'html': content,
+                    'filename': os.path.basename(file_path),
+                }
+            except Exception as e:
+                log(f"⚠️ Could not read source HTML file {file_path}: {e}")
+
+        return fallback_contents
+
+    try:
+        html_contents = {}
+
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Read and parse content.opf to get spine order
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}
+
+            content_opf_path = find_epub_opf_member(zf)
+            if content_opf_path:
+                content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
+
+            if not content_opf_data:
+                log("⚠️ Could not find an OPF package while extracting source HTML")
+                return _fallback_extract_html_files(zf)
+
+            soup_opf = BeautifulSoup(content_opf_data, 'xml')
+
+            manifest = soup_opf.find('manifest')
+            if manifest:
+                for item in manifest.find_all('item'):
+                    item_id = item.get('id')
+                    href = item.get('href')
+                    if item_id and href:
+                        manifest_map[item_id] = href
+
+            spine = soup_opf.find('spine')
+            if not spine:
+                log("⚠️ No spine found in content.opf for truncation detection")
+                return _fallback_extract_html_files(zf)
+
+            base_dir = ''
+            if content_opf_path:
+                base_dir = os.path.dirname(content_opf_path)
+                if base_dir:
+                    base_dir = base_dir + '/'
+
+            spine_index = 1
+            for itemref in spine.find_all('itemref'):
+                idref = itemref.get('idref')
+                if idref and idref in manifest_map:
+                    href = manifest_map[idref]
+                    possible_paths = [
+                        href,
+                        base_dir + href,
+                        'OEBPS/' + href,
+                        'OPS/' + href,
+                    ]
+
+                    for try_path in possible_paths:
+                        try:
+                            content = zf.read(try_path).decode('utf-8', errors='ignore')
+                            html_contents[spine_index] = {
+                                'html': content,
+                                'filename': os.path.basename(href)
+                            }
+                            break
+                        except KeyError:
+                            continue
+
+                    spine_index += 1
+
+        if html_contents:
+            log(f"   Extracted HTML content for {len(html_contents)} spine items")
+        else:
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                html_contents = _fallback_extract_html_files(zf)
+        return html_contents
+
+    except Exception as e:
+        log(f"⚠️ Error extracting source HTML content from EPUB: {e}")
+        return {}
+
+
+# ---------- Silent Truncation Detection ----------
+
+# Module-level lazy-loaded references (set on first call)
+_truncation_embed_model = None
+_truncation_translator = None
+_truncation_translation_cache = {}
+
+# Limit concurrent AI-truncation HTML parses (pure-Python html.parser holds
+# the GIL); see run_ai_truncation_check.
+_AI_TRUNCATION_PARSE_GATE = threading.Semaphore(2)
+
+
+def _extract_paragraphs(html, *, return_last_html_p=False):
+    """Extract paragraph/list-item texts and optionally the final text unit."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "head", "title", "meta", "link"]):
+        tag.decompose()
+    paragraph_tags = soup.find_all(["p", "li"])
+    last_html_p = None
+    if paragraph_tags:
+        # Preserve the distinction between a document containing only empty
+        # paragraphs and one containing no paragraph tags at all, while
+        # skipping empty trailing markup in otherwise populated documents.
+        last_html_p = ""
+        for paragraph_tag in reversed(paragraph_tags):
+            paragraph_text = paragraph_tag.get_text(" ", strip=True)
+            if paragraph_text:
+                last_html_p = paragraph_text
+                break
+    paragraphs = []
+    for p in paragraph_tags:
+        text = p.get_text(strip=True)
+        if text:
+            paragraphs.append(text)
+    # Fallback: if no <p> tags, split by double newlines
+    if not paragraphs:
+        raw_text = soup.get_text()
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', raw_text) if p.strip()]
+    if return_last_html_p:
+        return paragraphs, last_html_p
+    return paragraphs
+
+
+def _format_ai_truncation_last_p_preview(source_last_p, output_last_p, max_chars_per_p=160):
+    """Format source/output final-paragraph context for Progress Manager."""
+    def _format_value(value):
+        if value is None:
+            return "[no <p> tag]"
+        text = re.sub(r'\s+', ' ', str(value)).strip()
+        if not text:
+            return "[empty]"
+        if len(text) > max_chars_per_p:
+            text = text[:max_chars_per_p - 3].rstrip() + "..."
+        return text
+
+    return (
+        f"Source last <p>: {_format_value(source_last_p)} | "
+        f"Output last <p>: {_format_value(output_last_p)}"
+    )
+
+
+def _record_ai_truncation_issue(result_obj, ai_result):
+    """Attach the AI truncation issue and its final-``<p>`` preview."""
+    issue_code = f"ai_truncation_detected ({ai_result.get('details', 'unknown')})"
+    issues = result_obj.setdefault('issues', [])
+    if issue_code not in issues:
+        issues.append(issue_code)
+
+    previews = result_obj.setdefault('qa_issue_previews', {})
+    if not isinstance(previews, dict):
+        previews = {}
+        result_obj['qa_issue_previews'] = previews
+    previews[issue_code] = _format_ai_truncation_last_p_preview(
+        ai_result.get('source_last_p'),
+        ai_result.get('output_last_p'),
+    )
+    result_obj['score'] = len(issues)
+    return issue_code
+
+
+def check_potential_truncation(raw_text):
+    """Check if the last sentence in the chapter ends without proper punctuation.
+
+    Expects plain text (already stripped of HTML by extract_text_from_html).
+    Returns a dict with 'flagged' (bool), 'last_sentence' (str), and 'details' (str).
+
+    This is a cheap heuristic: if the very last real sentence doesn't end with
+    a period, exclamation mark, question mark, ellipsis, quotation marks preceded
+    by punctuation, or other common sentence-ending punctuation, we flag it as a
+    potential truncation.
+    """
+    result = {'flagged': False, 'last_sentence': '', 'details': ''}
+
+    if not raw_text or not isinstance(raw_text, str):
+        return result
+
+    import re as _re
+    # raw_text is already plain text (BeautifulSoup get_text), but defensively
+    # decode any leftover HTML entities and collapse whitespace
+    cleaned = raw_text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    # Strip invisible / zero-width characters that str.split() ignores but
+    # rstrip() does NOT strip — these appear at chapter ends as paragraph
+    # separators and would otherwise be treated as the "last character",
+    # incorrectly triggering the truncation heuristic.
+    #   U+200B  ZERO WIDTH SPACE
+    #   U+200C  ZERO WIDTH NON-JOINER
+    #   U+200D  ZERO WIDTH JOINER
+    #   U+2060  WORD JOINER
+    #   U+FEFF  ZERO WIDTH NO-BREAK SPACE (BOM)
+    #   U+00A0  NO-BREAK SPACE (treated as space)
+    _zw_translate = {
+        0x200B: None,
+        0x200C: None,
+        0x200D: None,
+        0x2060: None,
+        0xFEFF: None,
+        0x00A0: ord(' '),
+    }
+    cleaned = cleaned.translate(_zw_translate)
+    cleaned = ' '.join(cleaned.split())
+
+    if not cleaned or len(cleaned) < 10:
+        return result
+
+    # Find the last non-empty "sentence" by splitting on common sentence terminators
+    # then taking whatever comes after the last terminator.
+    # We want to find the last substantial text segment.
+
+    # Strategy: walk backwards from the end of the string, skip trailing whitespace
+    # and any trailing closing markers like quotes/brackets, then check if
+    # there's a sentence-ending punctuation mark.
+
+    # Sentence-ending punctuation (covers Latin, CJK, and common Unicode)
+    _ending_punct = set('.!?…。！？‥⋯')
+    # Characters that can follow ending punctuation (closing quotes, brackets,
+    # markdown emphasis/code wrappers, etc.). Adding ``*``, ``_``, and the
+    # backtick here means chapters ending in bold / italic / inline-code
+    # markdown (e.g. ``...great work.**``, ``...hello*``, ``...value`` ``)
+    # are correctly recognised as completed endings rather than being
+    # flagged as ``missing_ending_punctuation``. The peel loop below strips
+    # runs of these characters, so ``**bold.**`` → peels → core char = ``.``
+    # → ends_with_punctuation.
+    _trailing_wrappers = set(
+        '"' + "'" + '「」『』【】)]〕〗〙〛»›'
+        + chr(0x201c) + chr(0x201d) + chr(0x2018) + chr(0x2019)
+        + '*_`'  # markdown bold / italic / inline-code closers
+    )
+    # Decorative / emote characters that are intentional stylistic endings (not truncation)
+    # Includes:
+    #   ``^``   — emoticon endings like ``^^``, ``^_^``, ``^.^``, ``^-^``
+    #            (very common in Korean / Japanese web novels)
+    #   ``>``   — arrow / scene-transition endings like ``->``, ``=>``,
+    #            ``>>``, ``>>>`` (``===`` is still separately handled by
+    #            the 3+ separator regex below for long bars)
+    #   ``<``   — mirror of ``>`` and emoticon tails like ``>_<``, ``<_<``
+    #   ``=``   — short equals-bar endings like ``==``, ``=======`` (the
+    #            separator regex already covers 3+, this extends coverage
+    #            to any length)
+    # The peel loop below strips runs of these characters, so ``^^`` →
+    # empty core → returns ``ends_with_decorative``.
+    _decorative_chars = set(
+        '♥♡❤❤️💕☆★♪♫♬~〜♠♣♦○●◇◆△▽▲▼'
+        '^><='
+    )
+
+    # Walk backwards past trailing wrappers to find the core ending character
+    text = cleaned.rstrip()
+    if not text:
+        return result
+
+    # Store the last ~120 chars for context in the report
+    last_fragment = text[-120:] if len(text) > 120 else text
+
+    # If text ends with a closing quote, it's a completed dialogue — not truncation
+    if text[-1] in _trailing_wrappers:
+        result['details'] = 'ends_with_closing_quote'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # Peel off trailing decorative/emote characters
+    idx = len(text) - 1
+    peeled_decorative = False
+    while idx >= 0 and text[idx] in _decorative_chars:
+        idx -= 1
+        peeled_decorative = True
+
+    if peeled_decorative:
+        # Decorative chars are intentional stylistic endings (e.g. "I love you♥")
+        result['details'] = 'ends_with_decorative'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # Now peel off any trailing wrappers after the decorative chars
+    while idx >= 0 and text[idx] in _trailing_wrappers:
+        idx -= 1
+
+    if idx < 0:
+        result['flagged'] = True
+        result['last_sentence'] = last_fragment
+        result['details'] = 'text_ends_with_only_wrappers'
+        return result
+
+    core_ending_char = text[idx]
+
+    if core_ending_char in _ending_punct:
+        # Ends with proper punctuation — OK
+        result['details'] = 'ends_with_punctuation'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # Also allow a few edge cases that aren't truncation:
+    # 1. Text ending with "---", "***", or "===" (scene breaks / separators)
+    if _re.search(r'[-—–]{3,}\s*$', text) or _re.search(r'[*]{3,}\s*$', text) or _re.search(r'[=]{3,}\s*$', text):
+        result['details'] = 'ends_with_separator'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # 2. Text ending with a pure number (e.g. footnotes, chapter numbers)
+    if _re.search(r'\d\s*$', text):
+        result['details'] = 'ends_with_number'
+        result['last_sentence'] = last_fragment
+        return result
+
+    # If we reach here, the text doesn't end with sentence-ending punctuation
+    result['flagged'] = True
+    result['last_sentence'] = last_fragment
+    result['details'] = f"missing_ending_punctuation (last char: '{core_ending_char}')"
+    return result
+
+
+def run_silent_truncation_check(raw_html, trans_html, source_lang='zh-CN', target_lang='en', log=print,
+                                 tail_paragraphs=3, sleep_time=2,
+                                 cheap_threshold=0.12, borderline_score=0.40,
+                                 length_threshold=0.30, embed_threshold=0.30,
+                                 min_tail_chars=400):
+    """Check if translated content silently truncated the ending of the source.
+
+    Compares the last `min_tail_chars` chars of the raw (source) HTML with the last
+    `min_tail_chars` chars of the translated HTML via:
+      0. Paragraph count ratio (early exit if ≥70% paragraphs present).
+      1. Back-translate the raw tail to the target language (GoogleTranslator).
+      2. Cheap composite score (SequenceMatcher + keyword overlap + length ratio).
+      3. If borderline, use sentence-transformer embeddings for semantic similarity.
+
+    Returns:
+        dict with keys:
+            'flagged'  (bool)  – True when truncation is suspected
+            'score'    (float) – composite similarity score (0-1, lower = more suspicious)
+            'details'  (str)   – human-readable explanation
+            'raw_tail' (str)   – the raw tail text (back-translated)
+            'trans_tail' (str) – the translated tail text
+    """
+    global _truncation_embed_model, _truncation_translator, _truncation_translation_cache
+
+    result = {'flagged': False, 'score': 1.0, 'details': '', 'raw_tail': '', 'trans_tail': ''}
+
+    try:
+        raw_paragraphs = _extract_paragraphs(raw_html)
+        trans_paragraphs = _extract_paragraphs(trans_html)
+
+        if not raw_paragraphs or not trans_paragraphs:
+            result['details'] = 'insufficient_paragraphs'
+            return result
+
+        def _build_tail(paragraphs, min_chars):
+            """Take paragraphs from the end, expanding until min_chars reached."""
+            tail_parts = []
+            total_len = 0
+            for p in reversed(paragraphs):
+                tail_parts.append(p)
+                total_len += len(p)
+                if total_len >= min_chars:
+                    break
+            tail_parts.reverse()
+            return "\n".join(tail_parts)
+
+        raw_tail = _build_tail(raw_paragraphs, min_tail_chars)
+        trans_tail = _build_tail(trans_paragraphs, min_tail_chars)
+        result['trans_tail'] = trans_tail[:200]
+
+        # ---- Back-translate raw tail to target language ----
+        cache_key = raw_tail[:500]
+        if cache_key in _truncation_translation_cache:
+            raw_tail_translated = _truncation_translation_cache[cache_key]
+        else:
+            try:
+                from deep_translator import GoogleTranslator
+                if _truncation_translator is None:
+                    # Normalise language codes for deep_translator
+                    src = source_lang.lower().replace(' ', '-')
+                    tgt = target_lang.lower().replace(' ', '-')
+                    _truncation_translator = GoogleTranslator(source=src, target=tgt)
+                raw_tail_translated = _truncation_translator.translate(raw_tail[:4500]) or ''
+                _truncation_translation_cache[cache_key] = raw_tail_translated
+                import time as _t
+                _t.sleep(sleep_time)
+            except Exception as e:
+                log(f"      ⚠️ Back-translation failed: {e}")
+                result['details'] = f'back_translation_failed: {e}'
+                return result
+
+        result['raw_tail'] = raw_tail_translated[:200]
+
+        # Strip any residual HTML tags from both tails before comparison
+        raw_tail_translated = re.sub(r'<[^>]+>', '', raw_tail_translated).strip()
+        trans_tail = re.sub(r'<[^>]+>', '', trans_tail).strip()
+
+        # ---- Cheap composite score ----
+        from difflib import SequenceMatcher
+        seq_ratio = SequenceMatcher(None, raw_tail_translated.lower(), trans_tail.lower()).ratio()
+
+        # Keyword overlap
+        raw_kw = set(re.findall(r'[a-zA-Z]{3,}', raw_tail_translated.lower()))
+        trans_kw = set(re.findall(r'[a-zA-Z]{3,}', trans_tail.lower()))
+        if raw_kw:
+            kw_overlap = len(raw_kw & trans_kw) / len(raw_kw)
+        else:
+            kw_overlap = 0.0
+
+        # Length ratio
+        len_raw = max(len(raw_tail_translated), 1)
+        len_trans = max(len(trans_tail), 1)
+        len_ratio = min(len_raw, len_trans) / max(len_raw, len_trans)
+
+        cheap_score = 0.4 * seq_ratio + 0.35 * kw_overlap + 0.25 * len_ratio
+
+        # ---- Decision ----
+        if cheap_score >= borderline_score:
+            # High similarity → not truncated
+            result['score'] = cheap_score
+            result['details'] = f'cheap_pass (score={cheap_score:.2f})'
+            return result
+
+        if cheap_score < cheap_threshold and len_ratio < length_threshold:
+            # Very low → flagged immediately
+            result['flagged'] = True
+            result['score'] = cheap_score
+            result['details'] = f'cheap_fail (score={cheap_score:.2f}, len_ratio={len_ratio:.2f})'
+            return result
+
+        # ---- Borderline → use embeddings ----
+        try:
+            from sentence_transformers import SentenceTransformer
+            from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+
+            if _truncation_embed_model is None:
+                log("   🔄 Loading embedding model for truncation detection (first use)...")
+                _truncation_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+            embeddings = _truncation_embed_model.encode([raw_tail_translated, trans_tail])
+            embed_sim = float(_cos_sim([embeddings[0]], [embeddings[1]])[0][0])
+
+            result['score'] = embed_sim
+            if embed_sim < embed_threshold:
+                result['flagged'] = True
+                result['details'] = f'embed_fail (embed={embed_sim:.2f}, cheap={cheap_score:.2f})'
+            else:
+                result['details'] = f'embed_pass (embed={embed_sim:.2f}, cheap={cheap_score:.2f})'
+
+        except ImportError as ie:
+            log(f"      ⚠️ Embedding libraries not available: {ie}")
+            # Fall back to cheap score only
+            if cheap_score < 0.5:
+                result['flagged'] = True
+            result['score'] = cheap_score
+            result['details'] = f'cheap_only_fallback (score={cheap_score:.2f})'
+        except Exception as e:
+            log(f"      ⚠️ Embedding comparison failed: {e}")
+            result['score'] = cheap_score
+            result['details'] = f'embed_error: {e}'
+
+    except Exception as e:
+        log(f"      ⚠️ Truncation check error: {e}")
+        result['details'] = f'error: {e}'
+
+    return result
+
+
+# ---------- AI Truncation Detection ----------
+
+from contextlib import contextmanager
+import os
+
+@contextmanager
+def _qa_api_overrides_env(disable_thinking=False, delay_override=-1.0):
+    """Temporarily overrides API config environment variables for QA scans."""
+    orig_anthropic = os.environ.get('ENABLE_ANTHROPIC_THINKING')
+    orig_gemini = os.environ.get('ENABLE_GEMINI_THINKING')
+    orig_g_level = os.environ.get('GEMINI_THINKING_LEVEL')
+    orig_budget = os.environ.get('THINKING_BUDGET')
+    orig_ds = os.environ.get('ENABLE_DEEPSEEK_THINKING')
+    orig_delay = os.environ.get('SEND_INTERVAL_SECONDS')
+    
+    if disable_thinking:
+        os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
+        os.environ['ENABLE_GEMINI_THINKING'] = '0'
+        os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+        os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
+        try:
+            if 'THINKING_BUDGET' in os.environ:
+                del os.environ['THINKING_BUDGET']
+        except Exception:
+            pass
+            
+    if delay_override >= 0:
+        os.environ['SEND_INTERVAL_SECONDS'] = str(delay_override)
+        
+    try:
+        yield
+    finally:
+        if orig_anthropic is not None: os.environ['ENABLE_ANTHROPIC_THINKING'] = orig_anthropic
+        elif disable_thinking: os.environ.pop('ENABLE_ANTHROPIC_THINKING', None)
+        
+        if orig_gemini is not None: os.environ['ENABLE_GEMINI_THINKING'] = orig_gemini
+        elif disable_thinking: os.environ.pop('ENABLE_GEMINI_THINKING', None)
+        
+        if orig_ds is not None: os.environ['ENABLE_DEEPSEEK_THINKING'] = orig_ds
+        elif disable_thinking: os.environ.pop('ENABLE_DEEPSEEK_THINKING', None)
+        
+        if orig_g_level is not None: os.environ['GEMINI_THINKING_LEVEL'] = orig_g_level
+        elif disable_thinking: os.environ.pop('GEMINI_THINKING_LEVEL', None)
+        
+        if orig_budget is not None: os.environ['THINKING_BUDGET'] = orig_budget
+        
+        if orig_delay is not None: os.environ['SEND_INTERVAL_SECONDS'] = orig_delay
+        elif delay_override >= 0: os.environ.pop('SEND_INTERVAL_SECONDS', None)
+
+def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log=print,
+                            custom_system_prompt=None, temperature=None, max_tokens=None,
+                            prompt_role='system', disable_thinking=False, api_call_delay=-1.0):
+    """Check if translated content appears truncated by asking an AI model.
+
+    Sends the last `tail_chars` characters of both the source and translated
+    text to the configured LLM with a simple prompt:
+      "Does the translated text appear to be truncated? Answer YES or NO."
+
+    Args:
+        source_html: Raw source HTML content
+        trans_html:  Translated HTML content
+        client:      A UnifiedClient instance (supports single & multi-key)
+        tail_chars:  Number of characters from the end to send (default 800)
+        log:         Logging callback
+        custom_system_prompt: Optional custom system prompt to override the default
+
+    Returns:
+        dict with keys:
+            'flagged'  (bool)  – True when AI says YES (truncated)
+            'answer'   (str)   – raw AI answer
+            'details'  (str)   – human-readable explanation
+            'source_last_p' (str | None) – text from the source's final <p>
+            'output_last_p' (str | None) – text from the output's final <p>
+    """
+    result = {
+        'flagged': False,
+        'answer': '',
+        'details': '',
+        'source_last_p': None,
+        'output_last_p': None,
+    }
+
+    try:
+        # Extract plain text from HTML.
+        # Gated: in batch mode every worker thread (one per file at large
+        # batch sizes) lands here at once, and html.parser is pure Python —
+        # hundreds of concurrent parses monopolize the GIL and freeze the GUI
+        # before a single request is sent. Two at a time keeps prep far ahead
+        # of the API-delay stagger while leaving the GIL breathing room.
+        with _AI_TRUNCATION_PARSE_GATE:
+            source_paras, source_last_p = _extract_paragraphs(
+                source_html,
+                return_last_html_p=True,
+            )
+            trans_paras, output_last_p = _extract_paragraphs(
+                trans_html,
+                return_last_html_p=True,
+            )
+        result['source_last_p'] = source_last_p
+        result['output_last_p'] = output_last_p
+
+        if not source_paras or not trans_paras:
+            result['details'] = 'insufficient_text'
+            return result
+
+        def _get_clean_tail(paras, target_chars):
+            """Collect trailing paragraphs until total length >= target_chars.
+
+            ``target_chars`` is a SOFT floor: we keep walking backwards and
+            adding whole paragraphs until the accumulated length reaches or
+            exceeds it. The paragraph that crosses the threshold is always
+            included in full, so a short dialogue run followed by a 2000-char
+            narrative paragraph won't be silently dropped just because it
+            would overshoot.
+
+            Previously this function enforced a 1.5x hard ceiling
+            (``curr_len + p_len > target_chars * 1.5``) which caused chapters
+            with long narrative paragraphs preceding short dialogue lines to
+            return only those short lines — e.g. 16 chars out of a 5k-char
+            chapter when the user asked for 400.
+
+            The only truncation that now happens is if a SINGLE paragraph
+            is by itself vastly larger than the target (e.g. a 20k-char
+            monolithic dump). In that case we keep the final ``target_chars``
+            of it so the tail remains readable for the AI check.
+            """
+            tail_paras = []
+            curr_len = 0
+            for p in reversed(paras):
+                tail_paras.insert(0, p)
+                curr_len += len(p) + 1  # +1 for joining newline
+                if curr_len >= target_chars:
+                    break
+
+            tail_text = "\n".join(tail_paras)
+
+            # Safety net: if the ONLY paragraph we collected is massively
+            # larger than the target on its own, trim its leading portion
+            # so the AI doesn't get a 20k-char message. We only engage when
+            # exactly one paragraph is present and it alone is well over the
+            # target — this avoids chopping away dialogue context that would
+            # legitimately sit across multiple short paragraphs.
+            if len(tail_paras) == 1 and len(tail_text) > target_chars * 3:
+                cut_idx = len(tail_text) - target_chars
+                space_idx = tail_text.find(' ', cut_idx)
+                if space_idx != -1 and space_idx < len(tail_text) - 50:
+                    tail_text = "..." + tail_text[space_idx:]
+                else:
+                    tail_text = "..." + tail_text[cut_idx:]
+
+            return tail_text
+            
+        source_tail = _get_clean_tail(source_paras, tail_chars)
+        trans_tail = _get_clean_tail(trans_paras, tail_chars)
+
+        # Only bail when the translated tail is literally empty. The previous
+        # ``< 20`` guard auto-flagged chapters without ever calling the AI;
+        # combined with the old 1.5x hard ceiling in _get_clean_tail, it fired
+        # on 5k-char chapters whose final few paragraphs were short dialogue
+        # lines preceded by a long narrative paragraph. The tail builder now
+        # respects target_chars as a soft floor, so a near-empty tail here
+        # really does mean the translation is empty / unparseable.
+        if not trans_tail.strip():
+            result['flagged'] = True
+            result['details'] = 'translated_tail_empty'
+            return result
+
+        # Build messages for the AI
+        if custom_system_prompt and custom_system_prompt.strip():
+            system_prompt = custom_system_prompt.strip()
+        else:
+            system_prompt = (
+                "You are a strict translation quality analyst. Your ONLY job is to determine if "
+                "a translated text has been accidentally TRUNCATED (cut off abruptly mid-sentence, "
+                "or completely missing the final paragraphs/sentences present in the source).\n"
+                "You must be forgiving of minor structural changes, combined paragraphs, or paraphrasing. "
+                "Only evaluate the final sentences of the provided texts. Ignore mismatches occurring at the beginning "
+                "of the provided tail segment, as it may have been cleanly cut from a larger document.\n"
+                "Only answer YES if there is a glaring, obvious failure where the translation explicitly ends prematurely "
+                "compared to the source text. If it is a complete, well-formed ending that conveys the general final message, answer NO.\n"
+                "Respond with ONLY the word YES or NO. Do not explain."
+            )
+
+        user_prompt = (
+            "=== SOURCE TEXT (last portion) ===\n"
+            f"{source_tail}\n\n"
+            "=== TRANSLATED TEXT (last portion) ===\n"
+            f"{trans_tail}\n\n"
+            "Does the translated text appear to be truncated (missing content from the end "
+            "of the source)? Answer YES or NO only."
+        )
+
+        # Build messages based on the configured role
+        if prompt_role == 'user':
+            # Combine system prompt + data into a single user message
+            combined_user = f"{system_prompt}\n\n{user_prompt}"
+            messages = [
+                {"role": "user", "content": combined_user},
+            ]
+        else:
+            # Default: system + user messages
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+        # Send to AI
+        # Use the user's configured temperature if provided, otherwise default to 0.0
+        _temp = float(temperature) if temperature is not None else 0.0
+        _max_tokens = int(max_tokens) if max_tokens is not None and int(max_tokens) > 0 else 50
+        
+        with _qa_api_overrides_env(disable_thinking=disable_thinking, delay_override=api_call_delay):
+            # Snapshot the QA-specific delay into the client's thread-local
+            # storage so _apply_api_call_stagger uses it directly instead of
+            # re-reading the process-wide SEND_INTERVAL_SECONDS env var
+            # (which other threads may have restored to the global default).
+            if api_call_delay >= 0:
+                try:
+                    _tls = client._get_thread_local_client()
+                    _tls.active_api_delay_override = float(api_call_delay)
+                except Exception:
+                    pass
+                # Also pin the delay on the client instance. The TLS override
+                # above is wiped by key rotation / first-call thread init, and
+                # the SEND_INTERVAL_SECONDS env override is racy across
+                # parallel QA threads (one thread's finally restores it while
+                # another is mid-send). _apply_api_call_stagger reads this
+                # attribute directly for qa_truncation-scoped calls, making
+                # the dialog's API Call Delay authoritative on every route
+                # (main key, single key, and dedicated QA Scan Keys pool).
+                try:
+                    client._qa_truncation_delay_override = float(api_call_delay)
+                except Exception:
+                    pass
+            response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
+
+        # Parse response
+        if isinstance(response, tuple):
+            answer_text = response[0] if response[0] else ''
+        else:
+            answer_text = response if response else ''
+
+        answer_text = answer_text.strip()
+        result['answer'] = answer_text
+
+        # Check if answer is YES
+        answer_upper = answer_text.upper().strip().rstrip('.')
+        if answer_upper == 'YES' or answer_upper.startswith('YES'):
+            result['flagged'] = True
+            result['details'] = 'ai_verdict=YES'
+        elif answer_upper == 'NO' or answer_upper.startswith('NO'):
+            result['details'] = 'ai_verdict=NO'
+        else:
+            # Ambiguous answer — check for YES/NO keywords
+            if 'YES' in answer_upper and 'NO' not in answer_upper:
+                result['flagged'] = True
+                result['details'] = 'ai_verdict=YES_inferred'
+            elif 'NO' in answer_upper:
+                result['details'] = 'ai_verdict=NO_inferred'
+            else:
+                # Unable to parse — treat as uncertain, don't flag
+                result['details'] = 'ai_verdict=UNCLEAR'
+
+    except Exception as e:
+        error_text = str(e)
+        if getattr(e, 'error_type', None) == 'cancelled' or 'cancelled' in error_text.lower() or 'operation cancelled' in error_text.lower():
+            result['cancelled'] = True
+            result['details'] = 'cancelled'
+            return result
+        log(f"      ⚠️ AI truncation check error: {e}")
+        result['details'] = f'error: {e}'
+
+    return result
+
+
+def detect_multiple_headers(html_content):
+    """Detect if HTML content has 2 or more header tags"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # Find all header tags (h1 through h6)
+    headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    
+    if len(headers) >= 2:
+        header_info = []
+        for header in headers[:5]:  # Show first 5 headers
+            header_info.append({
+                'tag': header.name,
+                'text': header.get_text(strip=True)[:50]  # First 50 chars
+            })
+        return True, len(headers), header_info
+    
+    return False, len(headers), []
+
+
+# Set of standard HTML / SVG / MathML / EPUB tag names. Used by the
+# invalid/custom tag detection helpers below to decide whether a tag is
+# "non-standard" (e.g., <concept>) and therefore invisible in a browser.
+STANDARD_HTML_TAGS = frozenset([
+    # Core HTML
+    'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio',
+    'b', 'base', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
+    'canvas', 'caption', 'cite', 'code', 'col', 'colgroup',
+    'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog',
+    'div', 'dl', 'dt', 'em', 'embed', 'fieldset', 'figcaption', 'figure',
+    'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header',
+    'hgroup', 'hr', 'html', 'i', 'iframe', 'img', 'input', 'ins',
+    'kbd', 'label', 'legend', 'li', 'link', 'main', 'map', 'mark',
+    'menu', 'menuitem', 'meta', 'meter', 'nav', 'noscript', 'object', 'ol',
+    'optgroup', 'option', 'output', 'p', 'param', 'picture', 'pre',
+    'progress', 'q', 'rb', 'rp', 'rt', 'rtc', 'ruby', 's', 'samp', 'script',
+    'section', 'select', 'slot', 'small', 'source', 'span', 'strong', 'style',
+    'sub', 'summary', 'sup', 'svg', 'table', 'tbody', 'td', 'template',
+    'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track', 'u',
+    'ul', 'var', 'video', 'wbr',
+    # Obsolete/legacy but still common in older content
+    'acronym', 'big', 'center', 'font', 'strike', 'tt', 'basefont', 'frame',
+    'frameset', 'noframes', 'marquee', 'blink',
+    # SVG / MathML (common subset)
+    'math', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt',
+    'image', 'defs', 'g', 'path', 'circle', 'rect', 'line', 'polygon',
+    'polyline', 'text', 'tspan', 'use', 'symbol', 'lineargradient',
+    'radialgradient', 'stop', 'filter', 'clippath', 'mask', 'pattern',
+    'feblend', 'fecolormatrix', 'fegaussianblur', 'fecomposite', 'feoffset',
+    # XML/Doctype artifacts
+    'doctype', '!doctype', 'xml', '?xml',
+    # Epub/XHTML namespaced helpers (basename only, namespaces are handled
+    # separately in the regex by splitting on ':')
+    'epub', 'ops', 'ncx', 'navmap', 'navpoint', 'navlabel', 'content',
+    # Common "unknown to HTML but used by EPUB tooling" tags we don't want
+    # to flag as translation leftovers
+    'cover', 'package', 'manifest', 'spine', 'itemref', 'item',
+])
+
+_HTML_LIKE_EXTENSIONS = ('.html', '.xhtml', '.htm')
+_BEAUTIFULSOUP_REVIEW_TAGS = (
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li'
+)
+_BEAUTIFULSOUP_REVIEW_TEXT_TAGS = _BEAUTIFULSOUP_REVIEW_TAGS + ('hr',)
+_SDLXLIFF_INVISIBLE_TEXT_RE = re.compile(r'[\u200b\u200c\u200d\ufeff\u2060]')
+
+
+def _strip_html_like_extensions(name):
+    """Strip *all* trailing HTML-family extensions from ``name``.
+
+    ``os.path.splitext`` only removes the final extension, so compound
+    filenames such as ``Chapter103.html.xhtml`` or ``Chapter103.htm.html``
+    wouldn't match single-extension source names like ``Chapter103.xhtml``
+    during source/translation filename comparison, causing the scanner to
+    silently skip checks like ``invisible_html_tags_N_found`` and
+    ``source_custom_tags_missing_N_of_M``.
+
+    This helper repeatedly peels off any trailing ``.html``/``.xhtml``/
+    ``.htm`` suffix until none remain, so both sides normalize to the same
+    bare basename.
+    """
+    if not isinstance(name, str):
+        return name
+    result = name
+    lower = result.lower()
+    changed = True
+    while changed:
+        changed = False
+        for ext in _HTML_LIKE_EXTENSIONS:
+            if lower.endswith(ext):
+                result = result[:-len(ext)]
+                lower = result.lower()
+                changed = True
+                break
+    return result
+
+
+def _qa_source_basename(name):
+    """Return the source-side basename used by QA filename matching."""
+    if not isinstance(name, str):
+        return ""
+    base = os.path.basename(name).strip()
+    if base.lower().startswith('response_'):
+        base = base[9:]
+    base = _strip_html_like_extensions(base)
+    if base.lower().endswith('.txt'):
+        base = base[:-4]
+    return base.lower()
+
+
+def _pdf_section_filename_identity(name):
+    """Normalize stable-ID and numbered PDF bookmark section filenames.
+
+    Raw bookmark sections use unpadded names such as
+    ``pdf_section_1.html`` while translated files now use readable padded
+    names such as ``response_pdf_section_001.html``. Return a shared logical
+    identity without confusing stable bookmark IDs with filesystem names.
+    """
+    stem = _qa_source_basename(name)
+    prefix = 'pdf_section_'
+    if not stem.startswith(prefix):
+        return None
+    suffix = stem[len(prefix):]
+
+    if re.fullmatch(r'\d+', suffix):
+        return ('pdf-section', int(suffix))
+    if suffix:
+        return ('pdf-section-id', suffix.casefold())
+    return None
+
+
+def _pdf_identity_from_progress_entry(entry, output_file=''):
+    """Resolve a raw bookmark-section identity from a PDF progress row."""
+    if not isinstance(entry, dict):
+        return None
+
+    output_identity = _pdf_section_filename_identity(output_file)
+    try:
+        actual_num = float(entry.get('actual_num'))
+    except (TypeError, ValueError):
+        actual_num = None
+
+    if actual_num is not None:
+        major = int(actual_num)
+        return ('pdf-section', major)
+
+    return output_identity
+
+
+def build_pdf_qa_source_aliases(folder_path, progress_path=None):
+    """Map translated PDF section names to whole ``word_count`` sections.
+
+    Stable bookmark IDs and page ranges live in ``translation_progress.json``;
+    the raw extraction sidecars remain numbered. Progress output mappings are
+    therefore authoritative, with normalized numbered filenames as a fallback.
+    """
+    word_count_folder = os.path.join(folder_path, 'word_count')
+    if not os.path.isdir(word_count_folder):
+        return {}
+
+    raw_names = [
+        name for name in os.listdir(word_count_folder)
+        if name.lower().endswith(('.html', '.htm', '.xhtml', '.txt'))
+    ]
+    raw_by_name = {name.casefold(): name for name in raw_names}
+    raw_by_identity = {}
+    for raw_name in raw_names:
+        identity = _pdf_section_filename_identity(raw_name)
+        if identity is not None:
+            raw_by_identity.setdefault(identity, raw_name)
+
+    aliases = {}
+
+    def register(output_name, raw_name):
+        if not output_name or not raw_name:
+            return
+        clean_output = os.path.basename(str(output_name))
+        if clean_output.lower().startswith('response_'):
+            clean_output = clean_output[9:]
+        aliases[clean_output] = raw_name
+
+    progress_file = progress_path or os.path.join(folder_path, 'translation_progress.json')
+    if os.path.isfile(progress_file):
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as progress_handle:
+                progress_data = json.load(progress_handle)
+            for entry in (progress_data.get('chapters') or {}).values():
+                if not isinstance(entry, dict) or not entry.get('pdf_toc_section'):
+                    continue
+                output_file = os.path.basename(str(entry.get('output_file') or ''))
+                if not output_file:
+                    continue
+
+                raw_name = None
+                original_basename = os.path.basename(
+                    str(entry.get('original_basename') or '')
+                )
+                if original_basename:
+                    raw_name = raw_by_name.get(original_basename.casefold())
+                    if raw_name is None:
+                        raw_name = raw_by_identity.get(
+                            _pdf_section_filename_identity(original_basename)
+                        )
+
+                if raw_name is None:
+                    raw_name = raw_by_identity.get(
+                        _pdf_identity_from_progress_entry(entry, output_file)
+                    )
+
+                if raw_name is None and entry.get('pdf_section_id'):
+                    raw_name = raw_by_identity.get(
+                        ('pdf-section-id', str(entry['pdf_section_id']).casefold())
+                    )
+                register(output_file, raw_name)
+        except (OSError, ValueError, TypeError):
+            pass
+
+    # Match visible translated files through the normalized numbered identity
+    # when a progress entry is temporarily unavailable.
+    try:
+        translated_names = [
+            name for name in os.listdir(folder_path)
+            if name.lower().startswith('response_pdf_section_')
+            and name.lower().endswith(_HTML_LIKE_EXTENSIONS)
+        ]
+    except OSError:
+        translated_names = []
+    for output_name in translated_names:
+        clean_output = output_name[9:] if output_name.lower().startswith('response_') else output_name
+        if clean_output in aliases:
+            continue
+        register(
+            output_name,
+            raw_by_identity.get(_pdf_section_filename_identity(output_name)),
+        )
+
+    return aliases
+
+
+def _apply_pdf_qa_source_aliases(source_map, aliases):
+    """Add non-counting filename aliases to one extracted source-info map."""
+    if not isinstance(source_map, dict) or not source_map or not aliases:
+        return source_map
+
+    source_by_name = {
+        str(key).casefold(): key for key in source_map
+        if isinstance(key, str)
+    }
+    source_by_stem = {
+        _qa_source_basename(str(key)): key for key in source_map
+        if isinstance(key, str) and _qa_source_basename(str(key))
+    }
+    for alias, raw_name in aliases.items():
+        source_key = source_by_name.get(str(raw_name).casefold())
+        if source_key is None:
+            source_key = source_by_stem.get(_qa_source_basename(str(raw_name)))
+        if source_key is None or alias in source_map:
+            continue
+        source_info = source_map[source_key]
+        if isinstance(source_info, dict):
+            source_info = dict(source_info)
+            source_info.setdefault(
+                '_qa_pdf_raw_filename',
+                source_info.get('filename') or str(raw_name),
+            )
+            source_info['filename'] = alias
+            source_info['_qa_pdf_source_alias'] = True
+        source_map[alias] = source_info
+    return source_map
+
+
+def _normalize_preserved_reference(value, rename_map=None, *, image=False):
+    """Normalize an HTML reference without hiding meaningful URL changes."""
+    if not isinstance(value, str):
+        return ""
+    reference = html_lib.unescape(value).strip().replace('\\', '/')
+    if not reference:
+        return ""
+    if reference.lower().startswith('data:'):
+        return 'data:' + hashlib.sha256(reference.encode('utf-8')).hexdigest()
+
+    if not image:
+        return reference
+
+    if re.match(r'^[a-z][a-z0-9+.-]*://', reference, flags=re.IGNORECASE):
+        return reference
+
+    # Image files are routinely moved between ``images/`` and chapter-relative
+    # paths. Their basename is the stable identity, with image_rename_map.json
+    # providing the canonical replacement when extraction renamed the asset.
+    path_only = reference.split('#', 1)[0].split('?', 1)[0]
+    basename = os.path.basename(path_only).casefold()
+    if not basename:
+        return reference.casefold()
+    mapped = (rename_map or {}).get(basename)
+    return str(mapped or basename).casefold()
+
+
+def _html_preservation_profile(html_content, image_rename_map=None):
+    """Return compact source/output structure used by preservation QA."""
+    if not isinstance(html_content, str) or not html_content:
+        return {
+            'header_count': 0,
+            'header_info': [],
+            'review_tag_counts': {},
+            'link_hrefs': {},
+            'table_counts': {},
+            'table_shapes': [],
+            'graphic_counts': {},
+            'graphic_refs': {},
+            'image_srcs': {},
+        }
+
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+    except Exception:
+        return _html_preservation_profile('', image_rename_map)
+
+    headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    header_info = [
+        {'tag': header.name, 'text': header.get_text(' ', strip=True)[:80]}
+        for header in headers[:5]
+    ]
+
+    links = Counter()
+    for anchor in soup.find_all('a'):
+        href = _normalize_preserved_reference(anchor.get('href', ''))
+        if href:
+            links[href] += 1
+
+    table_counts = {
+        tag_name: len(soup.find_all(tag_name))
+        for tag_name in ('table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td')
+    }
+    table_counts = {name: count for name, count in table_counts.items() if count}
+
+    graphic_counts = {
+        tag_name: len(soup.find_all(tag_name))
+        for tag_name in (
+            'svg', 'path', 'circle', 'ellipse', 'rect', 'line', 'polygon',
+            'polyline', 'image', 'use', 'canvas', 'object', 'embed', 'picture',
+            'video',
+        )
+    }
+    css_backgrounds = 0
+    for element in soup.find_all(style=True):
+        css_backgrounds += len(re.findall(
+            r'background(?:-image)?\s*:[^;]*url\s*\(',
+            str(element.get('style', '')),
+            flags=re.IGNORECASE,
+        ))
+    if css_backgrounds:
+        graphic_counts['css-background'] = css_backgrounds
+    graphic_counts = {name: count for name, count in graphic_counts.items() if count}
+
+    image_srcs = Counter()
+    normalized_map = {
+        os.path.basename(str(old_name).replace('\\', '/')).casefold():
+        os.path.basename(str(new_name).replace('\\', '/')).casefold()
+        for old_name, new_name in (image_rename_map or {}).items()
+        if old_name and new_name
+    }
+    for image in soup.find_all('img'):
+        src = _normalize_preserved_reference(
+            image.get('src', ''),
+            normalized_map,
+            image=True,
+        )
+        if src:
+            image_srcs[src] += 1
+
+    graphic_refs = Counter()
+    for tag, attribute in (
+        ('source', 'src'),
+        ('source', 'srcset'),
+        ('object', 'data'),
+        ('embed', 'src'),
+        ('video', 'src'),
+        ('video', 'poster'),
+        ('image', 'href'),
+        ('image', 'xlink:href'),
+        ('use', 'href'),
+        ('use', 'xlink:href'),
+    ):
+        for element in soup.find_all(tag):
+            is_svg_image_reference = tag == 'image'
+            reference = _normalize_preserved_reference(
+                element.get(attribute, ''),
+                normalized_map if is_svg_image_reference else None,
+                image=is_svg_image_reference,
+            )
+            if reference:
+                graphic_refs[f'{tag}.{attribute}:{reference}'] += 1
+
+    table_shapes = []
+    for table in soup.find_all('table'):
+        rows = table.find_all('tr')
+        row_widths = []
+        span_signature = []
+        for row in rows:
+            cells = row.find_all(['th', 'td'], recursive=False)
+            if not cells:
+                cells = row.find_all(['th', 'td'])
+            row_widths.append(len(cells))
+            for cell in cells:
+                span_signature.append((
+                    cell.name,
+                    str(cell.get('rowspan', '1')),
+                    str(cell.get('colspan', '1')),
+                ))
+        table_shapes.append((tuple(row_widths), tuple(span_signature)))
+
+    return {
+        'header_count': len(headers),
+        'header_info': header_info,
+        'review_tag_counts': _count_beautifulsoup_review_tags(html_content),
+        'link_hrefs': dict(links),
+        'table_counts': table_counts,
+        'table_shapes': table_shapes,
+        'graphic_counts': graphic_counts,
+        'graphic_refs': dict(graphic_refs),
+        'image_srcs': dict(image_srcs),
+    }
+
+
+def _build_source_preservation_info(original_html_content, image_rename_map=None):
+    """Build a small, process-safe structure map instead of copying full HTML."""
+    result = {}
+    for key, source_info in (original_html_content or {}).items():
+        if not isinstance(source_info, dict):
+            continue
+        source_html = source_info.get('html')
+        if not isinstance(source_html, str):
+            continue
+        profile = _html_preservation_profile(source_html, image_rename_map)
+        profile['filename'] = source_info.get('filename', str(key))
+        profile['_qa_pdf_raw_filename'] = source_info.get(
+            '_qa_pdf_raw_filename',
+            source_info.get('filename', str(key)),
+        )
+        result[key] = profile
+    return result
+
+
+def _source_preservation_profile_for_output(source_info, filename):
+    """Find source structure using the same response-prefix rules as PDF QA."""
+    wanted = _qa_source_basename(filename)
+    if not wanted:
+        return None
+    for key, profile in (source_info or {}).items():
+        if not isinstance(profile, dict):
+            continue
+        candidates = (
+            key if isinstance(key, str) else '',
+            profile.get('filename', ''),
+            profile.get('_qa_pdf_raw_filename', ''),
+        )
+        if any(_qa_source_basename(str(candidate)) == wanted for candidate in candidates):
+            return profile
+    return None
+
+
+def _preservation_count_issues(source_profile, output_profile):
+    """Report lost links, tables, and non-img graphics with useful previews."""
+    if not isinstance(source_profile, dict) or not isinstance(output_profile, dict):
+        return []
+    issues = []
+
+    source_links = Counter(source_profile.get('link_hrefs') or {})
+    output_links = Counter(output_profile.get('link_hrefs') or {})
+    missing_links = source_links - output_links
+    unexpected_links = output_links - source_links
+    same_link_count = sum(source_links.values()) == sum(output_links.values())
+    if missing_links and unexpected_links and same_link_count:
+        changed_total = max(
+            sum(missing_links.values()),
+            sum(unexpected_links.values()),
+        )
+        issues.append((
+            f"changed_link_targets_{changed_total}_found",
+            (
+                "missing: " + ', '.join(list(missing_links.elements())[:3])
+                + "; unexpected: "
+                + ', '.join(list(unexpected_links.elements())[:3])
+            ),
+        ))
+    elif missing_links:
+        missing_total = sum(missing_links.values())
+        issues.append((
+            f"missing_link_targets_{missing_total}_lost_"
+            f"({sum(output_links.values())}/{sum(source_links.values())})",
+            ', '.join(list(missing_links.elements())[:5]),
+        ))
+    elif unexpected_links:
+        unexpected_total = sum(unexpected_links.values())
+        issues.append((
+            f"changed_link_targets_{unexpected_total}_found",
+            ', '.join(list(unexpected_links.elements())[:5]),
+        ))
+
+    for family, label in (('table_counts', 'table_elements'), ('graphic_counts', 'graphics')):
+        source_counts = source_profile.get(family) or {}
+        output_counts = output_profile.get(family) or {}
+        for tag_name in sorted(set(source_counts) | set(output_counts)):
+            source_count = int(source_counts.get(tag_name, 0) or 0)
+            output_count = int(output_counts.get(tag_name, 0) or 0)
+            if output_count < source_count:
+                issues.append((
+                    f"missing_{label}_{tag_name}_{source_count - output_count}_lost_"
+                    f"({output_count}/{source_count})",
+                    f"<{tag_name}>: source={source_count}, output={output_count}",
+                ))
+            elif output_count > source_count:
+                issues.append((
+                    f"extra_{label}_{tag_name}_{output_count - source_count}_added_"
+                    f"({output_count}/{source_count})",
+                    f"<{tag_name}>: source={source_count}, output={output_count}",
+                ))
+
+    source_table_shapes = source_profile.get('table_shapes') or []
+    output_table_shapes = output_profile.get('table_shapes') or []
+    if (
+        source_table_shapes
+        and len(source_table_shapes) == len(output_table_shapes)
+        and source_table_shapes != output_table_shapes
+    ):
+        issues.append((
+            'changed_table_structure_found',
+            'table row/cell/span structure differs from source',
+        ))
+
+    source_graphic_refs = Counter(source_profile.get('graphic_refs') or {})
+    output_graphic_refs = Counter(output_profile.get('graphic_refs') or {})
+    missing_graphic_refs = source_graphic_refs - output_graphic_refs
+    unexpected_graphic_refs = output_graphic_refs - source_graphic_refs
+    if missing_graphic_refs or unexpected_graphic_refs:
+        changed_count = max(
+            sum(missing_graphic_refs.values()),
+            sum(unexpected_graphic_refs.values()),
+        )
+        issues.append((
+            f'changed_graphic_references_{changed_count}_found',
+            (
+                'missing: ' + ', '.join(list(missing_graphic_refs.elements())[:3])
+                + '; unexpected: '
+                + ', '.join(list(unexpected_graphic_refs.elements())[:3])
+            ),
+        ))
+    return issues
+
+
+def _count_beautifulsoup_review_tags(html_content):
+    """Count the same non-empty text units shown by the SDLXLIFF viewer."""
+    if not isinstance(html_content, str) or not html_content:
+        return {}
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        counts = {}
+
+        def _is_review_text_unit(tag):
+            tag_name = str(getattr(tag, 'name', '') or '').lower()
+            if tag_name in _BEAUTIFULSOUP_REVIEW_TEXT_TAGS:
+                return True
+            if tag_name != 'div':
+                return False
+            classes = tag.get('class') or []
+            if isinstance(classes, str):
+                classes = classes.split()
+            return (
+                'u' in {str(value).casefold() for value in classes}
+                and not tag.find(_BEAUTIFULSOUP_REVIEW_TEXT_TAGS)
+            )
+
+        for tag in soup.find_all(_is_review_text_unit):
+            tag_name = str(tag.name or '').lower()
+            text = (
+                '*****'
+                if tag_name == 'hr'
+                else _SDLXLIFF_INVISIBLE_TEXT_RE.sub(
+                    '',
+                    html_lib.unescape(tag.get_text(' ', strip=True)),
+                ).replace('\xa0', ' ').strip()
+            )
+            if not text:
+                continue
+            if tag_name in ('div', 'hr'):
+                tag_name = 'p'
+            counts[tag_name] = counts.get(tag_name, 0) + 1
+        return counts
+    except Exception:
+        return {}
+
+
+def _xml_local_name(tag):
+    return str(tag).rsplit("}", 1)[-1].lower()
+
+
+def _xml_inner_xml_or_text(element):
+    if element is None:
+        return ""
+    children = list(element)
+    if not children:
+        return element.text or ""
+    parts = []
+    if element.text:
+        parts.append(element.text)
+    for child in children:
+        parts.append(ET.tostring(child, encoding="unicode"))
+        if child.tail:
+            parts.append(child.tail)
+    return "".join(parts)
+
+
+def _sdlxliff_review_tag_counts(
+        folder_path,
+        filename,
+        fallback_source_counts=None,
+        current_output_html=None):
+    """Read SDLXLIFF review counts, with bookmark-aware direct HTML fallback.
+
+    PDF response files may be renamed after their SDLXLIFF sidecar was written.
+    In that case an exact sidecar filename is no longer authoritative, while
+    the bookmark alias map still gives us the correct raw source structure.
+    """
+    output_name = os.path.basename(str(filename or "").replace("\\", "/"))
+    if not output_name:
+        return None, None
+    sidecar_path = os.path.join(str(folder_path or ""), "SDLXLIFF", f"{output_name}.sdlxliff")
+    if not os.path.isfile(sidecar_path):
+        if isinstance(fallback_source_counts, dict) and current_output_html is not None:
+            return (
+                dict(fallback_source_counts),
+                _count_beautifulsoup_review_tags(current_output_html),
+            )
+        return None, None
+    try:
+        root = ET.parse(sidecar_path).getroot()
+        source_parts = []
+        target_parts = []
+        for element in root.iter():
+            name = _xml_local_name(element.tag)
+            if name == "source":
+                source_parts.append(_xml_inner_xml_or_text(element))
+            elif name == "target":
+                target_parts.append(_xml_inner_xml_or_text(element))
+        source_counts = _count_beautifulsoup_review_tags("\n".join(source_parts))
+        output_counts = (
+            _count_beautifulsoup_review_tags(current_output_html)
+            if current_output_html is not None
+            else _count_beautifulsoup_review_tags("\n".join(target_parts))
+        )
+        return source_counts, output_counts
+    except Exception:
+        if isinstance(fallback_source_counts, dict) and current_output_html is not None:
+            return (
+                dict(fallback_source_counts),
+                _count_beautifulsoup_review_tags(current_output_html),
+            )
+        return None, None
+
+
+def _missing_beautifulsoup_tags_issue(
+    source_counts,
+    output_counts,
+    retention_threshold=1.0,
+    surplus_tolerance=0.0,
+    min_source_paragraph_tags=0,
+):
+    if not isinstance(source_counts, dict):
+        return None
+    output_counts = output_counts if isinstance(output_counts, dict) else {}
+    try:
+        min_paragraphs = int(min_source_paragraph_tags)
+    except (TypeError, ValueError):
+        min_paragraphs = 0
+    min_paragraphs = max(0, min_paragraphs)
+    source_paragraphs = (
+        _safe_int(source_counts.get('p'), 0)
+        + _safe_int(source_counts.get('li'), 0)
+    )
+    if source_paragraphs < min_paragraphs:
+        return None
+    total_source = 0
+    total_output = 0
+    for tag_name in _BEAUTIFULSOUP_REVIEW_TAGS:
+        source_count = _safe_int(source_counts.get(tag_name), 0)
+        output_count = _safe_int(output_counts.get(tag_name), 0)
+        total_source += source_count
+        total_output += output_count
+    delta = total_output - total_source
+    if delta == 0:
+        return None
+    if delta < 0 and total_source > 0:
+        try:
+            threshold = float(retention_threshold)
+        except (TypeError, ValueError):
+            threshold = 1.0
+        threshold = max(0.0, min(threshold, 1.0))
+        if (total_output / total_source) >= threshold:
+            return None
+    if delta > 0 and total_source > 0:
+        try:
+            tolerance = float(surplus_tolerance)
+        except (TypeError, ValueError):
+            tolerance = 0.0
+        tolerance = max(0.0, min(tolerance, 1.0))
+        if (delta / total_source) <= tolerance:
+            return None
+    return f"missing_tags: {total_source}/{total_output} ({delta:+d})"
+
+
+# Matches real angle-bracket tags like <concept> or <概念>. Tag names can be
+# any run of characters that aren't whitespace, angle brackets, slash, equals,
+# quote or ampersand, so this also catches translated (non-ASCII) tag names.
+# Group 2 captures whatever follows the tag name (attributes or free text)
+# so we can tell ``<a href="...">`` from ``<I have many things>``.
+_CUSTOM_TAG_ANGLE_RE = re.compile(r'<\s*/?\s*([^\s<>/="\'&]+)(\s[^>]*)?/?\s*>')
+
+# Matches HTML-entity-encoded tags like &lt;concept&gt; or &lt;概念&gt;.
+# Group 2 captures the content after the tag name, same reason as above.
+_CUSTOM_TAG_ENTITY_RE = re.compile(
+    r'&lt;\s*/?\s*([^\s<>/="\'&;]+?)(\s[^&]*?)?/?\s*&gt;',
+    re.IGNORECASE
+)
+
+
+def _is_standard_tag(raw_name):
+    """Return True if `raw_name` is a standard HTML/SVG/EPUB tag."""
+    if not raw_name:
+        return True  # Treat empty as "not interesting"
+    name = raw_name.lower()
+    # Strip namespace prefix (e.g., 'epub:type' -> 'type', 'svg:g' -> 'g')
+    if ':' in name:
+        name = name.split(':', 1)[1]
+    return name in STANDARD_HTML_TAGS
+
+
+# Sentence-punctuation markers that strongly indicate prose (rather than
+# a real or custom tag). Mixes Latin, CJK, and ellipsis glyphs so East
+# Asian angle-bracket quotations get classified correctly regardless of
+# which punctuation style the author used.
+_PROSE_PUNCTUATION = '.!?…。！？,、'
+
+
+# CJK Unicode ranges: Korean Hangul, Japanese Hiragana/Katakana, CJK ideographs
+_CJK_RANGES = (
+    (0x3040, 0x309F),  # Hiragana
+    (0x30A0, 0x30FF),  # Katakana
+    (0x3400, 0x4DBF),  # CJK Extension A
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0xAC00, 0xD7AF),  # Hangul Syllables
+    (0xF900, 0xFAFF),  # CJK Compatibility Ideographs
+    (0xFF00, 0xFFEF),  # Halfwidth / Fullwidth Forms
+)
+
+
+def _has_cjk(s):
+    """Return True if `s` contains any CJK character."""
+    if not s:
+        return False
+    for ch in s:
+        cp = ord(ch)
+        for lo, hi in _CJK_RANGES:
+            if lo <= cp <= hi:
+                return True
+    return False
+
+
+def _looks_like_prose_content(trailing):
+    """Return True if `trailing` looks like sentence prose, not HTML attrs.
+
+    Heuristic used to exclude angle-bracketed prose from custom-tag
+    counts. Example: Korean/Japanese novels commonly use ``<...>`` or
+    ``&lt;...&gt;`` as a stylistic quotation bracket around whole
+    sentences (``<마력 없는 사람에게 쓰면 안 된다니까요?>``) *and* shorter
+    noun-phrase titles like ``<내통자의 정체>`` ("The Traitor's
+    Identity"). The regex would otherwise read the first word as a tag
+    name and flag the entire phrase as a missing custom tag.
+
+    A ``trailing`` string is classified as prose when it:
+      * contains NO ``=`` (which would indicate real HTML attributes), and
+      * either contains sentence-ending punctuation,
+      * OR is multi-word (has whitespace). Real HTML tags without ``=``
+        are single-token attribute names (e.g. ``<input disabled>``); any
+        internal whitespace in an attribute-less tag is a strong prose
+        signal, especially for CJK languages where a 2-3 word title like
+        ``내통자의 정체`` (6 chars) is far shorter than the former
+        Latin-biased 12-char threshold.
+    """
+    if not trailing:
+        return False
+    s = trailing.strip()
+    if not s or s == '/' or '=' in s:
+        return False
+    if any(ch in s for ch in _PROSE_PUNCTUATION):
+        return True
+    # Multi-word run with no attribute-like ``=``.
+    # Previous rule required len(s) > 12 which miscategorised short CJK
+    # titles (``내통자의 정체``, ``앱리스의 악몽``) as custom tags.
+    # Any whitespace inside an attribute-less angle-bracket is a prose
+    # signal — real HTML boolean attributes are single-token.
+    if ' ' in s:
+        return True
+    # CJK signal: real HTML/XHTML tags and attributes never contain CJK
+    # characters. If the trailing content is CJK (even a single word like
+    # “정체” in ``<내통자의 정체>``), it's a quotation
+    # bracket, not a tag. The regex already split the match on the first
+    # whitespace, so a non-empty CJK trailing implies a multi-token phrase.
+    if _has_cjk(s):
+        return True
+    return False
+
+
+def _is_standard_tag_match(raw_name, trailing):
+    """Classify a tag match as a real HTML tag vs. a custom/story tag.
+
+    Returns True when the match should be IGNORED by custom-tag counts,
+    i.e. when it represents:
+      * a markup declaration (doctype / comment / PI), or
+      * genuine sentence prose wrapped in angle brackets, or
+      * a real HTML/SVG/EPUB tag (including those with attributes).
+
+    Returns False only for actual non-standard story/translation tags
+    like ``<concept>``, ``<概念>``, or ``&lt;mana&gt;``.
+
+    The prose-detection step is important for Asian-language EPUBs where
+    angle brackets are frequently used as quotation markers around whole
+    sentences — without it the scanner reports false ``source_custom_
+    tags_missing_*`` issues whenever a translator rewrites such passages
+    as plain dialogue.
+    """
+    # Doctypes, XML declarations, comments, and other markup declarations
+    # (names starting with '!' or '?', e.g. ``<!DOCTYPE html>``,
+    # ``<!-- comment -->``, ``<?xml version="1.0"?>``) carry free-form
+    # tokens after the name by design and are never custom/story tags.
+    # This check runs BEFORE the standard-tags lookup because names like
+    # ``!--`` or ``![CDATA[`` wouldn't be in ``STANDARD_HTML_TAGS``.
+    if raw_name and raw_name[0] in ('!', '?'):
+        return True
+    # Sentence prose wrapped in angle brackets (common Asian-novel
+    # quotation style). Skip regardless of whether the first word happens
+    # to look like a standard tag name.
+    if _looks_like_prose_content(trailing):
+        return True
+    # The regex captures everything up to the first space as the "tag
+    # name", so a single-word phrase ending in punctuation like
+    # ``<이거라면….>`` or ``<마석은요?>`` arrives here with no
+    # trailing content but sentence punctuation embedded in the name
+    # itself. Real HTML/custom tag names never contain ``. ! ? …``, so
+    # this is a reliable prose signal.
+    if raw_name and any(ch in raw_name for ch in _PROSE_PUNCTUATION):
+        return True
+    if not _is_standard_tag(raw_name):
+        return False
+    if trailing is None:
+        return True
+    stripped = trailing.strip()
+    if not stripped or stripped == '/':
+        return True
+    # Content that looks like HTML attributes (has ``=``) is treated as a
+    # real tag; free-form prose (no ``=``) is treated as a custom story tag.
+    return '=' in stripped
+
+
+def _count_custom_tag_occurrences(text, include_angle=True, include_entities=True):
+    """Return the total number of non-standard tag occurrences in `text`.
+    
+    Counts every hit (not unique names), in either angle-bracket or
+    HTML-entity-encoded form. Namespaced tags like <epub:type> are
+    considered "standard" by their local name and excluded; so are real
+    HTML tags with valid-looking attributes. Entity-encoded or
+    angle-bracketed prose like ``&lt;I have many things&gt;`` *is* counted
+    even when the first word happens to match a standard tag name.
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    count = 0
+    if include_angle:
+        for m in _CUSTOM_TAG_ANGLE_RE.finditer(text):
+            if not _is_standard_tag_match(m.group(1), m.group(2)):
+                count += 1
+    if include_entities:
+        for m in _CUSTOM_TAG_ENTITY_RE.finditer(text):
+            if not _is_standard_tag_match(m.group(1), m.group(2)):
+                count += 1
+    return count
+
+
+def _collect_custom_tag_names(text, include_angle=True, include_entities=True, limit=20):
+    """Return a list of unique non-standard tag names found in `text`.
+    
+    Tag names are returned in first-seen order and capped at `limit` to
+    keep the result compact (useful for displaying alongside counts).
+    Names can be in any language (e.g. ASCII ``concept`` or CJK ``概念``).
+    Uses the same entity/angle classifier as
+    ``_count_custom_tag_occurrences`` so custom-tag prose such as
+    ``&lt;I have many things&gt;`` is collected under the tag name ``I``.
+    """
+    if not isinstance(text, str) or not text:
+        return []
+    seen = []
+    seen_set = set()
+    
+    def _add(raw_name):
+        # Preserve original casing/script for display, but dedupe
+        # case-insensitively so <Concept> and <concept> don't double-list.
+        key = raw_name.lower() if isinstance(raw_name, str) else raw_name
+        if key in seen_set:
+            return
+        seen_set.add(key)
+        seen.append(raw_name)
+    
+    iters = []
+    if include_angle:
+        iters.append(_CUSTOM_TAG_ANGLE_RE.finditer(text))
+    if include_entities:
+        iters.append(_CUSTOM_TAG_ENTITY_RE.finditer(text))
+    
+    for it in iters:
+        for m in it:
+            raw = m.group(1)
+            if not _is_standard_tag_match(raw, m.group(2)):
+                _add(raw)
+                if len(seen) >= limit:
+                    return seen
+    return seen
+
+
+def check_all_text_in_header(html_content, threshold=0.7, min_total_length=200):
+    """Detect whether (nearly) all textual content is nested inside a single
+    header (h1-h6) tag.
+    
+    This catches malformed chapters where the translator collapsed the entire
+    chapter body into a single `<h1>...</h1>` wrapper, which renders as one
+    gigantic heading.
+    
+    Args:
+        html_content: Raw HTML string to analyze.
+        threshold: Fraction of total text length (0-1) that must live inside
+            a single header tag to trigger the flag. Default 0.7 (70%).
+        min_total_length: Skip the check if the document has less than this
+            many characters of visible text (avoids noise on tiny files).
+    
+    Returns:
+        tuple (flagged: bool, details: dict | None). Details dict contains
+        'tag', 'ratio', 'text_length', 'total_length' when flagged.
+    """
+    if not isinstance(html_content, str) or not html_content.strip():
+        return False, None
+    
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+    except Exception:
+        return False, None
+    
+    total_text = soup.get_text(strip=True)
+    total_length = len(total_text)
+    if total_length < min_total_length:
+        return False, None
+    
+    for tag_name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+        for header in soup.find_all(tag_name):
+            header_text = header.get_text(strip=True)
+            header_length = len(header_text)
+            if header_length == 0:
+                continue
+            ratio = header_length / total_length
+            if ratio >= threshold:
+                return True, {
+                    'tag': tag_name,
+                    'ratio': ratio,
+                    'text_length': header_length,
+                    'total_length': total_length,
+                }
+    
+    return False, None
+
+
+def detect_dominant_script(text):
+    """Heuristic dominant script detection.
+
+    Returns one of: cjk, japanese, korean, cyrillic, arabic, hebrew, thai, devanagari, latin, other
+
+    Notes:
+    - This is used for multiple purposes (non-target detection heuristics, word-count multipliers, etc.).
+    - It is *not* precise language detection, but it is fast and robust for major scripts.
+    """
+    ranges = [
+        ('cjk', [(0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x20000, 0x2A6DF), (0x2A700, 0x2B73F)]),
+        ('japanese', [(0x3040, 0x309F), (0x30A0, 0x30FF), (0x31F0, 0x31FF), (0xFF65, 0xFF9F)]),
+        ('korean', [(0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F), (0xA960, 0xA97F), (0xD7B0, 0xD7FF)]),
+        ('cyrillic', [(0x0400, 0x04FF), (0x0500, 0x052F)]),
+        ('arabic', [(0x0600, 0x06FF), (0x0750, 0x077F)]),
+        ('hebrew', [(0x0590, 0x05FF)]),
+        ('thai', [(0x0E00, 0x0E7F)]),
+        ('devanagari', [(0x0900, 0x097F)]),
+        # Latin range refined to exclude ASCII control/space/punctuation (0x20-0x40, 0x5B-0x60, 0x7B-0x7F)
+        # Includes A-Z, a-z, Extended Latin, etc.
+        ('latin', [(0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F), (0x1E00, 0x1EFF)]),
+    ]
+    counts = {k: 0 for k, _ in ranges}
+    for ch in text[:20000]:  # sample first 20k chars for speed
+        code = ord(ch)
+        for key, spans in ranges:
+            if any(start <= code <= end for start, end in spans):
+                counts[key] += 1
+                break
+    if not counts:
+        return 'other'
+    dominant = max(counts.items(), key=lambda kv: kv[1])
+    if dominant[1] == 0:
+        return 'other'
+    return dominant[0]
+
+
+def _script_to_source_language_label(script_hint: str) -> Optional[str]:
+    """Map a dominant script to a best-effort source language label used by multipliers."""
+    if not script_hint:
+        return None
+    s = str(script_hint).strip().lower()
+    mapping = {
+        # CJK
+        'cjk': 'chinese',
+        'japanese': 'japanese',
+        'korean': 'korean',
+        # Other scripts
+        'cyrillic': 'russian',
+        'arabic': 'arabic',
+        'hebrew': 'hebrew',
+        'thai': 'thai',
+        # Devanagari is most often Hindi in this context
+        'devanagari': 'hindi',
+    }
+    return mapping.get(s)
+
+
+def _sample_text_from_word_count_folder(folder_path: str, max_files: int = 3, max_chars: int = 15000) -> str:
+    """Read a small sample of *source* text from word_count folder.
+
+    This folder is typically created during extraction and contains original chunks
+    (often in the source language). We keep this fast and best-effort.
+    """
+    try:
+        word_count_folder = os.path.join(folder_path, 'word_count')
+        if not os.path.exists(word_count_folder):
+            return ''
+
+        sample_parts = []
+        files = sorted([
+            f for f in os.listdir(word_count_folder)
+            if f.lower().endswith(('.txt', '.html', '.htm', '.xhtml'))
+        ])
+        for f in files[:max_files]:
+            try:
+                p = os.path.join(word_count_folder, f)
+                with open(p, 'r', encoding='utf-8', errors='ignore') as fh:
+                    raw = fh.read(max_chars)
+                if '<' in raw and f.lower().endswith(('.html', '.htm', '.xhtml')):
+                    soup = BeautifulSoup(raw, 'html.parser')
+                    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                        try:
+                            tag.decompose()
+                        except Exception:
+                            pass
+                    txt = soup.get_text(separator=' ', strip=True)
+                else:
+                    txt = raw
+                txt = txt.strip()
+                if txt:
+                    sample_parts.append(txt)
+            except Exception:
+                continue
+
+        sample = ' '.join(sample_parts)
+        if len(sample) > max_chars:
+            sample = sample[:max_chars]
+        return sample
+    except Exception:
+        return ''
+
+
+def _sample_text_from_epub(epub_path: str, max_spine_items: int = 3, max_chars: int = 15000) -> str:
+    """Read a small sample of *source* text from the original EPUB.
+
+    This is used for logging the AUTO source language when the user configured
+    source_language=auto in QA settings.
+    """
+    try:
+        sample_parts = []
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Find content.opf
+            content_opf_data = None
+            content_opf_path = None
+            content_opf_path = find_epub_opf_member(zf)
+            if content_opf_path:
+                try:
+                    content_opf_data = zf.read(content_opf_path).decode('utf-8', errors='ignore')
+                except Exception:
+                    content_opf_data = None
+
+            if not content_opf_data:
+                return ''
+
+            soup_opf = BeautifulSoup(content_opf_data, 'xml')
+            manifest_map = {}
+            manifest = soup_opf.find('manifest')
+            if manifest:
+                for item in manifest.find_all('item'):
+                    item_id = item.get('id')
+                    href = item.get('href')
+                    if item_id and href:
+                        manifest_map[item_id] = href
+
+            spine_hrefs = []
+            spine = soup_opf.find('spine')
+            if spine:
+                for itemref in spine.find_all('itemref'):
+                    idref = itemref.get('idref')
+                    if idref and idref in manifest_map:
+                        spine_hrefs.append(manifest_map[idref])
+
+            if not spine_hrefs:
+                return ''
+
+            base_dir = ''
+            if content_opf_path:
+                base_dir = os.path.dirname(content_opf_path)
+                if base_dir:
+                    base_dir = base_dir + '/'
+
+            for href in spine_hrefs[:max_spine_items]:
+                possible_paths = [
+                    href,
+                    base_dir + href,
+                    'OEBPS/' + href,
+                    'OPS/' + href,
+                ]
+                content = None
+                for try_path in possible_paths:
+                    try:
+                        content = zf.read(try_path).decode('utf-8', errors='ignore')
+                        break
+                    except KeyError:
+                        continue
+                    except Exception:
+                        continue
+
+                if not content:
+                    continue
+
+                soup = BeautifulSoup(content, 'html.parser')
+                for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                    try:
+                        tag.decompose()
+                    except Exception:
+                        pass
+                txt = soup.get_text(separator=' ', strip=True)
+                txt = txt.strip()
+                if txt:
+                    sample_parts.append(txt)
+                if sum(len(x) for x in sample_parts) >= max_chars:
+                    break
+
+        sample = ' '.join(sample_parts)
+        if len(sample) > max_chars:
+            sample = sample[:max_chars]
+        return sample
+    except Exception:
+        return ''
+
+
+def _auto_detect_source_language_for_log(qa_settings, folder_path: str, epub_path: Optional[str], text_file_mode: bool,
+                                        original_word_counts: dict, log_fn=None) -> Tuple[Optional[str], Optional[str], Optional[float]]:
+    """Best-effort source language detection for logging when source_language is AUTO.
+
+    Returns:
+        (language_label, method, confidence)
+
+    Notes:
+    - The QA scan operates on *translated* HTML, so we try to detect from the original
+      inputs (EPUB / word_count folder) when available.
+    - This is for logging/visibility; per-chapter heuristics still drive multipliers.
+    """
+    try:
+        src = str(qa_settings.get('source_language', 'auto') or 'auto').strip().lower()
+        if src != 'auto':
+            return None, None, None
+
+        # 1) If we have per-chapter script hints from EPUB word-count extraction, use the dominant script.
+        script_counts = Counter()
+        try:
+            for _k, info in (original_word_counts or {}).items():
+                if isinstance(info, dict) and info.get('script'):
+                    script_counts[str(info.get('script')).strip().lower()] += 1
+        except Exception:
+            script_counts = Counter()
+
+        if script_counts:
+            top_script, top_count = script_counts.most_common(1)[0]
+            label = _script_to_source_language_label(top_script)
+            if label:
+                conf = top_count / max(1, sum(script_counts.values()))
+                return label, f"dominant_script:{top_script}", conf
+
+        # 2) Otherwise, sample original text and use langdetect.
+        sample = ''
+        if text_file_mode:
+            sample = _sample_text_from_word_count_folder(folder_path)
+        else:
+            if epub_path and os.path.exists(epub_path) and epub_path.lower().endswith('.epub'):
+                sample = _sample_text_from_epub(epub_path)
+
+        if sample:
+            # Quick script shortcut first (robust for CJK/etc)
+            script_hint = detect_dominant_script(sample)
+            label = _script_to_source_language_label(script_hint)
+            if label:
+                return label, f"sample_script:{script_hint}", None
+
+            try:
+                from langdetect import detect_langs
+                detections = detect_langs(sample)
+                if detections:
+                    top = detections[0]
+                    # Map ISO codes to labels used by multipliers
+                    code_map = {
+                        'en': 'english', 'es': 'spanish', 'fr': 'french', 'de': 'german',
+                        'pt': 'portuguese', 'it': 'italian', 'ru': 'russian',
+                        'ja': 'japanese', 'ko': 'korean', 'zh-cn': 'chinese (simplified)',
+                        'zh-tw': 'chinese (traditional)', 'zh': 'chinese',
+                        'ar': 'arabic', 'he': 'hebrew', 'th': 'thai',
+                        'hi': 'hindi',
+                    }
+                    label = code_map.get(str(top.lang).lower(), str(top.lang).lower())
+                    return label, 'langdetect', float(getattr(top, 'prob', 0.0))
+            except Exception:
+                pass
+
+        return None, None, None
+    except Exception:
+        return None, None, None
+
+def _normalize_lang_for_multiplier(lang: str) -> str:
+    if not lang:
+        return 'english'
+    s = lang.strip().lower()
+
+    # Handle Chinese variants first (keep simplified/traditional)
+    if 'chinese' in s:
+        if 'traditional' in s or 'zh-tw' in s or 'tw' in s:
+            return 'chinese (traditional)'
+        if 'simplified' in s or 'zh-cn' in s or 'cn' in s:
+            return 'chinese (simplified)'
+        return 'chinese'
+
+    # Strip parenthetical region labels like "(US)" and split region codes like "en-US"
+    s = re.sub(r'\s*\(.*?\)\s*', '', s)
+    s = re.split(r'[-_]', s)[0]
+
+    mapping = {
+        'en': 'english',
+        'es': 'spanish',
+        'fr': 'french',
+        'de': 'german',
+        'pt': 'portuguese',
+        'it': 'italian',
+        'ru': 'russian',
+        'ja': 'japanese',
+        'ko': 'korean',
+        'zh': 'chinese',
+        'zhcn': 'chinese (simplified)',
+        'zhtw': 'chinese (traditional)',
+    }
+    return mapping.get(s, s)
+
+
+DEFAULT_WC_MULTIPLIERS = {
+    'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
+    'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
+    'chinese': 2.50, 'chinese (simplified)': 2.50, 'chinese (traditional)': 2.50,
+    'japanese': 2.20, 'korean': 2.30, 'hebrew': 1.05, 'thai': 1.10,
+    'other': 1.0
+}
+
+def _get_wc_multiplier(qa_settings, source_lang_hint: str = None, script_hint: str = None, is_cjk: bool = None, log_fn=None):
+    """
+    Choose multiplier based on SOURCE language (expected expansion source→target).
+    Priority: explicit source_lang_hint > qa_settings['source_language'] > CJK heuristic > target_language > other > 1.0
+    """
+    multipliers = DEFAULT_WC_MULTIPLIERS.copy()
+    try:
+        mults = qa_settings.get('word_count_multipliers', {})
+        if isinstance(mults, dict) and mults:
+            multipliers.update(mults)
+    except Exception:
+        pass
+
+    def pick(lang_key):
+        if not lang_key or str(lang_key).lower() == 'auto':
+            return None
+        try:
+            norm = _normalize_lang_for_multiplier(lang_key)
+            return multipliers.get(norm)
+        except Exception:
+            return None
+
+    # 1) explicit hint from caller
+    m = pick(source_lang_hint)
+    if m:
+        if log_fn:
+            log_fn(f"   [WC] Source language hint: {source_lang_hint} -> mult {m}")
+        return m
+
+    # 2) configured source_language
+    m = pick(qa_settings.get('source_language', None))
+    if m:
+        if log_fn:
+            log_fn(f"   [WC] Using configured source_language: {qa_settings.get('source_language')} -> mult {m}")
+        return m
+
+    # 3) script hint auto-detected
+    m = pick(script_hint)
+    if m:
+        if log_fn:
+            log_fn(f"   [WC] Auto-detected script '{script_hint}' -> mult {m}")
+        return m
+
+    # 4) heuristic: CJK content detected in source
+    if is_cjk is True:
+        for candidate in ['chinese', 'japanese', 'korean']:
+            if candidate in multipliers:
+                if log_fn:
+                    log_fn(f"   [WC] CJK heuristic -> {candidate} mult {multipliers[candidate]}")
+                return multipliers[candidate]
+        if 'other' in multipliers:
+            return multipliers['other']
+        return 1.0
+
+    # 5) fallback to target_language (legacy)
+    m = pick(qa_settings.get('target_language', 'english'))
+    if m:
+        if log_fn:
+            log_fn(f"   [WC] Fallback target_language {qa_settings.get('target_language', 'english')} -> mult {m}")
+        return m
+    if 'other' in multipliers:
+        return multipliers['other']
+    return 1.0
+
+
+def cross_reference_word_counts(original_counts, translated_file, translated_text, log=print, merge_info=None, qa_settings=None):
+    """Cross-reference word counts between original and translated files.
+    
+    Matches translated files to original EPUB chapters by filename.
+    Handles response_ prefix and ignores file extensions (including double extensions).
+    
+    Args:
+        original_counts: Dict of chapter word counts from original EPUB
+        translated_file: Filename of the translated file
+        translated_text: Text content of the translated file
+        log: Logging function
+        merge_info: Dict with merged_chapters info from translation_progress.json
+                   Format: {parent_chapter_num: [list of merged child chapter nums]}
+    """
+    def strip_all_extensions(filename):
+        """Remove all extensions from filename, handling double extensions like .htm.xhtml"""
+        base = filename
+        while True:
+            new_base, ext = os.path.splitext(base)
+            if not ext or new_base == base:
+                break
+            base = new_base
+        return base
+    
+    basename = os.path.basename(translated_file)
+    # Remove ALL extensions for matching (handles .html, .htm.xhtml, etc.)
+    basename_no_ext = strip_all_extensions(basename)
+    
+    # Remove response_ prefix if present
+    search_name = basename_no_ext
+    if search_name.lower().startswith('response_'):
+        search_name = search_name[9:]  # Remove 'response_' prefix
+    
+    # Extract chapter number from filename for merge checking
+    file_chapter_num = None
+    num_match = re.search(r'(\d+)', search_name)
+    if num_match:
+        file_chapter_num = int(num_match.group(1))
+    
+    # CHECK: Is this file a merged CHILD chapter? If so, skip it - the parent handles word count
+    if merge_info and file_chapter_num is not None:
+        for parent_num, children in merge_info.items():
+            if file_chapter_num in children:
+                # This is a merged child - return a special result indicating it's merged
+                return {
+                    'found_match': True,
+                    'is_merged_child': True,
+                    'parent_chapter': parent_num,
+                    'chapter_num': file_chapter_num,
+                    'original_wc': 0,
+                    'translated_wc': 0,
+                    'ratio': 1.0,
+                    'percentage': 100,
+                    'is_reasonable': True,
+                    'is_typical': True,
+                    'skip_reason': f'Merged into chapter {parent_num}'
+                }
+    
+    # Build a filename-to-spine-idx map for merge lookups
+    # This allows us to find child chapter word counts by their filenames
+    filename_to_spine_idx = {}
+    for sidx, cinfo in original_counts.items():
+        fname = strip_all_extensions(cinfo['filename']).lower()
+        filename_to_spine_idx[fname] = sidx
+        # Also extract chapter number from filename for fallback matching
+        fname_num_match = re.search(r'(\d+)', fname)
+        if fname_num_match:
+            fname_num = int(fname_num_match.group(1))
+            # Map chapter number to spine idx (for merge_info lookup)
+            if fname_num not in filename_to_spine_idx:
+                filename_to_spine_idx[f"chapnum_{fname_num}"] = sidx
+    
+    # Try to find matching filename in original_counts
+    for spine_idx, count_info in original_counts.items():
+        epub_filename = strip_all_extensions(count_info['filename'])  # Remove ALL extensions from EPUB filename
+        
+        # Direct filename match (case-insensitive)
+        if search_name.lower() == epub_filename.lower():
+            original_wc = _source_word_count_value(count_info)
+            original_small_wc = _source_small_file_word_count(count_info, original_wc)
+            is_cjk = count_info.get('is_cjk', True)
+            
+            # REQUEST MERGING: If this chapter has merged children, combine word counts
+            # merge_info uses actual_num (chapter numbers), need to map to spine indices
+            if merge_info and file_chapter_num is not None and file_chapter_num in merge_info:
+                merged_children = merge_info[file_chapter_num]
+                original_wc_base = original_wc
+                children_found = 0
+                for child_num in merged_children:
+                    # Find child's spine_idx by its chapter number
+                    child_spine_key = f"chapnum_{child_num}"
+                    if child_spine_key in filename_to_spine_idx:
+                        child_spine_idx = filename_to_spine_idx[child_spine_key]
+                        if child_spine_idx in original_counts:
+                            child_info = original_counts[child_spine_idx]
+                            original_wc += _source_word_count_value(child_info)
+                            original_small_wc += _source_small_file_word_count(child_info)
+                            children_found += 1
+                    # Also try direct spine index lookup as fallback
+                    elif child_num in original_counts:
+                        child_info = original_counts[child_num]
+                        original_wc += _source_word_count_value(child_info)
+                        original_small_wc += _source_small_file_word_count(child_info)
+                        children_found += 1
+                if children_found > 0:
+                    log(f"   🔗 Merged chapter {file_chapter_num}: combining word counts from {children_found} child chapters")
+                    log(f"      Base: {original_wc_base}, Combined: {original_wc}")
+            
+            # Count words in translated text
+            translated_wc = _count_words_cached(translated_text)
+
+            small_file_threshold = _get_small_file_word_threshold(qa_settings)
+            if small_file_threshold and original_small_wc < small_file_threshold:
+                return _small_file_word_count_result(
+                    original_wc,
+                    translated_wc,
+                    count_info['filename'],
+                    small_file_threshold
+                )
+            
+            # If both sides are effectively empty, treat as reasonable and skip mismatch
+            if original_wc < 5 and translated_wc < 2:
+                ratio = translated_wc / max(1, original_wc)
+                multiplier = _get_wc_multiplier(
+                    qa_settings or {},
+                    source_lang_hint=qa_settings.get('source_language') if qa_settings else None,
+                    script_hint=(original_counts.get(spine_idx) or {}).get('script'),
+                    is_cjk=is_cjk,
+                    log_fn=log
+                )
+                ratio_norm = ratio / max(0.01, multiplier)
+                return {
+                    'found_match': True,
+                    'chapter_num': spine_idx,
+                    'original_wc': original_wc,
+                    'translated_wc': translated_wc,
+                    'ratio': ratio,
+                    'normalized_ratio': ratio_norm,
+                    'multiplier': multiplier,
+                    'percentage': ratio * 100,
+                    'is_reasonable': True,
+                    'is_typical': True,
+                    'original_file': count_info['filename'],
+                    'warning': 'empty_chapter',
+                    'warning_desc': 'Chapter is essentially empty; word count check skipped'
+                }
+            
+            # Calculate ratio (raw) then normalize by expected multiplier
+            ratio = translated_wc / max(1, original_wc)
+            multiplier = _get_wc_multiplier(
+                qa_settings or {},
+                source_lang_hint=qa_settings.get('source_language') if qa_settings else None,
+                script_hint=(original_counts.get(spine_idx) or {}).get('script'),
+                is_cjk=is_cjk,
+                log_fn=log
+            )
+            ratio_norm = ratio / max(0.01, multiplier)
+            
+            # Define VERY PERMISSIVE ratio ranges for novel translation
+            # These thresholds apply to the *normalized* ratio (ratio_norm).
+            min_ratio_cjk = 0.6
+            max_ratio_cjk = 2.0
+            min_ratio_non_cjk = 0.7
+            max_ratio_non_cjk = 1.5
+
+            # Override with custom settings if available
+            setting_min = None
+            setting_max = None
+            if qa_settings:
+                setting_min = qa_settings.get('word_count_min_ratio')
+                setting_max = qa_settings.get('word_count_max_ratio')
+                try:
+                    if setting_min is not None and str(setting_min).lower() != 'auto':
+                        val = float(setting_min)
+                        min_ratio_cjk = val
+                        min_ratio_non_cjk = val
+                    if setting_max is not None and str(setting_max).lower() != 'auto':
+                        val = float(setting_max)
+                        max_ratio_cjk = val
+                        max_ratio_non_cjk = val
+                except (ValueError, TypeError):
+                    # Keep defaults on parse error
+                    pass
+
+            if is_cjk:
+                # CJK to English novel translation - reasonable bounds
+                min_ratio = min_ratio_cjk
+                max_ratio = max_ratio_cjk
+                # Typical healthy range
+                typical_min = min_ratio + 0.2
+                typical_max = max_ratio * 0.7
+            else:
+                # Non-CJK source
+                min_ratio = min_ratio_non_cjk
+                max_ratio = max_ratio_non_cjk
+                typical_min = min_ratio + 0.1
+                typical_max = max_ratio * 0.8
+            
+            # Relax bounds for short files to avoid false positives from small word count variations
+            # Example: 18→24 words = 133%, which shouldn't be flagged as an issue
+            if original_wc < 500:
+                if original_wc < 20:
+                    # Very short (< 20 words): essentially disable checks (title pages, etc.)
+                    min_ratio = 0.0
+                    max_ratio = 10.0
+                    typical_min = 0.0
+                    typical_max = 10.0
+                elif original_wc < 100:
+                    # Short (20-100 words): very relaxed thresholds
+                    # Small absolute differences create large percentage swings
+                    min_ratio = 0.3   # Allow 3:1 compression
+                    max_ratio = 4.0   # Allow 4:1 expansion
+                    typical_min = 0.5
+                    typical_max = 3.0
+                elif original_wc < 500:
+                    # Medium-short (100-500 words): moderately relaxed
+                    min_ratio = 0.5   # Allow 2:1 compression
+                    max_ratio = 3.0   # Allow 3:1 expansion
+                    typical_min = 0.7
+                    typical_max = 2.0
+            
+            is_reasonable = min_ratio <= ratio_norm <= max_ratio
+            is_typical = typical_min <= ratio_norm <= typical_max
+            percentage = ratio * 100
+            
+            setting_min = None
+            setting_max = None
+            try:
+                if qa_settings:
+                    setting_min = qa_settings.get('word_count_min_ratio')
+                    setting_max = qa_settings.get('word_count_max_ratio')
+            except Exception:
+                pass
+
+            result = {
+                'found_match': True,
+                'chapter_num': spine_idx,
+                'original_wc': original_wc,
+                'translated_wc': translated_wc,
+                'ratio': ratio,
+                'normalized_ratio': ratio_norm,
+                'multiplier': multiplier,
+                'percentage': percentage,
+                'is_reasonable': is_reasonable,
+                'is_typical': is_typical,
+                'original_file': count_info['filename'],
+                # Debug info for mismatch logs (normalized ratio bounds)
+                'min_ratio_norm': min_ratio,
+                'max_ratio_norm': max_ratio,
+                'setting_min_ratio': setting_min,
+                'setting_max_ratio': setting_max,
+            }
+            
+            # Add descriptive warnings for extreme but acceptable ratios
+            if ratio_norm < 0.5:
+                result['warning'] = 'very_concise_translation'
+                result['warning_desc'] = 'Translation is less than 50% of original - possible summary style'
+            elif ratio_norm < typical_min:
+                result['warning'] = 'concise_translation'
+                result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat concise'
+            elif ratio_norm > 4.0:
+                result['warning'] = 'very_expansive_translation'
+                result['warning_desc'] = 'Translation is over 400% of original - extensive additions'
+            elif ratio_norm > typical_max:
+                result['warning'] = 'expansive_translation'
+                result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat expansive'
+            
+            # Only flag as error if REALLY extreme
+            if not is_reasonable:
+                if ratio_norm < min_ratio:
+                    result['error'] = 'possibly_missing_content'
+                    result['error_desc'] = f'Translation is only {percentage:.0f}% of original (expected ~{multiplier*100:.0f}%)'
+                else:
+                    result['error'] = 'possibly_excessive_content'
+                    result['error_desc'] = f'Translation is {percentage:.0f}% of original (expected ~{multiplier*100:.0f}%)'
+            
+            return result
+    
+    # Check if spine order was used (check if any entry has spine_index field)
+    # If spine order was used, we should NOT use chapter number fallback
+    spine_order_used = any(info.get('spine_index') is not None for info in original_counts.values())
+    
+    if spine_order_used:
+        # Spine order was used - no exact filename match means no match
+        # Do NOT use chapter number fallback as it will match wrong chapters
+        return {
+            'found_match': False,
+            'chapter_num': None,
+            'reason': f'No exact filename match for \'{search_name}\' in spine order'
+        }
+    
+    # Fallback: No spine order available, use chapter number extraction
+    # This is only safe when the EPUB didn't have a proper spine
+    chapter_num = None
+    
+    # PRIORITY 1: Extract from filename patterns (most specific first)
+    # Important: Check "response_No" patterns BEFORE generic "response_" patterns
+    # to avoid extracting just the first number from "response_No00001Chapter"
+    patterns = [
+        r'response_[Nn]o(\d{4,5})(?:[_-]|$)',   # response_No00001 or response_No00001Chapter
+        r'response_(\d{4,5})(?:[_-]|$)',         # response_00001 or response_00001Chapter
+        r'response_chapter(\d+)',                 # response_chapter1
+        r'chapter[\s_-]*(\d+)',                  # chapter1, chapter_2
+        r'ch[\s_-]*(\d+)',                       # ch1, ch_2
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, basename_no_ext, re.IGNORECASE)
+        if match:
+            chapter_num = int(match.group(1))
+            # Remove leading zeros for matching
+            if chapter_num > 1000:
+                chapter_num = chapter_num % 1000  # e.g., 00001 -> 1
+            break
+    
+    if chapter_num is None:
+        # PRIORITY 2: Try content-based matching as fallback
+        content_patterns = [
+            r'Chapter\s+(\d+)',
+            r'第\s*(\d+)\s*章',
+            r'제\s*(\d+)\s*장'
+        ]
+        
+        for pattern in content_patterns:
+            match = re.search(pattern, translated_text[:500], re.IGNORECASE)
+            if match:
+                chapter_num = int(match.group(1))
+                break
+    
+    if chapter_num is not None and chapter_num in original_counts:
+        count_info = original_counts[chapter_num]
+        original_wc = _source_word_count_value(count_info)
+        original_small_wc = _source_small_file_word_count(count_info, original_wc)
+        is_cjk = count_info.get('is_cjk', True)  # Get CJK flag if available
+        
+        # REQUEST MERGING: If this chapter has merged children, combine word counts
+        # Need to map child chapter numbers to spine indices
+        if merge_info and chapter_num in merge_info:
+            merged_children = merge_info[chapter_num]
+            for child_num in merged_children:
+                # Try to find child by chapter number mapping
+                child_spine_key = f"chapnum_{child_num}"
+                if child_spine_key in filename_to_spine_idx:
+                    child_spine_idx = filename_to_spine_idx[child_spine_key]
+                    if child_spine_idx in original_counts:
+                        child_info = original_counts[child_spine_idx]
+                        original_wc += _source_word_count_value(child_info)
+                        original_small_wc += _source_small_file_word_count(child_info)
+                # Fallback: try direct spine index
+                elif child_num in original_counts:
+                    child_info = original_counts[child_num]
+                    original_wc += _source_word_count_value(child_info)
+                    original_small_wc += _source_small_file_word_count(child_info)
+        
+        # Count words in translated text
+        translated_wc = _count_words_cached(translated_text)
+        
+        small_file_threshold = _get_small_file_word_threshold(qa_settings)
+        if small_file_threshold and original_small_wc < small_file_threshold:
+            return _small_file_word_count_result(
+                original_wc,
+                translated_wc,
+                count_info['filename'],
+                small_file_threshold
+            )
+        
+        # Calculate ratio (translated words / original words)
+        ratio = translated_wc / max(1, original_wc)
+        multiplier = _get_wc_multiplier(qa_settings)
+        ratio_norm = ratio / max(0.01, multiplier)
+        
+        # Define VERY PERMISSIVE ratio ranges for novel translation
+        # These are much looser to accommodate extreme translation cases
+        
+        # Default Auto Logic (used if settings are missing or explicitly None/Auto)
+        min_ratio_cjk = 0.6
+        max_ratio_cjk = 2.0  # Reduced from 2.5 to 2.0 as per request
+        min_ratio_non_cjk = 0.7
+        max_ratio_non_cjk = 1.5
+        
+        # Override with custom settings if available
+        if qa_settings:
+            # Word Count Ratio Thresholds (normalized)
+            # Use 'word_count_min_ratio' and 'word_count_max_ratio'
+            # If set to 'auto' or not present, fallback to defaults
+            
+            setting_min = qa_settings.get('word_count_min_ratio')
+            setting_max = qa_settings.get('word_count_max_ratio')
+            
+            try:
+                if setting_min is not None and str(setting_min).lower() != 'auto':
+                    val = float(setting_min)
+                    min_ratio_cjk = val
+                    min_ratio_non_cjk = val
+                
+                if setting_max is not None and str(setting_max).lower() != 'auto':
+                    val = float(setting_max)
+                    max_ratio_cjk = val
+                    max_ratio_non_cjk = val
+            except (ValueError, TypeError):
+                pass  # Keep defaults on error
+
+        if is_cjk:
+            # CJK to English novel translation - reasonable bounds
+            min_ratio = min_ratio_cjk
+            max_ratio = max_ratio_cjk
+            
+            # Typical healthy range (derived from reasonable bounds)
+            typical_min = min_ratio + 0.2
+            typical_max = max_ratio * 0.7
+        else:
+            # Non-CJK source
+            min_ratio = min_ratio_non_cjk
+            max_ratio = max_ratio_non_cjk
+            typical_min = min_ratio + 0.1
+            typical_max = max_ratio * 0.8
+        
+        # Relax bounds for short files to avoid false positives from small word count variations
+        # Example: 18→24 words = 133%, which shouldn't be flagged as an issue
+        if original_wc < 500:
+            if original_wc < 20:
+                # Very short (< 20 words): essentially disable checks (title pages, etc.)
+                min_ratio = 0.0
+                max_ratio = 10.0
+                typical_min = 0.0
+                typical_max = 10.0
+            elif original_wc < 100:
+                # Short (20-100 words): very relaxed thresholds
+                # Small absolute differences create large percentage swings
+                min_ratio = 0.3   # Allow 3:1 compression
+                max_ratio = 4.0   # Allow 4:1 expansion
+                typical_min = 0.5
+                typical_max = 3.0
+            elif original_wc < 500:
+                # Medium-short (100-500 words): moderately relaxed
+                min_ratio = 0.5   # Allow 2:1 compression
+                max_ratio = 3.0   # Allow 3:1 expansion
+                typical_min = 0.7
+                typical_max = 2.0
+        
+        is_reasonable = min_ratio <= ratio_norm <= max_ratio
+        is_typical = typical_min <= ratio_norm <= typical_max
+        
+        # Calculate percentage difference for logging
+        percentage = (ratio * 100)
+        
+        result = {
+            'found_match': True,
+            'chapter_num': chapter_num,
+            'original_wc': original_wc,
+            'translated_wc': translated_wc,
+            'ratio': ratio,
+            'percentage': percentage,  # e.g., 150 = 150% of original
+            'is_reasonable': is_reasonable,
+            'is_typical': is_typical,
+            'original_file': count_info['filename']
+        }
+        
+        # Add descriptive warnings for extreme but acceptable ratios
+        if ratio_norm < 0.5:
+            result['warning'] = 'very_concise_translation'
+            result['warning_desc'] = 'Translation is less than 50% of original - possible summary style'
+        elif ratio_norm < typical_min:
+            result['warning'] = 'concise_translation'
+            result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat concise'
+        elif ratio_norm > 4.0:
+            result['warning'] = 'very_expansive_translation'
+            result['warning_desc'] = 'Translation is over 400% of original - extensive additions'
+        elif ratio_norm > typical_max:
+            result['warning'] = 'expansive_translation'
+            result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat expansive'
+        
+        # Only flag as unreasonable if REALLY extreme
+        if not is_reasonable:
+            if ratio_norm < min_ratio:
+                result['error'] = 'possibly_missing_content'
+                result['error_desc'] = f'Translation is only {percentage:.0f}% of original (expected ~{multiplier*100:.0f}%)'
+            else:
+                result['error'] = 'possibly_excessive_content'
+                result['error_desc'] = f'Translation is {percentage:.0f}% of original (expected ~{multiplier*100:.0f}%)'
+        
+        return result
+    
+    return {
+        'found_match': False,
+        'chapter_num': chapter_num,
+        'reason': 'No matching chapter found in original'
+    }
+
+def process_html_file_batch(args):
+    """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""
+    if len(args) >= 12:
+        (
+            file_batch,
+            folder_path,
+            qa_settings,
+            mode,
+            original_word_counts,
+            merge_info,
+            text_file_mode,
+            original_image_info,
+            original_punctuation_info,
+            original_quotation_info,
+            original_preservation_info,
+            image_rename_map,
+        ) = args[:12]
+    elif len(args) >= 10:
+        (
+            file_batch,
+            folder_path,
+            qa_settings,
+            mode,
+            original_word_counts,
+            merge_info,
+            text_file_mode,
+            original_image_info,
+            original_punctuation_info,
+            original_quotation_info,
+        ) = args[:10]
+        original_preservation_info = {}
+        image_rename_map = {}
+    else:
+        # Backward-compatible worker tuple used by existing callers/tests.
+        file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info, original_punctuation_info = args
+        original_quotation_info = {}
+        original_preservation_info = {}
+        image_rename_map = {}
+    batch_results = []
+    
+    # Import what we need inside the worker
+    import os
+    import hashlib
+    
+    is_quick_scan = (mode == 'quick-scan')
+
+    # Custom mode: allow sample_size to limit duplicate comparison work
+    # Sentinel: -1 = use all characters
+    custom_sample_size = None
+    try:
+        if mode == 'custom' and isinstance(qa_settings, dict):
+            cms = qa_settings.get('custom_mode_settings')
+            if isinstance(cms, dict) and 'sample_size' in cms:
+                custom_sample_size = int(cms.get('sample_size'))
+    except Exception:
+        custom_sample_size = None
+    disable_dup = (mode == 'custom' and custom_sample_size == 0)
+    small_file_word_threshold = _get_small_file_word_threshold(qa_settings)
+    
+    for idx, filename in file_batch:
+        full_path = os.path.join(folder_path, filename)
+        
+        try:
+            if text_file_mode:
+                if filename.lower().endswith(_HTML_LIKE_EXTENSIONS):
+                    # PDF inputs produce HTML bookmark sections. Run textual
+                    # QA against visible text, while retaining the full markup
+                    # for structural, image, link, and tag checks.
+                    raw_text, qa_header_text = extract_text_from_html(
+                        full_path,
+                        include_headers=True,
+                    )
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        raw_file_content = f.read()
+                else:
+                    # Plain .txt inputs are already visible text.
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        raw_text = f.read()
+                    raw_file_content = raw_text
+                    qa_header_text = ""
+            else:
+                # For HTML, we need extracted text for most checks...
+                raw_text, qa_header_text = extract_text_from_html(full_path, include_headers=True)
+                
+                # ...AND raw content for structural/tag checks
+                try:
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        raw_file_content = f.read()
+                except Exception:
+                    raw_file_content = ""
+        except Exception as e:
+            # Skip files that can't be read
+            continue
+
+        foreign_qa_text = _foreign_character_qa_text(
+            raw_text,
+            raw_file_content,
+            qa_settings,
+        )
+        qa_header_text = _foreign_character_qa_text(
+            qa_header_text,
+            raw_file_content,
+            qa_settings,
+            headers_only=True,
+        )
+
+        # Text used for duplicate detection (may be downsampled in custom mode)
+        dup_text = raw_text
+        try:
+            if mode == 'custom' and custom_sample_size is not None:
+                if custom_sample_size == -1:
+                    dup_text = raw_text
+                elif custom_sample_size > 0:
+                    dup_text = raw_text[:custom_sample_size]
+        except Exception:
+            dup_text = raw_text
+
+        # Quick per-file word-count hint for downstream small-file checks.
+        translated_wc_hint = _count_small_file_words(raw_text) if isinstance(raw_text, str) else 0
+        skip_small_file_checks = bool(
+            small_file_word_threshold and translated_wc_hint < small_file_word_threshold
+        )
+        
+        # Check minimum file length
+        min_length = qa_settings.get('min_file_length', 0)
+        if len(raw_text.strip()) < min_length:
+            continue
+        
+        chapter_num, chapter_title = extract_chapter_info(filename, raw_text)
+        
+        # Quick scan optimizations (and allow custom sample_size=0 to skip duplicate detection work)
+        if is_quick_scan or disable_dup:
+            hashes = {}  # Empty dict for quick scan / disabled duplicate detection
+            preview_size = min(300, len(raw_text))
+        else:
+            hashes = generate_content_hashes(dup_text)
+            preview_size = 500
+        
+        preview = raw_text[:preview_size].replace('\n', ' ')
+        if len(preview) > preview_size:
+            preview = preview[:preview_size-3] + '...'
+        
+        # Normalize preview
+        preview_normalized = normalize_text(preview)[:300]
+        
+        # Detect translation artifacts
+        artifacts = []
+        check_translation_artifacts = qa_settings.get('check_translation_artifacts', False)
+        check_ai_artifacts = qa_settings.get('check_ai_artifacts', False)
+        # Allow checking artifacts in quick scan if explicitly enabled (regex is fast)
+        if check_translation_artifacts:
+            artifacts = detect_translation_artifacts(raw_text)
+            
+            # Check for "LLM Token Fix"-style empty-attribute tag hallucinations
+            # in RAW HTML content (these are tags, so stripped from ``raw_text``).
+            # Delegates to ``_empty_attr_fix`` so detection and repair agree on
+            # which patterns count -- multi-attribute, punctuated attr names,
+            # single or double quotes, whitespace around ``=``, etc.
+            if raw_file_content:
+                raw_content_count = count_empty_attr_tags(raw_file_content)
+                if raw_content_count:
+                    formatted_examples = find_empty_attr_tags(raw_file_content, limit=10)
+                    artifacts.append({
+                        'type': 'empty_attribute_tags',
+                        'count': raw_content_count,
+                        'examples': formatted_examples,
+                        'severity': 'medium'
+                    })
+                
+                # Check for split markers in RAW HTML content (these are HTML tags stripped from raw_text)
+                # This catches id="split-N" attributes that indicate leftover merge split markers
+                split_marker_pattern = re.compile(
+                    r'(id\s*=\s*["\']split-\d+["\']|'
+                    r'id\s*=\s*split-\d+|'
+                    r'&lt;h1[^&]*split-\d+[^&]*&gt;|'
+                    r'SPLIT\s*MARKER[^<]*)',
+                    re.IGNORECASE
+                )
+                split_matches = split_marker_pattern.findall(raw_file_content)
+                if split_matches:
+                    # Check if we already have split_indicators from detect_translation_artifacts
+                    existing_split = next((a for a in artifacts if a['type'] == 'split_indicators'), None)
+                    if existing_split:
+                        # Update count and add new examples
+                        existing_split['count'] += len(split_matches)
+                        existing_split['examples'] = list(set(existing_split.get('examples', []) + split_matches))[:5]
+                    else:
+                        artifacts.append({
+                            'type': 'split_indicators',
+                            'count': len(split_matches),
+                            'examples': list(set(split_matches))[:5],
+                            'severity': 'high'
+                        })
+        if check_ai_artifacts:
+            ai_artifacts = detect_ai_artifacts(
+                raw_text,
+                ai_artifact_patterns=qa_settings.get('ai_artifact_patterns'),
+                ai_artifact_patterns_are_regex=qa_settings.get(
+                    'ai_artifact_patterns_are_regex', False
+                ),
+                check_ai_thinking_preamble=qa_settings.get(
+                    'check_ai_thinking_preamble', False
+                ),
+                ai_thinking_preamble_patterns=qa_settings.get(
+                    'ai_thinking_preamble_patterns'
+                ),
+                ai_thinking_preamble_patterns_are_regex=qa_settings.get(
+                    'ai_thinking_preamble_patterns_are_regex', False
+                ),
+                ai_thinking_preamble_sample_size=qa_settings.get(
+                    'ai_thinking_preamble_sample_size', 500
+                ),
+            )
+            if ai_artifacts:
+                artifacts.extend(ai_artifacts)
+            
+        # Filter out encoding_issues if disabled
+        if not qa_settings.get('check_encoding_issues', True):
+            artifacts = [a for a in artifacts if a['type'] != 'encoding_issues']
+        
+        # Initialize issues list and optional display context.  Keep issue codes
+        # machine-readable in ``issues``; the Progress Manager can append these
+        # previews without changing code-based QA handling.
+        issues = []
+        qa_issue_previews = {}
+        source_preservation_profile = _source_preservation_profile_for_output(
+            original_preservation_info,
+            filename,
+        )
+        output_preservation_profile = None
+        if raw_file_content and filename.lower().endswith(_HTML_LIKE_EXTENSIONS):
+            output_preservation_profile = _html_preservation_profile(
+                raw_file_content,
+                image_rename_map,
+            )
+
+         # Check for glossary leakage
+        check_glossary = qa_settings.get('check_glossary_leakage', True)
+        if check_glossary and not is_quick_scan:
+            has_glossary_leak, glossary_issues = detect_glossary_leakage(raw_text)
+            
+            if has_glossary_leak:
+                # Add to translation artifacts
+                for glossary_issue in glossary_issues:
+                    artifacts.append({
+                        'type': f"glossary_{glossary_issue['type']}",
+                        'count': glossary_issue.get('count', 1),
+                        'examples': glossary_issue.get('examples', []),
+                        'severity': glossary_issue.get('severity', 'medium')
+                    })
+                
+                # Add to issues list for reporting
+                critical_glossary = any(g['severity'] == 'critical' for g in glossary_issues)
+                if critical_glossary:
+                    issues.append(f"CRITICAL_glossary_leakage_detected")
+                else:
+                    total_glossary_items = sum(g.get('count', 1) for g in glossary_issues)
+                    issues.append(f"glossary_leakage_{total_glossary_items}_entries_found")
+        
+        # Source resource preservation. This extends the historical missing-img
+        # option to links, tables and non-img graphics while retaining the same
+        # setting and source matching rules.
+        check_missing_imgs = qa_settings.get('check_missing_images', True)
+        if (
+            check_missing_imgs
+            and source_preservation_profile
+            and output_preservation_profile
+        ):
+            for resource_issue, resource_preview in _preservation_count_issues(
+                    source_preservation_profile,
+                    output_preservation_profile):
+                issues.append(resource_issue)
+                if resource_preview:
+                    qa_issue_previews[resource_issue] = resource_preview
+
+        # Check for missing images (skip for text file mode unless we have HTML files with image info)
+        
+        # DEBUG: Show the condition check
+        # print(f"[DEBUG] File {filename}: text_mode={text_file_mode}, check_imgs={check_missing_imgs}, is_html={filename.lower().endswith(('.html', '.xhtml', '.htm'))}, has_img_info={bool(original_image_info)}")
+        
+        # Allow image checking for HTML files even in text_file_mode if we have original_image_info
+        # This handles cases where PDF sources generate HTML output
+        if check_missing_imgs and filename.lower().endswith(('.html', '.xhtml', '.htm')) and original_image_info:
+            # Read the translated HTML content
+            try:
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    translated_html = f.read()
+                
+                # Match by filename
+                # Remove response_ prefix for matching
+                search_filename = filename.lower()
+                if search_filename.startswith('response_'):
+                    search_filename = search_filename[9:]  # Remove 'response_'
+                
+                has_missing_imgs = False
+                img_issues = []
+                matched_key = None
+                
+                # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices
+                if text_file_mode:
+                    # Direct filename match or basename match
+                    if search_filename in original_image_info:
+                        matched_key = search_filename
+                    else:
+                        # Try matching by basename (without extension)
+                        search_basename = os.path.splitext(search_filename)[0]
+                        for key, img_info in original_image_info.items():
+                            key_basename = os.path.splitext(key)[0] if isinstance(key, str) else None
+                            if key_basename == search_basename:
+                                matched_key = key
+                                break
+                    
+                    if matched_key:
+                        has_missing_imgs, img_issues = detect_missing_images(
+                            translated_html,
+                            matched_key,
+                            original_image_info,
+                            image_rename_map=image_rename_map,
+                        )
+                        # print(f"[IMAGE DEBUG] Matched {filename} to original chunk '{matched_key}'")
+                    else:
+                        # print(f"[IMAGE DEBUG] No match found for {filename} in word_count folder")
+                        pass
+                else:
+                    # EPUB mode: match by spine index
+                    search_basename = os.path.splitext(search_filename)[0]  # Remove extension
+                    for spine_idx, img_info in original_image_info.items():
+                        orig_filename = img_info.get('filename', '').lower()
+                        orig_basename = os.path.splitext(orig_filename)[0]  # Remove extension
+                        
+                        # EXACT match only - no fuzzy logic, no position-based matching
+                        if orig_basename == search_basename:
+                            has_missing_imgs, img_issues = detect_missing_images(
+                                translated_html,
+                                spine_idx,
+                                original_image_info,
+                                image_rename_map=image_rename_map,
+                            )
+                            matched_key = spine_idx
+                            # print(f"[IMAGE DEBUG] Matched {filename} to spine file '{orig_filename}' at spine_idx={spine_idx}")
+                            break
+                    else:
+                        # print(f"[IMAGE DEBUG] No exact match found for {filename} (searched for basename: '{search_basename}')")
+                        pass
+                
+                if matched_key:
+                    # print(f"[IMAGE DEBUG] Checked {filename}: found_match={has_missing_imgs}")
+                    if has_missing_imgs:
+                        orig_info = original_image_info.get(matched_key, {})
+                        # print(f"[IMAGE DEBUG]   Original has {orig_info.get('image_count', 0)} images")
+                
+                if has_missing_imgs:
+                    # print(f"[IMAGE DEBUG] Found image issues! Issues: {img_issues}")
+                    # Add to translation artifacts
+                    for img_issue in img_issues:
+                        issue_type = img_issue.get('type', 'missing_images')
+                        artifacts.append({
+                            'type': issue_type,
+                            'count': img_issue.get('count', 0),
+                            'examples': img_issue.get('missing_srcs', []),
+                            'severity': img_issue.get('severity', 'high')
+                        })
+                    
+                    # Add to issues list for reporting
+                    for img_issue in img_issues:
+                        issue_type = img_issue.get('type', 'missing_images')
+                        issue_count = img_issue.get('count', 0)
+                        orig_count = img_issue.get('original_count', 0)
+                        trans_count = img_issue.get('translated_count', 0)
+                        if issue_type == 'extra_images':
+                            issues.append(f"extra_images_{issue_count}_added_({trans_count}/{orig_count})")
+                        elif issue_type == 'changed_image_references':
+                            issue_code = f"changed_image_references_{issue_count}_found"
+                            issues.append(issue_code)
+                            changed_examples = (
+                                img_issue.get('missing_srcs', [])
+                                + img_issue.get('unexpected_srcs', [])
+                            )
+                            if changed_examples:
+                                qa_issue_previews[issue_code] = ', '.join(changed_examples[:5])
+                        else:
+                            issues.append(f"missing_images_{issue_count}_lost_({trans_count}/{orig_count})")
+                else:
+                    # print(f"[IMAGE DEBUG] No missing images detected for chapter {chapter_num}")
+                    pass
+            except Exception as e:
+                # Print exception for debugging
+                # print(f"[IMAGE DEBUG] Exception during image check: {e}")
+                # import traceback
+                # print(traceback.format_exc())
+                pass
+        
+        # Check for punctuation mismatches (if enabled)
+        check_punctuation = qa_settings.get('check_punctuation_mismatch', False)
+        if check_punctuation and original_punctuation_info:
+            # Extract VISIBLE text for punctuation comparison (matching source extraction logic)
+            # Strip non-visible tags like <head>, <title>, <script>, <style> if content has HTML
+            try:
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+                # Check if content looks like HTML (has any non-visible tags we care about)
+                content_lower = file_content.lower()
+                if any(tag in content_lower for tag in ['<head', '<title', '<script', '<style', '<meta', '<link']):
+                    soup = BeautifulSoup(file_content, 'html.parser')
+                    # Remove non-visible tags before extracting text (same as source extraction)
+                    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                        tag.decompose()
+                    punct_text = soup.get_text()
+                else:
+                    punct_text = raw_text
+            except Exception:
+                punct_text = raw_text  # Fallback to raw_text if parsing fails
+            
+            # Match logic similar to image checking
+            search_filename = filename.lower()
+            if search_filename.startswith('response_'):
+                search_filename = search_filename[9:]  # Remove 'response_'
+            
+            has_punct_mismatch = False
+            punct_issues = []
+            matched_punct_key = None
+            
+            # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices
+            if text_file_mode:
+                # Direct filename match or basename match
+                if search_filename in original_punctuation_info:
+                    matched_punct_key = search_filename
+                else:
+                    # Try matching by basename (without extension)
+                    search_basename = os.path.splitext(search_filename)[0]
+                    for key, punct_info in original_punctuation_info.items():
+                        key_basename = os.path.splitext(key)[0] if isinstance(key, str) else None
+                        if key_basename == search_basename:
+                            matched_punct_key = key
+                            break
+                
+                if matched_punct_key:
+                    has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, matched_punct_key, original_punctuation_info, qa_settings=qa_settings)
+            else:
+                # EPUB mode: match by spine index
+                search_basename = os.path.splitext(search_filename)[0]  # Remove extension
+                for spine_idx, punct_info in original_punctuation_info.items():
+                    orig_filename = punct_info.get('filename', '').lower()
+                    orig_basename = os.path.splitext(orig_filename)[0]  # Remove extension
+                    
+                    # EXACT match only
+                    if orig_basename == search_basename:
+                        has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, spine_idx, original_punctuation_info, qa_settings=qa_settings)
+                        matched_punct_key = spine_idx
+                        break
+            
+            if has_punct_mismatch:
+                # Add to translation artifacts
+                for punct_issue in punct_issues:
+                    artifacts.append({
+                        'type': punct_issue['type'],
+                        'count': punct_issue.get('original_count', 0),
+                        'examples': [f"{punct_issue.get('translated_count', 0)}/{punct_issue.get('original_count', 0)}"],
+                        'severity': punct_issue.get('severity', 'medium')
+                    })
+                
+                # Add to issues list for reporting
+                for punct_issue in punct_issues:
+                    # Determine the exact punctuation symbol for clearer logging
+                    if 'question' in punct_issue['type']:
+                        punct_symbol = '?'
+                        punct_name = 'question_marks'
+                    else:
+                        punct_symbol = '!'
+                        punct_name = 'exclamation_marks'
+                    
+                    orig_count = punct_issue.get('original_count', 0)
+                    trans_count = punct_issue.get('translated_count', 0)
+                    
+                    # Handle both loss and excess cases
+                    if 'excess' in punct_issue['type']:
+                        excess_count = punct_issue.get('excess_count', 0)
+                        issues.append(f"{punct_symbol}_punctuation_+{excess_count}_excess_({trans_count}/{orig_count})")
+                    else:
+                        loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
+                        issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count})")
+
+        # Quotation comparison is deliberately separate from the established
+        # ?! punctuation block above. It uses the same exact filename/spine
+        # matching rules without altering punctuation source selection.
+        if (
+            qa_settings.get('check_quotation_mismatch', False)
+            and (
+                qa_settings.get('only_check_incomplete_quotations', False)
+                or original_quotation_info
+            )
+            and (
+                text_file_mode
+                or filename.lower().endswith(('.html', '.xhtml', '.htm'))
+            )
+        ):
+            quotation_text = _visible_text_for_quotation_check(
+                raw_file_content,
+                allow_plain_text=text_file_mode,
+            )
+            missing_ending_quotations = _missing_ending_quotation_paragraphs(
+                raw_file_content,
+                allow_plain_text=text_file_mode,
+                include_square_brackets=qa_settings.get(
+                    'include_square_brackets_as_quotations',
+                    False,
+                ),
+                ignore_consecutive=qa_settings.get(
+                    'ignore_consecutive_missing_quotations',
+                    False,
+                ),
+            )
+            for missing_ending in missing_ending_quotations:
+                paragraph_index = missing_ending['paragraph_index']
+                paragraph_example = re.sub(
+                    r'\s+',
+                    ' ',
+                    missing_ending.get('text', ''),
+                ).strip()
+                if len(paragraph_example) > 160:
+                    paragraph_example = paragraph_example[:157].rstrip() + '...'
+                issue_code = f"missing_ending_quotation_p{paragraph_index}"
+                artifacts.append({
+                    'type': 'missing_ending_quotation',
+                    'count': 1,
+                    'examples': [paragraph_example],
+                    'severity': 'medium',
+                })
+                issues.append(issue_code)
+                if paragraph_example:
+                    qa_issue_previews[issue_code] = paragraph_example
+
+            if qa_settings.get('only_check_incomplete_quotations', False):
+                matched_quotation_key = None
+            else:
+                search_filename = filename.lower()
+                if search_filename.startswith('response_'):
+                    search_filename = search_filename[9:]
+
+                matched_quotation_key = None
+                if text_file_mode:
+                    if search_filename in original_quotation_info:
+                        matched_quotation_key = search_filename
+                    else:
+                        search_basename = os.path.splitext(search_filename)[0]
+                        for key in original_quotation_info:
+                            key_basename = os.path.splitext(key)[0] if isinstance(key, str) else None
+                            if key_basename == search_basename:
+                                matched_quotation_key = key
+                                break
+                else:
+                    search_basename = os.path.splitext(search_filename)[0]
+                    for spine_index, quotation_source in original_quotation_info.items():
+                        source_filename = quotation_source.get('filename', '').lower()
+                        source_basename = os.path.splitext(source_filename)[0]
+                        if source_basename == search_basename:
+                            matched_quotation_key = spine_index
+                            break
+
+            if matched_quotation_key is not None:
+                has_quotation_mismatch, quotation_issues = detect_quotation_mismatch(
+                    quotation_text,
+                    matched_quotation_key,
+                    original_quotation_info,
+                    ignore_excess=qa_settings.get('ignore_excess_quotation_marks', False),
+                    skip_stylistic_single_quotes=qa_settings.get(
+                        'skip_stylistic_single_quotes',
+                        False,
+                    ),
+                    include_square_brackets=qa_settings.get(
+                        'include_square_brackets_as_quotations',
+                        False,
+                    ),
+                )
+                if has_quotation_mismatch:
+                    for quotation_issue in quotation_issues:
+                        original_count = quotation_issue.get('original_count', 0)
+                        translated_count = quotation_issue.get('translated_count', 0)
+                        difference = quotation_issue.get('difference', 0)
+                        direction = 'missing' if translated_count < original_count else 'excess'
+                        artifacts.append({
+                            'type': quotation_issue['type'],
+                            'count': difference,
+                            'examples': [f"{translated_count}/{original_count}"],
+                            'severity': quotation_issue.get('severity', 'medium'),
+                        })
+                        issues.append(
+                            f"quotation_marks_{difference}_{direction}_"
+                            f"({translated_count}/{original_count})"
+                        )
+                    
+        # HTML tag check (allow for HTML files even in text_file_mode)
+        check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
+        check_body_tag = qa_settings.get('check_body_tag', False)
+        # Check HTML structure for any .html file, regardless of text_file_mode
+        if check_missing_html_tag and filename.lower().endswith(('.html', '.xhtml', '.htm')):
+            # Create a dummy log function for the worker
+            def dummy_log(msg):
+                pass
+            
+            # Modern PDF extraction emits bookmark-section HTML with h1-h6
+            # headings. Keep the structural check enabled for those files;
+            # source metadata below prevents false positives when a particular
+            # raw section genuinely has no heading.
+            check_header_tags_enabled = True
+            has_issues, html_issues = check_html_structure_issues(full_path, dummy_log, check_body_tag=check_body_tag, check_header_tags=check_header_tags_enabled)
+            
+            if has_issues:
+                # Skip structural warnings for essentially empty wrapper files
+                if translated_wc_hint < 10 and set(html_issues) == {'missing_html_structure'}:
+                    html_issues = []
+                    has_issues = False
+                for issue in html_issues:
+                    if issue == 'missing_html_structure':
+                        issues.append("missing_html_tag")
+                    elif issue == 'missing_header_tags':
+                        # Check if this check is enabled AND if source file had headers
+                        check_missing_header = qa_settings.get('check_missing_header_tags', False)
+                        if check_missing_header:
+                            # Only flag if the source file had header tags to begin with
+                            source_had_headers = False
+                            if original_word_counts:
+                                # Try to find the matching source file by FILENAME, not chapter_num
+                                # chapter_num can be unreliable as it's extracted from filename/content
+                                matched_source = None
+                                
+                                if not text_file_mode:
+                                    # EPUB mode: match by filename
+                                    search_basename = _strip_html_like_extensions(filename.lower())
+                                    if search_basename.startswith('response_'):
+                                        search_basename = search_basename[9:]
+                                    
+                                    # Search through original_word_counts by matching filenames
+                                    for key, value in original_word_counts.items():
+                                        if isinstance(value, dict):
+                                            orig_filename = value.get('filename', '').lower()
+                                            orig_basename = _strip_html_like_extensions(orig_filename)
+                                            if orig_basename == search_basename:
+                                                matched_source = value
+                                                break
+                                    
+                                    if matched_source:
+                                        source_had_headers = matched_source.get('has_headers', True)
+                                elif text_file_mode:
+                                    # Text mode: match by filename
+                                    clean_filename = filename.lower()
+                                    if clean_filename.startswith('response_'):
+                                        clean_filename = clean_filename[9:]
+                                    
+                                    # Try exact match first
+                                    if clean_filename in original_word_counts:
+                                        if isinstance(original_word_counts[clean_filename], dict):
+                                            source_had_headers = original_word_counts[clean_filename].get('has_headers', True)
+                                    else:
+                                        # Try basename match (strip *all* HTML-family extensions)
+                                        base_name = _strip_html_like_extensions(clean_filename)
+                                        for key, value in original_word_counts.items():
+                                            if _strip_html_like_extensions(str(key).lower()) == base_name and isinstance(value, dict):
+                                                source_had_headers = value.get('has_headers', True)
+                                                break
+                                else:
+                                    # Can't determine - assume source had headers (conservative)
+                                    source_had_headers = True
+                            else:
+                                # No source info available - assume source had headers (conservative)
+                                source_had_headers = True
+                            
+                            # Only add issue if source actually had header tags
+                            if source_had_headers:
+                                issues.append("missing_header_tags")
+                    elif issue == 'unwrapped_text_content':
+                        issues.append("unwrapped_text_content")
+                    elif issue == 'unclosed_html_tags':
+                        issues.append("unclosed_html_tags")
+                    elif issue == 'incomplete_html_structure':
+                        issues.append("incomplete_html_structure")
+                    elif issue == 'invalid_nesting':
+                        if qa_settings.get('check_invalid_nesting', False):
+                            issues.append("invalid_nesting")
+                    elif issue == 'malformed_html':
+                        issues.append("malformed_html")
+                    else:
+                        issues.append(issue)
+        
+        # Check for multiple headers against the matching source bookmark.
+        # Parsing visible ``raw_text`` could never see h1-h6 tags, and blindly
+        # flagging every second heading penalized legitimate multi-page PDF
+        # sections. Only flag header growth beyond the source allowance.
+        check_multiple_headers = qa_settings.get('check_multiple_headers', True)
+        has_multiple = False
+        header_count = 0
+        header_info = None
+        
+        if check_multiple_headers and raw_file_content:
+            _legacy_multiple, header_count, header_info = detect_multiple_headers(raw_file_content)
+            if source_preservation_profile is not None:
+                source_header_count = int(
+                    source_preservation_profile.get('header_count', 0) or 0
+                )
+                has_multiple = header_count > max(1, source_header_count)
+            else:
+                has_multiple = _legacy_multiple
+            if has_multiple:
+                issues.append(f"multiple_headers_{header_count}_found")
+        
+        # Check if (nearly) all chapter text is wrapped in a single header tag.
+        # Runs on the raw HTML file content because `raw_text` is already
+        # text-extracted and would report the full text regardless of wrapping.
+        check_all_in_header = qa_settings.get('check_all_text_in_header', True)
+        if check_all_in_header and filename.lower().endswith(('.html', '.xhtml', '.htm')) and raw_file_content:
+            try:
+                _hdr_threshold = float(qa_settings.get('all_text_in_header_threshold', 0.7))
+            except (TypeError, ValueError):
+                _hdr_threshold = 0.7
+            try:
+                hdr_flagged, hdr_details = check_all_text_in_header(
+                    raw_file_content, threshold=_hdr_threshold
+                )
+            except Exception:
+                hdr_flagged, hdr_details = False, None
+            if hdr_flagged and hdr_details:
+                pct = int(round(hdr_details['ratio'] * 100))
+                issues.append(
+                    f"all_text_in_{hdr_details['tag']}_{pct}pct"
+                )
+
+        # SDLXLIFF source/output tag preservation check. This compares only
+        # p + h1-h6 counts in the matching sidecar, so it catches dropped
+        # paragraph/header wrappers without treating arbitrary HTML structure
+        # differences as translation failures.
+        check_missing_beautifulsoup_tags = qa_settings.get('check_missing_beautifulsoup_tags', False)
+        if (check_missing_beautifulsoup_tags
+                and filename.lower().endswith(_HTML_LIKE_EXTENSIONS)
+                and raw_file_content):
+            fallback_source_counts = None
+            if source_preservation_profile is not None:
+                fallback_source_counts = source_preservation_profile.get(
+                    'review_tag_counts'
+                )
+            source_tag_counts, output_tag_counts = _sdlxliff_review_tag_counts(
+                folder_path,
+                filename,
+                fallback_source_counts=fallback_source_counts,
+                current_output_html=raw_file_content,
+            )
+            if source_tag_counts is not None and output_tag_counts is not None:
+                missing_tag_issue = _missing_beautifulsoup_tags_issue(
+                    source_tag_counts,
+                    output_tag_counts,
+                    retention_threshold=qa_settings.get(
+                        'sdlxliff_tag_retention_threshold', 0.9
+                    ),
+                    surplus_tolerance=qa_settings.get(
+                        'sdlxliff_tag_surplus_tolerance', 0.05
+                    ),
+                    min_source_paragraph_tags=qa_settings.get(
+                        'sdlxliff_min_source_paragraph_tags', 20
+                    ),
+                )
+                if missing_tag_issue:
+                    issues.append(missing_tag_issue)
+        
+        # Invalid / custom HTML tag mismatch check.
+        # Reuses the same source-file match the word counter already performed;
+        # we only need the pre-computed count stashed alongside has_headers.
+        # Tag *names* are not tracked because source tags may be translated
+        # into a different language (e.g. <概念>), so name-wise comparisons
+        # would always flag everything as missing.
+        check_invalid_tag_mismatch_setting = qa_settings.get('check_invalid_tag_mismatch', False)
+        if (check_invalid_tag_mismatch_setting
+                and original_word_counts
+                and filename.lower().endswith(_HTML_LIKE_EXTENSIONS)
+                and raw_file_content):
+            matched_source_entry = None
+            # Strip *all* HTML-family extensions so compound names like
+            # ``response_Chapter103.html.xhtml`` match the source's bare
+            # basename (``Chapter103`` from ``Chapter103.xhtml``).
+            search_basename = _strip_html_like_extensions(filename.lower())
+            if search_basename.startswith('response_'):
+                search_basename = search_basename[9:]
+            
+            if not text_file_mode:
+                # EPUB mode: entries are dicts keyed by spine index
+                for _key, value in original_word_counts.items():
+                    if isinstance(value, dict):
+                        orig_basename = _strip_html_like_extensions(value.get('filename', '').lower())
+                        if orig_basename == search_basename:
+                            matched_source_entry = value
+                            break
+            else:
+                # Text mode: entries keyed by filename; only dict-valued
+                # entries carry custom_tags_count (HTML chunks, not plain .txt)
+                clean_filename = filename.lower()
+                if clean_filename.startswith('response_'):
+                    clean_filename = clean_filename[9:]
+                candidate = original_word_counts.get(clean_filename)
+                if isinstance(candidate, dict):
+                    matched_source_entry = candidate
+                else:
+                    base_name = _strip_html_like_extensions(clean_filename)
+                    for key, value in original_word_counts.items():
+                        if isinstance(value, dict) and _strip_html_like_extensions(str(key).lower()) == base_name:
+                            matched_source_entry = value
+                            break
+            
+            if matched_source_entry is not None:
+                source_count = int(matched_source_entry.get('custom_tags_count') or 0)
+                source_tag_names = matched_source_entry.get('custom_tag_names') or []
+                try:
+                    trans_angle_count = _count_custom_tag_occurrences(
+                        raw_file_content, include_angle=True, include_entities=False
+                    )
+                    trans_entity_count = _count_custom_tag_occurrences(
+                        raw_file_content, include_angle=False, include_entities=True
+                    )
+                except Exception:
+                    trans_angle_count = 0
+                    trans_entity_count = 0
+                trans_any_count = trans_angle_count + trans_entity_count
+
+                missing_count = source_count - trans_any_count
+                if missing_count > 0:
+                    # Include a preview of the source tag names so the user
+                    # can see *what* is missing, not just how many.
+                    if source_tag_names:
+                        preview = ', '.join(f"<{t}>" for t in source_tag_names[:5])
+                        if len(source_tag_names) > 5:
+                            preview += f" (+{len(source_tag_names) - 5} more)"
+                        issues.append(
+                            f"source_custom_tags_missing_{missing_count}_of_{source_count}: {preview}"
+                        )
+                    else:
+                        issues.append(
+                            f"source_custom_tags_missing_{missing_count}_of_{source_count}"
+                        )
+                
+                # Invisible tags: non-standard tags present in the translation
+                # as raw angle brackets. Browsers silently ignore them, so
+                # their content / markers are effectively lost to readers.
+                if trans_angle_count > 0:
+                    try:
+                        trans_angle_names = _collect_custom_tag_names(
+                            raw_file_content, include_angle=True, include_entities=False, limit=5
+                        )
+                    except Exception:
+                        trans_angle_names = []
+                    if trans_angle_names:
+                        preview = ', '.join(f"<{t}>" for t in trans_angle_names)
+                        issues.append(
+                            f"invisible_html_tags_{trans_angle_count}_found: {preview}"
+                        )
+                    else:
+                        issues.append(
+                            f"invisible_html_tags_{trans_angle_count}_found"
+                        )
+        
+        # Check word count ratio
+        word_count_check = None
+        check_word_count = qa_settings.get('check_word_count_ratio', False)
+        
+        if check_word_count and original_word_counts:
+            # Create dummy log for worker
+            def dummy_log(msg):
+                pass
+            
+            # Quick shortcut: if translated content is essentially empty, skip word-count checks entirely
+            if translated_wc_hint < 2:
+                word_count_check = {
+                    'found_match': False,
+                    'reason': 'translated_text_empty',
+                    'translated_wc': translated_wc_hint
+                }
+                # Do not add issues; let structural/other checks handle empties
+                check_word_count = False
+            
+            # For text files, compare against corresponding chunk from word_count folder
+            if text_file_mode and original_word_counts:
+                # Strip response_ prefix and extension from filename (.txt or .html)
+                clean_filename = filename
+                if clean_filename.lower().startswith('response_'):
+                    clean_filename = clean_filename[9:]  # Remove 'response_' prefix
+                
+                # Try to find matching original chunk (exact match first)
+                if clean_filename in original_word_counts:
+                    # Found matching chunk!
+                    translated_wc = _count_words_cached(raw_text)
+                    original_wc = _source_word_count_value(original_word_counts[clean_filename])
+                    original_small_wc = _source_small_file_word_count(original_word_counts[clean_filename], original_wc)
+                else:
+                    # Try matching with different extension (e.g., chunk_1.html vs chunk_1.txt)
+                    base_name = os.path.splitext(clean_filename)[0]
+                    matched_key = None
+                    for key in original_word_counts.keys():
+                        if os.path.splitext(key)[0] == base_name:
+                            matched_key = key
+                            break
+                    
+                    if matched_key:
+                        translated_wc = _count_words_cached(raw_text)
+                        original_wc = _source_word_count_value(original_word_counts[matched_key])
+                        original_small_wc = _source_small_file_word_count(original_word_counts[matched_key], original_wc)
+                        clean_filename = matched_key  # Update for display
+                    else:
+                        # No match found, skip this file
+                        translated_wc = None
+                        original_wc = None
+                        original_small_wc = None
+                
+                if original_wc is not None:
+                        if small_file_word_threshold and original_small_wc is not None and original_small_wc < small_file_word_threshold:
+                            word_count_check = _small_file_word_count_result(
+                                original_wc,
+                                translated_wc,
+                                clean_filename,
+                                small_file_word_threshold
+                            )
+                        # If both sides are basically empty, skip mismatch
+                        elif original_wc < 5 and translated_wc < 2:
+                            word_count_check = {
+                                'found_match': True,
+                                'chapter_num': clean_filename,
+                                'original_wc': original_wc,
+                                'translated_wc': translated_wc,
+                                'ratio': 0 if original_wc == 0 else translated_wc / original_wc,
+                                'normalized_ratio': 0.0,
+                                'multiplier': 1.0,
+                                'percentage': 0.0,
+                                'is_reasonable': True,
+                                'is_typical': True,
+                                'original_file': clean_filename,
+                                'warning': 'empty_chapter',
+                                'warning_desc': 'Chapter is essentially empty; word count check skipped'
+                            }
+                        else:
+                            # Detect script from SOURCE text (word_count folder), not translated output
+                            _src_sample = _sample_text_from_word_count_folder(os.path.dirname(full_path))
+                            script_hint = detect_dominant_script(_src_sample) if _src_sample else detect_dominant_script(raw_text)
+                            is_cjk = script_hint in ['cjk', 'japanese', 'korean']
+                            
+                            ratio = translated_wc / original_wc
+                            multiplier = _get_wc_multiplier(
+                                qa_settings,
+                                source_lang_hint=qa_settings.get('source_language'),
+                                script_hint=script_hint,
+                                is_cjk=is_cjk,
+                                log_fn=dummy_log
+                            )
+                            ratio_norm = ratio / max(0.01, multiplier)
+                            # Define ratio ranges consistent with EPUB mode
+                            
+                            # Default Auto Logic
+                            min_ratio_cjk = 0.6
+                            max_ratio_cjk = 2.0  # Reduced from 2.5 to 2.0 as per request
+                            min_ratio_non_cjk = 0.7
+                            max_ratio_non_cjk = 1.5
+                            
+                            # Override with custom settings if available
+                            if qa_settings:
+                                setting_min = qa_settings.get('word_count_min_ratio')
+                                setting_max = qa_settings.get('word_count_max_ratio')
+                                try:
+                                    if setting_min is not None and str(setting_min).lower() != 'auto':
+                                        val = float(setting_min)
+                                        min_ratio_cjk = val
+                                        min_ratio_non_cjk = val
+                                    
+                                    if setting_max is not None and str(setting_max).lower() != 'auto':
+                                        val = float(setting_max)
+                                        max_ratio_cjk = val
+                                        max_ratio_non_cjk = val
+                                except (ValueError, TypeError):
+                                    pass
+
+                            if is_cjk:
+                                # CJK to English novel translation - reasonable bounds
+                                min_ratio = min_ratio_cjk
+                                max_ratio = max_ratio_cjk
+                                typical_min = min_ratio + 0.2
+                                typical_max = max_ratio * 0.7
+                            else:
+                                # Non-CJK source
+                                min_ratio = min_ratio_non_cjk
+                                max_ratio = max_ratio_non_cjk
+                                typical_min = min_ratio + 0.1
+                                typical_max = max_ratio * 0.8
+
+                            is_reasonable = min_ratio <= ratio_norm <= max_ratio
+                            is_typical = typical_min <= ratio_norm <= typical_max
+                            
+                            word_count_check = {
+                                'found_match': True,
+                                'chapter_num': clean_filename,
+                                'original_wc': original_wc,
+                                'translated_wc': translated_wc,
+                                'ratio': ratio,
+                                'normalized_ratio': ratio_norm,
+                                'multiplier': multiplier,
+                                'percentage': ratio * 100,
+                                'is_reasonable': is_reasonable,
+                                'is_typical': is_typical,
+                                'original_file': clean_filename
+                            }
+                            
+                            # Only mark as issue if ratio is unreasonable
+                            if not is_reasonable:
+                                issues.append(
+                                    f"word_count_mismatch: translated={ratio:.2f}x source "
+                                    f"(expected≈{multiplier:.2f}x, normalized={ratio_norm:.2f}, "
+                                    f"counts: src={original_wc}, dst={translated_wc}, "
+                                    f"thresholds: min={min_ratio}, max={max_ratio})"
+                                )
+                elif '_total' in original_word_counts:
+                    # Fallback: old behavior with total count (skip analysis)
+                    pass
+            else:
+                # Normal EPUB mode
+                wc_result = cross_reference_word_counts(
+                    original_word_counts, 
+                    filename, 
+                    raw_text,
+                    dummy_log,
+                    merge_info,
+                    qa_settings
+                )
+                
+                if wc_result['found_match']:
+                    word_count_check = wc_result
+                    # Only mark as issue if ratio is unreasonable (outside safe bounds) and not an empty-chapter skip
+                    if not wc_result.get('warning') == 'empty_chapter' and not wc_result['is_reasonable']:
+                        issues.append(
+                            f"word_count_mismatch: translated={wc_result['ratio']:.2f}x source "
+                            f"(expected≈{wc_result.get('multiplier', 1.0):.2f}x, "
+                            f"normalized={wc_result.get('normalized_ratio', wc_result['ratio']):.2f}, "
+                            f"counts: src={wc_result.get('original_wc','?')}, dst={wc_result.get('translated_wc','?')}, "
+                            f"thresholds: min={wc_result.get('min_ratio_norm','?')}, max={wc_result.get('max_ratio_norm','?')})"
+                        )
+                else:
+                    word_count_check = wc_result
+        
+        # Create result dictionary
+        result = {
+            "file_index": idx,
+            "filename": filename,
+            "filepath": full_path,
+            "issues": issues,
+            "qa_issue_previews": qa_issue_previews,
+            "preview": preview,
+            "preview_normalized": preview_normalized,
+            "score": 0,
+            "chapter_num": chapter_num,
+            "hashes": hashes,
+            "raw_text": raw_text,
+            "foreign_qa_text": foreign_qa_text,
+            "dup_text": dup_text,
+            "translation_artifacts": artifacts,
+            "small_file_word_count": translated_wc_hint,
+            "small_file_word_threshold": small_file_word_threshold,
+            "skip_small_file_checks": skip_small_file_checks,
+            "qa_header_text": qa_header_text,
+        }
+        
+        # Add optional fields
+        if check_multiple_headers and has_multiple:
+            result['header_count'] = header_count
+            result['header_info'] = header_info
+        
+        if word_count_check:
+            result['word_count_check'] = word_count_check
+        
+        batch_results.append(result)
+    
+    return batch_results
+
+
+def _init_worker_process():
+    """Initializer for worker processes to keep GUI responsive.
+    - On Windows: lower priority to BELOW_NORMAL and reserve some cores via affinity
+    - On POSIX: increase niceness
+    Uses environment var QA_RESERVE_CORES to decide how many logical cores to leave free (default 1).
+    """
+    try:
+        # Reserve some CPUs for the GUI/main process
+        reserve = 1
+        try:
+            reserve_env = int(os.environ.get('QA_RESERVE_CORES', '1'))
+            if reserve_env >= 0:
+                reserve = reserve_env
+        except Exception:
+            pass
+
+        if psutil is not None:
+            p = psutil.Process()
+            # Lower process priority
+            if os.name == 'nt':
+                try:
+                    p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                except Exception:
+                    pass
+            else:
+                try:
+                    p.nice(10)
+                except Exception:
+                    pass
+
+            # Set CPU affinity to leave some cores free if possible
+            try:
+                all_cpus = list(range(psutil.cpu_count(logical=True) or 1))
+                if len(all_cpus) > reserve:
+                    allowed = all_cpus[:max(1, len(all_cpus) - reserve)]
+                    if allowed:
+                        p.cpu_affinity(allowed)
+            except Exception:
+                pass
+        else:
+            # Fallback without psutil: best-effort niceness on POSIX
+            if os.name != 'nt':
+                try:
+                    os.nice(10)
+                except Exception:
+                    pass
+    except Exception:
+        # Silent best-effort
+        pass
+
+
+def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):
+    """
+    Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
+    Also supports text file scanning (auto-detected from epub_path extension)
+    """
+    global _stop_flag
+    _stop_flag = False
+    standalone_html_source = bool(
+        epub_path and str(epub_path).lower().endswith(('.html', '.htm', '.xhtml'))
+    )
+    
+    # Auto-detect text file mode from source extension when not explicitly set
+    # Enable for .txt or .pdf sources so PDFs are treated like text-mode inputs
+    # Also check if word_Count folder exists to determine if we should use text mode for HTML
+    if text_file_mode is None:
+        if epub_path and epub_path.lower().endswith(('.txt', '.pdf')):
+            # Check if word_Count folder exists - if so, we're in text mode with HTML files
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                text_file_mode = True
+                log(f"📄 Text file mode auto-detected: PDF source with word_count folder detected")
+            else:
+                text_file_mode = True
+                log(f"📄 Text file mode auto-detected from source file extension ({os.path.splitext(epub_path)[1].lower()})")
+        else:
+            text_file_mode = False
+    
+    # Debug logging
+    if epub_path:
+        log(f"📚 Source file: {os.path.basename(epub_path)} | Mode: {'TEXT' if text_file_mode else 'EPUB/HTML'}")
+    source_text_epub_path = _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings)
+    if source_text_epub_path != epub_path:
+        log(f"Vision QA source text: {os.path.basename(source_text_epub_path)}")
+    
+    # Create a combined stop check function
+    _stop_logged = [False]  # mutable so inner fn can flip it once
+
+    def should_stop():
+        if stop_flag and stop_flag():
+            if not _stop_logged[0]:
+                _stop_logged[0] = True
+                log("⛔ Stop requested via GUI stop button")
+            return True
+        if _stop_flag:
+            if not _stop_logged[0]:
+                _stop_logged[0] = True
+                log("⛔ Stop requested via global stop_scan() function")
+            return True
+        # Belt-and-suspenders: also check process-wide env vars set by
+        # the GUI's force/graceful stop mechanism.  These are always set
+        # and catch edge cases where stop_flag() hasn't propagated yet.
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            if not _stop_logged[0]:
+                _stop_logged[0] = True
+                log("⛔ Stop requested via TRANSLATION_CANCELLED env var")
+            return True
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            if not _stop_logged[0]:
+                _stop_logged[0] = True
+                log("⛔ Graceful stop requested via GRACEFUL_STOP env var")
+            return True
+        return False
+    
+    start_time = time.time()
+    
+    # Debug info
+    log(f"🔍 Starting scan with ProcessPoolExecutor")
+    log(f"⚡ MAXIMUM PERFORMANCE MODE ENABLED")
+    
+    # Load default settings if not provided
+    if qa_settings is None:
+        qa_settings = {
+            'foreign_char_threshold': 0,
+            'excluded_characters': '',
+            'whitelist_emoticon_patterns': False,
+            'emoticon_patterns': list(DEFAULT_EMOTICON_PATTERNS),
+            'emoticon_patterns_are_regex': False,
+            'target_language': 'english',
+            'check_encoding_issues': False,
+            'check_repetition': True,
+            'check_translation_artifacts': True,
+            'check_ai_artifacts': False,
+            'ai_artifact_patterns': list(DEFAULT_AI_ARTIFACT_PATTERNS),
+            'ai_artifact_patterns_are_regex': False,
+            'check_glossary_leakage': True,
+            'check_missing_images': True,
+            'exclude_ruby_tags': False,
+            'min_file_length': 0,
+            'min_duplicate_word_count': 500,
+            'report_format': 'detailed',
+            'auto_save_report': True,
+            'check_missing_html_tag': True,
+            'check_body_tag': False,
+            'check_missing_header_tags': False,
+            'check_missing_beautifulsoup_tags': False,
+            'sdlxliff_tag_retention_threshold': 0.9,
+            'sdlxliff_tag_surplus_tolerance': 0.05,
+            'sdlxliff_min_source_paragraph_tags': 20,
+            'check_invalid_nesting': False,
+            'check_silent_truncation': False,
+            'check_potential_truncation': False,
+            'check_ai_truncation_detection': False,
+            'ai_truncation_tail_chars': 400,
+            'check_quotation_mismatch': False,
+            'ignore_excess_quotation_marks': False,
+            'only_check_incomplete_quotations': False,
+            'ignore_consecutive_missing_quotations': False,
+            'skip_stylistic_single_quotes': False,
+            'include_square_brackets_as_quotations': False,
+            'check_word_count_ratio': True,
+            'check_multiple_headers': True,
+            'warn_name_mismatch': True
+        }
+    
+    check_word_count = qa_settings.get('check_word_count_ratio', False)
+    check_multiple_headers = qa_settings.get('check_multiple_headers', True)
+    # The invalid-tag-mismatch check reuses the same source metadata dict
+    # that the word counter populates, so we need the extraction to run
+    # when either of those checks is enabled. The missing-header check also
+    # needs source metadata so it only flags missing headers when the source
+    # chapter actually had h1-h6 tags.
+    check_invalid_tag_mismatch_setting = qa_settings.get('check_invalid_tag_mismatch', False)
+    check_missing_header_tags_setting = qa_settings.get('check_missing_header_tags', False)
+    _need_source_word_counts = (
+        check_word_count
+        or check_invalid_tag_mismatch_setting
+        or check_missing_header_tags_setting
+    )
+    
+    # Extract word counts, image info, and punctuation from original EPUB/text file if needed
+    original_word_counts = {}
+    original_image_info = {}  # For missing image detection
+    original_punctuation_info = {}  # For punctuation mismatch detection
+    original_quotation_info = {}  # Kept separate from established ?! punctuation data
+    original_html_content = {}  # For silent truncation detection
+    original_preservation_info = {}  # Compact links/tables/graphics/header metadata
+    image_rename_map = {}
+    merge_info = {}  # For request merging support
+    combined_text_file = None  # For text file mode word count analysis
+
+    image_rename_map_path = os.path.join(folder_path, 'image_rename_map.json')
+    if os.path.isfile(image_rename_map_path):
+        try:
+            with open(image_rename_map_path, 'r', encoding='utf-8') as rename_file:
+                loaded_rename_map = json.load(rename_file)
+            if isinstance(loaded_rename_map, dict):
+                image_rename_map = loaded_rename_map
+        except (OSError, ValueError, TypeError) as exc:
+            log(f"   WARNING: Could not read image_rename_map.json for QA: {exc}")
+    
+    # Extract image info from EPUB or word_count folder if missing images check is enabled
+    check_missing_imgs = qa_settings.get('check_missing_images', True)
+    if check_missing_imgs:
+        if text_file_mode:
+            # For text file mode (PDF sources), extract image info from word_count folder
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                log(f"🖼️ Extracting image information from word_count folder")
+                # Extract image counts from HTML files in word_count folder
+                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
+                if chunk_files:
+                    for chunk_file in chunk_files:
+                        chunk_path = os.path.join(word_count_folder, chunk_file)
+                        try:
+                            with open(chunk_path, 'r', encoding='utf-8') as f:
+                                chunk_html = f.read()
+                            soup = BeautifulSoup(chunk_html, 'html.parser')
+                            images = soup.find_all('img')
+                            if images:
+                                # Use filename as key for matching
+                                original_image_info[chunk_file] = {
+                                    'image_count': len(images),
+                                    'image_srcs': [img.get('src', '') for img in images],
+                                    'filename': chunk_file
+                                }
+                        except Exception as e:
+                            log(f"   ⚠️ Could not extract images from {chunk_file}: {e}")
+                    
+                    if original_image_info:
+                        total_images = sum(info['image_count'] for info in original_image_info.values())
+                        log(f"   Found images in {len(original_image_info)} chunks ({total_images} total images)")
+                    else:
+                        log(f"   No images found in word_count folder HTML files")
+                else:
+                    log(f"   No HTML files found in word_count folder for image extraction")
+        elif standalone_html_source and os.path.exists(epub_path):
+            try:
+                with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+                    source_html = source_file.read()
+                source_soup = BeautifulSoup(source_html, 'html.parser')
+                images = source_soup.find_all('img')
+                if images:
+                    original_image_info = {
+                        1: {
+                            'image_count': len(images),
+                            'image_srcs': [img.get('src', '') for img in images],
+                            'filename': os.path.basename(epub_path),
+                        }
+                    }
+                    log(f"🖼️ Found {len(images)} images in standalone HTML source")
+                else:
+                    log("   No images found in standalone HTML source")
+            except Exception as exc:
+                log(f"   ⚠️ Could not extract images from standalone HTML source: {exc}")
+        elif epub_path and os.path.exists(epub_path):
+            # For EPUB mode, extract from EPUB
+            image_source_epub_path = source_text_epub_path if _is_vision_output_mode(qa_settings) else epub_path
+            log(f"🖼️ Extracting image information from QA source EPUB: {os.path.basename(image_source_epub_path)}")
+            original_image_info = extract_epub_image_info(image_source_epub_path, log)
+            if original_image_info:
+                total_images = sum(info['image_count'] for info in original_image_info.values())
+                log(f"   Found images in {len(original_image_info)} chapters ({total_images} total images)")
+            else:
+                log(f"   No images found in EPUB (or unable to extract)")
+    
+    # Extract punctuation info from EPUB if punctuation mismatch check is enabled
+    check_punctuation = qa_settings.get('check_punctuation_mismatch', False)
+    if check_punctuation:
+        if text_file_mode:
+            # For text file mode (PDF sources), extract punctuation from word_count folder
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                log(f"❗ Extracting punctuation information from word_count folder")
+                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
+                if chunk_files:
+                    for chunk_file in chunk_files:
+                        chunk_path = os.path.join(word_count_folder, chunk_file)
+                        try:
+                            with open(chunk_path, 'r', encoding='utf-8') as f:
+                                chunk_html = f.read()
+                            soup = BeautifulSoup(chunk_html, 'html.parser')
+                            # Remove non-visible tags before extracting text
+                            for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                                tag.decompose()
+                            text = soup.get_text()
+                            
+                            question_count = text.count('?')
+                            exclamation_count = text.count('!')
+                            
+                            if question_count > 0 or exclamation_count > 0:
+                                original_punctuation_info[chunk_file] = {
+                                    'question_marks': question_count,
+                                    'exclamation_marks': exclamation_count,
+                                    'filename': chunk_file
+                                }
+                        except Exception as e:
+                            log(f"   ⚠️ Could not extract punctuation from {chunk_file}: {e}")
+                    
+                    if original_punctuation_info:
+                        total_questions = sum(info['question_marks'] for info in original_punctuation_info.values())
+                        total_exclamations = sum(info['exclamation_marks'] for info in original_punctuation_info.values())
+                        log(f"   Found ?! punctuation in {len(original_punctuation_info)} chunks ({total_questions}? + {total_exclamations}!)")
+                    else:
+                        log(f"   No ?! punctuation found in word_count folder HTML files")
+                else:
+                    log(f"   No HTML files found in word_count folder for punctuation extraction")
+        elif standalone_html_source and os.path.exists(epub_path):
+            try:
+                with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+                    source_html = source_file.read()
+                source_soup = BeautifulSoup(source_html, 'html.parser')
+                for tag in source_soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                    tag.decompose()
+                source_text = source_soup.get_text()
+                original_punctuation_info = {
+                    1: {
+                        'question_marks': source_text.count('?'),
+                        'exclamation_marks': source_text.count('!'),
+                        'filename': os.path.basename(epub_path),
+                    }
+                }
+                log("❗ Loaded punctuation from standalone HTML source")
+            except Exception as exc:
+                log(f"   ⚠️ Could not extract punctuation from standalone HTML source: {exc}")
+        elif epub_path and os.path.exists(epub_path):
+            # For EPUB mode, extract from EPUB
+            log(f"❗ Extracting punctuation information from original EPUB: {os.path.basename(epub_path)}")
+            original_punctuation_info = extract_epub_punctuation_info(epub_path, log)
+            if original_punctuation_info:
+                total_questions = sum(info['question_marks'] for info in original_punctuation_info.values())
+                total_exclamations = sum(info['exclamation_marks'] for info in original_punctuation_info.values())
+                log(f"   Found ?! punctuation in {len(original_punctuation_info)} chapters ({total_questions}? + {total_exclamations}!)")
+            else:
+                log(f"   No ?! punctuation found in EPUB (or unable to extract)")
+
+    # Extract quotations through the same already-selected raw source path.
+    # This option never participates in choosing or rematching epub_path.
+    if (
+        qa_settings.get('check_quotation_mismatch', False)
+        and not qa_settings.get('only_check_incomplete_quotations', False)
+    ):
+        skip_stylistic_single_quotes = qa_settings.get(
+            'skip_stylistic_single_quotes',
+            False,
+        )
+        include_square_brackets = qa_settings.get(
+            'include_square_brackets_as_quotations',
+            False,
+        )
+        if text_file_mode:
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                log("💬 Extracting quotation information from word_count folder")
+                chunk_files = [
+                    filename for filename in os.listdir(word_count_folder)
+                    if filename.lower().endswith(('.html', '.htm', '.xhtml', '.txt'))
+                ]
+                for chunk_file in chunk_files:
+                    chunk_path = os.path.join(word_count_folder, chunk_file)
+                    try:
+                        with open(chunk_path, 'r', encoding='utf-8') as source_file:
+                            source_content = source_file.read()
+                        source_text = _visible_text_for_quotation_check(
+                            source_content,
+                            allow_plain_text=True,
+                        )
+                        original_quotation_info[chunk_file] = {
+                            'quotation_marks': _count_quotation_marks(
+                                source_text,
+                                skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                                include_square_brackets=include_square_brackets,
+                            ),
+                            'filename': chunk_file,
+                        }
+                    except Exception as exc:
+                        log(f"   ⚠️ Could not extract quotations from {chunk_file}: {exc}")
+            elif epub_path and os.path.exists(epub_path):
+                # Single-file text/PDF fallback when no word_count chunks exist.
+                try:
+                    if epub_path.lower().endswith('.pdf'):
+                        from pdf_extractor import extract_text_from_pdf
+                        source_content = extract_text_from_pdf(epub_path)
+                    else:
+                        with open(epub_path, 'r', encoding='utf-8') as source_file:
+                            source_content = source_file.read()
+
+                    translated_candidates = [
+                        filename for filename in os.listdir(folder_path)
+                        if filename.lower().endswith(('.txt', '.html', '.htm', '.xhtml'))
+                    ]
+                    preferred_candidates = [
+                        filename for filename in translated_candidates
+                        if filename.lower().endswith('_translated.txt')
+                    ]
+                    if len(preferred_candidates) == 1:
+                        source_key = preferred_candidates[0]
+                    elif len(translated_candidates) == 1:
+                        source_key = translated_candidates[0]
+                    else:
+                        source_key = os.path.basename(epub_path)
+
+                    original_quotation_info[source_key] = {
+                        'quotation_marks': _count_quotation_marks(
+                            source_content,
+                            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            include_square_brackets=include_square_brackets,
+                        ),
+                        'filename': source_key,
+                    }
+                except Exception as exc:
+                    log(f"   ⚠️ Could not extract quotations from source file: {exc}")
+        elif standalone_html_source and os.path.exists(epub_path):
+            try:
+                with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+                    source_content = source_file.read()
+                source_text = _visible_text_for_quotation_check(source_content)
+                original_quotation_info = {
+                    1: {
+                        'quotation_marks': _count_quotation_marks(
+                            source_text,
+                            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            include_square_brackets=include_square_brackets,
+                        ),
+                        'filename': os.path.basename(epub_path),
+                    }
+                }
+            except Exception as exc:
+                log(f"   ⚠️ Could not extract quotations from standalone HTML source: {exc}")
+        elif epub_path and os.path.exists(epub_path):
+            log(f"💬 Extracting quotation information from original EPUB: {os.path.basename(epub_path)}")
+            original_quotation_info = extract_epub_quotation_info(
+                epub_path,
+                log,
+                skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                include_square_brackets=include_square_brackets,
+            )
+
+        if original_quotation_info:
+            total_quotations = sum(
+                info.get('quotation_marks', 0) for info in original_quotation_info.values()
+            )
+            log(
+                f"   Found {total_quotations} quotation marks in "
+                f"{len(original_quotation_info)} source chapters"
+            )
+        else:
+            log("   No source chapters available for quotation comparison")
+    
+    # Extract source HTML when a source-aware check needs chapter content.
+    check_truncation = qa_settings.get('check_silent_truncation', False)
+    check_ai_truncation = qa_settings.get('check_ai_truncation_detection', False)
+    check_repetition = qa_settings.get('check_repetition', True)
+    check_missing_beautifulsoup_tags_setting = qa_settings.get(
+        'check_missing_beautifulsoup_tags',
+        False,
+    )
+    _need_source_html = (
+        check_truncation
+        or check_ai_truncation
+        or check_repetition
+        or check_missing_imgs
+        or check_multiple_headers
+        or check_missing_beautifulsoup_tags_setting
+    )
+    if _need_source_html:
+        if text_file_mode:
+            # For text file mode, extract from word_count folder
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                log(f"🔍 Extracting source HTML content from word_count folder for source comparison")
+                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
+                for chunk_file in chunk_files:
+                    chunk_path = os.path.join(word_count_folder, chunk_file)
+                    try:
+                        with open(chunk_path, 'r', encoding='utf-8') as f:
+                            original_html_content[chunk_file] = {
+                                'html': f.read(),
+                                'filename': chunk_file
+                            }
+                    except Exception as e:
+                        log(f"   ⚠️ Could not read {chunk_file} for source comparison: {e}")
+                if original_html_content:
+                    log(f"   Loaded HTML content for {len(original_html_content)} source chunks")
+            else:
+                log("   ⚠️ No word_count folder found for source comparison in text mode")
+        elif standalone_html_source and os.path.exists(epub_path):
+            try:
+                with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+                    source_html = source_file.read()
+                original_html_content = {
+                    1: {
+                        'html': source_html,
+                        'filename': os.path.basename(epub_path),
+                    }
+                }
+                log("🔍 Loaded standalone HTML source for source comparison")
+            except Exception as exc:
+                log(f"   ⚠️ Could not read standalone HTML source for source comparison: {exc}")
+        elif epub_path and os.path.exists(epub_path):
+            html_source_epub_path = source_text_epub_path
+            if check_ai_truncation:
+                truncation_qa_settings = dict(qa_settings)
+                truncation_qa_settings['_qa_context'] = 'qa_truncation'
+                html_source_epub_path = _resolve_vision_ocr_qa_source_epub(epub_path, truncation_qa_settings)
+            log(f"🔍 Extracting source HTML content from EPUB for source comparison: {os.path.basename(html_source_epub_path)}")
+            original_html_content = extract_epub_html_content(html_source_epub_path, log)
+        else:
+            if check_truncation or check_ai_truncation:
+                log("⚠️ Truncation check(s) enabled but no source file provided - skipping")
+                check_truncation = False
+                check_ai_truncation = False
+
+    if _need_source_word_counts:
+        if text_file_mode:
+            # For text-type sources, load word counts from individual chunks in word_count folder
+            # The source is the epub_path parameter (which may be .txt or .pdf in this mode)
+            if epub_path and os.path.exists(epub_path) and epub_path.lower().endswith(('.txt', '.pdf')):
+                log(f"📝 Loading original text chunks for word count analysis")
+                try:
+                    # Check for word_count folder
+                    word_count_folder = os.path.join(folder_path, 'word_count')
+                    if os.path.exists(word_count_folder):
+                        # Load word counts from each chunk file (support both .txt and HTML-family files)
+                        chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.txt', '.html', '.htm', '.xhtml'))]
+                        if chunk_files:
+                            # Store as {filename: word_count} for easy lookup
+                            original_word_counts = {}
+                            for chunk_file in chunk_files:
+                                chunk_path = os.path.join(word_count_folder, chunk_file)
+                                with open(chunk_path, 'r', encoding='utf-8') as f:
+                                    chunk_text = f.read()
+                                raw_chunk_text = chunk_text
+                                chunk_source_info = None
+                                if chunk_file.lower().endswith(('.html', '.htm', '.xhtml')):
+                                    soup = BeautifulSoup(raw_chunk_text, 'html.parser')
+                                    has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                                    custom_tags_count = _count_custom_tag_occurrences(raw_chunk_text)
+                                    custom_tag_names = _collect_custom_tag_names(raw_chunk_text)
+                                    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                                        tag.decompose()
+                                    chunk_text = soup.get_text(separator=' ', strip=True)
+                                # Use the active QA counter on both sides of
+                                # the ratio. The legacy implementation always
+                                # stored source *words* here even when the
+                                # translated side used exact/sampled character
+                                # counting, producing meaningless PDF ratios.
+                                chunk_comparison_count = _count_words_cached(chunk_text)
+                                chunk_small_file_word_count = _count_small_file_words(chunk_text)
+                                # Store with filename as key
+                                if chunk_file.lower().endswith(('.html', '.htm', '.xhtml')):
+                                    script_hint = detect_dominant_script(chunk_text)
+                                    chunk_source_info = {
+                                        'word_count': chunk_comparison_count,
+                                        'small_file_word_count': chunk_small_file_word_count,
+                                        'filename': chunk_file,
+                                        'has_headers': has_headers,
+                                        'custom_tags_count': custom_tags_count,
+                                        'custom_tag_names': custom_tag_names,
+                                        'is_cjk': script_hint in ['cjk', 'japanese', 'korean'],
+                                        'script': script_hint,
+                                    }
+                                original_word_counts[chunk_file] = (
+                                    chunk_source_info
+                                    if chunk_source_info is not None
+                                    else chunk_comparison_count
+                                )
+                            
+                            log(f"   Loaded {len(original_word_counts)} original chunk files from word_count folder")
+                            log(f"   Total source words: {_sum_source_word_counts(original_word_counts):,}")
+                        else:
+                            log(f"   ⚠️ word_count folder exists but contains no .txt or .html files")
+                            check_word_count = False
+                    else:
+                        # Fallback: use total source file word count (old behavior)
+                        log(f"   ⚠️ word_count folder not found, using total source file word count")
+                        try:
+                            if epub_path.lower().endswith('.pdf'):
+                                # Use the same PDF extraction logic as text translation
+                                from pdf_extractor import extract_text_from_pdf
+                                source_text = extract_text_from_pdf(epub_path)
+                            else:
+                                with open(epub_path, 'r', encoding='utf-8') as f:
+                                    source_text = f.read()
+                        except Exception as e:
+                            log(f"   ⚠️ Failed to read source text for word count: {e}")
+                            source_text = ""
+                        source_word_count = len(source_text.split()) if source_text else 0
+                        original_word_counts = {'_total': source_word_count}
+                        log(f"   Source text word count: {source_word_count} words")
+                    
+                    # Find the combined translated file for additional reporting
+                    # Look for *_translated.txt in the folder
+                    try:
+                        txt_files = [f for f in os.listdir(folder_path) if f.lower().endswith('_translated.txt')]
+                        if txt_files:
+                            combined_text_file = txt_files[0]  # Use first match
+                            log(f"   Combined file found: {combined_text_file}")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log(f"   ⚠️ Could not load text chunk word counts: {e}")
+                    check_word_count = False
+            else:
+                log("⚠️ Word count cross-reference enabled but no valid text/PDF file provided - skipping this check")
+                check_word_count = False
+        elif standalone_html_source and os.path.exists(epub_path):
+            log(f"📄 Extracting word count from source HTML: {os.path.basename(epub_path)}")
+            min_length = qa_settings.get('min_file_length', 0)
+            original_word_counts = extract_html_word_counts(
+                epub_path,
+                log,
+                min_file_length=min_length,
+            )
+            log(f"   Found source metadata for {len(original_word_counts)} HTML file")
+        elif epub_path and os.path.exists(epub_path):
+            log(f"📚 Extracting word counts from source EPUB: {os.path.basename(source_text_epub_path)}")
+            min_length = qa_settings.get('min_file_length', 0)
+            original_word_counts = extract_epub_word_counts(source_text_epub_path, log, min_file_length=min_length)
+            log(f"   Found word counts for {len(original_word_counts)} chapters (min length: {min_length} chars)")
+            
+            # Load merge info from translation_progress.json for request merging support
+            progress_file = os.path.join(folder_path, 'translation_progress.json')
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r', encoding='utf-8') as f:
+                        progress_data = json.load(f)
+                    
+                    # Build merge_info: {parent_chapter_num: [list of merged child chapter nums]}
+                    # Method 1: From parent chapters with merged_chapters list
+                    for chapter_key, chapter_data in progress_data.get('chapters', {}).items():
+                        if isinstance(chapter_data, dict) and chapter_data.get('merged_chapters'):
+                            try:
+                                parent_num = int(chapter_key)
+                                merged_children = [int(c) for c in chapter_data['merged_chapters']]
+                                merge_info[parent_num] = merged_children
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    # Method 2: From child chapters with status: "merged" and merged_parent_chapter
+                    # This ensures we capture merging even if we only have the child info
+                    for chapter_key, chapter_data in progress_data.get('chapters', {}).items():
+                        if isinstance(chapter_data, dict) and chapter_data.get('status') == 'merged':
+                            try:
+                                child_num = chapter_data.get('actual_num')
+                                if child_num is None:
+                                    child_num = int(chapter_key)
+                                parent_num = chapter_data.get('merged_parent_chapter')
+                                if parent_num is not None:
+                                    if parent_num not in merge_info:
+                                        merge_info[parent_num] = []
+                                    if child_num not in merge_info[parent_num]:
+                                        merge_info[parent_num].append(child_num)
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    if merge_info:
+                        total_children = sum(len(v) for v in merge_info.values())
+                        log(f"   🔗 Found {len(merge_info)} parent chapters with {total_children} merged children")
+                except Exception as e:
+                    log(f"   ⚠️ Could not load merge info: {e}")
+        else:
+            log("⚠️ Word count cross-reference enabled but no valid EPUB/HTML source provided - skipping this check")
+            check_word_count = False
+    
+    pdf_source_aliases = {}
+    if (
+        text_file_mode
+        and epub_path
+        and str(epub_path).lower().endswith('.pdf')
+    ):
+        pdf_source_aliases = build_pdf_qa_source_aliases(
+            folder_path,
+            progress_path=progress_path,
+        )
+        for source_map in (
+            original_word_counts,
+            original_image_info,
+            original_punctuation_info,
+            original_quotation_info,
+            original_html_content,
+        ):
+            _apply_pdf_qa_source_aliases(source_map, pdf_source_aliases)
+        if pdf_source_aliases:
+            log(
+                f"PDF bookmark QA mapping: resolved "
+                f"{len(pdf_source_aliases)} translated section(s) to source sections"
+            )
+        elif os.path.isdir(os.path.join(folder_path, 'word_count')):
+            log(
+                "WARNING: PDF bookmark QA mapping found no matching translated/raw "
+                "sections; source-dependent checks will skip unmatched files"
+            )
+
+    original_preservation_info = _build_source_preservation_info(
+        original_html_content,
+        image_rename_map=image_rename_map,
+    )
+
+    # Log settings
+    log(f"\n📋 QA Settings Status:")
+    log(f"   ✓ Target language: {qa_settings.get('target_language', 'english').upper()}")
+
+    # Source language visibility (esp. when configured as AUTO)
+    src_lang_setting = qa_settings.get('source_language', 'auto')
+    log(f"   ✓ Source language: {str(src_lang_setting).upper()}")
+
+    detected_label = None
+    detected_method = None
+    detected_conf = None
+
+    if str(src_lang_setting).strip().lower() == 'auto':
+        detected_label, detected_method, detected_conf = _auto_detect_source_language_for_log(
+            qa_settings,
+            folder_path=folder_path,
+            epub_path=source_text_epub_path,
+            text_file_mode=bool(text_file_mode),
+            original_word_counts=original_word_counts,
+            log_fn=log
+        )
+        if detected_label:
+            extra = []
+            if detected_method:
+                extra.append(detected_method)
+            if detected_conf is not None:
+                try:
+                    extra.append(f"conf={detected_conf:.2f}")
+                except Exception:
+                    pass
+            suffix = f" ({', '.join(extra)})" if extra else ""
+            log(f"      → AUTO detected source language (global): {str(detected_label).upper()}{suffix}")
+        else:
+            log(f"      → AUTO detected source language (global): (unable to detect from source input; will rely on per-chapter script heuristics)")
+
+    # If source_language is AUTO and we successfully detected a dominant source language,
+    # FORCE it globally so per-chapter oddballs don't flip multipliers.
+    # This matches the common case where EPUBs are single-language throughout.
+    if str(src_lang_setting).strip().lower() == 'auto' and detected_label:
+        try:
+            qa_settings['_source_language_setting'] = src_lang_setting
+            qa_settings['source_language'] = detected_label
+            qa_settings['source_language_detection_method'] = detected_method
+            qa_settings['source_language_detection_conf'] = detected_conf
+            log(f"      → Applying AUTO source language globally for all chapters: {str(detected_label).upper()}")
+        except Exception:
+            pass
+
+    # Show which word-count multiplier will be used for source→target expansion expectations
+    # (This is primarily relevant for the word count ratio check.)
+    try:
+        # Note: after the override above, qa_settings['source_language'] is the effective global value.
+        multiplier_hint = qa_settings.get('source_language', src_lang_setting)
+        multiplier = _get_wc_multiplier(
+            qa_settings,
+            source_lang_hint=multiplier_hint,
+            script_hint=None,
+            is_cjk=None,
+            log_fn=None
+        )
+        # Display key in normalized form (aligns with word_count_multipliers keys)
+        try:
+            if multiplier_hint and str(multiplier_hint).strip().lower() != 'auto':
+                mult_key = _normalize_lang_for_multiplier(str(multiplier_hint))
+            else:
+                mult_key = "(auto/fallback)"
+        except Exception:
+            mult_key = str(multiplier_hint) if multiplier_hint else "(auto/fallback)"
+
+        tgt = str(qa_settings.get('target_language', 'english')).lower()
+        log(f"      → Word count multiplier used (global): {multiplier:.2f} (source={mult_key} → target={tgt})")
+    except Exception:
+        pass
+
+    log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 0)}")
+    log(
+        "   ✓ Ruby annotation tags excluded: "
+        + ("ENABLED" if _scan_should_exclude_ruby_tags(qa_settings) else "DISABLED")
+    )
+    log(
+        "   ✓ Emoticon pattern whitelist: "
+        + ("ENABLED" if qa_settings.get('whitelist_emoticon_patterns', False) else "DISABLED")
+    )
+    log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
+    log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
+    log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")
+    log(f"   ✓ Glossary leakage check: {'ENABLED' if qa_settings.get('check_glossary_leakage', True) else 'DISABLED'}")
+    log(f"   ✓ Source resource preservation (images/links/tables/graphics): {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
+    log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
+    log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', False) else 'DISABLED'}")
+    log(f"   ✓ Source->output p/h tag check (SDLXLIFF + bookmark fallback): {'ENABLED' if qa_settings.get('check_missing_beautifulsoup_tags', False) else 'DISABLED'}")
+    if qa_settings.get('check_missing_beautifulsoup_tags', False):
+        try:
+            retained_pct = int(round(float(
+                qa_settings.get('sdlxliff_tag_retention_threshold', 0.9)
+            ) * 100))
+        except (TypeError, ValueError):
+            retained_pct = 90
+        log(f"      → Minimum source tags retained: {retained_pct}%")
+        try:
+            surplus_pct = int(round(float(
+                qa_settings.get('sdlxliff_tag_surplus_tolerance', 0.05)
+            ) * 100))
+        except (TypeError, ValueError):
+            surplus_pct = 5
+        log(f"      → Maximum surplus output tags allowed: {surplus_pct}%")
+        try:
+            min_source_paragraphs = int(
+                qa_settings.get('sdlxliff_min_source_paragraph_tags', 20)
+            )
+        except (TypeError, ValueError):
+            min_source_paragraphs = 20
+        log(
+            "      → Minimum source <p> + <li> text-unit tags to check: "
+            f"{min_source_paragraphs}"
+        )
+    log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
+    log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
+    log(f"   ✓ Potential truncation check: {'ENABLED' if qa_settings.get('check_potential_truncation', False) else 'DISABLED'}")
+    log(f"   ✓ AI truncation detection: {'ENABLED' if qa_settings.get('check_ai_truncation_detection', False) else 'DISABLED'}")
+    log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}")
+    # Log counting mode
+    if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+        counting_mode_str = "WORD COUNT (legacy)"
+    elif os.getenv('QA_EXACT_CHAR_COUNT', '0') == '1':
+        counting_mode_str = "CHARACTER COUNT (exact)"
+    else:
+        counting_mode_str = "CHARACTER COUNT (sampled)"
+    log(f"   ✓ Counting mode: {counting_mode_str}")
+    log(f"   ✓ Unexpected extra headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")
+    log(f"   ✓ All-text-in-header check: {'ENABLED' if qa_settings.get('check_all_text_in_header', True) else 'DISABLED'}")
+    log(f"   ✓ Invalid/custom tag mismatch check: {'ENABLED' if qa_settings.get('check_invalid_tag_mismatch', False) else 'DISABLED'}")
+    
+    # Initialize configuration
+    custom_settings = None
+    if mode == 'custom' and qa_settings and 'custom_mode_settings' in qa_settings:
+        custom_settings = qa_settings['custom_mode_settings']
+    config = DuplicateDetectionConfig(mode, custom_settings)
+    small_file_word_threshold = _get_small_file_word_threshold(qa_settings, config, mode)
+    if mode in config.thresholds:
+        config.thresholds[mode]['min_duplicate_word_count'] = small_file_word_threshold
+
+    # Custom mode: sample_size sentinel values
+    #   0  => disable duplicate detection
+    #  -1  => use all characters
+    if mode == 'custom' and isinstance(custom_settings, dict):
+        try:
+            ss = int(custom_settings.get('sample_size', config.thresholds.get('custom', {}).get('sample_size', 3000)))
+            if ss == 0:
+                config.thresholds['custom']['disable_duplicate_check'] = True
+        except Exception:
+            pass
+
+    # Allow configurable sample size for quick-scan
+    if mode == 'quick-scan' and qa_settings:
+        qs_size = qa_settings.get('quick_scan_sample_size')
+        try:
+            if qs_size is not None:
+                qs_val = int(qs_size)
+                # Reset disable flag each run
+                config.thresholds['quick-scan']['disable_duplicate_check'] = False
+                if qs_val == -1:
+                    config.thresholds['quick-scan']['sample_size'] = None  # use full text
+                elif qs_val == 0:
+                    config.thresholds['quick-scan']['disable_duplicate_check'] = True
+                    config.thresholds['quick-scan']['sample_size'] = config.thresholds['quick-scan'].get('sample_size', 1000)
+                else:
+                    qs_val = max(100, min(qs_val, 50000))
+                    config.thresholds['quick-scan']['sample_size'] = qs_val
+        except Exception:
+            pass
+    
+    # Log mode info
+    mode_messages = {
+        'aggressive': '🚨 AGGRESSIVE',
+        'quick-scan': '⚡ Quick Scan',
+        'custom': '⚙️ Custom',
+        'ai-hunter': '🤖 AI HUNTER'
+    }
+    
+    log(f"{mode_messages.get(mode, '📋 Standard')} duplicate detection mode")
+    log(f"   Thresholds: {config.thresholds[mode]}")
+    log(f"   ✓ Small-file skip threshold: <{small_file_word_threshold} words")
+    
+    if mode == 'ai-hunter':
+        log("   ⚠️ WARNING: This mode will flag almost everything as potential duplicates!")
+        log("   🎯 Designed specifically for catching AI retranslations of the same content")
+        log("   ⏱️ NOTE: AI Hunter mode checks EVERY file pair - but now with PARALLEL PROCESSING!")
+    
+    # Resolve translated workspace artifacts before choosing ordinary chapter
+    # files. PDF text mode keeps these files in the workspace root, so treating
+    # TOC/header caches as raw text would scan their intentional ``Original:``
+    # lines instead of only the translated payload.
+    folder_names = {
+        name.casefold(): name
+        for name in os.listdir(folder_path)
+        if os.path.isfile(os.path.join(folder_path, name))
+    }
+    artifact_files = [
+        folder_names[expected.casefold()]
+        for expected in QA_TRANSLATION_ARTIFACT_FILENAMES
+        if expected.casefold() in folder_names
+    ]
+    artifact_name_folds = {name.casefold() for name in artifact_files}
+
+    # Get files to scan (HTML or text based on mode)
+    if text_file_mode:
+        # For text files, scan section files (including response_ prefix versions)
+        # Support both .txt and .html files for PDF sources that generate HTML
+        all_txt_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".txt", ".html"))])
+        # Combined PDF/legacy text output is a compilation artifact rather than
+        # one translatable bookmark entry. Workspace control files are either
+        # excluded or routed through translated-payload-only artifact QA.
+        html_files = [
+            filename for filename in all_txt_files
+            if not filename.casefold().endswith(('_translated.txt', '_translated.html'))
+            and filename.casefold() not in artifact_name_folds
+            and filename.casefold() != 'source_epub.txt'
+        ]
+        log(f"📄 Text file mode enabled - scanning section files (response_ prefix ignored for comparison)")
+    else:
+        html_files = sorted([f for f in os.listdir(folder_path) if is_html_like_path(f)])
+
+    # These three translated artifacts are intentionally scanned separately
+    # from HTML. Their source/audit fields contain foreign text by design, so
+    # only their translated payload values are eligible for QA.
+    
+    # If specific files were selected, filter to those (by basename)
+    if selected_files:
+        try:
+            selected_basenames = {
+                os.path.basename(p).casefold() for p in selected_files
+            }
+            html_files = [
+                f for f in html_files if f.casefold() in selected_basenames
+            ]
+            artifact_files = [
+                f for f in artifact_files if f.casefold() in selected_basenames
+            ]
+            log(
+                f"📄 Limited scan to "
+                f"{len(html_files) + len(artifact_files)} selected file(s)"
+            )
+        except Exception:
+            pass
+    
+    file_type = "text" if text_file_mode else "HTML"
+    log(f"🔍 Found {len(html_files)} {file_type} files. Starting parallel scan...")
+    
+    # Determine number of workers
+    cpu_count = multiprocessing.cpu_count()
+    max_workers_config = 0
+    
+    max_workers_config = _resolve_scan_max_workers_config()
+
+    if max_workers_config > 0:
+        max_workers = min(max_workers_config, cpu_count)
+        log(f"   🖥️ Using {max_workers} CPU cores for file processing (configured limit)")
+    else:
+        max_workers = cpu_count
+        log(f"   🚀 Using ALL {max_workers} CPU cores for file processing")
+        if cpu_count > 8:
+            log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
+    
+    # Create file batches with indices
+    file_list = [(idx, filename) for idx, filename in enumerate(html_files)]
+    batch_size = max(10, len(html_files) // (max_workers * 5))
+    batches = []
+    
+    for i in range(0, len(file_list), batch_size):
+        batch = file_list[i:i + batch_size]
+        batches.append(batch)
+    
+    log(f"   📦 Split into {len(batches)} batches of ~{batch_size} files each")
+    
+    # Prepare worker data
+    worker_args = []
+    for batch in batches:
+        args = (
+            batch,
+            folder_path,
+            qa_settings,
+            mode,
+            original_word_counts,
+            merge_info,
+            text_file_mode,
+            original_image_info,
+            original_punctuation_info,
+            original_quotation_info,
+            original_preservation_info,
+            image_rename_map,
+        )
+        worker_args.append(args)
+    
+    # Executor selection: thread pool avoids the ProcessPoolExecutor spawn
+    # cost on Windows (each child re-imports all modules, including PySide6
+    # when launched from the GUI). The toggle lives in QA Scanner settings
+    # and is mirrored into QA_USE_THREAD_EXECUTOR; qa_settings wins.
+    _use_thread_pool = bool(
+        qa_settings.get('use_thread_executor', False)
+        or os.environ.get('QA_USE_THREAD_EXECUTOR', '0') == '1'
+        or not mobile_runtime.processes_available()
+    )
+    if _use_thread_pool:
+        _ExecutorCls = concurrent.futures.ThreadPoolExecutor
+        _exec_kwargs = {'max_workers': max_workers}
+        log("   🧵 Using ThreadPoolExecutor (no spawn overhead)")
+    else:
+        _ExecutorCls = concurrent.futures.ProcessPoolExecutor
+        _exec_kwargs = {'max_workers': max_workers, 'initializer': _init_worker_process}
+    
+    # Process files in parallel
+    results = []
+    processed_count = 0
+    
+    with _ExecutorCls(**_exec_kwargs) as executor:
+        # Submit all batches
+        futures = []
+        
+        for args in worker_args:
+            if should_stop():
+                log("⛔ QA scan interrupted before processing.")
+                executor.shutdown(wait=True)
+                return
+            
+            future = executor.submit(process_html_file_batch, args)
+            futures.append(future)
+        
+        # Collect results as they complete
+        for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):
+            if should_stop():
+                log("⛔ QA scan interrupted during processing.")
+                executor.shutdown(wait=True)
+                return
+            
+            try:
+                batch_results = future.result()
+                
+                # Log individual file progress like original
+                for result in batch_results:
+                    if should_stop():
+                        break
+                    processed_count += 1
+                    idx = result['file_index']
+                    filename = result['filename']
+                    
+                    # Progress update every 10 files (like original)
+                    if processed_count % 10 == 0:
+                        progress = int((processed_count / len(html_files)) * 100)
+                        log(f"📄 [{processed_count}/{len(html_files)}] Scanning {filename}... ({progress}% complete)")
+                        
+                        # Debug: Check stop flag states periodically (like original)
+                        if processed_count % 50 == 0 and processed_count > 0:
+                            log(f"   [DEBUG] Global stop flag: {_stop_flag}, Stop function: {stop_flag() if stop_flag else 'N/A'}")
+                    elif processed_count % 5 == 0:
+                        # Show progress every 5 files for GUI visibility
+                        progress = int((processed_count / len(html_files)) * 100)
+                        log(f"📄 [{processed_count}/{len(html_files)}] {filename}... ({progress}%)")
+                    
+                    # Log issues found (like original)
+                    if result.get('issues'):
+                        # Check if HTML structure issues were found
+                        html_issues = [i for i in result['issues'] if 'html' in i.lower() or 'paragraph' in i.lower()]
+                        if html_issues:
+                            log(f"   → Found HTML structure issues in {filename}: {', '.join(html_issues)}")
+                        
+                        # Log word count issues
+                        wc_issues = [i for i in result['issues'] if 'word_count' in i]
+                        if wc_issues and result.get('word_count_check'):
+                            wc = result['word_count_check']
+                            if wc.get('ratio'):
+                                log(f"   {filename}: Word count ratio {wc['ratio']:.2f} " +
+                                    f"(Original: {wc.get('original_wc', '?')}, Translated: {wc.get('translated_wc', '?')})")
+                        
+                        # Log encoding artifacts (if enabled)
+                        if qa_settings.get('check_encoding_issues', True):
+                            encoding_issues = [i for i in result['issues'] if 'encoding' in i]
+                            if encoding_issues and processed_count <= 5:  # Only log first 5
+                                count = next((int(i.split('_')[2]) for i in encoding_issues if '_found' in i), 0)
+                                if count > 0:
+                                    log(f"      → Found encoding artifacts in {filename}: {count} instances")
+                        
+                        # Log spacing issues
+                        if 'no_spacing_or_linebreaks' in result['issues'] and processed_count <= 5:
+                            log(f"      → Found spacing/linebreak issue in {filename}")
+                        
+                        # Log API response unavailable markers
+                        api_issues = [i for i in result['issues'] if 'api_response_unavailable' in i]
+                        if api_issues and processed_count <= 5:
+                            count = next((int(i.split('_')[3]) for i in api_issues if '_found' in i), 0)
+                            if count > 0:
+                                log(f"      → Found AI response unavailable markers in {filename}: {count} instances")
+                
+                results.extend(batch_results)
+                
+            except Exception as e:
+                log(f"   ❌ Error processing batch: {e}")
+                import traceback
+                log(f"   Traceback: {traceback.format_exc()}")
+    
+    # Clear the progress line (like original)
+    print()  # New line after progress indicator
+    
+    # Build spine index map (basename -> spine_index) when available
+    spine_index_map = {}
+    try:
+        for sidx, info in original_word_counts.items():
+            if isinstance(info, dict) and info.get('spine_index') is not None:
+                spine_index_map[os.path.basename(info.get('filename', ''))] = info.get('spine_index')
+    except Exception:
+        spine_index_map = {}
+
+    def _extract_num_for_sort(res):
+        num = res.get('normalized_chapter_num')
+        if num is None:
+            try:
+                fname = res.get('filename')
+                base = os.path.basename(fname) if fname else ""
+                if base.startswith("response_"):
+                    base = base[len("response_"):]
+                while True:
+                    new_base, ext = os.path.splitext(base)
+                    if not ext:
+                        break
+                    base = new_base
+                m_dec = re.match(r"^(\d{1,4})_(\d{1,2})$", base)
+                if m_dec:
+                    major = int(m_dec.group(1).lstrip("0") or "0")
+                    minor = int(m_dec.group(2))
+                    return float(f"{major}.{minor:02d}")
+                nums = re.findall(r"(\d+)", base)
+                if nums:
+                    return int(nums[-1])
+            except Exception:
+                pass
+        return num
+
+    def _spine_idx_for_sort(res):
+        # Prefer spine index from map via original filename if available
+        try:
+            wc = res.get('word_count_check') or {}
+            orig = wc.get('original_file') or ''
+            base = os.path.basename(orig)
+            if base in spine_index_map:
+                return spine_index_map[base]
+        except Exception:
+            pass
+        return None
+
+    results.sort(
+        key=lambda r: (
+            _spine_idx_for_sort(r) is None,
+            _spine_idx_for_sort(r) or 1e9,
+            _extract_num_for_sort(r) is None,
+            _extract_num_for_sort(r) or 1e9,
+            r.get('file_index', 0),
+        )
+    )
+    
+    # Renumber file_index to match sorted order for report clarity
+    for new_idx, res in enumerate(results):
+        res['file_index'] = new_idx
+    
+    log("\n✅ Initial scan complete.")
+    
+    # Bail out early if stop was requested during file processing
+    if should_stop():
+        log("⛔ QA scan stopped after initial file processing.")
+        return
+
+    # Time the duplicate detection phase
+    dup_start_time = time.time()
+    
+    # Detect duplicates (already optimized)
+    duplicate_groups, near_duplicate_groups, duplicate_confidence = detect_duplicates(
+        results, log, should_stop, config
+    )
+    
+    dup_time = time.time() - dup_start_time
+    log(f"✅ Duplicate detection completed in {dup_time:.1f} seconds")
+
+    artifact_results = []
+    for artifact_filename in artifact_files:
+        artifact_path = os.path.join(folder_path, artifact_filename)
+        try:
+            with open(
+                artifact_path, 'r', encoding='utf-8', errors='ignore'
+            ) as artifact_file:
+                artifact_content = artifact_file.read()
+        except OSError as exc:
+            log(f"⚠️ Could not read {artifact_filename} for QA: {exc}")
+            continue
+        translated_text = translation_artifact_qa_text(
+            artifact_filename, artifact_content
+        )
+        artifact_results.append({
+            'file_index': len(results) + len(artifact_results),
+            'filename': artifact_filename,
+            'filepath': artifact_path,
+            'issues': [],
+            'qa_issue_previews': {},
+            'preview': translated_text[:300].replace('\n', ' '),
+            'preview_normalized': normalize_text(translated_text[:300]),
+            'score': 0,
+            'chapter_num': None,
+            'hashes': {},
+            'raw_text': translated_text,
+            'dup_text': '',
+            'translation_artifacts': [],
+            'small_file_word_count': _count_small_file_words(translated_text),
+            'small_file_word_threshold': 0,
+            'skip_small_file_checks': False,
+            'qa_header_text': '',
+            'translation_artifact_qa_only': True,
+        })
+    if artifact_results:
+        results.extend(artifact_results)
+        log(
+            f"📄 Checking translated payloads in "
+            f"{len(artifact_results)} workspace artifact file(s): "
+            + ", ".join(result['filename'] for result in artifact_results)
+        )
+    
+    # For text file mode with word count enabled, check the combined file separately
+    if text_file_mode and check_word_count and combined_text_file and original_word_counts:
+        log("\n📊 Analyzing word count for combined text file...")
+        try:
+            combined_path = os.path.join(folder_path, combined_text_file)
+            if os.path.exists(combined_path):
+                with open(combined_path, 'r', encoding='utf-8') as f:
+                    combined_text = f.read()
+                translated_word_count = len(combined_text.split())
+                
+                # Calculate total original word count from all chunks
+                if '_total' in original_word_counts:
+                    original_wc = original_word_counts['_total']
+                else:
+                    original_wc = _sum_source_word_counts(original_word_counts)
+                
+                if original_wc > 0:
+                    ratio = translated_word_count / original_wc
+                    log(f"   Original: {original_wc:,} words")
+                    log(f"   Translated: {translated_word_count:,} words")
+                    log(f"   Ratio: {ratio:.2f}")
+                    
+                    # Determine if ratio is reasonable (between 0.7 and 2.0)
+                    is_reasonable = 0.7 <= ratio <= 2.0
+                    if is_reasonable:
+                        log(f"   ✅ Word count ratio is reasonable")
+                    else:
+                        log(f"   ⚠️ Word count ratio seems unusual (expected 0.7-2.0)")
+        except Exception as e:
+            log(f"   ⚠️ Could not analyze combined file word count: {e}")
+    
+    # Process results and check for additional issues
+    log("\n📊 Checking for other issues...")
+
+    # Build the source lookup once. Repetition is language-independent here:
+    # only each repeated sentence's occurrence count is compared, because the
+    # source and translated sentence text naturally cannot be equal.
+    source_repetition_text_by_basename = {}
+    if check_repetition and original_html_content:
+        for source_info in original_html_content.values():
+            if not isinstance(source_info, dict):
+                continue
+            source_filename = os.path.basename(str(source_info.get('filename', ''))).lower()
+            source_basename = _strip_html_like_extensions(source_filename)
+            if source_basename.startswith('response_'):
+                source_basename = source_basename[9:]
+            source_html = source_info.get('html')
+            if source_basename and source_html:
+                source_repetition_text_by_basename[source_basename] = (
+                    _visible_text_for_quotation_check(source_html)
+                )
+    
+    # Group files by duplicate group
+    groups = {}
+    for filename, group_id in duplicate_groups.items():
+        if group_id not in groups:
+            groups[group_id] = []
+        groups[group_id].append(filename)
+    
+    # Check each file for all issues (this part is fast, no need to parallelize)
+    for idx, result in enumerate(results):
+        if should_stop():
+            log("⛔ QA scan stopped during issue processing.")
+            break
+        issues = result.get('issues', [])
+
+        if result.get('translation_artifact_qa_only'):
+            raw_text = result.get('raw_text', '')
+            if raw_text:
+                has_non_english, lang_issues = detect_non_english_content(
+                    raw_text, qa_settings
+                )
+                if has_non_english:
+                    issues.extend(lang_issues)
+            result['issues'] = issues
+            result['score'] = len(issues)
+            if issues:
+                log(
+                    f"   {result['filename']}: "
+                    + ', '.join(str(issue) for issue in issues[:2])
+                    + (" ..." if len(issues) > 2 else "")
+                )
+            continue
+        
+        # Check duplicates
+        if result['filename'] in duplicate_groups:
+            group_id = duplicate_groups[result['filename']]
+            group_files = groups[group_id]
+            if len(group_files) > 1:
+                others = [f for f in group_files if f != result['filename']]
+                
+                # Get confidence score
+                confidence = 0
+                for other in others:
+                    pair = tuple(sorted([result['filename'], other]))
+                    if pair in duplicate_confidence:
+                        confidence = max(confidence, duplicate_confidence[pair])
+                
+                result['duplicate_confidence'] = confidence
+                
+                if len(others) == 1:
+                    issues.append(f"DUPLICATE: exact_or_near_copy_of_{others[0]}")
+                else:
+                    issues.append(f"DUPLICATE: part_of_{len(group_files)}_file_group")
+        
+        # Check near-duplicates
+        elif result['filename'] in near_duplicate_groups:
+            near_group_id = near_duplicate_groups[result['filename']]
+            near_group_files = [f for f, gid in near_duplicate_groups.items() if gid == near_group_id]
+            if len(near_group_files) > 1:
+                others = [f for f in near_group_files if f != result['filename']]
+                if len(others) == 1:
+                    issues.append(f"NEAR_DUPLICATE: highly_similar_to_{others[0]}")
+                else:
+                    issues.append(f"NEAR_DUPLICATE: similar_to_{len(near_group_files)-1}_other_files")
+        
+        # Check other issues
+        raw_text = result['raw_text']
+        
+        # Small files keep their normal exemption, except heading text still
+        # receives the foreign-character check.
+        foreign_qa_text = (
+            result.get('qa_header_text', '')
+            if result.get('skip_small_file_checks')
+            else result.get('foreign_qa_text', raw_text)
+        )
+        if foreign_qa_text:
+            has_non_english, lang_issues = detect_non_english_content(foreign_qa_text, qa_settings)
+            if has_non_english:
+                issues.extend(lang_issues)
+        
+        # Spacing/formatting issues
+        if qa_settings.get('check_encoding_issues', True):
+            min_text_len = qa_settings.get('min_text_length_for_spacing', 100)
+            if has_no_spacing_or_linebreaks(raw_text, min_text_length=min_text_len):
+                issues.append("no_spacing_or_linebreaks")
+        
+        # Repetitive content
+        if check_repetition:
+            translated_basename = _strip_html_like_extensions(
+                os.path.basename(result['filename']).lower()
+            )
+            if translated_basename.startswith('response_'):
+                translated_basename = translated_basename[9:]
+            matched_source_text = source_repetition_text_by_basename.get(
+                translated_basename
+            )
+            if has_repeating_sentences(raw_text, source_text=matched_source_text):
+                issues.append("excessive_repetition")
+        
+        # Translation artifacts
+        if result.get('translation_artifacts'):
+            for artifact in result['translation_artifacts']:
+                if artifact['type'] == 'translation_failed_marker':
+                    # Gate to very short files only
+                    if isinstance(raw_text, str) and len(raw_text.strip()) < 50:
+                        examples = artifact.get('examples', [])
+                        if examples:
+                            log(f"   ⚠️ Translation failed marker detected")
+                            issues.append("translation_failed_marker_found")
+                        else:
+                            issues.append(f"translation_failed_marker_{artifact['count']}_found")
+                if artifact['type'] == 'machine_translation':
+                    # Log with details about what was found
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        # Show first example with ellipsis if text is long
+                        first_example = examples[0]
+                        display_example = first_example[:50] + '...' if len(first_example) > 50 else first_example
+                        log(f"   📝 Found machine translation marker: '{display_example}'")
+                        if len(examples) > 1:
+                            log(f"      (and {len(examples) - 1} more occurrence(s))")
+                        # Include example in issues for report
+                        issue_text = f"machine_translation_marker: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"machine_translation_markers_{artifact['count']}_found")
+                elif artifact['type'] == 'encoding_issues':
+                    if qa_settings.get('check_encoding_issues', True):
+                        examples = artifact.get('examples', [])
+                        if examples:
+                            first_example = examples[0][:30] if len(examples[0]) > 30 else examples[0]
+                            log(f"   🔣 Found encoding issue: '{first_example}'")
+                            issue_text = f"encoding_issues: '{first_example[:20]}'"
+                            if artifact['count'] > 1:
+                                issue_text += f" (+{artifact['count']-1} more)"
+                            issues.append(issue_text)
+                        else:
+                            issues.append(f"encoding_issues_{artifact['count']}_found")
+                elif artifact['type'] == 'repeated_watermarks':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:40] if len(examples[0]) > 40 else examples[0]
+                        log(f"   🏷️ Found repeated watermark: '{first_example}'")
+                        issue_text = f"repeated_watermark: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"repeated_watermarks_{artifact['count']}_found")
+                elif artifact['type'] == 'api_response_unavailable':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:40] if len(examples[0]) > 40 else examples[0]
+                        log(f"   ⚠️ API response unavailable marker: '{first_example}'")
+                        issue_text = f"api_unavailable: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"api_response_unavailable_{artifact['count']}_found")
+                elif artifact['type'] == 'chapter_continuation':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:40] if len(examples[0]) > 40 else examples[0]
+                        log(f"   🔗 Continuation marker: '{first_example}'")
+                        # Include example in issues for report
+                        issue_text = f"chapter_continuation: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"chapter_continuation_{artifact['count']}_found")
+                elif artifact['type'] == 'split_indicators':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:60] if len(examples[0]) > 60 else examples[0]
+                        display_example = first_example[:40] if len(first_example) > 40 else first_example
+                        log(f"   ✂️ Split indicator: '{first_example}'")
+                        issue_text = f"split_indicator: '{display_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"split_indicators_{artifact['count']}_found")
+                elif artifact['type'] == 'empty_attribute_tags':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        # Report ALL examples as requested
+                        log(f"   ⚠️ LLM token issues found: {len(examples)}")
+                        for ex in examples:
+                            # Truncate very long content for display
+                            display_ex = ex[:60] + "..." if len(ex) > 60 else ex
+                            log(f"      - '{display_ex}'")
+                            # Add each one to issues list
+                            # Use plain text for progress manager (no escaping needed here)
+                            # HTML escaping for the report is handled by generate_reports
+                            issues.append(f"LLM_token_issue: '{display_ex}'")
+                    else:
+                        issues.append(f"LLM_token_issue_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_artifact_leading_line':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:60] if len(examples[0]) > 60 else examples[0]
+                        log(f"   🤖 AI artifact (leading line): '{first_example}'")
+                        issue_text = f"ai_artifact_leading_line: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_artifact_leading_line_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_artifact_single_word':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = examples[0][:30] if len(examples[0]) > 30 else examples[0]
+                        log(f"   🤖 AI artifact (single word): '{first_example}'")
+                        issue_text = f"ai_artifact_single_word: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_artifact_single_word_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_thinking_tags':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:40] if len(str(examples[0])) > 40 else str(examples[0])
+                        log(f"   🤖 AI thinking tag(s) detected: '{first_example}'")
+                        issue_text = f"ai_thinking_tags: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_thinking_tags_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_code_fence_markers':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:10] if len(str(examples[0])) > 10 else str(examples[0])
+                        log(f"   🤖 AI code fence marker detected: '{first_example}'")
+                        issue_text = f"ai_code_fence_marker: '{first_example}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_code_fence_markers_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_json_artifacts':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:60] if len(str(examples[0])) > 60 else str(examples[0])
+                        log(f"   🤖 AI JSON artifact line: '{first_example}'")
+                        issue_text = f"ai_json_artifact: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_json_artifacts_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_refusal_pattern':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:60] if len(str(examples[0])) > 60 else str(examples[0])
+                        log(f"   🚫 AI refusal pattern detected: '{first_example}'")
+                        issue_text = f"ai_refusal_pattern: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_refusal_pattern_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_leaked_translation_rules':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:80] if len(str(examples[0])) > 80 else str(examples[0])
+                        log(f"   🤖 Leaked translation rules detected ({artifact['count']} keywords matched)")
+                        issue_text = f"ai_leaked_translation_rules: {artifact['count']} translation keywords"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_leaked_translation_rules_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_thinking_preamble':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        first_example = str(examples[0])[:60]
+                        log(f"   🤖 AI thinking preamble detected: '{first_example}'")
+                        issue_text = f"ai_thinking_preamble: '{first_example[:40]}'"
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_thinking_preamble_{artifact['count']}_found")
+                elif artifact['type'] == 'ai_prompt_section_headers':
+                    examples = artifact.get('examples', [])
+                    if examples:
+                        headers_str = ', '.join(str(e) for e in examples[:3])
+                        log(f"   🤖 Leaked prompt headers detected: {headers_str}")
+                        issue_text = f"ai_prompt_headers: {headers_str}"
+                        issues.append(issue_text)
+                    else:
+                        issues.append(f"ai_prompt_section_headers_{artifact['count']}_found")
+                elif 'glossary_' in artifact['type']:
+                    severity = artifact.get('severity', 'medium')
+                    examples = artifact.get('examples', [])
+                    
+                    # Log with examples
+                    if examples:
+                        first_example = str(examples[0])[:80] if len(str(examples[0])) > 80 else str(examples[0])
+                        log(f"   📚 Glossary leakage detected ({artifact['type']}): '{first_example}'")
+                        if len(examples) > 1:
+                            log(f"      (and {len(examples) - 1} more example(s))")
+                    
+                    # Add to issues with example
+                    if examples:
+                        example_text = str(examples[0])[:40] if len(str(examples[0])) > 40 else str(examples[0])
+                        if severity == 'critical':
+                            log(f"   ⚠️ CRITICAL glossary leakage - likely raw glossary data in translation")
+                            issue_text = f"CRITICAL_glossary_{artifact['type']}: '{example_text}'"
+                        else:
+                            issue_text = f"glossary_{artifact['type']}: '{example_text}'"
+                        
+                        if artifact['count'] > 1:
+                            issue_text += f" (+{artifact['count']-1} more)"
+                        issues.append(issue_text)
+                    else:
+                        if severity == 'critical':
+                            issues.append(f"CRITICAL_{artifact['type']}_{artifact['count']}_found")
+                        else:
+                            issues.append(f"{artifact['type']}_{artifact['count']}_found")
+                
+        
+        # Potential truncation check (last sentence ending punctuation)
+        if qa_settings.get('check_potential_truncation', False):
+            trunc_check = check_potential_truncation(raw_text)
+            if trunc_check['flagged']:
+                last_frag = trunc_check['last_sentence']
+                display_frag = last_frag[-60:] if len(last_frag) > 60 else last_frag
+                issues.append(f"potential_truncation: '...{display_frag}'")
+                log(f"   ✂️ {result['filename']}: Potential truncation — {trunc_check['details']}")
+
+        result['issues'] = issues
+        result['score'] = len(issues)
+        
+        if issues:
+            log(f"   {result['filename']}: {', '.join(issues[:2])}" + (" ..." if len(issues) > 2 else ""))
+    
+    # ---- Silent truncation detection (threadpooled) ----
+    if check_truncation and original_html_content and not should_stop():
+        import threading as _threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        src_lang = str(qa_settings.get('source_language', 'auto')).strip()
+        tgt_lang = str(qa_settings.get('target_language', 'english')).strip()
+        _cheap_t = int(qa_settings.get('truncation_cheap_threshold', 12)) / 100
+        _border_t = int(qa_settings.get('truncation_borderline_score', 40)) / 100
+        _len_t = int(qa_settings.get('truncation_length_threshold', 30)) / 100
+        _embed_t = int(qa_settings.get('truncation_embed_threshold', 30)) / 100
+        _heuristic_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 400))
+
+        # Use a lock for thread-safe translator / cache access
+        _trunc_lock = _threading.Lock()
+
+        def _check_one(result_obj):
+            """Run truncation check for a single file. Returns (result_obj, trunc_result) or None."""
+            if result_obj.get('translation_artifact_qa_only'):
+                return None
+            if should_stop():
+                return None
+            try:
+                filename = result_obj['filename']
+                matched_source_html = None
+                search_basename = os.path.splitext(filename.lower())[0]
+                if search_basename.startswith('response_'):
+                    search_basename = search_basename[9:]
+
+                if not text_file_mode:
+                    for spine_idx, info in original_html_content.items():
+                        if isinstance(info, dict):
+                            orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
+                            if orig_basename == search_basename:
+                                matched_source_html = info['html']
+                                break
+                else:
+                    for key, info in original_html_content.items():
+                        if isinstance(info, dict):
+                            orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
+                            if orig_basename == search_basename:
+                                matched_source_html = info['html']
+                                break
+
+                if not matched_source_html or should_stop():
+                    return None
+
+                trans_file_path = os.path.join(folder_path, filename)
+                if not os.path.exists(trans_file_path):
+                    return None
+                with open(trans_file_path, 'r', encoding='utf-8') as f:
+                    trans_html = f.read()
+                if not trans_html or should_stop():
+                    return None
+
+                trunc_result = run_silent_truncation_check(
+                    matched_source_html, trans_html,
+                    source_lang=src_lang, target_lang=tgt_lang, log=log,
+                    cheap_threshold=_cheap_t, borderline_score=_border_t,
+                    length_threshold=_len_t, embed_threshold=_embed_t,
+                    min_tail_chars=_heuristic_tail_chars,
+                )
+                return (result_obj, trunc_result)
+            except Exception as e:
+                log(f"   ⚠️ Truncation check failed for {result_obj.get('filename', '?')}: {e}")
+                return None
+
+        # Thread count: use up to 4 threads (limited by Google Translate rate limits)
+        max_workers = min(4, len(results))
+        log(f"\n🔍 Running silent truncation detection ({max_workers} threads)...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as trunc_pool:
+            futures = {trunc_pool.submit(_check_one, r): r for r in results}
+            for future in as_completed(futures):
+                if should_stop():
+                    break
+                try:
+                    pair = future.result()
+                    if pair:
+                        r_obj, tr = pair
+                        if tr['flagged']:
+                            r_obj['issues'].append(f"silent_truncation_suspected (score={tr['score']:.2f}, {tr['details']})")
+                            r_obj['score'] = len(r_obj['issues'])
+                            log(f"   ⚠️ {r_obj['filename']}: Silent truncation suspected - {tr['details']}")
+                except Exception:
+                    pass
+
+    # ---- AI Truncation Detection (uses API, threaded) ----
+    if check_ai_truncation and original_html_content and not should_stop():
+        import threading as _threading_ai
+        from concurrent.futures import ThreadPoolExecutor as _AIThreadPool, as_completed as _ai_as_completed
+
+        _ai_tail_chars = int(qa_settings.get('ai_truncation_tail_chars', 400))
+        _ai_custom_prompt = qa_settings.get('ai_truncation_prompt', None)
+
+        # Create a UnifiedClient shared across threads (thread-safe via internal locking)
+        _ai_client = None
+        try:
+            from unified_api_client import UnifiedClient
+            from extract_glossary_from_epub import create_client_with_multi_key_support
+
+            # Use the live decrypted config injected by QA_Scanner_GUI
+            # (config.json on disk is encrypted, so we MUST use the injected values)
+            _ai_config = qa_settings.get('_live_config', {})
+            if not _ai_config:
+                # Fallback: try to load and decrypt config from file
+                _config_path = _scan_config_json_path()
+                if os.path.exists(_config_path):
+                    try:
+                        from api_key_encryption import decrypt_config
+                        with open(_config_path, 'r', encoding='utf-8') as _cf:
+                            _ai_config = decrypt_config(json.load(_cf))
+                    except Exception:
+                        _ai_config = {}
+
+            # Dedicated AI truncation API settings (from QA Scanner settings dialog)
+            _dedicated_key = qa_settings.get('ai_truncation_api_key', '').strip()
+            _dedicated_model = qa_settings.get('ai_truncation_model', '').strip()
+            _dedicated_url = qa_settings.get('ai_truncation_endpoint_url', '').strip()
+
+            _ai_pool_enabled = bool(_ai_config.get('use_ai_truncation_detection_keys', False))
+            _ai_pool_keys = _ai_config.get('ai_truncation_detection_keys', [])
+            if not isinstance(_ai_pool_keys, list):
+                _ai_pool_keys = []
+            _ai_pool_usable_keys = [
+                key for key in _ai_pool_keys
+                if isinstance(key, dict)
+                and key.get('enabled', True)
+                and key.get('model')
+            ]
+            if _ai_pool_enabled:
+                if not _ai_pool_usable_keys:
+                    raise RuntimeError(
+                        "AI truncation detection key pool is enabled but has no usable enabled keys; refusing to use the main GUI key"
+                    )
+                log(
+                    f"   🔑 AI truncation detection key pool enabled "
+                    f"({len(_ai_pool_usable_keys)} usable key(s)); main GUI key will not be used"
+                )
+
+            # Priority: dedicated key > live main key > config key > env
+            _api_key = _dedicated_key or qa_settings.get('_live_api_key', '') or _ai_config.get('api_key', '') or os.getenv('API_KEY', os.getenv('GEMINI_API_KEY', ''))
+            _model = _dedicated_model or qa_settings.get('_live_model', '') or _ai_config.get('model', '') or os.getenv('MODEL', 'gemini-2.0-flash')
+            if _ai_pool_enabled:
+                _seed_key = _ai_pool_usable_keys[0]
+                _api_key = _seed_key.get('api_key') or 'dummy-key-for-dedicated-endpoint'
+                _model = _seed_key.get('model') or _model
+            _output_dir = folder_path
+
+            os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1' if _ai_pool_enabled else '0'
+            os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(_ai_pool_keys)
+
+            # Apply QA scan key environment variables if enabled in config
+            if _ai_config.get('use_qa_scan_keys', False):
+                os.environ['USE_QA_SCAN_KEYS'] = '1'
+                qa_keys = _ai_config.get('qa_scan_keys', [])
+                if qa_keys:
+                    os.environ['QA_SCAN_API_KEYS'] = json.dumps(qa_keys)
+                    UnifiedClient.set_in_memory_qa_scan_keys(
+                        qa_keys,
+                        force_rotation=_ai_config.get('force_key_rotation', True),
+                        rotation_frequency=_ai_config.get('rotation_frequency', 1)
+                    )
+            else:
+                os.environ['USE_QA_SCAN_KEYS'] = '0'
+
+            # Apply custom endpoint URL override for local LLM support
+            if _dedicated_url:
+                _ai_config = dict(_ai_config)  # Don't mutate the original
+                _ai_config['use_custom_openai_endpoint'] = True
+                _ai_config['openai_base_url'] = _dedicated_url
+                log(f"   🔗 Using custom endpoint: {_dedicated_url}")
+
+            _client_config = dict(_ai_config)
+            if _ai_pool_enabled:
+                _client_config['use_multi_api_keys'] = False
+                _client_config['multi_api_keys'] = []
+
+            _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)
+            _ai_client.context = 'qa_truncation'
+            # Wire QA scanner's stop flag into the client so in-flight API
+            # calls abort immediately when the user presses Stop.
+            # Force-stop only — no graceful stop needed for simple QA queries.
+            _ai_client._stop_callback = should_stop
+
+            _ai_uses_dedicated_qa_pool = bool(_ai_config.get('use_ai_truncation_detection_keys', False))
+            _ai_worker_clients = _threading_ai.local()
+
+            def _ai_client_for_worker():
+                # Check ALL stop flags before creating or returning a client
+                if should_stop():
+                    return None
+                import os as _os
+                if _os.environ.get('TRANSLATION_CANCELLED') == '1':
+                    return None
+                if _os.environ.get('GRACEFUL_STOP') == '1':
+                    return None
+                if not _ai_uses_dedicated_qa_pool:
+                    return _ai_client
+                worker_client = getattr(_ai_worker_clients, 'client', None)
+                if worker_client is None:
+                    # Re-check stop before expensive client creation
+                    if should_stop() or _os.environ.get('TRANSLATION_CANCELLED') == '1':
+                        return None
+                    worker_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)
+                    worker_client.context = 'qa_truncation'
+                    worker_client._stop_callback = should_stop
+                    _ai_worker_clients.client = worker_client
+                return worker_client
+        except Exception as _client_err:
+            log(f"   ⚠️ Could not create API client for AI truncation detection: {_client_err}")
+            _ai_client = None
+
+        if _ai_client is not None:
+            _ai_log_lock = _threading_ai.Lock()
+
+            def _ai_safe_log(msg):
+                with _ai_log_lock:
+                    log(msg)
+
+            # Build the source lookup ONCE instead of every worker rescanning
+            # original_html_content per file (O(N²) dict iteration across
+            # hundreds of simultaneously spawned threads — needless GIL churn
+            # right before the requests queue up).
+            _ai_source_by_basename = {}
+            for _src_info in original_html_content.values():
+                if isinstance(_src_info, dict):
+                    _src_base = os.path.splitext(str(_src_info.get('filename', '')).lower())[0]
+                    if _src_base and _src_base not in _ai_source_by_basename:
+                        _ai_source_by_basename[_src_base] = _src_info.get('html')
+
+            def _ai_check_one(result_obj):
+                """Run AI truncation check for a single file."""
+                if result_obj.get('translation_artifact_qa_only'):
+                    return None
+                # Check ALL stop flags — not just should_stop() but also env vars
+                # that are set by the GUI's force/graceful stop mechanism
+                if should_stop():
+                    return None
+                import os as _os
+                if _os.environ.get('TRANSLATION_CANCELLED') == '1':
+                    return None
+                if _os.environ.get('GRACEFUL_STOP') == '1':
+                    return None
+                try:
+                    filename = result_obj['filename']
+                    search_basename = os.path.splitext(filename.lower())[0]
+                    if search_basename.startswith('response_'):
+                        search_basename = search_basename[9:]
+
+                    matched_source_html = _ai_source_by_basename.get(search_basename)
+
+                    if not matched_source_html or should_stop():
+                        return None
+
+                    trans_file_path = os.path.join(folder_path, filename)
+                    if not os.path.exists(trans_file_path):
+                        return None
+                    with open(trans_file_path, 'r', encoding='utf-8') as _tf:
+                        trans_html_content = _tf.read()
+                    if not trans_html_content or should_stop():
+                        return None
+
+                    _ai_safe_log(f"   🔍 Checking: {filename}")
+
+                    worker_client = _ai_client_for_worker()
+                    if worker_client is None:
+                        return None  # Stop was requested
+
+                    # Set request label so client logs show filename instead of internal counter
+                    try:
+                        tls = worker_client._get_thread_local_client()
+                        tls.current_request_label = filename
+                    except Exception:
+                        pass
+
+                    # Read temperature: dedicated setting (-1 = global, else use value)
+                    _dedicated_temp = float(qa_settings.get('ai_truncation_temperature', 0.0))
+                    if _dedicated_temp < 0:
+                        # -1 means use global temperature
+                        try:
+                            _ai_temperature = float(_ai_config.get('translation_temperature', 0.3))
+                        except (ValueError, TypeError):
+                            _ai_temperature = 0.3
+                    else:
+                        _ai_temperature = _dedicated_temp
+
+                    # Read max_tokens: dedicated setting (-1 = global, else use value)
+                    _dedicated_tokens = int(qa_settings.get('ai_truncation_max_tokens', 2000))
+                    if _dedicated_tokens < 0:
+                        # -1 means use global output token limit
+                        try:
+                            _ai_max_tokens = int(_ai_config.get('max_output_tokens', 128000))
+                        except (ValueError, TypeError):
+                            _ai_max_tokens = 128000
+                    else:
+                        _ai_max_tokens = _dedicated_tokens if _dedicated_tokens > 0 else 2000
+
+                    # Read delay: dedicated setting (-1 = global, else use value)
+                    _dedicated_delay = float(qa_settings.get('ai_truncation_api_call_delay', -1.0))
+                    if _dedicated_delay < 0:
+                        # -1 means use global API call delay from translator config
+                        try:
+                            _ai_delay = float(_ai_config.get('delay', 2))
+                        except (ValueError, TypeError):
+                            _ai_delay = 2.0
+                    else:
+                        _ai_delay = _dedicated_delay
+
+                    ai_result = run_ai_truncation_check(
+                        matched_source_html, trans_html_content,
+                        client=worker_client,
+                        tail_chars=_ai_tail_chars,
+                        log=_ai_safe_log,
+                        custom_system_prompt=_ai_custom_prompt,
+                        temperature=_ai_temperature,
+                        max_tokens=_ai_max_tokens,
+                        prompt_role=qa_settings.get('ai_truncation_prompt_role', 'system'),
+                        disable_thinking=qa_settings.get('ai_truncation_disable_thinking', False),
+                        api_call_delay=_ai_delay,
+                    )
+
+                    # Route any deferred batch logs (key assignment, stagger
+                    # info) through the GUI logger instead of CMD/stdout.
+                    try:
+                        from unified_api_client import pop_deferred_batch_logs as _pop_logs
+                        for _deferred_msg in _pop_logs():
+                            _ai_safe_log(f"   {_deferred_msg}")
+                    except Exception:
+                        pass
+
+                    if ai_result and ai_result.get('cancelled'):
+                        return None
+
+                    # Log the verdict
+                    verdict = ai_result.get('details', 'unknown') if ai_result else 'error'
+                    if ai_result and ai_result.get('flagged'):
+                        _ai_safe_log(f"   ❌ {filename}: TRUNCATED — {verdict}")
+                    else:
+                        _ai_safe_log(f"   ✅ {filename}: OK — {verdict}")
+
+                    return (result_obj, ai_result)
+                except Exception as _e:
+                    _ai_safe_log(f"   ⚠️ AI truncation check failed for {result_obj.get('filename', '?')}: {_e}")
+                    return None
+
+            # Respect Batch Translation toggle and batch size from live GUI/config/env.
+            _batch_raw = _ai_config.get('batch_translation', os.getenv('BATCH_TRANSLATION', '0'))
+            if isinstance(_batch_raw, str):
+                _batch_enabled = _batch_raw.strip().lower() in ('1', 'true', 'yes', 'on')
+            else:
+                _batch_enabled = bool(_batch_raw)
+            if _batch_enabled:
+                try:
+                    _ai_max_workers = max(1, min(int(_ai_config.get('batch_size', os.getenv('BATCH_SIZE', 3))), len(results)))
+                except (ValueError, TypeError):
+                    _ai_max_workers = min(3, len(results))
+            else:
+                _ai_max_workers = 1  # Sequential when batch mode is off
+            log(f"\n🤖 Running AI Truncation Detection ({_ai_max_workers} thread{'s' if _ai_max_workers > 1 else ''}, {_ai_tail_chars} tail chars)...")
+
+            _ai_checked = 0
+            _ai_flagged = 0
+            # Set BATCH_TRANSLATION env var so _send_core in unified_api_client
+            # skips the _sequential_send_lock, allowing true parallel API calls.
+            _orig_batch_env = os.environ.get('BATCH_TRANSLATION')
+            if _batch_enabled:
+                os.environ['BATCH_TRANSLATION'] = '1'
+            _ai_pool = None
+            try:
+                _ai_pool = _AIThreadPool(max_workers=_ai_max_workers)
+                _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}
+                for _ai_future in _ai_as_completed(_ai_futures):
+                    if should_stop():
+                        for _pending in _ai_futures:
+                            _pending.cancel()
+                        break
+                    try:
+                        _ai_pair = _ai_future.result()
+                        if _ai_pair:
+                            _ai_r_obj, _ai_tr = _ai_pair
+                            if _ai_tr.get('cancelled'):
+                                continue
+                            _ai_checked += 1
+                            if _ai_tr['flagged']:
+                                _ai_flagged += 1
+                                _record_ai_truncation_issue(_ai_r_obj, _ai_tr)
+                                log(f"   ⚠️ {_ai_r_obj['filename']}: AI detected truncation - {_ai_tr['details']}")
+                    except Exception:
+                        pass
+            finally:
+                if _ai_pool is not None:
+                    try:
+                        # ALWAYS wait for threads to finish before returning.
+                        # cancel_futures=True kills QUEUED tasks instantly.
+                        # Running tasks hit stop checks in _ai_check_one/_setup_client
+                        # and exit quickly, so this won't block for long.
+                        # Using wait=False caused threads to outlive the scan function,
+                        # and _check_qa_stop_done would clear stop flags while threads
+                        # were still initializing clients.
+                        _ai_pool.shutdown(wait=True, cancel_futures=True)
+                    except TypeError:
+                        _ai_pool.shutdown(wait=True)
+                # Restore original BATCH_TRANSLATION env var
+                if _orig_batch_env is not None:
+                    os.environ['BATCH_TRANSLATION'] = _orig_batch_env
+                elif _batch_enabled:
+                    os.environ.pop('BATCH_TRANSLATION', None)
+
+            if should_stop():
+                log(f"   ⛔ AI truncation detection stopped: {_ai_checked} checked, {_ai_flagged} flagged")
+            else:
+                log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
+
+    _attach_chunk_results_to_scan(
+        folder_path,
+        results,
+        qa_settings,
+        log,
+        progress_path=progress_path,
+    )
+
+    # Clean up to save memory
+    for result in results:
+        result.pop('raw_text', None)
+        result.pop('foreign_qa_text', None)
+        result.pop('hashes', None)
+        result.pop('semantic_sig', None)
+        result.pop('structural_sig', None)
+        result.pop('normalized_text', None)
+        result.pop('qa_header_text', None)
+    
+    if should_stop():
+        log("⛔ QA scan stopped before report generation.")
+        return
+
+    # Generate reports
+    generate_reports(results, folder_path, duplicate_confidence, log, qa_settings)
+    
+    # Update progress file
+    update_progress_file(folder_path, results, log, progress_path=progress_path)
+    
+    # Final timing
+    total_time = time.time() - start_time
+    log(f"\n⏱️ Total scan time: {total_time:.1f} seconds")
+    if total_time > 60:
+        log(f"   ({int(total_time // 60)} minutes {int(total_time % 60)} seconds)")
+    
+    log("⚡ ProcessPoolExecutor: ENABLED - Maximum performance achieved!")
+
+
+def check_html_structure_issues(file_path, log, check_body_tag=False, check_header_tags=True):
+    """
+    Check for HTML structure problems including unwrapped text and unclosed tags.
+    
+    Args:
+        file_path: Path to the HTML file
+        log: Logging function
+        check_body_tag: Whether to check for body tag issues
+        check_header_tags: Whether to check for missing header tags (h1-h6)
+    
+    Returns:
+        tuple: (has_issues, issue_types) where issue_types is a list of specific issues found
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        issues = []
+        
+        # Check 1: Empty file
+        if not content.strip():
+            issues.append('missing_html_structure')
+            return True, issues
+            
+        # Check 2: No HTML tags at all
+        if '<' not in content or '>' not in content:
+            issues.append('missing_html_structure')
+            return True, issues
+        
+        # Check 3: Large blocks of unwrapped text
+        try:
+            unwrapped_text_total = _count_unwrapped_text_chars(content)
+            if BeautifulSoup(content, 'html.parser').find('body'):
+                # If we found significant unwrapped text, that's a problem
+                if unwrapped_text_total > 100:  # More than 100 chars of unwrapped text
+                    issues.append('unwrapped_text_content')
+                    log(f"   Found {unwrapped_text_total} characters of unwrapped text")
+        
+        except Exception as e:
+            log(f"   Warning: Could not parse HTML structure: {e}")
+        
+        # Check 4: Malformed and incomplete HTML tags
+        import re
+        
+        content_lower = content.lower()
+        
+        # First check for incomplete/malformed opening tags (like <p without closing >)
+        # Look for < followed by tag name but missing the closing >
+        malformed_patterns = [
+            # Match <tag followed by anything that's not > and then encountering text/quote
+            (r'<([a-zA-Z]+)(?![^>]*>)[^>]*["\w]', 'incomplete_opening_tag'),
+            # Match tags like <p" or <div' where quote comes right after tag name
+            (r'<([a-zA-Z]+)["\']', 'malformed_tag_with_quote'),
+            # Match < followed by tag name and then immediately text without >
+            (r'<(p|div|span|a|img|h[1-6])\s*[^>\s]+[^>]*$', 'incomplete_tag_at_line_end'),
+        ]
+        
+        # Check for orphaned closing brackets (e.g., p> without <p)
+        # Only check for common HTML tags to avoid false positives
+        common_html_tags = ['p', 'div', 'span', 'a', 'img', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                           'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'form', 'input', 'button',
+                           'nav', 'header', 'footer', 'section', 'article', 'aside', 'main']
+        orphaned_pattern = r'(?:^|\s)(' + '|'.join(common_html_tags) + r')>(?!\w)'
+        orphaned_matches = re.findall(orphaned_pattern, content, re.IGNORECASE | re.MULTILINE)
+        if orphaned_matches:
+            malformed_patterns.append((orphaned_pattern, 'orphaned_closing_bracket'))
+        
+        malformed_tags_found = []
+        for pattern, issue_type in malformed_patterns:
+            matches = re.findall(pattern, content, re.MULTILINE | re.IGNORECASE)
+            if matches:
+                for match in matches[:3]:  # Show first 3 examples
+                    # Find the actual malformed tag in context
+                    tag_name = match if isinstance(match, str) else match[0] if isinstance(match, tuple) else str(match)
+                    if issue_type == 'orphaned_closing_bracket':
+                        malformed_tags_found.append(f"{tag_name}> ({issue_type})")
+                    else:
+                        malformed_tags_found.append(f"<{tag_name} ({issue_type})")
+        
+        if malformed_tags_found:
+            issues.append('malformed_html')
+            log(f"   Found malformed HTML tags: {', '.join(malformed_tags_found[:3])}" + 
+                (" ..." if len(malformed_tags_found) > 3 else ""))
+        
+        # Check for unclosed HTML tags - Check common tags with simple logic
+        # Note: Excluding 'head' since it's metadata and often missing in translated content
+        tags_to_check = ['html', 'p', 'div', 'span', 'ul', 'ol', 'li']
+        if check_body_tag:
+            tags_to_check.insert(1, 'body')  # Add body after html if enabled
+        problematic_tags = []
+        
+        for tag in tags_to_check:
+            # Count: <tag (with space, attributes, or direct close)
+            open_count = len(re.findall(rf'<{tag}(?:\s[^>]*)?>', content_lower))
+            # Count: </tag>
+            close_count = len(re.findall(rf'</{tag}>', content_lower))
+            
+            # Flag only if there's a real imbalance
+            # Allow 1-2 difference for edge cases, but flag significant mismatches
+            diff = abs(open_count - close_count)
+            
+            if open_count > 0 or close_count > 0:  # Tag exists in file
+                allowed_difference = 0 if tag in {'ul', 'ol', 'li'} else 2
+                if diff > allowed_difference:
+                    problematic_tags.append(f"{tag} (open: {open_count}, close: {close_count})")
+        
+        if problematic_tags:
+            issues.append('unclosed_html_tags')
+            log(f"   Found tag mismatches: {', '.join(problematic_tags[:3])}" + 
+                (" ..." if len(problematic_tags) > 3 else ""))
+        
+        # Check 5: Basic HTML structure validation - only check for consistency, not completeness
+        # Define all structure check variables
+        # Note: Not checking 'head' tag since it's metadata and often missing/irrelevant in translated content
+        html_open_exists = bool(re.search(r'<html[^>]*>', content_lower))
+        html_close_exists = bool(re.search(r'</html>', content_lower))
+        body_open_exists = bool(re.search(r'<body[^>]*>', content_lower))
+        body_close_exists = bool(re.search(r'</body>', content_lower))
+        
+        # Check for missing heading tags (h1-h6) - only if enabled
+        if check_header_tags:
+            has_heading_tag = False
+            for heading_level in range(1, 7):  # h1 through h6
+                if re.search(rf'<h{heading_level}[^>]*>', content_lower):
+                    has_heading_tag = True
+                    break
+            
+            if not has_heading_tag:
+                issues.append('missing_header_tags')
+                log(f"   HTML file is missing heading tags (h1-h6)")
+        
+        missing_structure = []
+        
+        # Only flag if tags are opened but not closed (or vice versa)
+        if html_open_exists and not html_close_exists:
+            missing_structure.append('closing </html>')
+        elif html_close_exists and not html_open_exists:
+            missing_structure.append('opening <html>')
+            
+        # Only check body tags if enabled
+        if check_body_tag:
+            if body_open_exists and not body_close_exists:
+                missing_structure.append('closing </body>')
+            elif body_close_exists and not body_open_exists:
+                missing_structure.append('opening <body>')
+        
+        # Only flag as incomplete if there are actual mismatches
+        if missing_structure:
+            issues.append('incomplete_html_structure')
+            log(f"   Mismatched HTML structure tags: {', '.join(missing_structure)}")
+        
+        # Check 6: Nested tag validation using BeautifulSoup's parser errors
+        try:
+            # Parse with html.parser which is more strict
+            soup_strict = BeautifulSoup(content, 'html.parser')
+            
+            # Check for common nesting issues
+            # For example, p tags shouldn't contain div tags
+            invalid_nesting = []
+            
+            # Check for p tags containing block elements
+            for p_tag in soup_strict.find_all('p'):
+                block_elements = p_tag.find_all(['div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
+                                                'ul', 'ol', 'li', 'blockquote', 'pre', 'table'])
+                if block_elements:
+                    invalid_nesting.append(f"<p> contains block elements: {[el.name for el in block_elements[:3]]}")
+            
+            # Check for list items outside of lists
+            all_li = soup_strict.find_all('li')
+            for li in all_li:
+                parent = li.parent
+                if parent and parent.name not in ['ul', 'ol']:
+                    invalid_nesting.append(f"<li> not inside <ul> or <ol>")
+                    break  # Only report once
+            
+            if invalid_nesting:
+                issues.append('invalid_nesting')
+                log(f"   Found invalid tag nesting: {'; '.join(invalid_nesting[:3])}" + 
+                    (" ..." if len(invalid_nesting) > 3 else ""))
+                    
+        except Exception as e:
+            # BeautifulSoup might throw exceptions for severely malformed HTML
+            log(f"   Warning: HTML parsing error (possible malformed structure): {str(e)[:100]}")
+            issues.append('malformed_html')
+        
+        # Check 7: Final validation for critical mismatched tags
+        # Only flag if we have opening tags without closing tags (not missing both)
+        if html_open_exists and not html_close_exists:
+            if 'incomplete_html_structure' not in issues:
+                issues.append('incomplete_html_structure')
+            if 'unclosed_html_tags' not in issues:
+                issues.append('unclosed_html_tags')
+                log(f"   Critical: Found opening <html> tag but missing closing </html> tag")
+        
+        # Only flag unclosed body tags if check is enabled
+        if check_body_tag and body_open_exists and not body_close_exists:
+            if 'unclosed_html_tags' not in issues:
+                issues.append('unclosed_html_tags')
+                log(f"   Critical: Found opening <body> tag but missing closing </body> tag")
+        
+        return len(issues) > 0, issues
+        
+    except Exception as e:
+        log(f"Error checking HTML structure for {file_path}: {e}")
+        return False, []
+
+def launch_gui():
+    """Launch GUI interface with mode selection"""
+    def run_scan():
+        folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
+        if folder_path:
+            mode = mode_var.get()
+            
+            def scan_thread():
+                scan_html_folder(folder_path, print, None, mode)
+            
+            threading.Thread(target=scan_thread, daemon=True).start()
+            
+            # Show status
+            status_label.config(text=f"Scanning in {mode} mode...")
+            root.update()
+    
+    root = tk.Tk()
+    root.title("Translation QA Scanner - Enhanced Edition")
+    root.geometry("690x200")
+    
+    # Mode selection
+    mode_frame = tk.Frame(root)
+    mode_frame.pack(pady=10)
+    
+    tk.Label(mode_frame, text="Detection Mode:").pack(side=tk.LEFT, padx=5)
+    
+    mode_var = tk.StringVar(value="quick-scan")
+    modes = [
+        ("Aggressive (75% threshold)", "aggressive"),
+        ("Quick Scan (85% threshold)", "quick-scan"),
+        ("Custom (Configurable)", "custom"),
+        ("AI Hunter (30% text, 85% semantic)", "ai-hunter")
+    ]
+    
+    for text, mode in modes:
+        tk.Radiobutton(mode_frame, text=text, variable=mode_var, value=mode).pack(side=tk.LEFT, padx=5)
+    
+    # Scan button
+    scan_button = tk.Button(root, text="Scan Folder for QA Issues", 
+                           command=run_scan, height=2, width=30)
+    scan_button.pack(pady=20)
+    
+    # Status label
+    status_label = tk.Label(root, text="")
+    status_label.pack(pady=5)
+    
+    # Info label
+    info_text = "Enhanced scanner with semantic analysis, structural patterns, and fuzzy matching"
+    if not MINHASH_AVAILABLE:
+        info_text += "\n(Install 'datasketch' for faster processing of large datasets)"
+    
+    info_label = tk.Label(root, text=info_text, fg="gray")
+    info_label.pack(pady=5)
+    
+    root.mainloop()
+
+if __name__ == "__main__":
+    from shutdown_utils import run_cli_main
+    def _main():
+        import sys
+        import argparse
+        
+        if len(sys.argv) < 2:
+            launch_gui()
+        else:
+            # Parse command-line arguments
+            parser = argparse.ArgumentParser(description='QA Scanner for translated HTML files')
+            parser.add_argument('folder', help='Folder containing HTML files to scan')
+            parser.add_argument('--mode', choices=['quick-scan', 'aggressive', 'ai-hunter', 'custom', 'standard'], 
+                               default='quick-scan', help='Detection mode to use')
+            parser.add_argument('--interactive', action='store_true', 
+                               help='Show custom settings dialog for custom mode')
+            parser.add_argument('--aggressive', action='store_true', help='Use aggressive mode (deprecated, use --mode aggressive)')
+            parser.add_argument('--custom', action='store_true', help='Use custom mode (deprecated, use --mode custom)')
+            parser.add_argument('--quick-scan', action='store_true', help='Use quick-scan mode (deprecated, use --mode quick-scan)')
+            parser.add_argument('--ai-hunter', action='store_true', help='Use ai-hunter mode (deprecated, use --mode ai-hunter)')
+            
+            args = parser.parse_args()
+            
+            # Handle deprecated flags
+            if args.aggressive:
+                args.mode = 'aggressive'
+            elif args.custom:
+                args.mode = 'custom'
+            elif args.quick_scan:
+                args.mode = 'quick-scan'
+            elif args.ai_hunter:
+                args.mode = 'ai-hunter'
+            
+            # For custom mode with --interactive, show the custom detection settings dialog
+            if args.mode == 'custom' and args.interactive:
+                print("🏛️ Opening Custom Detection Settings dialog...")
+                from PySide6.QtWidgets import QApplication
+                from QA_Scanner_GUI import show_custom_detection_dialog
+                
+                app = QApplication(sys.argv)
+                
+                # Show the dialog and get the settings
+                settings_dict = show_custom_detection_dialog(None)
+                
+                if settings_dict:
+                    # User confirmed settings, now run the scan
+                    print("\u2705 Custom settings configured, starting scan...")
+                    
+                    # Create a config object from the settings
+                    config = DuplicateDetectionConfig()
+                    config.similarity_threshold = settings_dict['text_similarity'] / 100.0
+                    config.semantic_threshold = settings_dict['semantic_analysis'] / 100.0
+                    config.structural_threshold = settings_dict['structural_patterns'] / 100.0
+                    config.word_overlap_threshold = settings_dict['word_overlap'] / 100.0
+                    config.minhash_threshold = settings_dict['minhash_similarity'] / 100.0
+                    config.consecutive_chapters = settings_dict['consecutive_chapters']
+                    config.sample_size = settings_dict['sample_size']
+                    config.min_length = settings_dict['min_text_length']
+                    config.check_all_pairs = settings_dict.get('check_all_pairs', False)
+                    
+                    # Run the scan with custom settings
+                    scan_html_folder(args.folder, mode=args.mode, config=config)
+                else:
+                    print("\u274c Custom settings dialog cancelled, scan aborted")
+            else:
+                # Run scan normally without dialog
+                scan_html_folder(args.folder, mode=args.mode)
+        return 0
+    run_cli_main(_main)
+
+
+
+def reset_stop_flag():
+    """Reset the stop flag - useful for starting a new scan"""
+    global _stop_flag
+    _stop_flag = False
+    print("🔄 Stop flag reset to False")
+
+def is_stop_requested():
+    """Check if stop has been requested"""
+    global _stop_flag
+    return _stop_flag
+
+# Export the stop_scan function so GUI can call it
+__all__ = ['scan_html_folder', 'stop_scan', 'reset_stop_flag', 'is_stop_requested', 
+          'DuplicateDetectionConfig', 'test_stop_functionality']
+
+def test_stop_functionality():
+    """Test function to verify stop_scan works"""
+    global _stop_flag
+    print(f"Before stop_scan: _stop_flag = {_stop_flag}")
+    stop_scan()
+    print(f"After stop_scan: _stop_flag = {_stop_flag}")
+    _stop_flag = False  # Reset
+    return True
+
+
+# ADD THIS AT MODULE LEVEL (outside any function/class)
+
+def process_comparison_batch_fast(args):
+    """Process a batch of comparisons - MUST BE AT MODULE LEVEL FOR PICKLING"""
+    batch, data = args
+    batch_results = []
+    
+    all_data = data['all_data']
+    thresholds = data['thresholds']
+    min_text_sim = thresholds.get('min_text_similarity', 0.05)
+    
+    # Import what we need inside the worker
+    from difflib import SequenceMatcher
+    
+    # Import the similarity functions - they must also be at module level
+    # If they're in the same module, you might need to import them explicitly
+    # from scan_html_folder import calculate_semantic_similarity, calculate_structural_similarity
+    
+    for i, j in batch:
+        data_i = all_data[i]
+        data_j = all_data[j]
+        
+        # Calculate ALL similarities - NO SHORTCUTS
+        
+        # 1. Semantic similarity
+        sem_sim = calculate_semantic_similarity(
+            data_i['semantic_sig'], 
+            data_j['semantic_sig']
+        )
+        
+        # 2. Structural similarity
+        struct_sim = calculate_structural_similarity(
+            data_i['structural_sig'],
+            data_j['structural_sig']
+        )
+        
+        # 3. Text similarity - ALWAYS calculate
+        text_sim = 0.0
+        if data_i['text_hash'] and data_j['text_hash']:
+            if data_i['text_hash'] == data_j['text_hash']:
+                text_sim = 1.0
+            else:
+                # Always calculate full similarity
+                text_sim = SequenceMatcher(
+                    None, 
+                    data_i['text'], 
+                    data_j['text']
+                ).ratio()
+        
+        # Check ALL duplicate conditions
+        is_duplicate = False
+        is_retranslation = False
+        confidence = 0.0
+        
+        # AI Hunter logic: High semantic + high structural = likely duplicate
+        # Guardrail: require at least a tiny amount of text overlap to avoid zero-overlap false positives
+        if (sem_sim >= thresholds['semantic'] and struct_sim >= thresholds['structural']
+                and text_sim > min_text_sim):
+            is_duplicate = True
+            is_retranslation = text_sim < 0.6
+            confidence = (sem_sim + struct_sim) / 2
+        # Traditional similarity check
+        elif text_sim >= thresholds['similarity']:
+            is_duplicate = True
+            is_retranslation = False
+            confidence = text_sim
+        
+        # Store result if duplicate found
+        if is_duplicate:
+            batch_results.append({
+                'i': i,
+                'j': j,
+                'sem_sim': sem_sim,
+                'struct_sim': struct_sim,
+                'text_sim': text_sim,
+                'is_duplicate': True,
+                'is_retranslation': is_retranslation,
+                'confidence': confidence
+            })
+    
+    return batch_results
+
+
+def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, config, log, should_stop):
+    """Parallel AI Hunter checking - FIXED FOR PROCESSPOOLEXECUTOR"""
+    
+    log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
+    log("⚡ PARALLEL PROCESSING ENABLED - MAXIMUM PERFORMANCE!")
+    
+    total_comparisons = (len(results) * (len(results) - 1)) // 2
+    log(f"   ⚠️ Will check ALL {total_comparisons:,} file pairs - NO COMPROMISES!")
+    
+    # Determine number of workers
+    cpu_count = multiprocessing.cpu_count()
+    max_workers_config = 0
+    
+    max_workers_config = _resolve_scan_max_workers_config()
+    
+    if max_workers_config > 0:
+        max_workers = min(max_workers_config, cpu_count)
+        log(f"   🖥️ Using {max_workers} parallel workers (configured limit of {max_workers_config})")
+    else:
+        max_workers = cpu_count
+        log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
+    
+    # Pre-compute everything once
+    log("   📊 Pre-computing all data structures...")
+    
+    # Build a single data structure with everything we need
+    all_data = []
+    text_hash_lookup = {}
+    
+    for idx, result in enumerate(results):
+        text = result.get('normalized_text', '')[:2000]
+        text_hash = hashlib.sha256(text.encode()).hexdigest() if text else None
+        
+        data_entry = {
+            'idx': idx,
+            'filename': result['filename'],
+            'text': text,
+            'text_hash': text_hash,
+            'semantic_sig': result.get('semantic_sig', {}),
+            'structural_sig': result.get('structural_sig', {})
+        }
+        all_data.append(data_entry)
+        
+        if text_hash:
+            text_hash_lookup[text_hash] = text_hash_lookup.get(text_hash, 0) + 1
+    
+    # Create ALL comparison tasks
+    comparison_tasks = []
+    for i in range(len(results)):
+        for j in range(i + 1, len(results)):
+            comparison_tasks.append((i, j))
+    
+    log(f"   📋 Created {len(comparison_tasks):,} comparison tasks")
+    
+    # Optimal batch size
+    optimal_batch_size = max(1000, total_comparisons // (max_workers * 5))
+    optimal_batch_size = min(optimal_batch_size, 10000)
+    
+    batches = []
+    for i in range(0, len(comparison_tasks), optimal_batch_size):
+        batch = comparison_tasks[i:i + optimal_batch_size]
+        batches.append(batch)
+    
+    log(f"   📦 Split into {len(batches)} batches of ~{optimal_batch_size} comparisons each")
+    
+    # Progress tracking
+    comparisons_done = 0
+    last_progress = 0
+    start_time = time.time()
+    found_duplicates = []
+    
+    # Prepare data for multiprocessing
+    worker_data = {
+        'all_data': all_data,
+        'thresholds': {
+            'semantic': config.get_threshold('semantic'),
+            'structural': config.get_threshold('structural'),
+            'similarity': config.get_threshold('similarity')
+        }
+    }
+    
+    # Prepare batch arguments
+    batch_args = [(batch, worker_data) for batch in batches]
+    
+    # Process with ProcessPoolExecutor
+    with mobile_runtime.make_pool_executor(max_workers, initializer=_init_worker_process) as executor:
+        # Submit all batches
+        futures = []
+        for args in batch_args:
+            if should_stop():
+                log("⛔ AI Hunter interrupted by user.")
+                executor.shutdown(wait=True)
+                return comparisons_done
+            
+            future = executor.submit(process_comparison_batch_fast, args)
+            futures.append(future)
+        
+        # Process results as they complete
+        for completed_future in concurrent.futures.as_completed(futures):
+            if should_stop():
+                log("⛔ AI Hunter interrupted by user.")
+                executor.shutdown(wait=True)
+                return comparisons_done
+            
+            # Get results
+            batch_results = completed_future.result()
+            
+            # Batch all updates
+            updates = []
+            for result in batch_results:
+                if result['is_duplicate']:
+                    file1 = all_data[result['i']]['filename']
+                    file2 = all_data[result['j']]['filename']
+                    updates.append((file1, file2, result))
+            
+            # Apply all updates in one lock
+            if updates:
+                with merge_lock:
+                    for file1, file2, result in updates:
+                        merge_duplicate_groups(duplicate_groups, file1, file2)
+                        duplicate_confidence[(file1, file2)] = result['confidence']
+                        
+                        # Log findings
+                        if result['is_retranslation']:
+                            msg = (f"🎯 AI Hunter: Found potential retranslation\n"
+                                  f"      Files: {file1} ≈ {file2}\n"
+                                  f"      Text similarity: {int(result['text_sim']*100)}% (low)\n"
+                                  f"      Semantic similarity: {int(result['sem_sim']*100)}% (high)\n"
+                                  f"      Structural similarity: {int(result['struct_sim']*100)}% (high)")
+                            found_duplicates.append(msg)
+                            
+                            if len(found_duplicates) <= 3:
+                                log(f"\n   [DEBUG] AI Hunter Retranslation Detection:")
+                                log(f"   [DEBUG] File 1: {file1}")
+                                log(f"   [DEBUG] File 2: {file2}")
+                                log(f"   [DEBUG] Text Similarity: {result['text_sim']:.4f}")
+                                log(f"   [DEBUG] Semantic Similarity: {result['sem_sim']:.4f}")
+                                log(f"   [DEBUG] Structural Similarity: {result['struct_sim']:.4f}")
+                                log(f"   [DEBUG] Confidence: {result['confidence']:.4f}")
+                        else:
+                            msg = (f"   📄 Found duplicate: {file1} ≈ {file2} "
+                                  f"(confidence: {int(result['confidence']*100)}%)")
+                            found_duplicates.append(msg)
+            
+            # Update progress
+            comparisons_done += optimal_batch_size
+            if comparisons_done > total_comparisons:
+                comparisons_done = total_comparisons
+            
+            progress = int((comparisons_done / total_comparisons) * 100)
+            
+            if progress >= last_progress + 10 or progress == 100:
+                elapsed = time.time() - start_time
+                rate = comparisons_done / elapsed if elapsed > 0 else 0
+                remaining = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
+                
+                log(f"   📊 AI Hunter progress: {comparisons_done:,}/{total_comparisons:,} "
+                    f"({progress}%) - ~{int(remaining)}s remaining - "
+                    f"Speed: {int(rate):,} comparisons/sec")
+                
+                for msg in found_duplicates[:5]:
+                    log(msg)
+                found_duplicates = found_duplicates[5:]
+                
+                last_progress = progress
+    
+    # Final summary
+    elapsed = time.time() - start_time
+    log(f"✅ AI Hunter complete! Processed {total_comparisons:,} comparisons in {int(elapsed)}s")
+    log(f"   ⚡ Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
+    
+    log(f"\n   [DEBUG] === AI HUNTER FINAL STATISTICS ===")
+    log(f"   [DEBUG] Total comparisons: {total_comparisons:,}")
+    log(f"   [DEBUG] Time taken: {elapsed:.2f} seconds")
+    log(f"   [DEBUG] Comparisons per second: {int(total_comparisons/elapsed):,}")
+    log(f"   [DEBUG] Duplicate groups found: {len(set(duplicate_groups.values()))}")
+    log(f"   [DEBUG] Total duplicate pairs: {len(duplicate_confidence)}")
+    log(f"   [DEBUG] Parallel workers used: {max_workers}")
+    log(f"   [DEBUG] ProcessPoolExecutor: ENABLED")
+    log(f"   [DEBUG] =====================================\n")
+    
+    for msg in found_duplicates[-10:]:
+        log(msg)
+    
+    return comparisons_done

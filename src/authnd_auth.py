@@ -1,0 +1,3179 @@
+"""
+authnd_auth.py - NVIDIA Build browser-backed chat route.
+
+This module intentionally does not use the NVIDIA API key flow. It opens the
+public build.nvidia.com model page in Qt WebEngine to obtain the same hCaptcha
+token the page uses, then sends the hidden /v2/predict request with requests.
+Where a browser_driver is in use (Glossarion Mobile's hidden WebView, no helper
+processes), the same token flow runs on the driver's page instead.
+"""
+
+from __future__ import annotations
+
+import argparse
+import codecs
+import contextlib
+import functools
+import html as html_lib
+import json
+import math
+import os
+import queue
+import re
+import shlex
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from urllib.parse import quote
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+import requests
+import browser_driver
+import mobile_runtime
+from reasoning_compatibility import (
+    ReasoningEffortRejected, normalize_none_effort, call_with_reasoning_retry,
+)
+from request_parameters import normalize_request_parameters
+
+
+BUILD_BASE_URL = "https://build.nvidia.com"
+API_BASE_URL = "https://api.ngc.nvidia.com"
+PREDICT_API_BASE_URL = "https://buildapi.ngc.nvidia.com"
+DEFAULT_ORG_ID = "qc69jvmznzxy"
+CATALOG_SEARCH_URL = f"{API_BASE_URL}/v2/search/catalog/resources/ENDPOINT"
+CATALOG_PAGE_SIZE = 200
+CATALOG_MAX_PAGES = 50
+DEFAULT_HCAPTCHA_SITEKEY = "0c6a1e45-75d7-43cc-b836-a0c9d886b8ee"
+DEFAULT_PUBLISHER = "z-ai"
+DEFAULT_TIMEOUT = 180
+DEFAULT_TOKEN_CONCURRENCY_LIMIT = 1
+DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT = 1
+TOKEN_CONCURRENCY_ENV = "AUTHND_TOKEN_CONCURRENCY"
+TOKEN_SUBPROCESS_CONCURRENCY_ENV = "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY"
+TOKEN_CONCURRENCY_AUTO_ENV = "AUTHND_TOKEN_CONCURRENCY_AUTO"
+CAPTCHA_DOCUMENT_STABLE_SECONDS = 1.5
+CAPTCHA_MAX_INJECTION_ATTEMPTS = 3
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+# browser_driver page owner: cancel_stream() cancels only this route's in-app browser pages.
+BROWSER_OWNER = "authnd"
+
+_cancel_event = threading.Event()
+_cancel_generation = threading.Event()
+_cancel_lock = threading.Lock()
+_thread_local = threading.local()
+_metadata_cache: Dict[str, Dict[str, str]] = {}
+_metadata_lock = threading.Lock()
+_endpoint_output_limits: Dict[str, int] = {}
+_chat_template_unsupported_models: set = set()
+_chat_template_unsupported_lock = threading.Lock()
+_effort_fallback_notes_logged: set = set()
+_effort_fallback_notes_lock = threading.Lock()
+_configured_gate_lock = threading.Lock()
+_configured_gates: Dict[str, Tuple[threading.BoundedSemaphore, int]] = {}
+_active_helper_processes: set = set()
+_active_helper_lock = threading.Lock()
+_active_sessions: set = set()
+_active_sessions_lock = threading.Lock()
+_active_response_closers: set = set()
+_active_response_lock = threading.Lock()
+# Transports a cancel_stream() teardown thread already owns, so the many
+# workers that call cancel_stream() on one Stop do not each taskkill the
+# same browser helpers.
+_cancel_teardown_claimed: set = set()
+_cancel_teardown_lock = threading.Lock()
+
+
+def _debug_enabled() -> bool:
+    value = os.getenv("AUTHND_DEBUG", "").strip().lower()
+    return value in ("1", "true", "yes", "on", "debug")
+
+
+def _captcha_debug(message: str) -> None:
+    """Write token-safe browser diagnostics for the standalone Qt helper."""
+    if not _debug_enabled():
+        return
+    try:
+        print(
+            f"AuthND captcha debug: {_sanitize_error_text(message)}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
+def _captcha_debug_url(url: Any) -> str:
+    """Keep navigation logs useful without exposing query or fragment values."""
+    text = str(url or "").strip()
+    text = text.split("#", 1)[0].split("?", 1)[0]
+    return text[:500]
+
+
+def _is_injectable_captcha_document(url: Any, title: Any) -> bool:
+    """Reject Qt's blank/intermediate documents before captcha injection."""
+    normalized_url = str(url or "").strip().lower()
+    return bool(
+        str(title or "").strip()
+        and normalized_url.startswith(("https://", "http://"))
+    )
+
+
+def _log(log_fn: Optional[Callable[[str], None]], message: str, *, debug_only: bool = False) -> None:
+    if not log_fn or _is_cancelled():
+        return
+    if debug_only and not _debug_enabled():
+        return
+    log_fn(message)
+
+
+def _short_error(error: Any, limit: int = 1200) -> str:
+    text = _sanitize_error_text(str(error or ""))
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _html_error_summary(text: str) -> str:
+    text = str(text or "")
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    for pattern in (
+        r"<title[^>]*>(.*?)</title>",
+        r"<h1[^>]*>(.*?)</h1>",
+        r"<h2[^>]*>(.*?)</h2>",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            summary = re.sub(r"<[^>]+>", " ", match.group(1))
+            summary = html_lib.unescape(summary)
+            return re.sub(r"\s+", " ", summary).strip()
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _sanitize_error_text(text: str) -> str:
+    text = str(text or "").replace("\r", " ").replace("\n", " ").strip()
+    html_match = re.search(r"<\s*(?:!doctype|html|head|body|title|h[1-6]|center)\b", text, flags=re.IGNORECASE)
+    if not html_match:
+        return re.sub(r"\s+", " ", text).strip()
+
+    prefix = text[:html_match.start()].strip()
+    summary = _html_error_summary(text[html_match.start():])
+    if prefix and summary:
+        prefix = prefix.rstrip(" :")
+        if summary.lower() in prefix.lower():
+            return prefix
+        return f"{prefix}: {summary}"
+    return summary or prefix
+
+
+def _authnd_http_error_message(status_code: int, headers: Any, body: str, reason: str = "") -> str:
+    nv_error = ""
+    location = ""
+    try:
+        nv_error = headers.get("x-nv-error-msg") or headers.get("x-nv-error-code") or ""
+        location = headers.get("location") or ""
+    except Exception:
+        nv_error = ""
+        location = ""
+    if 300 <= status_code < 400:
+        target = _captcha_debug_url(location)
+        return f"AuthND HTTP {status_code}: redirected to {target or 'an unknown location'}"
+    detail = " ".join(part for part in (nv_error, _sanitize_error_text(body)) if part).strip()
+    return f"AuthND HTTP {status_code}: {detail or reason or 'HTTP error'}"
+
+
+def _terminate_process_tree(proc: Any, *, kill: bool = False) -> None:
+    try:
+        if proc is None or proc.poll() is not None:
+            return
+    except Exception:
+        return
+    if os.name == "nt":
+        try:
+            from shutdown_utils import terminate_subprocess_tree
+            terminate_subprocess_tree(proc, kill=kill, timeout=3)
+            return
+        except Exception:
+            pass
+    try:
+        if kill:
+            proc.kill()
+        else:
+            proc.terminate()
+    except Exception:
+        pass
+
+
+def _message_summary(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    roles: Dict[str, int] = {}
+    chars = 0
+    images = 0
+    for message in messages:
+        role = str(message.get("role") or "unknown")
+        roles[role] = roles.get(role, 0) + 1
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    chars += len(str(part or ""))
+                    continue
+                part_type = str(part.get("type") or "").lower()
+                if part_type in ("image_url", "input_image", "image"):
+                    images += 1
+                elif part_type in ("text", "input_text"):
+                    chars += len(str(part.get("text") or ""))
+                else:
+                    chars += len(str(part or ""))
+        else:
+            chars += len(str(content or ""))
+    return {"count": len(messages), "roles": roles, "chars": chars, "images": images}
+
+
+def _payload_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
+    summary = {
+        "model": payload.get("model"),
+        "stream": payload.get("stream"),
+        "messages": _message_summary(payload.get("messages") or []),
+    }
+    for key in ("temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty", "reasoning_effort"):
+        if key in payload:
+            summary[key] = payload.get(key)
+    if "chat_template_kwargs" in payload:
+        summary["chat_template_kwargs"] = payload.get("chat_template_kwargs")
+    return summary
+
+
+def _stream_logging_enabled() -> bool:
+    value = os.getenv("AUTHND_LOG_STREAM_CHUNKS")
+    if value is None:
+        value = os.getenv("LOG_STREAM_CHUNKS", "1")
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _stream_thinking_logging_enabled() -> bool:
+    value = os.getenv("AUTHND_STREAM_THINKING_LOGS")
+    if value is None:
+        value = os.getenv("STREAM_THINKING_LOGS", "1")
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _abort_active_transports(closers, sessions, helpers) -> None:
+    """Close live connections and kill browser helper trees. Runs off the caller's thread."""
+    try:
+        for closer in closers:
+            try:
+                closer()
+            except Exception:
+                pass
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
+        for proc in helpers:
+            _terminate_process_tree(proc, kill=True)
+    finally:
+        with _cancel_teardown_lock:
+            _cancel_teardown_claimed.difference_update(closers, sessions, helpers)
+
+
+def cancel_stream() -> None:
+    """Signal any active AuthND stream/request to stop.
+
+    Must never block: Stop handlers reach this through set_stop_flag() and
+    hard_cancel_all(), some of them on the GUI thread. close() can wait on the
+    thread that is reading the stream, and each helper tree is a taskkill of up
+    to 3s, so only the flags are set inline. Every AuthND wait loop polls them
+    within 0.1s, which is what releases the workers; closing the connections
+    and killing the helpers happens on a daemon thread.
+
+    The transports are snapshotted here, not on that thread, so a teardown that
+    runs late can never reach into the next run's requests.
+    """
+    with _cancel_lock:
+        _cancel_event.set()
+        _cancel_generation.set()
+    # Pages of a registered browser driver (Glossarion Mobile's hidden WebViews): their pending
+    # calls fail at once. Never blocks; a no-op without a driver (desktop).
+    browser_driver.cancel_pages(BROWSER_OWNER)
+    with _active_response_lock:
+        closers = list(_active_response_closers)
+    with _active_sessions_lock:
+        sessions = list(_active_sessions)
+    with _active_helper_lock:
+        helpers = list(_active_helper_processes)
+    with _cancel_teardown_lock:
+        closers = [item for item in closers if item not in _cancel_teardown_claimed]
+        sessions = [item for item in sessions if item not in _cancel_teardown_claimed]
+        helpers = [item for item in helpers if item not in _cancel_teardown_claimed]
+        _cancel_teardown_claimed.update(closers, sessions, helpers)
+    if not (closers or sessions or helpers):
+        return
+    try:
+        threading.Thread(
+            target=_abort_active_transports,
+            args=(closers, sessions, helpers),
+            name="AuthNDCancel",
+            daemon=True,
+        ).start()
+    except Exception:
+        # No thread to be had (interpreter shutting down). The flags are set, so
+        # each worker still tears its own request down; just release the claim.
+        with _cancel_teardown_lock:
+            _cancel_teardown_claimed.difference_update(closers, sessions, helpers)
+
+
+def reset_cancel() -> None:
+    """Clear the cancellation flag before a new request.
+
+    IMPORTANT: refuse to clear while a hard stop is active. ``_send_authnd`` and
+    ``reset_cleanup_state`` call this at the start of every attempt, and with up
+    to a few hundred concurrent AuthND workers a just-starting worker can wipe
+    the cancel signal that the Stop button just set. The AuthND browser helper
+    only observes ``_cancel_event`` (see ``_post_with_cancel`` /
+    ``_mint_captcha_token_subprocess``), so clearing it here lets an in-flight
+    request — and the browser child it spawned — bypass Stop and keep running,
+    which is also what leaves a child holding PyInstaller ``_MEIPASS`` DLLs and
+    triggers the "Failed to remove temporary directory" warning on exit.
+    """
+    global _cancel_generation
+    with _cancel_lock:
+        if _hard_stop_active():
+            return
+        if _cancel_generation.is_set():
+            _cancel_generation = threading.Event()
+        _cancel_event.clear()
+
+
+def _hard_stop_active() -> bool:
+    """True when the GUI/translation engine has requested an immediate abort.
+
+    ``TRANSLATION_CANCELLED`` is set only on hard/immediate stop (never on a
+    graceful stop), so honoring it here is safe and mirrors the AuthGem route's
+    ``_is_externally_stopped()`` helper.
+    """
+    return os.environ.get("TRANSLATION_CANCELLED") == "1"
+
+
+def _is_cancelled() -> bool:
+    # Also honor the hard-abort env var. The AuthND helper otherwise only sees
+    # _cancel_event, so a racing reset_cancel()/reset_cleanup_state() from
+    # another worker could let an in-flight request bypass Stop.
+    generation = getattr(_thread_local, "cancel_generation", _cancel_generation)
+    check = getattr(_thread_local, "cancel_check", None)
+    return (generation.is_set() or _cancel_event.is_set() or _hard_stop_active()
+            or (callable(check) and bool(check())))
+
+
+def _request_scope(fn):
+    """Keep an old request cancelled when the next run resets provider state."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        previous = getattr(_thread_local, "cancel_generation", None)
+        previous_check = getattr(_thread_local, "cancel_check", None)
+        _thread_local.cancel_generation = previous or _cancel_generation
+        _thread_local.cancel_check = kwargs.get("cancel_check") or previous_check
+        log = kwargs.get("log_fn")
+        if log:
+            kwargs["log_fn"] = lambda message: None if _is_cancelled() else log(message)
+        try:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            return fn(*args, **kwargs)
+        finally:
+            _thread_local.cancel_check = previous_check
+            if previous is None:
+                del _thread_local.cancel_generation
+            else:
+                _thread_local.cancel_generation = previous
+    return wrapped
+
+
+def _interruptible_transport(fn):
+    """Do not leave the caller blocked on headers, error bodies, or stream reads."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        generation = getattr(_thread_local, "cancel_generation", _cancel_generation)
+        check = getattr(_thread_local, "cancel_check", None)
+        # Keep the logical API worker in the helper's name.  AuthND performs
+        # the blocking HTTP/SSE work on this helper so hard cancellation can
+        # release the caller immediately.  Without the parent identity, GUI
+        # stream listeners see ``AuthNDTransport`` as a second request and
+        # render the live stream beside the final response from the API worker.
+        caller_thread_name = threading.current_thread().name
+        transport_thread_name = f"AuthNDTransport[{caller_thread_name}]"
+        results = queue.Queue(maxsize=1)
+        def run():
+            _thread_local.cancel_generation = generation
+            _thread_local.cancel_check = check
+            try:
+                if _is_cancelled():
+                    raise RuntimeError("stream cancelled")
+                results.put((True, fn(*args, **kwargs)))
+            except BaseException as exc:
+                results.put((False, exc))
+            finally:
+                session = getattr(_thread_local, "session", None)
+                if session is not None:
+                    try:
+                        session.close()
+                    finally:
+                        with _active_sessions_lock:
+                            _active_sessions.discard(session)
+        threading.Thread(
+            target=run,
+            name=transport_thread_name,
+            daemon=True,
+        ).start()
+        while True:
+            if generation.is_set() or _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            try:
+                success, result = results.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if generation.is_set() or _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            if not success:
+                raise result
+            return result
+    return wrapped
+
+
+@contextlib.contextmanager
+def _httpx_stream(httpx, *args, **kwargs):
+    # Register the client BEFORE waiting for response headers. Session-level
+    # cleanup cannot reach httpx.stream's otherwise hidden client.
+    with httpx.Client(timeout=kwargs.pop("timeout")) as client:
+        closer = _register_response_closer(client.close)
+        try:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            with client.stream(*args, **kwargs) as response:
+                yield response
+        finally:
+            _unregister_response_closer(closer)
+
+
+def _acquire_gate(
+    gate: threading.BoundedSemaphore,
+    *,
+    log_fn: Optional[Callable[[str], None]] = None,
+    wait_message: str = "",
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> None:
+    waited = False
+    while not gate.acquire(timeout=0.1):
+        if _is_cancelled() or (callable(cancel_check) and cancel_check()):
+            raise RuntimeError("stream cancelled")
+        if wait_message and not waited:
+            _log(log_fn, wait_message)
+            waited = True
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    return max(1, _env_int(name, default))
+
+
+def _auto_token_limits() -> Tuple[int, int]:
+    cores = max(1, int(os.cpu_count() or 1))
+    token_limit = min(4, max(1, cores // 2))
+    subprocess_limit = min(8, max(token_limit, cores))
+    return token_limit, subprocess_limit
+
+
+def _effective_token_limit(env_name: str, default_limit: int) -> int:
+    if _env_bool(TOKEN_CONCURRENCY_AUTO_ENV, False):
+        token_limit, subprocess_limit = _auto_token_limits()
+        if env_name == TOKEN_SUBPROCESS_CONCURRENCY_ENV:
+            return subprocess_limit
+        if env_name == TOKEN_CONCURRENCY_ENV:
+            return token_limit
+    return _env_positive_int(env_name, default_limit)
+
+
+def _get_configured_gate(env_name: str, default_limit: int) -> threading.BoundedSemaphore:
+    limit = _effective_token_limit(env_name, default_limit)
+    with _configured_gate_lock:
+        current = _configured_gates.get(env_name)
+        if current and current[1] == limit:
+            return current[0]
+        gate = threading.BoundedSemaphore(limit)
+        _configured_gates[env_name] = (gate, limit)
+        return gate
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _captcha_token_failure_hint(error: Any) -> str:
+    text = str(error or "").lower()
+    if "timeout waiting for hcaptcha" in text or "hcaptcha timed out" in text:
+        token_limit = _effective_token_limit(TOKEN_CONCURRENCY_ENV, DEFAULT_TOKEN_CONCURRENCY_LIMIT)
+        return (
+            " The hCaptcha SDK did not initialize. Check that js.hcaptcha.com is not "
+            "blocked by DNS, a firewall, proxy, or ad blocker; then retry. On slow or "
+            "busy systems, increase AUTHND_TOKEN_TIMEOUT and reduce Other Settings > "
+            "NIM/AuthND Token Helpers > Token concurrency "
+            f"(currently {token_limit}; try 1)."
+        )
+    if not any(marker in text for marker in ("rate-limited", "rate limited", "rate_limit", "too many", "429")):
+        return ""
+    token_limit = _effective_token_limit(TOKEN_CONCURRENCY_ENV, DEFAULT_TOKEN_CONCURRENCY_LIMIT)
+    subprocess_limit = _effective_token_limit(TOKEN_SUBPROCESS_CONCURRENCY_ENV, DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT)
+    return (
+        " hCaptcha is rate-limiting token creation. Reduce Other Settings > "
+        f"NIM/AuthND Token Helpers > Token concurrency (currently {token_limit}; try 1-2). "
+        f"Keep Token subprocess limit modest too (currently {subprocess_limit}), then retry after a short cooldown."
+    )
+
+
+def _build_page_model_slug(model_id: str) -> str:
+    """Return the NVIDIA Build page slug for a model id.
+
+    Build pages use underscore separators for numeric version components
+    in several public model slugs (for example llama-3_1-70b-instruct),
+    while the chat payload still expects the dotted model name.
+    """
+    model_id = str(model_id or "").strip("/")
+    return re.sub(r"(?<=\d)\.(?=\d)", "_", model_id)
+
+
+def _normalize_model(model: str) -> Tuple[str, str, str]:
+    """
+    Return (publisher, model_id, page_url) from authnd/z-ai/glm-5.1 or glm-5.1.
+    """
+    raw = (model or "").strip()
+    raw = re.sub(r"^authnd\d{0,4}/", "", raw, flags=re.IGNORECASE)
+    if raw.lower().startswith("authnd"):
+        raw = raw[len("authnd"):].lstrip("/")
+    raw = raw.strip("/")
+    if not raw:
+        raw = f"{DEFAULT_PUBLISHER}/glm-5.1"
+
+    if "/" in raw:
+        publisher, model_id = raw.split("/", 1)
+        model_id = model_id.strip("/")
+    else:
+        publisher = os.getenv("AUTHND_DEFAULT_PUBLISHER", DEFAULT_PUBLISHER).strip("/") or DEFAULT_PUBLISHER
+        model_id = raw
+
+    page_url = f"{BUILD_BASE_URL}/{publisher}/{_build_page_model_slug(model_id)}"
+    return publisher, model_id, page_url
+
+
+def _payload_model_name(model_path: str) -> str:
+    model = model_path.strip("/")
+    if model.startswith("stg/"):
+        return model
+    if os.getenv("AUTHND_ENABLE_STG_PREFIX", "0").lower() in ("1", "true", "yes"):
+        return f"stg/{model}"
+    return model
+
+
+def _payload_model_key(model: str) -> str:
+    return str(model or "").strip("/").lower()
+
+
+def _select_payload_model(metadata_payload_model: str, model_path: str, log_fn: Optional[Callable[[str], None]] = None) -> str:
+    requested_payload_model = _payload_model_name(model_path)
+    scraped_payload_model = str(metadata_payload_model or "").strip()
+    if not scraped_payload_model:
+        return requested_payload_model
+
+    if os.getenv("AUTHND_TRUST_PAGE_PAYLOAD_MODEL", "0").lower() in ("1", "true", "yes"):
+        return scraped_payload_model
+
+    requested_key = _payload_model_key(requested_payload_model)
+    scraped_key = _payload_model_key(scraped_payload_model)
+    if scraped_key == requested_key:
+        return scraped_payload_model
+
+    hidden_variant_prefixes = (requested_key + "-", requested_key + "_")
+    if any(scraped_key.startswith(prefix) for prefix in hidden_variant_prefixes):
+        _log(
+            log_fn,
+            f"AuthND: ignoring page payload model variant {scraped_payload_model!r}; using requested model {requested_payload_model!r}",
+        )
+        return requested_payload_model
+
+    return scraped_payload_model
+
+
+def _schema_output_token_limit(spec: Dict[str, Any]) -> Optional[int]:
+    """Read the chat POST input constraint, never examples or default values."""
+    def resolve(node, seen=()):
+        if not isinstance(node, dict):
+            return {}
+        ref = node.get('$ref')
+        if not ref:
+            return node
+        if not isinstance(ref, str) or not ref.startswith('#/') or ref in seen:
+            return {}
+        target = spec
+        for part in ref[2:].split('/'):
+            target = target.get(part.replace('~1', '/').replace('~0', '~'), {}) if isinstance(target, dict) else {}
+        return resolve(target, (*seen, ref))
+
+    def ceiling(node):
+        node = resolve(node)
+        bounds = []
+        maximum = node.get('maximum')
+        exclusive = node.get('exclusiveMaximum')
+        if isinstance(maximum, (int, float)) and not isinstance(maximum, bool) and math.isfinite(maximum):
+            bounds.append(math.ceil(maximum) - 1 if exclusive is True else math.floor(maximum))
+        if isinstance(exclusive, (int, float)) and not isinstance(exclusive, bool) and math.isfinite(exclusive):
+            bounds.append(math.ceil(exclusive) - 1)
+        for key in ('anyOf', 'oneOf'):
+            if isinstance(node.get(key), list):
+                branches = [resolve(branch) for branch in node[key]]
+                limits = [ceiling(branch) for branch in branches if branch.get('type') != 'null']
+                if limits and all(limit is not None for limit in limits):
+                    bounds.append(max(limits))
+        for branch in node.get('allOf', []):
+            limit = ceiling(branch)
+            if limit is not None:
+                bounds.append(limit)
+        return min(bounds) if bounds else None
+
+    def input_limit(node):
+        node = resolve(node)
+        limits = []
+        field = node.get('properties', {}).get('max_tokens')
+        if isinstance(field, dict):
+            limit = ceiling(field)
+            if limit is not None:
+                limits.append(limit)
+        for branch in node.get('allOf', []):
+            limit = input_limit(branch)
+            if limit is not None:
+                limits.append(limit)
+        return min(limits) if limits else None
+
+    for path, operation in spec.get('paths', {}).items():
+        if path.rstrip('/').endswith('/chat/completions'):
+            body = resolve(operation.get('post', {}).get('requestBody', {}))
+            schema = body.get('content', {}).get('application/json', {}).get('schema', {})
+            limit = input_limit(schema)
+            if limit is not None and limit > 0:
+                return limit
+    return None
+
+
+def _endpoint_output_token_limit(metadata, *, fetch=False, log_fn=None):
+    """Fetch the spec for the same namespace/artifact used by /predict."""
+    namespace = metadata.get('namespace') or DEFAULT_ORG_ID
+    endpoint = metadata.get('endpoint_id')
+    if not endpoint:
+        return None
+    url = f'{API_BASE_URL}/v2/endpoints/{quote(namespace, safe="")}/{quote(endpoint, safe="")}/spec'
+    with _metadata_lock:
+        cached = _endpoint_output_limits.get(url)
+    if cached is not None or not fetch:
+        return cached
+    try:
+        response = requests.get(url, headers={'accept': 'application/json', 'user-agent': USER_AGENT}, timeout=30)
+        try:
+            response.raise_for_status()
+            data = response.json()
+        finally:
+            response.close()
+        if data.get('namespace') != namespace or data.get('artifactName') != endpoint:
+            raise ValueError('endpoint spec identity does not match the prediction route')
+        spec = data.get('openAPISpec')
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        limit = _schema_output_token_limit(spec) if isinstance(spec, dict) else None
+    except (requests.RequestException, ValueError, TypeError, AttributeError, RecursionError) as error:
+        _log(log_fn, f'📝 AuthND: could not read the endpoint output limit: {_short_error(error)}')
+        return None
+    if limit is not None:
+        with _metadata_lock:
+            _endpoint_output_limits[url] = limit
+        _log(log_fn, f'📏 AuthND: endpoint {namespace}/{endpoint} declares max_tokens maximum={limit:,}')
+    else:
+        _log(log_fn, '📝 AuthND: endpoint schema does not declare a max_tokens maximum; keeping the original error.')
+    return limit
+
+
+def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
+    with _metadata_lock:
+        cached = _metadata_cache.get(page_url)
+        if cached:
+            return dict(cached)
+
+    response = requests.get(
+        page_url,
+        headers={"user-agent": USER_AGENT, "accept": "text/html,application/xhtml+xml"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    html = response.text or ""
+
+    def _match(patterns: Iterable[str]) -> str:
+        for pattern in patterns:
+            match = re.search(pattern, html)
+            if match:
+                return match.group(1)
+        return ""
+
+    def _matches(patterns: Iterable[str]) -> List[str]:
+        values: List[str] = []
+        for pattern in patterns:
+            values.extend(re.findall(pattern, html))
+        return values
+
+    function_id = os.getenv("AUTHND_NVCF_FUNCTION_ID", "").strip() or _match((
+        r'\\"nvcfFunctionId\\":\\"([^"\\]+)\\"',
+        r'"nvcfFunctionId"\s*:\s*"([^"]+)"',
+    ))
+    artifact_name = _match((
+        r'\\"artifactName\\":\\"([^"\\]+)\\"',
+        r'"artifactName"\s*:\s*"([^"]+)"',
+    ))
+    payload_model_candidates = _matches((
+        r'\\+"model\\+"\s*:\s*\\+"([^"\\]+)\\+"',
+        r'"model"\s*:\s*"([^"]+)"',
+    ))
+    # Next.js route state also contains a generic `model` field holding the
+    # Build page slug (for example ``glm-5-3-flash``).  It can precede the
+    # OpenAPI request example, whose publisher-qualified value is the actual
+    # chat payload model (``z-ai/glm-5.3-flash``).  Prefer that canonical ID
+    # instead of blindly accepting the first model-shaped field in the page.
+    payload_model = next(
+        (value for value in payload_model_candidates if "/" in value),
+        payload_model_candidates[0] if payload_model_candidates else "",
+    )
+    namespace = os.getenv("AUTHND_NGC_ORG", "").strip("/") or _match((
+        r'\\"namespace\\":\\"([^"\\]+)\\"',
+        r'"namespace"\s*:\s*"([^"]+)"',
+    )) or DEFAULT_ORG_ID
+
+    endpoint_id = os.getenv("AUTHND_PREDICT_ID", "").strip() or artifact_name or function_id
+    metadata = {
+        "endpoint_id": endpoint_id,
+        "function_id": function_id,
+        "artifact_name": artifact_name,
+        "namespace": namespace,
+        "payload_model": payload_model,
+    }
+    with _metadata_lock:
+        _metadata_cache[page_url] = dict(metadata)
+    return metadata
+
+
+def _catalog_label_values(entry: Dict[str, Any]) -> set:
+    """Return normalized values from the NGC search result's label variants."""
+    values = set()
+    labels = entry.get("labels", [])
+    if not isinstance(labels, list):
+        return values
+    for label in labels:
+        if isinstance(label, str):
+            candidates = (label,)
+        elif isinstance(label, dict):
+            candidates_list: List[Any] = []
+            for field in ("values", "unresolvedValues", "unresolved_values"):
+                field_values = label.get(field, [])
+                if isinstance(field_values, (list, tuple, set)):
+                    candidates_list.extend(field_values)
+                elif isinstance(field_values, str):
+                    candidates_list.append(field_values)
+            candidates = tuple(candidates_list)
+        else:
+            continue
+        for candidate in candidates:
+            value = str(candidate or "").strip().casefold()
+            if value:
+                values.add(value)
+                # Endpoint detail records sometimes qualify labels with a
+                # namespace, e.g. playgroundType:endpoint:playgroundtype_chat.
+                values.add(value.rsplit(":", 1)[-1])
+    return values
+
+
+def _catalog_entry_publisher(entry: Dict[str, Any]) -> str:
+    publisher = str(entry.get("publisher") or "").strip()
+    if publisher:
+        return publisher
+    labels = entry.get("labels", [])
+    if not isinstance(labels, list):
+        return ""
+    for label in labels:
+        if (
+            not isinstance(label, dict)
+            or str(label.get("key") or "").strip().casefold() != "publisher"
+        ):
+            continue
+        values = label.get("values", [])
+        if isinstance(values, str):
+            values = [values]
+        if isinstance(values, (list, tuple)):
+            publisher = next((str(value).strip() for value in values if str(value).strip()), "")
+            if publisher:
+                return publisher
+    return ""
+
+
+def _catalog_model_id(entry: Dict[str, Any]) -> Optional[str]:
+    """Return an AuthND-compatible ID for a free chat endpoint, if applicable."""
+    labels = _catalog_label_values(entry)
+    is_chat = bool(labels.intersection({"chat", "playgroundtype_chat"}))
+    is_free_endpoint = bool(labels.intersection({"free endpoint", "nim_type_preview"}))
+    if not is_chat or not is_free_endpoint:
+        return None
+
+    publisher = _catalog_entry_publisher(entry).strip("/")
+    display_name = str(
+        entry.get("displayName")
+        or entry.get("display_name")
+        or entry.get("name")
+        or ""
+    ).strip("/")
+    # NVIDIA's Build catalog exposes new Z.ai GLM versions using URL-slug
+    # spelling (glm-5-3[-flash]), while their OpenAI-compatible payload IDs
+    # use dotted version spelling (glm-5.3[-flash]).  Return the usable model
+    # ID from polling; _build_page_model_slug still supplies a valid page URL.
+    if publisher.casefold() == "z-ai":
+        display_name = re.sub(
+            r"^(glm-\d+)-(\d+)(?=$|-)",
+            r"\1.\2",
+            display_name,
+            flags=re.IGNORECASE,
+        )
+    model = f"{publisher}/{display_name}" if publisher and display_name else ""
+    if (
+        not model
+        or len(model) > 300
+        or any(character.isspace() for character in model)
+        or "//" in model
+    ):
+        raise ValueError(
+            "NVIDIA Build returned a free chat endpoint without a usable publisher/model ID"
+        )
+    return model
+
+
+def fetch_available_models(timeout: int = 15) -> List[str]:
+    """Return AuthND-compatible free chat IDs from NVIDIA's public Build catalog."""
+    request_timeout = max(1, int(round(timeout)))
+    resources: Dict[str, Dict[str, Any]] = {}
+    expected_total: Optional[int] = None
+
+    for page in range(CATALOG_MAX_PAGES):
+        query = {
+            "query": "*",
+            "filters": [{"field": "orgName", "value": DEFAULT_ORG_ID}],
+            "page": page,
+            "pageSize": CATALOG_PAGE_SIZE,
+        }
+        response = requests.get(
+            CATALOG_SEARCH_URL,
+            params={"q": json.dumps(query, separators=(",", ":"))},
+            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("NVIDIA Build returned a malformed endpoint catalog")
+        try:
+            page_total = int(payload["resultTotal"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("NVIDIA Build catalog did not include a valid result total") from exc
+        if page_total < 0 or (expected_total is not None and page_total != expected_total):
+            raise ValueError("NVIDIA Build catalog result total changed during pagination")
+        expected_total = page_total
+
+        added = 0
+        for group in payload["results"]:
+            if not isinstance(group, dict):
+                raise ValueError("NVIDIA Build returned a malformed catalog result group")
+            group_resources = group.get("resources", [])
+            if not isinstance(group_resources, list):
+                raise ValueError("NVIDIA Build returned a malformed catalog resource group")
+            for entry in group_resources:
+                if not isinstance(entry, dict):
+                    raise ValueError("NVIDIA Build returned a malformed endpoint record")
+                resource_id = str(entry.get("resourceId") or entry.get("resource_id") or "").strip()
+                if not resource_id:
+                    raise ValueError("NVIDIA Build returned an endpoint without a resource ID")
+                key = resource_id.casefold()
+                if key not in resources:
+                    resources[key] = entry
+                    added += 1
+
+        if len(resources) >= expected_total:
+            break
+        if not added:
+            raise RuntimeError(
+                f"NVIDIA Build catalog pagination stopped at {len(resources)}/{expected_total} endpoints"
+            )
+    else:
+        raise RuntimeError(
+            f"NVIDIA Build catalog exceeded {CATALOG_MAX_PAGES} pages "
+            f"with {len(resources)}/{expected_total or 0} endpoints"
+        )
+
+    if expected_total is None or len(resources) < expected_total:
+        raise RuntimeError(
+            f"NVIDIA Build catalog was incomplete ({len(resources)}/{expected_total or 0} endpoints)"
+        )
+
+    models: List[str] = []
+    seen_models = set()
+    for entry in resources.values():
+        model = _catalog_model_id(entry)
+        key = str(model or "").casefold()
+        if model and key not in seen_models:
+            seen_models.add(key)
+            models.append(model)
+    if not models:
+        raise ValueError("NVIDIA Build returned no compatible free chat model IDs")
+    return models
+
+
+def _content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type in (None, "text", "input_text"):
+                    parts.append(str(item.get("text") or ""))
+        return "\n".join(p for p in parts if p)
+    return str(content)
+
+
+def _image_part_url(item: Dict[str, Any]) -> str:
+    image_url = item.get("image_url")
+    image = item.get("image")
+    url = ""
+    mime = item.get("mime_type") or item.get("mimeType") or "image/png"
+
+    if isinstance(image_url, dict):
+        url = image_url.get("url") or image_url.get("data") or image_url.get("base64") or ""
+        mime = image_url.get("mime_type") or image_url.get("mimeType") or mime
+    elif isinstance(image_url, str):
+        url = image_url
+
+    if not url:
+        if isinstance(image, dict):
+            url = image.get("url") or image.get("data") or image.get("base64") or ""
+            mime = image.get("mime_type") or image.get("mimeType") or mime
+        elif isinstance(image, str):
+            url = image
+
+    if not url:
+        url = item.get("url") or item.get("data") or item.get("base64") or ""
+    url = str(url or "").strip()
+    if not url:
+        raise RuntimeError("AuthND image part is missing image_url.url/data/base64")
+    if url.startswith(("http://", "https://", "data:image/")):
+        return url
+    return f"data:{mime};base64,{url}"
+
+
+def _normalize_content(content: Any) -> Any:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    parts: List[Dict[str, Any]] = []
+    for item in content:
+        if isinstance(item, str):
+            if item:
+                parts.append({"type": "text", "text": item})
+            continue
+        if not isinstance(item, dict):
+            text = str(item or "")
+            if text:
+                parts.append({"type": "text", "text": text})
+            continue
+
+        item_type = str(item.get("type") or "").lower()
+        if item_type in ("", "text", "input_text"):
+            text = str(item.get("text") or "")
+            if text:
+                parts.append({"type": "text", "text": text})
+        elif item_type in ("image_url", "input_image", "image"):
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": _image_part_url(item)},
+            })
+
+    if not parts:
+        return ""
+    if all(part.get("type") == "text" for part in parts):
+        return "\n".join(str(part.get("text") or "") for part in parts if part.get("text"))
+    return parts
+
+
+def _prepend_system_content(content: Any, system_text: str) -> Any:
+    prefix = f"System instructions:\n{system_text}"
+    if isinstance(content, list):
+        return [{"type": "text", "text": prefix}, *content]
+    if content:
+        return f"{prefix}\n\n{content}"
+    return prefix
+
+
+def _normalize_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    system_parts: List[str] = []
+    normalized: List[Dict[str, Any]] = []
+
+    for message in messages or []:
+        role = str(message.get("role", "user")).lower()
+        raw_content = message.get("content")
+        content = _content_to_text(raw_content) if role == "system" else _normalize_content(raw_content)
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+            continue
+        if role not in ("user", "assistant"):
+            role = "user"
+        normalized.append({"role": role, "content": content})
+
+    if system_parts:
+        system_text = "\n\n".join(system_parts)
+        for message in normalized:
+            if message["role"] == "user":
+                message["content"] = _prepend_system_content(message.get("content"), system_text)
+                break
+        else:
+            normalized.insert(0, {"role": "user", "content": _prepend_system_content("", system_text)})
+
+    if not normalized:
+        normalized.append({"role": "user", "content": ""})
+    return normalized
+
+
+def _reasoning_toggle_enabled() -> bool:
+    shared_toggle = os.getenv("ENABLE_GPT_THINKING")
+    if shared_toggle is not None and shared_toggle.strip().lower() not in ("1", "true", "yes", "on", "enabled"):
+        return False
+
+    explicit = os.getenv("AUTHND_ENABLE_THINKING")
+    if explicit is not None:
+        if explicit.strip().lower() in ("0", "false", "no", "none", "off", "disabled"):
+            return False
+    return True
+
+
+def _reasoning_effort() -> str:
+    """Return the AuthND reasoning effort selected by shared GUI controls."""
+    if not _reasoning_toggle_enabled():
+        return "none"
+
+    explicit = os.getenv("AUTHND_ENABLE_THINKING")
+    shared_toggle = os.getenv("ENABLE_GPT_THINKING")
+    effort = (
+        os.getenv("AUTHND_REASONING_EFFORT")
+        or os.getenv("GPT_EFFORT")
+        or os.getenv("REASONING_EFFORT")
+        or ""
+    ).strip().lower()
+    if effort in ("0", "false", "no", "none", "off", "disabled"):
+        return "none"
+    if effort in ("low", "medium", "high", "xhigh", "max", "heavy"):
+        return effort
+
+    return "medium" if explicit is not None or shared_toggle is not None else "none"
+
+
+def _deepseek_v4_reasoning_effort(effort: str) -> str:
+    """Map shared reasoning choices to DeepSeek V4's none/low/high/max values."""
+    normalized = str(effort or "high").strip().lower()
+    if normalized in ("none", "low"):
+        return normalized
+    if normalized == "medium":
+        return "low"
+    if normalized in ("max", "heavy"):
+        return "max"
+    return "high"
+
+
+def _reasoning_control_configured() -> bool:
+    return any(
+        os.getenv(name) is not None
+        for name in ("AUTHND_ENABLE_THINKING", "AUTHND_REASONING_EFFORT", "GPT_EFFORT", "REASONING_EFFORT", "ENABLE_GPT_THINKING")
+    )
+
+
+def _reasoning_enabled() -> bool:
+    return _reasoning_control_configured() and _reasoning_effort() != "none"
+
+
+def _is_mistral_authnd_model(model_path: str) -> bool:
+    model_lower = (model_path or "").strip("/").lower()
+    if not model_lower:
+        return False
+    publisher, _, model_id = model_lower.partition("/")
+    return (
+        publisher in ("mistral", "mistralai", "mistral-ai")
+        or model_id.startswith(("mistral", "mixtral", "codestral", "devstral", "ministral", "magistral"))
+    )
+
+
+def _is_chat_template_unsupported_error(error: Any) -> bool:
+    return "chat_template is not supported" in str(error or "").lower()
+
+
+def _chat_template_cache_key(model_path: str) -> str:
+    return (model_path or "").strip("/").lower()
+
+
+def _model_requires_no_chat_template_kwargs(model_path: str) -> bool:
+    if _is_mistral_authnd_model(model_path):
+        return True
+    key = _chat_template_cache_key(model_path)
+    if not key:
+        return False
+    with _chat_template_unsupported_lock:
+        return key in _chat_template_unsupported_models
+
+
+def _remember_chat_template_unsupported_model(model_path: str) -> None:
+    key = _chat_template_cache_key(model_path)
+    if not key:
+        return
+    with _chat_template_unsupported_lock:
+        _chat_template_unsupported_models.add(key)
+
+
+def _apply_reasoning_payload(
+    payload: Dict[str, Any], model_path: str,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> None:
+    """
+    NVIDIA NIM uses model-specific reasoning controls:
+    - GPT-OSS supports top-level reasoning_effort: low/medium/high.
+    - Nemotron 3 Nano supports chat_template_kwargs.parallel_reasoning_mode.
+    - DeepSeek V4 supports top-level reasoning_effort: none/low/high/max.
+    - Kimi K3 supports top-level reasoning_effort: low/high/max.
+    - Other thinking models generally use chat_template_kwargs.enable_thinking.
+    """
+    if not _reasoning_control_configured():
+        return
+
+    model_lower = (model_path or "").lower()
+    effort = _reasoning_effort()
+    if re.search(r'(?:^|/)kimi-k3(?:$|[-_])', model_lower):
+        # https://docs.api.nvidia.com/nim/reference/moonshotai-kimi-k3-infer
+        # Map unsupported shared selections to the nearest documented level,
+        # preferring the lower level on a tie. K3 cannot disable reasoning.
+        selected = {'none': 'low', 'medium': 'low', 'xhigh': 'high', 'heavy': 'max'}.get(effort, effort)
+        payload['reasoning_effort'] = selected
+        if selected != effort:
+            # Every request makes the same substitution: say it once per session.
+            # Keyed on the mapping, so a changed effort setting is announced again.
+            with _effort_fallback_notes_lock:
+                first_time = ('kimi-k3', effort, selected) not in _effort_fallback_notes_logged
+                _effort_fallback_notes_logged.add(('kimi-k3', effort, selected))
+            if first_time:
+                _log(log_fn, f'📝 Kimi K3 does not support {effort}, using {selected} instead')
+        return
+    reasoning_disabled = not _reasoning_toggle_enabled() or (
+        effort == "none" and "deepseek-v4" not in model_lower
+    )
+    if _model_requires_no_chat_template_kwargs(model_lower):
+        return
+
+    def _kwargs() -> Dict[str, Any]:
+        existing = payload.setdefault("chat_template_kwargs", {})
+        return existing if isinstance(existing, dict) else {}
+
+    if reasoning_disabled:
+        kwargs = _kwargs()
+        kwargs["enable_thinking"] = False
+        if "nemotron-3-nano" in model_lower:
+            kwargs["parallel_reasoning_mode"] = "none"
+        payload["chat_template_kwargs"] = kwargs
+        return
+
+    if "gpt-oss" in model_lower:
+        payload["reasoning_effort"] = "high" if effort in ("xhigh", "max", "heavy") else effort
+        return
+
+    if "nemotron-3-nano" in model_lower:
+        kwargs = _kwargs()
+        kwargs["enable_thinking"] = True
+        kwargs["parallel_reasoning_mode"] = "heavy" if effort in ("high", "xhigh", "max", "heavy") else effort
+        payload["chat_template_kwargs"] = kwargs
+        return
+
+    if "deepseek-v4" in model_lower:
+        payload["reasoning_effort"] = _deepseek_v4_reasoning_effort(effort)
+
+    kwargs = _kwargs()
+    kwargs.setdefault("enable_thinking", True)
+    kwargs.setdefault("clear_thinking", False)
+    payload["chat_template_kwargs"] = kwargs
+
+
+def _reasoning_payload_status(payload: Dict[str, Any]) -> str:
+    """Describe controls present in the request, without inventing an effort."""
+    if 'reasoning_effort' in payload:
+        return f" (reasoning_effort: {payload['reasoning_effort']})"
+    kwargs = payload.get('chat_template_kwargs') or {}
+    if kwargs.get('enable_thinking') is False:
+        return " (thinking disabled)"
+    if 'parallel_reasoning_mode' in kwargs:
+        return f" (parallel reasoning: {kwargs['parallel_reasoning_mode']})"
+    if kwargs.get('enable_thinking') is True:
+        return " (thinking enabled)"
+    return ""
+
+
+def reasoning_status_label(model_path: str) -> str:
+    payload = {'model': model_path}
+    _apply_reasoning_payload(payload, model_path)
+    normalize_none_effort(payload)
+    return _reasoning_payload_status(payload)
+
+
+def _get_session() -> requests.Session:
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update({"user-agent": USER_AGENT})
+        _thread_local.session = session
+        with _active_sessions_lock:
+            _active_sessions.add(session)
+    return session
+
+
+def _post_with_cancel(session: requests.Session, *args, **kwargs) -> requests.Response:
+    """Run requests.post in a helper thread so AuthND hard-stop can return immediately.
+
+    Closing a requests.Session from another thread does not reliably interrupt a
+    blocking POST before a response object exists, especially on Windows. This
+    wrapper lets the caller observe _cancel_event and raise while the socket is
+    being torn down in the background.
+    """
+    result_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue(maxsize=1)
+    abandoned = threading.Event()
+    result_lock = threading.Lock()
+
+    def _run_post() -> None:
+        try:
+            response = session.post(*args, **kwargs)
+        except BaseException as exc:
+            try:
+                result_queue.put_nowait(("error", exc))
+            except Exception:
+                pass
+        else:
+            with result_lock:
+                if abandoned.is_set():
+                    response.close()
+                else:
+                    result_queue.put_nowait(("response", response))
+
+    worker = threading.Thread(target=_run_post, name="AuthNDRequest", daemon=True)
+    worker.start()
+    while True:
+        try:
+            kind, value = result_queue.get(timeout=0.1)
+        except queue.Empty:
+            if _is_cancelled():
+                with result_lock:
+                    abandoned.set()
+                    try:
+                        late_kind, late_value = result_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    else:
+                        if late_kind == "response":
+                            late_value.close()
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                raise RuntimeError("stream cancelled")
+            continue
+        if _is_cancelled():
+            try:
+                if kind == "response":
+                    value.close()
+            except Exception:
+                pass
+            raise RuntimeError("stream cancelled")
+        if kind == "error":
+            raise value
+        return value
+
+
+def _register_response_closer(closer: Callable[[], None]) -> Callable[[], None]:
+    with _active_response_lock:
+        _active_response_closers.add(closer)
+    return closer
+
+
+def _unregister_response_closer(closer: Callable[[], None]) -> None:
+    with _active_response_lock:
+        _active_response_closers.discard(closer)
+
+
+def _extract_json_from_process(stdout: str) -> Dict[str, Any]:
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    raise RuntimeError("AuthND token helper did not return JSON")
+
+
+def _is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _qtwebengine_chromium_flags(existing: str = "") -> str:
+    try:
+        tokens = shlex.split(existing or "")
+    except ValueError:
+        tokens = (existing or "").split()
+
+    # Linux users can run without usable GPU acceleration.  Disabling both GPU
+    # and Chromium's software rasterizer can make Qt WebEngine fail the page
+    # load before hCaptcha can be minted.
+    if not _env_bool("AUTHND_DISABLE_SOFTWARE_RASTERIZER", False):
+        tokens = [flag for flag in tokens if flag != "--disable-software-rasterizer"]
+
+    required_flags = [
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+    ]
+    seen = set()
+    merged = []
+    for flag in [*tokens, *required_flags]:
+        if flag in seen:
+            continue
+        seen.add(flag)
+        merged.append(flag)
+    return " ".join(merged)
+
+
+def _mint_captcha_token_subprocess(
+    page_url: str,
+    timeout: int,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> str:
+    if not mobile_runtime.subprocesses_available():
+        # Glossarion Mobile: no helper processes; get_captcha_token uses the browser driver.
+        raise browser_driver.BrowserUnavailable(browser_driver.unavailable_message("AuthND"))
+    helper_timeout = max(30, int(timeout))
+    if _is_frozen_app():
+        # In PyInstaller builds sys.executable is the Glossarion exe, not a
+        # Python interpreter.  Use a dedicated app-level helper argument so the
+        # child process mints a token and exits instead of launching the GUI.
+        cmd = [
+            sys.executable,
+            "--authnd-mint-token",
+            page_url,
+            "--timeout",
+            str(helper_timeout),
+        ]
+    else:
+        cmd = [
+            sys.executable,
+            os.path.abspath(__file__),
+            "--mint-token",
+            page_url,
+            "--timeout",
+            str(helper_timeout),
+        ]
+    env = os.environ.copy()
+    env["AUTHND_TOKEN_HELPER"] = "1"
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(env.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
+    env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
+    try:
+        from shutdown_utils import subprocess_no_window_kwargs
+        no_window_kwargs = subprocess_no_window_kwargs()
+    except Exception:
+        no_window_kwargs = {}
+
+    subprocess_gate = _get_configured_gate(
+        TOKEN_SUBPROCESS_CONCURRENCY_ENV,
+        DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT,
+    )
+    _acquire_gate(subprocess_gate, cancel_check=cancel_check)
+    proc = None
+    deadline = time.time() + helper_timeout + 20
+    stdout = ""
+    stderr = ""
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            **no_window_kwargs,
+        )
+        with _active_helper_lock:
+            _active_helper_processes.add(proc)
+        while proc.poll() is None:
+            if _is_cancelled() or (callable(cancel_check) and cancel_check()):
+                _terminate_process_tree(proc, kill=True)
+                raise RuntimeError("stream cancelled")
+            if time.time() >= deadline:
+                _terminate_process_tree(proc, kill=True)
+                raise RuntimeError(f"AuthND token helper timed out after {helper_timeout}s")
+            time.sleep(0.1)
+        try:
+            stdout, stderr = proc.communicate(timeout=1)
+        except Exception:
+            stdout, stderr = "", ""
+    finally:
+        if proc is not None:
+            with _active_helper_lock:
+                _active_helper_processes.discard(proc)
+        subprocess_gate.release()
+    if _is_cancelled() and proc.returncode:
+        raise RuntimeError("stream cancelled")
+    if proc.returncode != 0:
+        try:
+            result = _extract_json_from_process(stdout)
+            error = str(result.get("error") or "").strip()
+            if error:
+                raise RuntimeError(f"AuthND token helper failed ({proc.returncode}): {error}")
+        except RuntimeError as exc:
+            if str(exc).startswith("AuthND token helper failed"):
+                raise
+        detail = (stderr or stdout or "").strip()
+        raise RuntimeError(f"AuthND token helper failed ({proc.returncode}): {detail[-1200:]}")
+    result = _extract_json_from_process(stdout)
+    token = str(result.get("token") or "").strip()
+    if not token:
+        raise RuntimeError(f"AuthND token helper returned no token: {result}")
+    return token
+
+
+def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(
+        os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    )
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
+    from PySide6.QtCore import QEventLoop, QTimer, QUrl
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    created_app = False
+    if app is None:
+        app = QApplication(["authnd-token-helper"])
+        created_app = True
+
+    profile_root = os.path.join(
+        os.path.expanduser("~"),
+        ".glossarion",
+        "authnd_browser",
+        str(uuid.uuid4()),
+    )
+    os.makedirs(profile_root, exist_ok=True)
+
+    profile = QWebEngineProfile(f"authnd-{uuid.uuid4().hex}", app)
+    profile.setHttpUserAgent(USER_AGENT)
+    try:
+        profile.setPersistentStoragePath(profile_root)
+        profile.setCachePath(os.path.join(profile_root, "cache"))
+    except Exception:
+        pass
+
+    page = QWebEnginePage(profile, app)
+    try:
+        def _page_url() -> str:
+            try:
+                value = page.url()
+                return value.toString() if hasattr(value, "toString") else str(value)
+            except Exception:
+                return ""
+
+        def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
+            holder: Dict[str, Any] = {}
+            loop = QEventLoop()
+
+            def _done(value: Any) -> None:
+                holder["value"] = value
+                loop.quit()
+
+            page.runJavaScript(script, _done)
+            QTimer.singleShot(js_timeout_ms, loop.quit)
+            loop.exec()
+            return holder.get("value")
+
+        def _pump_events(delay_ms: int = 100) -> None:
+            loop = QEventLoop()
+            QTimer.singleShot(delay_ms, loop.quit)
+            loop.exec()
+
+        load_state: Dict[str, Any] = {
+            "generation": 0,
+            "finished_generation": -1,
+            "finished_at": 0.0,
+            "ok": False,
+            "error": "",
+            "last_event": "",
+        }
+
+        def _qt_value_text(value: Any) -> str:
+            try:
+                name = getattr(value, "name", "")
+                if name:
+                    return str(name)
+            except Exception:
+                pass
+            return str(value)
+
+        def _load_started() -> None:
+            load_state["generation"] = int(load_state.get("generation", 0)) + 1
+            load_state["finished_generation"] = -1
+            load_state["finished_at"] = 0.0
+            load_state["ok"] = False
+            load_state["error"] = ""
+            _captcha_debug(
+                "loadStarted "
+                f"generation={load_state['generation']} "
+                f"url={_captcha_debug_url(_page_url())}"
+            )
+
+        def _loaded(ok: bool) -> None:
+            generation = int(load_state.get("generation", 0))
+            load_state["ok"] = bool(ok)
+            load_state["finished_generation"] = generation
+            load_state["finished_at"] = time.monotonic() if ok else 0.0
+            try:
+                has_title = bool(str(page.title() or "").strip())
+            except Exception:
+                has_title = False
+            _captcha_debug(
+                "loadFinished "
+                f"generation={generation} ok={bool(ok)} has_title={has_title} "
+                f"url={_captcha_debug_url(_page_url())}"
+            )
+
+        def _loading_changed(info: Any) -> None:
+            try:
+                status_text = _qt_value_text(info.status())
+                status_lower = status_text.lower()
+                err = str(getattr(info, "errorString", lambda: "")() or "").strip()
+                code = getattr(info, "errorCode", lambda: "")()
+                domain = _qt_value_text(getattr(info, "errorDomain", lambda: "")())
+                info_url_obj = getattr(info, "url", lambda: None)()
+                info_url = ""
+                if info_url_obj is not None:
+                    info_url = info_url_obj.toString() if hasattr(info_url_obj, "toString") else str(info_url_obj)
+                detail_parts = [
+                    f"status={status_text}",
+                    f"error_domain={domain}",
+                    f"error_code={code}",
+                ]
+                if err:
+                    detail_parts.append(f"error={err}")
+                if info_url:
+                    detail_parts.append(f"url={_captcha_debug_url(info_url)}")
+                page_current_url = _page_url()
+                if page_current_url:
+                    detail_parts.append(f"current_url={_captcha_debug_url(page_current_url)}")
+                detail = ", ".join(detail_parts)
+                load_state["last_event"] = detail
+                if "loadfailed" in status_lower or "failed" in status_lower or "stopped" in status_lower:
+                    load_state["error"] = detail
+                _captcha_debug(f"loadingChanged generation={load_state['generation']} {detail}")
+            except Exception:
+                pass
+
+        page.loadStarted.connect(_load_started)
+        page.loadFinished.connect(_loaded)
+        try:
+            page.loadingChanged.connect(_loading_changed)
+        except Exception:
+            pass
+
+        return _mint_captcha_token_flow(
+            page_url,
+            timeout,
+            load=lambda url: page.load(QUrl(url)),
+            load_state=load_state,
+            current_url_fn=_page_url,
+            title_fn=page.title,
+            run_js=run_js,
+            pump_events=_pump_events,
+        )
+    finally:
+        try:
+            page.deleteLater()
+            profile.deleteLater()
+            cleanup_loop = QEventLoop()
+            QTimer.singleShot(100, cleanup_loop.quit)
+            cleanup_loop.exec()
+        except Exception:
+            pass
+        try:
+            from shutdown_utils import cleanup_generated_browser_profile_dir
+            cleanup_generated_browser_profile_dir(profile_root, "authnd_browser")
+        except Exception:
+            pass
+
+
+CAPTCHA_STATE_SCRIPT = (
+    "JSON.stringify({"
+    "marker: window.__authndInjectionMarker || '',"
+    "result: window.__authndResult || null,"
+    "readyState: document.readyState || ''"
+    "})"
+)
+
+
+def _captcha_injection_script(
+    marker: str,
+    sitekey: str,
+    onload_name: str,
+    captcha_wait_timeout_ms: int,
+) -> str:
+    """The page script that renders the invisible hCaptcha and executes it.
+
+    It records its progress and the token in ``window.__authndResult`` (tagged with
+    ``marker``, read back with CAPTCHA_STATE_SCRIPT) and evaluates to ``marker``.
+    """
+    return f"""
+(() => {{
+  const marker = {json.dumps(marker)};
+  const sitekey = {json.dumps(sitekey)};
+  const onloadName = {json.dumps(onload_name)};
+  const captchaWaitTimeoutMs = {captcha_wait_timeout_ms};
+  window.__authndInjectionMarker = marker;
+  window.__authndResult = {{marker, pending: true, step: "starting"}};
+  const isReady = () => Boolean(
+    window.hcaptcha && window.hcaptcha.render && window.hcaptcha.execute
+  );
+  const waitFor = (fn, timeoutMs = captchaWaitTimeoutMs) => new Promise((resolve, reject) => {{
+    const start = Date.now();
+    const tick = () => {{
+      try {{
+        if (fn()) return resolve(true);
+      }} catch (e) {{}}
+      if (Date.now() - start > timeoutMs) return reject(new Error("timeout waiting for hcaptcha"));
+      setTimeout(tick, 250);
+    }};
+    tick();
+  }});
+  const loadScript = () => new Promise((resolve, reject) => {{
+    if (isReady()) return resolve(true);
+    let settled = false;
+    const finish = () => {{
+      if (settled) return;
+      settled = true;
+      resolve(true);
+    }};
+    const fail = (error) => {{
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }};
+    window[onloadName] = finish;
+    const existing = document.querySelector("script[src*='hcaptcha.com/1/api.js']");
+    if (existing) {{
+      existing.addEventListener("error", () => fail(new Error("hcaptcha script failed")), {{once: true}});
+      waitFor(isReady).then(finish, fail);
+      return;
+    }}
+    const apiScript = document.createElement("script");
+    apiScript.src = "https://js.hcaptcha.com/1/api.js?render=explicit&onload=" + encodeURIComponent(onloadName);
+    apiScript.async = true;
+    apiScript.defer = true;
+    apiScript.onerror = () => fail(new Error("hcaptcha script failed"));
+    (document.head || document.documentElement).appendChild(apiScript);
+    waitFor(isReady).then(finish, fail);
+  }});
+  (async () => {{
+    try {{
+      window.__authndResult.step = "loading-script";
+      await loadScript();
+      await waitFor(isReady);
+      if (window.__authndInjectionMarker !== marker) return;
+      window.__authndResult.step = "rendering";
+      let container = document.getElementById("__authnd_hcaptcha");
+      if (!container) {{
+        container = document.createElement("div");
+        container.id = "__authnd_hcaptcha";
+        container.style.position = "fixed";
+        container.style.left = "-10000px";
+        container.style.top = "0";
+        (document.body || document.documentElement).appendChild(container);
+      }}
+      let widgetId = window.__authndWidgetId;
+      if (widgetId === undefined || widgetId === null) {{
+        widgetId = window.hcaptcha.render(container, {{sitekey, size: "invisible"}});
+        window.__authndWidgetId = widgetId;
+      }}
+      window.__authndResult.step = "executing";
+      const execResult = await window.hcaptcha.execute(widgetId, {{async: true}});
+      if (window.__authndInjectionMarker !== marker) return;
+      const token = (execResult && execResult.response) || window.hcaptcha.getResponse(widgetId) || "";
+      window.__authndResult = {{marker, pending: false, step: "complete", token, error: null}};
+    }} catch (error) {{
+      if (window.__authndInjectionMarker !== marker) return;
+      window.__authndResult = {{
+        marker,
+        pending: false,
+        step: "failed",
+        token: "",
+        error: String(error && (error.stack || error.message || error))
+      }};
+    }}
+  }})();
+  return marker;
+}})();
+"""
+
+
+def _mint_captcha_token_flow(
+    page_url: str,
+    timeout: int,
+    *,
+    load: Callable[[str], None],
+    load_state: Dict[str, Any],
+    current_url_fn: Callable[[], str],
+    title_fn: Callable[[], Any],
+    run_js: Callable[..., Any],
+    pump_events: Callable[[], None],
+) -> str:
+    """Mint the hCaptcha token on an open page; the QtWebEngine helper's flow.
+
+    Shared by ``_mint_captcha_token_qt`` (QtWebEngine) and ``_mint_captcha_token_driver`` (a
+    registered ``browser_driver`` page, e.g. Glossarion Mobile's hidden WebView): load the
+    model page, wait for a stable titled document, inject the invisible hCaptcha render +
+    execute, poll its result, and re-inject (at most CAPTCHA_MAX_INJECTION_ATTEMPTS times)
+    when a navigation replaces the document. ``load_state`` is the page's live load record
+    (keys of ``browser_driver.new_load_state``); ``run_js(script, js_timeout_ms)`` returns the
+    expression's value or None; ``pump_events()`` lets the page run for about 100 ms.
+    """
+    def _wait_for_stable_document(deadline: float) -> int:
+        while time.monotonic() < deadline:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            generation = int(load_state.get("generation", 0))
+            finished_generation = int(load_state.get("finished_generation", -1))
+            if load_state.get("ok") and finished_generation == generation:
+                current_url = current_url_fn()
+                try:
+                    title = str(title_fn() or "").strip()
+                except Exception:
+                    title = ""
+                finished_at = float(load_state.get("finished_at") or 0.0)
+                stable_for = time.monotonic() - finished_at if finished_at else 0.0
+                if (
+                    _is_injectable_captcha_document(current_url, title)
+                    and stable_for >= CAPTCHA_DOCUMENT_STABLE_SECONDS
+                ):
+                    _captcha_debug(
+                        "stable document "
+                        f"generation={generation} stable_for={stable_for:.2f}s "
+                        f"url={_captcha_debug_url(current_url)}"
+                    )
+                    return generation
+            pump_events()
+
+        detail = str(load_state.get("error") or load_state.get("last_event") or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(
+            f"AuthND browser did not reach a stable document for {_captcha_debug_url(page_url)}{suffix}"
+        )
+
+    # Treat AUTHND_TOKEN_TIMEOUT as one end-to-end browser-token deadline.
+    # Previously page loading and captcha initialization each received a
+    # fresh timeout, while the JavaScript SDK wait ignored the setting and
+    # always failed after 20 seconds.
+    deadline = time.monotonic() + max(timeout, 30)
+    initial_load_deadline = min(deadline, time.monotonic() + 60)
+    load(page_url)
+    stable_generation = _wait_for_stable_document(initial_load_deadline)
+
+    sitekey = os.getenv("AUTHND_HCAPTCHA_SITEKEY", DEFAULT_HCAPTCHA_SITEKEY)
+    injection_id = uuid.uuid4().hex
+    last_summary: Dict[str, Any] = {}
+    invalidation_detail = ""
+
+    for injection_attempt in range(1, CAPTCHA_MAX_INJECTION_ATTEMPTS + 1):
+        if injection_attempt > 1:
+            stable_generation = _wait_for_stable_document(deadline)
+
+        marker = f"{injection_id}:{injection_attempt}:{stable_generation}"
+        onload_name = f"__authndHcaptchaOnload_{injection_id}_{injection_attempt}"
+        captcha_wait_timeout_ms = max(
+            1000,
+            int(max(0.0, deadline - time.monotonic()) * 1000),
+        )
+        script = _captcha_injection_script(marker, sitekey, onload_name, captcha_wait_timeout_ms)
+        injected_marker = run_js(script, js_timeout_ms=10000)
+        if str(injected_marker or "") != marker:
+            invalidation_detail = (
+                f"attempt={injection_attempt}, generation={stable_generation}, marker was not installed"
+            )
+            _captcha_debug(f"injection invalidated immediately {invalidation_detail}")
+            continue
+
+        _captcha_debug(
+            f"injected attempt={injection_attempt} generation={stable_generation}"
+        )
+        last_debug_state: Optional[Tuple[Any, ...]] = None
+        while time.monotonic() < deadline:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+
+            current_generation = int(load_state.get("generation", 0))
+            if current_generation != stable_generation:
+                invalidation_detail = (
+                    f"attempt={injection_attempt}, generation={stable_generation}, "
+                    f"superseded_by={current_generation}"
+                )
+                _captcha_debug(f"injection invalidated by navigation {invalidation_detail}")
+                break
+
+            raw = run_js(CAPTCHA_STATE_SCRIPT, js_timeout_ms=5000)
+            current_generation = int(load_state.get("generation", 0))
+            if current_generation != stable_generation:
+                invalidation_detail = (
+                    f"attempt={injection_attempt}, generation={stable_generation}, "
+                    f"superseded_by={current_generation}"
+                )
+                _captcha_debug(f"injection invalidated by navigation {invalidation_detail}")
+                break
+            try:
+                snapshot = json.loads(raw or "{}")
+            except Exception:
+                snapshot = {}
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+
+            observed_marker = str(snapshot.get("marker") or "")
+            result = snapshot.get("result")
+            if not isinstance(result, dict):
+                result = {}
+            if observed_marker != marker or str(result.get("marker") or "") != marker:
+                invalidation_detail = (
+                    f"attempt={injection_attempt}, generation={stable_generation}, document marker disappeared"
+                )
+                _captcha_debug(f"injection state destroyed {invalidation_detail}")
+                break
+
+            last_summary = {
+                "attempt": injection_attempt,
+                "generation": stable_generation,
+                "pending": bool(result.get("pending", True)),
+                "step": str(result.get("step") or ""),
+                "error": _short_error(result.get("error") or ""),
+            }
+            debug_state = (
+                last_summary["pending"],
+                last_summary["step"],
+                bool(last_summary["error"]),
+            )
+            if debug_state != last_debug_state:
+                _captcha_debug(
+                    "captcha state "
+                    f"attempt={injection_attempt} generation={stable_generation} "
+                    f"pending={last_summary['pending']} step={last_summary['step']} "
+                    f"has_error={bool(last_summary['error'])}"
+                )
+                last_debug_state = debug_state
+
+            if result and not result.get("pending", True):
+                token = str(result.get("token") or "").strip()
+                if token:
+                    _captcha_debug(
+                        "token acquired "
+                        f"attempt={injection_attempt} generation={stable_generation} "
+                        f"token_length={len(token)}"
+                    )
+                    return token
+                raise RuntimeError(
+                    f"AuthND hCaptcha failed: {_short_error(result.get('error') or 'no token returned')}"
+                )
+            pump_events()
+
+        if time.monotonic() >= deadline:
+            break
+
+    if invalidation_detail:
+        raise RuntimeError(
+            "AuthND hCaptcha injection was invalidated after "
+            f"{CAPTCHA_MAX_INJECTION_ATTEMPTS} attempts: {invalidation_detail}"
+        )
+    raise RuntimeError(f"AuthND hCaptcha timed out: {last_summary}")
+
+
+def _mint_captcha_token_driver(
+    page_url: str,
+    timeout: int,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> str:
+    """``get_captcha_token`` on a page of the registered browser driver.
+
+    Glossarion Mobile has no helper processes: its hidden WebView runs the QtWebEngine
+    helper's flow (``_mint_captcha_token_flow``) in this worker thread. The page's blocking
+    calls end with "stream cancelled" on Stop (``cancel_stream``) or when the request is
+    cancelled (``cancel_check``, this thread's request scope).
+    """
+    driver = browser_driver.require_driver("AuthND")
+
+    def _cancelled() -> bool:
+        return _is_cancelled() or (callable(cancel_check) and bool(cancel_check()))
+
+    page = driver.open_page(owner=BROWSER_OWNER, user_agent=USER_AGENT, cancel_check=_cancelled)
+    try:
+        return _mint_captcha_token_flow(
+            page_url,
+            timeout,
+            load=page.load,
+            load_state=page.load_state,
+            current_url_fn=page.url,
+            title_fn=page.title,
+            run_js=page.run_js,
+            pump_events=page.wait,
+        )
+    finally:
+        page.close()
+
+
+def get_captcha_token(
+    page_url: str,
+    timeout: int = 90,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> str:
+    if browser_driver.use_driver("AUTHND_TOKEN_MODE"):
+        # Glossarion Mobile (no helper processes) or AUTHND_TOKEN_MODE=driver: a page of the
+        # registered browser driver (hidden WebView) runs the QtWebEngine helper's flow.
+        return _mint_captcha_token_driver(page_url, timeout, cancel_check=cancel_check)
+    mode = os.getenv("AUTHND_TOKEN_MODE", "subprocess").strip().lower()
+    if mode == "inline":
+        return _mint_captcha_token_qt(page_url, timeout)
+    return _mint_captcha_token_subprocess(
+        page_url,
+        timeout,
+        cancel_check=cancel_check,
+    )
+
+
+def _get_captcha_token_for_request(
+    page_url: str,
+    timeout: int = 90,
+    log_fn: Optional[Callable[[str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> str:
+    captcha_gate = _get_configured_gate(
+        TOKEN_CONCURRENCY_ENV,
+        DEFAULT_TOKEN_CONCURRENCY_LIMIT,
+    )
+    _acquire_gate(
+        captcha_gate,
+        log_fn=log_fn,
+        wait_message="⏳ AuthND: waiting for browser token slot",
+        cancel_check=cancel_check,
+    )
+    try:
+        return get_captcha_token(
+            page_url,
+            timeout,
+            cancel_check=cancel_check,
+        )
+    finally:
+        captcha_gate.release()
+
+
+def _extract_content_from_obj(obj: Any) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    choices = obj.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+        for candidate in (
+            delta.get("content"),
+            message.get("content"),
+            choice.get("text"),
+            choice.get("content"),
+        ):
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    for key in ("output_text", "text", "content", "response"):
+        value = obj.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _extract_reasoning_from_obj(obj: Any) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    choices = obj.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+        for candidate in (
+            delta.get("reasoning_content"),
+            delta.get("reasoning"),
+            delta.get("thinking"),
+            message.get("reasoning_content"),
+            message.get("reasoning"),
+            message.get("thinking"),
+            choice.get("reasoning_content"),
+            choice.get("reasoning"),
+            choice.get("thinking"),
+        ):
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        value = obj.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _extract_finish_reason(obj: Any) -> Optional[str]:
+    if not isinstance(obj, dict):
+        return None
+    choices = obj.get("choices")
+    if isinstance(choices, list) and choices:
+        reason = (choices[0] or {}).get("finish_reason")
+        if reason:
+            return str(reason)
+    reason = obj.get("finish_reason") or obj.get("stop_reason")
+    return str(reason) if reason else None
+
+
+def _usage_completion_tokens(usage: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not isinstance(usage, dict):
+        return None
+    for key in ("completion_tokens", "output_tokens", "generated_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _usage_reasoning_tokens(usage: Optional[Dict[str, Any]]) -> int:
+    if not isinstance(usage, dict):
+        return 0
+    for key in ("reasoning_tokens", "thinking_tokens", "thoughts_tokens", "thoughtsTokenCount"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict):
+        value = details.get("reasoning_tokens")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return 0
+
+
+def _infer_finish_reason(
+    *,
+    explicit_finish_reason: Optional[str],
+    content: str,
+    usage: Optional[Dict[str, Any]],
+    requested_max_tokens: Optional[int],
+    saw_done: bool,
+    saw_event: bool,
+    stream: bool,
+) -> Tuple[str, bool, str]:
+    if explicit_finish_reason:
+        return explicit_finish_reason, True, "provider"
+
+    completion_tokens = _usage_completion_tokens(usage)
+    if requested_max_tokens and completion_tokens is not None and completion_tokens >= int(requested_max_tokens):
+        return "length", False, "completion_tokens_reached_max_tokens"
+
+    if not (content or "").strip():
+        if saw_done or saw_event or not stream:
+            return "error", False, "empty_content_without_finish_reason"
+        return "incomplete", False, "no_content_no_done"
+
+    if stream and not saw_done:
+        return "incomplete", False, "stream_ended_without_done"
+
+    return "stop", False, "done_without_finish_reason"
+
+
+def _iter_utf8_lines(byte_iter: Iterable[Any]) -> Iterable[str]:
+    """Yield text lines from raw SSE bytes, decoded explicitly as UTF-8.
+
+    This avoids letting requests/httpx infer text encodings from platform or
+    headers, which is how UTF-8 punctuation can be decoded incorrectly before
+    JSON parsing sees it.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    buffer = ""
+    for chunk in byte_iter:
+        if not chunk:
+            continue
+        if isinstance(chunk, str):
+            text = chunk
+        else:
+            text = decoder.decode(bytes(chunk), final=False)
+        buffer += text
+        while True:
+            newline = buffer.find("\n")
+            if newline < 0:
+                break
+            line = buffer[:newline]
+            buffer = buffer[newline + 1:]
+            yield line.rstrip("\r")
+
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        buffer += tail
+    if buffer:
+        yield buffer.rstrip("\r")
+
+
+def _parse_sse_lines(
+    line_iter: Iterable[Any],
+    *,
+    close_fn: Optional[Callable[[], None]] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    log_stream: bool = True,
+    t_start: Optional[float] = None,
+    headers_received_at: Optional[float] = None,
+    requested_max_tokens: Optional[int] = None,
+) -> Dict[str, Any]:
+    parts: List[str] = []
+    reasoning_parts: List[str] = []
+    finish_reason: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
+    raw_tail: List[Any] = []
+    text_log_buf: List[str] = []
+    thought_log_buf: List[str] = []
+    first_token_ts: Optional[float] = None
+    thinking_started = False
+    thinking_ended = False
+    thinking_chunks = 0
+    thinking_start_ts: Optional[float] = None
+    stream_started_ts = t_start or time.time()
+    stream_thinking = _stream_thinking_logging_enabled()
+    saw_done = False
+    saw_event = False
+
+    def _mark_first_token() -> None:
+        nonlocal first_token_ts
+        if first_token_ts is None:
+            first_token_ts = time.time()
+            if log_stream:
+                total_wait = first_token_ts - stream_started_ts
+                timing = ""
+                if headers_received_at is not None:
+                    header_wait = max(0.0, headers_received_at - stream_started_ts)
+                    token_wait = max(0.0, first_token_ts - headers_received_at)
+                    timing = (
+                        f" (response headers {header_wait:.1f}s; "
+                        f"post-header queue/prefill {token_wait:.1f}s)"
+                    )
+                _log(
+                    log_fn,
+                    f"📡 AuthND: First token in {total_wait:.1f}s{timing}, streaming...",
+                )
+
+    def _emit_stream_text(fragment: str) -> None:
+        if not log_fn or not log_stream or not fragment:
+            return
+        text_log_buf.append(fragment.replace("\x1f", "\\x1F"))
+        combined = "".join(text_log_buf)
+        for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+            combined = combined.replace(tag, tag + "\n")
+        if "\n" in combined:
+            lines = combined.split("\n")
+            for line in lines[:-1]:
+                if line:
+                    log_fn(line)
+            text_log_buf[:] = [lines[-1]]
+        elif len(combined) >= 160:
+            log_fn(combined)
+            text_log_buf.clear()
+
+    def _emit_thinking(fragment: str) -> None:
+        nonlocal thinking_started, thinking_chunks, thinking_start_ts
+        if not fragment:
+            return
+        if not thinking_started:
+            thinking_started = True
+            thinking_start_ts = time.time()
+            thinking_chunks = 0
+            if log_fn and log_stream and stream_thinking:
+                log_fn("🧠 [authnd] Thinking...")
+        thinking_chunks += 1
+        if not log_fn or not log_stream or not stream_thinking:
+            return
+        thought_log_buf.append(fragment.replace("\\n", "\n").replace("\x1f", "\\x1F"))
+        combined = "".join(thought_log_buf)
+        if "\n" in combined:
+            lines = combined.split("\n")
+            for line in lines[:-1]:
+                log_fn(f"    {line}")
+            thought_log_buf[:] = [lines[-1]]
+        elif len(combined) >= 160:
+            log_fn(f"    {combined}")
+            thought_log_buf.clear()
+
+    def _finish_thinking_before_text() -> None:
+        nonlocal thinking_ended
+        if not thinking_started or thinking_ended:
+            return
+        thinking_ended = True
+        if not log_fn or not log_stream or not stream_thinking:
+            thought_log_buf.clear()
+            return
+        remainder = "".join(thought_log_buf).rstrip("\n")
+        if remainder:
+            for line in remainder.split("\n"):
+                log_fn(f"    {line}")
+        thought_log_buf.clear()
+        duration = time.time() - (thinking_start_ts or stream_started_ts)
+        log_fn(f"🧠 [authnd] Thinking complete ({thinking_chunks} chunks, {duration:.1f}s)")
+        log_fn("─" * 50)
+        log_fn("📡 Text streaming...")
+
+    for raw_line in line_iter:
+        if _is_cancelled():
+            if close_fn:
+                close_fn()
+            raise RuntimeError("stream cancelled")
+        if isinstance(raw_line, bytes):
+            raw_line = raw_line.decode("utf-8", errors="replace")
+        if not raw_line:
+            continue
+        line = raw_line.strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if not line or line == "[DONE]":
+            if line == "[DONE]":
+                saw_done = True
+                break
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        saw_event = True
+        raw_tail.append(obj)
+        if len(raw_tail) > 5:
+            raw_tail.pop(0)
+        text = _extract_content_from_obj(obj)
+        reasoning = _extract_reasoning_from_obj(obj)
+        if reasoning:
+            _mark_first_token()
+            reasoning_parts.append(reasoning)
+            _emit_thinking(reasoning)
+        if text:
+            _mark_first_token()
+            _finish_thinking_before_text()
+            parts.append(text)
+            _emit_stream_text(text)
+        reason = _extract_finish_reason(obj)
+        if reason:
+            finish_reason = reason
+        if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
+            usage = obj.get("usage")
+
+    if log_fn and log_stream and text_log_buf:
+        remainder = "".join(text_log_buf).strip()
+        if remainder:
+            log_fn(remainder)
+    if log_fn and log_stream and stream_thinking and thinking_started and not thinking_ended:
+        remainder = "".join(thought_log_buf).rstrip("\n")
+        if remainder:
+            for line in remainder.split("\n"):
+                log_fn(f"    {line}")
+        duration = time.time() - (thinking_start_ts or stream_started_ts)
+        log_fn(f"🧠 [authnd] Thinking complete ({thinking_chunks} chunks, {duration:.1f}s)")
+    thinking_tokens = _usage_reasoning_tokens(usage)
+    if log_fn and log_stream:
+        if thinking_tokens:
+            log_fn(f"   💭 Thinking tokens used: {thinking_tokens:,}")
+        elif reasoning_parts:
+            estimated_tokens = max(1, len("".join(reasoning_parts)) // 4)
+            log_fn(f"   💭 Thinking tokens used: ~{estimated_tokens:,}")
+    if log_stream:
+        _log(log_fn, f"📡 AuthND: Stream finished in {time.time() - stream_started_ts:.1f}s")
+
+    content = "".join(parts)
+    final_finish_reason, finish_reason_explicit, finish_reason_inference = _infer_finish_reason(
+        explicit_finish_reason=finish_reason,
+        content=content,
+        usage=usage,
+        requested_max_tokens=requested_max_tokens,
+        saw_done=saw_done,
+        saw_event=saw_event,
+        stream=True,
+    )
+
+    return {
+        "content": content,
+        "finish_reason": final_finish_reason,
+        "finish_reason_explicit": finish_reason_explicit,
+        "finish_reason_inference": finish_reason_inference,
+        "usage": usage,
+        "reasoning_content": "".join(reasoning_parts) if reasoning_parts else None,
+        "raw_response": raw_tail,
+    }
+
+
+def _parse_sse_response(
+    response: requests.Response,
+    *,
+    log_fn: Optional[Callable[[str], None]] = None,
+    log_stream: bool = True,
+    t_start: Optional[float] = None,
+    headers_received_at: Optional[float] = None,
+    requested_max_tokens: Optional[int] = None,
+) -> Dict[str, Any]:
+    return _parse_sse_lines(
+        _iter_utf8_lines(response.iter_content(chunk_size=1)),
+        close_fn=response.close,
+        log_fn=log_fn,
+        log_stream=log_stream,
+        t_start=t_start,
+        headers_received_at=headers_received_at,
+        requested_max_tokens=requested_max_tokens,
+    )
+
+
+def _parse_json_response(response: requests.Response, *, requested_max_tokens: Optional[int] = None) -> Dict[str, Any]:
+    try:
+        obj = response.json()
+    except ValueError:
+        text = response.text or ""
+        final_finish_reason, finish_reason_explicit, finish_reason_inference = _infer_finish_reason(
+            explicit_finish_reason=None,
+            content=text,
+            usage=None,
+            requested_max_tokens=requested_max_tokens,
+            saw_done=True,
+            saw_event=bool(text),
+            stream=False,
+        )
+        return {
+            "content": text,
+            "finish_reason": final_finish_reason,
+            "finish_reason_explicit": finish_reason_explicit,
+            "finish_reason_inference": finish_reason_inference,
+            "usage": None,
+            "reasoning_content": None,
+            "raw_response": text,
+        }
+
+    finish_reason = _extract_finish_reason(obj)
+    content = _extract_content_from_obj(obj)
+    reasoning = _extract_reasoning_from_obj(obj)
+    usage = obj.get("usage") if isinstance(obj, dict) else None
+    final_finish_reason, finish_reason_explicit, finish_reason_inference = _infer_finish_reason(
+        explicit_finish_reason=finish_reason,
+        content=content,
+        usage=usage,
+        requested_max_tokens=requested_max_tokens,
+        saw_done=True,
+        saw_event=True,
+        stream=False,
+    )
+
+    return {
+        "content": content,
+        "finish_reason": final_finish_reason,
+        "finish_reason_explicit": finish_reason_explicit,
+        "finish_reason_inference": finish_reason_inference,
+        "usage": usage,
+        "reasoning_content": reasoning or None,
+        "raw_response": obj,
+    }
+
+
+def _log_non_stream_summary(
+    result: Dict[str, Any],
+    *,
+    log_fn: Optional[Callable[[str], None]],
+    started_at: float,
+) -> None:
+    if not log_fn:
+        return
+    content = str(result.get("content") or "")
+    reasoning = str(result.get("reasoning_content") or "")
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
+    elapsed = time.time() - started_at
+    _log(log_fn, f"📡 AuthND: Non-stream response finished in {elapsed:.1f}s ({len(content):,} chars)")
+    thinking_tokens = _usage_reasoning_tokens(usage)
+    if thinking_tokens:
+        _log(log_fn, f"   💭 Thinking tokens used: {thinking_tokens:,}")
+    elif reasoning:
+        estimated_tokens = max(1, len(reasoning) // 4)
+        _log(log_fn, f"   💭 Thinking tokens used: ~{estimated_tokens:,}")
+    else:
+        _log(log_fn, "   💭 Thinking tokens used: 0")
+
+
+class _AuthNDHTTPError(RuntimeError):
+    def __init__(self, status_code, headers, body, reason=''):
+        super().__init__(_authnd_http_error_message(status_code, headers, body, reason))
+        self.status_code = status_code
+        self.body = body
+
+
+def _raise_for_status(response: requests.Response) -> None:
+    if 200 <= response.status_code < 300:
+        return
+    error = _AuthNDHTTPError(
+        response.status_code, response.headers, response.text or "", response.reason,
+    )
+    response.close()
+    raise error
+
+
+def _httpx_status_error(resp: Any) -> RuntimeError:
+    headers = getattr(resp, "headers", {}) or {}
+    reason = getattr(resp, "reason_phrase", "") or ""
+    try:
+        body = resp.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        body = ""
+    return _AuthNDHTTPError(resp.status_code, headers, body, reason)
+
+
+def _post_prediction(
+    *,
+    messages: List[Dict[str, Any]],
+    model_id: str,
+    model_path: str,
+    page_url: str,
+    captcha_token: str,
+    temperature: Optional[float],
+    max_tokens: Optional[int],
+    top_p: Optional[float],
+    frequency_penalty: Optional[float],
+    presence_penalty: Optional[float],
+    timeout: int,
+    connect_timeout: Optional[float],
+    stream: bool,
+    log_stream: Optional[bool] = None,
+    progress_label: Optional[str] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    suppress_chat_template_kwargs: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    metadata: Optional[Dict[str, str]] = None,
+    request_parameters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    metadata = dict(metadata) if metadata is not None else _resolve_model_metadata(page_url)
+    org_id = metadata.get("namespace") or DEFAULT_ORG_ID
+    endpoint_id = metadata.get("endpoint_id") or model_id
+    payload_model = _select_payload_model(metadata.get("payload_model") or "", model_path, log_fn=log_fn)
+    url = f"{PREDICT_API_BASE_URL}/v2/predict/models/{org_id}/{endpoint_id}"
+    payload: Dict[str, Any] = {
+        "messages": messages,
+        "model": payload_model,
+        "stream": bool(stream),
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens:
+        payload["max_tokens"] = int(max_tokens)
+        known_limit = _endpoint_output_token_limit(metadata)
+        if known_limit is not None and payload['max_tokens'] > known_limit:
+            _log(log_fn, f'📝 AuthND: using endpoint max_tokens maximum={known_limit:,} '
+                 f'instead of {payload["max_tokens"]:,}.')
+            payload['max_tokens'] = known_limit
+    if top_p is not None:
+        payload["top_p"] = float(top_p)
+    if frequency_penalty is not None:
+        payload["frequency_penalty"] = float(frequency_penalty)
+    if presence_penalty is not None:
+        payload["presence_penalty"] = float(presence_penalty)
+    _apply_reasoning_payload(payload, model_path, log_fn=log_fn)
+    normalize_none_effort(payload, lambda message: _log(log_fn, message))
+    if suppress_chat_template_kwargs:
+        payload.pop("chat_template_kwargs", None)
+    payload.update(normalize_request_parameters(request_parameters))
+    if "max_tokens" in payload:
+        known_limit = _endpoint_output_token_limit(metadata)
+        try:
+            requested_max_tokens = int(payload["max_tokens"])
+        except (TypeError, ValueError):
+            requested_max_tokens = None
+        if known_limit is not None and requested_max_tokens is not None and requested_max_tokens > known_limit:
+            payload["max_tokens"] = known_limit
+
+    _log(
+        log_fn,
+        "🔎 AuthND debug: "
+        + json.dumps(
+            {
+                "url": url,
+                "page_url": page_url,
+                "metadata": {
+                    "namespace": org_id,
+                    "endpoint_id": endpoint_id,
+                    "function_id": metadata.get("function_id") or "",
+                    "artifact_name": metadata.get("artifact_name") or "",
+                    "payload_model": payload_model,
+                },
+                "payload": _payload_summary(payload),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        debug_only=True,
+    )
+
+    request_id = str(uuid.uuid4())
+    headers = {
+        "accept": "text/event-stream" if stream else "application/json",
+        "content-type": "application/json",
+        "accept-encoding": "identity",
+        "origin": BUILD_BASE_URL,
+        "referer": page_url,
+        "host": "buildapi.ngc.nvidia.com",
+        "nv-captcha-token": captcha_token,
+        "user-agent": USER_AGENT,
+    }
+    if os.getenv("AUTHND_LEGACY_EXTRA_HEADERS", "0").lower() in ("1", "true", "yes"):
+        headers.update({
+            "nv-function-id": endpoint_id,
+            "nv-model-name": model_path,
+            "nv-session-id": str(uuid.uuid4()),
+            "nvcf-request-id": request_id,
+        })
+    _log(
+        log_fn,
+        "🔎 AuthND debug headers: "
+        + json.dumps(
+            {
+                "accept": headers["accept"],
+                "origin": headers["origin"],
+                "referer": headers["referer"],
+                "legacy_extra_headers": "nv-function-id" in headers,
+                "nv-captcha-token-length": len(captcha_token or ""),
+                "local_request_id": request_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        debug_only=True,
+    )
+
+    def check_retry_cancel():
+        # The caller's request-scoped check owns the graceful pre-dispatch
+        # boundary.  Once the provider call is claimed, graceful stop must let
+        # the active HTTP stream finish; _is_cancelled() still handles hard
+        # stop and request-local force cancellation immediately.
+        if _is_cancelled() or (callable(cancel_check) and cancel_check()):
+            raise RuntimeError("stream cancelled")
+
+    sent = False
+    limit_retried = False
+
+    def send(request):
+        nonlocal sent
+        check_retry_cancel()
+        request_headers = dict(headers)
+        if sent:
+            # A rejected prediction consumes its captcha token too.
+            request_headers['nv-captcha-token'] = _get_captcha_token_for_request(
+                page_url, _env_int('AUTHND_TOKEN_TIMEOUT', min(max(timeout, 60), 180)),
+                log_fn=log_fn, cancel_check=cancel_check,
+            )
+        check_retry_cancel()
+        sent = True
+        return _send_prediction_payload(
+            request, url=url, headers=request_headers, timeout=timeout,
+            connect_timeout=connect_timeout, stream=stream, log_fn=log_fn,
+            log_stream=log_stream, progress_label=progress_label, max_tokens=request.get('max_tokens'),
+        )
+
+    def reduce_to_endpoint_limit(request, failure):
+        nonlocal limit_retried
+        if limit_retried or not request.get('max_tokens'):
+            return False
+        try:
+            requested_limit = int(request['max_tokens'])
+        except (TypeError, ValueError):
+            return False
+        check_retry_cancel()
+        limit = _endpoint_output_token_limit(metadata, fetch=True, log_fn=log_fn)
+        check_retry_cancel()
+        if limit is None or requested_limit <= limit:
+            return False
+        limit_retried = True
+        _log(log_fn, f'📝 AuthND: {failure} with max_tokens={requested_limit:,}; '
+             f'retrying with the endpoint-declared maximum of {limit:,}.')
+        request['max_tokens'] = limit
+        return True
+
+    def send_with_endpoint_limit(request):
+        try:
+            result = send(request)
+        except _AuthNDHTTPError as error:
+            message = str(error).lower()
+            if (error.status_code != 400 or limit_retried or not request.get('max_tokens')
+                    or any(marker in message for marker in ('captcha', 'token is invalid', 'reasoning', 'chat_template'))):
+                raise
+            if not reduce_to_endpoint_limit(request, 'HTTP 400'):
+                raise
+            return send(request)
+        # NVIDIA can return HTTP 200 and an empty completed stream when the
+        # requested limit exceeds its endpoint constraint. Check the same
+        # authoritative schema before handing this response to global retry.
+        # Missing finish_reason alone does not establish a token-limit error.
+        if (not result.get('finish_reason_explicit')
+                and result.get('finish_reason_inference') == 'empty_content_without_finish_reason'
+                and not str(result.get('content') or '').strip()
+                and reduce_to_endpoint_limit(request, 'empty response without finish_reason')):
+            return send(request)
+        return result
+
+    return call_with_reasoning_retry(
+        send_with_endpoint_limit,
+        payload, lambda message: _log(log_fn, message), check_retry_cancel,
+    )
+
+
+@_interruptible_transport
+def _send_prediction_payload(
+    payload: Dict[str, Any], *, url: str, headers: Dict[str, str],
+    timeout: int, connect_timeout: Optional[float], stream: bool,
+    log_fn: Optional[Callable[[str], None]], log_stream: Optional[bool],
+    progress_label: Optional[str], max_tokens: Optional[int],
+) -> Dict[str, Any]:
+    """Send the prepared payload, preserving HTTP error details for effort repair."""
+    if progress_label:
+        # Replace the earlier status with the controls actually being sent,
+        # including any adjustment made by the reasoning compatibility retry.
+        progress_label = re.sub(
+            r" \((?:thinking (?:enabled|disabled)|reasoning_effort:|parallel reasoning:)[^)]*\)$",
+            "", progress_label,
+        ) + _reasoning_payload_status(payload)
+    request_started = time.time()
+    if _is_cancelled():
+        raise RuntimeError("stream cancelled")
+    if stream:
+        try:
+            import httpx as _httpx
+
+            _timeout = _httpx.Timeout(timeout, connect=connect_timeout)
+            with _httpx_stream(_httpx,
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+                timeout=_timeout,
+            ) as response:
+                headers_received_at = time.time()
+                closer = _register_response_closer(response.close)
+                if _is_cancelled():
+                    _unregister_response_closer(closer)
+                    raise RuntimeError("stream cancelled")
+                _log(
+                    log_fn,
+                    f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}, transport=httpx",
+                    debug_only=True,
+                )
+                if not 200 <= response.status_code < 300:
+                    exc = _httpx_status_error(response)
+                    if _is_cancelled():
+                        _unregister_response_closer(closer)
+                        raise RuntimeError("stream cancelled")
+                    _log(log_fn, f"⚠️ AuthND HTTP failure: {_short_error(exc)}")
+                    _unregister_response_closer(closer)
+                    raise exc
+                if _is_cancelled():
+                    try:
+                        response.close()
+                    finally:
+                        _unregister_response_closer(closer)
+                    raise RuntimeError("stream cancelled")
+                if progress_label:
+                    _log(log_fn, progress_label)
+                header_wait = max(0.0, headers_received_at - request_started)
+                nvcf_status = str(response.headers.get("nvcf-status", "") or "").strip()
+                nvcf_reqid = str(response.headers.get("nvcf-reqid", "") or "").strip()
+                nvcf_details = ""
+                if nvcf_status:
+                    nvcf_details += f"; NVCF status={nvcf_status}"
+                if nvcf_reqid:
+                    nvcf_details += f"; request={nvcf_reqid[:12]}"
+                _log(
+                    log_fn,
+                    "⏳ AuthND: NVIDIA queue / prefill — response headers "
+                    f"received in {header_wait:.1f}s; waiting for first token"
+                    f"{nvcf_details}",
+                )
+                if log_stream is None or log_stream:
+                    _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code}, transport=httpx)")
+                try:
+                    return _parse_sse_lines(
+                        _iter_utf8_lines(response.iter_raw()),
+                        close_fn=response.close,
+                        log_fn=log_fn,
+                        log_stream=_stream_logging_enabled() if log_stream is None else bool(log_stream),
+                        t_start=request_started,
+                        headers_received_at=headers_received_at,
+                        requested_max_tokens=max_tokens,
+                    )
+                finally:
+                    _unregister_response_closer(closer)
+        except ImportError:
+            _log(log_fn, "⚠️ AuthND: httpx not installed, falling back to requests (streaming may be buffered)")
+
+    request_timeout: Any = timeout
+    if connect_timeout is not None:
+        request_timeout = (connect_timeout, timeout)
+
+    session = _get_session()
+    if _is_cancelled():
+        raise RuntimeError("stream cancelled")
+    response = _post_with_cancel(
+        session,
+        url,
+        headers=headers,
+        json=payload,
+        timeout=request_timeout,
+        stream=stream,
+        allow_redirects=False,
+    )
+    headers_received_at = time.time()
+    response_closer = _register_response_closer(response.close)
+    try:
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
+        _log(
+            log_fn,
+            f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}",
+            debug_only=True,
+        )
+        if not 200 <= response.status_code < 300:
+            _log(
+                log_fn,
+                f"⚠️ AuthND HTTP failure: {_authnd_http_error_message(response.status_code, response.headers, response.text or '', response.reason)}",
+            )
+        _raise_for_status(response)
+        content_type = (response.headers.get("content-type") or "").lower()
+        if stream or "text/event-stream" in content_type:
+            if _is_cancelled():
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                raise RuntimeError("stream cancelled")
+            if progress_label:
+                _log(log_fn, progress_label)
+            header_wait = max(0.0, headers_received_at - request_started)
+            nvcf_status = str(response.headers.get("nvcf-status", "") or "").strip()
+            nvcf_reqid = str(response.headers.get("nvcf-reqid", "") or "").strip()
+            nvcf_details = ""
+            if nvcf_status:
+                nvcf_details += f"; NVCF status={nvcf_status}"
+            if nvcf_reqid:
+                nvcf_details += f"; request={nvcf_reqid[:12]}"
+            _log(
+                log_fn,
+                "⏳ AuthND: NVIDIA queue / prefill — response headers "
+                f"received in {header_wait:.1f}s; waiting for first token"
+                f"{nvcf_details}",
+            )
+            if log_stream is None or log_stream:
+                _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code})")
+            closer = _register_response_closer(response.close)
+            try:
+                return _parse_sse_response(
+                    response,
+                    log_fn=log_fn,
+                    log_stream=_stream_logging_enabled() if log_stream is None else bool(log_stream),
+                    t_start=request_started,
+                    headers_received_at=headers_received_at,
+                    requested_max_tokens=max_tokens,
+                )
+            finally:
+                _unregister_response_closer(closer)
+        result = _parse_json_response(response, requested_max_tokens=max_tokens)
+        _log_non_stream_summary(result, log_fn=log_fn, started_at=request_started)
+        return result
+    finally:
+        _unregister_response_closer(response_closer)
+        response.close()
+
+
+@_request_scope
+def send_chat_completion(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    top_p: Optional[float] = None,
+    frequency_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
+    timeout: Optional[int] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    connect_timeout: Optional[float] = None,
+    account_id: int = 0,
+    stream: Optional[bool] = None,
+    log_stream: Optional[bool] = None,
+    progress_label: Optional[str] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    before_send_callback: Optional[Callable[[], None]] = None,
+    request_parameters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    del account_id  # AuthND has no account slots; kept for unified handler symmetry.
+    def _request_cancelled() -> bool:
+        return _is_cancelled() or (
+            callable(cancel_check) and bool(cancel_check())
+        )
+
+    if _request_cancelled():
+        raise RuntimeError("stream cancelled")
+
+    publisher, model_id, page_url = _normalize_model(model)
+    model_path = f"{publisher}/{model_id}"
+    suppress_chat_template_kwargs = _model_requires_no_chat_template_kwargs(model_path)
+    timeout_value = int(timeout or _env_int("AUTHND_TIMEOUT", DEFAULT_TIMEOUT))
+    token_timeout = _env_int("AUTHND_TOKEN_TIMEOUT", min(max(timeout_value, 60), 180))
+    use_stream = stream
+    if use_stream is None:
+        use_stream = os.getenv("AUTHND_STREAM", "1").lower() not in ("0", "false", "no")
+
+    normalized_messages = _normalize_messages(messages)
+    # Resolve the public Build-page route before minting the short-lived captcha
+    # token.  A cold metadata lookup is an extra network request; doing it after
+    # token acquisition made that local delay look like NVIDIA queue time and
+    # unnecessarily consumed part of the token's usable lifetime.
+    if log_fn:
+        log_fn(f"🌐 AuthND: resolving NVIDIA Build route for {page_url}")
+    metadata = _resolve_model_metadata(page_url)
+    if log_fn:
+        log_fn(f"🌐 AuthND: opening browser token flow for {page_url}")
+    _log(
+        log_fn,
+        "🔎 AuthND debug request: "
+        + json.dumps(
+            {
+                "model_path": model_path,
+                "page_url": page_url,
+                "timeouts": {"request": timeout_value, "token": token_timeout, "connect": connect_timeout},
+                "stream": bool(use_stream),
+                "params": {
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "top_p": top_p,
+                    "frequency_penalty": frequency_penalty,
+                    "presence_penalty": presence_penalty,
+                    "reasoning_enabled": _reasoning_enabled(),
+                    "reasoning_effort": _reasoning_effort(),
+                },
+                "messages": _message_summary(normalized_messages),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        debug_only=True,
+    )
+    last_error: Optional[Exception] = None
+
+    for attempt in range(2):
+        if _request_cancelled():
+            raise RuntimeError("stream cancelled")
+        try:
+            if callable(cancel_check):
+                captcha_token = _get_captcha_token_for_request(
+                    page_url,
+                    token_timeout,
+                    log_fn=log_fn,
+                    cancel_check=cancel_check,
+                )
+            else:
+                captcha_token = _get_captcha_token_for_request(
+                    page_url,
+                    token_timeout,
+                    log_fn=log_fn,
+                )
+        except RuntimeError as exc:
+            if _request_cancelled() or "cancelled" in str(exc).lower():
+                raise RuntimeError("stream cancelled") from exc
+            error_detail = _short_error(exc)
+            _log(
+                log_fn,
+                f"⚠️ AuthND captcha token flow failed (attempt {attempt + 1}/2): "
+                f"{error_detail}{_captcha_token_failure_hint(exc)}",
+            )
+            if attempt == 0:
+                _log(log_fn, "🔁 AuthND: retrying captcha token flow with a fresh browser helper")
+                continue
+            raise
+        if _request_cancelled():
+            raise RuntimeError("stream cancelled")
+        _log(
+            log_fn,
+            f"🔎 AuthND debug: captcha token acquired (length={len(captcha_token)})",
+            debug_only=True,
+        )
+        _log(log_fn, "📨 AuthND: captcha token acquired; sending NVIDIA request")
+        _log(
+            log_fn,
+            "⏳ AuthND: NVIDIA queue / prefill — request submitted; "
+            "waiting for response headers",
+        )
+        if callable(before_send_callback):
+            before_send_callback()
+        post_progress_label = progress_label or f"📤 [{threading.current_thread().name}] API call in progress"
+        try:
+            result = _post_prediction(
+                messages=normalized_messages,
+                model_id=model_id,
+                model_path=model_path,
+                page_url=page_url,
+                captcha_token=captcha_token,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                frequency_penalty=frequency_penalty,
+                presence_penalty=presence_penalty,
+                timeout=timeout_value,
+                connect_timeout=connect_timeout,
+                stream=bool(use_stream),
+                log_stream=log_stream,
+                progress_label=post_progress_label,
+                log_fn=log_fn,
+                suppress_chat_template_kwargs=suppress_chat_template_kwargs,
+                cancel_check=cancel_check,
+                metadata=metadata,
+                request_parameters=request_parameters,
+            )
+            result["model"] = model_id
+            result["page_url"] = page_url
+            return result
+        except RuntimeError as exc:
+            last_error = exc
+            message = str(exc).lower()
+            if isinstance(exc, ReasoningEffortRejected):
+                raise
+            if (
+                _is_chat_template_unsupported_error(exc)
+                and _reasoning_control_configured()
+                and not suppress_chat_template_kwargs
+            ):
+                _remember_chat_template_unsupported_model(model_path)
+                suppress_chat_template_kwargs = True
+                if log_fn:
+                    log_fn(
+                        "AuthND: NVIDIA rejected chat_template_kwargs; "
+                        "caching this model without chat template controls and retrying once"
+                    )
+                result = _post_prediction(
+                    messages=normalized_messages,
+                    model_id=model_id,
+                    model_path=model_path,
+                    page_url=page_url,
+                    captcha_token=captcha_token,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    frequency_penalty=frequency_penalty,
+                    presence_penalty=presence_penalty,
+                    timeout=timeout_value,
+                    connect_timeout=connect_timeout,
+                    stream=bool(use_stream),
+                    log_stream=log_stream,
+                    progress_label=post_progress_label,
+                    log_fn=log_fn,
+                    suppress_chat_template_kwargs=True,
+                    cancel_check=cancel_check,
+                    request_parameters=request_parameters,
+                )
+                result["model"] = model_id
+                result["page_url"] = page_url
+                return result
+            is_context_length_error = (
+                "maximum context length" in message
+                or "max context length" in message
+            )
+            is_captcha_error = (
+                "captcha" in message
+                or "nv-captcha" in message
+                or "hcaptcha" in message
+            )
+            if attempt == 0 and is_captcha_error and not is_context_length_error:
+                if log_fn:
+                    log_fn(f"⚠️ AuthND: captcha token was rejected; retrying with a fresh browser token ({_short_error(exc)})")
+                continue
+            raise
+
+    raise RuntimeError(f"AuthND request failed: {last_error}")
+
+
+def _read_cli_text(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    if value == "-":
+        return sys.stdin.read()
+    return value
+
+
+def _read_cli_file(path: Optional[str]) -> str:
+    if not path:
+        return ""
+    if path == "-":
+        return sys.stdin.read()
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _load_cli_messages(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    if args.messages:
+        with open(args.messages, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict) and isinstance(data.get("messages"), list):
+            data = data["messages"]
+        if not isinstance(data, list):
+            raise ValueError("--messages must contain a JSON list or an object with a messages list")
+        return data
+
+    prompt = _read_cli_text(args.prompt) or _read_cli_file(args.prompt_file)
+    if not prompt and not sys.stdin.isatty():
+        prompt = sys.stdin.read()
+    if not prompt:
+        raise ValueError("provide --prompt, --prompt-file, --messages, or pipe prompt text on stdin")
+
+    messages: List[Dict[str, Any]] = []
+    if args.system:
+        messages.append({"role": "system", "content": _read_cli_text(args.system)})
+    elif args.system_file:
+        messages.append({"role": "system", "content": _read_cli_file(args.system_file)})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def _main() -> int:
+    for stream_name in ("stdout", "stderr"):
+        stream_obj = getattr(sys, stream_name, None)
+        if hasattr(stream_obj, "reconfigure"):
+            try:
+                stream_obj.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+    parser = argparse.ArgumentParser(
+        description="Send chat requests through NVIDIA Build's browser-backed AuthND route.",
+    )
+    parser.add_argument("--mint-token", dest="page_url", help=argparse.SUPPRESS)
+    parser.add_argument("--model", default="z-ai/glm-5.1", help="Model path, e.g. deepseek-ai/deepseek-v4-flash")
+    parser.add_argument("--prompt", help="User prompt text. Use '-' to read stdin.")
+    parser.add_argument("--prompt-file", help="UTF-8 file containing the user prompt. Use '-' to read stdin.")
+    parser.add_argument("--system", help="Optional system prompt text. Use '-' to read stdin.")
+    parser.add_argument("--system-file", help="UTF-8 file containing the system prompt.")
+    parser.add_argument("--messages", help="JSON file containing messages list or {'messages': [...]}.")
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--top-p", type=float)
+    parser.add_argument("--frequency-penalty", type=float)
+    parser.add_argument("--presence-penalty", type=float)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--token-timeout", type=int, help="Browser captcha token timeout in seconds.")
+    parser.add_argument("--connect-timeout", type=float)
+    parser.add_argument("--stream", dest="stream", action="store_true", default=None, help="Force SSE streaming.")
+    parser.add_argument("--no-stream", dest="stream", action="store_false", help="Disable SSE streaming.")
+    parser.add_argument("--json", action="store_true", help="Print the full result object as JSON.")
+    parser.add_argument("--output", help="Write final content to a UTF-8 file.")
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress logs.")
+    parser.add_argument("--debug", action="store_true", help="Enable sanitized AuthND debug logs.")
+    args = parser.parse_args()
+    if args.page_url:
+        try:
+            token = _mint_captcha_token_qt(args.page_url, args.timeout)
+            print(json.dumps({"token": token}, separators=(",", ":")), flush=True)
+            return 0
+        except Exception as exc:
+            message = _short_error(exc)
+            print(json.dumps({"error": message}, separators=(",", ":")), flush=True)
+            print(f"AuthND token helper error: {message}", file=sys.stderr)
+            return 1
+
+    if args.debug:
+        os.environ["AUTHND_DEBUG"] = "1"
+    if args.token_timeout:
+        os.environ["AUTHND_TOKEN_TIMEOUT"] = str(args.token_timeout)
+
+    try:
+        messages = _load_cli_messages(args)
+        log_fn = None
+        if not args.quiet:
+            log_fn = lambda message: print(message, file=sys.stderr, flush=True)
+        result = send_chat_completion(
+            messages=messages,
+            model=args.model,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            top_p=args.top_p,
+            frequency_penalty=args.frequency_penalty,
+            presence_penalty=args.presence_penalty,
+            timeout=args.timeout,
+            connect_timeout=args.connect_timeout,
+            stream=args.stream,
+            log_fn=log_fn,
+        )
+    except Exception as exc:
+        print(f"AuthND error: {_short_error(exc)}", file=sys.stderr)
+        return 1
+
+    content = str(result.get("content") or "")
+    if args.output:
+        with open(args.output, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+    else:
+        print(content, flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

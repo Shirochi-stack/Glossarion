@@ -1,0 +1,1074 @@
+#!/usr/bin/env python3
+"""
+PDF Generation Worker - Runs PDF generation in a separate process to prevent GUI freezing.
+
+Protocol:
+  - Receives a JSON config file path as argv[1]
+  - Outputs [PROGRESS], [INFO], [ERROR], [RESULT] lines to stdout
+  - The config file contains all parameters needed for PDF generation
+"""
+
+from safe_image import open_image
+
+import sys
+import os
+import io
+from pathlib import Path
+
+# Add parent directory to path for imports (before the first project import)
+sys.path.insert(0, str(Path(__file__).parent))
+
+import mobile_runtime
+
+# Force UTF-8 encoding for stdout/stderr on Windows (including when piped as subprocess).
+# Skipped where subprocesses are unavailable: there this module runs in-process
+# (pdf_generation_manager) and must not replace the host's streams.
+if hasattr(sys.stdout, 'buffer') and mobile_runtime.subprocesses_available():
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+import json
+import time
+import traceback
+import mimetypes
+import base64
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+from pdf_bookmarks import (
+    remove_pdf_source_page_break_markers,
+    replace_with_chapter_bookmarks,
+)
+
+# In-process mode (run_pdf_generation(emit=..., should_stop=...), used by
+# pdf_generation_manager where subprocesses are unavailable): protocol lines
+# go to the emit callback instead of stdout. Module-wide rather than
+# thread-local because the heartbeat threads log too; _INPROCESS_LOCK keeps
+# in-process runs from overlapping. The subprocess protocol is unchanged.
+_EMIT = None
+_SHOULD_STOP = None
+_INPROCESS_LOCK = threading.Lock()
+
+
+class PdfGenerationStopped(Exception):
+    """Raised in in-process mode once ``should_stop()`` returns True."""
+
+
+def _write_line(line):
+    """Write one protocol line: stdout in the worker process, else the emit callback."""
+    emit = _EMIT
+    if emit is None:
+        print(line, flush=True)
+    else:
+        emit(line)
+
+
+def _stop_requested():
+    should_stop = _SHOULD_STOP
+    return bool(should_stop is not None and should_stop())
+
+
+def _raise_if_stopped():
+    if _stop_requested():
+        raise PdfGenerationStopped("PDF generation stopped by user")
+
+
+def failure_protocol_lines(exc, tb):
+    """The [ERROR]/[RESULT] lines the worker reports for an unhandled failure."""
+    return [
+        f"[ERROR] PDF generation failed: {exc}",
+        f"[ERROR] {tb}",
+        f'[RESULT] {json.dumps({"success": False, "error": str(exc), "traceback": tb})}',
+    ]
+
+
+def log(msg):
+    """Output a progress message to stdout for the manager to read."""
+    _write_line(f"[PROGRESS] {msg}")
+
+
+def info(msg):
+    """Output an info message."""
+    _write_line(f"[INFO] {msg}")
+
+
+def _merge_rapid_pdf_shards(
+    prefix_documents,
+    render_results,
+    pdf_path,
+    chapters_order,
+    chapter_page_map,
+    settings,
+):
+    """Merge process-rendered bookmark shards without re-laying out HTML."""
+    import fitz
+
+    merge_started = time.time()
+    merged = fitz.open()
+    temporary_path = f"{pdf_path}.rapid.tmp.pdf"
+    try:
+        if os.path.isfile(temporary_path):
+            os.remove(temporary_path)
+
+        prefix_pages = 0
+        for document_index, document in enumerate(prefix_documents, 1):
+            source = fitz.open(
+                stream=document.write_pdf(),
+                filetype="pdf",
+            )
+            try:
+                merged.insert_pdf(source, links=True, annots=True)
+                prefix_pages += source.page_count
+            finally:
+                source.close()
+            log(f"  📎 Merged prefix document {document_index}/"
+                f"{len(prefix_documents)} ({prefix_pages} prefix page(s))")
+
+        chapter_pages = 0
+        input_merge_started = time.time()
+        for position, result in enumerate(render_results, 1):
+            source = fitz.open(result["path"])
+            try:
+                merged.insert_pdf(source, links=True, annots=True)
+                chapter_pages += source.page_count
+            finally:
+                source.close()
+            log(f"  📎 Merged bookmark render job {position}/"
+                f"{len(render_results)}: {chapter_pages} chapter page(s)")
+        log(f"  ✅ Merged {len(render_results)} rendered input PDF(s) in "
+            f"{time.time() - input_merge_started:.1f}s")
+
+        if settings.get('page_numbers') and chapter_pages:
+            numbering_started = time.time()
+            alignment = str(settings.get('page_number_alignment') or 'center')
+            align_code = {
+                'left': fitz.TEXT_ALIGN_LEFT,
+                'center': fitz.TEXT_ALIGN_CENTER,
+                'right': fitz.TEXT_ALIGN_RIGHT,
+            }.get(alignment, fitz.TEXT_ALIGN_CENTER)
+            log(f"  🔢 Adding {chapter_pages} continuous page number(s), "
+                f"alignment={alignment}")
+            for local_index in range(chapter_pages):
+                page = merged[prefix_pages + local_index]
+                rect = page.rect
+                footer = fitz.Rect(
+                    rect.x0 + 15,
+                    rect.y1 - 28,
+                    rect.x1 - 15,
+                    rect.y1 - 10,
+                )
+                page.insert_textbox(
+                    footer,
+                    str(local_index + 1),
+                    fontsize=10,
+                    fontname="helv",
+                    color=(0.35, 0.35, 0.35),
+                    fill_opacity=0.55,
+                    align=align_code,
+                    overlay=True,
+                )
+            log(f"  ✅ Continuous page numbers added in "
+                f"{time.time() - numbering_started:.1f}s")
+
+        outline_started = time.time()
+        outline = []
+        seen_sources = set()
+        for source_filename, chapter_number, title in chapters_order:
+            source_key = str(source_filename or '')
+            if source_key in seen_sources or not str(title or '').strip():
+                continue
+            seen_sources.add(source_key)
+            page_number = int(chapter_page_map.get(chapter_number, 1) or 1)
+            page_number = max(1, min(page_number, merged.page_count))
+            outline.append([1, str(title).strip(), page_number])
+        if outline:
+            merged.set_toc(outline)
+            log(f"  🔖 Added {len(outline)} bookmark outline entries in "
+                f"{time.time() - outline_started:.1f}s")
+
+        log(f"  💾 Saving merged rapid PDF ({merged.page_count} total page(s))")
+        save_started = time.time()
+        merged.save(
+            temporary_path,
+            # ``merged`` is a brand-new document assembled exclusively from
+            # the rendered inputs, so there are no abandoned objects to
+            # garbage-collect. Repacking every object into object streams
+            # made the final save noticeably CPU-bound on image-heavy books.
+            garbage=0,
+            deflate=False,
+            use_objstms=0,
+        )
+        log(f"  ✅ Merged PDF serialization finished in "
+            f"{time.time() - save_started:.1f}s")
+    except BaseException:
+        try:
+            if os.path.isfile(temporary_path):
+                os.remove(temporary_path)
+        except OSError:
+            pass
+        raise
+    finally:
+        merged.close()
+
+    os.replace(temporary_path, pdf_path)
+    elapsed = time.time() - merge_started
+    log(f"  ✅ Rapid merge and write complete in {elapsed:.1f}s")
+    return prefix_pages + chapter_pages
+
+
+
+
+
+def _build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map):
+    """Build HTML for PDF table of contents with clickable links and page numbers"""
+    import html as _html
+
+    toc_html = (
+        '<html><head><style>'
+        'body { font-family: serif; margin: 40px; }'
+        'h1 { text-align: center; margin-bottom: 30px; }'
+        '* { bookmark-level: none !important; }'
+        'ul { list-style-type: none; padding: 0; margin: 0; }'
+        'li { margin-bottom: 6px; padding: 4px 0; border-bottom: 1px dotted #ccc; }'
+        'a { text-decoration: none; color: #333; display: flex; justify-content: space-between; }'
+        'a:hover { color: #0066cc; text-decoration: underline; }'
+        '.title { flex: 1; }'
+        '.page-num { font-weight: bold; min-width: 40px; text-align: right; margin-left: 10px; }'
+        '</style></head><body>'
+        '<h1>Table of Contents</h1><ul>'
+    )
+
+    _dedup_on = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+    _seen_titles = set()
+
+    for chap_num in sorted(chapter_titles_info.keys()):
+        title, confidence, source = chapter_titles_info[chap_num]
+        if title.strip().lower() in ('untitled chapter', 'untitled'):
+            continue
+        if _dedup_on:
+            if title in _seen_titles:
+                continue
+            _seen_titles.add(title)
+        safe_title = _html.escape(title)
+
+        page_num = ""
+        if settings.get('toc_numbers') and chapter_page_map:
+            page_num = chapter_page_map.get(chap_num, "")
+            if not page_num and source:
+                page_num = chapter_page_map.get(source, "")
+            page_num = str(page_num) if page_num else ""
+
+        page_span = f'<span class="page-num">{page_num}</span>' if page_num else ''
+        toc_html += f'<li><a href="#chapter-{chap_num}"><span class="title">{safe_title}</span>{page_span}</a></li>'
+
+    toc_html += '</ul></body></html>'
+    return toc_html
+
+
+def run_pdf_generation(config_path, emit=None, should_stop=None):
+    """Main PDF generation logic, extracted from epub_converter._generate_pdf.
+
+    With ``emit``/``should_stop`` (in-process mode, used where subprocesses
+    are unavailable) every protocol line is passed to ``emit(line)`` instead
+    of stdout, and ``should_stop()`` is polled between render phases
+    (PdfGenerationStopped is raised). Without them this is the subprocess
+    worker, unchanged.
+    """
+    if emit is None and should_stop is None:
+        return _run_pdf_generation(config_path)
+    global _EMIT, _SHOULD_STOP
+    with _INPROCESS_LOCK:
+        _EMIT, _SHOULD_STOP = emit, should_stop
+        try:
+            return _run_pdf_generation(config_path)
+        finally:
+            _EMIT, _SHOULD_STOP = None, None
+
+
+def _run_pdf_generation(config_path):
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+
+    # Restore environment variables from config
+    for key, val in config.get('env_vars', {}).items():
+        os.environ[key] = str(val)
+
+    output_dir = config['output_dir']
+    images_dir = config['images_dir']
+    css_dir = config['css_dir']
+    html_files = config['html_files']
+    # chapter_titles_info keys must be integers
+    chapter_titles_info = {int(k): tuple(v) for k, v in config['chapter_titles_info'].items()}
+    processed_images = config.get('processed_images', {})
+    cover_file = config.get('cover_file')
+    metadata = config.get('metadata', {})
+
+    # Ensure fontconfig is available on Windows for WeasyPrint
+    import tempfile as _tempfile
+    if not os.environ.get("FONTCONFIG_FILE"):
+        _fc_dir = _tempfile.mkdtemp(prefix="fontconfig_")
+        _fc_path = os.path.join(_fc_dir, "fonts.conf")
+        if not os.path.exists(_fc_path):
+            with open(_fc_path, "w", encoding="utf-8") as _f:
+                _f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+                         '<fontconfig><dir>WINDOWSFONTDIR</dir>'
+                         '<cachedir>~/.cache/fontconfig</cachedir></fontconfig>\n')
+        os.environ["FONTCONFIG_FILE"] = _fc_path
+        os.environ["FONTCONFIG_PATH"] = _fc_dir
+        os.environ["FC_CONFIG_FILE"] = _fc_path
+
+    import pdf_mupdf_html
+    if pdf_mupdf_html.is_selected():
+        from pdf_mupdf_html import HTML as WeasyHTML
+        log(f"📄 PDF engine: {pdf_mupdf_html.ENGINE_NAME} (PyMuPDF Story, WeasyPrint subset)")
+    else:
+        try:
+            from weasyprint import HTML as WeasyHTML
+        except ImportError:
+            log("⚠️ WeasyPrint not installed - PDF generation disabled.")
+            _write_line(f'[RESULT] {json.dumps({"success": False, "error": "WeasyPrint not installed"})}')
+            return
+
+    log("📄 Generating PDF...")
+    start_time = time.time()
+
+    settings = {
+        'page_numbers': os.environ.get('PDF_PAGE_NUMBERS', '1') == '1',
+        'page_number_alignment': os.environ.get('PDF_PAGE_NUMBER_ALIGNMENT', 'center'),
+        'toc': os.environ.get('PDF_GENERATE_TOC', '1') == '1',
+        'toc_numbers': os.environ.get('PDF_TOC_PAGE_NUMBERS', '1') == '1',
+    }
+
+    # Determine PDF output path. Keep this dependency lightweight: importing
+    # the full EPUB converter here adds roughly nine seconds of startup time
+    # before any PDF rendering begins.
+    try:
+        from pdf_output_naming import safe_pdf_output_stem
+        book_title = metadata.get('title', os.path.basename(output_dir))
+        safe_title = safe_pdf_output_stem(
+            book_title,
+            output_dir,
+            extension=".pdf",
+        )
+    except Exception:
+        book_title = metadata.get('title', os.path.basename(output_dir))
+        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', str(book_title or "")).strip().rstrip(' .') or 'file'
+    pdf_path = os.path.join(output_dir, f"{safe_title}.pdf")
+
+    log(f"  PDF output: {pdf_path}")
+    log(f"  Settings: page_numbers={settings['page_numbers']}, toc={settings['toc']}, "
+        f"toc_numbers={settings['toc_numbers']}, alignment={settings['page_number_alignment']}")
+    compression_enabled = os.environ.get('ENABLE_IMAGE_COMPRESSION', '0') == '1'
+    if compression_enabled:
+        img_quality = os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
+        log(f"  Image: compression=enabled, quality={img_quality}")
+    else:
+        log("  Image: compression=disabled")
+
+    # --- Build image lookup ---
+    _mime_fallback = {
+        '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.png': 'image/png', '.gif': 'image/gif', '.bmp': 'image/bmp',
+        '.svg': 'image/svg+xml',
+    }
+    images_by_name = {}
+    if os.path.isdir(images_dir):
+        for fname in os.listdir(images_dir):
+            fpath = os.path.join(images_dir, fname)
+            if os.path.isfile(fpath):
+                ctype, _ = mimetypes.guess_type(fpath)
+                if not ctype:
+                    ctype = _mime_fallback.get(os.path.splitext(fname)[1].lower())
+                if ctype and ctype.startswith('image/'):
+                    images_by_name[fname] = (fpath, ctype)
+                    base = os.path.splitext(fname)[0]
+                    images_by_name[base] = (fpath, ctype)
+
+    # --- Map / pre-convert images for WeasyPrint ---
+    _fast_rendering = os.environ.get('PDF_FAST_RENDERING', '0') == '1'
+    _pdf_images_dir = os.path.join(output_dir, '_pdf_images')
+    _img_path_cache = {}  # maps lookup key -> relative path from output_dir
+    _unique_images = {}
+    for key, (fpath, ctype) in images_by_name.items():
+        if fpath not in _unique_images:
+            _unique_images[fpath] = (ctype, [])
+        _unique_images[fpath][1].append(key)
+
+    num_images = len(_unique_images)
+    if num_images > 0:
+        # Count how many webp images need conversion
+        _webp_count = sum(1 for _, (ct, _) in _unique_images.items() if ct == 'image/webp')
+        # Fast rendering converts: all images when compression ON, webp only when compression OFF
+        _convert_count = num_images if (_fast_rendering and compression_enabled) else (_webp_count if _fast_rendering else 0)
+
+        if _fast_rendering and _convert_count > 0:
+            _target_fmt = 'JPEG' if compression_enabled else 'PNG'
+            if compression_enabled:
+                log(f"  🖼️ Fast Rendering: converting {num_images} images → {_target_fmt}...")
+            else:
+                log(f"  🖼️ Fast Rendering: converting {_webp_count} webp → {_target_fmt} ({num_images} total images)...")
+            os.makedirs(_pdf_images_dir, exist_ok=True)
+            num_workers = int(os.environ.get('EXTRACTION_WORKERS', '4'))
+            num_workers = max(1, min(num_workers, _convert_count))
+
+            _img_done = [0]
+            _img_lock = threading.Lock()
+            _img_stop = threading.Event()
+            _img_start = time.time()
+
+            def _img_heartbeat():
+                while not _img_stop.is_set():
+                    if _img_stop.wait(3.0):
+                        break
+                    with _img_lock:
+                        done = _img_done[0]
+                    elapsed = time.time() - _img_start
+                    log(f"  🖼️ Converting images... {done}/{_convert_count} ({elapsed:.0f}s elapsed)")
+
+            _img_hb = threading.Thread(target=_img_heartbeat, daemon=True)
+            _img_hb.start()
+
+            def _convert_image(fpath, ctype, keys):
+                try:
+                    from PIL import Image
+                    base_name = os.path.splitext(os.path.basename(fpath))[0]
+
+                    if compression_enabled:
+                        # ALL images → JPEG
+                        quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+                        with open_image(fpath) as img:
+                            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                                bg = Image.new('RGB', img.size, (255, 255, 255))
+                                if img.mode != 'RGBA':
+                                    img = img.convert('RGBA')
+                                bg.paste(img, mask=img.split()[3])
+                                img = bg
+                            elif img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            out_name = base_name + '.jpg'
+                            out_path = os.path.join(_pdf_images_dir, out_name)
+                            img.save(out_path, format='JPEG', quality=quality, optimize=True)
+                        rel_path = f"_pdf_images/{out_name}"
+                    elif ctype == 'image/webp':
+                        # WebP → PNG (lossless)
+                        with open_image(fpath) as img:
+                            if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                                img = img.convert('RGBA')
+                            out_name = base_name + '.png'
+                            out_path = os.path.join(_pdf_images_dir, out_name)
+                            img.save(out_path, format='PNG')
+                        rel_path = f"_pdf_images/{out_name}"
+                    else:
+                        # Non-webp, no compression: use original
+                        rel_path = f"images/{os.path.basename(fpath)}"
+                    for k in keys:
+                        with _img_lock:
+                            _img_path_cache[k] = rel_path
+                except Exception:
+                    for k in keys:
+                        with _img_lock:
+                            _img_path_cache[k] = f"images/{os.path.basename(fpath)}"
+                with _img_lock:
+                    _img_done[0] += 1
+
+            with ThreadPoolExecutor(max_workers=num_workers) as img_executor:
+                futures = []
+                for fpath, (ctype, keys) in _unique_images.items():
+                    futures.append(img_executor.submit(_convert_image, fpath, ctype, keys))
+                for f in futures:
+                    f.result()
+
+            _img_stop.set()
+            _img_hb.join(timeout=1)
+            _img_elapsed = time.time() - _img_start
+            log(f"  ✅ Fast Rendering conversion complete ({_convert_count} images, {_img_elapsed:.1f}s)")
+        elif compression_enabled:
+            # Compression ON, Fast Rendering OFF → convert all images to WebP
+            log(f"  🖼️ Converting {num_images} images → WebP...")
+            os.makedirs(_pdf_images_dir, exist_ok=True)
+            num_workers = int(os.environ.get('EXTRACTION_WORKERS', '4'))
+            num_workers = max(1, min(num_workers, num_images))
+
+            _img_done = [0]
+            _img_lock = threading.Lock()
+            _img_stop = threading.Event()
+            _img_start = time.time()
+
+            def _img_heartbeat():
+                while not _img_stop.is_set():
+                    if _img_stop.wait(3.0):
+                        break
+                    with _img_lock:
+                        done = _img_done[0]
+                    elapsed = time.time() - _img_start
+                    log(f"  🖼️ Converting images... {done}/{num_images} ({elapsed:.0f}s elapsed)")
+
+            _img_hb = threading.Thread(target=_img_heartbeat, daemon=True)
+            _img_hb.start()
+
+            def _convert_to_webp(fpath, keys):
+                try:
+                    from PIL import Image
+                    quality = int(os.environ.get('IMAGE_COMPRESSION_QUALITY', '80'))
+                    base_name = os.path.splitext(os.path.basename(fpath))[0]
+                    with open_image(fpath) as img:
+                        if img.mode not in ('RGB', 'RGBA', 'L', 'LA'):
+                            img = img.convert('RGBA')
+                        out_name = base_name + '.webp'
+                        out_path = os.path.join(_pdf_images_dir, out_name)
+                        img.save(out_path, format='WEBP', quality=quality)
+                    rel_path = f"_pdf_images/{out_name}"
+                    for k in keys:
+                        with _img_lock:
+                            _img_path_cache[k] = rel_path
+                except Exception:
+                    for k in keys:
+                        with _img_lock:
+                            _img_path_cache[k] = f"images/{os.path.basename(fpath)}"
+                with _img_lock:
+                    _img_done[0] += 1
+
+            with ThreadPoolExecutor(max_workers=num_workers) as img_executor:
+                futures = []
+                for fpath, (ctype, keys) in _unique_images.items():
+                    futures.append(img_executor.submit(_convert_to_webp, fpath, keys))
+                for f in futures:
+                    f.result()
+
+            _img_stop.set()
+            _img_hb.join(timeout=1)
+            _img_elapsed = time.time() - _img_start
+            log(f"  ✅ WebP conversion complete ({num_images} images, {_img_elapsed:.1f}s)")
+        else:
+            # No fast rendering, no compression — direct mapping
+            log(f"  🖼️ Mapping {num_images} images...")
+            for fpath, (ctype, keys) in _unique_images.items():
+                rel_path = f"images/{os.path.basename(fpath)}"
+                for k in keys:
+                    _img_path_cache[k] = rel_path
+            log(f"  ✅ Image mapping complete ({len(_img_path_cache)} entries)")
+
+    def _file_path_for_src(src_value):
+        if not src_value or src_value.startswith('data:'):
+            return None
+        from urllib.parse import unquote
+        raw = unquote(src_value).replace('\\', '/')
+        filename = os.path.basename(raw)
+        for key in [raw, filename, os.path.splitext(filename)[0]]:
+            if key in _img_path_cache:
+                return _img_path_cache[key]
+        return None
+
+    def _embed_images_in_html(content):
+        def replace_attr(match):
+            attr = match.group(1)
+            quote = match.group(2)
+            src_value = match.group(3)
+            file_path = _file_path_for_src(src_value)
+            if file_path:
+                return f'{attr}={quote}{file_path}{quote}'
+            return match.group(0)
+        content = re.sub(
+            r'(\b(?:src|href|xlink:href)\b)\s*=\s*([\'"])([^\'"]+)\2',
+            replace_attr, content, flags=re.IGNORECASE
+        )
+        def replace_css_url(match):
+            quote = match.group(1) or ''
+            url_value = match.group(2)
+            if url_value.startswith('data:'):
+                return match.group(0)
+            file_path = _file_path_for_src(url_value)
+            if file_path:
+                return f'url("{file_path}")'
+            return match.group(0)
+        content = re.sub(
+            r'url\(\s*([\'"]?)([^\'")\s]+)\1\s*\)',
+            replace_css_url, content, flags=re.IGNORECASE
+        )
+        return content
+
+    def _extract_body_content(html_content):
+        body_match = re.search(r'<body[^>]*>(.*)</body>', html_content, re.DOTALL | re.IGNORECASE)
+        if body_match:
+            return body_match.group(1)
+        return html_content
+
+    def _rewrite_epub_hrefs(content, epub_file_map):
+        def _replace(m):
+            val = m.group(1)
+            low = val.lower()
+            if low.startswith(('#', 'data:', 'http://', 'https://', 'mailto:', 'tel:')):
+                return m.group(0)
+            if not any(c in val for c in ('/', '.xhtml', '.html', '.htm')):
+                return m.group(0)
+            file_part = val.split('#')[0].split('?')[0]
+            basename = os.path.basename(file_part)
+            anchor = epub_file_map.get(basename)
+            if anchor:
+                return f'href="{anchor}"'
+            if '#' in val:
+                frag = val.split('#', 1)[1]
+                if frag:
+                    return f'href="#{frag}"'
+            return m.group(0)
+        return re.sub(r'href="([^"]*)"', _replace, content, flags=re.IGNORECASE)
+
+    # --- Collect CSS ---
+    styles = ""
+    if os.path.isdir(css_dir):
+        for css_file in sorted(os.listdir(css_dir)):
+            if css_file.endswith('.css'):
+                try:
+                    with open(os.path.join(css_dir, css_file), 'r', encoding='utf-8') as f:
+                        styles += f.read() + "\n"
+                except Exception:
+                    pass
+
+    styles += " @page { margin: 15mm; } "
+    styles += " img { max-width: 100%; height: auto; display: block; margin: 10px auto; } "
+    # Imported EPUB CSS can assign bookmark-level to paragraphs or arbitrary
+    # elements. Render no CSS-derived outline entries; one bookmark per source
+    # HTML file is injected from the chapter anchors after rendering.
+    styles += " body * { bookmark-level: none !important; } "
+    # Backward compatibility for already translated TOC-section HTML. The
+    # empty marker is normally removed from the body, and this rule neutralizes
+    # any formatting variant the conservative marker parser does not match.
+    styles += " .pdf-toc-page-break { display: none !important; break-before: auto !important; page-break-before: auto !important; break-after: auto !important; page-break-after: auto !important; } "
+
+    alignment = settings['page_number_alignment']
+    page_position = f'@bottom-{alignment}' if alignment != 'center' else '@bottom-center'
+    page_number_style = ""
+    if settings['page_numbers']:
+        page_number_style = f" @page {{ {page_position} {{ content: counter(page); color: rgba(0,0,0,0.4); font-size: 10pt; }} }} "
+        styles += page_number_style
+
+    _dedup_enabled = os.environ.get('DEDUPLICATE_TOC', '0') == '1'
+    _dedup_use_translated = os.environ.get('DEDUPLICATE_TOC_USE_TRANSLATED', '0') == '1'
+    _seen_bm_titles = set()
+
+    styles = _embed_images_in_html(styles)
+
+    # --- Process chapters ---
+    documents = []
+    chapter_page_map = {}
+    current_page = 0
+
+    # Create mapping from source filename to chapter number
+    source_to_chapter = {}
+    for chap_num, (title, conf, source) in chapter_titles_info.items():
+        if source:
+            source_to_chapter[source] = chap_num
+
+    # --- Cover page ---
+    if cover_file:
+        try:
+            cover_path = None
+            for fname in os.listdir(images_dir):
+                fpath = os.path.join(images_dir, fname)
+                if os.path.isfile(fpath):
+                    if fname == cover_file or os.path.splitext(fname)[0] == os.path.splitext(cover_file)[0]:
+                        cover_path = fpath
+                        break
+            if cover_path:
+                ctype, _ = mimetypes.guess_type(cover_path)
+                if not ctype:
+                    ctype = _mime_fallback.get(os.path.splitext(cover_path)[1].lower())
+                if ctype and ctype.startswith('image/'):
+                    cover_rel_path = f"images/{os.path.basename(cover_path)}"
+                    cover_html = (
+                        f'<html><head><style>'
+                        f'@page {{ margin: 0; }}'
+                        f'@page {{ @bottom-left {{ content: none; }} @bottom-center {{ content: none; }} @bottom-right {{ content: none; }} }}'
+                        f'body {{ margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }}'
+                        f'img {{ max-width: 100%; max-height: 100%; object-fit: contain; }}'
+                        f'</style></head><body>'
+                        f'<img src="{cover_rel_path}" alt="Cover" />'
+                        f'</body></html>'
+                    )
+                    cover_doc = WeasyHTML(string=cover_html, base_url=output_dir).render()
+                    documents.append(cover_doc)
+                    current_page += len(cover_doc.pages)
+                    log("  ✅ Added cover page to PDF")
+        except Exception as e:
+            log(f"  ⚠️ Failed to add cover to PDF: {e}")
+
+    # --- TOC dry run ---
+    toc_page_count = 0
+    toc_insert_index = len(documents)
+    if settings['toc']:
+        log("  Calculating TOC size...")
+        dummy_toc_html = _build_pdf_toc_html(chapter_titles_info, settings, None)
+        toc_css = "<style>@page { @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }</style>"
+        dummy_toc_html = dummy_toc_html.replace("</head>", f"{toc_css}</head>")
+        try:
+            _toc_stop = threading.Event()
+            _toc_start = time.time()
+            def _toc_heartbeat():
+                while not _toc_stop.is_set():
+                    if _toc_stop.wait(3.0):
+                        break
+                    elapsed = time.time() - _toc_start
+                    log(f"  ⏳ Calculating TOC... ({elapsed:.0f}s elapsed)")
+            _toc_hb = threading.Thread(target=_toc_heartbeat, daemon=True)
+            _toc_hb.start()
+            toc_doc = WeasyHTML(string=dummy_toc_html, base_url=output_dir).render()
+            _toc_stop.set()
+            _toc_hb.join(timeout=1)
+            toc_page_count = len(toc_doc.pages)
+        except Exception as e:
+            log(f"  ⚠️ TOC size estimation failed: {e}")
+            toc_page_count = 1
+        current_page += toc_page_count
+        _toc_elapsed = time.time() - _toc_start
+        log(f"  Estimated TOC: {toc_page_count} pages ({_toc_elapsed:.1f}s)")
+
+    # --- Build EPUB href map ---
+    epub_file_map = {}
+    _epub_path = os.environ.get('EPUB_PATH', '')
+    if _epub_path and os.path.exists(_epub_path):
+        try:
+            import zipfile as _zf_mod
+            with _zf_mod.ZipFile(_epub_path) as _zf:
+                _container = _zf.read('META-INF/container.xml').decode('utf-8', errors='replace')
+                _opf_m = re.search(r'full-path="([^"]+)"', _container)
+                if _opf_m:
+                    _opf_txt = _zf.read(_opf_m.group(1)).decode('utf-8', errors='replace')
+                    _manifest = {m.group(1): m.group(2)
+                                 for m in re.finditer(r'<item\b[^>]*\bid="([^"]+)"[^>]*\bhref="([^"]+)"', _opf_txt)}
+                    _spine_hrefs = []
+                    for _iid in re.findall(r'<itemref\b[^>]*\bidref="([^"]+)"', _opf_txt):
+                        _href = _manifest.get(_iid, '')
+                        if not _href.lower().endswith(('.xhtml', '.html', '.htm')):
+                            continue
+                        _pm = re.search(rf'<item\b[^>]*\bid="{re.escape(_iid)}"[^>]*\bproperties="([^"]*)"', _opf_txt)
+                        if _pm and 'nav' in _pm.group(1):
+                            continue
+                        _spine_hrefs.append(_href)
+                    for _si, _sh in enumerate(_spine_hrefs):
+                        if _si < len(html_files):
+                            _hf = html_files[_si]
+                            _cn = source_to_chapter.get(_hf, _si)
+                            epub_file_map[os.path.basename(_sh)] = f'#chapter-{_cn}'
+        except Exception as _em:
+            log(f"  ⚠️ Could not build EPUB href map: {_em}")
+
+    # --- Build combined chapter HTML ---
+    log(f"  Building combined chapter document ({len(html_files)} chapters)...")
+    all_chapters_parts = []
+    chapters_order = []
+
+    for i, html_file in enumerate(html_files):
+        file_path = os.path.join(output_dir, html_file)
+        if not os.path.exists(file_path):
+            continue
+
+        chap_num = source_to_chapter.get(html_file, i)
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            content = _embed_images_in_html(content)
+            body_content = _extract_body_content(content)
+            body_content = remove_pdf_source_page_break_markers(body_content)
+            body_content = _rewrite_epub_hrefs(body_content, epub_file_map)
+
+            _bm_title = chapter_titles_info.get(chap_num, ('', 0, ''))[0]
+            if _bm_title and _bm_title.strip().lower() in ('untitled chapter', 'untitled'):
+                _bm_title = ''
+            if _bm_title and _dedup_enabled:
+                _bm_key = _bm_title if _dedup_use_translated else chapter_titles_info.get(chap_num, ('', 0, ''))[0]
+                if _bm_key in _seen_bm_titles:
+                    _bm_title = ''
+                else:
+                    _seen_bm_titles.add(_bm_key)
+            if i > 0:
+                body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{body_content}</div>'
+            else:
+                body_content = f'<div id="chapter-{chap_num}">{body_content}</div>'
+
+            all_chapters_parts.append(body_content)
+            chapters_order.append((html_file, chap_num, _bm_title))
+
+            if (i + 1) % 10 == 0 or (i + 1) == len(html_files):
+                log(f"  [{i+1}/{len(html_files)}] Added to document")
+
+        except Exception as e:
+            log(f"  ⚠️ Failed to process {html_file}: {e}")
+
+
+
+    # --- Render bookmark sections ---
+    _raise_if_stopped()
+    BATCH_SIZE = int(os.environ.get('PDF_RENDER_BATCH_SIZE', '50'))
+    rapid_workspace_compiler = (
+        os.environ.get('PDF_USE_RAPID_WORKSPACE_COMPILER', '1') == '1'
+        and mobile_runtime.processes_available()
+    )
+    rapid_render_bundle = None
+    rapid_temp_dir = ""
+    if all_chapters_parts and rapid_workspace_compiler and settings['toc']:
+        log("  ⚠️ Rapid process renderer currently defers to the standard path "
+            "when a generated clickable TOC is enabled")
+        rapid_workspace_compiler = False
+
+    if all_chapters_parts and rapid_workspace_compiler:
+        try:
+            from pdf_fast_extractor import resolve_pdf_extraction_workers
+            from pdf_workspace_compiler import (
+                build_balanced_bookmark_render_jobs,
+                render_workspace_bookmarks_rapid,
+            )
+
+            requested_setting = os.environ.get('PDF_EXTRACTION_WORKERS', 'auto')
+            resolved_workers = min(
+                len(all_chapters_parts),
+                resolve_pdf_extraction_workers(requested_setting),
+            )
+            log("  🧭 PDF compiler engine: Rapid Workspace Compiler "
+                "(bookmark-aware process renderer)")
+            log(f"  🧠 Worker plan: PDF_EXTRACTION_WORKERS={requested_setting} "
+                f"→ {resolved_workers} of {os.cpu_count() or 1} CPU core(s)")
+            bookmark_jobs = build_balanced_bookmark_render_jobs(
+                all_chapters_parts,
+                chapters_order,
+                resolved_workers,
+            )
+            rapid_styles = styles.replace(page_number_style, "")
+            render_jobs = [
+                (
+                    shard_index,
+                    f"<html><head><style>{rapid_styles}</style></head>"
+                    f"<body>{content}</body></html>",
+                    shard_order,
+                )
+                for shard_index, content, shard_order in bookmark_jobs
+            ]
+            write_kwargs = {}
+            if compression_enabled:
+                write_kwargs = {
+                    'jpeg_quality': int(
+                        os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
+                    ),
+                    'optimize_images': True,
+                }
+            rapid_render_bundle = render_workspace_bookmarks_rapid(
+                render_jobs,
+                output_dir,
+                log_callback=log,
+                max_workers=resolved_workers,
+                write_kwargs=write_kwargs,
+            )
+            rapid_temp_dir = rapid_render_bundle.get('temp_dir', '')
+
+            log("  🧭 Phase 2/3: indexing bookmark anchors from rendered jobs")
+            indexing_started = time.time()
+            _page_offset = current_page
+            shard_orders = {item[0]: item[2] for item in bookmark_jobs}
+            for result in rapid_render_bundle['results']:
+                shard_order = shard_orders[result['index']]
+                anchor_pages = result.get('anchor_pages', {})
+                for html_file, chapter_num, _title in shard_order:
+                    local_page = int(
+                        anchor_pages.get(
+                            str(chapter_num),
+                            anchor_pages.get(str(html_file), 0),
+                        ) or 0
+                    )
+                    page_number = _page_offset + local_page + 1
+                    chapter_page_map[html_file] = page_number
+                    chapter_page_map[chapter_num] = page_number
+                _page_offset += int(result['pages'])
+                current_page += int(result['pages'])
+                log(f"  🔖 Indexed render job {result['index'] + 1}/"
+                    f"{len(rapid_render_bundle['results'])}: "
+                    f"{result['chapters']} bookmark section(s), "
+                    f"{result['pages']} page(s)")
+            log(f"  ✅ Rapid indexing complete: {current_page} total page(s) in "
+                f"{time.time() - indexing_started:.1f}s")
+        except BaseException as exc:
+            log(f"  ⚠️ Rapid workspace rendering failed: "
+                f"{type(exc).__name__}: {exc}")
+            log("  ↩ Falling back to the unchanged standard sequential compiler")
+            rapid_render_bundle = None
+            if rapid_temp_dir:
+                import shutil
+                shutil.rmtree(rapid_temp_dir, ignore_errors=True)
+
+    if all_chapters_parts and not rapid_render_bundle:
+        num_batches = (len(all_chapters_parts) + BATCH_SIZE - 1) // BATCH_SIZE
+        log("  🧭 PDF compiler engine: standard sequential compiler")
+        log(f"  📦 Render plan: {len(all_chapters_parts)} chapters, "
+            f"{num_batches} batch(es), batch size={BATCH_SIZE}")
+        _render_start = time.time()
+        _render_stop = threading.Event()
+
+        def _render_heartbeat():
+            while not _render_stop.is_set():
+                if _render_stop.wait(3.0):
+                    break
+                elapsed = time.time() - _render_start
+                log(f"  ⏳ Rendering... ({elapsed:.0f}s elapsed)")
+
+        _render_hb = threading.Thread(target=_render_heartbeat, daemon=True)
+        _render_hb.start()
+        _page_offset = 0
+        for batch_idx in range(num_batches):
+            if _stop_requested():
+                break
+            batch_start = batch_idx * BATCH_SIZE
+            batch_end = min(batch_start + BATCH_SIZE, len(all_chapters_parts))
+            batch_parts = all_chapters_parts[batch_start:batch_end]
+            batch_order = chapters_order[batch_start:batch_end]
+            batch_html = (
+                f"<html><head><style>{styles}</style></head>"
+                f"<body>{''.join(batch_parts)}</body></html>"
+            )
+            batch_started = time.time()
+            log(f"  ▶ Standard render batch {batch_idx+1}/{num_batches} "
+                f"(chapters {batch_start+1}-{batch_end})")
+            try:
+                batch_doc = WeasyHTML(
+                    string=batch_html,
+                    base_url=output_dir,
+                ).render()
+                documents.append(batch_doc)
+                replace_with_chapter_bookmarks(batch_doc.pages, batch_order)
+                for html_file, chapter_num, _title in batch_order:
+                    page_index = 0
+                    for candidate, page in enumerate(batch_doc.pages):
+                        if f'chapter-{chapter_num}' in page.anchors:
+                            page_index = candidate
+                            break
+                    page_number = _page_offset + page_index + 1
+                    chapter_page_map[html_file] = page_number
+                    chapter_page_map[chapter_num] = page_number
+                _page_offset += len(batch_doc.pages)
+                current_page += len(batch_doc.pages)
+                log(f"  ✅ Standard render batch {batch_idx+1}/{num_batches}: "
+                    f"{len(batch_doc.pages)} page(s) in "
+                    f"{time.time() - batch_started:.1f}s")
+            except Exception as exc:
+                log(f"  ⚠️ Failed to render batch {batch_idx+1}: {exc}")
+        _render_stop.set()
+        _render_hb.join(timeout=1)
+        log(f"  ✅ Standard rendering complete: {current_page} total page(s) "
+            f"({time.time() - _render_start:.1f}s)")
+
+    _raise_if_stopped()
+    if not documents and not rapid_render_bundle:
+        log("⚠️ No chapters rendered for PDF")
+        _write_line(f'[RESULT] {json.dumps({"success": False, "error": "No chapters rendered"})}')
+        return
+
+    # --- Final TOC ---
+    if settings['toc'] and chapter_titles_info:
+        log("  Generating TOC with page numbers...")
+        real_toc_html = _build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map)
+        toc_css = "<style>@page { @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }</style>"
+        real_toc_html = real_toc_html.replace("</head>", f"{toc_css}</head>")
+        try:
+            toc_doc = WeasyHTML(string=real_toc_html, base_url=output_dir).render()
+            documents.insert(toc_insert_index, toc_doc)
+        except Exception as e:
+            log(f"  ⚠️ TOC generation failed: {e}")
+
+    # --- Merge and write ---
+    _raise_if_stopped()
+    log("  🧩 Phase 3/3: merging rendered pages in source chapter order")
+    try:
+        if rapid_render_bundle:
+            total_pages = _merge_rapid_pdf_shards(
+                documents,
+                rapid_render_bundle['results'],
+                pdf_path,
+                chapters_order,
+                chapter_page_map,
+                settings,
+            )
+            log(f"  Total pages: {total_pages}")
+        else:
+            all_pages = [page for doc in documents for page in doc.pages]
+            log(f"  Total pages: {len(all_pages)}")
+            log("  Writing PDF to disk...")
+            _pdf_write_kwargs = {}
+            if compression_enabled:
+                _pdf_quality = int(
+                    os.environ.get('IMAGE_COMPRESSION_QUALITY', '80')
+                )
+                _pdf_write_kwargs['jpeg_quality'] = _pdf_quality
+                _pdf_write_kwargs['optimize_images'] = True
+                log(f"  PDF jpeg_quality: {_pdf_quality}%, "
+                    "optimize_images: True")
+            else:
+                log("  PDF images: default encoding (no lossy re-compression)")
+            _write_stop = threading.Event()
+            _write_start = time.time()
+
+            def _write_heartbeat():
+                while not _write_stop.is_set():
+                    if _write_stop.wait(3.0):
+                        break
+                    elapsed = time.time() - _write_start
+                    log(f"  ⏳ Writing PDF... ({elapsed:.0f}s elapsed)")
+
+            _write_hb = threading.Thread(target=_write_heartbeat, daemon=True)
+            _write_hb.start()
+            documents[0].copy(all_pages).write_pdf(
+                pdf_path,
+                **_pdf_write_kwargs,
+            )
+            _write_stop.set()
+            _write_hb.join(timeout=1)
+            _write_elapsed = time.time() - _write_start
+            log(f"  ✅ PDF written ({_write_elapsed:.1f}s)")
+    except BaseException as e:
+        log(f"  ❌ write_pdf failed: {type(e).__name__}: {e}")
+        log(f"  [DEBUG] {traceback.format_exc()}")
+        _write_line(f'[RESULT] {json.dumps({"success": False, "error": str(e)})}')
+        return
+    finally:
+        # Clean up temp pre-converted images
+        import shutil
+        try:
+            shutil.rmtree(_pdf_images_dir, ignore_errors=True)
+            if rapid_temp_dir:
+                shutil.rmtree(rapid_temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    elapsed = time.time() - start_time
+    if os.path.exists(pdf_path):
+        file_size = os.path.getsize(pdf_path)
+        log(f"✅ PDF created: {pdf_path}")
+        log(f"📊 PDF size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+        log(f"⏱️ PDF generation took {elapsed:.1f}s")
+        _write_line(f'[RESULT] {json.dumps({"success": True, "pdf_path": pdf_path, "file_size": file_size, "elapsed": elapsed})}')
+    else:
+        log("❌ PDF file was not created")
+        _write_line(f'[RESULT] {json.dumps({"success": False, "error": "PDF file was not created"})}')
+
+
+def main():
+    """Main entry point for worker process."""
+    if len(sys.argv) < 2:
+        print("[ERROR] Usage: _pdf_worker.py <config_json_path>", flush=True)
+        sys.exit(1)
+
+    config_path = sys.argv[1]
+    if not os.path.exists(config_path):
+        print(f"[ERROR] Config file not found: {config_path}", flush=True)
+        sys.exit(1)
+
+    try:
+        run_pdf_generation(config_path)
+    except Exception as e:
+        tb = traceback.format_exc()
+        for line in failure_protocol_lines(e, tb):
+            print(line, flush=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

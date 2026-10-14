@@ -1,0 +1,103 @@
+# Self-built mobile wheels for the security pins (cryptography==50.0.2, pillow==12.3.0).
+#
+# pypi.flet.dev and PyPI have no Android/iOS cp313 wheels for these versions, so
+# .github/workflows/mobile-wheels.yml builds them with flet-dev/mobile-forge and the
+# mobile builds feed them to `flet build` through PIP_FIND_LINKS
+# (.github/actions/mobile-wheelhouse). Nothing here is uploaded to an index or a release.
+#
+# Read by:
+#   ci/wheels/wheels.py             env / fetch / stage-openssl / collect / verify-native / assert-selftest
+#   tools/check_mobile_wheels.py    --wheelhouse / --wheelhouse-plan / --verify-wheelhouse / --verify-installed
+#
+# Every sha256 below was checked on 2026-10-07 against the GitHub release asset digest
+# (or PyPI's JSON API for the sdists) AND by hashing the downloaded bytes.
+# Changing any value here, build_wheels.sh, wheels.py or a recipe changes the wheel
+# cache key, so the next run rebuilds.
+
+schema = 1
+
+# Every wheel we build is tagged <name>-<version>-<build_tag>-cp313-cp313-<platform>.whl.
+# pip ranks a higher build tag above an otherwise identical index file (an exact tie goes
+# to the index), and pypi.flet.dev uses build tags <= 11 today.
+build_tag = 1000
+
+[toolchain]
+python_build_release = "20260921"        # = flet_cli 1.0.3 utils/python_versions.py PYTHON_BUILD_RELEASE_DATE
+python_version = "3.13.15"               # the CPython that release (and Flet 1.0.3 on device) ships
+android_ndk = "27.3.13750724"            # NDK r27d; the support tree's sysconfigdata names this NDK
+rust = "1.98.1"
+ios_deployment_target = "13.0"           # wheel tag ios_13_0_*; every iOS recipe sets it in script_env
+                                         # (wheels.py checks it), the only channel forge passes to rustc
+
+[toolchain.mobile_forge]
+repo = "https://github.com/flet-dev/mobile-forge"
+rev = "0fadbfab0d63d11164030dfddc955ed980e32e2c"   # main, 2026-10-04 "recipe: thrift 0.25.0 (#126)"
+
+[toolchain.crossenv]
+repo = "https://github.com/flet-dev/crossenv"
+rev = "e5e615651f794d060d9484eab463861fef2a2019"   # head of the moving 'flet' branch (2026-06-03)
+
+# flet-dev/python-build release <python_build_release>: python-<platform>-mobile-forge-<python_version>.tar.gz
+[toolchain.support_sha256]
+android = "6f7dcf7e9dbe66e22c469c6bb7bdb40b8d8f887390afd1bfbefad72df4603035"
+ios = "a7c5b6059357154eb419a26ed45dc748dcd32c70fbe8145b408589696dc3205f"
+
+# Versions only (PIP_CONSTRAINT for forge's build environments). cffi stays at 2.0.0: the
+# cffi code generated into cryptography at build time must load with the cffi 2.0.0 that
+# pypi.flet.dev ships for the device. Bump the others deliberately.
+[toolchain.pip_constraints]
+maturin = "1.15.0"
+cffi = "2.0.0"
+setuptools = "84.0.0"
+pybind11 = "3.1.0"
+build = "1.6.1"
+
+# BeeWare's prebuilt OpenSSL 3.5.9 (LTS, supported until 2030-04-08), linked statically into
+# cryptography instead of the support tree's end-of-life 3.0.x. Only include/ and
+# lib/lib{crypto,ssl}.a are kept (wheels.py stage-openssl).
+[openssl]
+version = "3.5.9"
+
+[openssl.android]
+repo = "beeware/cpython-android-source-deps"
+tag = "openssl-3.5.9-0"
+build = "0"
+
+[openssl.android.assets]
+"arm64-v8a" = { file = "openssl-3.5.9-0-aarch64-linux-android.tar.gz", sha256 = "bf115f29963d577e20a1595dac13baec7ccd559bf8a05f37659ba6b735a8778b" }
+"x86_64" = { file = "openssl-3.5.9-0-x86_64-linux-android.tar.gz", sha256 = "11fe72e251fccb5d81fc43a67096a4ce540e09ddf3a8a587dede199774c89141" }
+
+[openssl.ios]
+repo = "beeware/cpython-apple-source-deps"
+tag = "OpenSSL-3.5.9-1"
+build = "1"
+
+[openssl.ios.assets]
+"iphoneos.arm64" = { file = "openssl-3.5.9-1-iphoneos.arm64.tar.gz", sha256 = "aa8c3a96138a5650f51a1416076f947fec9ae7a5fba83afb0015fefe314107dc" }
+"iphonesimulator.arm64" = { file = "openssl-3.5.9-1-iphonesimulator.arm64.tar.gz", sha256 = "3617fe2d80bb2f0cd981f39d32b0bd651c36b86efe71b9d4025ca3befd229461" }
+"iphonesimulator.x86_64" = { file = "openssl-3.5.9-1-iphonesimulator.x86_64.tar.gz", sha256 = "bd27471f292d501906a6d7ee36ce8ffe4d39ebb1c00ffe3c06e679b090d13f4d" }
+
+# The wheels we promise. version must equal the pyproject pin, sdist_sha256 the uv.lock sdist
+# hash, and requires_dist the wheel METADATA's Requires-Dist entries that carry no extra marker.
+# serious_python installs all three iOS slices, so iOS needs all three.
+[[wheel]]
+name = "cryptography"
+version = "50.0.2"
+recipe = "recipes/cryptography"
+sdist_sha256 = "7b46165bb56eb4704e2eaaf86f3c940d19154535d9b0ca7d6d590b04060e00d5"
+targets = ["arm64-v8a", "x86_64", "iphoneos.arm64", "iphonesimulator.arm64", "iphonesimulator.x86_64"]
+requires_dist = [
+    "cffi>=2.0.0; platform_python_implementation != \"PyPy\"",
+    "typing-extensions>=4.13.2; python_full_version < \"3.11\"",
+]
+
+# iOS keeps PyPI's official pillow-12.3.0 cp313 wheels; only Android is built here.
+# Android links the flet-lib* C libraries as published on pypi.flet.dev (follow-up: newer
+# libjpeg-turbo / FreeType builds).
+[[wheel]]
+name = "pillow"
+version = "12.3.0"
+recipe = "recipes/pillow"
+sdist_sha256 = "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce"
+targets = ["arm64-v8a", "x86_64"]
+requires_dist = ["flet-libjpeg==3.0.90", "flet-libfreetype==2.13.3", "flet-libwebp==1.6.0"]

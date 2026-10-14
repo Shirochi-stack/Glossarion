@@ -1,0 +1,34 @@
+name: flet_glossarion_native
+description: Glossarion native services for Flet (Android foreground service, notifications, share/open-with, iOS background tasks).
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.10.0 <4.0.0'
+  # flutter_foreground_task 11.0.3 requires Flutter >= 3.44 (Flet 1.0.3 builds with 3.44.8).
+  flutter: '>=3.44.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Lockstep with the app: the Flet 1.0.3 build template pins `flet: 1.0.3`
+  # in both dependencies and dependency_overrides.
+  flet: 1.0.3
+
+  flutter_foreground_task: ^11.0.3
+  receive_sharing_intent: ^1.9.0
+
+  # flutter_local_notifications is intentionally NOT a dependency: it requires
+  # core-library desugaring in :app, which a plugin cannot enable in the Flet
+  # 1.0.3 template. Notifications are implemented natively in this plugin
+  # behind the same API. See ../../../README.md ("Notifications and desugaring").
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.glossarion.flet_glossarion_native
+        pluginClass: GlossarionNativePlugin
+      ios:
+        pluginClass: GlossarionNativePlugin

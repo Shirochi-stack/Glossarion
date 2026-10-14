@@ -1,0 +1,265 @@
+# Ignore everything by default
+/*
+
+# Allow specific root files
+!.gitignore
+!.gitattributes
+!README.md
+!LICENSE
+!requirements.txt
+!requirements_Cuda.txt
+!requirements_NoCuda.txt
+!install_requirements.bat
+!build_msix.bat
+requirements-dev.txt
+
+# Allow .github, docs, assets folders if present
+!.github/
+!.github/**
+!docs/
+!docs/**
+!assets/
+!assets/**
+!tools/
+tools/**
+!tools/msix/
+!tools/msix/**
+!extension/
+!extension/**
+
+# Only include src, but exclude all subfolders; allow only top-level .py and .spec files
+!src/
+# Ignore everything under src by default (including all subfolders)
+src/**
+# Allow only top-level files directly under src (no subfolders)
+!src/*.py
+!src/*.pyproject
+!src/*.spec
+!src/*.bat
+!src/*.vbs
+!src/*.png
+!src/*.manifest
+# Explicitly include application icon in src
+!src/Halgakos.ico
+
+# Mobile app (Flet, Android + iOS). Generated build inputs stay ignored.
+!src/mobile/
+!src/mobile/**
+src/mobile/app/backend/
+src/mobile/app/assets/tiktoken/
+src/mobile/app/assets/selftest/
+src/mobile/build/
+src/mobile/dist/
+src/mobile/.flet/
+src/mobile/.venv/
+src/mobile/storage/
+src/mobile/extensions/**/.dart_tool/
+src/mobile/extensions/**/build/
+src/mobile/extensions/**/.flutter-plugins*
+src/mobile/extensions/**/pubspec.lock
+
+# Never commit secrets and configs anywhere
+**/config.json
+*.key
+*_key
+.glossarion_key
+
+# Never commit logs anywhere
+*.log
+logs/
+**/logs/
+
+# Exclude Python caches and compiled artifacts
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Allow C++ and DLL files
+!*.cpp
+!*.dll
+
+# Do not commit text files by default (change if needed)
+*.txt
+# But always include requirements files
+!requirements.txt
+!requirements_Cuda.txt
+!requirements_NoCuda.txt
+!requirements-*.txt
+howtoruntest.txt
+
+# Exclude all JSON by default (change if needed)
+*.json
+PATH
+PATH
+src/test_azure.py
+src/test_azure.py
+src/test_azure.py
+
+# Explicitly ignore local PowerShell helper
+src/wait_and_open.ps1
+
+# Ignore test folders and Warp markdown file
+tests/
+!tests/
+tests/**
+!tests/test_autharena_proxy.py
+!tests/test_autharena_worker.py
+!tests/test_autharena_browser.py
+!tests/test_autharena_upstream_transport.py
+!tests/test_glm_proxy.py
+!tests/test_sdlxliff_support.py
+!tests/test_sdlxliff_json_batch.py
+!tests/test_subtitle_processor.py
+!tests/test_partial_b2_batching.py
+!tests/test_google_free_translate.py
+!tests/test_progress_model_metadata.py
+!tests/test_translation_artifacts.py
+!tests/test_emergency_compliance_stop.py
+!tests/test_emergency_compliance_reuse.py
+!tests/test_glossary_filter_stop.py
+!tests/test_gemini_free_budget.py
+!tests/test_gemini_openai_thinking.py
+!tests/test_service_tier.py
+!tests/test_review_volume_mode.py
+!tests/test_glossary_dedup_logging.py
+!tests/test_gender_tracking.py
+!tests/test_extract_glossary_parser.py
+!tests/test_parallel_epub_visibility.py
+!tests/test_glossary_source_preparation.py
+!tests/test_glossary_log_numbering.py
+!tests/test_glossary_interior_special_files.py
+!tests/test_manga_ocr_io.py
+!tests/test_manga_drag_drop.py
+!tests/test_openrouter_thinking.py
+!tests/test_model_options_catalog.py
+!tests/test_assistant_prompt_profiles.py
+!tests/test_prompt_profile_renaming.py
+!tests/test_refinement_prompt_profiles.py
+!tests/test_glossary_refinement_cancellation.py
+!tests/test_glossary_refinement_status_display.py
+!tests/test_glossary_refinement_resume.py
+!tests/test_shutdown_utils_cleanup.py
+!tests/test_config_backup_restore.py
+!tests/test_update_manager_notes.py
+!tests/test_authnd_captcha_navigation.py
+!tests/test_authds_auth.py
+!tests/test_authgrok_auth.py
+!tests/test_authgpt_request.py
+!tests/test_authnan_auth.py
+!tests/test_authnan_routes.py
+!tests/test_openai_token_compatibility.py
+!tests/test_antigravity_proxy.py
+!tests/test_ocagy_cli.py
+!tests/test_tor_proxy.py
+!tests/test_epub_utils.py
+!tests/test_html_archive_epub.py
+!tests/test_html_file_selection.py
+!tests/test_zip_input_routing.py
+!tests/test_epub_library_layout.py
+!tests/test_reader_overlay.py
+!tests/test_metadata_subjects.py
+!tests/test_epub_library_search.py
+!tests/test_pdf_toc_extraction.py
+!tests/test_pdf_fast_extractor.py
+!tests/test_output_workspace_routing.py
+!tests/test_pdf_workspace_compiler.py
+# Desktop parity oracle (U0+): tooling + recorded baseline are tracked so extraction
+# worktrees have them; legacy/ and golden/ are regenerated per step (machine-local).
+!tests/parity/
+!tests/parity/*.py
+!tests/parity/BASELINE_FAILURES.txt
+!tests/parity/DISCREPANCIES.md
+# Mobile rewrite (U1+): desktop-parity tests for mobile_runtime, the shared GUI-free modules and
+# the backend mobile-compat patches (python-app.yml runs them on Python 3.10).
+!tests/test_mobile_runtime.py
+!tests/test_safe_image.py
+!tests/test_cv2_decode_gate.py
+!tests/test_mobile_compat_patches_core.py
+!tests/test_mobile_compat_patches_io.py
+!tests/test_mobile_compat_patches_api.py
+!tests/test_mobile_compat_patches_manga.py
+!tests/test_pdf_mupdf_html.py
+!tests/test_shared_core_p1.py
+# Mobile rewrite (U2+): HeadlessOwner and the shared-core moves, the generated settings schema,
+# and the helpers tracked tests import (desktop source corpus, HeadlessOwner sandbox).
+!tests/test_headless_owner.py
+!tests/test_settings_schema.py
+!tests/_src_corpus.py
+!tests/_headless_env.py
+# Mobile rewrite (U3+): stop_control/job_runner/text_jobs/input_preparation, the translation +
+# glossary pipelines and the Direct Text chat store/stream moves (verbatim, tier T/G parity).
+!tests/test_job_runner.py
+!tests/test_text_jobs.py
+!tests/test_translation_pipeline.py
+!tests/test_direct_text_core.py
+# Mobile rewrite (U4+): settings rules, the model catalog, prompt profiles, the key-pool service and
+# the Gemini/Claude/Grok OAuth begin/complete splits (verbatim moves + git-show parity oracles).
+!tests/test_settings_rules.py
+!tests/test_minimal_refinement_progress_path.py
+!tests/test_model_catalog_core.py
+!tests/test_prompt_profiles.py
+!tests/test_key_pool_service.py
+!tests/test_mobile_auth_splits.py
+# Mobile rewrite (U5+): the Library / covers / reader document / live stream moves and the Progress
+# Manager / Glossary Progress cores (verbatim pins, legacy-vs-new fuzz and file-system fixtures).
+# tests/parity/legacy_progress/ (the frozen Retranslation_GUI oracle) rebuilds itself from git.
+!tests/test_library_core.py
+!tests/test_reader_doc.py
+!tests/test_progress_core.py
+!tests/test_progress_actions.py
+!tests/test_glossary_progress_core.py
+# Mobile rewrite (U6+): the Glossary Editor document, the glossary file actions, the Parallel EPUB
+# pair core and the QA Scanner helpers (verbatim pins, frozen-vs-new fuzz, file-system fixtures,
+# offscreen dialog runs and a desktop-vs-mobile QA quick scan).
+!tests/test_glossary_document.py
+!tests/test_glossary_files.py
+!tests/test_parallel_epub_core.py
+!tests/test_qa_runtime_additions.py
+# Mobile rewrite (U7+): Retranslate Selected plan/apply + Resolve QA + image-folder view, the
+# SDLXLIFF reviewer core, the image / generative and RPG Maker runners, the async batch core, the
+# Review run orchestration and the QA / output tool cores (verbatim pins, file-system goldens vs
+# the frozen dialogs, runner-level trace parity, offscreen frozen-vs-rewired dialog sessions).
+!tests/test_retranslate_plan_apply.py
+!tests/test_sdlxliff_review_core.py
+!tests/test_image_job.py
+!tests/test_image_reference_map.py
+!tests/test_rpgmaker_job.py
+!tests/test_async_batch_core.py
+!tests/test_review_run_core.py
+!tests/test_u7_tool_cores.py
+# Mobile rewrite (U8+): the manga settings defaults / run env / Files-tab / batch-runner / editor cores,
+# the on-demand ONNX model registry and the Google Vision REST fallback (verbatim pins vs the frozen
+# manga tab, per-page process_image traces, image-diff goldens with a fixed font, local HTTP servers).
+!tests/test_manga_env.py
+!tests/test_manga_editor_core.py
+!tests/test_manga_models.py
+!tests/test_google_vision_rest.py
+# Mobile rewrite (U9): the browser-driver seam (authnd/ + search/gemini on the WebViewBridge), the
+# GUI-free release check (update_core, verbatim vs git show) and the schema-built desktop tables
+# (P5b: frozen literals == settings_schema.desktop_*() rows, HeadlessOwner differential runs).
+!tests/test_browser_driver.py
+!tests/test_update_core.py
+!tests/test_schema_p5b.py
+# Device fixes part 2 (2026-10-08): Other Settings' streaming notes come from settings_rules (owner-approved
+# text move; the constants, an AST pin and an offscreen render of Response Handling).
+!tests/test_other_settings_streaming_texts.py
+!tests/fixtures/
+!tests/fixtures/manga_editor/
+!tests/fixtures/manga_editor/**
+junktests/
+warp.md
+
+# Security dependency release notes
+!docs/security-dependency-upgrade.txt
+
+# GitLab alternatives and their offline regression coverage
+!/.gitlab-ci.yml
+!/.gitlab/
+!/.gitlab/**
+!tests/test_gitlab_ci.py
+
+# Bounded, reviewed source-oracle fixture (no full Git history)
+!tests/parity/oracle_manifest.json
+!tests/parity/oracle_objects.zip
+!tests/test_oracle_package.py

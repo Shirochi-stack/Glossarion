@@ -1,0 +1,2046 @@
+"""Arena sessions and the automatically provisioned LMArenaBridge runtime.
+
+Route labels match AuthGPT: autharena/ is slot 0, autharena1/ is slot 1.
+autharena0/ is reserved for the rotating pool.
+This file is also the managed Python worker entry point (including frozen builds).
+"""
+from __future__ import annotations
+
+import atexit
+import base64
+import contextlib
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+import zipfile
+
+import requests
+
+REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
+ADAPTER_VERSION = 34
+CATALOG_TTL_SECONDS = 24 * 60 * 60
+UV_VERSION = "0.8.22"
+ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
+_qt_host_command = None
+_lock = threading.RLock()
+_file_locks = {"state": threading.RLock(), "setup": threading.RLock()}
+_cancel = threading.Event()
+_generation = 0
+_responses = set()
+_pending_requests = {}
+_owned = None
+_started_callback = None
+_accounts_restore_logged = False
+
+
+class ArenaStreamError(RuntimeError):
+    def __init__(self, message, http_status=None, retry_after=None, partial_response=False):
+        super().__init__(message)
+        try:
+            status = int(http_status)
+        except (ValueError, TypeError):
+            status = 0
+        self.http_status = status if 400 <= status <= 599 else None
+        self.retry_after = retry_after
+        self.partial_response = partial_response
+
+
+def _http_response_error(response):
+    """Preserve HTTP failures returned before the local SSE stream starts."""
+    status = response.status_code
+    try:
+        body = response.json()
+        detail = body.get("detail", body.get("error", body)) if isinstance(body, dict) else body
+        if isinstance(detail, dict):
+            detail = detail.get("message") or detail.get("detail") or detail
+        if not isinstance(detail, str):
+            detail = json.dumps(detail, ensure_ascii=False)
+    except (ValueError, TypeError):
+        detail = response.text
+    detail = (detail or "").strip()[:8192]
+    retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
+    message = f"Arena HTTP {status}" + (f": {detail}" if detail else "")
+    if retry_after:
+        message += f" (Retry-After: {retry_after})"
+    return ArenaStreamError(message, status, retry_after)
+
+
+async def _run_stream_with_idle_timeout(awaitable, activity, timeout, started=None):
+    """Allow a long active response; time out only when upstream stops sending."""
+    import asyncio
+    task = asyncio.create_task(awaitable)
+    try:
+        if timeout is None:
+            return await task
+        if started is not None and not started.is_set():
+            gate = asyncio.create_task(started.wait())
+            try:
+                await asyncio.wait((task, gate), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                gate.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await gate
+        while not task.done():
+            activity.clear()
+            wake = asyncio.create_task(activity.wait())
+            try:
+                ready, _ = await asyncio.wait((task, wake), timeout=timeout,
+                                               return_when=asyncio.FIRST_COMPLETED)
+                if not ready:
+                    raise RuntimeError(f"Arena stream stalled: no upstream data for {timeout:g} seconds. Partial output was not replayed.")
+            finally:
+                wake.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wake
+        return await task
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("Arena browser stream timed out. Partial output was not replayed.") from exc
+    finally:
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+
+async def _open_arena_login(page, navigation):
+    """Open login and confirm its UI appeared before stopping navigation polls."""
+    async def login_visible():
+        for controls in (
+            page.get_by_role("heading", name=re.compile(r"log\s*in or create account|sign\s*in to arena", re.I)),
+            page.get_by_role("button", name=re.compile(r"^continue with (google|email)$", re.I)),
+        ):
+            for index in range(await controls.count()):
+                if await controls.nth(index).is_visible():
+                    return True
+        return False
+
+    if await login_visible():
+        return True
+    # React can render a clickable button before attaching its login handler.
+    # A successful click alone does not mean the dialog opened.
+    if time.monotonic() < navigation.get("retry_login_at", 0):
+        return False
+    async def click_visible(controls):
+        for index in range(await controls.count()):
+            control = controls.nth(index)
+            if await control.is_visible():
+                try:
+                    await control.click(timeout=1500)
+                    return True
+                except Exception:
+                    # Hydration/navigation can replace a control. Retry next poll.
+                    continue
+        return False
+
+    async def click_login():
+        for role in ("button", "link"):
+            if await click_visible(page.get_by_role(
+                role, name=re.compile(r"^\s*(sign\s*in|log\s*in|login)\s*$", re.I)
+            )):
+                return True
+        return False
+
+    if await click_login():
+        navigation["retry_login_at"] = time.monotonic() + 1
+        return await login_visible()
+    collapsed = await page.locator('[data-state="collapsed"][data-side]').count() > 0
+    if not navigation.get("sidebar_opened") or collapsed:
+        if time.monotonic() < navigation.get("retry_sidebar_at", 0):
+            return False
+        triggers = page.get_by_role("button", name=re.compile(
+            r"^(open|expand) sidebar$", re.I
+        ))
+        opened = await click_visible(triggers)
+        if not opened:
+            opened = await click_visible(page.locator(
+                'button[data-sidebar="trigger"], button[data-slot="sidebar-trigger"], '
+                'button[class~="group/toggle-btn"], '
+                'button:has(svg.lucide-panel-left), button:has(svg.lucide-panel-left-open)'
+            ))
+        if not opened:
+            opened = await click_visible(page.get_by_role("button", name=re.compile(
+                r"(open|expand|toggle).*sidebar|sidebar.*(open|expand|toggle)|^menu$", re.I
+            )))
+        if opened:
+            navigation["sidebar_opened"] = True
+            navigation["retry_sidebar_at"] = time.monotonic() + 2
+            if await click_login():
+                navigation["retry_login_at"] = time.monotonic() + 1
+            return await login_visible()
+    return False
+
+
+def _qt_helper_command():
+    if _qt_host_command is not None:
+        return list(_qt_host_command)
+    import importlib.util
+    try:
+        available = all(importlib.util.find_spec(name) is not None for name in (
+            "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebSockets"))
+    except (ImportError, ValueError):
+        available = False
+    if not available:
+        raise RuntimeError("Arena requires Qt6 WebEngine and Qt WebSockets in the running application. "
+                           "This installation/build does not include it; no Qt download was attempted.")
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--autharena-qt-browser"]
+    return [sys.executable, str(_source_file("autharena_proxy.py")), "--qt-browser"]
+
+
+def _qt_browser_helper(visible=False):
+    """Own Qt pages on the GUI thread; the bridge drives them over loopback CDP."""
+    # Windowed PyInstaller builds set Python's stdio objects to None even
+    # when the parent supplied pipes. Recover those inherited handles.
+    if os.name == "nt" and any(getattr(sys, name) is None for name in ("stdin", "stdout", "stderr")):
+        import ctypes
+        import msvcrt
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetStdHandle.argtypes = [ctypes.c_ulong]
+        kernel.GetStdHandle.restype = ctypes.c_void_p
+        for name, number, mode, flags in (("stdin", -10, "r", os.O_RDONLY),
+                                          ("stdout", -11, "w", os.O_WRONLY),
+                                          ("stderr", -12, "w", os.O_WRONLY)):
+            if getattr(sys, name) is None:
+                handle = kernel.GetStdHandle(number & 0xffffffff)
+                fd = msvcrt.open_osfhandle(handle, flags)
+                setattr(sys, name, os.fdopen(fd, mode, encoding="utf-8", buffering=1))
+    if not visible:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtCore import QObject, Signal, QTimer, QUrl, Qt, QCoreApplication, QEvent, qInstallMessageHandler
+    if sys.stderr is not None:
+        def qt_message(kind, context, message):
+            sys.stderr.write(message + "\n")
+            sys.stderr.flush()
+        qInstallMessageHandler(qt_message)
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtNetwork import QNetworkProxy
+    from PySide6.QtWebSockets import QWebSocket
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+
+    app = QApplication(["Arena Browser"])
+    app.setQuitOnLastWindowClosed(False)
+
+    relay_finished = False
+
+    def relay_event(event, **values):
+        nonlocal relay_finished
+        if relay_finished:
+            return
+        # Qt may emit disconnected after an error or our explicit close reply.
+        # The worker stops reading on the first terminal event.
+        if event in ("error", "closed"):
+            relay_finished = True
+        sys.stdout.write(json.dumps({"event": event, **values}, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+
+    # Use the app's Qt networking library. The managed worker exchanges CDP
+    # messages over its existing pipes and needs no WebSocket Python package.
+    socket = QWebSocket(parent=app)
+    socket.setProxy(QNetworkProxy(QNetworkProxy.NoProxy))
+    socket.connected.connect(lambda: relay_event("connected"))
+    socket.textMessageReceived.connect(lambda message: relay_event("message", data=message))
+    socket.errorOccurred.connect(lambda error: relay_event("error", message=socket.errorString()))
+    socket.disconnected.connect(lambda: relay_event("closed"))
+    # Off-the-record profile: Arena cookies are persisted only in our encrypted store.
+    profile = QWebEngineProfile(app)
+    profile.setHttpCacheType(QWebEngineProfile.MemoryHttpCache)
+    profile.setHttpCacheMaximumSize(16 * 1024 * 1024)
+    profile.setPersistentCookiesPolicy(QWebEngineProfile.NoPersistentCookies)
+    pages = {}
+
+    class Page(QWebEnginePage):
+        def createWindow(self, window_type):
+            return create_page(True).page()
+
+    class View(QWebEngineView):
+        def closeEvent(self, event):
+            pages.pop(self.page().devToolsId(), None)
+            super().closeEvent(event)
+
+    def create_page(show=False):
+        view = View()
+        view.setAttribute(Qt.WA_DeleteOnClose, True)
+        if not visible:
+            # Render for Chromium input/layout without ever mapping a desktop window.
+            view.setAttribute(Qt.WA_DontShowOnScreen, True)
+            view.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        view.setPage(Page(profile, view))
+        view.setWindowTitle("Arena Login / Verification")
+        view.resize(1100, 780)
+        target = view.page().devToolsId()
+        pages[target] = view
+        view.setUrl(QUrl("about:blank"))
+        if show:
+            view.show()
+        return view
+
+    class Commands(QObject):
+        received = Signal(object)
+    commands = Commands()
+    def execute(command):
+        action = command.get("action")
+        if action == "connect":
+            endpoint = command.get("endpoint", "")
+            match = re.fullmatch(r"ws://127\.0\.0\.1:(\d+)/devtools/browser/[a-fA-F0-9-]+", endpoint) if isinstance(endpoint, str) else None
+            if not match or not 0 < int(match.group(1)) < 65536:
+                relay_event("error", message="Arena Qt browser endpoint must use a local loopback socket.")
+                return
+            socket.open(QUrl(endpoint))
+        elif action == "cdp":
+            message = command.get("message")
+            if isinstance(message, str):
+                socket.sendTextMessage(message)
+        elif action == "disconnect":
+            socket.close()
+            # A socket that already failed need not emit disconnected again.
+            relay_event("closed")
+        elif action == "new":
+            create_page(True)  # Offscreen helpers still need an active rendered view.
+        elif action == "show" and visible:
+            view = pages.get(command.get("target"))
+            if view:
+                view.show(); view.raise_(); view.activateWindow()
+        elif action == "close":
+            view = pages.pop(command.get("target"), None)
+            if view:
+                view.close()
+        elif action == "quit":
+            app.quit()
+    commands.received.connect(execute)
+    def read_commands():
+        for line in sys.stdin:
+            try:
+                commands.received.emit(json.loads(line))
+            except (ValueError, RuntimeError):
+                break
+        commands.received.emit({"action": "quit"})
+    threading.Thread(target=read_commands, daemon=True).start()
+    create_page(False)  # Keeper page for profile cookie operations.
+    result = app.exec()
+    socket.abort()
+    # deleteLater() cannot run through the main event loop after app.exec()
+    # returns. Destroy every page while its profile is still alive, then drain
+    # the profile's deletion too; Qt WebEngine otherwise crashes during exit.
+    for view in list(pages.values()):
+        view.close()
+        view.deleteLater()
+    pages.clear()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    profile.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    return result
+
+
+def _qt_browser_env(port, visible, recovery=False):
+    env = _env()
+    env["PYINSTALLER_SUPPRESS_SPLASH_SCREEN"] = "1"
+    env["QTWEBENGINE_REMOTE_DEBUGGING"] = f"127.0.0.1:{port}"
+    # Keep software rasterization available on Linux machines without a GPU.
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --disable-dev-shm-usage"
+    if not visible:
+        env["QT_QPA_PLATFORM"] = "offscreen"
+    elif recovery and platform.system() == "Linux" and env.get("DISPLAY"):
+        env["QT_QPA_PLATFORM"] = "xcb"
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+    return env
+
+
+async def _open_qt_browser(visible=False):
+    """Retry startup only, before any login or translation has been submitted."""
+    import asyncio
+    import socket
+    from autharena_browser import QtArenaContext
+    for attempt in range(2):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        process = browser = None
+        with tempfile.TemporaryFile(mode="w+b") as startup_log:
+            try:
+                process = subprocess.Popen(
+                    _qt_helper_command()
+                    + (["--visible"] if visible else []),
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=startup_log,
+                    text=True, encoding="utf-8", env=_qt_browser_env(port, visible, attempt > 0),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise RuntimeError(f"Qt WebEngine exited during startup (exit {process.returncode}).")
+                    startup_log.seek(0)
+                    output = startup_log.read().decode("utf-8", errors="replace")
+                    endpoint = re.search(
+                        rf"DevTools listening on (ws://127\.0\.0\.1:{port}/devtools/browser/[a-fA-F0-9-]+)", output)
+                    if endpoint:
+                        browser = await QtArenaContext.connect(process, endpoint.group(1))
+                        return browser
+                    await asyncio.sleep(.1)
+                raise RuntimeError("Qt WebEngine did not become ready.")
+            except BaseException as exc:
+                if process is not None:
+                    if process.poll() is None:
+                        process.kill()
+                    await asyncio.to_thread(process.wait)
+                    for pipe in (process.stdin, process.stdout):
+                        with contextlib.suppress(OSError):
+                            pipe.close()
+                if browser is not None:
+                    with contextlib.suppress(Exception):
+                        await browser.close()
+                if not isinstance(exc, Exception) or attempt == 1:
+                    raise
+                print("🔄 Arena: browser startup failed; retrying with a fresh Qt WebEngine process…", flush=True)
+
+
+@contextlib.asynccontextmanager
+async def _regular_login_browser():
+    context = await _open_qt_browser(visible=True)
+    try:
+        yield context
+    finally:
+        await context.close()
+
+
+def set_proxy_started_callback(callback):
+    global _started_callback
+    _started_callback = callback
+
+
+def data_dir():
+    p = Path(os.environ.get("AUTHARENA_PROXY_DATA_DIR", str(Path.home() / ".glossarion" / "autharena_proxy")))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def parse_route(model):
+    """Return (stored slot or None for rotation, unprefixed model)."""
+    match = ROUTE_RE.match(str(model).strip())
+    if not match:
+        raise ValueError("Expected autharena/, autharena0/, or autharenaN/.")
+    number = match.group(1)
+    slot = None if number and int(number) == 0 else (int(number) if number else 0)
+    return slot, str(model).strip()[match.end():]
+
+
+def route_for_slot(slot, model):
+    return f"autharena{int(slot) if int(slot) else ''}/{model}"
+
+
+@contextlib.contextmanager
+def disk_lock(name="state"):
+    """Serialize setup and encrypted state writes across translation processes."""
+    with _file_locks[name], open(data_dir() / (name + ".lock"), "a+b") as f:
+        if f.tell() == 0:
+            f.write(b"0")
+            f.flush()
+        f.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(.1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            f.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _load(name):
+    from token_encryption import load_encrypted_tokens
+    path = data_dir() / name
+    return load_encrypted_tokens(str(path)) if path.exists() else {}
+
+
+def _save(name, value):
+    from token_encryption import save_encrypted_tokens
+    path = data_dir() / name
+    temporary = path.with_suffix(".tmp")
+    save_encrypted_tokens(value, str(temporary))
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def list_accounts():
+    with disk_lock():
+        accounts = _load("accounts.enc")
+    return [{"slot": int(k), "email": v.get("email", ""), "user_id": v.get("user_id", "")}
+            for k, v in sorted(accounts.items(), key=lambda x: int(x[0]))]
+
+
+def _catalog_models(value):
+    """Validate full upstream records; display names alone cannot route requests."""
+    if not isinstance(value, list) or not value or len(value) > 20000:
+        return []
+    models = []
+    for item in value:
+        if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                or not item["id"].strip() or not isinstance(item.get("publicName"), str)
+                or not item["publicName"].strip()):
+            return []
+        models.append(item)
+    return models
+
+
+def _load_catalog():
+    with disk_lock():
+        saved = _load("models.enc")
+    if not isinstance(saved, dict) or not _catalog_models(saved.get("models")):
+        return {"models": [], "fetched_at": 0}
+    return saved
+
+
+def _save_catalog(models):
+    models = _catalog_models(models)
+    if not models:
+        raise ValueError("Arena returned no valid model IDs; the saved catalog was retained.")
+    with disk_lock():
+        _save("models.enc", {"models": models, "fetched_at": time.time()})
+    return models
+
+
+def _extract_catalog(page_html):
+    """Decode Next.js stream strings without relying on the following field name."""
+    decoder = json.JSONDecoder()
+    chunks = []
+    for match in re.finditer(r"(?:self\.)?__next_f\.push\(", page_html):
+        try:
+            frame, _ = decoder.raw_decode(page_html[match.end():].lstrip())
+            if isinstance(frame, list) and len(frame) > 1 and frame[0] == 1 and isinstance(frame[1], str):
+                chunks.append(frame[1])
+        except (ValueError, TypeError):
+            continue
+    for content in ("".join(chunks), page_html):
+        for match in re.finditer(r'"initialModels"\s*:\s*', content):
+            try:
+                value, _ = decoder.raw_decode(content[match.end():])
+                models = _catalog_models(value)
+                if models:
+                    return models
+            except ValueError:
+                continue
+    return []
+
+
+async def _discover_catalog(context):
+    import asyncio
+    page = await context.new_page()
+    try:
+        response = await page.goto("https://arena.ai/", wait_until="domcontentloaded", timeout=30000)
+        if response is not None and response.status >= 400:
+            raise RuntimeError(f"Arena catalog page returned HTTP {response.status}.")
+        for _ in range(10):
+            models = _extract_catalog(await page.content())
+            if models:
+                return models
+            title = (await page.title()).lower()
+            if "just a moment" in title or "verify you are human" in title:
+                raise RuntimeError("Arena is requesting browser verification before loading its catalog.")
+            await asyncio.sleep(.5)
+        raise RuntimeError("Arena loaded, but its page did not contain readable model IDs.")
+    finally:
+        await page.close()
+
+
+async def _ensure_catalog(context):
+    saved = _load_catalog()
+    if saved["models"] and time.time() - float(saved.get("fetched_at", 0)) < CATALOG_TTL_SECONDS:
+        return saved["models"]
+    try:
+        return _save_catalog(await _discover_catalog(context))
+    except Exception as exc:
+        if saved["models"]:
+            return saved["models"]
+        raise RuntimeError(f"Arena has no saved model IDs and catalog retrieval failed: {exc} Open Arena Login to refresh the catalog from its browser.") from exc
+
+
+def _env():
+    # Do not inherit translation prompts or API keys into compiler/runtime processes.
+    keep = {"systemroot", "windir", "comspec", "path", "pathext", "temp", "tmp",
+            "home", "userprofile", "localappdata", "appdata", "programfiles", "programfiles(x86)", "lang", "lc_all",
+            "display", "xauthority", "wayland_display", "xdg_session_type", "xdg_runtime_dir", "xdg_config_home", "dbus_session_bus_address"}
+    env = {k: v for k, v in os.environ.items() if k.lower() in keep}
+    env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", UV_PYTHON_INSTALL_DIR=str(data_dir() / "python"))
+    env["AUTHARENA_PROXY_DATA_DIR"] = str(data_dir())
+    return env
+
+
+def _run(args, log_fn=print):
+    result = subprocess.run([str(a) for a in args], env=_env(), capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", timeout=900,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if result.returncode:
+        raise RuntimeError("Arena runtime setup failed: " + result.stderr[-1800:])
+    return result.stdout.strip()
+
+
+def _download(url, target):
+    with requests.get(url, stream=True, timeout=(15, 180)) as response:
+        response.raise_for_status()
+        with open(target, "wb") as out:
+            for block in response.iter_content(1024 * 1024):
+                out.write(block)
+
+
+def _extract(archive, target):
+    """Reject traversal and links before extracting downloaded archives."""
+    target = Path(target).resolve()
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as z:
+            for item in z.infolist():
+                if not (target / item.filename).resolve().is_relative_to(target):
+                    raise RuntimeError("Unsafe runtime archive")
+                if (item.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise RuntimeError("Runtime archive contains a symbolic link")
+            z.extractall(target)
+    else:
+        with tarfile.open(archive) as t:
+            for item in t.getmembers():
+                if not (target / item.name).resolve().is_relative_to(target) or item.issym() or item.islnk() or item.isdev():
+                    raise RuntimeError("Unsafe runtime archive")
+            t.extractall(target, filter="data")
+
+
+def _source_file(name):
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    for p in (root / name, root / "src" / name, Path(__file__).with_name(name)):
+        if p.is_file():
+            return p
+    raise RuntimeError(f"Arena packaged runtime source missing: {name}")
+
+
+def _qt_bridge_requirements(source):
+    """Exclude the pinned bridge's unused external browser backends."""
+    return "\n".join(line for line in source.splitlines() if not re.match(
+        r"^\s*(?:camoufox|playwright)(?:\s|[<>=!~;\[]|$)", line, re.I)) + "\n"
+
+
+def _prepare_qt_bridge_import(namespace):
+    """Load the pinned entry point with Qt as its only browser factory.
+
+    Adapt the one eager backend import before executing main. This is scoped
+    to the account's module namespace: no fake third-party packages, global
+    import hooks, or edits to the downloaded upstream checkout are required.
+    configure_slot binds the factory to that account before calling upstream.
+    """
+    import importlib
+    import importlib.util
+    parent = importlib.import_module(namespace + ".src")
+    name = namespace + ".src.main"
+    source = Path(__file__).parent / "bridge/src/main.py"
+    code = source.read_text(encoding="utf-8")
+    old_import = "from camoufox.async_api import AsyncCamoufox"
+    if code.count(old_import) != 1:
+        raise RuntimeError("Pinned LMArenaBridge browser factory is incompatible with Qt WebEngine.")
+    code = code.replace(old_import, "from autharena_browser import QtBrowserFactory as AsyncCamoufox")
+    spec = importlib.util.spec_from_file_location(name, source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    parent.main = module
+    try:
+        exec(compile(code, str(source), "exec"), module.__dict__)
+    except BaseException:
+        sys.modules.pop(name, None)
+        if getattr(parent, "main", None) is module:
+            del parent.main
+        raise
+
+
+def _ensure_runtime(log_fn=print):
+    root = data_dir()
+    runtime = root / ("bridge-" + REVISION)
+    python = runtime / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if (runtime / "ready").exists() and python.exists():
+        return runtime, python
+    log_fn("Arena: downloading the managed Python runtime and LMArenaBridge…")
+    machine = platform.machine().lower()
+    arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
+    system = platform.system()
+    triples = {"Windows": f"{arch}-pc-windows-msvc", "Darwin": f"{arch}-apple-darwin", "Linux": f"{arch}-unknown-linux-gnu"}
+    if system not in triples or machine not in ("amd64", "x86_64", "arm64", "aarch64"):
+        raise RuntimeError("Arena automatic runtime setup does not support this OS/architecture.")
+    uv = root / ("uv.exe" if os.name == "nt" else "uv")
+    with tempfile.TemporaryDirectory(prefix="setup-", dir=root) as work:
+        work = Path(work)
+        if not uv.exists():
+            asset = f"uv-{triples[system]}." + ("zip" if os.name == "nt" else "tar.gz")
+            archive = work / asset
+            _download(f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{asset}", archive)
+            _extract(archive, work / "uv")
+            candidate = next((work / "uv").rglob(uv.name))
+            shutil.copy2(candidate, uv)
+            uv.chmod(0o700)
+        archive = work / "bridge.zip"
+        _download(f"https://github.com/CloudWaddie/LMArenaBridge/archive/{REVISION}.zip", archive)
+        _extract(archive, work / "bridge")
+        extracted = next((work / "bridge").iterdir())
+        code = (extracted / "src/main.py").read_text(encoding="utf-8")
+        for symbol in ("async def api_chat_completions", "async def get_initial_data", "STRICT_BROWSER_FETCH_MODELS"):
+            if symbol not in code:
+                raise RuntimeError("LMArenaBridge adapter compatibility check failed.")
+        # venv paths are absolute; build in a version-specific final directory.
+        # The ready marker is the atomic publication boundary for other processes.
+        runtime.mkdir(exist_ok=True)
+        shutil.copytree(extracted, runtime / "bridge", dirs_exist_ok=True)
+        _run([uv, "python", "install", "3.12"], log_fn)
+        _run([uv, "venv", "--python", "3.12", runtime / "venv"], log_fn)
+        log_fn("Arena: installing proxy dependencies…")
+        # The pinned bridge's generic requirements include external browser
+        # automation packages. Qt is provided by the app; install only its
+        # service dependencies. The application's Qt helper owns the browser
+        # and its native WebSocket connection; the worker uses stdlib pipes.
+        requirements = runtime / "qt-requirements.txt"
+        requirements.write_text(_qt_bridge_requirements(
+            (runtime / "bridge/requirements.txt").read_text(encoding="utf-8")), encoding="utf-8")
+        _run([uv, "pip", "install", "--python", python, "-r", requirements,
+              "requests", "cryptography"], log_fn)
+        (runtime / "ready").write_text(REVISION, encoding="ascii")
+    return runtime, python
+
+
+def check_proxy_health():
+    try:
+        state = _load("service.enc")
+        response = requests.get(state["url"] + "/health", headers={"Authorization": "Bearer " + state["key"]}, timeout=2)
+        compatible = response.ok and response.json().get("revision") == REVISION
+        return {"running": compatible and response.json().get("adapter_version") == ADAPTER_VERSION,
+                "outdated": compatible and response.json().get("adapter_version") != ADAPTER_VERSION, **state}
+    except Exception:
+        return {"running": False}
+
+
+def ensure_proxy_running(log_fn=print, notify_started=True):
+    global _owned
+    with disk_lock("setup"):
+        status = check_proxy_health()
+        if status["running"]:
+            return status
+        if status.get("outdated"):
+            requests.post(status["url"] + "/shutdown", headers={"Authorization": "Bearer " + status["key"]}, timeout=5).raise_for_status()
+        qt_command = _qt_helper_command()
+        runtime, python = _ensure_runtime(log_fn or print)
+        for name in ("autharena_proxy.py", "autharena_browser.py", "token_encryption.py"):
+            shutil.copy2(_source_file(name), runtime / name)
+        key = secrets.token_urlsafe(32)
+        # The child binds port 0 itself and publishes its authenticated endpoint.
+        _owned = subprocess.Popen([str(python), str(runtime / "autharena_proxy.py"), "--worker"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 env=_env(), cwd=runtime, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _owned.stdin.write(json.dumps({"key": key, "qt_helper_command": qt_command}).encode() + b"\n")
+        _owned.stdin.close()
+        # Worker publishes state without taking the parent-held setup lock.
+        for _ in range(120):
+            status = check_proxy_health()
+            if status["running"] and status.get("key") == key:
+                if notify_started and _started_callback:
+                    _started_callback()
+                return status
+            if _owned.poll() is not None:
+                raise RuntimeError("Arena proxy exited during initialization. Check the installed runtime dependencies.")
+            time.sleep(.25)
+    raise RuntimeError("Arena proxy did not become healthy.")
+
+
+def _request(path, payload=None, timeout=600, status=None):
+    if status is None:
+        status = ensure_proxy_running()
+    method = requests.post if payload is not None else requests.get
+    response = method(status["url"] + path, headers={"Authorization": "Bearer " + status["key"]},
+                      **({"json": payload} if payload is not None else {}), timeout=timeout)
+    if not response.ok:
+        raise RuntimeError(response.json().get("detail", "Arena request failed"))
+    return response.json()
+
+
+def open_login(log_fn=print, account_id=0):
+    if log_fn:
+        log_fn("⚙️ Arena Login: preparing the proxy and internal browser…")
+    status = ensure_proxy_running(log_fn=log_fn)
+    if log_fn:
+        log_fn("🌐 Arena Login: opening the internal browser. Finish sign-in on the Arena page.")
+    return _request("/login", {"slot": account_id}, timeout=660, status=status)
+
+
+def list_models(timeout=30):
+    # A stopped local worker is not a logged-out account. Catalog polling runs
+    # off the GUI thread; _request starts the worker and restores saved sessions.
+    if not list_accounts():
+        return []
+    return _request("/v1/models", timeout=timeout).get("data", [])
+
+
+def capture_cancel_generation():
+    return _generation
+
+
+def is_cancel_generation_cancelled(generation):
+    return _cancel.is_set() or (generation is not None and generation != _generation)
+
+
+def is_cancelled():
+    return _cancel.is_set()
+
+
+def cancel_stream():
+    global _generation
+    with _lock:
+        _generation += 1
+        _cancel.set()
+        active = list(_responses)
+        pending = list(_pending_requests.items())
+    def notify_worker():
+        for request_id, state in pending:
+            with contextlib.suppress(Exception):
+                requests.post(state["url"] + "/cancel", json={"id": request_id},
+                              headers={"Authorization": "Bearer " + state["key"]}, timeout=2)
+    if pending:
+        threading.Thread(target=notify_worker, daemon=True, name="Arena cancellation").start()
+    for response in active:
+        # Interrupt an outstanding read before close() waits for urllib3's lock.
+        with contextlib.suppress(Exception):
+            import socket
+            response.raw._fp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(Exception):
+            response.close()
+
+
+def reset_cancel():
+    _cancel.clear()
+
+
+def visible_stream():
+    name, default = ("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0") if os.getenv("BATCH_TRANSLATION") == "1" else ("LOG_STREAM_CHUNKS", "1")
+    return os.getenv(name, default).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+class _ArenaStreamLog:
+    """Group deltas into readable log records, as the AuthGPT adapter does."""
+    def __init__(self, log_fn):
+        self.log_fn = log_fn
+        self.phase = None
+        self.buffer = ""
+
+    def _emit(self, text):
+        prefix = "    " if self.phase == "thinking" and text else ""
+        self.log_fn(prefix + text.replace("\x1f", "\\x1F"))
+
+    def flush(self):
+        if self.log_fn and self.buffer.strip(" \t\r\n"):
+            self._emit(self.buffer.strip(" \t\r\n"))
+        self.buffer = ""
+
+    def append(self, chunk, phase):
+        if not self.log_fn:
+            return
+        if phase != self.phase:
+            self.flush()
+            if self.phase is not None:
+                self.log_fn("─" * 50)
+            self.log_fn("📡 Arena: Text streaming..." if phase == "text" else "🧠 [autharena] Thinking...")
+            self.phase = phase
+        combined = self.buffer + chunk
+        for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+            combined = combined.replace(tag, tag + "\n")
+        if "\n" in combined:
+            parts = combined.split("\n")
+            for part in parts[:-1]:
+                self._emit(part)
+            self.buffer = parts[-1]
+        elif len(combined) > 150:
+            self._emit(combined)
+            self.buffer = ""
+        else:
+            self.buffer = combined
+
+
+def consume_stream(lines, log_fn=print, log_stream=True, cancel_generation=None, progress_callback=None):
+    text, thinking, usage, finish = [], [], None, None
+    done = False
+    display = _ArenaStreamLog(log_fn if log_stream else None)
+    try:
+        for line in lines:
+            if is_cancel_generation_cancelled(cancel_generation):
+                raise RuntimeError("Arena stream cancelled")
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                done = True
+                break
+            event = json.loads(data)
+            if event.get("arena_progress"):
+                if progress_callback:
+                    progress_callback(event["arena_progress"])
+                continue
+            if event.get("error"):
+                error = event["error"]
+                message = str((error.get("message") or "") if isinstance(error, dict) else error).strip()
+                if not message:
+                    phase = "after reasoning, before answer text" if thinking and not text else "before completion"
+                    kind = str(error.get("type") or "unspecified upstream error") if isinstance(error, dict) else "unspecified upstream error"
+                    message = f"Arena ended the stream {phase} without an error message ({kind})."
+                status = error.get("status_code") if isinstance(error, dict) else None
+                retry_after = error.get("retry_after") if isinstance(error, dict) else None
+                if retry_after:
+                    message += f" (Retry-After: {retry_after})"
+                raise ArenaStreamError("Arena stream failed: " + message, status, retry_after, bool(text or thinking))
+            usage = event.get("usage") or usage
+            for choice in event.get("choices", []):
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta", {})
+                for field, target in (("content", text), ("reasoning_content", thinking), ("reasoning", thinking)):
+                    chunk = delta.get(field)
+                    if isinstance(chunk, str) and chunk:
+                        target.append(chunk)
+                        display.append(chunk, "text" if field == "content" else "thinking")
+                finish = choice.get("finish_reason") or finish
+    finally:
+        display.flush()
+    if is_cancel_generation_cancelled(cancel_generation):
+        raise RuntimeError("Arena stream cancelled")
+    if not done or not finish:
+        raise ArenaStreamError("Arena stream interrupted before its completion marker; partial output was not retried.",
+                               partial_response=bool(text or thinking))
+    if display.log_fn and display.phase is not None:
+        display.log_fn("📡 Arena: Stream complete")
+    return {"content": "".join(text), "reasoning_content": "".join(thinking), "usage": usage, "finish_reason": finish}
+
+
+def send_message_stream(messages, model, temperature=0.7, max_tokens=None, timeout=600,
+                        log_fn=print, log_stream=None, account_id=0, cancel_generation=None,
+                        before_send_callback=None, progress_label=None):
+    generation = capture_cancel_generation() if cancel_generation is None else cancel_generation
+    if is_cancel_generation_cancelled(generation):
+        raise RuntimeError("Arena stream cancelled")
+    status = ensure_proxy_running(log_fn=log_fn)
+    if is_cancel_generation_cancelled(generation):
+        raise RuntimeError("Arena stream cancelled")
+    payload = {"model": model, "messages": messages, "stream": True, "temperature": temperature, "account_slot": account_id, "dispatch_ack": True, "stream_timeout": timeout}
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    request_id = secrets.token_hex(16)
+    payload["request_id"] = request_id
+    with _lock:
+        _pending_requests[request_id] = status
+    response = None
+    def progress(stage):
+        if stage == "dispatch":
+            if is_cancel_generation_cancelled(generation):
+                raise RuntimeError("Arena stream cancelled")
+            if before_send_callback:
+                before_send_callback()
+            approved = requests.post(status["url"] + "/dispatch", json={"id": request_id},
+                                     headers={"Authorization": "Bearer " + status["key"]}, timeout=10)
+            if approved.status_code == 409:
+                if is_cancel_generation_cancelled(generation):
+                    raise RuntimeError("Arena stream cancelled")
+                raise ArenaStreamError("Arena dispatch preparation ended before handoff; no automatic replay was attempted.", 409)
+            if approved.status_code >= 400:
+                raise _http_response_error(approved)
+            approved.raise_for_status()
+            if log_fn:
+                log_fn("📨 Arena: captcha token acquired; sending Arena request")
+                log_fn(progress_label or f"📤 [{threading.current_thread().name}] API call in progress")
+        elif log_fn:
+            if stage.startswith("headers:"):
+                log_fn("📥 Arena: response headers received (HTTP " + stage.split(":", 1)[1] + ")")
+                return
+            if isinstance(stage, str) and stage.startswith("stream_error:"):
+                log_fn("❌ Arena upstream error (inside HTTP 200 stream): " + stage.split(":", 1)[1])
+                return
+            if isinstance(stage, str) and stage.startswith("stream_summary:"):
+                log_fn("📊 Arena: upstream stream ended — " + stage.split(":", 1)[1])
+            labels = {"bridge_retry": "🔁 Arena: LMArenaBridge is retrying because the previous stream contained no usable model output; see any upstream error above.",
+                      "captcha": "🔐 Arena: requesting a fresh captcha token…",
+                      "token": "✅ Arena: captcha token received",
+                      "retry": "🔁 Arena: captcha rejected; retrying with a fresh token",
+                      "verification": "🔄 Arena: CAPTCHA rejected; LMArenaBridge is obtaining a fresh token in the Arena browser…",
+                      "browser_verification": "🌐 Arena: security verification required. Complete it in the Arena browser window; this request will wait before submission.",
+                      "headers": "📥 Arena: response headers received"}
+            if stage in labels:
+                log_fn(labels[stage])
+    try:
+        if log_fn:
+            log_fn("🌐 Arena: preparing saved session and browser…")
+        if is_cancel_generation_cancelled(generation):
+            raise RuntimeError("Arena stream cancelled")
+        response = requests.post(status["url"] + "/v1/chat/completions", json=payload,
+                                 headers={"Authorization": "Bearer " + status["key"]}, stream=True, timeout=(15, timeout))
+        with _lock:
+            _responses.add(response)
+        if is_cancel_generation_cancelled(generation):
+            raise RuntimeError("Arena stream cancelled")
+        if not response.ok:
+            raise _http_response_error(response)
+        selected = getattr(response, "headers", {}).get("X-Arena-Account-Slot")
+        if log_fn and selected is not None and str(selected).isdigit():
+            selected = int(selected)
+            saved = next((a for a in list_accounts() if a["slot"] == selected), {})
+            identity = saved.get("email") or "saved account"
+            log_fn(f"👤 Arena: using account #{selected} ({identity})" + (" — rotation" if account_id is None else ""))
+        response.encoding = "utf-8"
+        return consume_stream(response.iter_lines(decode_unicode=True, chunk_size=1), log_fn,
+                              visible_stream() if log_stream is None else log_stream, generation, progress)
+    except Exception:
+        with contextlib.suppress(Exception):
+            requests.post(status["url"] + "/cancel", json={"id": request_id},
+                          headers={"Authorization": "Bearer " + status["key"]}, timeout=2)
+        if is_cancel_generation_cancelled(generation):
+            raise RuntimeError("Arena stream cancelled") from None
+        raise
+    finally:
+        with _lock:
+            _responses.discard(response)
+            _pending_requests.pop(request_id, None)
+        if response is not None:
+            response.close()
+
+
+send_message = send_message_stream
+
+
+def shutdown_proxy():
+    cancel_stream()
+    if _owned is not None and _owned.poll() is None:
+        try:
+            state = _load("service.enc")
+            requests.post(state["url"] + "/shutdown", headers={"Authorization": "Bearer " + state["key"]}, timeout=2)
+            _owned.wait(timeout=5)
+        except Exception:
+            _owned.terminate()
+
+
+atexit.register(shutdown_proxy)
+
+
+def session_from_cookies(cookies):
+    # Qt uses an in-memory profile. Retain reCAPTCHA's verification cookie
+    # in the encrypted account snapshot too, without saving Google login cookies.
+    allowed = [c for c in cookies if (
+        c.get("domain", "").lstrip(".").lower() in ("arena.ai", "lmarena.ai")
+        or (c.get("name") == "_GRECAPTCHA" and c.get("domain", "").lstrip(".").lower()
+            in ("google.com", "www.google.com", "recaptcha.google.com", "recaptcha.net", "www.recaptcha.net"))
+    )]
+    chunks = {c["name"]: c["value"] for c in allowed}
+    token = chunks.get("arena-auth-prod-v1", "")
+    if not token:
+        parts = sorted((int(k.rsplit(".", 1)[1]), v) for k, v in chunks.items()
+                       if re.fullmatch(r"arena-auth-prod-v1\.\d+", k))
+        token = "".join(v for _, v in parts)
+    try:
+        raw = token.removeprefix("base64-")
+        session = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        user = session.get("user", {})
+        if not user.get("id") or user.get("is_anonymous", False) or not user.get("email"):
+            return None
+        if session.get("expires_at", 0) <= time.time():
+            return None
+        return {"token": token, "cookies": allowed, "email": user["email"], "user_id": user["id"],
+                "expires_at": session["expires_at"]}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _persist_session(slot, cookies, expected_token=None):
+    """Keep refreshed Arena credentials across worker/app restarts."""
+    session = session_from_cookies(cookies)
+    if session is None:
+        return None
+    with disk_lock():
+        accounts = _load("accounts.enc")
+        previous = accounts.get(str(slot))
+        if not previous or previous.get("user_id") != session["user_id"]:
+            raise RuntimeError("Arena restored a different account; reconnect the intended account with Arena Login.")
+        if expected_token is not None and previous.get("token") != expected_token:
+            # Restoration started before another request or Arena Login saved
+            # a different session. It must not overwrite those credentials.
+            return session
+        # Concurrent contexts can finish out of order. Keep newer refreshed
+        # credentials even if an older, still-valid session finishes last.
+        if session["expires_at"] >= previous.get("expires_at", 0):
+            accounts[str(slot)] = session
+            _save("accounts.enc", accounts)
+    return session
+
+
+class _ArenaBridgeResponse:
+    """Keep browser pages alive through streaming and close them on context exit."""
+    def __init__(self, response, cleanup, events):
+        self.response, self.cleanup, self.events = response, cleanup, events
+        self.closed = False
+
+    def __getattr__(self, name):
+        return getattr(self.response, name)
+
+    async def __aenter__(self):
+        await self.response.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        await self.aclose()
+        return False
+
+    async def aiter_lines(self):
+        count = 0
+        types = {}
+        async for line in self.response.aiter_lines():
+            count += 1
+            value = str(line).strip().removeprefix("data:").lstrip()
+            # Count wire formats only; never log chapter text or token contents.
+            match = re.match(r"^(a[0-9a-z]):", value)
+            kind = match.group(1) if match else ("json" if value.startswith("{") else "other")
+            types[kind] = types.get(kind, 0) + 1
+            if kind == "a3":
+                try:
+                    error = json.loads(value[3:])
+                    message = error if isinstance(error, str) else json.dumps(error, ensure_ascii=False)
+                except (ValueError, TypeError):
+                    message = "Arena returned a malformed a3 error event."
+                await self.events.put({"arena_progress": "stream_error:" + message[:2000]})
+            yield line
+        summary = ", ".join(f"{name}={number}" for name, number in sorted(types.items())) or "empty"
+        await self.events.put({"arena_progress": f"stream_summary:{count} lines ({summary})"})
+
+    async def aclose(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            await self.response.aclose()
+        finally:
+            await self.cleanup()
+
+
+def _bridge_error_metadata(page, activity=None):
+    """Pass the HTTP error body into upstream's metadata-based error handling."""
+    errors = []
+    def on_response(response):
+        from urllib.parse import urlparse
+        parsed = urlparse(response.url)
+        if response.status >= 400 and parsed.hostname in ("arena.ai", "lmarena.ai") and parsed.path.startswith("/nextjs-api/stream/"):
+            errors.append(response)
+    page.on("response", on_response)
+    expose = page.expose_binding
+    async def expose_binding(name, callback, **kwargs):
+        if name != "reportChunk":
+            return await expose(name, callback, **kwargs)
+        async def report(source, line):
+            if activity is not None:
+                activity.set()
+            try:
+                meta = json.loads(line)
+            except (ValueError, TypeError):
+                meta = None
+            if isinstance(meta, dict) and meta.get("__type") == "meta" and meta.get("status", 0) >= 400:
+                response = next((r for r in reversed(errors) if r.status == meta["status"]), None)
+                if response is not None:
+                    meta["text"] = await response.text()
+                    line = json.dumps(meta, separators=(",", ":"))
+            return await callback(source, line)
+        return await expose(name, report, **kwargs)
+    page.expose_binding = expose_binding
+
+
+def _bridge_cancel_compat(cancel_background_task):
+    """Do not mistake a cancelled child fetch for cancellation of its caller."""
+    async def cancel(task, **kwargs):
+        import asyncio
+        try:
+            await cancel_background_task(task, **kwargs)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if (caller is not None and caller.cancelling()) or task is None or not task.cancelled():
+                raise
+    return cancel
+
+
+async def _restore_login_session(context, slot):
+    """Seed a fresh login profile from the selected account's encrypted cookies."""
+    if slot is None:
+        return  # + N must open a separate, unsigned-in account.
+    with disk_lock():
+        account = _load("accounts.enc").get(str(slot))
+    if account:
+        # Preserve expired access sessions too: their refresh cookie may still
+        # allow Arena's session client to renew them after navigation.
+        await context.add_cookies(account.get("cookies", []))
+
+
+async def _serve_worker(key, qt_helper_command=None):
+    """Authenticated loopback broker; independent browser/bridge state per request."""
+    global _qt_host_command
+    _qt_host_command = qt_helper_command
+    import asyncio
+    import copy
+    import importlib
+    import socket
+    import types
+    from fastapi import FastAPI, HTTPException, Request
+    globals()["Request"] = Request  # FastAPI resolves postponed endpoint annotations.
+    from starlette.responses import JSONResponse, StreamingResponse
+    import uvicorn
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    slots = {}
+    slot_pool_lock = asyncio.Lock()
+    login_lock = asyncio.Lock()
+    cursor = 0
+    jobs = {}
+    cancelled_jobs = set()
+    dispatch_acks = {}
+
+    @app.middleware("http")
+    async def authorize(request, call_next):
+        if not secrets.compare_digest(request.headers.get("authorization", ""), "Bearer " + key):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        try:
+            return await call_next(request)
+        except Exception:
+            return JSONResponse({"detail": "Arena operation failed. Reconnect with Arena Login."}, status_code=503)
+
+    @app.get("/health")
+    async def health():
+        return {"revision": REVISION, "adapter_version": ADAPTER_VERSION}
+
+    @app.post("/login")
+    async def login(request: Request):
+        body = await request.json()
+        async with login_lock:
+            login_browser = _regular_login_browser()
+            try:
+                context = await login_browser.__aenter__()
+            except Exception as exc:
+                raise HTTPException(503, f"Arena Qt browser startup failed after automatic recovery: {exc}")
+            page = None
+            browser_closed = False
+            login_task = asyncio.current_task()
+            def on_login_closed(*args):
+                nonlocal browser_closed
+                browser_closed = True
+                login_task.cancel()
+            try:
+                await _restore_login_session(context, body.get("slot"))
+                page = context.pages[0] if context.pages else await context.new_page()
+                page.on("close", on_login_closed)
+                await page.goto("https://arena.ai/", wait_until="domcontentloaded")
+                await page.bring_to_front()
+                clicked = False
+                navigation = {}
+                deadline = time.monotonic() + 300
+                while time.monotonic() < deadline:
+                    cookies = await context.cookies()
+                    account = session_from_cookies(cookies)
+                    if account and body.get("slot") is not None:
+                        expected = next((item for item in list_accounts() if item["slot"] == int(body["slot"])), None)
+                        if expected and expected.get("user_id") and expected["user_id"] != account["user_id"]:
+                            raise HTTPException(409, f"The internal browser is signed into a different Arena account. Switch accounts on the Arena page, then reconnect account {body['slot']}.")
+                    if account and body.get("slot") is None:
+                        known = list_accounts()
+                        if any(v["user_id"] == account["user_id"] for v in known):
+                            await asyncio.sleep(1)
+                            continue
+                    if account:
+                        # Reconnect future requests immediately. Active requests
+                        # finish in their own contexts before those are retired.
+                        async with slot_pool_lock:
+                            with disk_lock():
+                                saved = _load("accounts.enc")
+                                slot = body.get("slot")
+                                if slot is None:
+                                    slot = max([int(k) for k in saved] + [-1]) + 1
+                                slot = int(slot)
+                                if slot < 0 or slot > 9998:
+                                    raise HTTPException(400, "Invalid Arena account slot")
+                                saved[str(slot)] = account
+                                _save("accounts.enc", saved)
+                            previous = slots.pop(slot, [])
+                            for state in previous:
+                                state["retired"] = True
+                        for state in previous:
+                            if not state["lock"].locked():
+                                await close_slot(state)
+                        # Capture full routing metadata while the regular login
+                        # browser is available; background requests can reuse it.
+                        catalog_cached = False
+                        try:
+                            page_models = _extract_catalog(await page.content())
+                            if page_models:
+                                _save_catalog(page_models)
+                            else:
+                                await _ensure_catalog(context)
+                            catalog_cached = True
+                        except Exception:
+                            pass  # Keep the successful encrypted login.
+                        return {"slot": slot, "email": account["email"], "catalog_cached": catalog_cached}
+                    if not clicked:
+                        clicked = await _open_arena_login(page, navigation)
+                    await asyncio.sleep(1 if clicked else .2)
+                raise HTTPException(408, "Arena Login timed out before a signed-in session was available.")
+            except asyncio.CancelledError:
+                if browser_closed:
+                    raise HTTPException(499, "Sign-in cancelled: the Arena login window was closed.") from None
+                raise
+            finally:
+                if page is not None:
+                    page.remove_listener("close", on_login_closed)
+                with contextlib.suppress(Exception):
+                    await login_browser.__aexit__(None, None, None)
+
+    async def get_slot(slot):
+        """Reserve an idle context, or create another for overlapping requests."""
+        while True:
+            async with slot_pool_lock:
+                pool = slots.setdefault(slot, [])
+                for state in list(pool):
+                    if not state["context"].is_connected():
+                        state["retired"] = True
+                        pool.remove(state)
+                        if not state["lock"].locked():
+                            await close_slot(state)
+                    elif not state["lock"].locked():
+                        await state["lock"].acquire()
+                        return state
+            # Navigation and catalog loading must not block other batch calls.
+            state = await initialize_slot(slot)
+            reserved = False
+            try:
+                async with slot_pool_lock:
+                    if slots.get(slot) is pool:
+                        await state["lock"].acquire()
+                        pool.append(state)
+                        reserved = True
+                        return state
+            finally:
+                if not reserved:
+                    # Login changed the account during restoration, or the
+                    # caller cancelled while waiting to reserve this context.
+                    await close_slot(state)
+
+    async def close_slot(state):
+        state["retired"] = True
+        with contextlib.suppress(Exception):
+            await state["context"].close()
+        namespace = state["namespace"]
+        for name in list(sys.modules):
+            if name == namespace or name.startswith(namespace + "."):
+                sys.modules.pop(name, None)
+
+    async def release_slot(state):
+        try:
+            # Upstream launches browser tasks separately from its stream
+            # iterator. Drain them before this context can be reused.
+            pending = [task for task in state.get("transport_tasks", ())
+                       if task is not asyncio.current_task() and not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            main = state["main"]
+            main.chat_sessions.clear()
+            main.conversation_tokens.clear()
+            main.request_failed_tokens.clear()
+            async with slot_pool_lock:
+                pool = slots.get(state.get("slot"), [])
+                if not state["retired"] and any(other is not state and not other["lock"].locked() for other in pool):
+                    state["retired"] = True
+                    if state in pool:
+                        pool.remove(state)
+            if state["retired"]:
+                await close_slot(state)
+        finally:
+            state["lock"].release()
+
+    async def restore_context(slot, refresh=False):
+        with disk_lock():
+            account = _load("accounts.enc").get(str(slot))
+        if not account:
+            raise HTTPException(401, f"Arena account {slot} needs Arena Login.")
+        context = await _open_qt_browser()
+        try:
+            await context.add_cookies(account["cookies"])
+            if refresh or account.get("expires_at", 0) <= time.time() + 60:
+                page = await context.new_page()
+                try:
+                    await page.goto("https://arena.ai/", wait_until="domcontentloaded")
+                    # Let Arena's own session client refresh its saved session.
+                    # Access-token expiry alone must not discard a refresh token.
+                    for _ in range(60):
+                        restored = _persist_session(slot, await context.cookies(),
+                                                    expected_token=account.get("token"))
+                        if restored:
+                            account = restored
+                            break
+                        await asyncio.sleep(.5)
+                    else:
+                        raise HTTPException(401, f"Arena account {slot} could not refresh its saved session. Use Arena Login.")
+                finally:
+                    await page.close()
+            return context, account
+        except BaseException:
+            await context.close()
+            raise
+
+    async def initialize_slot(slot):
+        context, account = await restore_context(slot)
+        namespace = f"arena_slot_{slot}_{secrets.token_hex(4)}"
+        try:
+            return await configure_slot(slot, context, account, namespace)
+        except BaseException:
+            await close_slot({"context": context, "namespace": namespace})
+            raise
+
+    async def configure_slot(slot, context, account, namespace):
+        package = types.ModuleType(namespace)
+        package.__path__ = [str(Path(__file__).parent / "bridge")]
+        sys.modules[namespace] = package
+        _prepare_qt_bridge_import(namespace)
+        main = importlib.import_module(namespace + ".src.main")
+        config_module = importlib.import_module(namespace + ".src.config")
+        auth = importlib.import_module(namespace + ".src.auth")
+        transport = importlib.import_module(namespace + ".src.transport")
+        recaptcha = importlib.import_module(namespace + ".src.recaptcha")
+        if not all(callable(getattr(recaptcha, name, None)) for name in (
+            "_mint_recaptcha_v3_token_in_page", "refresh_recaptcha_token", "get_cached_recaptcha_token"
+        )):
+            raise RuntimeError("Pinned LMArenaBridge CAPTCHA helpers are incompatible with this adapter.")
+        cfg = {"auth_tokens": [account["token"]], "auth_token": account["token"], "api_keys": [{"key": key, "rpm": 100000}],
+               "persist_arena_auth_cookie": False, "browser_cookies": {c["name"]: c["value"] for c in account["cookies"]}}
+        config_module._apply_config_defaults(cfg)
+        # The optional vision solver launches its own external browser. Keep
+        # legacy runtimes with that extra installed on the Qt-only path too.
+        cfg["vision_recaptcha_solver"] = {"enabled": False}
+        # Upstream's default 120s outer timeout includes navigation, interactive
+        # verification, token minting and dispatch acknowledgment together.
+        cfg["chrome_fetch_outer_timeout_seconds"] = 300
+        cfg["camoufox_fetch_outer_timeout_seconds"] = 300
+        try:
+            models = list(await _ensure_catalog(context))
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise HTTPException(503, str(exc)) from exc
+        def save_config(value, **kwargs):
+            cfg.update(copy.deepcopy(value))
+        def save_models(value):
+            validated = _save_catalog(value)
+            models[:] = validated
+        for module in (main, config_module):
+            module.get_config = lambda: copy.deepcopy(cfg)
+            module.save_config = save_config
+            module.get_models = lambda: list(models)
+            module.save_models = save_models
+        main.DEBUG = False
+        main.debug_print = lambda *args, **kwargs: None
+        main.print = lambda *args, **kwargs: None
+        # Supply Qt as the browser backend. Keep upstream CAPTCHA functions,
+        # site keys, payload fields, and retry policy intact.
+        class ContextLease:
+            def __init__(self, **kwargs):
+                pass
+            async def __aenter__(self):
+                return self
+            async def new_context(self, **kwargs):
+                return context
+            async def new_page(self, **kwargs):
+                return await context.new_page()
+            async def __aexit__(self, *args):
+                # The upstream response may still be streaming on these pages.
+                # The response wrapper below closes them after consumption.
+                pass
+        main.AsyncCamoufox = ContextLease
+        # Skip the standalone Chrome token path (which imports Playwright).
+        # The upstream fallback uses ContextLease and our Qt page instead.
+        async def no_external_browser_token(*args, **kwargs):
+            return None
+        recaptcha.get_recaptcha_v3_token_with_chrome = no_external_browser_token
+        main.get_recaptcha_v3_token_with_chrome = no_external_browser_token
+        recaptcha.find_chrome_executable = lambda: None
+        main._cancel_background_task = _bridge_cancel_compat(main._cancel_background_task)
+        # Keep the bridge's discovery intact: it also reads CAPTCHA settings
+        # and server actions from Arena's JavaScript, not just model names.
+        discovery_pages = set(context.pages)
+        try:
+            await main.get_initial_data()
+        finally:
+            for page in list(context.pages):
+                if page not in discovery_pages:
+                    await page.close()
+        main.STRICT_BROWSER_FETCH_MODELS = {m["publicName"] for m in models}
+        state = {"main": main, "context": context, "lock": asyncio.Lock(), "models": models,
+                 "namespace": namespace, "slot": slot, "retired": False, "submitted": False, "usage": None}
+
+        upstream_fetch = transport.fetch_lmarena_stream_via_camoufox
+
+        async def submit_once(http_method, url, payload, auth_token="", **kwargs):
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            if parsed.hostname not in ("arena.ai", "lmarena.ai"):
+                raise RuntimeError("Unexpected Arena transport origin")
+            if state["submitted"]:
+                await state["events"].put({"arena_progress": "bridge_retry"})
+            state["submitted"] = True
+            # Preserve the current Arena conversation schema, without changing
+            # either of the proxy's CAPTCHA token fields.
+            if parsed.path.rstrip("/") == "/nextjs-api/stream/create-evaluation" and payload.get("mode") == "direct":
+                payload = dict(payload, mode="direct-battle")
+            before = set(context.pages)
+            original_new_page = context.new_page
+            dispatched = False
+
+            async def observed_page():
+                page = await original_new_page()
+                _bridge_error_metadata(page, state.get("stream_activity"))
+                async def before_dispatch(route):
+                    nonlocal dispatched
+                    request = route.request
+                    if request.method.upper() == http_method.upper():
+                        if not dispatched:
+                            await state["events"].put({"arena_progress": "token"})
+                            if state.get("dispatch_ack") is not None:
+                                state["dispatch_ack"].clear()
+                                await state["events"].put({"arena_progress": "dispatch"})
+                                await state["dispatch_ack"].wait()
+                            dispatched = True
+                            if state.get("stream_started") is not None:
+                                state["stream_started"].set()
+                    await route.fallback()
+                # Observe actual dispatch without rewriting the proxy's request.
+                await page.route("**/nextjs-api/stream/**", before_dispatch)
+                return page
+
+            async def cleanup():
+                with contextlib.suppress(Exception):
+                    _persist_session(slot, await context.cookies())
+                for page in list(context.pages):
+                    if page not in before:
+                        with contextlib.suppress(Exception):
+                            await page.close()
+
+            context.new_page = observed_page
+            try:
+                await state["events"].put({"arena_progress": "captcha"})
+                response = await upstream_fetch(http_method, url, payload, auth_token, **kwargs)
+                if response is None:
+                    raise RuntimeError("LMArenaBridge browser transport could not complete the request.")
+                await state["events"].put({"arena_progress": "headers:" + str(response.status_code)})
+                if response.status_code >= 400:
+                    state["upstream_error"] = {
+                        "message": f"Arena HTTP {response.status_code}: {response.text}",
+                        "status_code": response.status_code,
+                        "retry_after": response.headers.get("retry-after"),
+                    }
+                    await response.aclose()
+                    await cleanup()
+                    # The browser transport has already completed its retries.
+                    # Prevent the outer API loop from submitting another job.
+                    return transport.BrowserFetchStreamResponse(400, {}, text=state["upstream_error"]["message"])
+                return _ArenaBridgeResponse(response, cleanup, state["events"])
+            except BaseException:
+                await cleanup()
+                raise
+            finally:
+                context.new_page = original_new_page
+
+        # Qt runs the upstream in-page transport; no custom CAPTCHA minting or
+        # retry transport remains. Both bridge routes share this implementation.
+        main.fetch_lmarena_stream_via_chrome = submit_once
+        main.fetch_lmarena_stream_via_camoufox = submit_once
+        return state
+
+    @app.get("/v1/models")
+    async def models_route():
+        accounts = list_accounts()
+        if not accounts:
+            return {"data": []}
+        state = await get_slot(accounts[0]["slot"])
+        try:
+            state["models"][:] = await _ensure_catalog(state["context"])
+            state["main"].STRICT_BROWSER_FETCH_MODELS = {m["publicName"] for m in state["models"]}
+        finally:
+            await release_slot(state)
+        return {"data": [{"id": m["publicName"]} for m in state["models"]]}
+
+    @app.post("/cancel")
+    async def cancel_request(request: Request):
+        request_id = str((await request.json()).get("id", ""))
+        if len(cancelled_jobs) > 1024:
+            cancelled_jobs.clear()
+        cancelled_jobs.add(request_id)
+        task = jobs.get(request_id)
+        if task is not None:
+            task.cancel()
+        return {"cancelled": True}
+
+    @app.post("/dispatch")
+    async def approve_dispatch(request: Request):
+        request_id = str((await request.json()).get("id", ""))
+        if request_id in cancelled_jobs or request_id not in dispatch_acks:
+            raise HTTPException(409, "Arena request is no longer waiting to send")
+        dispatch_acks[request_id].set()
+        return {"approved": True}
+
+    @app.post("/v1/chat/completions")
+    async def chat(request: Request):
+        body = await request.json()
+        request_id = str(body.pop("request_id", secrets.token_hex(16)))
+        if request_id in cancelled_jobs:
+            cancelled_jobs.discard(request_id)
+            raise HTTPException(409, "Arena request cancelled")
+        jobs[request_id] = asyncio.current_task()
+        try:
+            return await prepare_chat(request, body, request_id)
+        except BaseException:
+            jobs.pop(request_id, None)
+            raise
+
+    async def prepare_chat(request, body, request_id):
+        nonlocal cursor
+        stream_timeout = body.pop("stream_timeout", 600)
+        if stream_timeout is not None:
+            try:
+                stream_timeout = float(stream_timeout)
+                if not math.isfinite(stream_timeout) or stream_timeout <= 0:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise HTTPException(400, "Arena stream_timeout must be positive or null")
+        slot = body.pop("account_slot", 0)
+        if slot is None:
+            accounts = list_accounts()
+            if not accounts:
+                raise HTTPException(401, "No Arena accounts. Use Arena Login.")
+            slot = accounts[cursor % len(accounts)]["slot"]
+            cursor += 1
+        body["stream"] = True
+        body.pop("conversation_id", None)
+        dispatch_ack = body.pop("dispatch_ack", False)
+        request._body = json.dumps(body).encode()
+        request._json = body
+        state = await get_slot(int(slot))
+        main = state["main"]
+        main.chat_sessions.clear()
+        state["submitted"] = False
+        state["terminal_error"] = None
+        state["usage"] = None
+        state["stream_timeout"] = stream_timeout
+        state["stream_started"] = asyncio.Event()
+        state["stream_activity"] = asyncio.Event()
+        state["upstream_error"] = None
+        state["events"] = asyncio.Queue(maxsize=64)
+        state["transport_tasks"] = set()
+        state["dispatch_ack"] = asyncio.Event() if dispatch_ack else None
+        if state["dispatch_ack"] is not None:
+            dispatch_acks[request_id] = state["dispatch_ack"]
+        try:
+            response = await main.api_chat_completions(request, {"key": key, "rpm": 100000})
+        except BaseException:
+            dispatch_acks.pop(request_id, None)
+            await release_slot(state)
+            raise
+        if not hasattr(response, "body_iterator"):
+            dispatch_acks.pop(request_id, None)
+            await release_slot(state)
+            jobs.pop(request_id, None)
+            return response
+        async def upstream_chunks():
+            try:
+                jobs[request_id] = asyncio.current_task()
+                if request_id in cancelled_jobs:
+                    raise asyncio.CancelledError()
+                async for chunk in response.body_iterator:
+                    if isinstance(chunk, str) and chunk.startswith("data: {"):
+                        event = json.loads(chunk[6:])
+                        if event.get("error") and state["upstream_error"]:
+                            event["error"] = state["upstream_error"]
+                            chunk = "data: " + json.dumps(event) + "\n\n"
+                        elif state["usage"] and any(c.get("finish_reason") for c in event.get("choices", [])):
+                            event["usage"] = state["usage"]
+                            chunk = "data: " + json.dumps(event) + "\n\n"
+                    yield chunk
+            finally:
+                close_iterator = getattr(response.body_iterator, "aclose", None)
+                if close_iterator is not None:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await close_iterator()
+                jobs.pop(request_id, None)
+        async def chunks():
+            events = state["events"]
+            end = object()
+            async def produce():
+                upstream = upstream_chunks()
+                async def forward():
+                    async for chunk in upstream:
+                        await events.put(chunk)
+                try:
+                    await _run_stream_with_idle_timeout(forward(), state["stream_activity"],
+                                                        stream_timeout, state["stream_started"])
+                except asyncio.CancelledError:
+                    with contextlib.suppress(asyncio.QueueFull):
+                        events.put_nowait(asyncio.CancelledError())
+                    raise
+                except BaseException as exc:
+                    await events.put(exc)
+                finally:
+                    await upstream.aclose()
+                await events.put(end)
+            producer = asyncio.create_task(produce())
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(events.get(), 5)
+                    except asyncio.TimeoutError:
+                        if producer.done():
+                            if producer.cancelled():
+                                raise asyncio.CancelledError()
+                            failure = producer.exception()
+                            if failure:
+                                raise failure
+                            break
+                        yield ": Arena request pending\n\n"
+                        continue
+                    if item is end:
+                        break
+                    if isinstance(item, Exception):
+                        # Headers may already have been sent. Preserve the
+                        # actual browser/idle-timeout failure in the SSE body
+                        # so the client can reject partial output explicitly.
+                        yield "data: " + json.dumps({"error": {"message": str(item)}}) + "\n\n"
+                        return
+                    if isinstance(item, BaseException):
+                        raise item
+                    yield "data: " + json.dumps(item) + "\n\n" if isinstance(item, dict) else item
+            finally:
+                producer.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await producer
+                dispatch_acks.pop(request_id, None)
+                cancelled_jobs.discard(request_id)
+                await release_slot(state)
+        return StreamingResponse(chunks(), media_type="text/event-stream",
+                                 headers={"X-Arena-Account-Slot": str(slot)})
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    _save("service.enc", {"url": f"http://127.0.0.1:{sock.getsockname()[1]}", "key": key})
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error", access_log=False))
+    @app.post("/shutdown")
+    async def shutdown():
+        for task in list(jobs.values()):
+            task.cancel()
+        server.should_exit = True
+        return {"stopping": True}
+    try:
+        await server.serve(sockets=[sock])
+    finally:
+        for pool in slots.values():
+            for state in pool:
+                await close_slot(state)
+
+
+def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=None, selector_enabled=None):
+    """Shared Qt controls; capture the target slot before starting background work."""
+    from PySide6.QtCore import Signal, Slot, QTimer, Qt
+    from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
+    from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QComboBox, QInputDialog, QMessageBox
+
+    class Controls(QWidget):
+        completed = Signal(object, object)
+        progress = Signal(str)
+        accounts_loaded = Signal(object, object)
+
+        def __init__(self):
+            super().__init__(parent)
+            row = QHBoxLayout(self)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(3)
+            self.accounts = QComboBox(self)
+            self.accounts.setFixedWidth(54)
+            self.accounts.setStyleSheet(
+                "QComboBox { background-color: #2a3a4a; color: #ccc; font-weight: bold; "
+                "font-size: 9pt; padding: 1px 2px 1px 4px; border: 1px solid #555; border-radius: 3px; "
+                "min-width: 28px; max-width: 46px; } "
+                "QComboBox:hover { background-color: #3a4a5a; color: white; border-color: #888; } "
+                "QComboBox::drop-down { width: 12px; border: none; } "
+                "QComboBox::down-arrow { image: none; border: none; width: 0px; } "
+                "QComboBox QAbstractItemView { background-color: #2a3a4a; color: #e0e0e0; "
+                "selection-background-color: #4a6a8a; border: 1px solid #555; }"
+            )
+            self.login_slot = 0
+            self.login_button = QPushButton("Arena Login", self)
+            self.login_button.setStyleSheet(
+                "background-color: #10a37f; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+            )
+            self.login_button.setToolTip("Log into Arena in the app's Qt6 WebEngine browser")
+            row.addWidget(self.login_button)
+            row.addWidget(self.accounts)
+            self.login_button.clicked.connect(self.login)
+            self.accounts.activated.connect(self.select_account)
+            self.completed.connect(self.finished)
+            self.progress.connect(log_fn or print)
+            self.progress.connect(self.show_progress)
+            self.spinner = QTimer(self)
+            self.spinner.setInterval(80)
+            self.spinner.timeout.connect(self.animate)
+            self.spinner_angle = 0
+            self.saved_accounts = []
+            self.accounts_ready = False
+            self.accounts_loading = False
+            self.accounts_reload_pending = False
+            self.accounts_checked_at = None
+            self.accounts_loaded.connect(self.receive_accounts)
+            self.busy = False
+            self.refresh()
+
+        def load_accounts_async(self):
+            if self.accounts_loading:
+                return
+            self.accounts_loading = True
+            def worker():
+                try:
+                    result, error = list_accounts(), None
+                except Exception as exc:
+                    result, error = None, str(exc)
+                with contextlib.suppress(RuntimeError):
+                    self.accounts_loaded.emit(result, error)
+            threading.Thread(target=worker, daemon=True, name="Arena account list").start()
+
+        @Slot(object, object)
+        def receive_accounts(self, accounts, error):
+            global _accounts_restore_logged
+            self.accounts_loading = False
+            self.accounts_checked_at = time.monotonic()
+            if error is None:
+                self.saved_accounts = accounts
+                self.accounts_ready = True
+                if accounts and not _accounts_restore_logged:
+                    _accounts_restore_logged = True
+                    first = min(accounts, key=lambda account: account["slot"])
+                    noun = "account" if len(accounts) == 1 else "accounts"
+                    self.progress.emit(
+                        f"🔓 Arena: restored {len(accounts)} {noun} from encrypted storage — "
+                        f"first: {first.get('email') or 'email unavailable'}.")
+            else:
+                self.progress.emit("⚠️ Arena: could not load saved accounts: " + error)
+                QTimer.singleShot(5000, self.refresh)
+            if self.accounts_reload_pending:
+                self.accounts_reload_pending = False
+                self.accounts_checked_at = None
+            self.refresh()
+
+        def animate(self):
+            pixmap = QPixmap(20, 20)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor("white"), 2.5))
+            painter.drawArc(3, 3, 14, 14, self.spinner_angle * 16, 270 * 16)
+            painter.end()
+            icon = QIcon()
+            icon.addPixmap(pixmap, QIcon.Mode.Normal)
+            icon.addPixmap(pixmap, QIcon.Mode.Disabled)
+            self.login_button.setIcon(icon)
+            self.spinner_angle = (self.spinner_angle - 30) % 360
+
+        @Slot(str)
+        def show_progress(self, message):
+            if self.busy:
+                self.login_button.setToolTip(message)
+
+        def refresh(self, *args):
+            model = str(get_model() or "")
+            match = ROUTE_RE.match(model.strip())
+            self.setVisible(bool(match))
+            if not match:
+                return
+            slot, _ = parse_route(model)
+            if self.accounts_checked_at is None or time.monotonic() - self.accounts_checked_at >= 5:
+                self.load_accounts_async()
+            saved_accounts = self.saved_accounts
+            login_slot = self.login_slot if slot is None else slot
+            account_suffix = f" #{login_slot}" if login_slot else ""
+            selected_accounts = [a for a in saved_accounts if a["slot"] == login_slot]
+            if not self.busy:
+                self.login_button.setText(
+                    f"✅ Arena{account_suffix}" if selected_accounts
+                    else f"Arena{account_suffix} Login"
+                )
+                if selected_accounts:
+                    identities = ", ".join(f"#{a['slot']} ({a.get('email') or 'saved account'})" for a in selected_accounts)
+                    self.login_button.setToolTip(
+                        ("Selected pool account: " if slot is None else "Saved Arena account: ") + identities
+                        + ". Credentials are encrypted and restored automatically. Click to reconnect. "
+                        "Saved login does not guarantee CAPTCHA acceptance.")
+                else:
+                    self.login_button.setToolTip("Log into Arena in the app's Qt6 WebEngine browser")
+            self.accounts.blockSignals(True)
+            self.accounts.clear()
+            ids = sorted({0, login_slot, *[a["slot"] for a in saved_accounts]})
+            for aid in ids:
+                self.accounts.addItem(f"#{aid}", aid)
+            self.accounts.addItem("+ N", "new")
+            self.accounts.setCurrentIndex(max(0, self.accounts.findData(self.login_slot if slot is None else slot)))
+            self.accounts.blockSignals(False)
+            self.accounts.setVisible(match.group(1) == "0" and (selector_enabled is None or selector_enabled()))
+            self.accounts.setEnabled(not self.busy and self.accounts_ready)
+            self.login_button.setEnabled(not self.busy and self.accounts_ready)
+            if not self.accounts_ready:
+                self.login_button.setToolTip("Loading saved Arena accounts…")
+
+        def select_account(self, index):
+            selected = self.accounts.itemData(index)
+            if selected == "new":
+                self.start(None, False)
+            else:
+                self.login_slot = selected
+                self.refresh()
+
+        def login(self):
+            slot, _ = parse_route(get_model())
+            if slot is None:
+                slot = self.login_slot
+            self.start(slot, False)
+
+        def start(self, slot, update_route):
+            if self.busy:
+                return
+            self.busy = True
+            self.accounts.setEnabled(False)
+            self.login_button.setEnabled(False)
+            self.login_button.setText("Signing in…")
+            self.login_button.setToolTip("Preparing Arena login. First-time setup can take a few minutes.")
+            self.animate()
+            self.spinner.start()
+            # A row/model can change while login is open. Never retarget the
+            # credential write or overwrite a later model edit on completion.
+            original = get_model()
+            def worker():
+                try:
+                    if slot is None:
+                        self.progress.emit("Arena: sign in with the new account in the internal browser.")
+                    result = open_login(log_fn=self.progress.emit, account_id=slot)
+                    self.completed.emit((result, original, update_route), None)
+                except Exception as exc:
+                    with contextlib.suppress(RuntimeError):
+                        self.completed.emit(None, str(exc))
+            threading.Thread(target=worker, daemon=True, name="Arena Login").start()
+
+        @Slot(object, object)
+        def finished(self, result, error):
+            self.busy = False
+            self.spinner.stop()
+            self.login_button.setIcon(QIcon())
+            self.login_button.setText("Arena Login")
+            self.login_button.setToolTip("Log into Arena in the app's Qt6 WebEngine browser")
+            if error:
+                icon = "🦀" if "Sign-in cancelled:" in error else "⚠️"
+                self.progress.emit(f"{icon} Arena Login: " + error)
+                self.login_button.setToolTip(error)
+            else:
+                account, original, update_route = result
+                if get_model() == original:
+                    self.login_slot = account["slot"]
+                if update_route and get_model() == original:
+                    _, model = parse_route(original)
+                    set_model(route_for_slot(account["slot"], model))
+                self.progress.emit(f"✅ Arena account #{account['slot']} ({account.get('email') or 'saved account'}) connected.")
+                if account.get("catalog_cached") is False:
+                    self.progress.emit("Arena login was saved, but model IDs could not be refreshed. The last successful catalog will be reused if available.")
+                if on_login:
+                    on_login()
+            self.accounts_checked_at = None
+            self.accounts_reload_pending = self.accounts_loading
+            self.refresh()
+
+    return Controls()
+
+
+def install_combo_login(parent, combo, log_fn=print, on_login=None):
+    """Attach the shared control to dynamically created multi-key model fields."""
+    from PySide6.QtCore import QTimer
+    if getattr(combo, "_autharena_controls", None) is not None or not combo.isEditable():
+        return
+    editor = combo.lineEdit()
+    controls = create_login_controls(editor, combo.currentText, combo.setCurrentText, log_fn, on_login)
+    combo._autharena_controls = controls
+    margins = editor.textMargins()
+    previous_width = 0
+    def position(*args):
+        nonlocal previous_width
+        from shiboken6 import isValid
+        if not isValid(combo) or not isValid(controls):
+            return
+        controls.refresh()
+        width = controls.sizeHint().width() if ROUTE_RE.match(combo.currentText().strip()) else 0
+        controls.resize(width, editor.height())
+        controls.move(max(0, editor.width() - width), 0)
+        controls.raise_()
+        current = editor.textMargins()
+        if width:
+            editor.setTextMargins(current.left(), current.top(), width + 2, current.bottom())
+        elif previous_width and current.right() == previous_width + 2:
+            editor.setTextMargins(current.left(), current.top(), margins.right(), current.bottom())
+        previous_width = width
+    original = editor.resizeEvent
+    def resized(event):
+        original(event)
+        position()
+    editor.resizeEvent = resized
+    combo.currentTextChanged.connect(position)
+    QTimer.singleShot(0, position)
+
+
+if __name__ == "__main__":
+    if "--qt-browser" in sys.argv:
+        sys.exit(_qt_browser_helper("--visible" in sys.argv))
+    elif "--worker" in sys.argv:
+        import asyncio
+        startup = json.loads(sys.stdin.readline())
+        asyncio.run(_serve_worker(startup["key"], startup.get("qt_helper_command")))
+    else:
+        import argparse
+        parser = argparse.ArgumentParser(description="Manage Glossarion's Arena proxy; no arguments starts the service until Ctrl+C.")
+        parser.add_argument("--status", action="store_true", help="Check health without starting the service or browser")
+        parser.add_argument("--login", metavar="PREFIX", help="Sign in to an account, e.g. autharena/ for account #0, autharena1/ for #1")
+        args = parser.parse_args()
+        try:
+            if args.status:
+                print("Arena proxy is " + ("running" if check_proxy_health().get("running") else "stopped"))
+            elif args.login:
+                slot, _ = parse_route(args.login)
+                account = open_login(account_id=slot)
+                print(f"Arena account {account['slot']} connected.")
+            else:
+                ensure_proxy_running()
+                print("Arena proxy is running. Press Ctrl+C to stop.")
+                while True:
+                    time.sleep(1)
+        except KeyboardInterrupt:
+            pass

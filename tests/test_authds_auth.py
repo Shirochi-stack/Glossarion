@@ -1,0 +1,538 @@
+import json
+from contextlib import contextmanager
+
+import pytest
+import authds_auth as ds
+
+
+def frame(value, event=None):
+    return (f"event: {event}\n" if event else "") + "data: " + json.dumps(value) + "\n\n"
+
+
+@pytest.fixture(autouse=True)
+def reset():
+    ds.reset_cancel()
+    ds._muted.update(until=0.0, message="")
+    yield
+    ds.reset_cancel()
+    ds._muted.update(until=0.0, message="")
+
+
+@pytest.mark.parametrize("model,kind,thinking", [
+    ("authds/flash", "default", False), ("authds/pro", "expert", False),
+    ("authds/flash-thinking", "default", True), ("authds/pro-thinking", "expert", True),
+])
+def test_model(model, kind, thinking):
+    assert ds.resolve_model(model) == (kind, thinking)
+
+
+def test_unknown_model_and_images_rejected():
+    with pytest.raises(ds.AuthDSError):
+        ds.resolve_model("authds/fake-model")
+    with pytest.raises(ds.AuthDSError):
+        ds.build_prompt([{"content": [{"type": "image_url"}]}])
+
+
+def test_roles_preserved():
+    assert ds.build_prompt([{"role":"system", "content":"translate"},
+                            {"role":"user", "content":"한국어"}]) == "[system]\ntranslate\n\n[user]\n한국어"
+
+
+def test_split_sse_and_thinking_isolation():
+    stream = frame({"v":{"response":{"fragments":[{"type":"THINK","content":"secret reasoning"}]}}})
+    stream += frame({"o":"APPEND","v":" more reasoning"})
+    stream += frame({"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE","content":"Hello"}]})
+    stream += frame({"p":"response/fragments/-1/content","o":"APPEND","v":" world"})
+    stream += frame({}, "close")
+    parser = ds.StreamParser()
+    outputs=[]
+    # One character at a time, including across CRLF boundaries.
+    for character in stream.replace("\n", "\r\n"):
+        outputs.extend(parser.feed(character))
+    assert ''.join(outputs) == parser.content == "Hello world"
+    assert parser.reasoning == "secret reasoning more reasoning"
+    assert parser.finished
+
+
+def test_nested_batch_and_usage():
+    parser = ds.StreamParser()
+    parser.feed(frame({"p":"response","o":"BATCH","v":[
+        {"p":"fragments","o":"APPEND","v":[{"type":"RESPONSE","content":"answer"}]},
+        {"p":"accumulated_token_usage","v":42}, {"p":"status","v":"FINISHED"}]}))
+    assert parser.content == "answer" and parser.tokens == 42 and parser.finished
+
+
+def test_error_never_returns_partial_answer():
+    parser=ds.StreamParser()
+    parser.feed(frame({"v":{"response":{"fragments":[{"type":"RESPONSE","content":"partial"}]}}}))
+    with pytest.raises(ds.AuthDSError):
+        parser.feed(frame({"error":{"message":"secret account data"}}, "error"))
+
+
+class Page:
+    def __init__(self, states):
+        self.states=iter(states)
+        self.start=None
+    def evaluate(self, script):
+        if 'const cfg =' in script:
+            self.start=script
+            return True
+        if 'splice(0)' in script:
+            return next(self.states)
+        return None
+
+
+def test_completion_uses_fresh_chat_and_omits_sampling(monkeypatch):
+    monkeypatch.setenv('ENABLE_DEEPSEEK_THINKING','1')
+    data = frame({"v":{"response":{"fragments":[{"type":"RESPONSE","content":"translated"}]}}}) + frame({}, "close")
+    page=Page([{"chunks":[data], "done":True}])
+    seen=[]
+    result=ds._complete(page, "authds/pro-thinking", [{"role":"user","content":"source"}], 5, None, seen.append, lambda:seen.append("send"))
+    assert result['content']=="translated" and seen==["send","translated"]
+    assert 'parent_message_id:null' in page.start and "chat_session/create" in page.start
+    assert '"model": "expert"' in page.start and '"thinking": true' in page.start
+    assert 'temperature' not in page.start and 'max_tokens' not in page.start
+
+
+@pytest.mark.parametrize('model', ['authds/flash', 'authds/pro', 'authds/flash-thinking',
+                                  'authds/pro-thinking', 'authds/deepseek-reasoner'])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_model_alias_controls_deepthink_independent_of_toggle(monkeypatch, model, enabled):
+    monkeypatch.setenv('ENABLE_DEEPSEEK_THINKING', '1' if enabled else '0')
+    data=frame({'v':{'response':{'fragments':[{'type':'RESPONSE','content':'answer'}]}}}) + frame({},'close')
+    page=Page([{'chunks':[data],'done':True}])
+    ds._complete(page,model,[{'content':'source'}],5,None,None,None)
+    expected = model.endswith('-thinking') or model.endswith('/deepseek-reasoner')
+    assert ('"thinking": true' in page.start) is expected
+    assert ('"thinking": false' in page.start) is (not expected)
+
+
+def test_plain_model_disables_deepthink_when_toggle_unset(monkeypatch):
+    monkeypatch.delenv('ENABLE_DEEPSEEK_THINKING',raising=False)
+    data=frame({'v':{'response':{'fragments':[{'type':'RESPONSE','content':'answer'}]}}}) + frame({},'close')
+    page=Page([{'chunks':[data],'done':True}])
+    ds._complete(page,'authds/flash',[{'content':'source'}],5,None,None,None)
+    assert '"thinking": false' in page.start
+
+
+@pytest.mark.parametrize("chunks", [[], [frame({"v":{"response":{"fragments":[{"type":"RESPONSE","content":"partial"}]}}})],
+    [frame({"v":{"response":{"fragments":[{"type":"THINK","content":"reasoning"}]}}}) + frame({}, "close")]])
+def test_truncated_empty_and_thinking_only_fail(chunks):
+    with pytest.raises(ds.AuthDSError):
+        ds._complete(Page([{"chunks":chunks,"done":True}]), "flash", [{"content":"x"}], 5, None, None, None)
+
+
+def test_expired_session_reopens_visible_browser(monkeypatch):
+    visibility=[]
+    scripts=[]
+    @contextmanager
+    def browser(**kwargs):
+        visibility.append(kwargs['visible'])
+        yield object()
+    monkeypatch.setattr(ds, '_open_browser', browser)
+    monkeypatch.setattr(ds, 'has_session', lambda:True)
+    monkeypatch.setattr(ds, '_wait_login', lambda *a:None)
+    class Profile:
+        def __truediv__(self, other): return self
+        def unlink(self, **kwargs): pass
+    monkeypatch.setattr(ds, 'profile_dir', lambda:Profile())
+    calls=[]
+    def complete(*args):
+        calls.append(1)
+        if len(calls)==1:
+            raise ds.AuthDSError("expired", "auth_error")
+        return {'content':'ok'}
+    # Avoid initial page-ready polling for this transport test.
+    class BrowserPage:
+        def evaluate(self, script):
+            scripts.append(script)
+            return True
+    @contextmanager
+    def ready_browser(**kwargs):
+        visibility.append(kwargs['visible'])
+        yield BrowserPage()
+    monkeypatch.setattr(ds,'_open_browser',ready_browser)
+    monkeypatch.setattr(ds,'_complete',complete)
+    assert ds.send_chat_completion(messages=[{'content':'x'}],log_fn=lambda _:None)['content']=='ok'
+    assert visibility==[False,True]
+    assert any("removeItem('userToken')" in script for script in scripts)
+
+
+def test_cancel_queued_work():
+    ds.cancel_stream()
+    with pytest.raises(ds.AuthDSError) as error:
+        with ds._serialized(): pass
+    assert error.value.error_type=='cancelled'
+    assert ds._gate.acquire(blocking=False)
+    ds._gate.release()
+
+
+def test_manual_login_preserves_existing_session(monkeypatch, tmp_path):
+    scripts=[]
+    class BrowserPage:
+        def evaluate(self, script):
+            scripts.append(script)
+            return True
+    @contextmanager
+    def browser(**kwargs):
+        assert kwargs['visible'] is True
+        yield BrowserPage()
+    monkeypatch.setattr(ds,'profile_dir',lambda:tmp_path)
+    monkeypatch.setattr(ds,'_open_browser',browser)
+    monkeypatch.setattr(ds,'_clear_page_token',lambda *a:pytest.fail('valid session must be preserved'))
+    ds.login(log_fn=lambda _:None)
+    assert scripts == [ds._TOKEN_PRESENT]
+    assert (tmp_path/'.signed_in').exists()
+
+
+def test_login_browser_does_not_modify_workers_or_reload(monkeypatch, tmp_path):
+    import io
+    scripts=[]
+    commands=[]
+    args=[]
+    class Process:
+        def poll(self): return None
+        def wait(self, **kwargs): pass
+    def launch(arguments, **kwargs):
+        args.extend(arguments)
+        (tmp_path/'DevToolsActivePort').write_text('12345\n/devtools/browser/test',encoding='utf-8')
+        return Process()
+    class Opener:
+        def open(self, url, **kwargs):
+            return io.BytesIO(json.dumps([{'type':'page','url':ds.BASE_URL+'/',
+                'webSocketDebuggerUrl':'ws://127.0.0.1:12345/devtools/page/test'}]).encode())
+    class Socket:
+        def send(self, message): commands.append(json.loads(message)['method'])
+        def close(self): pass
+    class BrowserPage:
+        ws=Socket()
+        def evaluate(self, script):
+            scripts.append(script)
+            return True
+        def call(self, method, *args, **kwargs):
+            commands.append(method)
+            return {}
+    monkeypatch.setattr(ds,'profile_dir',lambda:tmp_path)
+    monkeypatch.setattr(ds,'_browser_binary',lambda:'chrome')
+    monkeypatch.setattr(ds.subprocess,'Popen',launch)
+    monkeypatch.setattr(ds.urllib.request,'build_opener',lambda *a:Opener())
+    monkeypatch.setattr(ds,'_Page',lambda *a:BrowserPage())
+    with ds._launch_browser(visible=True): pass
+    assert '--headless=new' not in args
+    assert commands == ['Browser.close']
+    assert scripts and all('Worker' not in s and 'reload' not in s for s in scripts)
+
+
+@pytest.fixture
+def shared_browser(monkeypatch):
+    from types import SimpleNamespace
+    opened, closed, launches, shutdowns = [], [], [], []
+    class Control:
+        debugger_url = 'ws://127.0.0.1:12345/devtools/page/root'
+        def call(self, method, params):
+            if method == 'Target.createTarget':
+                target = str(len(opened))
+                opened.append(target)
+                return {'targetId': target}
+            assert method == 'Target.closeTarget'
+            closed.append(params['targetId'])
+            return {}
+    @contextmanager
+    def launch(**kwargs):
+        launches.append(kwargs)
+        try:
+            yield Control()
+        finally:
+            shutdowns.append(True)
+    class Tab:
+        def __init__(self, url, cancel_check):
+            self.target = url.rsplit('/', 1)[-1]
+            self.ws = SimpleNamespace(close=lambda: None)
+        def evaluate(self, script):
+            return True
+    monkeypatch.setattr(ds.browser_driver, 'use_driver', lambda _: False)
+    monkeypatch.setattr(ds.mobile_runtime, 'subprocesses_available', lambda: True)
+    monkeypatch.setattr(ds, '_launch_browser', launch)
+    monkeypatch.setattr(ds, '_Page', Tab)
+    monkeypatch.setattr(ds, 'has_session', lambda: True)
+    yield SimpleNamespace(opened=opened, closed=closed, launches=launches, shutdowns=shutdowns)
+    assert ds._LEASES.session is None
+
+
+def test_batch_completions_overlap_in_independent_tabs(monkeypatch, shared_browser):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    barrier = threading.Barrier(4)
+    def complete(page, model, messages, *args):
+        # All four calls must be inside the completion transport at once.
+        barrier.wait(timeout=5)
+        return {'content': messages[0]['content'], 'tab': page.target}
+    monkeypatch.setattr(ds, '_complete', complete)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(ds.send_chat_completion, messages=[{'content': str(i)}])
+                   for i in range(4)]
+        results = [future.result(timeout=10) for future in futures]
+    assert [result['content'] for result in results] == ['0', '1', '2', '3']
+    assert len({result['tab'] for result in results}) == 4
+    assert len(shared_browser.launches) == len(shared_browser.shutdowns) == 1
+    assert sorted(shared_browser.closed) == sorted(shared_browser.opened)
+
+
+def test_closing_one_request_keeps_other_request_alive(shared_browser):
+    with ds._open_browser() as first:
+        with ds._open_browser() as second:
+            assert first.target != second.target
+        assert shared_browser.closed == [second.target]
+        assert not shared_browser.shutdowns
+    assert len(shared_browser.shutdowns) == 1
+
+
+def test_cancel_closes_all_tabs_and_releases_profile(shared_browser):
+    with ds._open_browser():
+        with ds._open_browser():
+            ds.cancel_stream()
+    assert len(shared_browser.closed) == len(shared_browser.opened) == 2
+    assert len(shared_browser.shutdowns) == 1
+
+
+def test_tab_connection_failure_releases_profile(monkeypatch, shared_browser):
+    def fail(*args):
+        raise ds.AuthDSError('connection failed', 'browser_error')
+    monkeypatch.setattr(ds, '_Page', fail)
+    with pytest.raises(ds.AuthDSError, match='connection failed'):
+        with ds._open_browser():
+            pytest.fail('failed tab must not be used')
+    assert shared_browser.closed == shared_browser.opened
+    assert len(shared_browser.shutdowns) == 1
+
+
+def test_worker_discovery_reads_targets_without_page_mutation():
+    calls=[]
+    class BrowserPage:
+        def call(self, method):
+            calls.append(method)
+            return {'targetInfos':[
+                {'type':'worker','url':'https://captcha.example/worker.js'},
+                {'type':'page','url':'https://fe-static.deepseek.com/chat/static/main.js'},
+                {'type':'worker','url':'https://fe-static.deepseek.com/chat/static/current-worker.js'}]}
+    assert ds._discover_worker(BrowserPage()).endswith('/current-worker.js')
+    assert calls == ['Target.getTargets']
+
+
+def test_http_403_preserves_session_and_does_not_relogin(monkeypatch, tmp_path):
+    visibility=[]
+    (tmp_path/'.signed_in').touch()
+    class BrowserPage(Page):
+        def evaluate(self, script):
+            if script == ds._TOKEN_PRESENT:
+                return True
+            return super().evaluate(script)
+    @contextmanager
+    def browser(**kwargs):
+        visibility.append(kwargs['visible'])
+        yield BrowserPage([{'chunks':[], 'done':True,'error':'HTTP 403','status':403}])
+    monkeypatch.setattr(ds,'profile_dir',lambda:tmp_path)
+    monkeypatch.setattr(ds,'_open_browser',browser)
+    monkeypatch.setattr(ds,'_clear_page_token',lambda *a:pytest.fail('403 must not clear token'))
+    with pytest.raises(ds.AuthDSError) as error:
+        ds.send_chat_completion(messages=[{'content':'source'}],log_fn=lambda _:None)
+    assert error.value.error_type == 'access_denied'
+    assert visibility == [False]
+    assert (tmp_path/'.signed_in').exists()
+
+
+def test_mobile_rejected_before_process_spawn(monkeypatch):
+    monkeypatch.setattr(ds.mobile_runtime,'subprocesses_available',lambda:False)
+    monkeypatch.setattr(ds.subprocess,'Popen',lambda *a,**k:pytest.fail('must not launch'))
+    with pytest.raises(ds.AuthDSError,match='desktop'):  # no browser driver registered: a clear error, no spawn
+        with ds._open_browser(): pass
+
+
+def test_browser_script_protocol(tmp_path):
+    import shutil
+    import subprocess
+    node=shutil.which('node')
+    if not node:
+        pytest.skip('Node is needed to execute the browser JavaScript test')
+    config={'model':'expert','thinking':True,'prompt':'한국어 source',
+            'worker':'https://fe-static.deepseek.com/chat/static/current-worker.js',
+            'fallbackWorker':ds.POW_WORKER_URL}
+    setup=r'''
+const assert = require('node:assert/strict');
+global.window=global;
+global.location={href:'https://chat.deepseek.com/'};
+global.localStorage={getItem:()=>JSON.stringify({value:'test-token'})};
+global.__glossarionDSWorkers=['https://fe-static.deepseek.com/chat/static/current-worker.js'];
+const requests=[];
+global.Worker=class {
+ postMessage(input){assert.equal(input.type,'pow-challenge');
+  queueMicrotask(()=>this.onmessage({data:{type:'pow-answer',answer:{
+   algorithm:'DeepSeekHashV1',challenge:'c',salt:'s',signature:'sig',answer:7}}}));}
+ terminate(){}
+};
+global.fetch=async (url, options={})=>{
+ requests.push({url,options});
+ if(url.endsWith('current-worker.js'))return new Response('worker');
+ if(url.endsWith('create_pow_challenge'))return Response.json({code:0,data:{biz_code:0,biz_data:{
+  challenge:{algorithm:'DeepSeekHashV1',challenge:'c',salt:'s',signature:'sig',difficulty:1,expire_at:9}}}});
+ if(url.endsWith('chat_session/create'))return Response.json({code:0,data:{biz_code:0,biz_data:{chat_session:{id:'fresh'}}}});
+ if(url.endsWith('chat/completion'))return new Response('data: {"v":{"response":{"fragments":[{"type":"RESPONSE","content":"answer"}]}}}\n\nevent: close\ndata: {}\n\n');
+ throw Error('Unexpected endpoint');
+};
+'''
+    checks=r'''
+(async()=>{
+ while(!window.__glossarionDS.done)await new Promise(r=>setTimeout(r,1));
+ assert.equal(window.__glossarionDS.error,null);
+ assert.ok(window.__glossarionDS.chunks.join('').includes('answer'));
+ const completion=requests.find(r=>r.url.endsWith('chat/completion'));
+ const body=JSON.parse(completion.options.body);
+ assert.equal(body.chat_session_id,'fresh');assert.equal(body.parent_message_id,null);
+ assert.equal(body.model_type,'expert');assert.equal(body.thinking_enabled,true);
+ assert.equal(body.search_enabled,false);assert.equal(body.prompt,'한국어 source');
+ assert.equal(completion.options.headers.authorization,'Bearer test-token');
+ const proof=JSON.parse(Buffer.from(completion.options.headers['x-ds-pow-response'],'base64').toString());
+ assert.equal(proof.answer,7);assert.equal(proof.target_path,'/api/v0/chat/completion');
+ assert.equal('temperature' in body,false);assert.equal('max_tokens' in body,false);
+ assert.equal(requests.filter(r=>r.url.endsWith('chat_session/create')).length,1);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+'''
+    script=tmp_path/'authds_protocol.cjs'
+    script.write_text(setup+ds._START_SCRIPT.replace('__CONFIG__',json.dumps(config))+';\n'+checks,encoding='utf-8')
+    result=subprocess.run([node,str(script)],capture_output=True,text=True,timeout=15)
+    assert result.returncode==0, result.stderr
+
+
+def test_unified_routing():
+    from unified_api_client import UnifiedClient
+    assert UnifiedClient._provider_from_model_name('authds/pro')=='authds'
+    assert not UnifiedClient._model_needs_api_key('authds/flash')
+    assert UnifiedClient._key_data_is_usable({'model':'authds/flash','api_key':''})
+
+
+def test_client_initializes_without_api_key(monkeypatch):
+    from unified_api_client import UnifiedClient
+    monkeypatch.delenv('CUSTOM_OPENAI_PREFIX_ROUTES',raising=False)
+    client=UnifiedClient.for_key_test(api_key='',model='authds/flash')
+    assert client.client_type=='authds'
+    assert client._get_actual_provider()=='authds'
+
+
+def test_stop_lifecycle_resets_between_runs():
+    from unified_api_client import set_stop_flag
+    set_stop_flag(True)
+    assert ds._cancel.is_set()
+    set_stop_flag(False)
+    assert not ds._cancel.is_set()
+
+
+def test_unified_transport_dispatch(monkeypatch):
+    from unified_api_client import UnifiedClient, UnifiedClientError
+    from types import SimpleNamespace
+    calls=[]
+    tls=SimpleNamespace()
+    client=object.__new__(UnifiedClient)
+    client.request_timeout=60
+    monkeypatch.setattr(client,'_get_thread_local_client',lambda:tls)
+    monkeypatch.setattr(client,'_get_active_request_model',lambda:'authds/flash')
+    monkeypatch.setattr(client,'_is_stop_requested',lambda:False)
+    monkeypatch.setattr(client,'_streaming_enabled',lambda:False)
+    def send(**kwargs):
+        calls.append(kwargs)
+        kwargs['before_send_callback']()
+        return {'content':'answer','finish_reason':'stop','usage':None}
+    monkeypatch.setattr(ds,'send_chat_completion',send)
+    result=client._send_authds([{'content':'source'}],.5,8192,'chapter')
+    assert result.content=='answer'
+    assert calls[0]['model']=='authds/flash'
+    assert 'temperature' not in calls[0] and 'max_tokens' not in calls[0]
+    def rejected(**kwargs):
+        raise ds.AuthDSError('limited','rate_limit')
+    monkeypatch.setattr(ds,'send_chat_completion',rejected)
+    with pytest.raises(UnifiedClientError) as exc:
+        client._send_authds([{'content':'source'}],.5,8192,'chapter')
+    assert exc.value.error_type=='rate_limit'
+
+
+def test_images_are_collected_for_upload():
+    import base64
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+    images = []
+    prompt = ds.build_prompt([{"role": "system", "content": "translate"},
+                              {"role": "user", "content": [{"type": "text", "text": "page 1"},
+                                                           {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}"}}]}],
+                             images=images)
+    assert prompt == "[system]\ntranslate\n\n[user]\npage 1"
+    assert images == [{"mime": "image/png", "b64": png, "name": "image1.png"}]
+    with pytest.raises(ds.AuthDSError):  # only data URLs of real image types
+        ds.build_prompt([{"content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]}], images=[])
+    assert ds.resolve_model("authds/auto") == ds.resolve_model("authds/flash")
+
+
+def test_browser_script_uploads_images_before_the_completion(tmp_path):
+    import shutil
+    import subprocess
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is needed to execute the browser JavaScript test')
+    config = {'model': 'default', 'thinking': False, 'prompt': 'translate the page',
+              'images': [{'mime': 'image/png', 'b64': 'iVBORw0KGgo=', 'name': 'image1.png'}],
+              'worker': 'https://fe-static.deepseek.com/chat/static/current-worker.js', 'fallbackWorker': ds.POW_WORKER_URL}
+    setup = r'''
+const assert = require('node:assert/strict');
+global.window=global; global.location={href:'https://chat.deepseek.com/'};
+global.localStorage={getItem:()=>JSON.stringify({value:'test-token'})};
+const requests=[]; let polls=0;
+global.Worker=class { postMessage(input){ queueMicrotask(()=>this.onmessage({data:{type:'pow-answer',answer:{
+  algorithm:'DeepSeekHashV1',challenge:'c',salt:'s',signature:'sig',answer:input.challenge.target_path.length}}})); } terminate(){} };
+const ok=data=>Response.json({code:0,data:{biz_code:0,biz_data:data}});
+global.fetch=async (url, options={})=>{
+ requests.push({url,options});
+ if(url.endsWith('current-worker.js'))return new Response('worker');
+ if(url.endsWith('users/current'))return ok({chat:{is_muted:0}});
+ if(url.endsWith('create_pow_challenge'))return ok({challenge:{algorithm:'DeepSeekHashV1',challenge:'c',salt:'s',signature:'sig',difficulty:1,expire_at:9,target_path:JSON.parse(options.body).target_path}});
+ if(url.endsWith('file/upload_file'))return ok({id:'file-1'});
+ if(url.includes('fetch_files'))return ok({files:[{id:'file-1',status:++polls>1?'SUCCESS':'PENDING'}]});
+ if(url.endsWith('chat_session/create'))return ok({chat_session:{id:'fresh'}});
+ if(url.endsWith('chat/completion'))return new Response('event: close\ndata: {}\n\n');
+ throw Error('Unexpected endpoint '+url);
+};
+'''
+    checks = r'''
+(async()=>{
+ while(!window.__glossarionDS.done)await new Promise(r=>setTimeout(r,1));
+ assert.equal(window.__glossarionDS.error,null);
+ const upload=requests.find(r=>r.url.endsWith('file/upload_file'));
+ assert.ok(upload.options.body instanceof FormData);
+ assert.equal(upload.options.headers['x-model-type'],'default');
+ assert.equal(upload.options.headers['x-file-size'],'8');
+ assert.equal('content-type' in upload.options.headers,false);
+ const proof=JSON.parse(Buffer.from(upload.options.headers['x-ds-pow-response'],'base64').toString());
+ assert.equal(proof.target_path,'/api/v0/file/upload_file');
+ const completion=requests.find(r=>r.url.endsWith('chat/completion'));
+ assert.deepEqual(JSON.parse(completion.options.body).ref_file_ids,['file-1']);
+ assert.ok(requests.indexOf(completion)>requests.indexOf(upload));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+'''
+    script = tmp_path / 'authds_images.cjs'
+    script.write_text(setup + ds._START_SCRIPT.replace('__CONFIG__', json.dumps(config)) + ';\n' + checks, encoding='utf-8')
+    result = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_muted_account_is_a_rate_limit_that_rests_the_key_for_the_session(monkeypatch):
+    import math
+
+    class MutedPage(Page):
+        pass
+    page = MutedPage([{'chunks': [], 'done': True, 'error': 'DeepSeek has muted this account', 'status': 429,
+                       'retryAfter': 90000}])
+    with pytest.raises(ds.AuthDSError) as error:
+        ds._complete(page, 'flash', [{'content': 'x'}], 5, None, None, None)
+    assert error.value.error_type == 'rate_limit' and error.value.retry_after == math.inf
+    # the mute is remembered: later requests fail at once, without opening DeepSeek
+    opened = []
+    monkeypatch.setattr(ds, '_open_browser', lambda **k: opened.append(1))
+    with pytest.raises(ds.AuthDSError, match='muted') as again:
+        ds.send_chat_completion(messages=[{'content': 'x'}], log_fn=lambda _: None)
+    assert again.value.retry_after == math.inf and not opened

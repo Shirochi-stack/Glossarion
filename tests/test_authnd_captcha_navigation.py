@@ -1,0 +1,1085 @@
+import json
+import copy
+import os
+import re
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import authnd_auth as authnd
+
+
+@pytest.mark.parametrize(
+    ("selected", "expected"),
+    [
+        ("none", "none"),
+        ("low", "low"),
+        ("medium", "low"),
+        ("high", "high"),
+        ("xhigh", "high"),
+    ],
+)
+def test_deepseek_v4_reasoning_effort_mapping(selected, expected):
+    assert authnd._deepseek_v4_reasoning_effort(selected) == expected
+
+
+def test_deepseek_v4_none_is_sent_as_reasoning_effort(monkeypatch):
+    monkeypatch.setenv("ENABLE_GPT_THINKING", "1")
+    monkeypatch.setenv("GPT_EFFORT", "none")
+    monkeypatch.delenv("AUTHND_ENABLE_THINKING", raising=False)
+    monkeypatch.delenv("AUTHND_REASONING_EFFORT", raising=False)
+    payload = {}
+
+    authnd._apply_reasoning_payload(payload, "deepseek-ai/deepseek-v4-flash")
+
+    assert payload["reasoning_effort"] == "none"
+    assert payload["chat_template_kwargs"]["enable_thinking"] is True
+
+
+def _catalog_endpoint(
+    name,
+    publisher,
+    *,
+    values=(),
+    unresolved_values=(),
+    available="true",
+):
+    return {
+        "resourceType": "ENDPOINT",
+        "resourceId": f"{authnd.DEFAULT_ORG_ID}/{name}",
+        "orgName": authnd.DEFAULT_ORG_ID,
+        "name": name.replace(".", "_"),
+        "displayName": name,
+        "isPublic": True,
+        "guestAccess": True,
+        "labels": [
+            {
+                "key": "general",
+                "values": list(values),
+                "unresolvedValues": list(unresolved_values),
+            },
+            {"key": "publisher", "values": [publisher]},
+        ],
+        "attributes": [{"key": "AVAILABLE", "value": available}],
+    }
+
+
+class _CatalogResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def test_fetch_available_models_uses_paginated_build_free_chat_catalog(monkeypatch):
+    monkeypatch.setattr(authnd, "CATALOG_PAGE_SIZE", 2)
+    requested_pages = []
+    deepseek = _catalog_endpoint(
+        "deepseek-v4-flash-0731",
+        "deepseek-ai",
+        values=("chat", "Free Endpoint"),
+        # This flag is inconsistent with real hidden-route usability and must
+        # not override the explicit free-chat labels.
+        available="false",
+    )
+    embedding = _catalog_endpoint(
+        "bge-m3",
+        "baai",
+        values=("Embeddings", "Free Endpoint"),
+    )
+    glm = _catalog_endpoint(
+        "glm-5.2",
+        "z-ai",
+        unresolved_values=("playgroundtype_chat", "nim_type_preview"),
+    )
+    image_model = _catalog_endpoint(
+        "image-only",
+        "example",
+        values=("Image Generation", "Free Endpoint"),
+    )
+    pages = {
+        0: {
+            "resultTotal": 4,
+            "results": [
+                {"resources": [deepseek, embedding]},
+                # NGC can repeat records in multiple result groups.
+                {"resources": [deepseek]},
+            ],
+        },
+        1: {
+            "resultTotal": 4,
+            "results": [{"resources": [glm, image_model]}],
+        },
+    }
+
+    def fake_get(url, *, params, headers, timeout):
+        assert url == authnd.CATALOG_SEARCH_URL
+        assert headers["Accept"] == "application/json"
+        assert timeout == 7
+        query = json.loads(params["q"])
+        requested_pages.append(query["page"])
+        assert query["pageSize"] == 2
+        assert query["filters"] == [
+            {"field": "orgName", "value": authnd.DEFAULT_ORG_ID}
+        ]
+        return _CatalogResponse(pages[query["page"]])
+
+    monkeypatch.setattr(authnd.requests, "get", fake_get)
+
+    assert authnd.fetch_available_models(timeout=7) == [
+        "deepseek-ai/deepseek-v4-flash-0731",
+        "z-ai/glm-5.2",
+    ]
+    assert requested_pages == [0, 1]
+
+
+@pytest.mark.parametrize(
+    ("catalog_name", "expected"),
+    [
+        ("glm-5-3", "z-ai/glm-5.3"),
+        ("glm-5-3-flash", "z-ai/glm-5.3-flash"),
+        ("glm-5.2", "z-ai/glm-5.2"),
+    ],
+)
+def test_catalog_model_id_normalizes_zai_glm_version_slug(catalog_name, expected):
+    entry = _catalog_endpoint(
+        catalog_name,
+        "z-ai",
+        values=("chat", "Free Endpoint"),
+    )
+
+    assert authnd._catalog_model_id(entry) == expected
+
+
+def test_resolve_metadata_prefers_publisher_qualified_payload_model(monkeypatch):
+    page_html = r'''
+        {\"model\":\"glm-5-3-flash\",\"namespace\":\"test-org\",
+         \"artifactName\":\"glm-5-3-flash\",
+         \"nvcfFunctionId\":\"function-id\"}
+        {\"requestJson\":\"{\\n \\\"model\\\": \\\"z-ai/glm-5.3-flash\\\"\"}
+        {\"model\":\"z-ai/glm-5.3-flash\"}
+    '''
+    monkeypatch.setattr(authnd, "_metadata_cache", {})
+    monkeypatch.setattr(
+        authnd.requests,
+        "get",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            text=page_html,
+            raise_for_status=lambda: None,
+        ),
+    )
+
+    metadata = authnd._resolve_model_metadata(
+        "https://build.nvidia.com/z-ai/glm-5-3-flash"
+    )
+
+    assert metadata["payload_model"] == "z-ai/glm-5.3-flash"
+
+
+def test_fetch_available_models_rejects_incomplete_pagination(monkeypatch):
+    monkeypatch.setattr(authnd, "CATALOG_PAGE_SIZE", 1)
+    first_model = _catalog_endpoint(
+        "deepseek-v4-flash-0731",
+        "deepseek-ai",
+        values=("chat", "Free Endpoint"),
+    )
+
+    def fake_get(_url, *, params, **_kwargs):
+        page = json.loads(params["q"])["page"]
+        if page:
+            raise RuntimeError("second catalog page failed")
+        return _CatalogResponse({
+            "resultTotal": 2,
+            "results": [{"resources": [first_model]}],
+        })
+
+    monkeypatch.setattr(authnd.requests, "get", fake_get)
+
+    with pytest.raises(RuntimeError, match="second catalog page failed"):
+        authnd.fetch_available_models(timeout=3)
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"resultTotal": 1, "results": "not-a-list"}, "malformed endpoint catalog"),
+        ({"resultTotal": 0, "results": []}, "no compatible free chat model IDs"),
+    ],
+)
+def test_fetch_available_models_rejects_malformed_or_empty_catalogs(
+    monkeypatch, payload, error
+):
+    monkeypatch.setattr(
+        authnd.requests,
+        "get",
+        lambda *_args, **_kwargs: _CatalogResponse(payload),
+    )
+
+    with pytest.raises(ValueError, match=error):
+        authnd.fetch_available_models()
+
+
+def test_fetch_available_models_rejects_chat_endpoint_without_publisher(monkeypatch):
+    malformed = _catalog_endpoint(
+        "missing-publisher",
+        "",
+        values=("chat", "Free Endpoint"),
+    )
+    payload = {"resultTotal": 1, "results": [{"resources": [malformed]}]}
+    monkeypatch.setattr(
+        authnd.requests,
+        "get",
+        lambda *_args, **_kwargs: _CatalogResponse(payload),
+    )
+
+    with pytest.raises(ValueError, match="without a usable publisher/model ID"):
+        authnd.fetch_available_models()
+
+
+class _Signal:
+    def __init__(self):
+        self._callbacks = []
+
+    def connect(self, callback):
+        self._callbacks.append(callback)
+
+    def emit(self, *args):
+        for callback in list(self._callbacks):
+            callback(*args)
+
+
+def _install_fake_qt(monkeypatch, tmp_path, *, reloads_after_injection):
+    pages = []
+
+    class FakeQUrl:
+        def __init__(self, value=""):
+            self._value = str(value)
+
+        def toString(self):
+            return self._value
+
+    class FakeEventLoop:
+        def quit(self):
+            pass
+
+        def exec(self):
+            for page in list(pages):
+                page.advance_pending_navigation()
+
+    class FakeTimer:
+        @staticmethod
+        def singleShot(_delay, _callback):
+            pass
+
+    class FakeApplication:
+        _instance = None
+
+        def __init__(self, _args):
+            type(self)._instance = self
+
+        @classmethod
+        def instance(cls):
+            return cls._instance
+
+    class FakeProfile:
+        def __init__(self, _name, _app):
+            pass
+
+        def setHttpUserAgent(self, _value):
+            pass
+
+        def setPersistentStoragePath(self, _value):
+            pass
+
+        def setCachePath(self, _value):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    class FakePage:
+        def __init__(self, _profile, _app):
+            self.loadStarted = _Signal()
+            self.loadFinished = _Signal()
+            self.loadingChanged = _Signal()
+            self._url = FakeQUrl("about:blank")
+            self._title = ""
+            self._pending_titled_reload = False
+            self._reloads_remaining = reloads_after_injection
+            self._marker = ""
+            self.markers = []
+            self.injection_scripts = []
+            pages.append(self)
+
+        def url(self):
+            return self._url
+
+        def title(self):
+            return self._title
+
+        def load(self, url):
+            # NVIDIA first completes an untitled document at the requested URL,
+            # then replaces it with a second, titled document at the same URL.
+            self._url = FakeQUrl(url.toString())
+            self._title = ""
+            self.loadStarted.emit()
+            self.loadFinished.emit(True)
+            self._pending_titled_reload = True
+
+        def advance_pending_navigation(self):
+            if not self._pending_titled_reload:
+                return
+            self._pending_titled_reload = False
+            self.loadStarted.emit()
+            self._title = "NVIDIA NIM"
+            self.loadFinished.emit(True)
+
+        def _same_url_reload(self):
+            self._marker = ""
+            self.loadStarted.emit()
+            self._title = "NVIDIA NIM"
+            self.loadFinished.emit(True)
+
+        def runJavaScript(self, script, callback):
+            if "const marker =" in script and "return marker" in script:
+                marker_match = re.search(r"const marker = (\".*?\");", script)
+                assert marker_match, "injection marker was not embedded in the script"
+                self._marker = json.loads(marker_match.group(1))
+                self.markers.append(self._marker)
+                self.injection_scripts.append(script)
+                callback(self._marker)
+                return
+
+            if "result: window.__authndResult" in script:
+                if self._reloads_remaining:
+                    self._reloads_remaining -= 1
+                    self._same_url_reload()
+                    callback(json.dumps({"marker": "", "result": None, "readyState": "loading"}))
+                    return
+                callback(
+                    json.dumps(
+                        {
+                            "marker": self._marker,
+                            "result": {
+                                "marker": self._marker,
+                                "pending": False,
+                                "step": "complete",
+                                "token": "secret-captcha-token",
+                                "error": None,
+                            },
+                            "readyState": "complete",
+                        }
+                    )
+                )
+                return
+
+            callback(None)
+
+        def deleteLater(self):
+            pass
+
+    pyside_module = types.ModuleType("PySide6")
+    core_module = types.ModuleType("PySide6.QtCore")
+    core_module.QEventLoop = FakeEventLoop
+    core_module.QTimer = FakeTimer
+    core_module.QUrl = FakeQUrl
+    webengine_module = types.ModuleType("PySide6.QtWebEngineCore")
+    webengine_module.QWebEnginePage = FakePage
+    webengine_module.QWebEngineProfile = FakeProfile
+    widgets_module = types.ModuleType("PySide6.QtWidgets")
+    widgets_module.QApplication = FakeApplication
+    monkeypatch.setitem(sys.modules, "PySide6", pyside_module)
+    monkeypatch.setitem(sys.modules, "PySide6.QtCore", core_module)
+    monkeypatch.setitem(sys.modules, "PySide6.QtWebEngineCore", webengine_module)
+    monkeypatch.setitem(sys.modules, "PySide6.QtWidgets", widgets_module)
+
+    shutdown_module = types.ModuleType("shutdown_utils")
+    shutdown_module.cleanup_generated_browser_profile_dir = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(sys.modules, "shutdown_utils", shutdown_module)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    monkeypatch.setenv("QTWEBENGINE_DISABLE_SANDBOX", "1")
+    monkeypatch.setattr(authnd, "CAPTCHA_DOCUMENT_STABLE_SECONDS", 0.0)
+    authnd._cancel_event.clear()
+    return pages
+
+
+def test_qt_captcha_reinjects_after_same_url_document_replacement(
+    monkeypatch, tmp_path, capsys
+):
+    pages = _install_fake_qt(
+        monkeypatch,
+        tmp_path,
+        reloads_after_injection=1,
+    )
+    monkeypatch.setenv("AUTHND_DEBUG", "1")
+
+    token = authnd._mint_captcha_token_qt(
+        "https://build.nvidia.com/deepseek-ai/deepseek-v4-flash?private=do-not-log",
+        30,
+    )
+
+    assert token == "secret-captcha-token"
+    assert len(pages) == 1
+    assert len(pages[0].markers) == 2
+    assert pages[0].markers[0].endswith(":1:2")
+    assert pages[0].markers[1].endswith(":2:3")
+    assert all("render=explicit&onload=" in script for script in pages[0].injection_scripts)
+    wait_match = re.search(
+        r"const captchaWaitTimeoutMs = (\d+);",
+        pages[0].injection_scripts[0],
+    )
+    assert wait_match
+    assert 20_000 < int(wait_match.group(1)) <= 30_000
+    assert "timeoutMs = captchaWaitTimeoutMs" in pages[0].injection_scripts[0]
+
+    diagnostics = capsys.readouterr().err
+    assert "injection invalidated by navigation" in diagnostics
+    assert "token_length=20" in diagnostics
+    assert "do-not-log" not in diagnostics
+    assert "secret-captcha-token" not in diagnostics
+
+
+def test_qt_captcha_caps_destroyed_document_reinjection(monkeypatch, tmp_path):
+    pages = _install_fake_qt(
+        monkeypatch,
+        tmp_path,
+        reloads_after_injection=10,
+    )
+
+    with pytest.raises(RuntimeError, match="invalidated after 3 attempts"):
+        authnd._mint_captcha_token_qt(
+            "https://build.nvidia.com/deepseek-ai/deepseek-v4-flash",
+            30,
+        )
+
+    assert len(pages) == 1
+    assert len(pages[0].markers) == 3
+
+
+def test_send_chat_completion_retries_token_helper_failure(monkeypatch):
+    authnd._cancel_event.clear()
+    token_calls = []
+    logs = []
+    monkeypatch.setattr(authnd, "_resolve_model_metadata", lambda _page: {})
+
+    def fake_get_token(page_url, timeout, log_fn=None):
+        token_calls.append((page_url, timeout, log_fn))
+        if len(token_calls) == 1:
+            raise RuntimeError("AuthND hCaptcha failed: timeout waiting for hcaptcha")
+        return "fresh-token"
+
+    def fake_post_prediction(**kwargs):
+        assert kwargs["captcha_token"] == "fresh-token"
+        return {"content": "ok", "finish_reason": "stop"}
+
+    monkeypatch.setattr(authnd, "_get_captcha_token_for_request", fake_get_token)
+    monkeypatch.setattr(authnd, "_post_prediction", fake_post_prediction)
+    monkeypatch.setenv("AUTHND_TOKEN_TIMEOUT", "75")
+
+    result = authnd.send_chat_completion(
+        messages=[{"role": "user", "content": "test"}],
+        model="z-ai/glm-5.1",
+        stream=False,
+        log_fn=logs.append,
+    )
+
+    assert result["content"] == "ok"
+    assert len(token_calls) == 2
+    assert all(call[1] == 75 for call in token_calls)
+    assert any("captcha token flow failed (attempt 1/2)" in message for message in logs)
+    assert any("fresh browser helper" in message for message in logs)
+
+
+def test_send_chat_completion_honors_request_local_queue_cancel(monkeypatch):
+    authnd._cancel_event.clear()
+    state = {"cancelled": False}
+    post_calls = []
+    monkeypatch.setattr(authnd, "_resolve_model_metadata", lambda _page: {})
+
+    def fake_get_token(page_url, timeout, log_fn=None, cancel_check=None):
+        assert callable(cancel_check)
+        state["cancelled"] = True
+        assert cancel_check() is True
+        raise RuntimeError("stream cancelled")
+
+    monkeypatch.setattr(authnd, "_get_captcha_token_for_request", fake_get_token)
+    monkeypatch.setattr(
+        authnd,
+        "_post_prediction",
+        lambda **kwargs: post_calls.append(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="stream cancelled"):
+        authnd.send_chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            model="z-ai/glm-5.1",
+            stream=False,
+            cancel_check=lambda: state["cancelled"],
+        )
+
+    assert post_calls == []
+    assert authnd._cancel_event.is_set() is False
+
+
+def test_authnd_provider_boundary_callback_runs_immediately_before_post(monkeypatch):
+    authnd._cancel_event.clear()
+    events = []
+    sent_parameters = []
+
+    monkeypatch.setattr(
+        authnd,
+        "_resolve_model_metadata",
+        lambda _page: events.append("metadata") or {},
+    )
+
+    monkeypatch.setattr(
+        authnd,
+        "_get_captcha_token_for_request",
+        lambda *args, **kwargs: events.append("token") or "fresh-token",
+    )
+
+    def fake_post_prediction(**kwargs):
+        events.append("post")
+        sent_parameters.append(kwargs["request_parameters"])
+        return {"content": "ok", "finish_reason": "stop"}
+
+    monkeypatch.setattr(authnd, "_post_prediction", fake_post_prediction)
+
+    result = authnd.send_chat_completion(
+        messages=[{"role": "user", "content": "test"}],
+        model="z-ai/glm-5.1",
+        stream=False,
+        before_send_callback=lambda: events.append("boundary"),
+        request_parameters={"service_tier": "flex"},
+    )
+
+    assert result["content"] == "ok"
+    assert events == ["metadata", "token", "boundary", "post"]
+    assert sent_parameters == [{"service_tier": "flex"}]
+
+
+def test_authnd_stream_logs_queue_and_prefill_timing(monkeypatch):
+    logs = []
+    timestamps = iter((130.0, 130.0, 140.0, 140.0))
+    monkeypatch.setattr(authnd.time, "time", lambda: next(timestamps))
+
+    result = authnd._parse_sse_lines(
+        [
+            'data: {"choices":[{"delta":{"reasoning_content":"plan"}}]}',
+            "data: [DONE]",
+        ],
+        log_fn=logs.append,
+        log_stream=True,
+        t_start=100.0,
+        headers_received_at=120.0,
+    )
+
+    assert result["reasoning_content"] == "plan"
+    assert any(
+        "First token in 30.0s (response headers 20.0s; "
+        "post-header queue/prefill 10.0s)" in message
+        for message in logs
+    )
+
+
+def test_hcaptcha_timeout_hint_is_actionable(monkeypatch):
+    monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY", "3")
+
+    hint = authnd._captcha_token_failure_hint(
+        RuntimeError("AuthND hCaptcha failed: timeout waiting for hcaptcha")
+    )
+
+    assert "js.hcaptcha.com" in hint
+    assert "AUTHND_TOKEN_TIMEOUT" in hint
+    assert "currently 3; try 1" in hint
+
+
+def test_authnd_uses_buildapi_prediction_gateway():
+    assert authnd.PREDICT_API_BASE_URL == "https://buildapi.ngc.nvidia.com"
+
+
+def test_authnd_rejects_redirect_before_stream_parsing():
+    closed = []
+    response = types.SimpleNamespace(
+        status_code=302,
+        headers={"location": "https://ngc.nvidia.com/404"},
+        text="",
+        reason="Found",
+        close=lambda: closed.append(True),
+    )
+
+    with pytest.raises(RuntimeError, match=r"redirected to https://ngc\.nvidia\.com/404"):
+        authnd._raise_for_status(response)
+    assert closed == [True]
+
+
+@pytest.fixture(params=['httpx', 'requests_stream', 'requests_json'])
+def reasoning_transport(request, monkeypatch):
+    calls, responses, logs = [], [], []
+    state = {'cancelled': False, 'cancel_after_failure': False, 'model': 'deepseek-ai/deepseek-v4-flash'}
+    monkeypatch.setattr(authnd, '_endpoint_output_limits', {})
+    state.update(tokens=[], spec_calls=[], spec_limit=None)
+    token_number = 0
+
+    def mint_token(*args, **kwargs):
+        nonlocal token_number
+        token_number += 1
+        return f'token-{token_number}'
+
+    monkeypatch.setattr(authnd, '_get_captcha_token_for_request', mint_token)
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    monkeypatch.delenv('GRACEFUL_STOP', raising=False)
+    monkeypatch.setattr(authnd, '_is_cancelled', lambda: state['cancelled'])
+    monkeypatch.setattr(authnd, '_resolve_model_metadata', lambda page: {
+        'namespace': 'test-org', 'endpoint_id': 'test-endpoint',
+        'payload_model': state['model'],
+    })
+
+    class Response:
+        def __init__(self, status, body):
+            self.status_code = status
+            self.text = json.dumps(body)
+            self.headers = {'content-type': 'application/json'}
+            self.reason = self.reason_phrase = 'Bad Request' if status == 400 else 'OK'
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+        def read(self):
+            return self.text.encode()
+
+        def json(self):
+            return json.loads(self.text)
+
+        def iter_raw(self):
+            yield ('data: ' + self.text + '\n\ndata: [DONE]\n\n').encode()
+
+        def iter_content(self, **kwargs):
+            return self.iter_raw()
+
+    def post(*args, **kwargs):
+        token = kwargs['headers']['nv-captcha-token']
+        assert token not in state['tokens'], 'A single-use captcha token was reused'
+        state['tokens'].append(token)
+        calls.append(copy.deepcopy(kwargs['json']))
+        response = responses[len(calls) - 1]
+        if response.status_code >= 400 and state['cancel_after_failure']:
+            state['cancelled'] = True
+        return response
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def close(self):
+            pass
+        stream = staticmethod(post)
+
+    monkeypatch.setitem(sys.modules, 'httpx', types.SimpleNamespace(
+        Timeout=lambda *args, **kwargs: None, Client=Client,
+    ) if request.param == 'httpx' else None)
+    monkeypatch.setattr(authnd, '_get_session', lambda: object())
+    monkeypatch.setattr(authnd, '_post_with_cancel', post)
+
+    def get_spec(url, **kwargs):
+        state['spec_calls'].append(url)
+        return types.SimpleNamespace(
+            raise_for_status=lambda: None, close=lambda: None,
+            json=lambda: {'namespace': 'test-org', 'artifactName': 'test-endpoint',
+                          'openAPISpec': json.dumps(_chat_spec({'type': 'integer', 'maximum': state['spec_limit']}))},
+        )
+
+    monkeypatch.setattr(authnd.requests, 'get', get_spec)
+
+    def send(request_parameters=None):
+        return authnd._post_prediction(
+            messages=[{'role': 'user', 'content': 'Reply OK.'}],
+            model_id=state['model'].split('/')[-1], model_path=state['model'],
+            page_url='https://build.nvidia.com/' + state['model'],
+            captcha_token=mint_token(), temperature=0.5, max_tokens=1234,
+            top_p=None, frequency_penalty=None, presence_penalty=None,
+            timeout=30, connect_timeout=10, stream=request.param != 'requests_json',
+            log_stream=False, log_fn=logs.append,
+            progress_label='Chapter 1 API call in progress (reasoning_effort: max)',
+            request_parameters=request_parameters,
+        )
+
+    return send, calls, responses, logs, state, Response
+
+
+def _reasoning_error(values):
+    return {'error': {'param': 'reasoning_effort', 'code': 'unsupported_value',
+                     'message': 'Unsupported value for reasoning_effort. Supported values are: '
+                     + ', '.join(repr(value) for value in values) + '.'}}
+
+
+def test_kimi_k3_max_reaches_transport(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    state['model'] = 'moonshotai/kimi-k3'
+    responses.append(Response(200, {'choices': [{'message': {'content': 'OK'},
+                                                 'delta': {'content': 'OK'}, 'finish_reason': 'stop'}]}))
+    assert send()['content'] == 'OK'
+    assert len(calls) == 1
+    assert calls[0]['reasoning_effort'] == 'max'
+    assert 'chat_template_kwargs' not in calls[0]
+    if calls[0]['stream']:
+        assert 'Chapter 1 API call in progress (reasoning_effort: max)' in logs
+        assert any(
+            'NVIDIA queue / prefill — response headers received in' in message
+            for message in logs
+        )
+
+
+def test_custom_request_parameters_reach_authnd_payload(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    responses.append(Response(200, {'choices': [{'message': {'content': 'OK'},
+                                                 'delta': {'content': 'OK'}, 'finish_reason': 'stop'}]}))
+    assert send({'service_tier': 'flex', 'custom_flag': True, 'model': 'blocked'})['content'] == 'OK'
+    assert calls[0]['service_tier'] == 'flex'
+    assert calls[0]['custom_flag'] is True
+    assert calls[0]['model'] == state['model']
+
+
+@pytest.mark.parametrize('requested,supported,expected', [
+    ('max', ['low', 'medium', 'high', 'xhigh'], 'xhigh'),
+    ('max', ['low', 'medium', 'high'], 'high'),
+    ('none', ['low', 'medium', 'high'], 'low'),
+])
+def test_authnd_retries_nearest_effort(reasoning_transport, monkeypatch, requested, supported, expected):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', requested)
+    responses.extend([
+        Response(400, _reasoning_error(supported)),
+        Response(200, {'choices': [{'message': {'content': 'OK'}, 'delta': {'content': 'OK'},
+                                    'finish_reason': 'stop'}]}),
+    ])
+    assert send()['content'] == 'OK'
+    assert [call['reasoning_effort'] for call in calls] == [requested, expected]
+    assert calls[1] == {**calls[0], 'reasoning_effort': expected}
+    assert os.environ['GPT_EFFORT'] == requested
+    assert responses[0].closed
+    assert any(line.startswith('📝') and f'retrying with {expected}' in line for line in logs)
+    progress = [line for line in logs if 'API call in progress' in line]
+    if calls[1]['stream']:
+        assert progress == [f'Chapter 1 API call in progress (reasoning_effort: {expected})']
+
+
+@pytest.mark.parametrize('model,expected', [
+    ('moonshotai/kimi-k3', ' (reasoning_effort: max)'),
+    ('moonshotai/kimi-k2.5', ' (thinking enabled)'),
+    ('openai/gpt-oss-120b', ' (reasoning_effort: high)'),
+    ('deepseek-ai/deepseek-v4-flash', ' (reasoning_effort: max)'),
+    ('nvidia/nemotron-3-nano', ' (parallel reasoning: heavy)'),
+])
+def test_authnd_max_status_matches_payload(monkeypatch, model, expected):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    assert authnd._reasoning_effort() == 'max'
+    assert authnd.reasoning_status_label(model) == expected
+    if model == 'moonshotai/kimi-k3':
+        payload = {}
+        authnd._apply_reasoning_payload(payload, model)
+        assert payload == {'reasoning_effort': 'max'}
+
+
+@pytest.mark.parametrize('selected,expected', [
+    ('none', 'low'), ('low', 'low'), ('medium', 'low'),
+    ('high', 'high'), ('xhigh', 'high'), ('max', 'max'),
+])
+def test_kimi_k3_uses_documented_effort_with_note(monkeypatch, selected, expected):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', selected)
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    monkeypatch.setattr(authnd, '_effort_fallback_notes_logged', set())
+    logs = []
+    payload = {}
+    authnd._apply_reasoning_payload(payload, 'moonshotai/kimi-k3', log_fn=logs.append)
+    assert payload == {'reasoning_effort': expected}
+    assert authnd.reasoning_status_label('moonshotai/kimi-k3') == f' (reasoning_effort: {expected})'
+    assert logs == ([f'📝 Kimi K3 does not support {selected}, using {expected} instead'] if selected != expected else [])
+
+
+def test_kimi_k3_effort_note_is_logged_once_per_session(monkeypatch):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', 'medium')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    monkeypatch.delenv('AUTHND_REASONING_EFFORT', raising=False)
+    monkeypatch.setattr(authnd, '_effort_fallback_notes_logged', set())
+    logs = []
+    for _request in range(5):
+        payload = {}
+        authnd._apply_reasoning_payload(payload, 'moonshotai/kimi-k3', log_fn=logs.append)
+        assert payload == {'reasoning_effort': 'low'}, 'the substitution itself happens on every request'
+    assert logs == ['📝 Kimi K3 does not support medium, using low instead']
+    # A different setting is a different substitution: announced once as well.
+    monkeypatch.setenv('GPT_EFFORT', 'xhigh')
+    for _request in range(3):
+        authnd._apply_reasoning_payload({}, 'moonshotai/kimi-k3', log_fn=logs.append)
+    assert logs == ['📝 Kimi K3 does not support medium, using low instead',
+                    '📝 Kimi K3 does not support xhigh, using high instead']
+
+
+def test_authnd_status_honors_provider_override(monkeypatch):
+    monkeypatch.setenv('ENABLE_GPT_THINKING', '1')
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    monkeypatch.setenv('AUTHND_REASONING_EFFORT', 'low')
+    monkeypatch.delenv('AUTHND_ENABLE_THINKING', raising=False)
+    assert authnd.reasoning_status_label('openai/gpt-oss-120b') == ' (reasoning_effort: low)'
+
+
+def test_authnd_reasoning_retry_stops_after_second_rejection(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    responses.extend([Response(400, _reasoning_error(['high'])) for _ in range(2)])
+    with pytest.raises(authnd.ReasoningEffortRejected):
+        send()
+    assert len(calls) == 2
+    assert all(response.closed for response in responses)
+
+
+def test_authnd_cancellation_prevents_reasoning_retry(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    state['cancel_after_failure'] = True
+    responses.append(Response(400, _reasoning_error(['high'])))
+    with pytest.raises(RuntimeError, match='stream cancelled'):
+        send()
+    assert len(calls) == 1
+    assert responses[0].closed
+
+
+def test_authnd_unrelated_error_does_not_change_effort(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setenv('GPT_EFFORT', 'max')
+    responses.append(Response(400, {'error': {'param': 'temperature', 'message': 'Unsupported value'}}))
+    with pytest.raises(RuntimeError):
+        send()
+    assert len(calls) == 1
+    assert calls[0]['reasoning_effort'] == 'max'
+
+
+def _chat_spec(field):
+    return {
+        'paths': {'/chat/completions': {'post': {'requestBody': {'content': {
+            'application/json': {'schema': {'$ref': '#/components/schemas/ChatInput'}}
+        }}}}},
+        'components': {'schemas': {'ChatInput': {'properties': {'max_tokens': field}}}},
+    }
+
+
+@pytest.mark.parametrize('field,expected', [
+    ({'type': 'integer', 'maximum': 8192, 'default': 512}, 8192),
+    ({'anyOf': [{'type': 'integer', 'maximum': 32768}, {'type': 'null'}]}, 32768),
+    ({'type': 'integer', 'exclusiveMaximum': 32768}, 32767),
+    ({'type': 'integer', 'maximum': 32768, 'exclusiveMaximum': True}, 32767),
+    ({'allOf': [{'maximum': 32768}, {'maximum': 8192}]}, 8192),
+    ({'anyOf': [{'type': 'integer', 'maximum': 8192}, {'type': 'integer'}]}, None),
+    ({'type': 'integer', 'default': 32768, 'examples': [32768]}, None),
+    ({'type': 'integer', 'maximum': None}, None),
+])
+def test_endpoint_schema_reads_constraints_only(field, expected):
+    spec = _chat_spec(field)
+    spec['components']['schemas']['UnrelatedResponse'] = {'properties': {'max_tokens': {'maximum': 99}}}
+    assert authnd._schema_output_token_limit(spec) == expected
+
+
+def test_endpoint_schema_resolves_field_reference():
+    spec = _chat_spec({'$ref': '#/components/schemas/TokenCount'})
+    spec['components']['schemas']['TokenCount'] = {'type': 'integer', 'maximum': 4096}
+    assert authnd._schema_output_token_limit(spec) == 4096
+
+
+def _opaque_400(Response):
+    response = Response(400, {})
+    response.text = 'data:' + json.dumps({'type': 'about:blank', 'title': 'Bad Request',
+        'status': 400, 'detail': '400 Bad Request from POST https://grpc.nvcf.nvidia.com/v1/chat/completions'})
+    return response
+
+
+def _ok_response(Response):
+    return Response(200, {'choices': [{'message': {'content': 'OK'}, 'delta': {'content': 'OK'},
+                                       'finish_reason': 'stop'}]})
+
+
+def test_authnd_400_uses_real_endpoint_schema_and_caches_limit(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.extend([_opaque_400(Response), _ok_response(Response), _ok_response(Response)])
+    assert send()['content'] == 'OK'
+    assert calls[1] == {**calls[0], 'max_tokens': 1000}
+    assert responses[0].closed
+    assert send()['content'] == 'OK'
+    assert [call['max_tokens'] for call in calls] == [1234, 1000, 1000]
+    assert state['spec_calls'] == ['https://api.ngc.nvidia.com/v2/endpoints/test-org/test-endpoint/spec']
+    assert any('endpoint-declared maximum of 1,000' in line for line in logs)
+
+
+@pytest.mark.parametrize('limit', [None, 1234, 9999])
+def test_authnd_400_does_not_guess_when_schema_cannot_reduce_limit(reasoning_transport, limit):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = limit
+    responses.append(_opaque_400(Response))
+    with pytest.raises(authnd._AuthNDHTTPError):
+        send()
+    assert len(calls) == 1
+
+
+def test_authnd_schema_limit_retry_is_bounded(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.extend([_opaque_400(Response), _opaque_400(Response)])
+    with pytest.raises(authnd._AuthNDHTTPError):
+        send()
+    assert [call['max_tokens'] for call in calls] == [1234, 1000]
+
+
+def test_authnd_empty_missing_finish_checks_schema_and_caches_limit(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.extend([Response(200, {'choices': []}), _ok_response(Response), _ok_response(Response)])
+    assert send()['content'] == 'OK'
+    assert calls[1] == {**calls[0], 'max_tokens': 1000}
+    assert responses[0].closed
+    assert send()['content'] == 'OK'
+    assert [call['max_tokens'] for call in calls] == [1234, 1000, 1000]
+    assert len(state['spec_calls']) == 1
+    assert len(set(state['tokens'])) == 3
+    assert any('empty response without finish_reason' in line and 'maximum of 1,000' in line for line in logs)
+
+
+@pytest.mark.parametrize('limit', [None, 1234, 9999])
+def test_authnd_empty_missing_finish_does_not_guess_limit(reasoning_transport, limit):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = limit
+    responses.append(Response(200, {'choices': []}))
+    result = send()
+    assert result['finish_reason_inference'] == 'empty_content_without_finish_reason'
+    assert not result['finish_reason_explicit']
+    assert len(calls) == 1
+    assert len(state['spec_calls']) == 1
+
+
+def test_authnd_empty_schema_limit_retry_is_bounded(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.extend([Response(200, {'choices': []}), Response(200, {'choices': []})])
+    result = send()
+    assert result['finish_reason_inference'] == 'empty_content_without_finish_reason'
+    assert [call['max_tokens'] for call in calls] == [1234, 1000]
+    assert len(state['spec_calls']) == 1
+
+
+def test_authnd_done_only_response_checks_actual_payload_limit(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    empty = Response(200, {})
+    empty.iter_raw = lambda: iter([b'data: [DONE]\n\n'])
+    responses.extend([empty, _ok_response(Response)])
+    assert send(request_parameters={'max_tokens': 8765})['content'] == 'OK'
+    assert [call['max_tokens'] for call in calls] == [8765, 1000]
+
+
+def test_authnd_empty_response_keeps_original_error_if_spec_unavailable(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+
+    def unavailable(*args, **kwargs):
+        raise authnd.requests.Timeout('endpoint spec unavailable')
+
+    monkeypatch.setattr(authnd.requests, 'get', unavailable)
+    responses.append(Response(200, {'choices': []}))
+    result = send()
+    assert result['finish_reason_inference'] == 'empty_content_without_finish_reason'
+    assert len(calls) == 1
+    assert any('could not read the endpoint output limit' in line for line in logs)
+
+
+@pytest.mark.parametrize('body', [
+    {'choices': [{'message': {'content': 'valid content'}, 'delta': {'content': 'valid content'}}]},
+    {'choices': [{'message': {'content': ''}, 'finish_reason': 'content_filter'}]},
+    {'choices': [], 'usage': {'completion_tokens': 1234}},
+])
+def test_authnd_other_missing_finish_paths_do_not_trigger_clamp(reasoning_transport, body):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    responses.append(Response(200, body))
+    send()
+    assert len(calls) == 1
+    assert state['spec_calls'] == []
+
+
+def test_authnd_cancelled_empty_response_does_not_start_limit_retry(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['spec_limit'] = 1000
+    original = authnd._endpoint_output_token_limit
+
+    def cancel_during_lookup(metadata, **kwargs):
+        limit = original(metadata, **kwargs)
+        if kwargs.get('fetch'):
+            state['cancelled'] = True
+        return limit
+
+    monkeypatch.setattr(authnd, '_endpoint_output_token_limit', cancel_during_lookup)
+    responses.append(Response(200, {'choices': []}))
+    with pytest.raises(RuntimeError, match='stream cancelled'):
+        send()
+    assert len(calls) == 1
+
+
+def test_authnd_cancellation_prevents_schema_lookup(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    state['cancel_after_failure'] = True
+    responses.append(_opaque_400(Response))
+    with pytest.raises(RuntimeError, match='stream cancelled'):
+        send()
+    assert len(calls) == 1
+    assert state['spec_calls'] == []
+
+
+def test_authnd_captcha_error_does_not_trigger_limit_retry(reasoning_transport):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    responses.append(Response(400, {'detail': 'Token is invalid'}))
+    with pytest.raises(authnd._AuthNDHTTPError):
+        send()
+    assert state['spec_calls'] == []
+
+
+def test_authnd_rejects_mismatched_endpoint_spec(reasoning_transport, monkeypatch):
+    send, calls, responses, logs, state, Response = reasoning_transport
+    monkeypatch.setattr(authnd.requests, 'get', lambda *args, **kwargs: types.SimpleNamespace(
+        raise_for_status=lambda: None, close=lambda: None,
+        json=lambda: {'namespace': 'test-org', 'artifactName': 'different-model',
+                      'openAPISpec': _chat_spec({'maximum': 500})},
+    ))
+    responses.append(_opaque_400(Response))
+    with pytest.raises(authnd._AuthNDHTTPError):
+        send()
+    assert len(calls) == 1
+    assert authnd._endpoint_output_limits == {}

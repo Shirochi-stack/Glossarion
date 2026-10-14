@@ -1,0 +1,42 @@
+# Glossarion's in-repo Flet user extension (Python service + Flutter plugin).
+#
+# Layout mirrors Flet 1.0.3's extension template and its first-party extensions
+# (flet-secure-storage, flet-permission-handler):
+#   src/flet_glossarion_native/          Python package (GlossarionNative service)
+#   src/flutter/flet_glossarion_native/  Dart package + Android/iOS plugin code
+#
+# `flet build` installs this project through `[tool.flet].dev_packages` in
+# src/mobile/pyproject.toml. serious_python then moves site-packages/flutter/*
+# into the Flutter build, so every Dart/Kotlin/Swift/Gradle/podspec file under
+# src/flutter/flet_glossarion_native/ must ship in the wheel (package-data below).
+
+[project]
+name = "flet-glossarion-native"
+version = "0.1.0"
+description = "Glossarion native services for Flet: Android foreground service, notifications, share/open-with and iOS background tasks"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Glossarion contributors" }]
+dependencies = [
+    "flet==1.0.3",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["flet_glossarion_native", "flutter.flet_glossarion_native"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+"flutter.flet_glossarion_native" = ["**/*"]
+
+[tool.setuptools.exclude-package-data]
+"flutter.flet_glossarion_native" = [
+    ".dart_tool/**",
+    "build/**",
+    "pubspec.lock",
+    ".flutter-plugins*",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"

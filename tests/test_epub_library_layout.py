@@ -1,0 +1,3297 @@
+import json
+import os
+import time
+import zipfile
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from _src_corpus import desktop_gui_source
+
+pytest.importorskip("PySide6")
+
+import epub_library
+import library_core
+import library_covers
+import reader_doc
+from PySide6.QtCore import QEventLoop, QPoint, QRect, Qt
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+
+from epub_library import (
+    BookDetailsDialog,
+    EpubLibraryDialog,
+    EpubReaderDialog,
+    SIZE_NORMAL,
+    _FlowLayout,
+    _BookDetailsLoader,
+    _OverlayMergeThread,
+    _configure_epub_reader_web_settings,
+    _merge_manual_metadata_edits,
+    _prepare_chapter_row_spec,
+)
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def isolated_library(tmp_path, monkeypatch):
+    """Never create or read the real ~/Documents/Glossarion/Library or output roots.
+
+    ``EpubLibraryDialog`` resolves the Library folder (``get_library_dir`` mkdirs it)
+    and reads its origins / shelves registries while it builds; the same isolation
+    as ``tests/test_library_core.py::isolated_library``.
+    """
+    library = tmp_path / "_isolated" / "Library"
+    output = tmp_path / "_isolated" / "Output"
+    library.mkdir(parents=True)
+    output.mkdir(parents=True)
+    monkeypatch.setenv("GLOSSARION_LIBRARY_DIR", str(library))
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(output))
+    for module in (library_core, epub_library):
+        monkeypatch.setattr(module, "_default_output_root", lambda: str(output))
+    monkeypatch.setattr(library_covers, "_COVER_CACHE_DIR_OVERRIDE",
+                        str(tmp_path / "_isolated" / "covers"))
+    yield
+
+
+def _pump_events(app: QApplication, timeout: float = 0.8) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents(QEventLoop.AllEvents, 50)
+        time.sleep(0.005)
+
+
+def _books(prefix: str, count: int = 8) -> list[dict]:
+    return [
+        {
+            "path": f"C:/layout-test/{prefix}-{idx}.txt",
+            "name": f"Book {idx}",
+            "size": 1024,
+            "mtime": float(idx),
+            "type": "txt",
+        }
+        for idx in range(count)
+    ]
+
+
+def _make_dialog(
+    qapp: QApplication, width: int, height: int = 700
+) -> EpubLibraryDialog:
+    dialog = EpubLibraryDialog(
+        config={
+            "epub_library_card_size": SIZE_NORMAL,
+            "epub_library_tab": 0,
+        }
+    )
+    # Keep the test focused on layout: showEvent normally starts a real scan.
+    dialog._initial_scan_started = True
+    dialog._auto_refresh = lambda: None
+    dialog.resize(width, height)
+    dialog.show()
+    dialog._auto_refresh_timer.stop()
+    dialog._hide_loading()
+    qapp.processEvents()
+    return dialog
+
+
+def _layout_rows(layout) -> list[int]:
+    return [layout.getItemPosition(i)[0] for i in range(layout.count())]
+
+
+def test_resize_before_first_streamed_card_reflows_without_zoom(qapp):
+    """A resize in the stream's zero-card window must not freeze old columns."""
+    dialog = _make_dialog(qapp, 700)
+    try:
+        books = _books("active")
+        dialog._in_progress_books = books
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+
+        dialog._refresh_view()
+        assert dialog._is_card_stream_active("ip")
+        assert dialog._ip_cards == []
+
+        # Reproduce the startup race: the stream captured the narrow width,
+        # then the window widened before its first 16 ms card batch ran.
+        dialog.resize(1800, 1000)
+        _pump_events(qapp)
+
+        assert len(dialog._ip_cards) == 8
+        assert set(_layout_rows(dialog._ip_grid_layout)) == {0}
+    finally:
+        dialog._auto_refresh_timer.stop()
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_library_angle_wheel_scroll_uses_accumulated_animation(qapp):
+    dialog = _make_dialog(qapp, 700, 500)
+    try:
+        area = dialog._ip_scroll
+        area.widget().setMinimumHeight(2400)
+        qapp.processEvents()
+        bar = area.verticalScrollBar()
+        assert bar.maximum() > 300
+
+        assert dialog._animate_library_scroll("ip", area, -120)
+        first_target = dialog._library_scroll_targets["ip"]
+        assert first_target == dialog._WHEEL_SCROLL_PIXELS
+        assert (dialog._library_scroll_animations["ip"].state()
+                == epub_library.QAbstractAnimation.Running)
+        _pump_events(qapp, 0.05)
+        assert 0 < bar.value() < first_target
+
+        # A second tick while the first animation is running adds to its end
+        # target instead of discarding the remaining movement.
+        assert dialog._animate_library_scroll("ip", area, -120)
+        final_target = dialog._library_scroll_targets["ip"]
+        assert final_target == first_target + dialog._WHEEL_SCROLL_PIXELS
+        _pump_events(qapp, 0.25)
+        assert bar.value() == final_target
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_reader_accepts_translated_pdf_html_workspace(qapp, tmp_path, monkeypatch):
+    workspace = tmp_path / "Translated PDF"
+    workspace.mkdir()
+    source = tmp_path / "Raw.pdf"
+    source.write_bytes(b"placeholder")
+    (workspace / "source_epub.txt").write_text(str(source), encoding="utf-8")
+    (workspace / "response_pdf_section_1.html").write_text(
+        "<html><body><h1>Abertura traduzida</h1>"
+        "<p>translated</p></body></html>",
+        encoding="utf-8",
+    )
+    (workspace / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "pdf:outline:1": {
+                        "actual_num": 1,
+                        "output_file": "response_pdf_section_1.html",
+                        "original_basename": "pdf_section_1.html",
+                        "pdf_toc_section": True,
+                        "pdf_toc_title": "Opening",
+                        "pdf_start_page": 1,
+                        "pdf_end_page": 2,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: False,
+    )
+
+    dialog = EpubReaderDialog(
+        str(source),
+        config={},
+        workspace_dir=str(workspace),
+        initial_show_raw=False,
+    )
+
+    assert dialog._workspace_mode is True
+    assert dialog._workspace_has_raw is True
+    assert dialog._workspace_manifest["entries"][0]["title"] == "Opening"
+    assert dialog._workspace_manifest["entries"][0]["filename"] == \
+        "response_pdf_section_1.html"
+    toolbar = dialog._toolbar_widget.layout()
+    assert toolbar.indexOf(dialog._translate_btn) < toolbar.indexOf(
+        dialog._layout_combo
+    )
+    assert toolbar.indexOf(dialog._layout_combo) < toolbar.indexOf(
+        dialog._raw_btn
+    )
+    assert dialog._reader_startup_pending is True
+    assert dialog._loading_widget.isHidden() is False
+    assert dialog._toolbar_widget.isHidden() is True
+    assert dialog._content_widget.isHidden() is True
+    try:
+        dialog.show()
+        _pump_events(qapp, timeout=1.2)
+        assert dialog._reader_startup_pending is False
+        assert dialog._loading_widget.isHidden() is True
+        assert dialog._toolbar_widget.isHidden() is False
+        assert dialog._content_widget.isHidden() is False
+        assert len(dialog._chapters_overlaid) == 1
+        assert "translated" in dialog._chapters_overlaid[0][1]
+        assert dialog._chapters_overlaid[0][0] == "Abertura traduzida"
+        assert dialog._chapters_raw[0][0] == "Opening"
+        assert dialog._chapter_filenames == ["response_pdf_section_1.html"]
+
+        scheduled = []
+
+        class _Signal:
+            def connect(self, callback):
+                self.callback = callback
+
+        class _RawThreadStub:
+            def __init__(self, *args, **kwargs):
+                self.done = _Signal()
+                self.error = _Signal()
+                self.started = False
+
+            def isRunning(self):
+                return self.started
+
+            def start(self):
+                self.started = True
+
+        monkeypatch.setattr(
+            epub_library, "_PdfRawSectionLoaderThread", _RawThreadStub)
+        monkeypatch.setattr(
+            epub_library.QTimer,
+            "singleShot",
+            lambda delay, callback: scheduled.append((delay, callback)),
+        )
+
+        assert dialog._ensure_workspace_raw_chapter(0) is False
+        raw_thread = dialog._workspace_raw_thread
+        assert raw_thread.started is False
+        assert "Loading raw PDF pages" in dialog._chapters_raw[0][1]
+        assert scheduled[0][0] == dialog._RAW_PDF_WORKER_PAINT_DELAY_MS
+        scheduled[0][1]()
+        assert raw_thread.started is True
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_reader_native_toc_prefers_translated_txt_and_maps_targets(tmp_path):
+    (tmp_path / "TOC.txt").write_text(
+        """TOC Translations
+==================================================
+
+Chapter 1:
+  Original:   Prologue
+  Translated: Opening
+  Target URI: Text/part0010.xhtml#opening
+----------------------------------------
+Chapter 2:
+  Original:   Chapter One
+  Translated: First Day
+  Target URI: part0011.xhtml
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "toc.ncx").write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap><navPoint><navLabel><text>NCX label</text></navLabel>
+  <content src="part0010.xhtml" /></navPoint></navMap>
+</ncx>""",
+        encoding="utf-8",
+    )
+
+    entries = epub_library._load_reader_native_toc(str(tmp_path), "")
+    mapped = epub_library._map_native_toc_to_chapters(
+        entries,
+        ["cover.xhtml", "part0010.xhtml", "part0011.xhtml"],
+    )
+
+    assert [entry["title"] for entry in mapped] == ["Opening", "First Day"]
+    assert [entry["chapter_index"] for entry in mapped] == [1, 2]
+    assert mapped[0]["fragment"] == "opening"
+    assert mapped[0]["source"].endswith("TOC.txt")
+
+
+def test_reader_native_toc_falls_back_to_embedded_ncx(tmp_path):
+    epub_path = tmp_path / "book.epub"
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr(
+            "OEBPS/toc.ncx",
+            """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap><navPoint><navLabel><text>Opening</text></navLabel>
+  <content src="Text/part0010.xhtml#start" /></navPoint></navMap>
+</ncx>""",
+        )
+
+    entries = epub_library._load_reader_native_toc("", str(epub_path))
+
+    assert entries[0]["title"] == "Opening"
+    assert entries[0]["target"] == "Text/part0010.xhtml#start"
+    assert entries[0]["source"].endswith("::OEBPS/toc.ncx")
+
+
+def test_reader_native_toc_toggle_rebuilds_sidebar_and_restores_config(
+        qapp, tmp_path, monkeypatch):
+    (tmp_path / "toc.txt").write_text(
+        """Chapter 1:
+  Original: Prologue
+  Translated: Opening
+  Target URI: part0010.xhtml#opening
+Chapter 2:
+  Original: Chapter One
+  Translated: First Day
+  Target URI: part0011.xhtml
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    config = {"epub_reader_native_toc": False}
+    reader = EpubReaderDialog(
+        str(tmp_path / "missing.epub"),
+        config=config,
+        toc_output_dir=str(tmp_path),
+    )
+    restored = None
+    try:
+        reader._chapters = [
+            ("Cover", ""),
+            ("HTML prologue", ""),
+            ("HTML chapter", ""),
+        ]
+        reader._chapter_filenames = [
+            "cover.xhtml", "part0010.xhtml", "part0011.xhtml"
+        ]
+        reader._refresh_native_toc_entries()
+        reader._rebuild_toc_sidebar(current_chapter=0)
+        assert reader._toc_list.count() == 3
+
+        reader._native_toc_btn.setChecked(True)
+
+        assert config["epub_reader_native_toc"] is True
+        assert reader._toc_list.count() == 2
+        assert reader._toc_list.item(0).text() == "Opening"
+        assert reader._toc_row_to_chapter == [1, 2]
+
+        restored = EpubReaderDialog(
+            str(tmp_path / "missing.epub"),
+            config=config,
+            toc_output_dir=str(tmp_path),
+        )
+        assert restored._native_toc_enabled is True
+        assert restored._native_toc_btn.isChecked() is True
+    finally:
+        if restored is not None:
+            restored.close()
+        reader.close()
+        qapp.processEvents()
+
+
+def test_pdf_book_details_uses_bookmark_entries_not_workspace_artifacts(
+        qapp, tmp_path):
+    workspace = tmp_path / "PDF details"
+    workspace.mkdir()
+    source = tmp_path / "Raw.pdf"
+    source.write_bytes(b"placeholder")
+    response = workspace / "response_pdf_section_1.html"
+    response.write_text("<html><body>translated</body></html>", encoding="utf-8")
+    progress_path = workspace / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "special_image_rename_map": {
+                        "actual_num": 0,
+                        "output_file": "image_rename_map.json",
+                        "original_basename": "image_rename_map.json",
+                        "status": "completed",
+                        "auto_discovered": True,
+                    },
+                    "pdf:outline:1": {
+                        "actual_num": 1,
+                        "content_hash": "pdf-section-hash",
+                        "output_file": response.name,
+                        "original_basename": "pdf_section_1.html",
+                        "status": "completed",
+                        "pdf_toc_section": True,
+                        "pdf_toc_title": "Opening",
+                        "pdf_start_page": 1,
+                        "pdf_end_page": 4,
+                    },
+                },
+                "chapter_chunks": {
+                    "pdf-section-hash": {
+                        "schema_version": 2,
+                        "total": 2,
+                        "completed": [1],
+                        "chunks": {"1": "translated first chunk"},
+                        "entries": {
+                            "1": {
+                                "index": 1,
+                                "status": "completed",
+                                "model_name": "provider/model-a",
+                                "qa_issues_found": [],
+                            },
+                            "2": {
+                                "index": 2,
+                                "status": "pending",
+                                "model_name": "provider/model-b",
+                                "qa_issues_found": [],
+                            },
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = {}
+    loader = _BookDetailsLoader(
+        {
+            "name": "PDF details",
+            "path": str(source),
+            "type": "pdf",
+            "output_folder": str(workspace),
+            "progress_file": str(progress_path),
+            "raw_source_path": str(source),
+            "compiled_output_kind": "pdf",
+        },
+        {},
+    )
+    loader.done.connect(lambda result: payload.update(result))
+
+    loader.run()
+
+    chapters = payload["chapters_info"]
+    assert len(chapters) == 1
+    assert chapters[0]["raw_title"] == "Opening"
+    assert chapters[0]["output_file"] == response.name
+    assert chapters[0]["pdf_start_page"] == 1
+    assert chapters[0]["pdf_end_page"] == 4
+    assert chapters[0]["chunk_status_text"] == "Chunks 1✓ 2○"
+    assert [chunk["model_name"] for chunk in chapters[0]["chunks"]] == [
+        "provider/model-a",
+        "provider/model-b",
+    ]
+
+
+def test_library_pagination_only_builds_current_card_page(qapp):
+    dialog = _make_dialog(qapp, 1100, 700)
+    try:
+        books = _books("paged", 2006)
+        dialog._in_progress_books = books
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+
+        dialog._populate_tab("ip")
+        _pump_events(qapp)
+        pager = dialog._library_pagers["ip"]
+        assert len(dialog._ip_cards) == 20
+        assert len(dialog._ip_card_cache) == 20
+        assert pager["label"].text() == "Page 1 / 101 · 1-20 of 2006"
+        assert dialog._ip_count_label.text() == "2006 novels"
+        first_page_paths = {card.book["path"] for card in dialog._ip_cards}
+
+        dialog._on_library_page_action("ip", "next")
+        _pump_events(qapp)
+        second_page_paths = {card.book["path"] for card in dialog._ip_cards}
+        assert len(second_page_paths) == 20
+        assert first_page_paths.isdisjoint(second_page_paths)
+        # Off-page widgets are deleted instead of accumulating in the cache.
+        assert set(dialog._ip_card_cache) == second_page_paths
+        assert pager["label"].text() == "Page 2 / 101 · 21-40 of 2006"
+
+        dialog._on_library_page_action("ip", "last")
+        _pump_events(qapp)
+        assert len(dialog._ip_cards) == 6
+        assert len(dialog._ip_card_cache) == 6
+        assert pager["label"].text() == (
+            "Page 101 / 101 · 2001-2006 of 2006")
+        assert not pager["next"].isEnabled()
+        assert not pager["last"].isEnabled()
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_auto_scan_replaces_only_changed_mounted_card(qapp):
+    dialog = _make_dialog(qapp, 1100, 450)
+    try:
+        books = _books("targeted-auto-refresh", 20)
+        for book in books:
+            book.update({
+                "type": "in_progress",
+                "workspace_kind": "txt",
+                "completed_chapters": 1,
+                "total_chapters": 20,
+                "translation_state": "in_progress",
+            })
+        dialog._in_progress_books = books
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+        dialog._populate_tab("ip")
+        _pump_events(qapp)
+
+        cards_before = {card.book["path"]: card for card in dialog._ip_cards}
+        changed_path = books[5]["path"]
+        changed_before = cards_before[changed_path]
+        dialog._selected_paths_ip.add(changed_path)
+        changed_before.set_selected(True)
+        dialog._set_hovered_card(changed_before)
+        generation_before = dialog._card_stream_generation["ip"]
+
+        bar = dialog._ip_scroll.verticalScrollBar()
+        assert bar.maximum() > 0
+        bar.setValue(min(90, bar.maximum()))
+        scroll_before = bar.value()
+
+        fresh = [dict(book) for book in books]
+        fresh[5]["completed_chapters"] = 2
+        fresh[5]["size"] = 4096
+        fresh[5]["mtime"] = 10_000.0
+        dialog._on_auto_scan_done(fresh, [])
+
+        cards_after = {card.book["path"]: card for card in dialog._ip_cards}
+        assert cards_after[changed_path] is not changed_before
+        assert cards_after[changed_path].book["completed_chapters"] == 2
+        assert cards_after[changed_path]._selected is True
+        assert dialog._hovered_card is cards_after[changed_path]
+        assert cards_after[changed_path]._hovered is True
+        qapp.processEvents()
+        for path, old_card in cards_before.items():
+            if path != changed_path:
+                assert cards_after[path] is old_card
+        assert dialog._card_stream_generation["ip"] == generation_before
+        assert not dialog._is_card_stream_active("ip")
+        assert bar.value() == scroll_before
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_auto_scan_new_workspace_keeps_full_refresh_fallback(qapp):
+    dialog = _make_dialog(qapp, 900, 600)
+    try:
+        books = _books("auto-refresh-structure", 3)
+        dialog._in_progress_books = books
+        refresh_calls = []
+        dialog._refresh_view = lambda: refresh_calls.append(True)
+
+        fresh = [*books, _books("new-workspace", 1)[0]]
+        dialog._on_auto_scan_done(fresh, [])
+
+        assert refresh_calls == [True]
+        assert dialog._in_progress_books == fresh
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_library_page_size_is_shared_and_filter_resets_page(qapp):
+    dialog = _make_dialog(qapp, 1100, 700)
+    try:
+        books = _books("shared-page-size", 66)
+        dialog._in_progress_books = books
+        dialog._completed_books = list(books)
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+        dialog._populate_tab("ip")
+        _pump_events(qapp)
+        dialog._on_library_page_action("ip", "last")
+        _pump_events(qapp)
+        assert dialog._library_pages["ip"] == 3
+
+        ip_combo = dialog._library_pagers["ip"]["page_size"]
+        comp_combo = dialog._library_pagers["comp"]["page_size"]
+        ip_combo.setCurrentIndex(ip_combo.findData(50))
+        _pump_events(qapp)
+        assert comp_combo.currentData() == 50
+        assert dialog._config["epub_library_page_size"] == 50
+        assert dialog._library_pages == {"ip": 0, "comp": 0}
+        assert len(dialog._ip_cards) == 50
+
+        dialog._on_library_page_action("ip", "next")
+        _pump_events(qapp)
+        assert dialog._library_pages["ip"] == 1
+        dialog._search.setText("Book 1")
+        _pump_events(qapp)
+        assert dialog._library_pages["ip"] == 0
+        assert dialog._library_pagers["ip"]["label"].text().startswith(
+            "Page 1 / 1 · ")
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_hidden_tab_uses_settled_visible_width(qapp):
+    """Inactive-tab preloading must not trust Qt's default ~640 px width."""
+    dialog = _make_dialog(qapp, 1200)
+    try:
+        books = _books("hidden")
+        dialog._completed_books = books
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+
+        assert not dialog._comp_scroll.isVisible()
+        dialog._populate_tab("comp")
+        _pump_events(qapp)
+
+        assert len(dialog._comp_cards) == 8
+        assert set(_layout_rows(dialog._comp_grid_layout)) == {0}
+    finally:
+        dialog._auto_refresh_timer.stop()
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_scrollbar_and_window_resize_do_not_repeat_full_reflow(qapp):
+    """Scrollbar toggles and one resize should produce at most one new stream."""
+    dialog = _make_dialog(qapp, 1200, 450)
+    try:
+        books = _books("many", count=20)
+        dialog._in_progress_books = books
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+
+        dialog._refresh_view()
+        _pump_events(qapp)
+
+        assert dialog._ip_scroll.verticalScrollBar().maximum() > 0
+        assert dialog._card_stream_generation["ip"] == 1
+        assert not dialog._is_card_stream_active("ip")
+        assert "ip" not in dialog._pending_card_reflow
+
+        dialog.resize(1400, 450)
+        _pump_events(qapp)
+
+        assert dialog._card_stream_generation["ip"] == 2
+        assert not dialog._is_card_stream_active("ip")
+        assert "ip" not in dialog._pending_card_reflow
+    finally:
+        dialog._auto_refresh_timer.stop()
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_details_tags_keep_full_text_and_wrap_to_multiple_rows(qapp):
+    container = QWidget()
+    layout = _FlowLayout(container, horizontal_spacing=8, vertical_spacing=8)
+
+    class DetailsStub:
+        _tags_row = container
+
+    tags = [
+        "Modern",
+        "Apocalypse",
+        "TS",
+        "Genius",
+        "Mage",
+        "System",
+        "Growth",
+        "Gallery",
+        "Community",
+        "No Romance",
+        "Regression",
+        "Tower Master",
+        "Survival",
+        "Magic",
+        "Post-apocalyptic",
+    ]
+    BookDetailsDialog._fill_chip_row(DetailsStub(), layout, tags)
+
+    width = 380
+    height = layout.heightForWidth(width)
+    container.resize(width, height)
+    layout.setGeometry(QRect(0, 0, width, height))
+    qapp.processEvents()
+
+    chips = [layout.itemAt(i).widget() for i in range(layout.count())]
+    assert len(chips) == len(tags)
+    assert [chip.text() for chip in chips] == tags
+    assert len({chip.y() for chip in chips}) > 1
+    assert height > max(chip.height() for chip in chips)
+    assert all(chip.width() >= chip.sizeHint().width() for chip in chips)
+
+
+def test_reader_enables_remote_images_for_local_chapter_pages():
+    if not epub_library._HAS_WEBENGINE:
+        pytest.skip("Qt WebEngine is unavailable")
+
+    class FakeSettings:
+        def __init__(self):
+            self.attributes = {}
+
+        def setAttribute(self, attribute, enabled):
+            self.attributes[attribute] = enabled
+
+    class FakeView:
+        def __init__(self):
+            self.web_settings = FakeSettings()
+
+        def settings(self):
+            return self.web_settings
+
+    view = FakeView()
+
+    assert _configure_epub_reader_web_settings(view) is True
+    assert view.web_settings.attributes[
+        epub_library.QWebEngineSettings.AutoLoadImages
+    ] is True
+    assert view.web_settings.attributes[
+        epub_library.QWebEngineSettings.LocalContentCanAccessRemoteUrls
+    ] is True
+
+
+def test_reader_html_reserves_extra_space_below_page_content():
+    class ReaderStub:
+        _font_family = "Georgia"
+        _font_size = 14
+        _line_spacing = 1.8
+        _translated_overlay = {}
+        _raw_epub_alt_path = ""
+        _translated_css_dirs = []
+        _workspace_mode = False
+        _show_raw = False
+
+        @staticmethod
+        def _get_theme():
+            return {
+                "bg": "#111111",
+                "fg": "#eeeeee",
+                "heading": "#ffffff",
+                "link": "#88aaff",
+                "code_bg": "#222222",
+                "border": "#333333",
+            }
+
+        @staticmethod
+        def _get_embedded_css():
+            return ""
+
+    paginated = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<p>Page text</p>", paginated=True
+    )
+    scrolling = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<p>Page text</p>", paginated=False
+    )
+
+    assert "padding: 10px 0 26px 0" in paginated
+    assert "window.innerHeight - 36" in paginated
+    assert "function _pageCountFor(c)" in paginated
+    assert "Math.ceil((c.scrollWidth + gap) / span)" in paginated
+    assert "padding: 10px 20px 28px 20px" in scrolling
+
+
+def test_translated_pdf_workspace_normalizes_legacy_h3_body_weight():
+    class ReaderStub:
+        _font_family = "Embedded CSS"
+        _font_size = 14
+        _line_spacing = 1.8
+        _translated_overlay = {}
+        _raw_epub_alt_path = ""
+        _translated_css_dirs = []
+        _workspace_mode = True
+        _show_raw = False
+
+        @staticmethod
+        def _get_theme():
+            return {
+                "bg": "#111111",
+                "fg": "#eeeeee",
+                "heading": "#ffffff",
+                "link": "#88aaff",
+                "code_bg": "#222222",
+                "border": "#333333",
+            }
+
+        @staticmethod
+        def _get_embedded_css():
+            return "h3 { font-weight: bold; }"
+
+    expected = (
+        "body h3 { font-size: 1em; font-weight: normal !important; margin: 0.6em 0; "
+        "padding: 0; }"
+    )
+    alignment_fix = (
+        ".pdf-fast-semantic-page p.pdf-align-justify { "
+        "text-align: justify !important; text-justify: auto; }"
+    )
+    paginated = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<h3>Legacy PDF body</h3>", paginated=True
+    )
+    scrolling = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<h3>Legacy PDF body</h3>", paginated=False
+    )
+
+    assert expected in paginated
+    assert expected in scrolling
+    assert alignment_fix in paginated
+    assert alignment_fix in scrolling
+    assert paginated.index("font-weight: bold") < paginated.index(expected)
+
+    ReaderStub._show_raw = True
+    raw = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<h3>Real source heading</h3>", paginated=True
+    )
+    assert expected not in raw
+    assert alignment_fix not in raw
+
+
+def test_reader_recounts_pages_after_hidden_prime_is_revealed(monkeypatch):
+    scheduled = []
+
+    class StackStub:
+        shown = False
+
+        def show(self):
+            self.shown = True
+
+    class ReaderStub:
+        _priming_initial_render = True
+        _prime_toc_sizes = [240, 960]
+        _reader_stack = StackStub()
+
+        def _end_toc_width_lock(self, sizes):
+            self.restored_sizes = sizes
+
+        def _reveal_initial_reader_shell(self):
+            self.shell_revealed = True
+
+        def _resync_page_count(self):
+            self.recounted = True
+
+    reader = ReaderStub()
+    monkeypatch.setattr(
+        epub_library.QTimer,
+        "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+
+    EpubReaderDialog._reveal_reader_stack_after_prime(reader)
+
+    assert reader._reader_stack.shown is True
+    assert reader._priming_initial_render is False
+    assert reader.restored_sizes == [240, 960]
+    assert reader._prime_toc_sizes is None
+    assert reader.shell_revealed is True
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 0
+
+    scheduled[0][1]()
+    assert reader.recounted is True
+
+
+def test_raw_toggle_is_serialized_and_queued_click_is_rejected(qapp):
+    button = QPushButton("Raw")
+    button.setCheckable(True)
+    button.setChecked(True)
+
+    class ReaderStub:
+        _raw_toggle_in_flight = True
+        _show_raw = False
+        _raw_btn = button
+
+    reader = ReaderStub()
+    EpubReaderDialog._on_show_raw_toggled(reader, True)
+
+    assert reader._show_raw is False
+    assert button.isChecked() is False
+
+
+def test_dual_path_raw_toggle_reuses_visited_reader_state(tmp_path):
+    translated = tmp_path / "translated.epub"
+    raw = tmp_path / "raw.epub"
+    translated.write_bytes(b"translated")
+    raw.write_bytes(b"raw")
+
+    class ReaderStub:
+        _raw_toggle_in_flight = False
+        _show_raw = False
+        _raw_btn = None
+        _config = {}
+        _raw_epub_alt_path = str(raw)
+        _translated_epub_path = str(translated)
+        _epub_path = str(translated)
+        _translated_overlay = {}
+        _chapters_raw = [("Chapter", "<p>Translated</p>")]
+        _chapters_overlaid = list(_chapters_raw)
+
+        def _set_raw_toggle_busy(self, busy):
+            self.busy = busy
+
+        def _remember_dual_path_reader_state(self):
+            self.remembered_show_raw = self._show_raw
+
+        def _capture_position_hint(self):
+            return {"row": 0, "was_last_page": False, "proportion": 0.0}
+
+        def _restore_dual_path_reader_state(self):
+            self.restored = True
+            return True
+
+        def _reload_epub_from_active_path(self):
+            self.reloaded = True
+
+    reader = ReaderStub()
+    EpubReaderDialog._on_show_raw_toggled(reader, True)
+
+    assert reader.remembered_show_raw is False
+    assert reader._show_raw is True
+    assert reader._epub_path == str(raw)
+    assert reader.restored is True
+    assert not hasattr(reader, "reloaded")
+    assert reader._reload_position_hint["row"] == 0
+
+
+def test_dual_path_reader_snapshot_copies_prepared_image_state(tmp_path):
+    translated = tmp_path / "translated.epub"
+    raw = tmp_path / "raw.epub"
+    translated.write_bytes(b"translated")
+    raw.write_bytes(b"raw")
+
+    class ReaderStub:
+        _raw_epub_alt_path = str(raw)
+        _translated_overlay = {}
+        _epub_path = str(translated)
+        _show_special_files = True
+        _config = {}
+        _chapters_raw = [("Chapter", '<img src="scan.jpg">')]
+        _chapters_overlaid = list(_chapters_raw)
+        _images = {"scan.jpg": ("lazy", "scan.jpg")}
+        _chapter_filenames = ["chapter.xhtml"]
+        _processed_html_cache = {"chapter": "prepared"}
+        _image_sizeable_cache = {"scan": True}
+        _preloaded_chapter_keys = {"next"}
+        _preloaded_image_resources = {
+            "scan": {"path": "cached.jpg", "sizeable": True},
+        }
+        _image_cache_generation = 3
+        _image_resource_signature = (("scan.jpg", "lazy"),)
+        _dual_path_reader_states = {}
+        _dual_path_reader_state_key = (
+            EpubReaderDialog._dual_path_reader_state_key)
+
+    reader = ReaderStub()
+    EpubReaderDialog._remember_dual_path_reader_state(reader)
+    state = next(iter(reader._dual_path_reader_states.values()))
+
+    reader._processed_html_cache.clear()
+    reader._preloaded_image_resources.clear()
+    assert state["processed_html_cache"] == {"chapter": "prepared"}
+    assert state["preloaded_image_resources"]["scan"]["path"] == "cached.jpg"
+    assert state["image_cache_generation"] == 3
+
+
+def test_standalone_raw_epub_open_preloads_initial_chapter_images(monkeypatch):
+    created = []
+
+    class SignalStub:
+        def connect(self, callback):
+            self.callback = callback
+
+    class ThreadStub:
+        def __init__(self, preload_key, html_content, images, extra_dirs,
+                     epub_path, temp_dir, parent=None):
+            self.preload_key = preload_key
+            self.html_content = html_content
+            self.images = images
+            self.done = SignalStub()
+            self.finished = SignalStub()
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+    class ReaderStub:
+        _raw_toggle_in_flight = False
+        _reader_startup_pending = True
+        _chapters = []
+        _reload_position_hint = None
+        _initial_chapter_filename = "scan.xhtml"
+        _initial_chapter = None
+        _epub_load_image_preload_thread = None
+        _extra_image_dirs = []
+        _epub_path = "raw.epub"
+        _pending_epub_load = None
+
+        def _dual_path_reader_state_key(self):
+            return "raw-state"
+
+        def _ensure_reader_image_temp_dir(self):
+            return "image-cache"
+
+        def _on_epub_load_images_preloaded(self, *_args):
+            pass
+
+        def _on_epub_load_image_preload_finished(self, *_args):
+            pass
+
+    monkeypatch.setattr(
+        epub_library, "_ReaderImagePreloadThread", ThreadStub,
+    )
+    chapters = [
+        ("Text", "<p>No image</p>"),
+        ("Scan", '<p><img src="scan.jpg"></p>'),
+    ]
+    reader = ReaderStub()
+
+    started = EpubReaderDialog._start_epub_load_image_preload(
+        reader, chapters, {"scan.jpg": b"image"},
+        ["one.xhtml", "scan.xhtml"],
+    )
+
+    assert started is True
+    assert created[0].started is True
+    assert 'src="scan.jpg"' in created[0].html_content
+    assert reader._pending_epub_load[0] == "raw-state"
+
+
+def test_finishing_raw_toggle_recovers_hidden_prime_and_unlocks_button(
+        qapp, monkeypatch):
+    class StackStub:
+        shown = False
+
+        def show(self):
+            self.shown = True
+
+    button = QPushButton("Raw")
+    button.setEnabled(False)
+
+    class ReaderStub:
+        _raw_toggle_in_flight = True
+        _raw_btn = button
+        _priming_initial_render = True
+        _layout_mode = epub_library.LAYOUT_SCROLL
+        _prime_saved_mode = epub_library.LAYOUT_SINGLE
+        _prime_toc_sizes = [240, 960]
+        _reader_stack = StackStub()
+        _reader = None
+        _set_raw_toggle_busy = EpubReaderDialog._set_raw_toggle_busy
+
+        def _end_toc_width_lock(self, sizes):
+            self.restored_sizes = sizes
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    reader = ReaderStub()
+
+    EpubReaderDialog._finish_raw_toggle(reader)
+
+    assert reader._raw_toggle_in_flight is False
+    assert button.isEnabled() is True
+    assert reader._reader_stack.shown is True
+    assert reader._priming_initial_render is False
+    assert reader._layout_mode == epub_library.LAYOUT_SINGLE
+    assert reader._prime_toc_sizes is None
+    assert reader.restored_sizes == [240, 960]
+
+
+def test_stale_paginated_callback_cannot_finalize_newer_raw_render():
+    callbacks = []
+
+    class ReaderStub:
+        _reader_render_generation = 7
+        _reader = object()
+        _chapter_page_cache = {}
+        _current_row = 0
+
+        def _js_page_count(self, browser, callback):
+            callbacks.append(callback)
+
+    reader = ReaderStub()
+    EpubReaderDialog._finalize_single_page(reader)
+    reader._reader_render_generation = 8
+    callbacks[0](12)
+
+    assert reader._chapter_page_cache == {}
+
+
+def test_reader_initial_shell_is_revealed_in_one_batched_update(monkeypatch):
+    events = []
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+
+    class WidgetStub:
+        def __init__(self, name):
+            self.name = name
+
+        def show(self):
+            events.append((self.name, "show"))
+
+        def hide(self):
+            events.append((self.name, "hide"))
+
+    class TimerStub:
+        def stop(self):
+            events.append(("spinner", "stop"))
+
+    class ReaderStub:
+        _reader_startup_pending = True
+        _reader_reveal_queued = False
+        _closing = False
+        _spin_timer = TimerStub()
+        _reader_stack = WidgetStub("reader")
+        _toolbar_widget = WidgetStub("toolbar")
+        _content_widget = WidgetStub("content")
+        _loading_widget = WidgetStub("loading")
+        _commit_initial_reader_shell = \
+            EpubReaderDialog._commit_initial_reader_shell
+
+        def setUpdatesEnabled(self, enabled):
+            events.append(("updates", enabled))
+
+        def update(self):
+            events.append(("dialog", "update"))
+
+    reader = ReaderStub()
+
+    EpubReaderDialog._reveal_initial_reader_shell(reader)
+
+    assert reader._reader_startup_pending is False
+    assert events == [
+        ("spinner", "stop"),
+        ("updates", False),
+        ("reader", "show"),
+        ("toolbar", "show"),
+        ("content", "show"),
+        ("loading", "hide"),
+        ("updates", True),
+        ("dialog", "update"),
+    ]
+    EpubReaderDialog._reveal_initial_reader_shell(reader)
+    assert len(events) == 8
+
+
+def test_reader_starts_one_native_crossfade_before_webengine_handoff(monkeypatch):
+    events = []
+
+    class WidgetStub:
+        def __init__(self, name):
+            self.name = name
+
+        def show(self):
+            events.append((self.name, "show"))
+
+        def hide(self):
+            events.append((self.name, "hide"))
+
+    class TimerStub:
+        def stop(self):
+            events.append(("spinner", "stop"))
+
+    class ReaderStub:
+        _reader_startup_pending = True
+        _reader_reveal_queued = False
+        _closing = False
+        _reader_transition_overlay = None
+        _spin_timer = TimerStub()
+        _reader_stack = WidgetStub("reader")
+        _toolbar_widget = WidgetStub("toolbar")
+        _content_widget = WidgetStub("content")
+        _loading_widget = WidgetStub("loading")
+        _commit_initial_reader_shell = \
+            EpubReaderDialog._commit_initial_reader_shell
+
+        def _begin_initial_reader_transition(self):
+            events.append(("transition", "begin"))
+
+        def setUpdatesEnabled(self, enabled):
+            events.append(("updates", enabled))
+
+        def update(self):
+            events.append(("dialog", "update"))
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
+    reader = ReaderStub()
+
+    EpubReaderDialog._reveal_initial_reader_shell(reader)
+
+    assert reader._reader_startup_pending is True
+    assert reader._reader_reveal_queued is True
+    assert events == [("transition", "begin")]
+
+    # A repeated completion signal cannot launch a second native overlay.
+    EpubReaderDialog._reveal_initial_reader_shell(reader)
+    assert events == [("transition", "begin")]
+
+    EpubReaderDialog._commit_initial_reader_shell(reader)
+    assert reader._reader_startup_pending is False
+    assert reader._reader_reveal_queued is False
+    assert ("spinner", "stop") in events
+    assert ("content", "show") in events
+    assert ("loading", "hide") in events
+
+
+def test_reader_crossfade_uses_owned_native_snapshot(qapp, monkeypatch):
+    scheduled = []
+
+    class TransitionHarness(QWidget):
+        def __init__(self):
+            super().__init__()
+            self._closing = False
+            self._reader_startup_pending = True
+            self._reader_reveal_queued = True
+            self._reader_transition_overlay = None
+            self._reader_transition_animation = None
+
+        def _commit_initial_reader_shell(self):
+            pass
+
+    monkeypatch.setattr(
+        epub_library.QTimer,
+        "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+    harness = TransitionHarness()
+    harness.setStyleSheet("background: #1e1e1e;")
+    harness.resize(360, 240)
+    harness.show()
+    qapp.processEvents()
+    try:
+        EpubReaderDialog._begin_initial_reader_transition(harness)
+
+        overlay = harness._reader_transition_overlay
+        assert overlay is not None
+        assert overlay.isWindow() is True
+        assert overlay.parent() is harness
+        assert bool(overlay.windowFlags() & Qt.Tool)
+        assert scheduled == [(0, harness._commit_initial_reader_shell)]
+    finally:
+        EpubReaderDialog._cleanup_initial_reader_transition(harness)
+        harness.close()
+        qapp.processEvents()
+
+
+def test_reader_resync_ignores_transitional_page_count(monkeypatch):
+    counts = iter([198, 8, 8])
+
+    class ReaderStub:
+        _closing = False
+        _layout_mode = epub_library.LAYOUT_SINGLE
+        _chapters = [("Chapter", "<p>Text</p>")]
+        _current_row = 0
+        _current_page = 0
+        _chapter_page_cache = {0: 7}
+        _reader = object()
+        _pagination_resync_token = 0
+
+        def _js_page_count(self, browser, callback):
+            callback(next(counts))
+
+        def _clamp_page_for_layout(self, page, count):
+            return max(0, min(page, count - 1))
+
+        def _js_scroll_to(self, browser, page, animate=True):
+            raise AssertionError("Page zero should not need clamping")
+
+        def _update_nav_buttons(self):
+            self.nav_updated = True
+
+        def _schedule_search_realign(self):
+            self.search_realigned = True
+
+    reader = ReaderStub()
+    delays = []
+
+    def run_timer(delay, callback):
+        delays.append(delay)
+        callback()
+
+    monkeypatch.setattr(epub_library.QTimer, "singleShot", run_timer)
+
+    EpubReaderDialog._resync_page_count(reader)
+
+    assert reader._chapter_page_cache == {0: 8}
+    assert delays == [60, 80, 80]
+    assert reader.nav_updated is True
+    assert reader.search_realigned is True
+
+
+def test_reader_next_rechecks_live_count_before_leaving_chapter(monkeypatch):
+    class TocStub:
+        def blockSignals(self, blocked):
+            pass
+
+        def setCurrentRow(self, row):
+            raise AssertionError("The live final page must be shown first")
+
+    class ReaderStub:
+        _layout_mode = epub_library.LAYOUT_SINGLE
+        _current_row = 0
+        _current_page = 6
+        _chapters = [("Current", ""), ("Next", "")]
+        _chapter_page_cache = {0: 7}
+        _reader = object()
+        _toc_list = TocStub()
+
+        def _js_page_count(self, browser, callback):
+            callback(8)
+
+        def _advance_paginated_next(self, count):
+            EpubReaderDialog._advance_paginated_next(self, count)
+
+        def _scroll_to_page_single(self):
+            self.scrolled_to = self._current_page
+
+        def _scroll_to_page_double(self):
+            raise AssertionError("Single-page mode should use the single scroller")
+
+        def _render_current(self):
+            raise AssertionError("The reader must not skip to the next chapter")
+
+    reader = ReaderStub()
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
+
+    EpubReaderDialog._next_chapter(reader)
+
+    assert reader._chapter_page_cache[0] == 8
+    assert reader._current_row == 0
+    assert reader._current_page == 7
+    assert reader.scrolled_to == 7
+
+
+def test_overlay_worker_extracts_translated_title_from_path_only_entry(tmp_path):
+    translated = tmp_path / "response_chapter0039.html"
+    translated.write_text(
+        "<html><head><meta charset='utf-8'></head>"
+        "<body><h1>Episode 38. God Killer (3)</h1>"
+        "<p>Translated chapter text.</p></body></html>",
+        encoding="utf-8",
+    )
+    result = {}
+    worker = _OverlayMergeThread(
+        raw_chapters=[("38화. 신살자 (3)", "<p>Source chapter text.</p>")],
+        images={},
+        filenames=["chapter0039.xhtml"],
+        overlay_map={"chapter0039.xhtml": {"path": os.fspath(translated)}},
+        extra_image_dirs=[],
+        config={},
+    )
+    worker.done.connect(
+        lambda chapters, images, applied: result.update(
+            chapters=chapters,
+            images=images,
+            applied=applied,
+        )
+    )
+
+    # Call run directly so the test remains deterministic; production starts
+    # the same method on the worker thread.
+    worker.run()
+
+    assert result["applied"] is True
+    assert result["chapters"] == [
+        (
+            "Episode 38. God Killer (3)",
+            translated.read_text(encoding="utf-8"),
+        )
+    ]
+
+
+@pytest.fixture
+def overlay_reader(qapp, tmp_path, monkeypatch):
+    """Exercise real loading/refresh/TOC logic without a browser or threads."""
+    readers = []
+    workers = []
+
+    class SynchronousOverlayWorker(_OverlayMergeThread):
+        def start(self):
+            workers.append(self)
+            self.run()
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(epub_library, "_OverlayMergeThread", SynchronousOverlayWorker)
+    monkeypatch.setattr(epub_library, "_load_reader_native_toc", lambda *args: [])
+    monkeypatch.setattr(epub_library, "_epub_reader_webengine_is_warmed", lambda: False)
+    monkeypatch.setattr(EpubReaderDialog, "_start_loading", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        EpubReaderDialog, "_start_epub_load_image_preload", lambda *args: False)
+    for method in (
+        "_ensure_overlay_refresh_timer", "_reveal_initial_reader_shell",
+        "_finish_raw_toggle", "_update_nav_buttons",
+    ):
+        monkeypatch.setattr(EpubReaderDialog, method, lambda self: None)
+
+    def make(overlay, *, show_raw=False):
+        reader = EpubReaderDialog(
+            os.fspath(tmp_path / "source.epub"),
+            config={},
+            translated_overlay=overlay,
+            overlay_provider=lambda: (overlay, []),
+            initial_show_raw=show_raw,
+        )
+        readers.append(reader)
+        reader.renders = []
+        monkeypatch.setattr(reader, "isVisible", lambda: True)
+        monkeypatch.setattr(
+            reader, "_render_current",
+            lambda: reader.renders.append(reader._chapters[reader._current_row]),
+        )
+        monkeypatch.setattr(
+            reader, "_capture_position_hint",
+            lambda: {"row": reader._current_row, "proportion": 0.5},
+        )
+        reader._on_epub_loaded_from_cache(
+            [("Raw one", "<p>Source one.</p>"),
+             ("Raw two", "<p>Source two.</p>")],
+            {},
+            ["chapter0001.xhtml", "chapter0002.xhtml"],
+        )
+        reader.renders.clear()
+        return reader
+
+    yield make, workers
+
+    for reader in readers:
+        reader.close()
+        reader.deleteLater()
+    qapp.processEvents()
+
+
+def _write_reader_translation(path, title, body):
+    previous = path.stat() if path.exists() else None
+    html = f"<html><body><h1>{title}</h1><p>{body}</p></body></html>"
+    path.write_text(html, encoding="utf-8")
+    if previous is not None:
+        # Deterministic on filesystems with coarse timestamp granularity.
+        stamp = max(time.time_ns(), previous.st_mtime_ns + 2_000_000_000)
+        os.utime(path, ns=(stamp, stamp))
+    return html
+
+
+def test_reader_refresh_same_path_updates_body_title_and_keeps_position(
+    overlay_reader, tmp_path,
+):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    _write_reader_translation(translated, "First title", "First version.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+    assert reader._chapters[0][0] == "First title"
+    assert len(workers) == 1
+    reader._chapter_page_cache = {0: 3, 1: 4}
+
+    updated = _write_reader_translation(translated, "Revised title", "Revised body.")
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters[0] == ("Revised title", updated)
+    assert reader._toc_list.item(0).text() == "Revised title"
+    assert reader.renders == [("Revised title", updated)]
+    assert reader._current_row == 0
+    assert reader._pending_page_hint == {"row": 0, "proportion": 0.5}
+    assert reader._chapter_page_cache == {1: 4}
+    assert len(workers) == 2
+
+    reader._on_overlay_refresh_tick()
+    assert len(workers) == 2
+    assert len(reader.renders) == 1
+
+
+def test_reader_refresh_loads_previously_missing_translation(
+    overlay_reader, tmp_path,
+):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+    assert reader._chapters[0][0] == "Raw one"
+
+    updated = _write_reader_translation(translated, "Completed chapter", "Translation.")
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters[0] == ("Completed chapter", updated)
+    assert reader._toc_list.item(0).text() == "Completed chapter"
+    assert reader.renders == [("Completed chapter", updated)]
+    assert len(workers) == 2
+
+
+@pytest.mark.parametrize("show_raw", [False, True])
+def test_reader_refresh_discovers_first_translation_after_raw_only_load(
+    overlay_reader, tmp_path, show_raw,
+):
+    make_reader, workers = overlay_reader
+    overlay = {}
+    reader = make_reader(overlay, show_raw=show_raw)
+    assert reader._chapters == reader._chapters_raw
+    assert workers == []
+
+    translated = tmp_path / "response_chapter0001.html"
+    expected = _write_reader_translation(translated, "First translation", "Translation.")
+    overlay["chapter0001.xhtml"] = {"path": os.fspath(translated)}
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters_overlaid[0] == ("First translation", expected)
+    displayed_title = "Raw one" if show_raw else "First translation"
+    assert reader._chapters[0][0] == displayed_title
+    assert reader._toc_list.item(0).text() == displayed_title
+    assert reader._raw_btn.isHidden() is False
+    assert reader._raw_btn.isChecked() == show_raw
+    assert len(workers) == 1
+
+    reader._raw_btn.click()
+    assert reader._show_raw == (not show_raw)
+    assert reader._raw_btn.isChecked() == (not show_raw)
+    assert reader._chapters == (
+        reader._chapters_overlaid if show_raw else reader._chapters_raw)
+
+
+def test_reader_refresh_retries_transient_read_failure_without_stat_change(
+    overlay_reader, tmp_path, monkeypatch,
+):
+    import builtins
+
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    expected = _write_reader_translation(translated, "Completed chapter", "Translation.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    actual_open = builtins.open
+    attempts = []
+
+    def temporarily_locked_open(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(translated):
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise PermissionError("The translator is replacing the response file")
+        return actual_open(path, *args, **kwargs)
+
+    # the overlay merge moved to reader_doc (epub_library's thread inherits it)
+    monkeypatch.setattr(reader_doc, "open", temporarily_locked_open, raising=False)
+    before = translated.stat()
+    reader = make_reader(overlay)
+    assert reader._chapters[0][0] == "Raw one"
+
+    reader._on_overlay_refresh_tick()
+
+    after = translated.stat()
+    assert (after.st_mtime_ns, after.st_ctime_ns, after.st_size, after.st_ino) == (
+        before.st_mtime_ns, before.st_ctime_ns, before.st_size, before.st_ino)
+    assert len(attempts) == 2
+    assert reader._chapters[0] == ("Completed chapter", expected)
+    assert reader._toc_list.item(0).text() == "Completed chapter"
+    assert len(workers) == 2
+    reader._on_overlay_refresh_tick()
+    assert len(workers) == 2
+
+
+def test_reader_refresh_read_failure_keeps_last_translation_until_retry(
+    overlay_reader, tmp_path, monkeypatch,
+):
+    import builtins
+
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    previous = _write_reader_translation(translated, "Readable translation", "Previous body.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+    actual_open = builtins.open
+    attempts = []
+
+    def temporarily_locked_open(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(translated):
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise PermissionError("The response file is temporarily locked")
+        return actual_open(path, *args, **kwargs)
+
+    # the overlay merge moved to reader_doc (epub_library's thread inherits it)
+    monkeypatch.setattr(reader_doc, "open", temporarily_locked_open, raising=False)
+    expected = _write_reader_translation(translated, "Updated translation", "Updated body.")
+    before = translated.stat()
+    reader._on_overlay_refresh_tick()
+
+    assert len(attempts) == 1
+    assert reader._chapters[0] == ("Readable translation", previous)
+    assert reader.renders == []
+    assert len(workers) == 2
+
+    reader._on_overlay_refresh_tick()
+
+    after = translated.stat()
+    assert (after.st_mtime_ns, after.st_ctime_ns, after.st_size, after.st_ino) == (
+        before.st_mtime_ns, before.st_ctime_ns, before.st_size, before.st_ino)
+    assert len(attempts) == 2
+    assert reader._chapters[0] == ("Updated translation", expected)
+    assert reader.renders == [("Updated translation", expected)]
+    assert len(workers) == 3
+
+
+def test_reader_refresh_inactive_chapter_updates_toc_and_invalidates_its_pages(
+    overlay_reader, tmp_path,
+):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0002.html"
+    _write_reader_translation(translated, "Old second title", "Old second body.")
+    overlay = {"chapter0002.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+    reader._chapter_page_cache = {0: 3, 1: 4}
+
+    updated = _write_reader_translation(translated, "New second title", "Longer new body.")
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters[1] == ("New second title", updated)
+    assert reader._toc_list.item(1).text() == "New second title"
+    assert reader._chapter_page_cache == {0: 3}
+    assert reader._current_row == 0
+    assert reader._toc_list.currentRow() == 0
+    assert reader.renders == []
+    assert len(workers) == 2
+
+
+def test_reader_refresh_keeps_explicit_raw_view_while_translation_updates(
+    overlay_reader, tmp_path,
+):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    _write_reader_translation(translated, "Old translation", "Old translated body.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay, show_raw=True)
+    raw_chapters = list(reader._chapters)
+    assert reader._show_raw is True
+
+    updated = _write_reader_translation(translated, "New translation", "New translated body.")
+    reader._on_overlay_refresh_tick()
+
+    assert reader._chapters_overlaid[0] == ("New translation", updated)
+    assert reader._chapters == raw_chapters == reader._chapters_raw
+    assert reader._toc_list.item(0).text() == "Raw one"
+    assert reader._show_raw is True
+    assert reader.renders == []
+    assert len(workers) == 2
+
+
+def test_reader_refresh_does_not_merge_unchanged_files(overlay_reader, tmp_path):
+    make_reader, workers = overlay_reader
+    translated = tmp_path / "response_chapter0001.html"
+    _write_reader_translation(translated, "Completed chapter", "Translation.")
+    overlay = {"chapter0001.xhtml": {"path": os.fspath(translated)}}
+    reader = make_reader(overlay)
+
+    for _ in range(3):
+        reader._on_overlay_refresh_tick()
+
+    assert len(workers) == 1
+    assert reader.renders == []
+
+
+@pytest.fixture
+def scroll_refresh_reader(monkeypatch):
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
+
+    class BrowserStub:
+        def __init__(self):
+            self.scripts = []
+
+        def page(self):
+            return self
+
+        def scrollPosition(self):
+            return QPoint(19, 724)
+
+        def runJavaScript(self, script):
+            self.scripts.append(script)
+
+    class ReaderStub:
+        _chapters = [("One", "<p>One</p>"), ("Two", "<p>Two</p>")]
+        _current_row = 1
+        _current_page = 0
+
+        def __init__(self):
+            self._reader = BrowserStub()
+
+        def sender(self):
+            return self._reader
+
+        def _get_chapter_pages(self, row):
+            return 4
+
+        def _apply_pending_scroll_hint(self):
+            EpubReaderDialog._apply_pending_scroll_hint(self)
+
+        def _reveal_initial_reader_shell(self):
+            pass
+
+        def _finish_raw_toggle(self):
+            pass
+
+    return ReaderStub()
+
+
+@pytest.mark.parametrize("layout", [epub_library.LAYOUT_SCROLL, epub_library.LAYOUT_ALL])
+def test_reader_scroll_refresh_restores_position_once_after_load(
+    scroll_refresh_reader, layout,
+):
+    reader = scroll_refresh_reader
+    reader._layout_mode = layout
+    reader._pending_page_hint = EpubReaderDialog._capture_position_hint(reader)
+
+    EpubReaderDialog._on_reader_load_finished(reader, True)
+
+    assert reader._reader.scripts == [
+        "window.scrollTo({left: 19.0, top: 724.0, behavior: 'instant'});"]
+    assert reader._pending_page_hint is None
+
+    EpubReaderDialog._on_reader_load_finished(reader, True)
+    assert len(reader._reader.scripts) == 1
+
+
+@pytest.mark.parametrize("navigation", ["chapter", "layout"])
+def test_reader_scroll_refresh_discards_hint_after_user_navigation(
+    scroll_refresh_reader, navigation,
+):
+    reader = scroll_refresh_reader
+    reader._layout_mode = epub_library.LAYOUT_SCROLL
+    reader._pending_page_hint = EpubReaderDialog._capture_position_hint(reader)
+    if navigation == "chapter":
+        reader._current_row = 0
+    else:
+        reader._layout_mode = epub_library.LAYOUT_ALL
+
+    EpubReaderDialog._on_reader_load_finished(reader, True)
+
+    assert reader._reader.scripts == []
+    assert reader._pending_page_hint is None
+
+
+def test_reader_paints_shell_before_creating_browser_views(
+    qapp, monkeypatch,
+):
+    load_starts = []
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        EpubReaderDialog,
+        "_start_loading",
+        lambda self, preserve_shell=False: load_starts.append(preserve_shell),
+    )
+
+    dialog = EpubReaderDialog("C:/layout-test/deferred-reader.epub", config={})
+    try:
+        # Construction remains lightweight; showing the native shell does not
+        # synchronously create the expensive reader panes.
+        assert dialog._reader is None
+        assert not dialog._reader_views_ready
+        assert load_starts == []
+
+        dialog.show()
+        assert dialog.isVisible()
+        assert dialog._reader is None
+        assert load_starts == []
+        assert dialog._loading_widget.isVisible()
+        assert not dialog._toolbar_widget.isVisible()
+        assert not dialog._content_widget.isVisible()
+
+        _pump_events(qapp, timeout=0.2)
+        assert dialog._reader_views_ready
+        assert dialog._reader is not None
+        # Double-page mode is a two-column layout in the primary browser; the
+        # old auxiliary panes stay unconstructed.
+        assert dialog._reader_left is None
+        assert dialog._reader_right is None
+        assert load_starts == [True]
+        assert dialog._loading_widget.isVisible()
+        assert not dialog._toolbar_widget.isVisible()
+        assert not dialog._content_widget.isVisible()
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_reader_keeps_qobject_parent_but_clears_transient_window_owner(
+    qapp, monkeypatch,
+):
+    """Minimizing Library/Details must not minimize their open reader."""
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        EpubReaderDialog,
+        "_initialize_reader_views",
+        lambda self: None,
+    )
+
+    owner = QWidget()
+    owner.show()
+    dialog = EpubReaderDialog(
+        "C:/layout-test/independent-reader.epub",
+        config={},
+        parent=owner,
+    )
+    try:
+        dialog.show()
+        qapp.processEvents()
+
+        # The QObject parent remains available for cleanup and config access,
+        # while the QWindow transient parent (the native minimize link) is gone.
+        assert dialog.parent() is owner
+        assert dialog.windowHandle() is not None
+        assert dialog.windowHandle().transientParent() is None
+
+        owner.showMinimized()
+        qapp.processEvents()
+        assert owner.isMinimized()
+        assert not dialog.isMinimized()
+        owner.showNormal()
+
+        # Re-showing must not recreate the native owner relationship.
+        dialog.hide()
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.windowHandle().transientParent() is None
+    finally:
+        dialog.close()
+        owner.close()
+        qapp.processEvents()
+
+
+def test_epub_details_chapter_row_exposes_individual_chunk_statuses():
+    spec = _prepare_chapter_row_spec(
+        {
+            "filename": "chapter.xhtml",
+            "raw_title": "Raw chapter",
+            "translated_title": "Translated chapter",
+            "status": "completed",
+            "chunk_status_text": "Chunks 1✓ 2⚠ 3○",
+            "chunk_summary": {
+                "total": 3,
+                "completed": 1,
+                "failed": 1,
+                "pending": 1,
+            },
+        }
+    )
+
+    assert spec["primary_text"] == "Translated chapter"
+    assert spec["filename"] == "chapter.xhtml · Chunks 1✓ 2⚠ 3○"
+    assert spec["badge_text"] == "⚠ 1/3 chunks"
+
+
+def test_epub_details_loader_attaches_chunk_records_from_progress(tmp_path):
+    workspace = tmp_path / "chunked-epub-workspace"
+    workspace.mkdir()
+    output = workspace / "response_chapter_001.html"
+    output.write_text("<h1>Translated chapter</h1>", encoding="utf-8")
+    progress_path = workspace / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "content_hash": "chapter-hash",
+                        "original_basename": "chapter_001.xhtml",
+                        "output_file": output.name,
+                        "status": "completed",
+                    }
+                },
+                "chapter_chunks": {
+                    "chapter-hash": {
+                        "schema_version": 2,
+                        "total": 3,
+                        "completed": [1],
+                        "chunks": {
+                            "1": "<p>Good output</p>",
+                            "2": "<p>Bad output</p>",
+                        },
+                        "entries": {
+                            "1": {
+                                "index": 1,
+                                "status": "completed",
+                                "qa_issues_found": [],
+                            },
+                            "2": {
+                                "index": 2,
+                                "status": "qa_failed",
+                                "qa_issues_found": ["bad output"],
+                            },
+                            "3": {
+                                "index": 3,
+                                "status": "pending",
+                                "qa_issues_found": [],
+                            },
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    payloads = []
+    loader = _BookDetailsLoader(
+        {
+            "path": str(workspace),
+            "type": "in_progress",
+            "output_folder": str(workspace),
+            "progress_file": str(progress_path),
+        },
+        {},
+    )
+    loader.done.connect(payloads.append)
+
+    loader.run()
+
+    assert len(payloads) == 1
+    chapter = payloads[0]["chapters_info"][0]
+    assert chapter["chunk_progress_key"] == "chapter-hash"
+    assert chapter["status"] == "pending"
+    assert chapter["chunk_status_text"] == "Chunks 1✓ 2⚠ 3○"
+    assert chapter["chunk_summary"]["failed"] == 1
+    assert chapter["chunk_summary"]["pending"] == 1
+    assert chapter["chunks"] == [
+        {
+            "index": 1,
+            "status": "completed",
+            "qa_issues_found": [],
+            "model_name": None,
+            "key_identifier": None,
+        },
+        {
+            "index": 2,
+            "status": "qa_failed",
+            "qa_issues_found": ["bad output"],
+            "model_name": None,
+            "key_identifier": None,
+        },
+        {
+            "index": 3,
+            "status": "pending",
+            "qa_issues_found": [],
+            "model_name": None,
+            "key_identifier": None,
+        },
+    ]
+
+
+def test_library_summary_does_not_count_saved_partial_chunk_file_as_done(
+    tmp_path,
+):
+    output = tmp_path / "response_chapter_001.html"
+    output.write_text("<p>saved truncated evidence</p>", encoding="utf-8")
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "content_hash": "chapter-hash",
+                        "original_basename": "chapter_001.xhtml",
+                        "output_file": output.name,
+                        "status": "completed",
+                    }
+                },
+                "chapter_chunks": {
+                    "chapter-hash": {
+                        "schema_version": 2,
+                        "total": 5,
+                        "completed": [1],
+                        "chunks": {"1": "translated one"},
+                        "entries": {
+                            "1": {"index": 1, "status": "completed"},
+                            "2": {"index": 2, "status": "pending"},
+                            "3": {"index": 3, "status": "pending"},
+                            "4": {"index": 4, "status": "pending"},
+                            "5": {"index": 5, "status": "pending"},
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = epub_library._read_progress_summary(str(progress_path))
+
+    assert summary["total"] == 1
+    assert summary["completed"] == 0
+    assert summary["in_progress"] == 1
+
+
+def test_epub_details_full_chapter_retranslation_clears_chunk_cache(tmp_path):
+    output = tmp_path / "response_chapter.xhtml"
+    output.write_text("<p>translated</p>", encoding="utf-8")
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "content_hash": "chapter-hash",
+                        "original_basename": "chapter.xhtml",
+                        "output_file": output.name,
+                        "status": "completed",
+                    }
+                },
+                "chapter_chunks": {
+                    "chapter-hash": {
+                        "schema_version": 2,
+                        "total": 2,
+                        "completed": [1, 2],
+                        "chunks": {"1": "one", "2": "two"},
+                        "entries": {
+                            "1": {"index": 1, "status": "completed"},
+                            "2": {"index": 2, "status": "completed"},
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert epub_library._mark_chapter_pending_for_retranslation(
+        str(tmp_path), "chapter.xhtml"
+    ) is True
+
+    saved = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert not output.exists()
+    assert saved["chapters"]["1"]["status"] == "pending"
+    assert saved["chapter_chunks"]["chapter-hash"]["chunks"] == {}
+    assert saved["chapter_chunks"]["chapter-hash"]["completed"] == []
+    assert {
+        record["status"]
+        for record in saved["chapter_chunks"]["chapter-hash"]["entries"].values()
+    } == {"pending"}
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_visible"),
+    [
+        ("completed", False),
+        ("", False),
+        ("qa_failed", True),
+        ("failed", True),
+        ("pending", True),
+    ],
+)
+def test_reader_translate_button_uses_overlay_progress_status(
+    tmp_path, status, expected_visible,
+):
+    translated = tmp_path / "response_chapter.xhtml"
+    translated.write_text("<p>translated</p>", encoding="utf-8")
+
+    class ButtonStub:
+        visible = None
+
+        def setVisible(self, visible):
+            self.visible = bool(visible)
+
+    class ReaderStub:
+        _translate_btn = ButtonStub()
+        _workspace_mode = False
+        _live_translate_active = False
+        _current_row = 0
+        _chapter_filenames = ["chapter.xhtml"]
+        _translated_overlay = {
+            "chapter.xhtml": {
+                "path": str(translated),
+                "status": status,
+            }
+        }
+        _raw_epub_alt_path = ""
+
+    reader = ReaderStub()
+    EpubReaderDialog._update_translate_btn_visibility(reader)
+
+    assert reader._translate_btn.visible is expected_visible
+
+
+def test_details_overlay_preserves_qa_failed_status(tmp_path):
+    translated = tmp_path / "response_chapter.xhtml"
+    translated.write_text("<p>translated but failed QA</p>", encoding="utf-8")
+
+    class DetailsStub:
+        _chapters_info = [
+            {
+                "filename": "chapter.xhtml",
+                "translated_path": str(translated),
+                "translated_title": "Chapter",
+                "status": "qa_failed",
+            }
+        ]
+        _book = {"output_folder": str(tmp_path)}
+
+    overlay, _extra_dirs = BookDetailsDialog._build_translated_overlay(
+        DetailsStub()
+    )
+
+    assert overlay["chapter.xhtml"]["status"] == "qa_failed"
+
+
+def test_reader_retries_qa_failed_chapter_without_completed_confirmation(
+    tmp_path, monkeypatch,
+):
+    raw_epub = tmp_path / "book.epub"
+    raw_epub.write_bytes(b"epub")
+    translated = tmp_path / "response_chapter.xhtml"
+    translated.write_text("<p>translated but failed QA</p>", encoding="utf-8")
+    reset_calls = []
+
+    class GuiStub:
+        translation_thread = None
+
+        def add_log_listener(self, _listener):
+            pass
+
+        def start_single_chapter_translation(self, *_args, **_kwargs):
+            return False
+
+    class ReaderStub:
+        _live_translate_active = False
+        _chapters = [("Chapter", "<p>raw</p>")]
+        _chapter_filenames = ["chapter.xhtml"]
+        _current_row = 0
+        _epub_path = str(raw_epub)
+        _raw_epub_alt_path = ""
+        _translated_overlay = {
+            "chapter.xhtml": {
+                "path": str(translated),
+                "status": "qa_failed",
+            }
+        }
+
+        def _ensure_live_panel(self):
+            pass
+
+        def _reset_live_state(self):
+            pass
+
+        def _on_live_log_line(self, _message):
+            pass
+
+        def _teardown_live_listener(self):
+            pass
+
+    monkeypatch.setattr(epub_library, "_find_translator_gui", lambda _reader: GuiStub())
+    monkeypatch.setattr(
+        epub_library,
+        "_mark_chapter_pending_for_retranslation",
+        lambda folder, filename: reset_calls.append((folder, filename)) or True,
+    )
+    monkeypatch.setattr(
+        epub_library.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: pytest.fail(
+            "QA-failed chapters must not use the completed confirmation"
+        ),
+    )
+
+    EpubReaderDialog._on_translate_current_chapter(ReaderStub())
+
+    assert reset_calls == [(str(tmp_path), "chapter.xhtml")]
+
+
+def test_reader_cold_webengine_is_initialized_before_first_show(
+    qapp, monkeypatch,
+):
+    events = []
+    state = {"warmed": False}
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: state["warmed"],
+    )
+
+    def prewarm():
+        events.append("prewarm")
+        state["warmed"] = True
+        return True
+
+    def initialize(self):
+        events.append("initialize")
+        self._reader_init_queued = False
+        self._reader_views_ready = True
+        self._reader = QWidget()
+
+    monkeypatch.setattr(
+        epub_library, "prewarm_epub_reader_webengine", prewarm
+    )
+    monkeypatch.setattr(
+        EpubReaderDialog, "_initialize_reader_views", initialize
+    )
+
+    dialog = EpubReaderDialog(
+        "C:/layout-test/cold-webengine-reader.epub", config={}
+    )
+    try:
+        assert events == ["prewarm", "initialize"]
+        assert dialog._reader_views_ready is True
+        assert dialog.isVisible() is False
+
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.isVisible() is True
+        assert events == ["prewarm", "initialize"]
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_reader_installs_browser_before_show_when_engine_is_prewarmed(
+    qapp, monkeypatch,
+):
+    load_starts = []
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        EpubReaderDialog,
+        "_start_loading",
+        lambda self, preserve_shell=False: load_starts.append(preserve_shell),
+    )
+
+    dialog = EpubReaderDialog("C:/layout-test/prewarmed-reader.epub", config={})
+    try:
+        assert dialog._reader_views_ready
+        assert dialog._reader is not None
+        assert load_starts == [True]
+
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.isVisible()
+        assert not dialog._reader_init_queued
+        assert load_starts == [True]
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_remote_image_url_survives_local_image_processing(tmp_path):
+    remote_url = (
+        "https://images.novelpia.com/imagebox/b1/"
+        "b1b11a46e497175bfdc6278959170d99_1958056_1779373634_ori.file"
+    )
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(tmp_path / "book.epub")
+    reader._images = {}
+    reader._extra_image_dirs = []
+
+    processed = reader._process_html(
+        f'<p><img class="remote-image" alt="Image 1" src="{remote_url}"/></p>'
+    )
+
+    assert remote_url in processed
+    assert 'class="remote-image"' in processed
+
+
+def test_reader_lazily_extracts_only_referenced_epub_images_and_caches_html(
+    tmp_path, monkeypatch,
+):
+    epub_path = tmp_path / "lazy-images.epub"
+    used_bytes = b"used-image" * 800
+    unused_bytes = b"unused-image" * 800
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("OEBPS/Images/used.png", used_bytes)
+        archive.writestr("OEBPS/Images/unused.png", unused_bytes)
+
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(epub_path)
+    reader._images = {
+        "used.png": epub_library._lazy_epub_image("OEBPS/Images/used.png"),
+        "unused.png": epub_library._lazy_epub_image("OEBPS/Images/unused.png"),
+    }
+    reader._extra_image_dirs = []
+    reader._img_temp_dir = str(tmp_path / "reader-images")
+
+    reads = []
+    classifications = []
+    original_read = epub_library._read_epub_member_from_zip
+    # the reader document builder moved to reader_doc (EpubReaderDialog inherits it)
+    monkeypatch.setattr(
+        reader_doc,
+        "_read_epub_member_from_zip",
+        lambda archive, member, lookup=None: (
+            reads.append(member)
+            or original_read(archive, member, lookup)
+        ),
+    )
+    monkeypatch.setattr(
+        reader_doc,
+        "_reader_image_is_sizeable",
+        lambda data: classifications.append(len(data)) or True,
+    )
+
+    html = '<p><img src="../Images/used.png"></p>'
+    try:
+        first = reader._process_html(html)
+        second = reader._process_html(html)
+    finally:
+        reader._close_epub_image_zip()
+
+    assert first == second
+    assert reads == ["OEBPS/Images/used.png"]
+    assert classifications == [len(used_bytes)]
+    assert "unused.png" not in " ".join(reads)
+    assert (tmp_path / "reader-images" / "used.png").read_bytes() == used_bytes
+
+
+def test_epub_loader_caches_image_members_without_eager_payloads(
+    tmp_path, monkeypatch,
+):
+    from ebooklib import epub
+
+    epub_path = tmp_path / "descriptor-cache.epub"
+    book = epub.EpubBook()
+    book.set_identifier("descriptor-cache")
+    book.set_title("Descriptor cache")
+    book.set_language("en")
+    chapter = epub.EpubHtml(
+        title="Chapter",
+        file_name="Text/chapter.xhtml",
+        lang="en",
+    )
+    chapter.content = '<html><body><img src="../Images/page.png"></body></html>'
+    image = epub.EpubItem(
+        uid="page-image",
+        file_name="Images/page.png",
+        media_type="image/png",
+        content=b"large-image-payload" * 2000,
+    )
+    book.add_item(chapter)
+    book.add_item(image)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.toc = (chapter,)
+    book.spine = ["nav", chapter]
+    epub.write_epub(str(epub_path), book)
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    # the EPUB loader / cache moved to reader_doc (epub_library re-exports them)
+    for module in (epub_library, reader_doc):
+        monkeypatch.setattr(module, "_epub_cache_dir", lambda: str(cache_dir))
+    archive_reads = []
+    original_read_file = epub.EpubReader.read_file
+    monkeypatch.setattr(
+        epub.EpubReader,
+        "read_file",
+        lambda self, name: (
+            archive_reads.append(str(name).replace("\\", "/"))
+            or original_read_file(self, name)
+        ),
+    )
+    worker = epub_library._EpubLoaderThread(str(epub_path), config={})
+    errors = []
+    worker.error.connect(errors.append)
+
+    worker.run()
+    cached = epub_library._load_epub_cache(str(epub_path), config={})
+
+    assert errors == []
+    assert cached is not None
+    _chapters, images, _filenames = cached
+    assert images
+    assert all(not isinstance(value, bytes) for value in images.values())
+    assert not any(name.lower().endswith("images/page.png")
+                   for name in archive_reads)
+    assert {
+        epub_library._lazy_epub_image_member(value)
+        for value in images.values()
+    } == {"Images/page.png"}
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(epub_path)
+    reader._images = images
+    reader._extra_image_dirs = []
+    reader._img_temp_dir = str(tmp_path / "materialized")
+    try:
+        processed = reader._process_html(
+            '<p><img src="../Images/page.png"></p>')
+    finally:
+        reader._close_epub_image_zip()
+    assert "file:" in processed
+    assert (tmp_path / "materialized" / "page.png").read_bytes() == image.content
+
+
+def test_next_chapter_image_preloader_materializes_only_its_references(
+    tmp_path, monkeypatch,
+):
+    epub_path = tmp_path / "preload-images.epub"
+    next_bytes = b"next-image" * 800
+    later_bytes = b"later-image" * 800
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("Images/next.png", next_bytes)
+        archive.writestr("Images/later.png", later_bytes)
+
+    reads = []
+    original_read = epub_library._read_epub_member_from_zip
+    # the preload thread's run moved to reader_doc (the Qt thread inherits it)
+    monkeypatch.setattr(
+        reader_doc,
+        "_read_epub_member_from_zip",
+        lambda archive, member, lookup=None: (
+            reads.append(member)
+            or original_read(archive, member, lookup)
+        ),
+    )
+    worker = epub_library._ReaderImagePreloadThread(
+        "0:1:test",
+        '<p><img src="Images/next.png"></p>',
+        {
+            "Images/next.png": epub_library._lazy_epub_image("Images/next.png"),
+            "Images/later.png": epub_library._lazy_epub_image("Images/later.png"),
+        },
+        [],
+        str(epub_path),
+        str(tmp_path / "preloaded"),
+    )
+    emitted = []
+    worker.done.connect(lambda key, resources: emitted.append((key, resources)))
+
+    worker.run()
+
+    assert reads == ["Images/next.png"]
+    assert (tmp_path / "preloaded" / "next.png").read_bytes() == next_bytes
+    assert not (tmp_path / "preloaded" / "later.png").exists()
+    assert emitted and emitted[0][0] == "0:1:test"
+    assert len(emitted[0][1]) == 1
+
+
+def test_large_raw_image_classification_does_not_decode_bitmap(monkeypatch):
+    # _reader_image_is_sizeable moved to reader_doc, which probes dimensions with
+    # library_covers._probe_image_size (imported into reader_doc) instead of
+    # QImageReader. The probe sits inside ``except Exception``, so record calls
+    # rather than raising: the byte-size rule must answer before any probe runs.
+    probes = []
+
+    def recording_probe(data):
+        probes.append(len(data))
+        return (1000, 1000)
+
+    monkeypatch.setattr(reader_doc, "_probe_image_size", recording_probe)
+
+    assert epub_library._reader_image_is_sizeable(b"large-scan" * 700) is True
+    assert probes == []
+    # Control: a small image does reach the (patched) probe, so the patch is live.
+    assert epub_library._reader_image_is_sizeable(b"tiny") is True
+    assert probes == [4]
+
+
+def test_reader_schedules_next_chapter_image_preload_off_thread(
+    qapp, tmp_path, monkeypatch,
+):
+    epub_path = tmp_path / "scheduled-preload.epub"
+    image_bytes = b"scheduled-image" * 800
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("Images/next.png", image_bytes)
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library, "_epub_reader_webengine_is_warmed", lambda: False)
+    monkeypatch.setattr(EpubReaderDialog, "_start_loading", lambda self, **_kw: None)
+    reader = EpubReaderDialog(str(epub_path), config={})
+    reader._chapters = [
+        ("Current", "<p>text only</p>"),
+        ("Next", '<p><img src="Images/next.png"></p>'),
+    ]
+    reader._images = {
+        "Images/next.png": epub_library._lazy_epub_image("Images/next.png")
+    }
+    reader._current_row = 0
+    reader._layout_mode = epub_library.LAYOUT_SINGLE
+    try:
+        reader._schedule_next_chapter_image_preload()
+        _pump_events(qapp, timeout=0.8)
+
+        assert reader._image_preload_thread is None
+        assert reader._preloaded_chapter_keys
+        assert reader._preloaded_image_resources
+        warmed = next(iter(reader._preloaded_image_resources.values()))
+        assert open(warmed["path"], "rb").read() == image_bytes
+    finally:
+        reader.close()
+        qapp.processEvents()
+
+
+def test_raw_reader_defers_uncached_image_chapter_jump(
+    qapp, tmp_path, monkeypatch,
+):
+    epub_path = tmp_path / "jump-preload.epub"
+    image_bytes = b"jump-image" * 1200
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("Images/jump.png", image_bytes)
+
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library, "_epub_reader_webengine_is_warmed", lambda: False)
+    monkeypatch.setattr(EpubReaderDialog, "_start_loading", lambda self, **_kw: None)
+    reader = EpubReaderDialog(str(epub_path), config={})
+    reader._chapters = [
+        ("Current", "<p>Current chapter</p>"),
+        ("Scan", '<p><img src="Images/jump.png"></p>'),
+    ]
+    reader._images = {
+        "Images/jump.png": epub_library._lazy_epub_image("Images/jump.png")
+    }
+    reader._current_row = 0
+    reader._layout_mode = epub_library.LAYOUT_SINGLE
+    rendered = []
+    reader._render_current = lambda: rendered.append(reader._current_row)
+    try:
+        reader._activate_chapter_index(1)
+        assert reader._current_row == 0
+        assert rendered == []
+
+        _pump_events(qapp, timeout=0.8)
+
+        assert reader._current_row == 1
+        assert rendered == [1]
+        warmed = next(iter(reader._preloaded_image_resources.values()))
+        assert open(warmed["path"], "rb").read() == image_bytes
+    finally:
+        reader.close()
+        qapp.processEvents()
+
+
+@pytest.mark.parametrize("href_attr", ["href", "xlink:href"])
+def test_svg_image_link_is_rehydrated_and_resolved(tmp_path, href_attr):
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(tmp_path / "book.epub")
+    reader._images = {"cover_img_1.jpg": b"valid-cover-bytes"}
+    reader._extra_image_dirs = []
+    reader._img_temp_dir = str(tmp_path / "reader-images")
+    (tmp_path / "reader-images").mkdir()
+
+    escaped_image = (
+        f'&lt;image height="2560" width="1804" '
+        f'{href_attr}="../Images/cover_img_1.jpg" /&gt;'
+    )
+    processed = reader._process_html(
+        '<svg viewBox="0 0 1804 2560" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        f'{escaped_image}</svg>'
+    )
+
+    cached_path = tmp_path / "reader-images" / "cover_img_1.jpg"
+    cached_url = epub_library.QUrl.fromLocalFile(str(cached_path)).toString()
+    assert cached_path.read_bytes() == b"valid-cover-bytes"
+    assert f'{href_attr}="{cached_url}"' in processed
+    assert "&lt;image" not in processed
+
+
+def test_leading_workspace_pdf_image_does_not_start_on_blank_column(tmp_path):
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(tmp_path / "source.pdf")
+    reader._images = {}
+    reader._extra_image_dirs = [str(tmp_path / "images")]
+    reader._img_temp_dir = str(tmp_path / "reader-images")
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "cover.png").write_bytes(b"image" * 2000)
+
+    processed = reader._process_html(
+        '<article class="pdf-fast-semantic-page">'
+        '<a id="page-1"></a>'
+        '<figure class="pdf-image"><img src="images/cover.png"></figure>'
+        '</article>'
+    )
+
+    assert 'class="full-page-img full-page-img-first"' in processed
+
+    class ReaderStub:
+        _font_family = "Georgia"
+        _font_size = 14
+        _line_spacing = 1.8
+        _translated_overlay = {}
+        _raw_epub_alt_path = ""
+        _translated_css_dirs = []
+        _workspace_mode = True
+        _show_raw = False
+
+        @staticmethod
+        def _get_theme():
+            return {
+                "bg": "#111111",
+                "fg": "#eeeeee",
+                "heading": "#ffffff",
+                "link": "#88aaff",
+                "code_bg": "#222222",
+                "border": "#333333",
+            }
+
+        @staticmethod
+        def _get_embedded_css():
+            return ""
+
+    wrapped = EpubReaderDialog._wrap_html(
+        ReaderStub(), processed, paginated=True
+    )
+    assert (
+        ".full-page-img-first { break-before: avoid !important; }"
+        in wrapped
+    )
+
+
+def test_remote_cover_page_is_downloaded_and_cached(tmp_path, monkeypatch):
+    remote_url = (
+        "https://images.novelpia.com/imagebox/cover/"
+        "7699c81bc9ee1228b9fb46cf4c3af980_358677_ori.file"
+    )
+    remote_bytes = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000d49444154789c6360f8cff00000040101005fe5c34b0000000049454e44"
+        "ae426082"
+    )
+    epub_path = tmp_path / "remote-cover.epub"
+    with zipfile.ZipFile(epub_path, "w") as epub:
+        epub.writestr(
+            "OEBPS/Text/chapter0001.xhtml",
+            '<html><body><img src="https://example.com/chapter.file"/></body></html>',
+        )
+        epub.writestr(
+            "OEBPS/Text/cover.html",
+            f'<html><body><img class="remote-image" src="{remote_url}"/></body></html>',
+        )
+
+    seen_urls = []
+    # the cover helpers moved to library_covers (epub_library re-exports them)
+    monkeypatch.setattr(library_covers, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        library_covers,
+        "_download_remote_cover_image",
+        lambda url: seen_urls.append(url) or remote_bytes,
+    )
+    (tmp_path / "cache").mkdir()
+
+    cover_path = epub_library._extract_cover(str(epub_path))
+
+    assert seen_urls == [remote_url]
+    assert cover_path
+    assert open(cover_path, "rb").read() == remote_bytes
+
+
+def test_pdf_cover_extracts_first_embedded_image_and_reuses_cache(tmp_path, monkeypatch):
+    fitz = pytest.importorskip("fitz")
+    Image = pytest.importorskip("PIL.Image")
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(library_covers, "_cover_cache_dir", lambda: str(cache_dir))
+    pdf_path = tmp_path / "source.pdf"
+    first_image = tmp_path / "first.png"
+    second_image = tmp_path / "second.png"
+    Image.new("RGB", (200, 300), "blue").save(first_image)
+    Image.new("RGB", (200, 300), "red").save(second_image)
+
+    with fitz.open() as document:
+        first = document.new_page(width=300, height=500)
+        first.insert_image(fitz.Rect(50, 80, 250, 380), filename=str(first_image))
+        second = document.new_page(width=300, height=500)
+        second.insert_image(fitz.Rect(50, 80, 250, 380), filename=str(second_image))
+        document.save(str(pdf_path))
+
+    first_result = epub_library._extract_pdf_cover(str(pdf_path))
+    second_result = epub_library._extract_pdf_cover(str(pdf_path))
+
+    assert first_result == second_result
+    assert first_result and os.path.isfile(first_result)
+    image = epub_library.QImage(first_result)
+    assert not image.isNull()
+    assert image.size() == epub_library.QSize(200, 300)
+    # The native first image is blue; a page screenshot would be 300x500 with
+    # white margins, while extracting the second image would make this red.
+    center = image.pixelColor(image.width() // 2, image.height() // 2)
+    assert center.blue() > center.red()
+
+
+def test_pdf_without_embedded_images_does_not_fall_back_to_page_screenshot(
+    tmp_path, monkeypatch
+):
+    fitz = pytest.importorskip("fitz")
+    monkeypatch.setattr(
+        library_covers, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+    pdf_path = tmp_path / "vector-only.pdf"
+    with fitz.open() as document:
+        page = document.new_page(width=300, height=500)
+        page.draw_rect(page.rect, fill=(0.1, 0.3, 0.8))
+        page.insert_text((40, 80), "NO IMAGE OBJECT")
+        document.save(str(pdf_path))
+
+    assert epub_library._extract_pdf_cover(str(pdf_path)) is None
+
+
+def test_pdf_cover_image_search_stops_after_first_five_pages(
+    tmp_path, monkeypatch
+):
+    fitz = pytest.importorskip("fitz")
+    Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(
+        library_covers, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+    late_image = tmp_path / "late-cover.png"
+    Image.new("RGB", (120, 180), "green").save(late_image)
+    pdf_path = tmp_path / "late-image.pdf"
+    with fitz.open() as document:
+        for page_number in range(6):
+            page = document.new_page(width=300, height=500)
+            if page_number == 5:
+                page.insert_image(
+                    fitz.Rect(50, 50, 170, 230), filename=str(late_image))
+        document.save(str(pdf_path))
+
+    assert epub_library._PDF_COVER_SCAN_PAGE_LIMIT == 5
+    assert epub_library._extract_pdf_cover(str(pdf_path)) is None
+
+
+def test_in_progress_pdf_uses_raw_source_first_image_as_cover(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    raw_pdf = tmp_path / "raw.pdf"
+    raw_pdf.write_bytes(b"%PDF-test")
+    rendered = str(tmp_path / "first-image.png")
+    seen = []
+    # _CoverLoader.run moved to library_covers (the Qt thread inherits it)
+    monkeypatch.setattr(
+        library_covers,
+        "_extract_pdf_cover",
+        lambda path: seen.append(path) or rendered,
+    )
+
+    loader = epub_library._CoverLoader(
+        str(workspace),
+        file_type="in_progress",
+        raw_source_path=str(raw_pdf),
+    )
+    results = []
+    loader.result_ready.connect(lambda path, cover: results.append((path, cover)))
+    loader.run()
+
+    assert seen == [str(raw_pdf)]
+    assert results == [(str(workspace), rendered)]
+
+
+def test_book_details_never_lists_source_epub_sidecar(qapp, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    raw_pdf = tmp_path / "raw.pdf"
+    raw_pdf.write_bytes(b"%PDF-test")
+    (workspace / "source_epub.txt").write_text(
+        str(raw_pdf), encoding="utf-8")
+    (workspace / "image_rename_map.json").write_text(
+        "{}", encoding="utf-8")
+    (workspace / "image_reference_map.json").write_text(
+        '{"version": 1}', encoding="utf-8")
+    (workspace / "response_chapter_001.html").write_text(
+        "<h1>Chapter One</h1>", encoding="utf-8")
+    progress_file = workspace / "translation_progress.json"
+    progress_file.write_text(json.dumps({
+        "chapters": {
+            "special_source_epub": {
+                "actual_num": 0,
+                "original_basename": "source_epub.txt",
+                "output_file": "source_epub.txt",
+                "status": "completed",
+            },
+            "special_image_rename_map": {
+                "actual_num": 0,
+                "original_basename": "image_rename_map.json",
+                "output_file": "image_rename_map.json",
+                "status": "completed",
+            },
+            "special_image_reference_map": {
+                "actual_num": 0,
+                "original_basename": "image_reference_map.json",
+                "output_file": "image_reference_map.json",
+                "status": "completed",
+            },
+            "chapter_001": {
+                "actual_num": 1,
+                "original_basename": "chapter_001.xhtml",
+                "output_file": "response_chapter_001.html",
+                "status": "completed",
+            },
+        }
+    }), encoding="utf-8")
+
+    summary = epub_library._read_progress_summary(str(progress_file))
+    assert summary["total"] == 1
+    assert summary["completed"] == 1
+
+    loader = epub_library._BookDetailsLoader({
+        "path": str(workspace),
+        "type": "in_progress",
+        "output_folder": str(workspace),
+        "progress_file": str(progress_file),
+        "raw_source_path": str(raw_pdf),
+    })
+    payloads = []
+    loader.done.connect(payloads.append)
+    loader.run()
+
+    assert len(payloads) == 1
+    assert [row["filename"] for row in payloads[0]["chapters_info"]] == [
+        "chapter_001.xhtml"
+    ]
+
+
+def test_epub_reader_uses_nonreset_display_number_without_changing_row_index():
+    reader = epub_library.EpubReaderDialog.__new__(
+        epub_library.EpubReaderDialog
+    )
+    reader._chapter_display_numbers = [0, 1, 2, 3, 4]
+
+    assert reader._reader_chapter_display_number(0) == 0
+    assert reader._reader_chapter_display_number(3) == 3
+    assert reader._reader_chapter_display_number(99) == 100
+
+
+def test_gif_cover_detection_uses_content_and_movie_advances(qapp, tmp_path):
+    Image = pytest.importorskip("PIL.Image")
+    disguised_gif = tmp_path / "legacy-cache-name.jpg"
+    frames = [
+        Image.new("RGB", (40, 60), "red"),
+        Image.new("RGB", (40, 60), "blue"),
+    ]
+    # The cache historically gives every EPUB cover a .jpg suffix. Explicitly
+    # encode GIF data under that name to verify content-based detection.
+    frames[0].save(
+        disguised_gif,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=40,
+        loop=0,
+    )
+    label = epub_library.QLabel()
+    movie = epub_library._build_cover_movie(
+        str(disguised_gif), label, 120, 180)
+
+    assert movie is not None
+    assert movie.isValid()
+    # The decoder remains at native size; our frame callback performs smooth
+    # scaling instead of QMovie's low-quality setScaledSize path.
+    assert not movie.scaledSize().isValid()
+    seen_frames = []
+    movie.frameChanged.connect(seen_frames.append)
+    movie.start()
+    _pump_events(qapp, 0.15)
+    assert movie.frameCount() == 2
+    assert 0 in seen_frames and 1 in seen_frames
+    assert movie.state() == epub_library.QMovie.Running
+    assert label.pixmap() is not None
+    assert label.pixmap().size() == epub_library.QSize(120, 180)
+    epub_library._dispose_cover_movie(movie)
+
+
+def test_other_settings_exposes_remote_image_download_toggle():
+    source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    settings_source = open(
+        os.path.join(source_root, "src", "other_settings.py"),
+        encoding="utf-8",
+    ).read()
+    extractor_source = open(
+        os.path.join(source_root, "src", "Chapter_Extractor.py"),
+        encoding="utf-8",
+    ).read()
+    gui_source = desktop_gui_source()
+
+    assert '"Download remote image URLs"' in settings_source
+    assert "self.config['download_remote_image_urls'] = enabled" in settings_source
+    assert "os.environ['DOWNLOAD_REMOTE_IMAGE_URLS']" in settings_source
+    assert 'QLabel("Threads:")' in settings_source
+    assert 'QLabel("Interval:")' in settings_source
+    assert "remote_image_workers_spin = QDoubleSpinBox()" in settings_source
+    assert "remote_image_workers_spin.setDecimals(0)" in settings_source
+    assert "remote_image_spin_style" not in settings_source
+    assert "remote_image_workers_spin.wheelEvent" in settings_source
+    assert "remote_image_interval_spin.wheelEvent" in settings_source
+    assert "REMOTE_IMAGE_DOWNLOAD_WORKERS" in settings_source
+    assert "REMOTE_IMAGE_DOWNLOAD_INTERVAL" in settings_source
+    assert "self.config.get('remote_image_download_interval', 0.5)" in settings_source
+    assert "'REMOTE_IMAGE_DOWNLOAD_INTERVAL', '0.5'" in extractor_source
+    assert "self.download_remote_image_urls_var = self.config.get(" in gui_source
+    assert "('download_remote_image_urls', ['download_remote_image_urls_var']" in gui_source
+    assert "('remote_image_download_workers', ['remote_image_download_workers_var']" in gui_source
+    assert "('remote_image_download_interval', ['remote_image_download_interval_var']" in gui_source
+    assert "self.config.get('remote_image_download_interval', 0.5)" in gui_source
+
+
+def test_details_tags_prefer_translated_metadata_subjects():
+    class DetailsStub:
+        _details = {"subjects": ["판타지", "빙의"]}
+        _metadata_json = {
+            "subject": ["Fantasy", "Possession"],
+        }
+
+        def _collect_tag_values(self, *sources):
+            return BookDetailsDialog._collect_tag_values(self, *sources)
+
+    assert BookDetailsDialog._display_tag_values(DetailsStub()) == [
+        "Fantasy",
+        "Possession",
+    ]
+
+
+def test_details_tags_fall_back_to_source_epub_subjects():
+    class DetailsStub:
+        _details = {"subjects": ["판타지", "빙의"]}
+        _metadata_json = {}
+
+        def _collect_tag_values(self, *sources):
+            return BookDetailsDialog._collect_tag_values(self, *sources)
+
+    assert BookDetailsDialog._display_tag_values(DetailsStub()) == [
+        "판타지",
+        "빙의",
+    ]
+
+
+def test_output_card_uses_source_epub_when_only_artifact_progress_exists(
+    tmp_path, monkeypatch,
+):
+    """Generated TOC/header rows must not invalidate source_epub.txt."""
+    output_root = tmp_path / "Output"
+    workspace = output_root / "[1058] Test Book"
+    raw_root = tmp_path / "Raws"
+    library_raw = tmp_path / "Library" / "Raw"
+    workspace.mkdir(parents=True)
+    raw_root.mkdir()
+    library_raw.mkdir(parents=True)
+
+    source_epub = raw_root / "[1058] Test Book.epub"
+    container_xml = """<?xml version="1.0"?>
+    <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+      <rootfiles>
+        <rootfile full-path="OEBPS/content.opf"
+                  media-type="application/oebps-package+xml"/>
+      </rootfiles>
+    </container>"""
+    opf = """<?xml version="1.0" encoding="UTF-8"?>
+    <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+      <manifest>
+        <item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+        <item id="c2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+      </manifest>
+      <spine>
+        <itemref idref="c1"/>
+        <itemref idref="c2"/>
+      </spine>
+    </package>"""
+    with zipfile.ZipFile(source_epub, "w") as epub:
+        epub.writestr("META-INF/container.xml", container_xml)
+        epub.writestr("OEBPS/content.opf", opf)
+        epub.writestr("OEBPS/chapter1.xhtml", "<p>One</p>")
+        epub.writestr("OEBPS/chapter2.xhtml", "<p>Two</p>")
+
+    (workspace / "source_epub.txt").write_text(
+        str(source_epub), encoding="utf-8",
+    )
+    progress = {
+        "version": "2.1",
+        "chapters": {
+            "__metadata__": {
+                "original_basename": "metadata.json",
+                "output_file": "metadata.json",
+                "status": "pending",
+                "special_type": "metadata",
+            },
+            "__translation_artifact__:toc": {
+                "original_basename": "TOC.txt",
+                "output_file": "TOC.txt",
+                "status": "pending",
+                "special_type": "toc",
+                "translation_artifact_progress_key": (
+                    "__translation_artifact__:toc"
+                ),
+            },
+            "__translation_artifact__:headers": {
+                "original_basename": "translated_headers.txt",
+                "output_file": "translated_headers.txt",
+                "status": "pending",
+                "special_type": "headers",
+                "translation_artifact_progress_key": (
+                    "__translation_artifact__:headers"
+                ),
+            },
+        },
+    }
+    (workspace / "translation_progress.json").write_text(
+        json.dumps(progress), encoding="utf-8",
+    )
+
+    # the scans moved to library_core (epub_library re-exports them)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "_resolve_output_roots",
+            lambda _config=None: [str(output_root)],
+        )
+    # the source-EPUB resolver moved to library_core (epub_library re-exports it)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "_origins_raw_sources_for_stem", lambda _stem: [],
+        )
+        monkeypatch.setattr(module, "load_library_raw_inputs", lambda: [])
+        monkeypatch.setattr(
+            module, "get_library_raw_dir", lambda: str(library_raw),
+        )
+
+    rows = epub_library.scan_output_folders({})
+
+    assert len(rows) == 1
+    assert os.path.normpath(rows[0]["raw_source_path"]) == os.path.normpath(
+        str(source_epub)
+    )
+    assert rows[0]["missing_raw_file"] is False
+    assert rows[0]["total_chapters"] == 2
+
+
+def test_exact_named_partial_source_epub_remains_linked(
+    tmp_path, monkeypatch,
+):
+    """An exact Scan-for-Raw pairing may point at the latest EPUB batch."""
+    output_root = tmp_path / "Output"
+    workspace = output_root / "[344608] Rolling Story"
+    raw_root = tmp_path / "Raws"
+    library_raw = tmp_path / "Library" / "Raw"
+    workspace.mkdir(parents=True)
+    raw_root.mkdir()
+    library_raw.mkdir(parents=True)
+
+    source_epub = raw_root / "[344608] Rolling Story.epub"
+    with zipfile.ZipFile(source_epub, "w") as epub:
+        # The linked file is a later partial batch rather than the EPUB that
+        # supplied every historical row in translation_progress.json.
+        for chapter_number in range(432, 437):
+            epub.writestr(
+                f"OEBPS/Text/chapter{chapter_number:04d}.xhtml",
+                f"<p>{chapter_number}</p>",
+            )
+    mismatched_epub = raw_root / "Different Story.epub"
+    with zipfile.ZipFile(mismatched_epub, "w") as epub:
+        for chapter_number in range(432, 437):
+            epub.writestr(
+                f"OEBPS/Text/chapter{chapter_number:04d}.xhtml",
+                f"<p>{chapter_number}</p>",
+            )
+
+    (workspace / "source_epub.txt").write_text(
+        str(source_epub), encoding="utf-8",
+    )
+    chapters = {
+        str(chapter_number): {
+            "original_basename": f"chapter{chapter_number:04d}.xhtml",
+            "output_file": f"response_chapter{chapter_number:04d}.html",
+            "status": "completed",
+        }
+        for chapter_number in range(1, 41)
+    }
+    chapters.update({
+        str(chapter_number): {
+            "original_basename": f"chapter{chapter_number:04d}.xhtml",
+            "output_file": f"response_chapter{chapter_number:04d}.html",
+            "status": "completed",
+        }
+        for chapter_number in range(432, 437)
+    })
+    (workspace / "translation_progress.json").write_text(
+        json.dumps({"chapters": chapters}), encoding="utf-8",
+    )
+
+    # the scans moved to library_core (epub_library re-exports them)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "_resolve_output_roots", lambda _config=None: [str(output_root)],
+        )
+    # the source-EPUB resolver moved to library_core (epub_library re-exports it)
+    for module in (epub_library, library_core):
+        monkeypatch.setattr(
+            module, "_origins_raw_sources_for_stem", lambda _stem: [],
+        )
+        monkeypatch.setattr(module, "load_library_raw_inputs", lambda: [])
+        monkeypatch.setattr(
+            module, "get_library_raw_dir", lambda: str(library_raw),
+        )
+
+    assert epub_library._validate_source_epub_for_workspace(
+        str(workspace), str(source_epub),
+    )
+    assert not epub_library._validate_source_epub_for_workspace(
+        str(workspace), str(mismatched_epub),
+    )
+    rows = epub_library.scan_output_folders({})
+    assert len(rows) == 1
+    assert rows[0]["raw_source_path"] == str(source_epub)
+    assert rows[0]["missing_raw_file"] is False
+
+
+def test_details_tags_allow_manually_cleared_metadata_subjects():
+    class DetailsStub:
+        _details = {"subjects": ["판타지", "빙의"]}
+        _metadata_json = {"subject": []}
+
+        def _collect_tag_values(self, *sources):
+            return BookDetailsDialog._collect_tag_values(self, *sources)
+
+    assert BookDetailsDialog._display_tag_values(DetailsStub()) == []
+
+
+def test_details_author_prefers_metadata_creator():
+    class DetailsStub:
+        _details = {"authors": ["원작자"]}
+        _metadata_json = {"creator": "Edited Author"}
+
+    assert BookDetailsDialog._metadata_author_values(DetailsStub()) == [
+        "Edited Author",
+    ]
+
+
+def test_manual_metadata_edits_preserve_originals_and_unknown_fields():
+    existing = {
+        "title": "Translated Title",
+        "original_title": "원제",
+        "identifier": "book-123",
+        "subject": ["Fantasy", "Possession"],
+    }
+    updated, changed = _merge_manual_metadata_edits(
+        existing,
+        {
+            "title": "My Preferred Title",
+            "subject": "Fantasy\nDrama; Fantasy",
+        },
+        {
+            "title": "원제",
+            "subject": ["판타지", "빙의"],
+        },
+    )
+
+    assert changed == {"title", "subject"}
+    assert updated["title"] == "My Preferred Title"
+    assert updated["original_title"] == "원제"
+    assert updated["title_translated"] is True
+    assert updated["subject"] == ["Fantasy", "Drama"]
+    assert updated["original_subject"] == ["판타지", "빙의"]
+    assert updated["subject_translated"] is True
+    assert updated["identifier"] == "book-123"
+
+
+def test_details_chapter_filter_shows_only_qa_failures():
+    class DetailsStub:
+        _show_special_files = False
+        _show_qa_failures_only = True
+        _toc_search = None
+        _chapters_info = [
+            {"index": 0, "status": "completed"},
+            {"index": 1, "status": "qa_failed"},
+            {"index": 2, "status": "failed"},
+            {"index": 3, "status": "qa_failed", "is_special": True},
+        ]
+        _chapter_base_infos = BookDetailsDialog._chapter_base_infos
+
+    filtered = BookDetailsDialog._filtered_chapter_infos(DetailsStub())
+
+    assert [chapter["index"] for chapter in filtered] == [1]
+
+
+def test_details_chapters_button_switches_to_failures_view(qapp, monkeypatch):
+    monkeypatch.setattr(BookDetailsDialog, "_start_loading", lambda self: None)
+    dialog = BookDetailsDialog(
+        {"path": "C:/layout-test/book.epub", "name": "Book"},
+        config={},
+    )
+    dialog._auto_refresh_timer.stop()
+    dialog._chapters_info = [
+        {"index": 0, "status": "completed"},
+        {"index": 1, "status": "qa_failed"},
+    ]
+    dialog._populate_chapters = (
+        lambda silent=False: dialog._update_toc_toggle_label()
+    )
+
+    assert isinstance(dialog._toc_title, QPushButton)
+    assert dialog._toc_title.contextMenuPolicy() == Qt.DefaultContextMenu
+
+    dialog._toc_title.click()
+    assert dialog._toc_title.isChecked() is True
+    assert dialog._toc_title.text() == "Failures  (1)"
+
+    dialog._toc_title.click()
+    assert dialog._toc_title.isChecked() is False
+    assert dialog._toc_title.text() == "Chapters  (1/2)"
+    dialog.close()
+
+
+def test_empty_failure_view_keeps_chapter_toolbar_vertical_anchor(
+    qapp, monkeypatch
+):
+    monkeypatch.setattr(BookDetailsDialog, "_start_loading", lambda self: None)
+    dialog = BookDetailsDialog(
+        {"path": "C:/layout-test/book.epub", "name": "Book"},
+        config={},
+    )
+    dialog._auto_refresh_timer.stop()
+    dialog._chapters_info = [
+        {
+            "index": index,
+            "filename": f"chapter-{index}.xhtml",
+            "title": f"Chapter {index}",
+            "status": "completed",
+        }
+        for index in range(358)
+    ]
+    first_page = dialog._chapters_info[:20]
+    dialog._chap_list.append_specs([
+        {
+            "info": info,
+            "primary_text": info["title"],
+            "filename": info["filename"],
+        }
+        for info in first_page
+    ])
+
+    try:
+        dialog.resize(1565, 800)
+        dialog._chap_list.show()
+        dialog._chap_container.hide()
+        dialog._toc_bottom_pager.show()
+        dialog._chap_loading_lbl.hide()
+        dialog._chapters_loaded = True
+        dialog._update_toc_toggle_label()
+        dialog.show()
+        qapp.processEvents()
+
+        viewport = dialog._scroll.viewport()
+        body = dialog._scroll.widget()
+        toolbar_body_y = dialog._toc_title.mapTo(body, QPoint(0, 0)).y()
+        dialog._scroll.verticalScrollBar().setValue(toolbar_body_y - 70)
+        qapp.processEvents()
+        before_y = dialog._toc_title.mapTo(viewport, QPoint(0, 0)).y()
+
+        dialog._toc_title.click()
+        qapp.processEvents()
+        after_y = dialog._toc_title.mapTo(viewport, QPoint(0, 0)).y()
+
+        assert dialog._toc_title.text() == "Failures  (0)"
+        assert dialog._chap_list.count() == 0
+        assert dialog._chap_list.reserved_height() > 0
+        assert after_y == before_y
+
+        # Restoring from an empty failure view used to expose a hybrid frame:
+        # the pager jumped to the chapter count while the old Failures label
+        # and blank list remained visible until background row prep finished.
+        failure_page_text = dialog._toc_page_label.text()
+        assert failure_page_text == "Page 1 / 1 · 0 of 0"
+        assert not dialog._toc_bottom_pager.isVisible()
+
+        dialog._toc_title.click()
+
+        # Before queued row-prep results are applied, the complete previous
+        # state remains intact rather than showing half of the new state.
+        assert dialog._toc_title.text() == "Failures  (0)"
+        assert dialog._toc_page_label.text() == failure_page_text
+        assert not dialog._toc_bottom_pager.isVisible()
+
+        _pump_events(qapp, timeout=0.3)
+
+        restored_y = dialog._toc_title.mapTo(viewport, QPoint(0, 0)).y()
+        assert dialog._toc_title.text() == "Chapters  (358/358)"
+        assert dialog._toc_page_label.text() == "Page 1 / 18 · 1-20 of 358"
+        assert dialog._toc_bottom_pager.isVisible()
+        assert dialog._chap_list.count() == 20
+        assert restored_y == before_y
+    finally:
+        dialog.close()
+        qapp.processEvents()

@@ -1,0 +1,243 @@
+name: Python application
+
+# This workflow will install Python dependencies, run tests and lint with a single version of Python
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # Full history: the desktop-parity tests (test_shared_core_p1 / test_headless_owner and
+        # tests/parity) read `git show <base sha>:src/...` and fail in CI when it is missing.
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install Cairo and headless Qt dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libcairo2-dev pkg-config python3-dev
+        # Native libraries PySide6's QtGui/QtWidgets load at import time; the tests that
+        # import the desktop GUI modules run with QT_QPA_PLATFORM=offscreen (no X server).
+        sudo apt-get install -y libegl1 libgl1 libopengl0 libxkbcommon0 libdbus-1-3 libfontconfig1 libfreetype6
+    
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/local/lib/android || true
+        sudo rm -rf /opt/ghc || true
+        sudo rm -rf /usr/share/dotnet || true
+        sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+        docker system prune -af || true
+        sudo apt-get clean
+        pip cache purge || true
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install --no-cache-dir -r requirements.txt
+
+    - name: Force CPU-only PyTorch wheels
+      run: |
+        # Install lightweight CPU-only wheels for torch/torchvision to avoid CUDA deps
+        pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision
+
+    - name: Check Python syntax
+      run: |
+        python -m py_compile src/*.py
+    
+    - name: Run basic smoke test
+      run: |
+        # This will at least check if imports work correctly
+        python -c "import sys; sys.path.insert(0, 'src'); import unified_api_client"
+        echo "Basic import test passed!"
+
+    - name: Mobile shared-module and backend patch tests (Python 3.10)
+      env:
+        # tests/conftest.py (which puts src/ on sys.path locally) is not tracked.
+        PYTHONPATH: ${{ github.workspace }}/src
+        QT_QPA_PLATFORM: offscreen
+      run: |
+        pip install --no-cache-dir pytest
+        python -m pytest -p no:cacheprovider -W ignore -o console_output_style=classic \
+          tests/test_mobile_runtime.py \
+          tests/test_safe_image.py \
+          tests/test_cv2_decode_gate.py \
+          tests/test_mobile_compat_patches_core.py \
+          tests/test_mobile_compat_patches_io.py \
+          tests/test_mobile_compat_patches_api.py \
+          tests/test_mobile_compat_patches_manga.py \
+          tests/test_pdf_mupdf_html.py \
+          tests/test_shared_core_p1.py \
+          tests/test_headless_owner.py \
+          tests/test_settings_schema.py \
+          tests/test_job_runner.py \
+          tests/test_text_jobs.py \
+          tests/test_translation_pipeline.py \
+          tests/test_direct_text_core.py \
+          tests/test_settings_rules.py \
+          tests/test_model_catalog_core.py \
+          tests/test_prompt_profiles.py \
+          tests/test_key_pool_service.py \
+          tests/test_mobile_auth_splits.py \
+          tests/test_library_core.py \
+          tests/test_reader_doc.py \
+          tests/test_progress_core.py \
+          tests/test_progress_actions.py \
+          tests/test_glossary_progress_core.py \
+          tests/test_glossary_document.py \
+          tests/test_glossary_files.py \
+          tests/test_parallel_epub_core.py \
+          tests/test_qa_runtime_additions.py \
+          tests/test_retranslate_plan_apply.py \
+          tests/test_sdlxliff_review_core.py \
+          tests/test_image_job.py \
+          tests/test_rpgmaker_job.py \
+          tests/test_async_batch_core.py \
+          tests/test_review_run_core.py \
+          tests/test_u7_tool_cores.py \
+          tests/test_manga_env.py \
+          tests/test_manga_editor_core.py \
+          tests/test_manga_models.py \
+          tests/test_google_vision_rest.py \
+          tests/test_update_core.py \
+          tests/test_browser_driver.py \
+          tests/test_schema_p5b.py \
+          tests/test_other_settings_streaming_texts.py \
+          tests/parity/test_u9_extractions.py \
+          tests/parity/test_u9_gap_moves.py \
+          tests/parity/test_u9_gap_round3.py \
+          tests/parity/test_u9_gap_round4.py
+
+    - name: Import hygiene of the shared GUI-free modules (PySide6 blocked)
+      run: |
+        python - <<'PY'
+        import importlib
+        import sys
+
+        sys.path.insert(0, "src")
+        # Desktop and mobile share these modules, so they must import without the desktop GUI.
+        for name in ("PySide6", "shiboken6", "tkinter", "translator_gui", "dpi_setup"):
+            sys.modules[name] = None  # any import of these now raises ImportError
+        SHARED = (
+            "mobile_runtime", "pdf_mupdf_html", "app_paths", "config_store", "prompt_defaults",
+            "metadata_defaults", "ollama_settings", "key_pools", "output_naming",
+            # U2: owner state/env/persistence mixins, HeadlessOwner, settings schema
+            "owner_state", "run_env", "settings_persistence", "headless_owner", "settings_schema",
+            "settings_schema_data", "library_core",
+            # U3: stop protocol, job scope, text jobs, input preparation, pipelines, Direct Text chat
+            "stop_control", "job_runner", "text_jobs", "input_preparation", "translation_pipeline",
+            "direct_text_store", "direct_text_stream",
+            # U4: settings rules, model catalog, prompt profiles, key pools, shared OAuth helpers
+            "settings_rules", "model_catalog_core", "prompt_profiles", "key_pool_service", "oauth_session",
+            # U5: Library covers, reader document, live stream, Progress Manager / Glossary Progress cores
+            "library_covers", "reader_doc", "live_stream", "progress_core", "progress_actions",
+            "glossary_progress_core",
+            # U6: Glossary Editor document, glossary file actions, Parallel EPUB pair core, QA helpers
+            "glossary_document", "glossary_files", "parallel_epub_core", "qa_scan_runtime",
+            # U7: image / generative and RPG Maker runners, async batch core, output tools core,
+            # SDLXLIFF reviewer core, Review run orchestration
+            "image_job", "rpgmaker_job", "async_batch_core", "output_tools_core", "sdlxliff_review_core",
+            "review_generator",
+            # U8: manga settings defaults, run env, Files-tab logic, batch runner, editor core, ONNX
+            # model registry, Google Vision / Azure Document Intelligence REST clients
+            "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
+            "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
+            # U9: the release check the desktop UpdateManager and the mobile About > Updates share,
+            # and the browser-driver seam (authnd/ + search/gemini keep their Qt helpers lazy)
+            "update_core", "browser_driver", "authnd_auth", "gemini_free",
+        )
+        failed = []
+        for name in SHARED:
+            try:
+                module = importlib.import_module(name)
+            except Exception as exc:
+                failed.append(f"{name}: {type(exc).__name__}: {exc}")
+            else:
+                print(f"ok    {name:20} {module.__file__}")
+        for line in failed:
+            print(f"FAIL  {line}")
+        sys.exit(1 if failed else 0)
+        PY
+
+  mobile-backend-check:
+    # Mobile backend closure: GUI-taint, excluded-module edges, process-spawn ratchet and pinned
+    # third-party imports (src/mobile/tools/collect_backend.py --check), a Python 3.13 syntax
+    # check of the mobile app, tools and CI scripts, and the host import smoke of the collected
+    # bundle (src/mobile/tools/host_smoke.py: read-only bundle, device env contract, process
+    # tripwires, blocked desktop packages, offline network).
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up uv (Python 3.13)
+      uses: astral-sh/setup-uv@v10.2.0
+      with:
+        python-version: '3.13'
+        enable-cache: true
+        cache-dependency-glob: |
+          src/mobile/pyproject.toml
+          src/mobile/uv.lock
+        cache-suffix: mobile-backend-check
+
+    - name: Collector check
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+      run: uv run --no-project python tools/collect_backend.py --check
+
+    - name: Compile mobile app, tools and CI scripts (Python 3.13)
+      working-directory: src/mobile
+      env:
+        PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      run: uv run --no-project python -m compileall -q app tools ci tests_host tests
+
+    - name: Collect backend bundle
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+      run: uv run --no-project python tools/collect_backend.py --out app/backend -q
+
+    - name: Prepare assets (tiktoken cache, self-test EPUB)
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+        PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      run: uv run --locked python tools/prepare_assets.py
+
+    - name: Host import smoke (Android simulation)
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+        PYTHONIOENCODING: utf-8
+        PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      run: uv run --locked python tools/host_smoke.py --simulate android --bundle app/backend --json build/host_smoke_android.json
+
+    - name: Mobile CI policy (no tag trigger, never publishes, optional suites)
+      working-directory: src/mobile
+      env:
+        PYTHONUTF8: '1'
+        PYTHONIOENCODING: utf-8
+        PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      run: uv run --locked python -m pytest -p no:cacheprovider -o console_output_style=classic -q tests_host/test_ci_release.py
+
+    - name: Upload host smoke report
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: mobile-host-smoke-report
+        path: src/mobile/build/host_smoke_android.json
+        if-no-files-found: ignore
+        retention-days: 14

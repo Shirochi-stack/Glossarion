@@ -1,0 +1,421 @@
+<p align="center">
+  <img src="assets/Halgakos.png" width="200" alt="Glossarion Logo" />
+</p>
+
+# 📚 Glossarion
+
+**Glossarion** is a comprehensive AI-powered translation suite for light novels, web novels, manga, subtitles, synchronized lyrics, and documents in virtually any language, with preconfigured profiles for Korean, Japanese, and Chinese via its profile system. Built to transform EPUB, TXT, PDF, SRT, ASS, and LRC files into high-quality, context-aware translations, it also includes a dedicated **manga translator** panel that combines multiple AI models to translate .cbz archives and direct image files, plus a **translation-editing tool** for .sdlxliff files. It works with **40+ AI providers** — including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, xAI Grok, Mistral, and local LLMs via Ollama — and, beyond those, **any OpenAI-compatible model or endpoint**, all through a modern PySide6 GUI that gives you total control over every step of the translation process.
+
+<p align="center">
+  <a href="docs/Glossarion_User_Guide_Sep-23-2026.md"><strong>📖 Read the Complete User Guide →</strong></a><br/>
+  <em>Every button and setting explained in plain language — including how to translate for free.</em>
+</p>
+
+---
+
+## 🏷️ Badges
+
+![Build](https://img.shields.io/github/actions/workflow/status/Shirochi-stack/Glossarion/python-app.yml?branch=main)
+![License](https://img.shields.io/github/license/Shirochi-stack/Glossarion)
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![Python application](https://github.com/Shirochi-stack/Glossarion/workflows/Python%20application/badge.svg)
+[![GitHub release](https://img.shields.io/github/release/Shirochi-stack/Glossarion.svg)](https://GitHub.com/Shirochi-stack/Glossarion/releases/)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Community-7289da?style=flat&logo=discord&logoColor=white)](https://discord.gg/n7WXRXn533)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Donate-ff5f5f?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/glossarion/)
+
+---
+
+## ✨ Key Features
+
+### 📖 Novel Translation Engine
+* **Multi-Provider AI Support** — 40+ providers out of the box (see [Supported Providers](#-supported-ai-providers) below)
+* **Advanced Context Management**
+  * Rolling history window for consistent translations
+  * Chunk-based processing for long chapters
+  * Contextual memory with configurable depth
+  * Parallel chapter translation support
+  * Full history export/import
+* **Smart Retry System**
+  * AI Hunter duplicate detection (ML-based similarity analysis with TF-IDF fingerprinting)
+  * Automatic retry for timeouts, truncation, and server errors
+  * Multi-key rotation with automatic failover on 429/5xx errors
+  * Rate limit handling with exponential backoff
+
+### 🎌 Manga Translation Engine
+* **Dual OCR System**
+  * Google Cloud Vision API for text detection
+  * Azure AI Vision / Document Intelligence as alternative OCR backends
+* **YOLO Bubble Detection**
+  * ONNX-based speech bubble detection for precise text region isolation
+  * Automatic bubble segmentation for complex page layouts
+* **Visual Context-Aware Translation**
+  * AI sees the full manga page image for accurate context
+  * Full page context mode for multi-bubble consistency
+  * Character expressions inform translation tone
+* **Advanced Text Rendering**
+  * Customizable fonts, colors, backgrounds, shadows, and outlines
+  * Smart inpainting to remove original text (local ONNX or Replicate cloud)
+  * Preserve original art option
+* **Batch Processing**
+  * Process entire manga chapters automatically
+  * Stop/resume functionality with progress tracking
+
+### 🧠 AI Hunter — Duplicate Detection
+* **ML-based content similarity analysis** with TF-IDF semantic fingerprinting
+* **Structural pattern recognition** and statistical outlier detection
+* **Configurable sensitivity thresholds** with length ratio checks
+* **Key phrase verification** and character name consistency checks
+
+### 📓 Glossary System
+* **AI-Powered Extraction** from EPUB and TXT files
+* Custom field support with configurable prompts
+* Multi-language support (KR/JP/CN)
+* Duplicate merging strategies
+* Import/export with validation (JSON and Markdown formats)
+* Automatic backup system
+
+### 🛡️ Quality Assurance Suite
+* **Comprehensive Scanning** — duplicate content, non-English fragments, spacing/formatting issues, repetitive patterns
+* **Multiple Report Formats** — interactive HTML, JSON analysis, CSV exports, summary statistics
+
+### 📚 File Format Support
+* **EPUB** — structure-preserving translation, metadata/cover retention, image gallery, clean HTML output, EPUB → translated EPUB conversion
+* **TXT** — chapter detection, custom delimiters, encoding auto-detection, format preservation
+* **PDF** — extraction via PyMuPDF, generation via WeasyPrint/xhtml2pdf
+* **HTML** — header translation, scan and batch processing
+
+### 🖼️ Image Translation
+* Auto-detection of text in images
+* Tall image splitting for reliable OCR
+* Batch processing with progress tracking
+* Context preservation across chunks
+
+### 🖥️ Modern GUI (PySide6)
+* **Cross-Platform** — Windows 10/11, macOS (Apple Silicon & Intel)
+* DPI-aware scaling with high-DPI display support
+* Animated splash screen and spinner indicators
+* Real-time translation progress with API watchdog monitoring
+* Comprehensive logging system with rotating log files and crash tracing
+* Per-language prompt profiles, temperature/token controls, API endpoint customization
+
+### 🔐 Security & Configuration
+* **API Key Encryption** — keys encrypted at rest using the `cryptography` library
+* **Multi-Key Management** — key pool with rotation, rate limit caching, and per-key health tracking
+* **Config Backup System** — automatic JSON config backups with atomic writes
+* **AuthGPT OAuth** — use your ChatGPT subscription directly via OAuth token flow
+* **AuthGrok Browser Login & Pooling** — sign in to multiple xAI/Grok accounts with deterministic numbered slots, or use `authgrok0/` for automatic rotation
+* **AuthArena Browser Login & Pooling** — use **Arena Login** to save encrypted Arena sessions, with numbered accounts or automatic rotation through `autharena0/`
+* **OpenCode Antigravity OAuth** — use `ocagy0/` for the plugin-managed account pool or numbered OcAgy routes for deterministic batch-account selection, including Gemini 3.1 Pro High
+
+---
+
+## 🔑 Supported AI Providers
+
+| Provider | Model Prefix | Example Models (2026) |
+|----------|-------------|----------------------|
+| **OpenAI** | `gpt-*`, `o3-*` | gpt-5.4, gpt-5.4-pro, gpt-5.3-codex, gpt-5.2, gpt-5, gpt-5-mini, gpt-5-nano, o3 |
+| **Google Gemini** | `gemini-*` | gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-2.5-flash, gemini-2.5-pro |
+| **Anthropic Claude** | `claude-*` | claude-opus-4-6, claude-sonnet-4-6, claude-sonnet-4-5, claude-haiku-4-5 |
+| **xAI Grok** | `grok-*`, `xai/*` | grok-4.20-beta, grok-4-fast, grok-4-0709, grok-3, grok-3-mini |
+| **DeepSeek** | `deepseek-*` | deepseek-chat, deepseek-reasoner, deepseek-coder |
+| **Mistral** | `mistral-*`, `mixtral-*`, `codestral-*` | mistral-large, mixtral-8x22b, codestral-latest |
+| **Cohere** | `command-*` | command-r, command-r-plus |
+| **ElectronHub** | `eh/*` | eh/gpt-5-chat-latest, eh/claude-sonnet-4-6, eh/gemini-3.1-pro-preview, eh/grok-4-fast |
+| **OpenRouter** | `or/*` | or/openai/gpt-5.4, or/google/gemini-3.1-pro-preview, or/deepseek/deepseek-v3.2 |
+| **LiteRouter** | `lr/*` | lr/deepseek-v3.2:free, lr/gpt-oss-120b:free, lr/openrouter:free:full-context |
+| **OpenCode** | `oc/*` | oc/claude-fable-5-1, oc/gpt-5.4, oc/deepseek-v4-pro, oc/qwen3.8-flash |
+| **OpenCode Free** | `ocz/*` | ocz/deepseek-v4-flash-free, ocz/mimo-v2.6-flash-free, ocz/nemotron-3-ultra-free |
+| **Poe** | `poe/*` | poe/gpt-4.5, poe/claude-4-opus, poe/gemini-2.5-pro |
+| **VertexAI** | `vertex/*` | vertex/gemini-3.1-pro-preview, vertex/claude-4-opus |
+| **Groq** | `groq/*` | groq/llama-3.3-70b-versatile, groq/meta-llama/llama-4-maverick-17b |
+| **AuthGPT** | `authgpt/*` | authgpt/gpt-5.4, authgpt/gpt-5.3-codex, authgpt/gpt-5.2 |
+| **AuthGrok** | `authgrok0/*`, `authgrok/*`, `authgrokN/*` | authgrok0/grok-4.5, authgrok/grok-4.5, authgrok1/grok-build |
+| **AuthArena** | `autharena/*`, `autharena0/*`, `autharenaN/*` | autharena/deepseek-v4-pro-low, autharena/kimi-k3, autharena/gpt-5.6-sol-medium |
+| **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
+| **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
+| **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking-high, antigravity/gemini-3.1-pro-low |
+| **OcAgy (OpenCode Antigravity)** | `ocagy0/*`, `ocagy/*`, `ocagy1/*`, ... | ocagy0/gemini-3.1-pro-high, ocagy/gemini-3.1-pro-high, ocagy1/gemini-3.1-pro-high |
+| **AuthND** | `authnd/*` | authnd/z-ai/glm-5.1 |
+| **NVIDIA** | `nd/*` | nd/deepseek-ai/deepseek-v3.2, nd/moonshotai/kimi-k2-thinking |
+| **Chutes** | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.2, chutes/openai/gpt-oss-120b |
+| **Zhipu Intl.** | `za/*` | za/glm-4.6, za/glm-4-plus |
+| **NanoGPT** | `nan/*` | nan/gpt-image-2, nan/deepseek/deepseek-v4-flash, nan/openai/gpt-latest |
+| **NanoGPT Subscription** | `authnan/*`, `authnanN/*`, `authnan0/*` | Browser login; select models from the subscription catalog. [Account and billing guide](docs/authnan.md) |
+| **SambaNova** | `sam/*` | sam/DeepSeek-V3.2, sam/Meta-Llama-3.3-70B-Instruct, sam/gpt-oss-120b |
+| **Fireworks** | `fireworks/*` | fireworks/llama-v3-70b |
+| **Together AI** | `together/*` | together/llama-3-70b |
+| **Perplexity** | `perplexity/*`, `pplx-*` | perplexity-70b-online, pplx-70b-online |
+| **AI21** | `j2-*`, `jamba-*` | j2-ultra, jamba-instruct |
+| **Qwen** | `qwen-*` | qwen-72b-chat, qwen-plus, qwen-turbo |
+| **Yi** | `yi-*` | yi-34b-chat-200k |
+| **DeepL** | `deepl` | deepl (traditional translation API) |
+| **Google Translate** | `google-translate*` | google-translate, google-translate-free |
+| **Custom Prefix Routes** | user-defined `prefix/*` | Route custom prefixes to OpenAI-compatible endpoints in Model Manager |
+
+> **AuthGrok browser login and account pool:** `authgrok/` pins the default saved account, while `authgrok1/`, `authgrok2/`, and later numbered routes pin their matching account slots. When `authgrok0/` is selected in the main model field or used in the Multi API Key Manager, the Grok account-slot dropdown appears beside **Grok Login**. Choose **+ N** there to allocate the next free numbered slot and open a fresh xAI sign-in for another email—there is no need to type numbered prefixes manually. Numbered logins use xAI's device-authorization flow in the regular default browser. Glossarion first signs out the previous xAI website session (without signing out Google or deleting the already-saved OAuth token), then polls xAI and saves the new account's tokens automatically after approval; a Grok Build code never needs to be copied back from the browser. Glossarion also rejects saving the same known email into two numbered slots. After saving the accounts, `authgrok0/` rotates distinct accounts round-robin and advances to another account on authentication, quota, or request failure.
+
+> **OcAgy login and account slots:** OcAgy is separate from the local `antigravity/` proxy. Click **OCAGY Login**; Glossarion installs OpenCode and `opencode-antigravity-auth` automatically when needed, then opens the login so you can choose **Google → OAuth with Google (Antigravity)**. No API key is required. `ocagy0/...` preserves the plugin-managed shared pool/current behavior; `ocagy/...` pins saved account #1, `ocagy1/...` pins account #2, `ocagy2/...` pins account #3, and so on. A pinned route fails clearly if that slot is missing, disabled, or out of quota instead of silently switching accounts.
+
+> **AuthArena login and account pool:** Click **Arena Login** in the main window or Multi API Key Manager. Glossarion automatically installs its managed LMArenaBridge runtime and opens Arena sign-in; no API key is required. This uses browser-session authentication, not official Arena OAuth. Saved sessions are encrypted. `autharena/` selects account #0, `autharena0/` rotates all saved accounts, and `autharena1/`, `autharena2/`, and later numbered routes select their matching account numbers. AuthArena supports real-time streaming and parallel batch requests, with a fresh conversation for each request. Website login and security challenges remain interactive. See [AuthArena proxy details](docs/autharena_proxy.md).
+
+Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
+
+> **Managed local Ollama:** Enter `ollamapull/model-name` in the main model field or Multi API Key Manager. If Ollama is missing, a **🦙 Download Ollama** button appears beside the field; click it to install and start Ollama with visible progress. The button becomes **🦙 Ollama Settings** once Ollama is available. Glossarion downloads a missing model on first use and lists locally installed models through its automatic model poll. Settings include context size, multi-token prediction, and an automatic Ollama application update switch. Model downloads can take substantial time and disk space; the translation Stop action interrupts a download in progress.
+
+> **Existing local servers:** Use `ollama/model-name` for Ollama at `http://localhost:11434/v1`, or `lmstudio/model-name` for LM Studio at `http://localhost:1234/v1`. These built-in routes use servers and models you have already started and downloaded; no custom prefix or endpoint toggle is needed. The model list includes 50 small and mid-sized local model suggestions under each local prefix, and polling adds the exact model IDs reported by your server. LM Studio may use different IDs from Ollama, so choose a polled model or enter its exact served ID.
+
+> **Note:** Many more providers are supported — including Baichuan, Zhipu AI (GLM), Moonshot/Kimi, Baidu ERNIE, Tencent Hunyuan, ByteDance Doubao, MiniMax, Meta Llama, Microsoft Phi, Falcon, and others. See `model_options.py` and `unified_api_client.py` for the full catalog.
+
+### API Key Setup
+Custom endpoints can use either a base URL or a user-defined prefix route for self-hosted and alternative OpenAI-compatible endpoints.
+
+1. **Direct Providers** — use API keys from OpenAI, Google, Anthropic, etc.
+2. **ElectronHub** — single API key for access to models from multiple providers
+3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
+4. **AuthGrok** — type `authgrok/grok-4.5`, click **Grok Login**, and sign in to xAI (Google sign-in is available on xAI's page)
+5. **AuthArena** — type `autharena/deepseek-v4-pro-low`, click **Arena Login**, and sign in to Arena; the local proxy and its dependencies are installed automatically (no API key required)
+6. **OcAgy** — use `ocagy0/gemini-3.1-pro-high` for automatic plugin account rotation or a numbered account route for batch translation, then use **OCAGY Login**; Glossarion installs the required OpenCode runtime and auth plugin when needed (no API key required)
+7. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `Shirochi-stack/antigravity-proxy` (no API key needed)
+8. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
+
+### Manga Translation Setup
+1. Create a Google Cloud Project (or Azure AI resource)
+2. Enable Cloud Vision API (or Azure AI Vision)
+3. Create service account credentials
+4. Download JSON key file
+5. Set path in Manga Translator interface
+
+---
+
+## 📁 Supported Extensions
+
+| Workflow | Extensions | Notes |
+|----------|------------|-------|
+| **Books and documents** | `.epub`, `.txt`, `.pdf`, `.md`, `.json`, `.csv` | Supported by the main translation and batch workflows. |
+| **Translation editing** | `.sdlxliff` | Extract, translate, review, and rebuild SDLXLIFF translation units. |
+| **Subtitles and synchronized lyrics** | `.srt`, `.ass`, `.lrc` | Preserves subtitle timing and structure. Files can be selected directly or stored inside a ZIP, including within nested subfolders. |
+| **Archives and comics** | `.zip`, `.cbz` | ZIP handling depends on its contents; subtitle ZIPs are processed as one bundle, while CBZ archives are handled by the manga workflow. |
+| **Images** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp` | Supported by the image and manga translation workflows. |
+| **Video and game integration** | `.mp4`, `.exe` | MP4 video input and RPG Maker game translation through the GTool integration. |
+| **Additional Direct Text attachments** | `.markdown`, `.html`, `.htm`, `.xhtml`, `.xml`, `.tsv`, `.vtt`, `.log`, `.tif`, `.tiff`, `.svg`, `.ico`, `.heic`, `.heif`, `.avif`, `.jxl` | Available when attaching a file in Direct Text. |
+
+Extension matching is case-insensitive. Output formats depend on the selected workflow and its output settings.
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+- Python 3.10 or higher
+- Windows 10/11 or macOS (for full feature support)
+
+### Quick Start
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Shirochi-stack/Glossarion.git
+   cd Glossarion
+   ```
+
+2. Install dependencies:
+   ```bash
+   # Windows
+   pip install -r requirements.txt
+
+   # macOS
+   pip install -r requirements-macos.txt
+   ```
+
+3. Launch the GUI:
+   ```bash
+   cd src
+   python translator_gui.py
+   ```
+
+### Building Executable (Optional)
+
+```bash
+pip install pyinstaller
+
+# Standard build
+pyinstaller src/translator.spec
+
+# Lite build
+pyinstaller src/translator_lite.spec
+
+# macOS
+pyinstaller src/translator_lite_mac.spec
+```
+
+---
+
+## 📋 Key Dependencies
+
+```text
+# GUI Framework
+PySide6==6.9.3
+
+# AI/API Clients
+openai, anthropic, mistralai, cohere, tiktoken
+google-genai, google-cloud-aiplatform, vertexai
+poe-api-wrapper, deepl, httpx, aiohttp
+
+# File Processing
+ebooklib, beautifulsoup4, lxml, html5lib, html2text
+pymupdf, weasyprint, xhtml2pdf
+
+# Image Processing & OCR
+Pillow, opencv-python-headless, numpy, scipy
+google-cloud-vision, azure-ai-vision-imageanalysis
+azure-ai-documentintelligence
+
+# Manga / Bubble Detection
+onnxruntime, ultralytics (YOLO)
+torch, torchvision, transformers
+
+# Text Analysis
+langdetect, chardet, datasketch, rapidfuzz, jellyfish, regex
+
+# Security
+cryptography
+```
+
+---
+
+## 🚀 Usage
+
+> 📖 **For a full walkthrough of every feature and setting, see the [Complete User Guide](docs/Glossarion_User_Guide_Sep-23-2026.md).** The quick steps below get you started.
+
+### Basic Translation
+1. Launch `translator_gui.py`
+2. Select your EPUB/TXT/PDF file
+3. Choose source language (Korean, Japanese, or Chinese)
+4. Enter your API key and select a model
+5. Configure translation settings (chunk size, context depth, etc.)
+6. Click **"Run Translation"**
+
+### Manga Translation
+1. Open **Manga Translator** from the Tools menu
+2. Set Google Cloud Vision (or Azure) credentials
+3. Select manga images or folder
+4. Configure text rendering options (font, color, inpainting)
+5. Start batch translation
+
+### Glossary Extraction
+1. After translation completes, click **"Extract Glossary"**
+2. Review and edit entries
+3. Export to JSON or Markdown
+
+### Quality Assurance
+1. Complete translation
+2. Click **"QA Scan"**
+3. Review the interactive HTML report
+4. Fix identified issues
+
+---
+
+## 🧱 Project Structure
+
+```
+Glossarion/
+├── src/
+│   ├── translator_gui.py           # Main GUI entry point (PySide6)
+│   ├── TransateKRtoEN.py           # Core translation engine
+│   ├── unified_api_client.py       # Multi-provider AI client (40+ providers)
+│   ├── async_api_processor.py      # Async concurrent chapter processing
+│   ├── model_options.py            # Centralized model catalog
+│   ├── multi_api_key_manager.py    # API key pool & rotation
+│   ├── manga_translator.py         # Manga OCR and translation
+│   ├── manga_integration.py        # Manga GUI interface
+│   ├── bubble_detector.py          # YOLO-based speech bubble detection
+│   ├── local_inpainter.py          # ONNX local inpainting engine
+│   ├── ocr_manager.py              # OCR provider manager
+│   ├── ai_hunter_enhanced.py       # ML-based duplicate detection
+│   ├── epub_converter.py           # EPUB processing & conversion
+│   ├── pdf_extractor.py            # PDF text extraction (PyMuPDF)
+│   ├── scan_html_folder.py         # QA scanner
+│   ├── GlossaryManager.py          # Glossary management engine
+│   ├── extract_glossary_from_epub.py  # EPUB glossary extractor
+│   ├── review_dialog.py            # Translation review UI
+│   ├── other_settings.py           # Advanced settings dialogs
+│   ├── authgpt_auth.py             # ChatGPT OAuth integration
+│   ├── authnan_auth.py             # NanoGPT browser login and subscription accounts
+│   ├── authgrok_auth.py            # xAI/Grok OAuth integration
+│   ├── autharena_proxy.py          # Arena browser-session proxy and streaming
+│   ├── api_key_encryption.py       # API key encryption at rest
+│   ├── config_backup.py            # Config backup management
+│   ├── dpi_setup.py                # DPI awareness configuration
+│   ├── splash_utils.py             # Animated splash screen
+│   ├── update_manager.py           # Auto-update system
+
+│   └── ...
+├── assets/                         # App icons and images
+├── docs/                           # User guides and documentation
+├── .github/workflows/              # CI/CD (Windows, macOS)
+├── requirements.txt                # Windows dependencies
+├── requirements-macos.txt          # macOS dependencies
+├── translator.spec                 # PyInstaller build config
+└── LICENSE                         # GNU AGPL v3.0
+```
+
+---
+
+## 🎯 Advanced Features
+
+### Translation Profiles
+- **Japanese** (Manga_JP / Novel) — optimized for manga and novel translation
+- **Korean** (Manga_KR / Novel) — manhwa and web novel translation
+- **Chinese** (Manga_CN / Novel) — manhua and web novel translation
+
+### Context Window Management
+- **Rolling Window** — maintains recent context for consistency
+- **Reset on Limit** — clears history at threshold
+- **Dynamic Adjustment** — adapts based on model token limits
+- **Export/Import** — save and resume translation sessions
+
+### Batch Processing
+- **Concurrent Chunks** — process multiple sections simultaneously
+- **Auto-retry** — automatic error recovery with key rotation
+- **Progress Persistence** — resume interrupted translations via `translation_progress.json`
+- **Resource Management** — memory usage tracking and optimization
+
+### API Watchdog
+- Real-time monitoring of in-flight API requests
+- Per-request tracking with chapter/chunk labels
+- Retry attempt logging and duration tracking
+
+---
+
+## 🙏 Acknowledgments
+
+Built using:
+- OpenAI, Google, Anthropic, xAI, and many more AI provider APIs
+- Designed with assistance from ChatGPT & Claude
+- Community feedback and contributions
+- OMORIO - contributed the SDLXLIFF source-to-output reviewer workflow
+- TK - contributed the Gemma stray p&gt; and number spacing token fixes
+- Jin - contributed the `ocagy/` prefix routing implementation
+- Open source libraries and tools
+- The `autharena/` prefix routing uses [LMArenaBridge](https://github.com/CloudWaddie/LMArenaBridge).
+- comic-translate by ogkalu2 — https://github.com/ogkalu2/comic-translate
+
+---
+
+## 📜 License
+
+Copyright (C) 2025 Shirochi-stack.
+
+This project is licensed under the GNU Affero General Public License v3.0 only
+(`AGPL-3.0-only`) — see the [LICENSE](LICENSE) file for details. Third-party
+components remain subject to their respective licenses.
+
+---
+
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/Shirochi-stack/Glossarion/issues)
+- **Discord**: [Join our Community](https://discord.gg/n7WXRXn533)
+
+---
+
+<p align="center">Made with 🌸 for the translation community</p>
