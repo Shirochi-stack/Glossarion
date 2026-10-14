@@ -103,6 +103,22 @@ class BuildBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ci.PrerequisiteError, "Signing prerequisite missing"):
             ci.signing_gate({"CI_COMMIT_REF_PROTECTED": "true", "GLOSSARION_SIGNING_APPROVED": "true"}, ["FIXTURE_KEY_FILE"])
 
+    def test_prepared_bundle_requires_same_commit_pipeline_and_success(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(ci, "ROOT", Path(directory)):
+            marker = Path(directory) / "artifacts/mobile-check/prepared.json"
+            marker.parent.mkdir(parents=True)
+            runner = ci.Runner("build", plan=True)
+            runner.env.update(CI_COMMIT_SHA="a" * 40, CI_PIPELINE_ID="17")
+            good = {"source_commit": "a" * 40, "pipeline_id": "17", "validated": True}
+            for key, value in (("source_commit", "b" * 40), ("pipeline_id", "18"), ("validated", False)):
+                marker.write_text(json.dumps({**good, key: value}))
+                with self.subTest(key=key), self.assertRaises(ci.PrerequisiteError):
+                    ci.prepared_mobile(runner)
+            marker.write_text(json.dumps(good))
+            with patch.object(runner, "command") as command:
+                self.assertTrue(ci.prepared_mobile(runner))
+                self.assertEqual(command.call_args_list[-1].args[0][-1], "--verify")
+
 
 class PipelineTests(unittest.TestCase):
     @classmethod

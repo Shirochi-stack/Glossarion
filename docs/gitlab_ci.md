@@ -27,8 +27,12 @@ and `android_legacy_packaging` (false) inputs preserve the GitHub defaults.
 UI suite off. An explicitly enabled optional Android UI suite may fail without
 failing the pipeline, matching the current GitHub policy. Android device smoke
 remains blocking. The combined mobile task adds an explicit host preparation
-job before the platform build jobs. Build helpers still rerun required host
-checks in their own checkout before packaging.
+job before the platform build jobs. Wheel compilation runs concurrently with
+preparation, as it does on GitHub. The prepared backend/assets are transferred
+to the build jobs only after host smoke, offline regression and E2E validation.
+Build helpers require matching commit/pipeline provenance and verify the
+bundle again before packaging. Individual platform tasks without this artifact
+still perform all preparation checks themselves.
 
 macOS/Xcode jobs use `saas-macos-medium-m1` and `macos-26-xcode-26`, with
 Python 3.13, pinned Rust and GNU timeout bootstrapped in the disposable job.

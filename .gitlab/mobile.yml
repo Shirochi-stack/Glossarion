@@ -32,6 +32,7 @@ wheels-android:
     - artifacts/wheelhouse-android/
     - artifacts/wheels-android/
     - .gitlab-work/wheels-android/forge/logs/
+  needs: []
 wheels-ios:
   stage: wheels
   tags:
@@ -46,6 +47,7 @@ wheels-ios:
   before_script:
   - source .gitlab/setup_ios.sh
   - python -m pip install -r .gitlab/requirements.txt
+  needs: []
 android-apk:
   stage: build
   tags:
@@ -54,7 +56,7 @@ android-apk:
   - wheels-android
   - job: mobile-prepare
     optional: true
-    artifacts: false
+    artifacts: true
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "android" || $GLOSSARION_TASK == "android-smoke" || ($GLOSSARION_TASK
@@ -111,7 +113,7 @@ ios-unsigned:
   - wheels-ios
   - job: mobile-prepare
     optional: true
-    artifacts: false
+    artifacts: true
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "ios" || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS
@@ -152,7 +154,7 @@ ios-simulator:
   - wheels-ios
   - job: mobile-prepare
     optional: true
-    artifacts: false
+    artifacts: true
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "ios-simulator" || ($GLOSSARION_TASK == "mobile" && ($GLOSSARION_TARGETS
@@ -211,3 +213,16 @@ mobile-prepare:
   - if: $GLOSSARION_TASK == "mobile"
   script:
   - python .gitlab/ci.py mobile-check
+  artifacts:
+    when: always
+    expire_in: 1 day
+    paths:
+    - artifacts/mobile-check/
+    - src/mobile/app/backend/
+    - src/mobile/app/assets/tiktoken/
+    - src/mobile/app/assets/selftest/
+    - src/mobile/build/*report*.md
+    - src/mobile/build/host_smoke*.json
+    - src/mobile/build/e2e_result.json
+    exclude:
+    - src/mobile/app/**/__pycache__/**

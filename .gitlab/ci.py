@@ -268,19 +268,39 @@ def mobile_prerequisites(r, target=None):
         tools_required("xcodebuild", "xcrun", "pod", "ditto")
 
 
-def mobile_prepare(r, tests=True):
+def prepared_mobile(r):
+    """Use only a successfully validated preparation artifact from this pipeline."""
+    marker = ROOT / "artifacts/mobile-check/prepared.json"
+    if not marker.is_file():
+        return False
+    data = json.loads(marker.read_text())
+    require(bool(r.env.get("CI_COMMIT_SHA")) and bool(r.env.get("CI_PIPELINE_ID")), "Prepared mobile bundle requires CI provenance.")
+    require(data == {"source_commit": r.env["CI_COMMIT_SHA"], "pipeline_id": r.env["CI_PIPELINE_ID"], "validated": True},
+            "Prepared mobile bundle belongs to a different commit/pipeline or did not pass validation.")
+    r.command(["uv", "sync", "--locked", "--group", "dev"], MOBILE)
+    r.command(["uv", "run", "--locked", "python", "tools/collect_backend.py", "--verify"], MOBILE)
+    return True
+
+
+def mobile_prepare(r, tests=True, targets=None):
     mobile_prerequisites(r)
     if tests and not r.plan:
         require_tests("src/mobile/tests_host", "src/mobile/extensions/flet_glossarion_native/tests")
         prepare_oracles(r)
         check_oracle_history(r.env)
     r.command(["uv", "sync", "--locked", "--group", "dev"], MOBILE)
+    r.step("build-mobile.yml", "prepare", "Check mobile wheels (pypi.flet.dev / PyPI + the planned self-built wheels)",
+           {"steps.opts.outputs.targets": targets or r.env.get("GLOSSARION_TARGETS", "all")})
     r.command(["uv", "run", "--locked", "python", "tools/build.py", "prepare"], MOBILE)
+    r.step("build-mobile.yml", "prepare", "Compile app, tools and CI scripts (Python 3.13 syntax)")
     r.step("build-mobile.yml", "prepare", "Host import smoke (Android and iOS simulation)")
     if tests:
         r.command(["uv", "run", "--locked", "pytest", "tests_host", "extensions/flet_glossarion_native/tests", "-q", "-m", "not online"], MOBILE)
     # Use a workspace-owned scratch folder; do not run the GitHub disk-cleanup steps.
     r.step("build-mobile.yml", "prepare", "Offline E2E on the collected bundle (fake OpenAI server)")
+    if tests and not r.plan and r.env.get("CI_COMMIT_SHA") and r.env.get("CI_PIPELINE_ID"):
+        (r.report / "prepared.json").write_text(json.dumps({"source_commit": r.env["CI_COMMIT_SHA"],
+            "pipeline_id": r.env["CI_PIPELINE_ID"], "validated": True}))
 
 
 def wheels(r, target):
@@ -336,7 +356,8 @@ def mobile_build(r, target, signed=False):
     if not r.plan:
         require(wheelhouse.is_dir() and any(wheelhouse.glob("*.whl")), "Required verified wheelhouse artifact is missing.")
         require(" " not in str(wheelhouse), "PIP_FIND_LINKS path must not contain spaces.")
-    mobile_prepare(r)
+    if r.plan or not prepared_mobile(r):
+        mobile_prepare(r, targets=target_platform)
     r.command(["uv", "run", "--no-project", "python", "src/mobile/tools/check_mobile_wheels.py", "--platform", target_platform,
                "--no-host", "--wheelhouse", wheelhouse, "--report", r.report / "wheelhouse-selection.md"])
     info = r.command([sys.executable, "src/mobile/tools/version_info.py", "--json"], capture=True)
