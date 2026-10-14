@@ -10,7 +10,13 @@ uv venv --python 3.13 "$CI_PROJECT_DIR/.gitlab-toolchain/host"
 source "$CI_PROJECT_DIR/.gitlab-toolchain/host/bin/activate"
 uv pip install pip
 eval "$(python src/mobile/ci/wheels/wheels.py env --platform ios)"
-rustup toolchain install "$RUST_VERSION" --profile minimal --target "$RUST_TARGETS"
-rustup default "$RUST_VERSION"
+# The image's Homebrew Rust path is discarded by forge's cross environment.
+# Install into the standard location in this disposable VM, which forge retains.
+export CARGO_HOME="$HOME/.cargo"
+export RUSTUP_HOME="$HOME/.rustup"
+export PATH="$CARGO_HOME/bin:$PATH"
+curl --fail --location --retry 3 https://sh.rustup.rs -o "$CI_PROJECT_DIR/.gitlab-toolchain/rustup-init.sh"
+bash "$CI_PROJECT_DIR/.gitlab-toolchain/rustup-init.sh" -y --profile minimal --default-toolchain "$RUST_VERSION" --target "$RUST_TARGETS" --no-modify-path
+env -i HOME="$HOME" PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" cargo --version
 xcodebuild -version
 python --version

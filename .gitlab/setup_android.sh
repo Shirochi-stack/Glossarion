@@ -9,8 +9,10 @@ python -m pip install uv
 export ANDROID_HOME="$CI_PROJECT_DIR/.gitlab-toolchain/android"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
-export CARGO_HOME="$CI_PROJECT_DIR/.gitlab-toolchain/cargo"
-export RUSTUP_HOME="$CI_PROJECT_DIR/.gitlab-toolchain/rustup"
+# Forge keeps HOME and reconstructs PATH with $HOME/.cargo/bin; it deliberately
+# drops outer CARGO_HOME/RUSTUP_HOME. Use the standard locations in this container.
+export CARGO_HOME="$HOME/.cargo"
+export RUSTUP_HOME="$HOME/.rustup"
 export PATH="$CARGO_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 python .gitlab/setup_android_sdk.py
 # sdkmanager reports success only after licenses are accepted, just as the
@@ -23,4 +25,5 @@ eval "$(python src/mobile/ci/wheels/wheels.py env --platform android)"
 curl --fail --location --retry 3 https://sh.rustup.rs -o "$CI_PROJECT_DIR/.gitlab-toolchain/rustup-init.sh"
 bash "$CI_PROJECT_DIR/.gitlab-toolchain/rustup-init.sh" -y --profile minimal --default-toolchain "$RUST_VERSION" --target "$RUST_TARGETS" --no-modify-path
 rustc --version
+env -i HOME="$HOME" PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" cargo --version
 java -version
