@@ -377,6 +377,9 @@ def mobile_build(r, target, signed=False):
     r.env.update(BUILD_VERSION=str(version["build_version"]), BUILD_NUMBER=str(version["build_number"]),
                  ARTIFACT_PREFIX=version["artifact_prefix"], APP_PACKAGE="com.glossarion.app", HAS_KEYSTORE="true" if signed else "false")
     command = ["uv", "run", "--locked", "python", "tools/build.py", target, "--skip-prepare"]
+    # flet-build-action supplies noninteractive setup and the bundled Python
+    # version on GitHub. Pass the same contract through our local build driver.
+    flet_args = ["--yes", "--no-rich-output", "--python-version", "3.13"]
     if target == "apk" and r.env.get("GLOSSARION_ANDROID_LEGACY_PACKAGING") == "true":
         command.append("--legacy-packaging")
     if signed and target_platform == "ios":
@@ -386,8 +389,9 @@ def mobile_build(r, target, signed=False):
             tools_required("security")
             identities = r.command(["security", "find-identity", "-v", "-p", "codesigning"], capture=True)
             require(r.env["IOS_SIGNING_CERTIFICATE"] in identities, "Requested signing identity is not available in the runner keychain.")
-        command += ["--", "--ios-team-id", r.env.get("IOS_TEAM_ID", "PLAN"), "--ios-provisioning-profile", r.env.get("IOS_PROFILE_UUID", "PLAN"),
+        flet_args += ["--ios-team-id", r.env.get("IOS_TEAM_ID", "PLAN"), "--ios-provisioning-profile", r.env.get("IOS_PROFILE_UUID", "PLAN"),
                     "--ios-signing-certificate", r.env.get("IOS_SIGNING_CERTIFICATE", "PLAN"), "--ios-export-method", r.env.get("IOS_EXPORT_METHOD", "PLAN")]
+    command += ["--", *flet_args]
     r.command(command, MOBILE, label="Build " + target + (" (signed)" if signed else ""))
     r.command(["uv", "run", "--no-project", "python", "src/mobile/tools/check_mobile_wheels.py", "--verify-installed", "src/mobile/build/site-packages", "--wheelhouse", wheelhouse, "--platform", target_platform])
     if target_platform == "android":

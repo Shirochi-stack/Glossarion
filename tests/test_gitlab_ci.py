@@ -32,6 +32,19 @@ ci, release = load("ci"), load("release")
 
 
 class BuildBridgeTests(unittest.TestCase):
+    def test_every_mobile_build_is_noninteractive_and_uses_bundled_python_pin(self):
+        for target, signed in (("apk", False), ("apk", True), ("aab", True), ("ipa", False), ("ipa", True), ("ios-simulator", False)):
+            runner=ci.Runner("test",plan=True)
+            with self.subTest(target=target,signed=signed), patch.object(runner,"command",wraps=runner.command) as command, redirect_stdout(io.StringIO()):
+                ci.mobile_build(runner,target,signed)
+                build=next(call.args[0] for call in command.call_args_list if call.kwargs.get("label","").startswith("Build "))
+                self.assertEqual(build.count("--"),1)
+                options=build[build.index("--")+1:]
+                self.assertIn("--yes",options)
+                self.assertIn("--no-rich-output",options)
+                self.assertEqual(options[options.index("--python-version")+1],"3.13")
+                if signed and target == "ipa": self.assertIn("--ios-team-id",options)
+
     def test_all_selected_build_plans_resolve_without_execution(self):
         commands = [["desktop", "--platform", platform, "--variant", variant, "--plan"]
                     for platform, variants in (("windows", ci.WINDOWS), ("linux", ci.LINUX),
