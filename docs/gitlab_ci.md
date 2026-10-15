@@ -6,23 +6,25 @@ manual alternatives and the original automatic event triggers:
 
 - A push to `main`, or a merge request targeting `main`, runs the Python
   application's desktop tests (Python 3.10) and mobile backend check (Python 3.13).
-- A push of a tag matching `v*` runs Linux, macOS and the complete mobile build
-  graph. Windows and Build All remain manual, matching their original workflows.
+- A push of a version tag such as `v9.14.5` runs the three Linux variants and
+  the complete mobile build graph, then appends verified output to that release.
+  macOS desktop, Windows and Build All remain available as manual selections.
+  Other historical `v*` tags retain the older Linux/macOS/mobile build-only graph.
 - **Run pipeline** (`web`) and the authenticated Pipelines API (`api`) retain
   the typed manual task inputs. Other branches, other MR targets, non-version
   tags, schedules and token-trigger pipelines are not admitted automatically.
 
 None of the seven original workflows defines a cron schedule; no new schedule
-or cadence is created. Automatic rules set their own task selection and keep
-signing approval/publication false, so a manual input cannot turn a branch or
-MR check into a release. Tag jobs use the original mobile platform/suite defaults.
+or cadence is created. Automatic rules set their own task selection. Main/MR
+checks keep publication false; signing remains false on every automatic path.
+Tag jobs use the original mobile platform/suite defaults.
 
 Both hosts can consume runner time if the same event is mirrored/pushed to
 GitHub and GitLab. The preserved GitHub Linux/macOS tag workflows publish
 releases and the mobile tag workflow updates existing release assets. Automatic
-GitLab publication is held for an owner-approved release cutover to avoid
-duplicate consequential publication: `publish-existing-release` remains a
-separate blocking manual job, requiring the existing release and protected ref.
+GitLab version-tag publication uses the approved release cutover described
+below. `publish-existing-release` remains a separate blocking manual alternative,
+requiring the existing release and protected ref.
 No signing credentials, tokens, runner registration or paid capacity is added.
 
 Choose the typed `task` input in the Run pipeline form. This also works when
@@ -81,7 +83,8 @@ selects signing or release publication.
 | `build-mobile.yml` | `android-signed`, `ios-signed` | Blocking manual signing job after the platform's wheel build |
 | `build-mobile.yml` | `ios-simulator` | Simulator app archive plus actual simulator smoke/cryptography checks |
 | `build-mobile.yml` | `android-ui`, `android-smoke` | UI suite or APK smoke/E2E on an already running emulator/device |
-| Linux/macOS tag release steps; mobile existing-release upload | `GLOSSARION_PUBLISH=true` on a protected version tag | Separate blocking manual upload to an **existing GitLab release** |
+| Linux/mobile automatic release builds | Normal push of a version tag, e.g. `v9.14.5` | Three Linux ZIPs, Android APKs and unsigned IPA; automatic append-only upload to an existing same-source GitLab release |
+| Other explicitly selected release uploads | `GLOSSARION_PUBLISH=true` on a protected version tag | Separate blocking manual upload to an **existing GitLab release** |
 
 `.gitlab/ci.py` deliberately reuses named `run` steps from the checked-in
 GitHub workflows, PyInstaller specs, and `src/mobile/tools` / `src/mobile/ci`
@@ -107,7 +110,7 @@ this configuration neither purchases capacity nor grants credentials.
 | Runner tag | Required environment |
 | --- | --- |
 | `saas-linux-medium-amd64`, desktop tests | Python 3.10 container and the original Cairo/headless Qt packages |
-| `saas-linux-small-amd64`, source/release checks | Python 3.12 container and the pinned bridge dependency; publication remains manual |
+| `saas-linux-small-amd64`, source/release checks | Python 3.12 container; automatic publisher uses only the standard library |
 | `saas-linux-medium-amd64`, Linux packaging | Python 3.12 container and the original native library list, with Debian's `libasound2` name in place of Ubuntu's `libasound2t64` |
 | `saas-windows-medium-amd64` | uv-provisioned Python 3.12, MSYS2 MINGW64 and the original GTK/Pango/Cairo packages; PowerShell 7.4+ is required by reused shell steps |
 | `saas-macos-medium-m1`, ARM packaging | macOS 26/Xcode 26, native ARM Python 3.12, create-dmg and original Homebrew libraries |
@@ -178,15 +181,55 @@ retry; it does not silently clobber prior output. Build-only selections keep
 ordinary job artifacts for seven days; registry assets have a separate
 retention policy set by the owner.
 
-The current application updater remains pointed at its existing release
-source. Publishing a GitLab release does not change the updater's provider.
 See [manual jobs](https://docs.gitlab.com/ci/jobs/job_control/),
 [generic packages](https://docs.gitlab.com/user/packages/generic_packages/),
 and [release API](https://docs.gitlab.com/api/releases/).
 
+## Automatic version-tag release cutover
+
+Agree the exact integrated source commit after validating the updater and the
+Windows outputs. Its `src/app_version.py` must match the new tag. Push that tag
+once normally, without `ci.skip`, and create the GitLab release metadata for the
+same tag before its builds finish. Do not start a duplicate manual pipeline.
+For v9.14.5, the proposed title is `Glossarion v9.14.5`; the owner's release note
+is `- updated glossarion auto updater for gitlab`. This publisher does not edit
+either field, so later owner edits are preserved.
+
+The version-tag graph contains eleven expanded jobs: preparation, Android/iOS
+wheelhouses, three Linux builds, APK, unsigned IPA, simulator validation, Android
+device smoke and one publisher. It does not start desktop macOS or Windows
+builds. `publish-version-release` waits for the device stage and uses available
+verified outputs even if another platform fails; failures remain visible in the
+pipeline. Simulator archives remain diagnostic artifacts. Default Android APKs
+are explicitly named debug-signed; the IPA is unsigned. No production signing
+or notarization is implied or added.
+
+`.gitlab/auto_release.py` requires this project's version-tag push, matching app
+version, exact manifest source SHA and SHA-256 of every output. It uses only the
+running job's short-lived `CI_JOB_TOKEN` with Generic Packages and Release Links
+APIs. It requires an existing same-commit release, never creates tags/releases,
+and never contacts GitHub. Each binary gets a size/SHA-256 sidecar, published
+before the binary link. Windows and other existing links, release title and
+notes are preserved. Conflicting names, URLs or package bytes fail before any
+upload; identical packages/links are reused. A transient publication failure
+can be recovered by retrying **only this publisher job**, without rebuilding.
+
+This is a **tag-push path**, not a release-created event subscription. Creating
+or editing release metadata against an existing tag does not itself start this
+pipeline, and the release/link writes cannot recursively start builds. At the
+read-only configuration check, project 87623444 had no webhooks. Literal
+release-created automation therefore still needs a separately approved
+persistent Release webhook and pipeline trigger connection (or an authorized
+external dispatcher), plus event validation and tag/build deduplication. No
+such credential or access setting is installed by this change. Historical
+tags also retain their historical CI configuration; do not retarget them to
+retrofit new behavior. See [pipeline triggers](https://docs.gitlab.com/ci/triggers/)
+and [release webhook events](https://docs.gitlab.com/user/project/integrations/webhook_events/#release-events).
+
 ## Validation and limits
 
-Run `python tests/test_gitlab_ci.py` after installing `.gitlab/requirements.txt`.
+Run `python tests/test_gitlab_ci.py` and `python tests/test_gitlab_auto_release.py`
+after installing `.gitlab/requirements.txt`.
 Plan examples: `python .gitlab/ci.py desktop --platform linux --variant nocuda --plan`
 and `python .gitlab/ci.py mobile --target ipa --plan`.
 

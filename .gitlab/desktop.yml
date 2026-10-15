@@ -24,7 +24,7 @@ linux-build:
   timeout: 3 hours
   rules:
   - if: $GLOSSARION_TASK == "linux" || $GLOSSARION_TASK == "desktop" || $GLOSSARION_TASK
-      == "tag-builds"
+      == "tag-builds" || $GLOSSARION_TASK == "release-builds"
   parallel:
     matrix:
     - VARIANT:

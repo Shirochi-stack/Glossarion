@@ -148,7 +148,7 @@ class PipelineTests(unittest.TestCase):
             ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_BRANCH":"feature"}, None),
             ({"CI_PIPELINE_SOURCE":"merge_request_event", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME":"main"}, "ci"),
             ({"CI_PIPELINE_SOURCE":"merge_request_event", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME":"develop"}, None),
-            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"v9.14.4"}, "tag-builds"),
+            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"v9.14.4"}, "release-builds"),
             ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"v"}, "tag-builds"),
             ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"nightly"}, None),
             ({"CI_PIPELINE_SOURCE":"schedule", "CI_COMMIT_BRANCH":"main"}, None),

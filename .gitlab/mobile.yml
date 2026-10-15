@@ -17,7 +17,7 @@ wheels-android:
   timeout: 2 hours
   rules:
   - if: $GLOSSARION_TASK =~ /^(android|android-signed|android-ui|android-smoke|wheels-android)$/
-      || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds") && ($GLOSSARION_TARGETS
+      || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS
       == "all" || $GLOSSARION_TARGETS == "android"))
   script:
   - python .gitlab/ci.py wheels --platform android
@@ -41,7 +41,7 @@ wheels-ios:
   timeout: 2 hours
   rules:
   - if: $GLOSSARION_TASK =~ /^(ios|ios-signed|ios-simulator|wheels-ios)$/ || (($GLOSSARION_TASK
-      == "mobile" || $GLOSSARION_TASK == "tag-builds") && ($GLOSSARION_TARGETS ==
+      == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS ==
       "all" || $GLOSSARION_TARGETS == "ios"))
   script:
   - python .gitlab/ci.py wheels --platform ios
@@ -70,7 +70,7 @@ android-apk:
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "android" || $GLOSSARION_TASK == "android-smoke" || (($GLOSSARION_TASK
-      == "mobile" || $GLOSSARION_TASK == "tag-builds") && ($GLOSSARION_TARGETS ==
+      == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS ==
       "all" || $GLOSSARION_TARGETS == "android"))
   script:
   - python .gitlab/ci.py mobile --target apk
@@ -128,7 +128,7 @@ ios-unsigned:
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "ios" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
-      == "tag-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
+      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
       "ios"))
   script:
   - python .gitlab/ci.py mobile --target ipa
@@ -170,7 +170,7 @@ ios-simulator:
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "ios-simulator" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
-      == "tag-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
+      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
       "ios") && ($GLOSSARION_IOS_SIMULATOR_SMOKE == "on" || $GLOSSARION_IOS_SIMULATOR_SMOKE
       == "auto"))
   script:
@@ -187,7 +187,7 @@ android-ui:
   - wheels-android
   timeout: 4 hours
   rules:
-  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds") && ($GLOSSARION_TARGETS
+  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS
       == "all" || $GLOSSARION_TARGETS == "android") && $GLOSSARION_UI_TESTS == "on"
     allow_failure: true
   - if: $GLOSSARION_TASK == "android-ui"
@@ -206,7 +206,7 @@ android-smoke:
   timeout: 75 minutes
   rules:
   - if: $GLOSSARION_TASK == "android-smoke" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
-      == "tag-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
+      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
       "android") && $GLOSSARION_EMULATOR_SMOKE == "true")
   script:
   - python .gitlab/ci.py android-smoke
@@ -223,7 +223,7 @@ mobile-prepare:
   - python -m pip install -r .gitlab/requirements.txt uv
   timeout: 2 hours
   rules:
-  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds")
+  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds")
   script:
   - python .gitlab/ci.py mobile-check
   artifacts:

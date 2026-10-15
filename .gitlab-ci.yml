@@ -1,4 +1,4 @@
-# Original main/MR test and v* tag build triggers; publication remains owner-gated.
+# Main/MR checks and version-tag release builds; manual signing stays gated.
 spec:
   inputs:
     task:
@@ -79,6 +79,16 @@ workflow:
       GLOSSARION_TASK: ci
       GLOSSARION_PUBLISH: 'false'
       GLOSSARION_SIGNING_APPROVED: 'false'
+  - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG =~ /^v[0-9]+(\.[0-9]+)+[A-Za-z0-9_.+-]*$/
+    variables:
+      GLOSSARION_TASK: release-builds
+      GLOSSARION_TARGETS: all
+      GLOSSARION_EMULATOR_SMOKE: 'true'
+      GLOSSARION_IOS_SIMULATOR_SMOKE: auto
+      GLOSSARION_UI_TESTS: auto
+      GLOSSARION_ANDROID_LEGACY_PACKAGING: 'false'
+      GLOSSARION_PUBLISH: 'true'
+      GLOSSARION_SIGNING_APPROVED: 'false'
   - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG =~ /^v/
     variables:
       GLOSSARION_TASK: tag-builds
@@ -135,6 +145,7 @@ source-check:
   - python tests/test_gitlab_ci.py
   - python tests/test_gitlab_native_environment.py
   - python tests/test_gitlab_android_platform.py
+  - python tests/test_gitlab_auto_release.py
   - python tests/test_oracle_package.py
   image: python:3.12-bookworm
 desktop-tests:
@@ -159,7 +170,7 @@ publish-existing-release:
   - saas-linux-small-amd64
   interruptible: false
   rules:
-  - if: $GLOSSARION_PUBLISH == "true" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED
+  - if: $GLOSSARION_TASK != "release-builds" && $GLOSSARION_PUBLISH == "true" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED
       == "true"
     when: manual
     allow_failure: false
@@ -182,3 +193,23 @@ mobile-backend-check:
   - if: $GLOSSARION_TASK == "ci" || $GLOSSARION_TASK == "mobile-backend-check"
   script:
   - python .gitlab/ci.py mobile-backend-check
+
+publish-version-release:
+  stage: release
+  tags:
+  - saas-linux-small-amd64
+  image: python:3.12-bookworm
+  before_script: []
+  timeout: 30 minutes
+  interruptible: false
+  resource_group: glossarion-release
+  rules:
+  - if: $GLOSSARION_TASK == "release-builds" && $GLOSSARION_PUBLISH == "true" && $CI_COMMIT_TAG
+    when: always
+  - when: never
+  dependencies:
+  - linux-build
+  - android-apk
+  - ios-unsigned
+  script:
+  - python .gitlab/auto_release.py
