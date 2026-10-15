@@ -145,6 +145,7 @@ class CloudRecordStore:
         self.path = os.fspath(path)
         self._clock = clock
         self.lock = threading.RLock()
+        self._write_lock = threading.Lock()
         self._data: dict = _empty()
         self._aliases: dict = {}  # old book key -> new book key (relocations of this session)
         #: Book keys deleted this session (``forget_book``): a copy that was already running when its book was
@@ -217,6 +218,12 @@ class CloudRecordStore:
         return error is None
 
     def _save_if_dirty(self) -> bool:
+        # A flush can overlap the debounced worker. Serialize the snapshot and
+        # write together so an older snapshot cannot overwrite a newer flush.
+        with self._write_lock:
+            return self._write_current()
+
+    def _write_current(self) -> bool:
         with self.lock:
             if self._version == self._saved_version:
                 return False

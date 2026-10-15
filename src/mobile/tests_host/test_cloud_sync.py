@@ -1560,6 +1560,49 @@ def test_record_store_roundtrip_and_overrides(tmp_path):
     assert list(tmp_path.glob("c.json.corrupt-*"))
 
 
+def test_flush_waits_for_older_background_snapshot(tmp_path, monkeypatch):
+    import threading
+    from glossarion_mobile.state import cloud_records
+
+    store = CloudRecordStore(tmp_path / "serialized.json", save_delay=60)
+    store.load()
+    book = tmp_path / "book"
+    store.enqueue(book, "manual")
+    entered, release, flushed = threading.Event(), threading.Event(), threading.Event()
+    writer = cloud_records.atomic_write_json
+    calls = []
+
+    def blocked_write(path, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        writer(path, payload)
+
+    monkeypatch.setattr(cloud_records, "atomic_write_json", blocked_write)
+    older = threading.Thread(target=store._save_if_dirty)
+    newer = threading.Thread(target=lambda: (store.flush(), flushed.set()))
+    try:
+        older.start()
+        assert entered.wait(5)
+        store.set_override(book, "always")
+        newer.start()
+        assert not flushed.wait(0.1), "flush returned while the older write was unfinished"
+    finally:
+        release.set()
+        older.join(5)
+        if newer.ident is not None:
+            newer.join(5)
+        store.close()
+    assert not older.is_alive() and not newer.is_alive()
+    reloaded = CloudRecordStore(store.path, save_delay=60)
+    try:
+        assert reloaded.load() and reloaded.override(book) == "always"
+        assert len(calls) == 2
+    finally:
+        reloaded.close()
+
+
 def test_sources_are_ascii_safe_and_python310_parsable():
     import ast
 
