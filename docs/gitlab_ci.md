@@ -222,6 +222,13 @@ GNU coreutils `gnubin` directory from its PATH so serious_python's SPM staging
 uses BSD `stat`; the GNU implementation rejects its BSD arguments. Wheel
 builds keep their existing GNU toolchain environment.
 
+Android jobs install Google's released platform 37.0 for
+receive_sharing_intent 1.9. The pinned AGP 8.11 SDK reader expects integer API
+37, so `.gitlab/android_platform.py` creates an additional legacy SDK view
+inside the disposable job. It accepts only released 37.0 metadata, preserves
+the official installation, and checks every copied platform binary with
+SHA-256. Application dependency versions and target SDK remain unchanged.
+
 Historical desktop source readers retain the reviewed fixture lookup while
 application tests scrub their environment. The source-check job verifies all
 declared fixture paths after that scrub and confirms refs and checkout objects

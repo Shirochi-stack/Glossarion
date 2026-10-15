@@ -26,6 +26,8 @@ import types
 from pathlib import Path
 
 import pytest
+
+from parity.oracle_package import oracle_git_environment
 import requests
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,7 +50,7 @@ MOVED_MEMBERS = (
 def _git_show(relpath: str) -> str:
     try:
         data = subprocess.run(["git", "show", f"{BASE_SHA}:{relpath}"], cwd=str(ROOT),
-                              check=True, capture_output=True).stdout
+                              check=True, capture_output=True, env=oracle_git_environment()).stdout
     except Exception as exc:  # pragma: no cover - shallow clone
         message = f"git show {BASE_SHA}:{relpath} unavailable: {exc}"
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):

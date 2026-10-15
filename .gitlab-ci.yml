@@ -134,6 +134,7 @@ source-check:
   - python .gitlab/ci.py source-check
   - python tests/test_gitlab_ci.py
   - python tests/test_gitlab_native_environment.py
+  - python tests/test_gitlab_android_platform.py
   - python tests/test_oracle_package.py
   image: python:3.12-bookworm
 desktop-tests:

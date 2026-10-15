@@ -21,6 +21,10 @@ set +o pipefail
 yes | sdkmanager --licenses > /dev/null
 set -o pipefail
 sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+# receive_sharing_intent 1.9 uses integer API 37. Google's current package
+# metadata spells the same released platform 37.0, which AGP 8.11 cannot read.
+sdkmanager 'platforms;android-37.0'
+python .gitlab/android_platform.py
 eval "$(python src/mobile/ci/wheels/wheels.py env --platform android)"
 curl --fail --location --retry 3 https://sh.rustup.rs -o "$CI_PROJECT_DIR/.gitlab-toolchain/rustup-init.sh"
 bash "$CI_PROJECT_DIR/.gitlab-toolchain/rustup-init.sh" -y --profile minimal --default-toolchain "$RUST_VERSION" --target "$RUST_TARGETS" --no-modify-path
