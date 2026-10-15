@@ -170,6 +170,9 @@ class PipelineTests(unittest.TestCase):
                     break
             with self.subTest(event=values): self.assertEqual(actual,expected)
 
+    def test_new_commits_do_not_cancel_an_inflight_manual_build(self):
+        self.assertEqual(self.config["workflow"]["auto_cancel"]["on_new_commit"],"none")
+
     def test_trigger_mapping_matches_original_workflows_without_new_schedules(self):
         originals={p.name:yaml.safe_load(p.read_text()).get("on",yaml.safe_load(p.read_text()).get(True))
                    for p in (ROOT/".github/workflows").glob("*.yml")}
