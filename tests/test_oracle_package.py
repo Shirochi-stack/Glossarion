@@ -52,7 +52,7 @@ class OraclePackageTests(unittest.TestCase):
             def git(*args, env=clean, check=True):
                 return subprocess.run(["git", "-C", str(root), *args], env=env, capture_output=True, check=check)
             git("init", "-q")
-            git("-c", "user.name=Offline fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "Fresh fixture")
+            git("-c", "user.name=Offline fixture", "-c", "user.email=fixture@example.invalid", "commit", "--no-gpg-sign", "--allow-empty", "-qm", "Fresh fixture")
             head = git("rev-parse", "HEAD").stdout
             refs = git("show-ref").stdout
             before = {p.relative_to(root / ".git/objects").as_posix(): p.read_bytes()

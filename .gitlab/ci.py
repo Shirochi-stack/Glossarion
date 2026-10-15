@@ -250,7 +250,7 @@ def desktop_tests(r):
         check_oracle_history(r.env)
         tools_required("bash")
     r.env.update(QT_QPA_PLATFORM="offscreen", PYTHONPATH=str(ROOT / "src"),
-                 PYTEST_ADDOPTS=f'--maxfail=1 --tb=short --junitxml={r.report / "desktop-tests.xml"}')
+                 PYTEST_ADDOPTS=f'--maxfail=1 --tb=short -o faulthandler_timeout=180 --junitxml={r.report / "desktop-tests.xml"}')
     for name in ("Install dependencies", "Force CPU-only PyTorch wheels", "Check Python syntax", "Run basic smoke test",
                  "Mobile shared-module and backend patch tests (Python 3.10)",
                  "Import hygiene of the shared GUI-free modules (PySide6 blocked)"):

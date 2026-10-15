@@ -203,7 +203,7 @@ android-smoke:
   - saas-linux-medium-amd64
   needs:
   - android-apk
-  timeout: 1 hour
+  timeout: 75 minutes
   rules:
   - if: $GLOSSARION_TASK == "android-smoke" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
       == "tag-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
