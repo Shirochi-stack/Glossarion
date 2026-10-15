@@ -125,12 +125,13 @@ include:
 source-check:
   stage: check
   tags:
-  - glossarion-linux-py312
+  - saas-linux-small-amd64
   rules:
   - if: $GLOSSARION_TASK == "source-check"
   script:
   - python .gitlab/ci.py source-check
   - python tests/test_gitlab_ci.py
+  image: python:3.12-bookworm
 desktop-tests:
   stage: check
   tags:
@@ -150,7 +151,7 @@ publish-existing-release:
   stage: release
   resource_group: glossarion-release
   tags:
-  - glossarion-linux-py312
+  - saas-linux-small-amd64
   interruptible: false
   rules:
   - if: $GLOSSARION_PUBLISH == "true" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED
@@ -163,6 +164,7 @@ publish-existing-release:
     name: gitlab-release
   script:
   - python .gitlab/release.py
+  image: python:3.12-bookworm
 mobile-backend-check:
   stage: check
   tags:

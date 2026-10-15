@@ -99,18 +99,19 @@ events, and marketplace actions are not silently translated.
 
 ## Runner prerequisites
 
-The desktop tags below are intentional custom tags. No matching runner means a job
-waits; it does not fall back to an arbitrary shared machine. Use isolated,
-disposable build environments. Installing/registering a runner, purchasing
-capacity, or granting credentials is a separate owner action.
+Jobs use existing GitLab-hosted runner tags and install their prerequisites in
+disposable job environments. No custom runner registration is needed. Hosted
+runner entitlement and available compute are still platform prerequisites;
+this configuration neither purchases capacity nor grants credentials.
 
 | Runner tag | Required environment |
 | --- | --- |
-| `glossarion-linux-py310` | Linux x64, Python 3.10 as `python`, Bash, Git, Cairo/Pango/GTK and headless Qt native libraries from `python-app.yml` |
-| `glossarion-linux-py312` | Linux x64, Python 3.12, Bash, Git; for desktop builds: compiler/python headers, zip, pkg-config, cmake, and the exact apt-library list in `build-linux.yml` |
-| `glossarion-windows-py312` | Windows x64, Python 3.12, PowerShell **7.4+** as `pwsh`, Git, MSYS2 MINGW64 with the GTK/Pango/Cairo package list from `build-windows.yml`; set `MSYS2_ROOT` if not `C:/msys64` |
-| `glossarion-macos-arm64-py312` | Native ARM Python 3.12 on Apple Silicon, Bash, Git, create-dmg, pango, cairo, libffi, gdk-pixbuf, gobject-introspection, pkg-config, cmake |
-| `glossarion-macos-x64-py312` | Same dependencies with x86_64 Python on an Intel-compatible Mac; an ARM interpreter does not produce the Intel variant |
+| `saas-linux-medium-amd64`, desktop tests | Python 3.10 container and the original Cairo/headless Qt packages |
+| `saas-linux-small-amd64`, source/release checks | Python 3.12 container and the pinned bridge dependency; publication remains manual |
+| `saas-linux-medium-amd64`, Linux packaging | Python 3.12 container and the original native library list, with Debian's `libasound2` name in place of Ubuntu's `libasound2t64` |
+| `saas-windows-medium-amd64` | uv-provisioned Python 3.12, MSYS2 MINGW64 and the original GTK/Pango/Cairo packages; PowerShell 7.4+ is required by reused shell steps |
+| `saas-macos-medium-m1`, ARM packaging | macOS 26/Xcode 26, native ARM Python 3.12, create-dmg and original Homebrew libraries |
+| `saas-macos-medium-m1`, Intel packaging | Rosetta, x86_64 Python 3.12 and a separate Intel Homebrew library prefix; architecture is checked before building |
 | `saas-linux-medium-amd64` | Existing hosted Linux runner; Python 3.13 container, uv and disposable Android SDK/JDK 17/Rust setup are supplied by the jobs |
 | `saas-macos-medium-m1` | Existing hosted macOS entitlement, `macos-26-xcode-26`; uv/Python 3.13, Rust targets, pkg-config and GNU timeout setup supplied by the jobs; CocoaPods/Xcode/simulators from the image |
 | `saas-linux-medium-amd64`, device jobs | Android toolchain above plus isolated API-35 x86_64 emulator; setup supplies `ANDROID_SERIAL`, boot timeout and emulator log; KVM preferred, software acceleration fallback |
@@ -200,11 +201,15 @@ platform/smoke/UI input combinations, and checks against the original dispatch
 defaults. Server lint and actual pipeline status are separate runtime evidence;
 successful static checks do not prove an APK/IPA was produced.
 
+The native packaging bridge supplies `--yes --no-rich-output --python-version
+3.13`, matching the noninteractive/bundled-Python setup of the original Flet
+action. Without `--yes`, clean hosted machines hit an interactive Flutter SDK
+installation prompt and fail with EOF before compiling any application.
+
 Automatic event selection is checked against the checked-in GitHub trigger
 definitions, including rejection of feature-branch pushes, MRs to other targets,
 non-version tags and schedules. Automatic desktop tests use the existing hosted
 Linux medium runner with the original Python 3.10/headless native prerequisites.
-Linux/macOS desktop packaging still requires the custom runner tags listed
-above; their event wiring is restored, but a missing matching desktop runner
-leaves those build jobs pending. The current manually triggered mobile run is
-left alone while its completion verification is deferred until the user resumes.
+Desktop packaging and source checks now use the available hosted tags above.
+Native build completion and artifact verification remain runtime evidence, not
+a consequence of static trigger/plan checks.
