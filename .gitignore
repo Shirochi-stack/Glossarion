@@ -22,6 +22,7 @@ requirements-dev.txt
 !assets/**
 !tools/
 tools/**
+!tools/generate_update_metadata.py
 !tools/msix/
 !tools/msix/**
 !extension/
