@@ -1852,6 +1852,14 @@ class UpdateManager(UpdateCoreMixin, QObject):
             # Save current state/config if needed
             self.main_gui.save_config(show_message=False)
             
+            # The updated program outlives this process. Force a new onefile
+            # extraction instead of borrowing our soon-to-be-deleted _MEIPASS.
+            # Set the public flag on a child-only copy; leave PATH and the
+            # parent/build environment untouched, and let PyInstaller reset
+            # its own private _PYI_* variables.
+            restart_env = os.environ.copy()
+            restart_env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
+
             # Get current executable path
             if getattr(sys, 'frozen', False):
                 current_exe = sys.executable
@@ -1879,6 +1887,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                    env=restart_env,
                 )
                 
                 print(f"[DEBUG] Update batch file created: {batch_path}")
@@ -1888,7 +1897,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
             else:
                 # Running as script, just start the new exe
                 import subprocess
-                subprocess.Popen([update_file])
+                subprocess.Popen([update_file], env=restart_env)
             
             # Hard-exit so QApplication cleanup doesn't kill children.
             # os._exit skips atexit handlers and Python cleanup, which
