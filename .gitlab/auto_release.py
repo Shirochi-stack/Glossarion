@@ -37,9 +37,11 @@ def digest(stream):
 
 
 def prerequisites(env, root):
-    require(env.get("GLOSSARION_TASK") == "release-builds" and env.get("GLOSSARION_PUBLISH") == "true",
+    task, source = env.get("GLOSSARION_TASK"), env.get("CI_PIPELINE_SOURCE")
+    require(task in ("release-builds", "linux-release-repair") and env.get("GLOSSARION_PUBLISH") == "true",
             "Automatic release publication was not selected.")
-    require(env.get("CI_PIPELINE_SOURCE") == "pipeline"
+    require(((task == "release-builds" and source == "pipeline")
+             or (task == "linux-release-repair" and source in ("api", "web")))
             and env.get("GLOSSARION_RELEASE_EVENT_VALIDATED") == "true",
             "Automatic publication requires a validated release-event dispatch.")
     tag = env.get("CI_COMMIT_TAG", "")
@@ -91,6 +93,11 @@ def publish(env, root=ROOT, opener=None):
     root = Path(root)
     prerequisites(env, root)
     entries = artifact_entries(root, env["CI_COMMIT_SHA"])
+    if env["GLOSSARION_TASK"] == "linux-release-repair":
+        variant = env.get("GLOSSARION_REPAIR_LINUX_VARIANT")
+        require(env.get("CI_COMMIT_BRANCH") == "main" and variant in ("standard", "nocuda", "turbolite")
+                and all(label == "desktop-linux-" + variant for label, _, _ in entries),
+                "Linux recovery may publish only its one explicitly selected variant.")
     opener = opener or build_opener(NoRedirect())
     api = env["CI_API_V4_URL"] + "/projects/" + env["CI_PROJECT_ID"]
     tag = env["CI_COMMIT_TAG"]

@@ -302,3 +302,14 @@ Linux packaging containers explicitly install `libdbus-1-3` and `libopengl0`
 and check their shared libraries before installing Python build dependencies.
 This supplies the Qt WebEngine baseline present on the original Ubuntu runner;
 the earlier minimal Debian image failed its Qt import check without DBus.
+
+A failed Linux release variant can be repaired without repeating the mobile or
+full Linux pipeline. Explicit task `linux-release-repair` requires `publish=true`,
+an existing `release_tag`, its exact `release_source_sha`, and one
+`linux_repair_variant` (`standard`, `nocuda`, or `turbolite`). The API/web pipeline
+contains one job; it revalidates the live release/tag/version before native setup,
+builds that exact application source with current main CI helpers, and appends
+only the selected Linux variant through the existing hash-verified publisher.
+It never recreates releases or changes their title, notes, or existing assets.
+WebEngine containers also explicitly supply XKB file, X shared-memory fence,
+XCB DRI3, cursor/input and PulseAudio libraries from the Qt Linux baseline.

@@ -142,6 +142,22 @@ class SourceCheckoutTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
+    def test_repair_checkout_rejects_unscoped_inputs_before_network_or_git(self):
+        base = dict(CI='true', CI_PROJECT_ID='87623444', CI_SERVER_URL='https://gitlab.com',
+                    CI_API_V4_URL='https://gitlab.com/api/v4', CI_JOB_TOKEN='offline-job-token',
+                    CI_PIPELINE_SOURCE='api', CI_COMMIT_BRANCH='main', GLOSSARION_TASK='linux-release-repair',
+                    GLOSSARION_RELEASE_EVENT_VALIDATED='true', GLOSSARION_PUBLISH='true',
+                    GLOSSARION_REPAIR_LINUX_VARIANT='standard', GLOSSARION_RELEASE_TAG='v9.14.5',
+                    GLOSSARION_RELEASE_SOURCE_SHA='a' * 40)
+        for key, value in [('CI_COMMIT_BRANCH', 'feature'), ('GLOSSARION_PUBLISH', 'false'),
+                           ('CI_PIPELINE_SOURCE', 'push'), ('GLOSSARION_REPAIR_LINUX_VARIANT', 'all'),
+                           ('GLOSSARION_RELEASE_EVENT_VALIDATED', 'false')]:
+            env = dict(base, **{key: value})
+            api = API('a' * 40)
+            with self.subTest(key=key), patch.object(event.subprocess, 'run', side_effect=AssertionError('Git ran')):
+                with self.assertRaises(event.EventError): event.checkout(env, api=api)
+                self.assertEqual(api.calls, [])
+
     def test_historical_tag_builds_exact_app_source_retains_only_new_ci_helpers_and_incoming_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -178,6 +194,16 @@ class SourceCheckoutTests(unittest.TestCase):
             self.assertEqual((checkout / '.gitlab/helper.py').read_text(), 'current CI helper')
             self.assertEqual(json.loads(artifact.read_text())['source_commit'], sha)
             self.assertEqual(self.git(original, 'rev-parse', 'HEAD'), automation)
+            # API recovery retains fixed main helpers while rebuilding the identical tag source.
+            checkout = base / 'repair-checkout'
+            self.git(base, 'clone', str(original), str(checkout))
+            env.update(CI_PIPELINE_SOURCE='api', CI_COMMIT_BRANCH='main', GLOSSARION_TASK='linux-release-repair',
+                       GLOSSARION_PUBLISH='true', GLOSSARION_REPAIR_LINUX_VARIANT='standard')
+            result = event.checkout(env, checkout, API(sha))
+            self.assertEqual(result['source_commit'], sha)
+            self.assertEqual(result['automation_commit'], automation)
+            self.assertEqual((checkout / 'src/app.py').read_text(), 'tagged app source')
+            self.assertEqual((checkout / '.gitlab/helper.py').read_text(), 'current CI helper')
 
 
 if __name__ == '__main__':

@@ -138,9 +138,12 @@ def checkout(env, root=ROOT, api=None):
     application source and original GitHub build steps come from the exact tag.
     """
     project_environment(env)
-    require(env.get('CI') == 'true' and env.get('CI_PIPELINE_SOURCE') == 'pipeline'
-            and env.get('GLOSSARION_RELEASE_EVENT_VALIDATED') == 'true'
-            and env.get('GLOSSARION_TASK') == 'release-builds', 'Source checkout requires a dispatched CI build.')
+    automatic = env.get('CI_PIPELINE_SOURCE') == 'pipeline' and env.get('GLOSSARION_TASK') == 'release-builds'
+    repair = (env.get('CI_PIPELINE_SOURCE') in ('api', 'web') and env.get('CI_COMMIT_BRANCH') == 'main'
+              and env.get('GLOSSARION_TASK') == 'linux-release-repair' and env.get('GLOSSARION_PUBLISH') == 'true'
+              and env.get('GLOSSARION_REPAIR_LINUX_VARIANT') in ('standard', 'nocuda', 'turbolite'))
+    require(env.get('CI') == 'true' and (automatic or repair)
+            and env.get('GLOSSARION_RELEASE_EVENT_VALIDATED') == 'true', 'Source checkout requires a validated CI build.')
     tag, commit = env.get('GLOSSARION_RELEASE_TAG', ''), env.get('GLOSSARION_RELEASE_SOURCE_SHA', '')
     require(re.fullmatch(VERSION, tag) and re.fullmatch(SHA, commit), 'Invalid dispatched source.')
     verify_release(api or GitLab(env), tag, commit)

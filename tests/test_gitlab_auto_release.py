@@ -176,6 +176,17 @@ class PublisherTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "refusing to forward"):
             release.NoRedirect().redirect_request(None, None, 302, "redirect", {}, "https://example.invalid")
 
+    def test_linux_recovery_publishes_only_one_selected_variant(self):
+        self.env.update(GLOSSARION_TASK="linux-release-repair", CI_PIPELINE_SOURCE="api", CI_COMMIT_BRANCH="main",
+                        GLOSSARION_REPAIR_LINUX_VARIANT="standard")
+        with self.assertRaisesRegex(release.ReleaseError, "only its one"):
+            self.publish()  # existing APK fixture cannot leak into a Linux recovery
+        self.assertEqual(self.api.calls, [])
+        self.binary.unlink(); (self.binary.parent / "manifest.json").unlink()
+        self.artifact("desktop-linux-standard", "Glossarion_Linux_Standard.zip", b"verified Linux")
+        self.assertEqual(self.publish()["artifacts"], 1)
+        self.assertEqual(len(self.api.release["assets"]["links"]), 3)
+
 
 def evaluate(expression, variables):
     expression = re.sub(r'\$(\w+) =~ /([^/]+)/', lambda m: str(bool(re.search(m[2], variables.get(m[1], "")))), expression)
@@ -248,6 +259,15 @@ class ReleaseEventTests(unittest.TestCase):
         self.assertNotIn("publish-version-release", self.select("push", branch="main")[1])
         self.assertNotIn("publish-version-release", self.select("api", "v9.14.5")[1])
         self.assertNotIn("publish-version-release", self.select("push", "v")[1])
+
+    def test_explicit_recovery_selects_one_job_and_no_mobile_or_matrix_rebuild(self):
+        values, jobs = self.select("api", branch="main", GLOSSARION_TASK="linux-release-repair",
+                                   GLOSSARION_PUBLISH="true", GLOSSARION_RELEASE_TAG="v9.14.5",
+                                   GLOSSARION_RELEASE_SOURCE_SHA="a" * 40)
+        self.assertEqual(values["GLOSSARION_RELEASE_EVENT_VALIDATED"], "true")
+        self.assertEqual(jobs, {"linux-release-repair"})
+        self.assertNotIn("parallel", self.config["linux-release-repair"])
+        self.assertEqual(self.config["linux-release-repair"]["before_script"][0], "python3 .gitlab/release_event.py checkout")
 
 
 if __name__ == "__main__":

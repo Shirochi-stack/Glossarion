@@ -22,6 +22,7 @@ spec:
       - wheels-android
       - wheels-ios
       - mobile-backend-check
+      - linux-release-repair
       description: Select mobile for the Build Mobile (Android + iOS) workflow, or
         an individual task.
     targets:
@@ -75,11 +76,27 @@ spec:
       default: ''
       regex: ^([a-f0-9]{40})?$
       description: Exact source commit validated by the release receiver.
+    linux_repair_variant:
+      default: standard
+      options:
+      - standard
+      - nocuda
+      - turbolite
+      description: One failed Linux release variant; requires exact release tag/source
+        and publish opt-in.
 ---
 workflow:
   auto_cancel:
     on_new_commit: none
   rules:
+  - if: ($CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH
+      == "main" && $GLOSSARION_TASK == "linux-release-repair" && $GLOSSARION_PUBLISH
+      == "true" && $GLOSSARION_RELEASE_TAG && $GLOSSARION_RELEASE_SOURCE_SHA
+    variables:
+      GLOSSARION_RELEASE_EVENT_VALIDATED: 'true'
+      GLOSSARION_SIGNING_APPROVED: 'false'
+      GLOSSARION_PIPELINE_NAME: Glossarion repair $[[ inputs.release_tag ]] Linux
+        $[[ inputs.linux_repair_variant ]]
   - if: $CI_PIPELINE_SOURCE == "trigger" && $CI_COMMIT_BRANCH == "main" && $TRIGGER_PAYLOAD
     variables:
       GLOSSARION_TASK: release-event
@@ -150,6 +167,7 @@ variables:
   GLOSSARION_RELEASE_TAG: $[[ inputs.release_tag ]]
   GLOSSARION_RELEASE_SOURCE_SHA: $[[ inputs.release_source_sha ]]
   GLOSSARION_PIPELINE_NAME: Glossarion $CI_PIPELINE_SOURCE $CI_COMMIT_REF_NAME
+  GLOSSARION_REPAIR_LINUX_VARIANT: $[[ inputs.linux_repair_variant ]]
 default:
   interruptible: true
   before_script:
@@ -278,3 +296,21 @@ release-event-dispatch:
     expire_in: 7 days
     paths:
     - artifacts/release-event/
+linux-release-repair:
+  stage: build
+  tags:
+  - saas-linux-medium-amd64
+  image: python:3.12-bookworm
+  timeout: 3 hours
+  interruptible: false
+  resource_group: glossarion-linux-repair-$GLOSSARION_REPAIR_LINUX_VARIANT
+  rules:
+  - if: $GLOSSARION_TASK == "linux-release-repair"
+  before_script:
+  - python3 .gitlab/release_event.py checkout
+  - export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"
+  - source .gitlab/setup_desktop_linux.sh
+  script:
+  - python .gitlab/ci.py desktop --platform linux --variant "$GLOSSARION_REPAIR_LINUX_VARIANT"
+  - python .gitlab/auto_release.py
