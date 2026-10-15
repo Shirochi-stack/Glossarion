@@ -246,6 +246,10 @@ class ReleaseEventTests(unittest.TestCase):
         self.assertEqual(publisher["dependencies"], ["linux-build", "android-apk", "ios-unsigned"])
         self.assertEqual(publisher["rules"][0]["when"], "always")
         self.assertNotIn("needs", publisher)  # waits for the existing device stage too
+        # A publisher downloads all platform outputs. Inheriting the default
+        # archive upload would upload them again and exceed the artifact limit.
+        effective_artifacts = publisher.get("artifacts", self.config["default"]["artifacts"])
+        self.assertEqual(effective_artifacts.get("paths"), [])
         for name in jobs:
             bootstrap = self.config[name]["before_script"][0]
             self.assertIn("release_event.py checkout", bootstrap)

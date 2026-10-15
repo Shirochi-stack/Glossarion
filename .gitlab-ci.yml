@@ -246,6 +246,10 @@ mobile-backend-check:
   - python .gitlab/ci.py mobile-backend-check
 publish-version-release:
   stage: release
+  # The downloaded binaries already live in the package registry. Re-uploading
+  # their combined archive exceeds GitLab's job-artifact limit.
+  artifacts:
+    paths: []
   tags:
   - saas-linux-small-amd64
   image: python:3.12-bookworm

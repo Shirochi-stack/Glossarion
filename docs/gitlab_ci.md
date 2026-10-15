@@ -313,3 +313,11 @@ only the selected Linux variant through the existing hash-verified publisher.
 It never recreates releases or changes their title, notes, or existing assets.
 WebEngine containers also explicitly supply XKB file, X shared-memory fence,
 XCB DRI3, cursor/input and PulseAudio libraries from the Qt Linux baseline.
+
+The automatic publisher downloads the platform job outputs and uploads them to
+the durable package registry. It explicitly disables its own job-artifact archive:
+re-uploading the combined Linux/mobile binaries exceeded GitLab's archive limit
+with HTTP 413 after v9.14.7 was already published successfully. The original build
+jobs retain their individual artifacts; release assets and publisher logs provide
+the publication evidence. Retrying that old publisher would reuse its old CI
+configuration and encounter the same redundant archive failure.
