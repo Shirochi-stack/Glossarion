@@ -62,6 +62,8 @@ import textwrap
 import types
 from pathlib import Path
 
+from parity.oracle_package import oracle_git_environment
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 TESTS = REPO_ROOT / "tests"
@@ -1334,7 +1336,7 @@ def golden_view(observations):
 
 def capture_golden():
     """Run the BASE_SHA dialog probe and store its synthetic observations as ``GOLDEN_PATH``."""
-    data = subprocess.run(["git", "show", f"{BASE_SHA}:src/translator_gui.py"], cwd=str(REPO_ROOT),
+    data = subprocess.run(["git", "show", f"{BASE_SHA}:src/translator_gui.py"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                           capture_output=True, check=True, timeout=120).stdout
     root = Path(tempfile.mkdtemp(prefix="dtprobe_"))  # same prefix (path length) as the test run
     try:
@@ -1565,7 +1567,7 @@ def _src_text(module):
 
 def _legacy_tg_text():
     try:
-        data = subprocess.run(["git", "show", f"{BASE_SHA}:src/translator_gui.py"], cwd=str(REPO_ROOT),
+        data = subprocess.run(["git", "show", f"{BASE_SHA}:src/translator_gui.py"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                               capture_output=True, check=True, timeout=120).stdout
     except Exception as exc:  # shallow clone / no git
         import pytest

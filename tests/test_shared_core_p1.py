@@ -43,6 +43,8 @@ from pathlib import Path
 
 import pytest
 
+from parity.oracle_package import oracle_git_environment
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 TESTS = REPO_ROOT / "tests"
@@ -85,7 +87,7 @@ def legacy_source(relpath: str) -> str:
     if relpath not in _LEGACY_CACHE:
         try:
             data = subprocess.run(
-                ["git", "show", f"{BASE_SHA}:{relpath}"], cwd=str(REPO_ROOT),
+                ["git", "show", f"{BASE_SHA}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                 check=True, capture_output=True,
             ).stdout
         except Exception as exc:  # pragma: no cover - environment dependent

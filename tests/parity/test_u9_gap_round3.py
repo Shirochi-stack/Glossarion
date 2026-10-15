@@ -29,6 +29,11 @@ from pathlib import Path
 
 import pytest
 
+try:
+    from parity.oracle_package import oracle_git_environment
+except ModuleNotFoundError:  # direct script invocation
+    from oracle_package import oracle_git_environment
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
@@ -39,7 +44,7 @@ U9_BASE_SHA = "96da1ec6ccb34828c3ebd6e7f1c842796639a8e8"
 
 def frozen(relpath: str) -> str:
     try:
-        raw = subprocess.check_output(["git", "show", f"{U9_BASE_SHA}:{relpath}"], cwd=str(REPO_ROOT),
+        raw = subprocess.check_output(["git", "show", f"{U9_BASE_SHA}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                                       stderr=subprocess.DEVNULL)
     except Exception as exc:  # pragma: no cover - shallow clone
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):

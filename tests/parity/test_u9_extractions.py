@@ -35,6 +35,11 @@ from pathlib import Path
 
 import pytest
 
+try:
+    from parity.oracle_package import oracle_git_environment
+except ModuleNotFoundError:  # direct script invocation
+    from oracle_package import oracle_git_environment
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
@@ -45,7 +50,7 @@ NL = chr(10)
 
 
 def frozen(relpath: str) -> str:
-    raw = subprocess.check_output(["git", "show", f"{U9_BASE_SHA}:{relpath}"], cwd=str(REPO_ROOT))
+    raw = subprocess.check_output(["git", "show", f"{U9_BASE_SHA}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT))
     text = raw.decode("utf-8")
     return text.lstrip("﻿").replace("\r\n", "\n")
 

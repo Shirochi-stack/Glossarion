@@ -213,3 +213,16 @@ Linux medium runner with the original Python 3.10/headless native prerequisites.
 Desktop packaging and source checks now use the available hosted tags above.
 Native build completion and artifact verification remain runtime evidence, not
 a consequence of static trigger/plan checks.
+
+Native packaging removes the test fixture's Git object overrides before
+invoking Flutter. On Linux, the pinned Flutter SDK directory receives a
+child-process-only `safe.directory` setting, preserving existing Git settings
+without writing global configuration. On macOS, native packaging removes the
+GNU coreutils `gnubin` directory from its PATH so serious_python's SPM staging
+uses BSD `stat`; the GNU implementation rejects its BSD arguments. Wheel
+builds keep their existing GNU toolchain environment.
+
+Historical desktop source readers retain the reviewed fixture lookup while
+application tests scrub their environment. The source-check job verifies all
+declared fixture paths after that scrub and confirms refs and checkout objects
+are unchanged. It also runs the native-environment regressions.

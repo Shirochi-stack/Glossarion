@@ -349,6 +349,38 @@ def signing_gate(env, required):
         require(bool(env.get(name)), "Signing prerequisite missing: " + name)
 
 
+def native_build_environment(r):
+    # Test-only objects must not redirect Git operations in the Flutter SDK or
+    # other repositories opened by its packaging tools.
+    for key in ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+        r.env.pop(key, None)
+    if sys.platform == "darwin":
+        # serious_python's SPM staging uses BSD `stat -f '%N %z'`. GNU stat
+        # interprets -f differently and exits silently in its hash pipeline.
+        r.env["PATH"] = os.pathsep.join(p for p in r.env.get("PATH", "").split(os.pathsep)
+                                         if not p.rstrip("/").endswith("/coreutils/libexec/gnubin"))
+        if not r.plan:
+            found = r.command(["/usr/bin/which", "stat"], capture=True, label="Check native macOS stat").strip()
+            require(found == "/usr/bin/stat", "Native macOS packaging requires BSD /usr/bin/stat.")
+    elif sys.platform == "linux" and not r.plan:
+        # Flet extracts the official SDK tar as root in this disposable job;
+        # archive ownership can differ. Trust only the pinned SDK directory,
+        # through child-process Git settings, without editing global config.
+        metadata = r.command(["uv", "run", "--locked", "python", "-c",
+            "import json,flet.version;from flet_cli.utils.flutter import get_flutter_dir;"
+            "print(json.dumps({'version':flet.version.flutter_version,'path':get_flutter_dir(flet.version.flutter_version)}))"],
+            MOBILE, capture=True, label="Resolve pinned Flutter SDK directory")
+        sdk = json.loads(metadata)
+        home = Path(r.env.get("HOME", str(Path.home()))).resolve()
+        target = Path(sdk["path"]).resolve()
+        require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", sdk["version"]) and
+                target == home / "flutter" / sdk["version"], "Unexpected Flutter SDK directory.")
+        count = int(r.env.get("GIT_CONFIG_COUNT", "0"))
+        require(0 <= count < 100, "Unexpected inherited Git configuration count.")
+        r.env.update({"GIT_CONFIG_COUNT":str(count + 1), "GIT_CONFIG_KEY_" + str(count):"safe.directory",
+                      "GIT_CONFIG_VALUE_" + str(count):str(target)})
+
+
 def mobile_build(r, target, signed=False):
     target_platform = "android" if target in ("apk", "aab") else "ios"
     mobile_prerequisites(r, target_platform)
@@ -372,6 +404,7 @@ def mobile_build(r, target, signed=False):
         require(" " not in str(wheelhouse), "PIP_FIND_LINKS path must not contain spaces.")
     if r.plan or not prepared_mobile(r):
         mobile_prepare(r, targets=target_platform)
+    native_build_environment(r)
     r.command(["uv", "run", "--no-project", "python", "src/mobile/tools/check_mobile_wheels.py", "--platform", target_platform,
                "--no-host", "--wheelhouse", wheelhouse, "--report", r.report / "wheelhouse-selection.md"])
     info = r.command([sys.executable, "src/mobile/tools/version_info.py", "--json"], capture=True)
@@ -453,6 +486,7 @@ def main(argv=None):
             if not args.plan:
                 require_tests("src/mobile/tests")
             mobile_prepare(runner)
+            native_build_environment(runner)
             wheelhouse = ROOT / "artifacts/wheelhouse-android"
             runner.env["PIP_FIND_LINKS"] = str(wheelhouse)
             runner.command(["uv", "run", "--no-project", "python", "src/mobile/tools/check_mobile_wheels.py", "--platform", "android", "--no-host", "--wheelhouse", wheelhouse])

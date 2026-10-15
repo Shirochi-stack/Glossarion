@@ -55,6 +55,8 @@ from pathlib import Path
 
 import pytest
 
+from parity.oracle_package import oracle_git_environment
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -222,7 +224,7 @@ def git_text(relpath, sha=U6_BASE_SHA):
     key = (relpath, sha)
     if key not in _GIT_CACHE:
         try:
-            data = subprocess.run(["git", "show", f"{sha}:{relpath}"], cwd=str(REPO_ROOT),
+            data = subprocess.run(["git", "show", f"{sha}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                                   capture_output=True, check=True).stdout
         except (OSError, subprocess.CalledProcessError) as exc:
             pytest.skip(f"frozen source {relpath}@{sha[:8]} unavailable: {exc}")

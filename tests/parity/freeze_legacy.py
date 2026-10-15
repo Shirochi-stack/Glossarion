@@ -49,6 +49,11 @@ import types
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from parity.oracle_package import oracle_git_environment
+except ModuleNotFoundError:  # direct script invocation
+    from oracle_package import oracle_git_environment
+
 PARITY_DIR = Path(__file__).resolve().parent
 TESTS_DIR = PARITY_DIR.parent
 REPO_ROOT = TESTS_DIR.parent
@@ -390,7 +395,7 @@ def other_settings_bound_methods(sha: str) -> list:
 
 def _git(*args: str) -> bytes:
     return subprocess.run(
-        ["git", *args], cwd=str(REPO_ROOT), check=True, capture_output=True
+        ["git", *args], env=oracle_git_environment(), cwd=str(REPO_ROOT), check=True, capture_output=True
     ).stdout
 
 

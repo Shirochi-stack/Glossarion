@@ -41,6 +41,8 @@ from pathlib import Path
 
 import pytest
 
+from parity.oracle_package import oracle_git_environment
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 TESTS = ROOT / "tests"
@@ -77,7 +79,7 @@ LEGACY = frozen.FrozenDesktopTables
 
 def _git_show(relpath: str, sha: str = P5B_BASE_SHA) -> str:
     try:
-        data = subprocess.run(["git", "show", f"{sha}:{relpath}"], cwd=str(ROOT),
+        data = subprocess.run(["git", "show", f"{sha}:{relpath}"], env=oracle_git_environment(), cwd=str(ROOT),
                               check=True, capture_output=True).stdout
     except Exception as exc:  # pragma: no cover - shallow clone / no git
         message = f"git show {sha}:{relpath} unavailable: {exc}"

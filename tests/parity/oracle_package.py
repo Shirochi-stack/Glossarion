@@ -28,6 +28,16 @@ MANIFEST_SHA256 = "36af019a573c45e926d116694b07eede3d219fd49fc945ec129e02040af21
 MAX_OBJECTS = 400
 MAX_TOTAL_BYTES = 110_000_000
 
+# Application sandboxes clear os.environ, but parity reads still belong to the
+# checkout's reviewed source fixture. Capture only its two Git lookup settings.
+_ORACLE_GIT_ENV = {key: os.environ[key] for key in
+                   ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES") if key in os.environ}
+
+
+def oracle_git_environment():
+    """Preserve the source fixture while inheriting other current process settings."""
+    return {**os.environ, **_ORACLE_GIT_ENV}
+
 
 class OracleError(RuntimeError):
     pass

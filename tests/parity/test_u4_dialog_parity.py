@@ -52,6 +52,11 @@ from pathlib import Path
 
 import pytest
 
+try:
+    from parity.oracle_package import oracle_git_environment
+except ModuleNotFoundError:  # direct script invocation
+    from oracle_package import oracle_git_environment
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -92,7 +97,7 @@ _ABSENT = "<absent>"
 
 def _git_text(relpath):
     try:
-        data = subprocess.run(["git", "show", f"{U4_BASE_SHA}:{relpath}"], cwd=str(REPO_ROOT),
+        data = subprocess.run(["git", "show", f"{U4_BASE_SHA}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                               capture_output=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         pytest.skip(f"legacy source {relpath}@{U4_BASE_SHA[:8]} unavailable: {exc}")

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -69,17 +70,34 @@ class OraclePackageTests(unittest.TestCase):
             # Headless application tests intentionally scrub process variables;
             # frozen-source reads must retain the fixture's isolated Git lookup.
             with patch.dict(os.environ, env, clear=True):
+                fixture_spec = importlib.util.spec_from_file_location("fixture_oracle", ROOT / "tests/parity/oracle_package.py")
+                fixture = importlib.util.module_from_spec(fixture_spec)
+                fixture_spec.loader.exec_module(fixture)
                 progress_spec = importlib.util.spec_from_file_location("fixture_progress", ROOT / "tests/parity/progress_legacy.py")
                 progress = importlib.util.module_from_spec(progress_spec)
-                progress_spec.loader.exec_module(progress)
+                with patch.dict(sys.modules, {"parity.oracle_package": fixture}):
+                    progress_spec.loader.exec_module(progress)
+                    runner_spec = importlib.util.spec_from_file_location("fixture_runner", ROOT / "tests/parity/runner_parity.py")
+                    runner = importlib.util.module_from_spec(runner_spec)
+                    with patch.dict(sys.modules, {"fixture_runner": runner}):
+                        runner_spec.loader.exec_module(runner)
                 os.environ.pop("GIT_OBJECT_DIRECTORY", None)
                 os.environ.pop("GIT_ALTERNATE_OBJECT_DIRECTORIES", None)
+                expected = [(c["commit"] + ":" + f["path"], f["oid"]) for c in manifest["commits"] for f in c["files"]]
+                probe = subprocess.run(["git", "cat-file", "--batch-check=%(objectname)"], cwd=root,
+                                       env=fixture.oracle_git_environment(), input="\n".join(spec for spec, _ in expected) + "\n",
+                                       text=True, capture_output=True, check=True)
+                self.assertEqual(probe.stdout.splitlines(), [oid for _, oid in expected])
                 with patch.object(progress, "REPO_ROOT", root):
                     source = progress._git_show("src/Retranslation_GUI.py")
                 pinned = next(c for c in manifest["commits"] if c["commit"] == progress.BASE_SHA)
                 declared = next(f for f in pinned["files"] if f["path"] == "src/Retranslation_GUI.py")
                 body = source.encode("utf-8")
                 self.assertEqual(hashlib.sha1(f"blob {len(body)}\0".encode() + body).hexdigest(), declared["oid"])
+                sha = "9355bb5d376ca9eb8149a36b35b6028a95f86009"
+                with patch.object(runner, "REPO_ROOT", root):
+                    source = runner.git_show(sha, "src/manga_settings_dialog.py")
+                self.assertIn("class MangaSettingsDialog", source)
             self.assertEqual(git("rev-parse", "HEAD").stdout, head)
             self.assertEqual(git("show-ref").stdout, refs)
             self.assertEqual(git("rev-list", "--all", "--count").stdout.strip(), b"1")

@@ -38,6 +38,11 @@ import types
 import zipfile
 from pathlib import Path
 
+try:
+    from parity.oracle_package import oracle_git_environment
+except ModuleNotFoundError:  # direct script invocation
+    from oracle_package import oracle_git_environment
+
 PARITY_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PARITY_DIR.parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -46,12 +51,6 @@ LEGACY_DIR = PARITY_DIR / "legacy_progress"
 #: Parent commit of the U5 progress extraction (the merged U4 commit).
 BASE_SHA = "20b446b06b10e60195769dd9c2c9078249300a9c"
 SHA12 = BASE_SHA[:12]
-
-# The test process deliberately scrubs its environment while constructing
-# headless owners. Keep the CI fixture's Git object lookup independent of that
-# application sandbox, just as the original checkout's object store is.
-_ORACLE_GIT_ENV = {key: os.environ[key] for key in
-                   ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES") if key in os.environ}
 
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -69,7 +68,7 @@ FIXTURE_EPOCH_LIMIT = 1_500_000_000
 
 def _git_show(path, sha=BASE_SHA):
     raw = subprocess.check_output(["git", "show", f"{sha}:{path}"], cwd=str(REPO_ROOT),
-                                  env={**os.environ, **_ORACLE_GIT_ENV})
+                                  env=oracle_git_environment())
     return raw.decode("utf-8")
 
 

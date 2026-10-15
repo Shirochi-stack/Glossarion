@@ -56,6 +56,8 @@ from pathlib import Path
 
 import pytest
 
+from parity.oracle_package import oracle_git_environment
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -136,7 +138,7 @@ SECRET = "sk-test-0123456789"
 @functools.lru_cache(maxsize=None)
 def _git_show(relpath):
     try:
-        data = subprocess.run(["git", "show", f"{U7_BASE_SHA}:{relpath}"], cwd=str(REPO_ROOT),
+        data = subprocess.run(["git", "show", f"{U7_BASE_SHA}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                               capture_output=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         return None, str(exc)

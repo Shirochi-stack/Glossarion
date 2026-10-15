@@ -41,6 +41,8 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import pytest
 
+from parity.oracle_package import oracle_git_environment
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
@@ -236,7 +238,7 @@ def legacy_module(name):
     if name not in _LEGACY:
         try:
             data = subprocess.run(
-                ["git", "show", f"{BASE_SHA}:src/{name}.py"], cwd=str(REPO_ROOT),
+                ["git", "show", f"{BASE_SHA}:src/{name}.py"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                 check=True, capture_output=True,
             ).stdout
         except Exception as exc:  # pragma: no cover - environment dependent
@@ -1345,7 +1347,7 @@ def test_authgem_project_picker_rule_matches_the_desktop_slot():
     U7 parent's inline code did, for random billing results and saved projects."""
     import random
 
-    legacy_text = subprocess.run(["git", "show", f"{U7_BASE_SHA}:src/translator_gui.py"], cwd=str(REPO_ROOT),
+    legacy_text = subprocess.run(["git", "show", f"{U7_BASE_SHA}:src/translator_gui.py"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                                  capture_output=True).stdout.decode("utf-8-sig").replace("\r\n", "\n")
     if not legacy_text:
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):

@@ -48,6 +48,8 @@ from pathlib import Path
 
 import pytest
 
+from parity.oracle_package import oracle_git_environment
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 MOBILE_APP = SRC / "mobile" / "app"
@@ -376,7 +378,7 @@ def test_mobile_key_backend_binds_the_shared_service(monkeypatch):
 
 def _git_text(relpath):
     try:
-        data = subprocess.run(["git", "show", f"{U4_BASE_SHA}:{relpath}"], cwd=str(REPO_ROOT),
+        data = subprocess.run(["git", "show", f"{U4_BASE_SHA}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                               capture_output=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         pytest.skip(f"legacy source {relpath}@{U4_BASE_SHA[:8]} unavailable: {exc}")

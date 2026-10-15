@@ -61,6 +61,8 @@ from pathlib import Path
 
 import pytest
 
+from parity.oracle_package import oracle_git_environment
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 TESTS = REPO_ROOT / "tests"
@@ -162,7 +164,7 @@ def git_text(relpath: str, sha: str = U6_BASE_SHA) -> str:
     key = (relpath, sha)
     if key not in _GIT_CACHE:
         try:
-            data = subprocess.run(["git", "show", f"{sha}:{relpath}"], cwd=str(REPO_ROOT),
+            data = subprocess.run(["git", "show", f"{sha}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT),
                                   capture_output=True, check=True).stdout
         except (OSError, subprocess.CalledProcessError) as exc:
             if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):

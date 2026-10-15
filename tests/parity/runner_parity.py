@@ -42,6 +42,11 @@ import types
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from parity.oracle_package import oracle_git_environment
+except ModuleNotFoundError:  # direct script invocation
+    from oracle_package import oracle_git_environment
+
 PARITY_DIR = Path(__file__).resolve().parent
 TESTS_DIR = PARITY_DIR.parent
 REPO_ROOT = TESTS_DIR.parent
@@ -70,7 +75,7 @@ class Unavailable(RuntimeError):
 
 def git_show(sha: str, relpath: str) -> str:
     try:
-        raw = subprocess.run(["git", "show", f"{sha}:{relpath}"], cwd=str(REPO_ROOT), capture_output=True,
+        raw = subprocess.run(["git", "show", f"{sha}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT), capture_output=True,
                              check=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise Unavailable(f"git show {sha[:12]}:{relpath} failed: {exc}") from exc
