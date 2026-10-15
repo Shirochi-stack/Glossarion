@@ -163,6 +163,15 @@ class _Response:
         self.status_code = status
         self._payload = payload
 
+    headers = {}
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def close(self): pass
+    def iter_content(self, chunk_size):
+        if self._payload is None:
+            raise ValueError('Invalid response JSON')
+        yield json.dumps(self._payload).encode()
+
     def raise_for_status(self):
         import requests
 
@@ -182,7 +191,7 @@ def github(monkeypatch):
 
     state = types.SimpleNamespace(latest=_mobile_release(), calls=[])
 
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, **kwargs):
         state.calls.append(url)
         if isinstance(state.latest, Exception):
             raise state.latest
@@ -261,8 +270,8 @@ def test_service_current_desktop_only_and_errors(tmp_path, github, capsys):
     ios = up.UpdateService(store, "9.14.0", platform="ios", arch="arm64").check(manual=True)
     assert "no iOS build" in ios.message
 
-    for exc, text in ((requests.Timeout("t"), "timed out"), (requests.ConnectionError("c"), "Cannot reach GitHub"),
-                      (_Response({}, 403), "rate limit"), (_Response({}, 502), "error: 502"),
+    for exc, text in ((requests.Timeout("t"), "timed out"), (requests.ConnectionError("c"), "Cannot reach update servers"),
+                      (_Response({}, 403), "GitLab has no stable"), (_Response({}, 502), "GitLab has no stable"),
                       (_Response(None), "Invalid response")):
         github.latest = exc
         result = service.check(manual=True)

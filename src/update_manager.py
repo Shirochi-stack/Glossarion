@@ -2,9 +2,6 @@
 import os
 import sys
 
-# Suppress Qt SSL warnings in frozen builds (no SSL backend available, using verify=none)
-if getattr(sys, 'frozen', False):
-    os.environ['QT_LOGGING_RULES'] = 'qt.network.ssl=false'
 import json
 import requests
 import threading
@@ -21,9 +18,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QUrl, QRunnable, QThreadPool
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PySide6.QtGui import QFont, QIcon, QPixmap, QTextCursor, QTextDocument, QImage
+from PySide6.QtGui import QFont, QIcon, QPixmap, QTextCursor, QTextDocument, QImage, QDesktopServices
 from datetime import datetime
-from update_core import UpdateCoreMixin
+from update_core import UpdateCoreMixin, HeadlessUpdateChecker, UpdateCancelled, UpdateVerificationError
 
 
 class _ReleaseImageSignals(QObject):
@@ -196,24 +193,66 @@ class ReleaseNotesBrowser(QTextBrowser):
         super().resizeEvent(event)
         self._fit_images()
 
+class _UpdateConfigSnapshot:
+    """A worker owns only plain data; saving the real GUI config belongs to the GUI thread."""
+    def __init__(self, config):
+        self.config = {'last_update_check_time': config.get('last_update_check_time', 0),
+                       'skipped_versions': list(config.get('skipped_versions') or [])}
+
+    def save_config(self, show_message=False):
+        pass
+
+
 class UpdateCheckWorker(QThread):
-    """Worker thread for checking updates in background"""
-    update_checked = Signal(bool, object)  # (update_available, release_data)
-    error_occurred = Signal(str)  # error message
-    
+    """GUI-free checks on an isolated snapshot; never construct widgets or save GUI state."""
+    update_checked = Signal(bool, object)
+    error_occurred = Signal(str)
+    check_cancelled = Signal()
+
     def __init__(self, update_manager, silent=True, force_show=False):
         super().__init__()
-        self.update_manager = update_manager
         self.silent = silent
         self.force_show = force_show
-    
+        self._cancel_event = threading.Event()
+        self.result_state = {}
+        self.checker = HeadlessUpdateChecker(_UpdateConfigSnapshot(update_manager.main_gui.config),
+                                             update_manager.CURRENT_VERSION,
+                                             build_variant=update_manager._build_variant)
+        self.checker._last_check_time = update_manager._last_check_time
+        self.checker._check_cache_duration = update_manager._check_cache_duration
+        self.checker._update_check_timeout = getattr(update_manager, '_update_check_timeout', 20)
+        self.checker._cancel_update_check = self._cancel_event.is_set
+        platform, arch = update_manager._detect_platform(), update_manager._detect_arch()
+        self.checker._detect_platform = lambda: platform
+        self.checker._detect_arch = lambda: arch
+
+    def cancel(self):
+        self._cancel_event.set()
+        self.requestInterruption()
+
+    def _snapshot(self):
+        self.result_state = {'latest_release': self.checker.latest_release,
+                             'all_releases': list(self.checker.all_releases),
+                             'performed': getattr(self.checker, '_update_check_performed', True),
+                             'last_check_time': self.checker._last_check_time}
+
     def run(self):
-        """Run update check in background thread"""
         try:
-            result = self.update_manager._check_for_updates_internal(self.silent, self.force_show)
-            self.update_checked.emit(*result)
-        except Exception as e:
-            self.error_occurred.emit(str(e))
+            available, release = self.checker._check_for_updates_core(self.force_show)
+            self._snapshot()
+            if self._cancel_event.is_set():
+                self.check_cancelled.emit()
+            else:
+                self.update_checked.emit(available, release)
+        except UpdateCancelled:
+            self.check_cancelled.emit()
+        except Exception as exc:
+            self._snapshot()
+            if self._cancel_event.is_set():
+                self.check_cancelled.emit()
+            else:
+                self.error_occurred.emit(str(exc))
+
 
 class DownloadWorker(QObject):
     """Worker that downloads a file and emits progress via Qt signals"""
@@ -354,23 +393,7 @@ class QtDownloadJob(QObject):
             req.setAttribute(QNetworkRequest.FollowRedirectsAttribute, True)
         except Exception:
             pass
-        # Disable SSL verification in frozen builds (no SSL backend available)
-        try:
-            import sys
-            if getattr(sys, 'frozen', False):
-                from PySide6.QtNetwork import QSslConfiguration
-                ssl_config = QSslConfiguration.defaultConfiguration()
-                ssl_config.setPeerVerifyMode(QSslConfiguration.VerifyNone)
-                req.setSslConfiguration(ssl_config)
-        except Exception:
-            pass
         self.reply = self.nam.get(req)
-        # Ignore SSL errors in frozen builds (no SSL backend)
-        try:
-            if getattr(sys, 'frozen', False):
-                self.reply.ignoreSslErrors()
-        except Exception:
-            pass
         self.reply.downloadProgress.connect(self._on_progress)
         self.reply.readyRead.connect(self._on_ready_read)
         self.reply.finished.connect(self._on_finished)
@@ -518,6 +541,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
         self.base_dir = base_dir
         self.update_available = False
         self._check_in_progress = False  # Prevent concurrent checks
+        self.worker = None
         self._current_dialog = None  # Store current dialog for signal handlers
         # Use shared executor from main GUI if available
         try:
@@ -567,122 +591,83 @@ class UpdateManager(UpdateCoreMixin, QObject):
             return None
     
     def check_for_updates_async(self, silent=True, force_show=False):
-        """Run check_for_updates in background using QThread (PySide6 compatible).
-        """
-        
-        # Prevent concurrent update checks
+        """Return immediately; all network I/O runs on one cancellable worker."""
         if self._check_in_progress:
             return None
-            
         self._check_in_progress = True
-        
-        # Show loading dialog for manual checks (when not silent)
+        self.worker = UpdateCheckWorker(self, silent, force_show)
+        self.worker.update_checked.connect(self._on_update_checked, Qt.QueuedConnection)
+        self.worker.error_occurred.connect(self._on_update_error, Qt.QueuedConnection)
+        self.worker.check_cancelled.connect(self._on_update_cancelled, Qt.QueuedConnection)
+        self.worker.finished.connect(self._on_update_finished, Qt.QueuedConnection)
         if not silent:
             self._show_loading_dialog()
-        
-        # Create and start worker thread
-        self.worker = UpdateCheckWorker(self, silent, force_show)
-        self.worker.update_checked.connect(self._on_update_checked)
-        self.worker.error_occurred.connect(self._on_update_error)
-        self.worker.finished.connect(self._on_update_finished)  # Clean up flag
         self.worker.start()
-        
-        return None  # Async, results will come via signals
-    
+        return None
+
+    def _apply_check_state(self, include_release=False):
+        state = self.worker.result_state if self.worker is not None else {}
+        if not state.get('performed', False):
+            return
+        if include_release:
+            self.latest_release = state.get('latest_release')
+            self.all_releases = state.get('all_releases', [])
+        checked_at = state.get('last_check_time')
+        if checked_at:
+            self._last_check_time = checked_at
+            self.main_gui.config['last_update_check_time'] = checked_at
+            self.main_gui.save_config(show_message=False)
+
+    @Slot(bool, object)
     def _on_update_checked(self, update_available, release_data):
-        """Handle update check results from worker thread"""
-        if update_available or self.worker.force_show:
-            self.show_update_dialog()
-    
-    def _on_update_error(self, error_msg):
-        """Handle update check error from worker thread"""
-        # Close loading dialog first
+        worker = self.worker
+        if worker is None or worker._cancel_event.is_set():
+            return
         self._close_loading_dialog()
-        if not self.worker.silent:
+        if not worker.result_state.get('performed', False):
+            return
+        self._apply_check_state(include_release=True)
+        self.update_available = update_available
+        if self.latest_release and (update_available or worker.force_show):
+            self.show_update_dialog()
+
+    @Slot(str)
+    def _on_update_error(self, error_msg):
+        worker = self.worker
+        self._close_loading_dialog()
+        if worker is None or worker._cancel_event.is_set():
+            return
+        self._apply_check_state()
+        self.update_available = False
+        if not worker.silent:
             msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
             msg.setIcon(QMessageBox.Critical)
             msg.setWindowTitle("Update Check Failed")
             msg.setText(f"Failed to check for updates: {error_msg}")
             msg.exec()
-    
-    def _on_update_finished(self):
-        """Clean up after update check is finished"""
-        self._check_in_progress = False
-        # Close loading dialog if it exists
+
+    @Slot()
+    def _on_update_cancelled(self):
         self._close_loading_dialog()
 
-    def _check_for_updates_internal(self, silent=True, force_show=False) -> Tuple[bool, Optional[Dict]]:
-        """Check GitHub for newer releases
-        
-        Args:
-            silent: If True, don't show error messages
-            force_show: If True, show the dialog even when up to date
-            
-        Returns:
-            Tuple of (update_available, release_info)
-        """
-        try:
-            return self._check_for_updates_core(force_show)
-                
-        except requests.Timeout:
-            if not silent:
-                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
-                msg.setIcon(QMessageBox.Critical)
-                msg.setWindowTitle("Update Check Failed")
-                msg.setText("Connection timed out while checking for updates.\n\n"
-                          "This is usually due to network connectivity issues.\n"
-                          "The next update check will be in 1 hour.")
-                msg.exec()
-            return False, None
-            
-        except requests.ConnectionError as e:
-            if not silent:
-                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
-                msg.setIcon(QMessageBox.Critical)
-                msg.setWindowTitle("Update Check Failed")
-                if 'api.github.com' in str(e):
-                    msg.setText("Cannot reach GitHub servers for update check.\n\n"
-                              "This may be due to:\n"
-                              "• Internet connectivity issues\n"
-                              "• Firewall blocking GitHub API\n"
-                              "• GitHub API temporarily unavailable\n\n"
-                              "The next update check will be in 1 hour.")
-                else:
-                    msg.setText(f"Network error: {str(e)}\n\n"
-                              "The next update check will be in 1 hour.")
-                msg.exec()
-            return False, None
-            
-        except requests.HTTPError as e:
-            if not silent:
-                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
-                msg.setIcon(QMessageBox.Critical)
-                msg.setWindowTitle("Update Check Failed")
-                if e.response.status_code == 403:
-                    msg.setText("GitHub API rate limit exceeded. Please try again later.")
-                else:
-                    msg.setText(f"GitHub returned error: {e.response.status_code}")
-                msg.exec()
-            return False, None
-            
-        except ValueError as e:
-            if not silent:
-                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
-                msg.setIcon(QMessageBox.Critical)
-                msg.setWindowTitle("Update Check Failed")
-                msg.setText("Invalid response from GitHub. The update service may be temporarily unavailable.")
-                msg.exec()
-            return False, None
-            
-        except Exception as e:
-            if not silent:
-                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
-                msg.setIcon(QMessageBox.Critical)
-                msg.setWindowTitle("Update Check Failed")
-                msg.setText(f"An unexpected error occurred:\n{str(e)}")
-                msg.exec()
-            return False, None
-    
+    @Slot()
+    def cancel_update_check(self):
+        if self.worker is not None:
+            self.worker.cancel()
+        self._close_loading_dialog()
+
+    @Slot()
+    def _on_update_finished(self):
+        self._check_in_progress = False
+        self._close_loading_dialog()
+        worker, self.worker = self.worker, None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _check_for_updates_internal(self, silent=True, force_show=False):
+        """GUI-free compatibility seam; interactive callers use the async entry point."""
+        return self._check_for_updates_core(force_show)
+
     def check_for_updates_manual(self):
         """Manual update check from menu - always shows dialog (async)"""
         return self.check_for_updates_async(silent=False, force_show=True)
@@ -752,7 +737,9 @@ class UpdateManager(UpdateCoreMixin, QObject):
         dlg_h = max(170, int(screen_rect.height() * 0.17))
         self.loading_dialog.setMinimumSize(dlg_w, dlg_h)
         self.loading_dialog.resize(dlg_w, dlg_h)
-        self.loading_dialog.setModal(True)
+        self.loading_dialog.setModal(False)
+        self.loading_dialog.setWindowModality(Qt.NonModal)
+        self.loading_dialog.rejected.connect(self.cancel_update_check)
         
         # Set the proper application icon for the dialog
         try:
@@ -796,6 +783,11 @@ class UpdateManager(UpdateCoreMixin, QObject):
         progress_bar.setFixedWidth(240)
         main_layout.addWidget(progress_bar, 0, Qt.AlignHCenter)
         
+        cancel = QPushButton("Cancel", self.loading_dialog)
+        cancel.setObjectName("cancel_update_check")
+        cancel.clicked.connect(self.cancel_update_check)
+        main_layout.addWidget(cancel)
+
         # Animation state
         self.loading_animation_active = True
         self.loading_rotation = 0
@@ -828,8 +820,13 @@ class UpdateManager(UpdateCoreMixin, QObject):
             if hasattr(self, 'loading_animation_active'):
                 self.loading_animation_active = False
             if hasattr(self, 'loading_dialog') and self.loading_dialog:
-                self.loading_dialog.close()
-                delattr(self, 'loading_dialog')
+                dialog, self.loading_dialog = self.loading_dialog, None
+                try:
+                    dialog.rejected.disconnect(self.cancel_update_check)
+                except RuntimeError:
+                    pass
+                dialog.close()
+                dialog.deleteLater()
         except:
             pass  # Dialog might already be destroyed
     
@@ -838,25 +835,10 @@ class UpdateManager(UpdateCoreMixin, QObject):
         print("[DEBUG] show_update_dialog called")
         
         if not self.latest_release and not self.all_releases:
-            print("[DEBUG] No release data, trying to fetch...")
-            # Try to fetch releases if we don't have them
-            try:
-                self.all_releases = self.fetch_multiple_releases(count=10)
-                if self.all_releases:
-                    self.latest_release = self.all_releases[0]
-                    print(f"[DEBUG] Fetched {len(self.all_releases)} releases")
-                else:
-                    print("[DEBUG] No releases fetched")
-                    msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
-                    msg.setIcon(QMessageBox.Critical)
-                    msg.setWindowTitle("Error")
-                    msg.setText("Unable to fetch version information from GitHub.")
-                    msg.exec()
-                    return
-            except Exception as e:
-                print(f"[DEBUG] Error fetching releases in show_update_dialog: {e}")
-                return
-        
+            # Empty history must never start requests on the Qt GUI thread.
+            self.check_for_updates_async(silent=False, force_show=True)
+            return
+
         # Set appropriate title
         if self.update_available:
             title = "Update Available"
@@ -1096,7 +1078,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
         main_layout.addWidget(version_group)
         
         # ALWAYS show asset selection when we have the first release data (current or latest)
-        release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
+        release_to_check = self.latest_release or (self.all_releases[0] if self.all_releases else None)
         
         if release_to_check:
             # Get downloadable files from the first/latest release (.exe for Windows, .dmg for macOS)
@@ -1226,7 +1208,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
                 else:
                     # Only one installable file - just show it and set it as selected
                     asset = all_installable[0]
-                    self.selected_asset = asset
+                    self.selected_asset = asset if self._compatible_update_asset(asset) else None
                     filename = asset['name']
                     size_mb = asset['size'] / (1024 * 1024)
                     asset_label = QLabel(f"{filename} ({size_mb:.1f} MB)")
@@ -1236,6 +1218,13 @@ class UpdateManager(UpdateCoreMixin, QObject):
                 asset_group.setLayout(asset_layout)
                 main_layout.addWidget(asset_group)
         
+        rejected = [a for a in (release_to_check or {}).get('assets', []) if a.get('_verification_error')]
+        if rejected:
+            verification_label = QLabel("Some downloads are blocked because their SHA-256 metadata is missing or invalid. "
+                                        "See the release page for details.")
+            verification_label.setWordWrap(True)
+            main_layout.addWidget(verification_label)
+
         # Create tab widget for version history
         tab_widget = QTabWidget()
         tab_widget.setMinimumHeight(300)
@@ -1381,7 +1370,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
             # Reset progress
             self.progress_bar.setRange(0, 0)  # indeterminate until we know size
             self.progress_bar.setValue(0)
-            self.progress_label.setText("Connecting to GitHub...")
+            self.progress_label.setText("Connecting to the update service...")
             self.status_label.setText("")
             self.download_progress = 0
 
@@ -1394,21 +1383,6 @@ class UpdateManager(UpdateCoreMixin, QObject):
             # Start download using Qt thread worker (signals/slots)
             try:
                 self.download_update(dialog)
-                # After starting thread, connect cancel to worker
-                def do_cancel():
-                    self.cancel_btn.setEnabled(False)
-                    try:
-                        if hasattr(self, 'download_worker') and self.download_worker:
-                            self.download_worker.cancel()
-                        # Immediately update UI to cancelled
-                        self._on_download_cancelled(dialog)
-                    except Exception:
-                        # Still try to update UI to cancelled
-                        try:
-                            self._on_download_cancelled(dialog)
-                        except Exception:
-                            pass
-                self.cancel_btn.clicked.connect(do_cancel)
             except Exception as e:
                 msg = QMessageBox(dialog)
                 msg.setIcon(QMessageBox.Critical)
@@ -1420,7 +1394,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
         # Always show download button if we have exe files
         has_exe_files = self.selected_asset is not None
         
-        if self.update_available:
+        if self.update_available and has_exe_files:
             # Show update-specific buttons
             download_btn = QPushButton("Download Update")
             download_btn.setObjectName("update_download_btn")
@@ -1473,7 +1447,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
         elif has_exe_files:
             # We're up to date but have downloadable files
             # Check if there are multiple downloadable files
-            release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
+            release_to_check = self.latest_release or (self.all_releases[0] if self.all_releases else None)
             exe_count = 0
             if release_to_check:
                 exe_count = len([a for a in release_to_check.get('assets', []) 
@@ -1549,7 +1523,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
         # Add "View All Releases" link button
         def open_releases_page():
             import webbrowser
-            webbrowser.open("https://github.com/Shirochi-stack/Glossarion/releases")
+            webbrowser.open((self.latest_release or {}).get('html_url') or "https://github.com/Shirochi-stack/Glossarion/releases")
         
         view_releases_btn = QPushButton("View All Releases")
         view_releases_btn.setMinimumHeight(35)
@@ -1670,238 +1644,68 @@ class UpdateManager(UpdateCoreMixin, QObject):
         msg.exec()
 
     def download_update(self, dialog):
-        """Start the update download in a QThread and update UI via signals"""
-        # Use the selected asset
+        """Download and verify in a background thread; only verified bytes reach install."""
+        if getattr(self, 'download_thread', None) and self.download_thread.is_alive():
+            return
         asset = self.selected_asset
-        if not asset:
-            self._show_download_error(dialog, "No file selected for download.")
+        release = self.latest_release
+        if not asset or not release or not self._compatible_update_asset(asset):
+            self._show_download_error(dialog, "Select a file for this platform and architecture.")
             return
-
         if not self._eligible_update_asset(asset):
-            self._show_download_error(dialog, "Update must contain Glossarion in its filename and be at least 60 MB.")
+            self._show_download_error(dialog, "Update must contain Glossarion in its filename and be at least 60 MB. "
+                                             + asset.get('_verification_error', ''))
             return
-
-        # Get the current executable path and target directory
-        if getattr(sys, 'frozen', False):
-            current_exe = sys.executable
-            download_dir = os.path.dirname(current_exe)
-        else:
-            current_exe = None
-            download_dir = self.base_dir
-
-        # Use the exact filename from GitHub
-        original_filename = asset['name']  # e.g., "Glossarion v3.1.3.exe"
-        new_exe_path = os.path.join(download_dir, original_filename)
-
-        # If new file would overwrite current executable, download to temp name first
-        if current_exe and os.path.normpath(new_exe_path) == os.path.normpath(current_exe):
-            download_path = new_exe_path + ".new"
-        else:
-            download_path = new_exe_path
-
-        url = asset['browser_download_url']
-        # Track path and expected size for cleanup/validation on cancel/error
-        self._current_download_path = download_path
-        self._expected_download_size = asset.get('size', 0)
-
-        # Reset and show initial progress state
-        self.progress_bar.setRange(0, 0)  # indeterminate until we know size
-        self.progress_bar.setValue(0)
-        self.progress_label.setText("Connecting to GitHub...")
-        self.status_label.setText("")
-
-        # Use Qt network only when NOT frozen (frozen builds lack SSL support)
-        if not getattr(sys, 'frozen', False):
-            try:
-                # Clean up any previous job
-                if hasattr(self, 'qt_downloader') and self.qt_downloader:
-                    try:
-                        self.qt_downloader.deleteLater()
-                    except Exception:
-                        pass
-                self.qt_downloader = QtDownloadJob()
-                # Reset cancel handled flag for this run
-                self._cancel_handled = False
-                self.qt_downloader.progress.connect(self._on_download_progress)
-                self.qt_downloader.finished.connect(lambda fp: self.download_complete(dialog, fp))
-                self.qt_downloader.cancelled.connect(lambda: self._on_download_cancelled(dialog))
-                self.qt_downloader.error.connect(lambda code, msg: self._on_qtnetwork_error(dialog, code, msg))
-                # Watchdog for no progress
-                try:
-                    if hasattr(self, '_download_watchdog') and self._download_watchdog:
-                        self._download_watchdog.stop()
-                        self._download_watchdog.deleteLater()
-                except Exception:
-                    pass
-                self._download_watchdog = QTimer(self)
-                self._download_watchdog.setInterval(90000)
-                self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
-                self._download_watchdog.start()
-                self.qt_downloader.start(url, download_path)
-                # Hook cancel
-                if hasattr(self, 'cancel_btn') and self.cancel_btn:
-                    try:
-                        self.cancel_btn.clicked.disconnect()
-                    except Exception:
-                        pass
-                    # Cancel and immediately reflect UI as cancelled
-                    self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), self.qt_downloader.cancel(), self._on_download_cancelled(dialog)))
-                return
-            except Exception:
-                pass
-
-        # Fallback: Use plain threading.Thread (QThread + requests causes deadlock)
-        print(f"[DEBUG] Using requests downloader for {url}")
+        current_exe = sys.executable if getattr(sys, 'frozen', False) else None
+        directory = os.path.dirname(current_exe) if current_exe else self.base_dir
+        path = os.path.join(directory, asset['name'])
+        if current_exe and os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(current_exe)):
+            path += '.new'
+        self._current_download_path = path
+        self._verified_download_asset = None
         self._download_cancelled = False
+        self._cancel_handled = False
         self._current_dialog = dialog
-        
-        # Connect signals to handlers
-        self._download_progress_signal.connect(self._on_download_progress)
-        self._download_complete_signal.connect(lambda fp: self.download_complete(self._current_dialog, fp))
-        self._download_error_signal.connect(lambda msg: self._show_download_error(self._current_dialog, msg))
-        self._download_cancelled_signal.connect(lambda: self._on_download_cancelled(self._current_dialog))
-        
-        def download_thread_func():
-            # In frozen builds, SSL verification can be problematic - disable it
-            if getattr(sys, 'frozen', False):
-                print(f"[DEBUG] Frozen build detected, disabling SSL verification")
-                ca_bundle = False
-                # Suppress SSL warnings
-                import urllib3
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            else:
-                try:
-                    import certifi
-                    ca_bundle = certifi.where()
-                    print(f"[DEBUG] Using CA bundle: {ca_bundle}")
-                except Exception as e:
-                    print(f"[DEBUG] Certifi error: {e}, using default SSL")
-                    ca_bundle = True
-            
+        # Repeated attempts must not accumulate completion/install callbacks.
+        for signal in (self._download_progress_signal, self._download_complete_signal,
+                       self._download_error_signal, self._download_cancelled_signal):
             try:
-                print("[DEBUG] Starting download...")
-                
-                # Use urllib for frozen builds (requests has SSL issues)
-                if getattr(sys, 'frozen', False):
-                    print("[DEBUG] Using urllib for download")
-                    import urllib.request
-                    import ssl                   
-                    
-                    # Create unverified SSL context
-                    ssl_context = ssl._create_unverified_context()
-                    
-                    req = urllib.request.Request(url, headers={
-                        'User-Agent': 'Glossarion-Updater',
-                        'Accept': 'application/octet-stream'
-                    })
-                    
-                    with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
-                        print(f"[DEBUG] Got response: {response.status}")
-                        total_size = int(response.headers.get('content-length', 0))
-                        print(f"[DEBUG] Content length: {total_size} bytes")
-                        downloaded = 0
-                        last_emit_time = time.time()
-                        
-                        with open(download_path, 'wb') as f:
-                            while True:
-                                if self._download_cancelled:
-                                    try:
-                                        f.close()
-                                        if os.path.exists(download_path):
-                                            os.remove(download_path)
-                                    except Exception:
-                                        pass
-                                    self._download_cancelled_signal.emit()
-                                    return
-                                
-                                chunk = response.read(65536)
-                                if not chunk:
-                                    break
-                                    
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                now = time.time()
-                                
-                                if total_size > 0:
-                                    p = int(downloaded * 100 / total_size)
-                                    if (now - last_emit_time) >= 0.1:
-                                        last_emit_time = now
-                                        self._download_progress_signal.emit(p, downloaded / (1024 * 1024), total_size / (1024 * 1024))
-                        
-                        print(f"[DEBUG] Download complete: {downloaded} bytes")
-                        self._download_complete_signal.emit(download_path)
+                signal.disconnect()
+            except RuntimeError:
+                pass
+        self._download_progress_signal.connect(self._on_download_progress)
+        self._download_complete_signal.connect(lambda fp: self.download_complete(dialog, fp))
+        self._download_error_signal.connect(lambda message: self._show_download_error(dialog, message))
+        self._download_cancelled_signal.connect(lambda: self._on_download_cancelled(dialog))
+        self.progress_bar.setRange(0, 0)
+        self.progress_label.setText("Checking SHA-256 metadata and connecting...")
+        self.status_label.setText("")
+        # Immutable copies keep UI selection/history changes out of the active attempt.
+        asset = dict(asset)
+        release = {**release, 'assets': [dict(a) for a in release.get('assets', [])]}
+        def run():
+            try:
+                self._verified_download_asset = self._download_verified_update(
+                    asset, release, path, self._download_progress_signal.emit,
+                    lambda: self._download_cancelled)
+                if self._download_cancelled:
+                    self._download_cancelled_signal.emit()
                 else:
-                    # Use requests for source builds
-                    print("[DEBUG] Using requests for download")
-                    with requests.Session() as s:
-                        headers = {
-                            'User-Agent': 'Glossarion-Updater',
-                            'Accept': 'application/octet-stream'
-                        }
-                        with s.get(url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True, verify=ca_bundle) as r:
-                            print(f"[DEBUG] Got response: {r.status_code}")
-                            r.raise_for_status()
-                            total_size = int(r.headers.get('content-length', 0))
-                            print(f"[DEBUG] Content length: {total_size} bytes")
-                            downloaded = 0
-                            last_emit_time = time.time()
-                            with open(download_path, 'wb') as f:
-                                for chunk in r.iter_content(chunk_size=65536):
-                                    if self._download_cancelled:
-                                        try:
-                                            f.close()
-                                            if os.path.exists(download_path):
-                                                os.remove(download_path)
-                                        except Exception:
-                                            pass
-                                        QTimer.singleShot(0, lambda: self._on_download_cancelled(dialog))
-                                        return
-                                    if not chunk:
-                                        continue
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    now = time.time()
-                                    if total_size > 0:
-                                        p = int(downloaded * 100 / total_size)
-                                        if (now - last_emit_time) >= 0.1:
-                                            last_emit_time = now
-                                            self._download_progress_signal.emit(p, downloaded / (1024 * 1024), total_size / (1024 * 1024))
-                            print(f"[DEBUG] Download complete: {downloaded} bytes")
-                            self._download_complete_signal.emit(download_path)
-            except Exception as e:
-                print(f"[DEBUG] Download error: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
-                try:
-                    if os.path.exists(download_path):
-                        os.remove(download_path)
-                except Exception:
-                    pass
-                self._download_error_signal.emit(str(e))
-        
-        self.download_thread = threading.Thread(target=download_thread_func, daemon=True)
-        # Watchdog: cancel if no progress
-        try:
-            if hasattr(self, '_download_watchdog') and self._download_watchdog:
-                self._download_watchdog.stop()
-                self._download_watchdog.deleteLater()
-        except Exception:
-            pass
-        self._download_watchdog = QTimer(self)
-        self._download_watchdog.setInterval(90000)
-        self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
-        self._download_watchdog.start()
-        # Hook cancel button
+                    self._download_complete_signal.emit(path)
+            except UpdateCancelled:
+                self._download_cancelled_signal.emit()
+            except Exception as exc:
+                self._download_error_signal.emit(str(exc))
+        self.download_thread = threading.Thread(target=run, daemon=True)
         if hasattr(self, 'cancel_btn') and self.cancel_btn:
             try:
                 self.cancel_btn.clicked.disconnect()
-            except Exception:
+            except RuntimeError:
                 pass
-            self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), setattr(self, '_download_cancelled', True)))
-        print("[DEBUG] Starting download thread...")
+            self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False),
+                                                     setattr(self, '_download_cancelled', True)))
         self.download_thread.start()
-        print("[DEBUG] Download thread started")
-    
+
     def _on_download_timeout(self, dialog):
         try:
             # Try cancel on either backend
@@ -1972,28 +1776,12 @@ class UpdateManager(UpdateCoreMixin, QObject):
         except Exception:
             pass
         
-        # Validate downloaded file before offering install
-        try:
-            file_size = self._validate_update_file(file_path)
-
-            # Check expected size if we tracked it
-            expected_size = getattr(self, '_expected_download_size', 0)
-            if expected_size > 0 and file_size < expected_size * 0.95:
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-                self._show_download_error(
-                    dialog,
-                    f"Download incomplete ({file_size / (1024*1024):.1f} MB of "
-                    f"{expected_size / (1024*1024):.1f} MB expected).\n\n"
-                    "Please try downloading again."
-                )
-                return
-        except Exception as e:
-            self._show_download_error(dialog, f"Update rejected: {e}")
+        if self._download_cancelled:
+            self._on_download_cancelled(dialog)
             return
-        
+        if not getattr(self, '_verified_download_asset', None):
+            self._show_download_error(dialog, "SHA-256 verification is required before installation.")
+            return
         dialog.close()
         
         # Proceed directly to install (no confirmation prompt — clicking
@@ -2004,7 +1792,13 @@ class UpdateManager(UpdateCoreMixin, QObject):
     def install_update(self, update_file):
         """Launch the update installer and exit current app"""
         try:
-            self._validate_update_file(update_file)
+            self._verify_downloaded_update(update_file, getattr(self, '_verified_download_asset', None))
+            if self._detect_platform() != 'windows':
+                # Existing packages are opened for manual installation; never run a Windows
+                # replacement batch or delete the running app on macOS/Linux.
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(update_file)):
+                    raise ValueError("Cannot open the verified package. Install it manually from: " + update_file)
+                return
             # Save current state/config if needed
             self.main_gui.save_config(show_message=False)
             

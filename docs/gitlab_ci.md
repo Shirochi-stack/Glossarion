@@ -6,8 +6,9 @@ manual alternatives and the original automatic event triggers:
 
 - A push to `main`, or a merge request targeting `main`, runs the Python
   application's desktop tests (Python 3.10) and mobile backend check (Python 3.13).
-- A push of a version tag such as `v9.14.5` runs the three Linux variants and
-  the complete mobile build graph, then appends verified output to that release.
+- A push of a version tag such as `v9.14.5` runs a small readiness job. Creating
+  the GitLab release starts the three Linux variants and complete mobile graph,
+  then appends verified output to that release. This also works for existing tags.
   macOS desktop, Windows and Build All remain available as manual selections.
   Other historical `v*` tags retain the older Linux/macOS/mobile build-only graph.
 - **Run pipeline** (`web`) and the authenticated Pipelines API (`api`) retain
@@ -83,7 +84,7 @@ selects signing or release publication.
 | `build-mobile.yml` | `android-signed`, `ios-signed` | Blocking manual signing job after the platform's wheel build |
 | `build-mobile.yml` | `ios-simulator` | Simulator app archive plus actual simulator smoke/cryptography checks |
 | `build-mobile.yml` | `android-ui`, `android-smoke` | UI suite or APK smoke/E2E on an already running emulator/device |
-| Linux/mobile automatic release builds | Normal push of a version tag, e.g. `v9.14.5` | Three Linux ZIPs, Android APKs and unsigned IPA; automatic append-only upload to an existing same-source GitLab release |
+| Linux/mobile automatic release builds | GitLab release-created webhook | Three Linux ZIPs, Android APKs and unsigned IPA; automatic append-only upload to the same-source release |
 | Other explicitly selected release uploads | `GLOSSARION_PUBLISH=true` on a protected version tag | Separate blocking manual upload to an **existing GitLab release** |
 
 `.gitlab/ci.py` deliberately reuses named `run` steps from the checked-in
@@ -185,17 +186,18 @@ See [manual jobs](https://docs.gitlab.com/ci/jobs/job_control/),
 [generic packages](https://docs.gitlab.com/user/packages/generic_packages/),
 and [release API](https://docs.gitlab.com/api/releases/).
 
-## Automatic version-tag release cutover
+## Automatic release-created workflow
 
 Agree the exact integrated source commit after validating the updater and the
-Windows outputs. Its `src/app_version.py` must match the new tag. Push that tag
-once normally, without `ci.skip`, and create the GitLab release metadata for the
-same tag before its builds finish. Do not start a duplicate manual pipeline.
-For v9.14.5, the proposed title is `Glossarion v9.14.5`; the owner's release note
-is `- updated glossarion auto updater for gitlab`. This publisher does not edit
-either field, so later owner edits are preserved.
+Windows outputs. Its `src/app_version.py` must match the new tag. Create that tag
+once and publish the GitLab release metadata for it. A tag push is readiness-only;
+the Release webhook is the sole expensive build dispatch. Do not start a manual
+duplicate. For v9.14.5, the title is `Glossarion v9.14.5`; the owner's two notes
+are `- updated emergency glossarion compliance efficiency` and
+`- updated glossarion auto updater for gitlab`, separated by a newline.
+The publisher does not edit these fields, so later owner edits are preserved.
 
-The version-tag graph contains eleven expanded jobs: preparation, Android/iOS
+The release-build graph contains eleven expanded jobs: preparation, Android/iOS
 wheelhouses, three Linux builds, APK, unsigned IPA, simulator validation, Android
 device smoke and one publisher. It does not start desktop macOS or Windows
 builds. `publish-version-release` waits for the device stage and uses available
@@ -204,8 +206,8 @@ pipeline. Simulator archives remain diagnostic artifacts. Default Android APKs
 are explicitly named debug-signed; the IPA is unsigned. No production signing
 or notarization is implied or added.
 
-`.gitlab/auto_release.py` requires this project's version-tag push, matching app
-version, exact manifest source SHA and SHA-256 of every output. It uses only the
+`.gitlab/auto_release.py` requires this project's validated release-event dispatch,
+matching app version, exact manifest source SHA and SHA-256 of every output. It uses only the
 running job's short-lived `CI_JOB_TOKEN` with Generic Packages and Release Links
 APIs. It requires an existing same-commit release, never creates tags/releases,
 and never contacts GitHub. Each binary gets a size/SHA-256 sidecar, published
@@ -214,17 +216,36 @@ notes are preserved. Conflicting names, URLs or package bytes fail before any
 upload; identical packages/links are reused. A transient publication failure
 can be recovered by retrying **only this publisher job**, without rebuilding.
 
-This is a **tag-push path**, not a release-created event subscription. Creating
-or editing release metadata against an existing tag does not itself start this
-pipeline, and the release/link writes cannot recursively start builds. At the
-read-only configuration check, project 87623444 had no webhooks. Literal
-release-created automation therefore still needs a separately approved
-persistent Release webhook and pipeline trigger connection (or an authorized
-external dispatcher), plus event validation and tag/build deduplication. No
-such credential or access setting is installed by this change. Historical
-tags also retain their historical CI configuration; do not retarget them to
-retrofit new behavior. See [pipeline triggers](https://docs.gitlab.com/ci/triggers/)
-and [release webhook events](https://docs.gitlab.com/user/project/integrations/webhook_events/#release-events).
+The owner-approved, project-scoped trigger token is stored in a masked webhook
+URL variable on GitLab; it is never embedded in source, a job variable or an
+artifact. Only Release events are subscribed, with TLS verification enabled.
+The receiver runs on `main` and accepts only this project's `release/create`
+payload. It checks the live release, immutable tag commit and source app version
+before dispatch. Release updates/deletions, including appended asset links, are
+ignored. No pipeline/job/tag-push webhook is subscribed, preventing loops.
+
+`.gitlab/release_event.py` serializes lookup/create using the receiver's resource
+group. Its deduplication key is the exact release tag and source SHA in the
+downstream pipeline name. Repeated delivery reuses that pipeline, including a
+failed one: retry the failed job rather than rebuilding every platform. An
+uncertain dispatch response is not automatically reposted; receiver retry first
+looks up the existing pipeline. The downstream request uses only the receiver's
+short-lived job token and validated typed inputs, with no extra persistent token.
+
+Release builds use the current `main` CI configuration, including when the tag
+predates this webhook setup. Each disposable job verifies/fetches the exact tag,
+checks out its application source and original GitHub build steps, and retains
+only the current `.gitlab` automation helpers. Manifests and preparation markers
+record the tagged application commit; checkout logs also record the separate
+automation commit. The release must continue to point at that source throughout
+the jobs. Historical tags are never moved or rewritten. See
+[pipeline triggers](https://docs.gitlab.com/ci/triggers/) and
+[release webhook events](https://docs.gitlab.com/user/project/integrations/webhook_events/#release-events).
+
+The first end-to-end webhook test is the real, validated v9.14.5 publication.
+Offline tests and server lint do not establish successful event delivery, job-token
+dispatch, hosted Linux packaging, or automatic release attachment. No dummy release
+or expensive diagnostic pipeline is needed for setup.
 
 ## Validation and limits
 

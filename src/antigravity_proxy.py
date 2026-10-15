@@ -39,7 +39,7 @@ import time
 import webbrowser
 import zipfile
 from typing import Any, Callable, Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 try:
     import httpx
@@ -78,6 +78,35 @@ PROXY_GITHUB_RAW_PACKAGE_URL = (
 PROXY_CODELOAD_URL = "https://codeload.github.com/Shirochi-stack/antigravity-proxy"
 PROXY_GITHUB_TAG_ARCHIVE_URL = f"{PROXY_CODELOAD_URL}/zip/refs/tags/{{tag}}"
 PROXY_GITHUB_REVISION_ARCHIVE_URL = f"{PROXY_CODELOAD_URL}/zip/{{revision}}"
+# Verified in antigravity-proxy-final-main-import.json (2026-10-14).
+PROXY_FORK_REPO_URL = "https://gitlab.com/shirochi-stack/antigravity-proxy-fork67"
+PROXY_FORK_API_URL = (
+    "https://gitlab.com/api/v4/projects/"
+    "shirochi-stack%2Fantigravity-proxy-fork67/repository"
+)
+
+
+def _fork_archive_url(ref: str) -> str:
+    return f"{PROXY_FORK_API_URL}/archive.zip?sha={quote(ref, safe='')}"
+
+
+def _fork_package_url(ref: str) -> str:
+    return f"{PROXY_FORK_API_URL}/files/package.json/raw?ref={quote(ref, safe='')}"
+
+
+def _proxy_archive_urls(url: str) -> List[str]:
+    """Retry only an equivalent ref on the verified fork; never substitute main."""
+    prefix = f"{PROXY_CODELOAD_URL}/zip/"
+    if not url.startswith(prefix):
+        return [url]
+    ref = url[len(prefix):]
+    if ref.startswith("refs/tags/"):
+        ref = ref[len("refs/tags/"):]
+    elif not re.fullmatch(r"[0-9a-fA-F]{40}", ref):
+        return [url]
+    return [url, _fork_archive_url(ref)]
+
+
 PROXY_DEFAULT_REVISION = "abc82ce6b756ee1c4d794b9f1599eda9b55730d8"
 PROXY_DEFAULT_VERSION = "0.7.7"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
@@ -180,6 +209,63 @@ def _github_headers() -> Dict[str, str]:
     }
 
 
+def _proxy_package_payload(revision: str) -> Dict[str, Any]:
+    errors = []
+    for url in (
+        PROXY_GITHUB_RAW_PACKAGE_URL.format(revision=revision),
+        _fork_package_url(revision),
+    ):
+        try:
+            response = requests.get(url, headers=_github_headers(), timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("package metadata was not an object")
+            return payload
+        except Exception as exc:
+            errors.append(str(exc))
+    raise RuntimeError("; ".join(errors))
+
+
+def _raise_for_fork_status(response: Any, ref: str) -> None:
+    status = getattr(response, "status_code", None)
+    if status in (401, 403, 404):
+        raise RuntimeError(
+            f"GitLab fallback cannot access requested ref {ref!r} (HTTP {status}). "
+            "The fork may be private/inaccessible or the ref may be missing. "
+            "No account credentials are bundled and no different ref is substituted."
+        )
+    response.raise_for_status()
+
+
+def _latest_fork_release() -> Dict[str, Any]:
+    """Resolve the fork's own immutable revision only if GitHub discovery fails."""
+    response = requests.get(
+        f"{PROXY_FORK_API_URL}/commits/main", headers=_github_headers(), timeout=15
+    )
+    _raise_for_fork_status(response, "main")
+    payload = response.json()
+    revision = str(payload.get("id") or "").strip() if isinstance(payload, dict) else ""
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise ValueError("fork returned an invalid commit revision")
+    # Never label an unknown fork package with the old GitHub default version.
+    response = requests.get(
+        _fork_package_url(revision), headers=_github_headers(), timeout=15
+    )
+    _raise_for_fork_status(response, revision)
+    package = response.json()
+    version = str(package.get("version") or "") if isinstance(package, dict) else ""
+    parsed = _parse_semver(version)
+    if parsed == (0, 0, 0):
+        raise ValueError("fork returned an invalid package version")
+    return {
+        "tag": f"main-{revision[:12]}",
+        "version": _version_to_str(parsed),
+        "archive_url": _fork_archive_url(revision),
+        "resolved": True,
+    }
+
+
 def _latest_proxy_release() -> Dict[str, Any]:
     """Return the current Shirochi-stack fork revision via GitHub HTTPS APIs."""
     override = os.environ.get("ANTIGRAVITY_PROXY_TAG", "").strip()
@@ -205,13 +291,7 @@ def _latest_proxy_release() -> Dict[str, Any]:
         if re.fullmatch(r"[0-9a-fA-F]{40}", revision):
             version = PROXY_DEFAULT_VERSION
             try:
-                package_resp = requests.get(
-                    PROXY_GITHUB_RAW_PACKAGE_URL.format(revision=revision),
-                    headers=_github_headers(),
-                    timeout=15,
-                )
-                package_resp.raise_for_status()
-                package_payload = package_resp.json()
+                package_payload = _proxy_package_payload(revision)
                 package_version = str(
                     package_payload.get("version") or ""
                 ).strip() if isinstance(package_payload, dict) else ""
@@ -228,6 +308,11 @@ def _latest_proxy_release() -> Dict[str, Any]:
             }
     except Exception as exc:
         logger.debug("Could not resolve the latest Antigravity proxy fork revision: %s", exc)
+
+    try:
+        return _latest_fork_release()
+    except Exception as exc:
+        logger.debug("Could not resolve the fallback Antigravity proxy revision: %s", exc)
 
     return {
         "tag": f"main-{PROXY_DEFAULT_REVISION[:12]}",
@@ -1285,6 +1370,22 @@ def _download_proxy_archive_bytes(url: str) -> bytes:
     raise RuntimeError("; ".join(errors) or "proxy archive download failed")
 
 
+def _download_proxy_release_archive(release: Dict[str, str]) -> tuple:
+    errors = []
+    for url in _proxy_archive_urls(release["archive_url"]):
+        try:
+            data = _download_proxy_archive_bytes(url)
+            # Keep runtime provenance accurate when a fallback actually succeeds.
+            return data, {**release, "archive_url": url}
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+    raise RuntimeError(
+        "Proxy archive sources failed. GitLab fallback needs public access and "
+        "the exact requested revision/tag; private or missing refs are not "
+        "substituted and no account credentials are bundled. " + "; ".join(errors)
+    )
+
+
 def _download_proxy_runtime(
     release: Dict[str, str],
     client_version: str,
@@ -1294,7 +1395,7 @@ def _download_proxy_runtime(
     _log = log_fn or _log_noop
     _log(f"⬇️ Antigravity: downloading {PROXY_PACKAGE_NAME} {release['tag']}...")
 
-    archive_data = _download_proxy_archive_bytes(release["archive_url"])
+    archive_data, release = _download_proxy_release_archive(release)
 
     parent = os.path.dirname(runtime_dir)
     os.makedirs(parent, exist_ok=True)

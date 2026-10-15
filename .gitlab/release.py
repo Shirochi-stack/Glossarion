@@ -6,6 +6,7 @@ pipeline opt-in. Does not create releases, mint credentials, or contact GitHub.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,8 @@ from urllib.parse import quote, urlparse
 from urllib.request import build_opener, HTTPRedirectHandler, Request
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
+from generate_update_metadata import metadata_bytes
 ALLOWED = {".exe", ".dmg", ".zip", ".apk", ".aab", ".ipa"}
 
 
@@ -62,6 +65,7 @@ def artifact_entries(root, commit):
             entries.append((label, path, digest))
     require(entries, "No verified build artifacts; no release upload performed.")
     require(len({(label, path.name) for label, path, _ in entries}) == len(entries), "Duplicate release artifacts.")
+    require(len({path.name for _, path, _ in entries}) == len(entries), "Release asset names must be unique across build labels.")
     return entries
 
 
@@ -73,6 +77,12 @@ class NoRedirect(HTTPRedirectHandler):
 def publish(env, root=ROOT, opener=None):
     prerequisites(env)
     entries = artifact_entries(root, env["CI_COMMIT_SHA"])
+    # Generate checksums from the final bytes and recheck against the build digest.
+    # Consumers receive a distinct per-file manifest bound to this exact tag/name.
+    uploads = []
+    for label, path, digest in entries:
+        uploads.append((label, path.name, path))
+        uploads.append((label, path.name + '.sha256.json', metadata_bytes(path, env['CI_COMMIT_TAG'], digest)))
     opener = opener or build_opener(NoRedirect())
     api = env["CI_API_V4_URL"].rstrip("/") + "/projects/" + env["CI_PROJECT_ID"]
     tag = quote(env["CI_COMMIT_TAG"], safe="")
@@ -93,8 +103,8 @@ def publish(env, root=ROOT, opener=None):
     require(not existing_links, "Release already has asset links; review it manually instead of overwriting or duplicating assets.")
     # Preflight every package path before uploading any file. No replacement/clobber behavior.
     urls = []
-    for label, path, _ in entries:
-        package_name = label + "--" + path.name
+    for label, name, content in uploads:
+        package_name = label + "--" + name
         url = api + "/packages/generic/glossarion/" + tag + "/" + quote(package_name, safe="")
         try:
             with opener.open(Request(url, headers=headers, method="HEAD"), timeout=60):
@@ -102,14 +112,15 @@ def publish(env, root=ROOT, opener=None):
         except HTTPError as exc:
             require(exc.code == 404, f"Package preflight failed (HTTP {exc.code}).")
         urls.append(url)
-    for (label, path, _), url in zip(entries, urls):
-        with path.open("rb") as stream:
-            with request("PUT", url, stream, {"Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)}):
+    for (label, name, content), url in zip(uploads, urls):
+        size = content.stat().st_size if isinstance(content, Path) else len(content)
+        with (content.open('rb') if isinstance(content, Path) else io.BytesIO(content)) as stream:
+            with request("PUT", url, stream, {"Content-Type": "application/octet-stream", "Content-Length": str(size)}):
                 pass
-        payload = json.dumps({"name": path.name, "url": url, "link_type": "package"}).encode()
+        payload = json.dumps({"name": name, "url": url, "link_type": "package"}).encode()
         with request("POST", api + "/releases/" + tag + "/assets/links", payload, {"Content-Type": "application/json"}):
             pass
-        print("Published verified artifact: " + label + "/" + path.name)
+        print("Published verified artifact: " + label + "/" + name)
 
 
 if __name__ == "__main__":

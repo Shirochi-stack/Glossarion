@@ -67,7 +67,8 @@ class PublisherTests(unittest.TestCase):
         (self.root / "src").mkdir()
         (self.root / "src/app_version.py").write_text("VERSION_TAG = 'v9.14.5'\n")
         self.commit = "a" * 40
-        self.env = dict(GLOSSARION_TASK="release-builds", GLOSSARION_PUBLISH="true", CI_PIPELINE_SOURCE="push",
+        self.env = dict(GLOSSARION_TASK="release-builds", GLOSSARION_PUBLISH="true", CI_PIPELINE_SOURCE="pipeline",
+                        GLOSSARION_RELEASE_EVENT_VALIDATED="true",
                         CI_COMMIT_TAG="v9.14.5", CI_COMMIT_SHA=self.commit, CI_JOB_TOKEN="offline-job-token",
                         CI_PROJECT_ID="87623444", CI_SERVER_URL="https://gitlab.com", CI_API_V4_URL="https://gitlab.com/api/v4")
         self.api = GitLab(self.commit)
@@ -189,9 +190,10 @@ class ReleaseEventTests(unittest.TestCase):
         for include in cls.config["include"]:
             cls.config.update(yaml.safe_load((ROOT / include["local"]).read_text()))
 
-    def select(self, source, tag="", branch=""):
+    def select(self, source, tag="", branch="", **extra):
         values = dict(CI_PIPELINE_SOURCE=source, CI_COMMIT_TAG=tag, CI_COMMIT_BRANCH=branch,
                       GLOSSARION_TASK="source-check", GLOSSARION_PUBLISH="false")
+        values.update(extra)
         for rule in self.config["workflow"]["rules"]:
             if rule.get("when") == "never":
                 return values, set()
@@ -207,8 +209,23 @@ class ReleaseEventTests(unittest.TestCase):
                     break
         return values, jobs
 
-    def test_new_version_tag_runs_requested_platforms_and_one_automatic_publisher(self):
+    def test_new_version_tag_is_cheap_until_release_creation(self):
         values, jobs = self.select("push", "v9.14.5")
+        self.assertEqual(values["GLOSSARION_TASK"], "release-wait")
+        self.assertEqual(jobs, {"release-tag-ready"})
+        self.assertEqual(values["GLOSSARION_PUBLISH"], "false")
+
+    def test_release_receiver_only_runs_dispatcher_on_main_with_payload(self):
+        _, jobs = self.select("trigger", branch="main", TRIGGER_PAYLOAD="/tmp/release.json")
+        self.assertEqual(jobs, {"release-event-dispatch"})
+        self.assertEqual(self.config["release-event-dispatch"]["resource_group"], "glossarion-release-dispatch")
+        self.assertFalse(self.config["release-event-dispatch"]["interruptible"])
+        self.assertEqual(self.select("trigger", branch="main")[1], set())
+        self.assertEqual(self.select("trigger", branch="feature", TRIGGER_PAYLOAD="/tmp/release.json")[1], set())
+
+    def test_validated_release_dispatch_runs_requested_platforms_and_one_publisher(self):
+        values, jobs = self.select("pipeline", branch="main", GLOSSARION_RELEASE_DISPATCH="true",
+                                   GLOSSARION_RELEASE_TAG="v9.14.5", GLOSSARION_RELEASE_SOURCE_SHA="a" * 40)
         self.assertEqual(values["GLOSSARION_TASK"], "release-builds")
         self.assertEqual(values["GLOSSARION_PUBLISH"], "true")
         self.assertEqual(jobs, {"mobile-prepare", "wheels-android", "wheels-ios", "android-apk", "ios-unsigned",
@@ -218,6 +235,11 @@ class ReleaseEventTests(unittest.TestCase):
         self.assertEqual(publisher["dependencies"], ["linux-build", "android-apk", "ios-unsigned"])
         self.assertEqual(publisher["rules"][0]["when"], "always")
         self.assertNotIn("needs", publisher)  # waits for the existing device stage too
+        for name in jobs:
+            bootstrap = self.config[name]["before_script"][0]
+            self.assertIn("release_event.py checkout", bootstrap)
+            self.assertIn('CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA"', bootstrap)
+        self.assertNotIn("release_event.py checkout", str(self.config["windows-build"]["before_script"]))
 
     def test_release_metadata_or_asset_edits_cannot_start_builds_or_self_trigger(self):
         for source in ("release", "webhook", "schedule"):

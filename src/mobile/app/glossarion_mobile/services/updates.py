@@ -1,6 +1,7 @@
 """Update checks for About › Updates (UI_SPEC §4.16 "Updates"; FEATURE_MAP "Update checker").
 
-The release check is the desktop's: ``update_core.HeadlessUpdateChecker`` runs the moved
+The release check is the desktop's GitHub-primary/GitLab-fallback checker:
+``update_core.HeadlessUpdateChecker`` runs the shared
 ``UpdateManager`` logic (``_check_for_updates_core``: 30-minute cache, ``skipped_versions``,
 ``/releases/latest`` + history, version compare; ``_skip_latest_version``) against the mobile
 ``config.json`` through :class:`StoreConfigHost`, so desktop and mobile share
@@ -137,8 +138,10 @@ def select_downloads(release: Optional[dict], platform: str, arch: str) -> Mobil
     return out
 
 
-def releases_page() -> str:
+def releases_page(provider: str = 'github') -> str:
     """``https://github.com/<owner>/<repo>/releases`` from the desktop's API URL."""
+    if provider == 'gitlab':
+        return 'https://gitlab.com/shirochi-stack/Glossarion/-/releases'
     api = _core().UpdateCoreMixin.GITHUB_API_URL  # https://api.github.com/repos/<owner>/<repo>/releases
     repo = api.split("/repos/", 1)[-1].rsplit("/releases", 1)[0]
     return f"https://github.com/{repo}/releases"
@@ -240,15 +243,14 @@ class UpdateService:
         except requests.Timeout:
             return self._remember(UpdateResult("error", "Connection timed out while checking for updates."))
         except requests.ConnectionError:
-            return self._remember(UpdateResult("error", "Cannot reach GitHub. Check the connection and try again."))
+            return self._remember(UpdateResult("error", "Cannot reach update servers. Check the connection and try again."))
         except requests.HTTPError as exc:
             code = getattr(getattr(exc, "response", None), "status_code", None)
-            text = ("GitHub API rate limit exceeded. Please try again later." if code == 403
-                    else f"GitHub returned error: {code}")
+            text = ("Update API rate limit exceeded. Please try again later." if code == 403
+                    else f"Update service returned error: {code}")
             return self._remember(UpdateResult("error", text))
-        except ValueError:
-            return self._remember(UpdateResult("error", "Invalid response from GitHub. The update service may be "
-                                                        "temporarily unavailable."))
+        except ValueError as exc:
+            return self._remember(UpdateResult("error", f"Invalid response from the update service: {exc}"))
         except Exception as exc:  # pragma: no cover - defensive
             log.exception("update check failed")
             return self._remember(UpdateResult("error", f"An unexpected error occurred: {exc}"))
@@ -281,7 +283,7 @@ class UpdateService:
             status="current",
             tag=str(release.get("tag_name") or ""),
             notes=str(release.get("body") or ""),
-            html_url=html_url if html_url.startswith("https://") else releases_page(),
+            html_url=html_url if html_url.startswith("https://") else releases_page(release.get('_provider', 'github')),
             published=str(release.get("published_at") or "")[:10],
             downloads=select_downloads(release, self.platform, self.arch),
         )

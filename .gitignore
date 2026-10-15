@@ -263,3 +263,15 @@ warp.md
 !tests/parity/oracle_manifest.json
 !tests/parity/oracle_objects.zip
 !tests/test_oracle_package.py
+
+!tests/test_update_providers.py
+
+!tests/test_update_release_metadata.py
+
+!tests/test_update_install_gate.py
+
+!tests/test_update_gui_responsiveness.py
+
+!tests/test_gitlab_auto_release.py
+
+!tests/test_gitlab_release_event.py

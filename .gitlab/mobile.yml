@@ -17,12 +17,16 @@ wheels-android:
   timeout: 2 hours
   rules:
   - if: $GLOSSARION_TASK =~ /^(android|android-signed|android-ui|android-smoke|wheels-android)$/
-      || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS
-      == "all" || $GLOSSARION_TARGETS == "android"))
+      || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK
+      == "release-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS
+      == "android"))
   script:
   - python .gitlab/ci.py wheels --platform android
   image: python:3.13-bookworm
   before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   - source .gitlab/setup_android.sh
   - python -m pip install -r .gitlab/requirements.txt
   artifacts:
@@ -41,12 +45,15 @@ wheels-ios:
   timeout: 2 hours
   rules:
   - if: $GLOSSARION_TASK =~ /^(ios|ios-signed|ios-simulator|wheels-ios)$/ || (($GLOSSARION_TASK
-      == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS ==
-      "all" || $GLOSSARION_TARGETS == "ios"))
+      == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds")
+      && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS == "ios"))
   script:
   - python .gitlab/ci.py wheels --platform ios
   image: macos-26-xcode-26
   before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   - source .gitlab/setup_ios.sh
   - python -m pip install -r .gitlab/requirements.txt
   needs: []
@@ -70,12 +77,15 @@ android-apk:
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "android" || $GLOSSARION_TASK == "android-smoke" || (($GLOSSARION_TASK
-      == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS ==
-      "all" || $GLOSSARION_TARGETS == "android"))
+      == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds")
+      && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS == "android"))
   script:
   - python .gitlab/ci.py mobile --target apk
   image: python:3.13-bookworm
   before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   - source .gitlab/setup_android.sh
   - python -m pip install -r .gitlab/requirements.txt
   artifacts:
@@ -128,12 +138,15 @@ ios-unsigned:
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "ios" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
-      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
-      "ios"))
+      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS
+      == "all" || $GLOSSARION_TARGETS == "ios"))
   script:
   - python .gitlab/ci.py mobile --target ipa
   image: macos-26-xcode-26
   before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   - source .gitlab/setup_ios.sh
   - python -m pip install -r .gitlab/requirements.txt
 ios-signed:
@@ -170,13 +183,16 @@ ios-simulator:
   timeout: 4 hours
   rules:
   - if: $GLOSSARION_TASK == "ios-simulator" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
-      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
-      "ios") && ($GLOSSARION_IOS_SIMULATOR_SMOKE == "on" || $GLOSSARION_IOS_SIMULATOR_SMOKE
-      == "auto"))
+      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS
+      == "all" || $GLOSSARION_TARGETS == "ios") && ($GLOSSARION_IOS_SIMULATOR_SMOKE
+      == "on" || $GLOSSARION_IOS_SIMULATOR_SMOKE == "auto"))
   script:
   - python .gitlab/ci.py mobile --target ios-simulator
   image: macos-26-xcode-26
   before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   - source .gitlab/setup_ios.sh
   - python -m pip install -r .gitlab/requirements.txt
 android-ui:
@@ -187,8 +203,9 @@ android-ui:
   - wheels-android
   timeout: 4 hours
   rules:
-  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS
-      == "all" || $GLOSSARION_TARGETS == "android") && $GLOSSARION_UI_TESTS == "on"
+  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK
+      == "release-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS
+      == "android") && $GLOSSARION_UI_TESTS == "on"
     allow_failure: true
   - if: $GLOSSARION_TASK == "android-ui"
   script:
@@ -206,12 +223,16 @@ android-smoke:
   timeout: 75 minutes
   rules:
   - if: $GLOSSARION_TASK == "android-smoke" || (($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK
-      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS == "all" || $GLOSSARION_TARGETS ==
-      "android") && $GLOSSARION_EMULATOR_SMOKE == "true")
+      == "tag-builds" || $GLOSSARION_TASK == "release-builds") && ($GLOSSARION_TARGETS
+      == "all" || $GLOSSARION_TARGETS == "android") && $GLOSSARION_EMULATOR_SMOKE
+      == "true")
   script:
   - python .gitlab/ci.py android-smoke
   image: python:3.13-bookworm
   before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   - source .gitlab/setup_emulator.sh
   - python -m pip install -r .gitlab/requirements.txt
 mobile-prepare:
@@ -220,10 +241,14 @@ mobile-prepare:
   - saas-linux-medium-amd64
   image: python:3.13-bookworm
   before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   - python -m pip install -r .gitlab/requirements.txt uv
   timeout: 2 hours
   rules:
-  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK == "release-builds")
+  - if: ($GLOSSARION_TASK == "mobile" || $GLOSSARION_TASK == "tag-builds" || $GLOSSARION_TASK
+      == "release-builds")
   script:
   - python .gitlab/ci.py mobile-check
   artifacts:

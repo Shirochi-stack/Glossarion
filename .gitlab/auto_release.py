@@ -39,7 +39,9 @@ def digest(stream):
 def prerequisites(env, root):
     require(env.get("GLOSSARION_TASK") == "release-builds" and env.get("GLOSSARION_PUBLISH") == "true",
             "Automatic release publication was not selected.")
-    require(env.get("CI_PIPELINE_SOURCE") == "push", "Automatic publication requires the version-tag event.")
+    require(env.get("CI_PIPELINE_SOURCE") == "pipeline"
+            and env.get("GLOSSARION_RELEASE_EVENT_VALIDATED") == "true",
+            "Automatic publication requires a validated release-event dispatch.")
     tag = env.get("CI_COMMIT_TAG", "")
     require(re.fullmatch(r"v[0-9]+(?:\.[0-9]+)+(?:[A-Za-z0-9_.+-]*)", tag), "A version tag is required.")
     require(env.get("CI_PROJECT_ID") == "87623444" and env.get("CI_SERVER_URL") == "https://gitlab.com"

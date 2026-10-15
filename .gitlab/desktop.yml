@@ -36,6 +36,9 @@ linux-build:
   needs: []
   image: python:3.12-bookworm
   before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   - source .gitlab/setup_desktop_linux.sh
 macos-arm-build:
   stage: build

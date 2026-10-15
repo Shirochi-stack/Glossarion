@@ -148,7 +148,7 @@ class PipelineTests(unittest.TestCase):
             ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_BRANCH":"feature"}, None),
             ({"CI_PIPELINE_SOURCE":"merge_request_event", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME":"main"}, "ci"),
             ({"CI_PIPELINE_SOURCE":"merge_request_event", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME":"develop"}, None),
-            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"v9.14.4"}, "release-builds"),
+            ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"v9.14.4"}, "release-wait"),
             ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"v"}, "tag-builds"),
             ({"CI_PIPELINE_SOURCE":"push", "CI_COMMIT_TAG":"nightly"}, None),
             ({"CI_PIPELINE_SOURCE":"schedule", "CI_COMMIT_BRANCH":"main"}, None),
@@ -160,8 +160,8 @@ class PipelineTests(unittest.TestCase):
             actual=None
             for rule in self.config["workflow"]["rules"]:
                 if rule.get("when") == "never": break
-                expression=re.sub(r'\$(\w+) =~ /([^/]+)/', lambda m:str(bool(re.search(m[2],variables[m[1]]))), rule["if"])
-                expression=re.sub(r'\$(\w+)',lambda m:repr(variables[m[1]]),expression).replace("&&","and").replace("||","or")
+                expression=re.sub(r'\$(\w+) =~ /([^/]+)/', lambda m:str(bool(re.search(m[2],variables.get(m[1], "")))), rule["if"])
+                expression=re.sub(r'\$(\w+)',lambda m:repr(variables.get(m[1], "")),expression).replace("&&","and").replace("||","or")
                 if eval(expression,{"__builtins__":{}},{}):
                     actual=rule.get("variables",{}).get("GLOSSARION_TASK","source-check")
                     if actual in ("ci","tag-builds"):
@@ -215,8 +215,8 @@ class PipelineTests(unittest.TestCase):
                     if not expression:
                         continue
                     expression = re.sub(r'\$(\w+) =~ /([^/]+)/',
-                        lambda m: str(bool(re.search(m[2], variables[m[1]]))), expression)
-                    expression = re.sub(r'\$(\w+)', lambda m: repr(variables[m[1]]), expression)
+                        lambda m: str(bool(re.search(m[2], variables.get(m[1], "")))), expression)
+                    expression = re.sub(r'\$(\w+)', lambda m: repr(variables.get(m[1], "")), expression)
                     expression = expression.replace("&&", "and").replace("||", "or")
                     if eval(expression, {"__builtins__": {}}, {}):
                         selected.add(name)
@@ -347,13 +347,20 @@ class ReleaseTests(unittest.TestCase):
             if req.method == "HEAD":
                 raise HTTPError(req.full_url, 404, "not found", {}, None)
             if req.method == "PUT":
-                self.assertEqual(req.data.read(), b"fixture executable")
+                data = req.data.read()
+                if req.full_url.endswith('.sha256.json'):
+                    metadata = json.loads(data)
+                    self.assertEqual(metadata['sha256'], hashlib.sha256(b'fixture executable').hexdigest())
+                    self.assertEqual(metadata['tag'], self.env['CI_COMMIT_TAG'])
+                    self.assertEqual(metadata['size'], len(b'fixture executable'))
+                else:
+                    self.assertEqual(data, b"fixture executable")
             if req.method == "POST":
                 self.assertEqual(json.loads(req.data)["link_type"], "package")
             return io.BytesIO(b"{}")
         with redirect_stdout(io.StringIO()):
             release.publish(self.env, self.root, Mock(open=open_request))
-        self.assertEqual(requests, ["GET", "HEAD", "PUT", "POST"])
+        self.assertEqual(requests, ["GET", "HEAD", "HEAD", "PUT", "POST", "PUT", "POST"])
 
     def test_redirect_does_not_forward_token(self):
         with self.assertRaisesRegex(release.ReleaseError, "refusing to forward"):

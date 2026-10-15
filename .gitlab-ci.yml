@@ -1,4 +1,4 @@
-# Main/MR checks and version-tag release builds; manual signing stays gated.
+# Main/MR checks; release creation dispatches Linux/mobile once.
 spec:
   inputs:
     task:
@@ -62,11 +62,43 @@ spec:
       type: boolean
       default: false
       description: Explicit permission for separately selected, blocking signed jobs.
+    release_dispatch:
+      type: boolean
+      default: false
+      description: Internal release receiver dispatch; only a same-project downstream
+        pipeline admits it.
+    release_tag:
+      default: ''
+      regex: ^(v[0-9]+(\.[0-9]+)+[A-Za-z0-9_.+-]*)?$
+      description: Exact version tag validated by the release receiver.
+    release_source_sha:
+      default: ''
+      regex: ^([a-f0-9]{40})?$
+      description: Exact source commit validated by the release receiver.
 ---
 workflow:
   auto_cancel:
     on_new_commit: none
   rules:
+  - if: $CI_PIPELINE_SOURCE == "trigger" && $CI_COMMIT_BRANCH == "main" && $TRIGGER_PAYLOAD
+    variables:
+      GLOSSARION_TASK: release-event
+      GLOSSARION_PUBLISH: 'false'
+      GLOSSARION_SIGNING_APPROVED: 'false'
+  - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH == "main" && $GLOSSARION_RELEASE_DISPATCH
+      == "true" && $GLOSSARION_RELEASE_TAG && $GLOSSARION_RELEASE_SOURCE_SHA
+    variables:
+      GLOSSARION_TASK: release-builds
+      GLOSSARION_TARGETS: all
+      GLOSSARION_EMULATOR_SMOKE: 'true'
+      GLOSSARION_IOS_SIMULATOR_SMOKE: auto
+      GLOSSARION_UI_TESTS: auto
+      GLOSSARION_ANDROID_LEGACY_PACKAGING: 'false'
+      GLOSSARION_PUBLISH: 'true'
+      GLOSSARION_SIGNING_APPROVED: 'false'
+      GLOSSARION_RELEASE_EVENT_VALIDATED: 'true'
+      GLOSSARION_PIPELINE_NAME: Glossarion release $[[ inputs.release_tag ]] $[[ inputs.release_source_sha
+        ]]
   - if: $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"
   - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
       == "main"
@@ -81,13 +113,8 @@ workflow:
       GLOSSARION_SIGNING_APPROVED: 'false'
   - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG =~ /^v[0-9]+(\.[0-9]+)+[A-Za-z0-9_.+-]*$/
     variables:
-      GLOSSARION_TASK: release-builds
-      GLOSSARION_TARGETS: all
-      GLOSSARION_EMULATOR_SMOKE: 'true'
-      GLOSSARION_IOS_SIMULATOR_SMOKE: auto
-      GLOSSARION_UI_TESTS: auto
-      GLOSSARION_ANDROID_LEGACY_PACKAGING: 'false'
-      GLOSSARION_PUBLISH: 'true'
+      GLOSSARION_TASK: release-wait
+      GLOSSARION_PUBLISH: 'false'
       GLOSSARION_SIGNING_APPROVED: 'false'
   - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG =~ /^v/
     variables:
@@ -100,6 +127,7 @@ workflow:
       GLOSSARION_PUBLISH: 'false'
       GLOSSARION_SIGNING_APPROVED: 'false'
   - when: never
+  name: $GLOSSARION_PIPELINE_NAME
 stages:
 - check
 - wheels
@@ -118,6 +146,10 @@ variables:
   GLOSSARION_IOS_SIMULATOR_SMOKE: $[[ inputs.ios_simulator_smoke ]]
   GLOSSARION_UI_TESTS: $[[ inputs.ui_tests ]]
   GLOSSARION_ANDROID_LEGACY_PACKAGING: $[[ inputs.android_legacy_packaging ]]
+  GLOSSARION_RELEASE_DISPATCH: $[[ inputs.release_dispatch ]]
+  GLOSSARION_RELEASE_TAG: $[[ inputs.release_tag ]]
+  GLOSSARION_RELEASE_SOURCE_SHA: $[[ inputs.release_source_sha ]]
+  GLOSSARION_PIPELINE_NAME: Glossarion $CI_PIPELINE_SOURCE $CI_COMMIT_REF_NAME
 default:
   interruptible: true
   before_script:
@@ -147,6 +179,7 @@ source-check:
   - python tests/test_gitlab_android_platform.py
   - python tests/test_gitlab_auto_release.py
   - python tests/test_oracle_package.py
+  - python tests/test_gitlab_release_event.py
   image: python:3.12-bookworm
 desktop-tests:
   stage: check
@@ -170,8 +203,8 @@ publish-existing-release:
   - saas-linux-small-amd64
   interruptible: false
   rules:
-  - if: $GLOSSARION_TASK != "release-builds" && $GLOSSARION_PUBLISH == "true" && $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED
-      == "true"
+  - if: $GLOSSARION_TASK != "release-builds" && $GLOSSARION_PUBLISH == "true" && $CI_COMMIT_TAG
+      && $CI_COMMIT_REF_PROTECTED == "true"
     when: manual
     allow_failure: false
   - when: never
@@ -193,18 +226,20 @@ mobile-backend-check:
   - if: $GLOSSARION_TASK == "ci" || $GLOSSARION_TASK == "mobile-backend-check"
   script:
   - python .gitlab/ci.py mobile-backend-check
-
 publish-version-release:
   stage: release
   tags:
   - saas-linux-small-amd64
   image: python:3.12-bookworm
-  before_script: []
+  before_script:
+  - if [ "${GLOSSARION_RELEASE_EVENT_VALIDATED:-false}" = "true" ]; then python3 .gitlab/release_event.py
+    checkout || exit 1; export CI_COMMIT_SHA="$GLOSSARION_RELEASE_SOURCE_SHA" CI_COMMIT_TAG="$GLOSSARION_RELEASE_TAG"
+    CI_COMMIT_REF_NAME="$GLOSSARION_RELEASE_TAG"; fi
   timeout: 30 minutes
   interruptible: false
   resource_group: glossarion-release
   rules:
-  - if: $GLOSSARION_TASK == "release-builds" && $GLOSSARION_PUBLISH == "true" && $CI_COMMIT_TAG
+  - if: $GLOSSARION_TASK == "release-builds" && $GLOSSARION_PUBLISH == "true" && $GLOSSARION_RELEASE_TAG
     when: always
   - when: never
   dependencies:
@@ -213,3 +248,33 @@ publish-version-release:
   - ios-unsigned
   script:
   - python .gitlab/auto_release.py
+release-tag-ready:
+  stage: check
+  tags:
+  - saas-linux-small-amd64
+  image: python:3.12-bookworm
+  before_script: []
+  timeout: 5 minutes
+  rules:
+  - if: $GLOSSARION_TASK == "release-wait"
+  script:
+  - echo "Version tag is ready. Creating its GitLab release starts one Linux/mobile
+    build pipeline."
+release-event-dispatch:
+  stage: check
+  tags:
+  - saas-linux-small-amd64
+  image: python:3.12-bookworm
+  before_script: []
+  timeout: 10 minutes
+  interruptible: false
+  resource_group: glossarion-release-dispatch
+  rules:
+  - if: $GLOSSARION_TASK == "release-event"
+  script:
+  - python .gitlab/release_event.py
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+    - artifacts/release-event/
