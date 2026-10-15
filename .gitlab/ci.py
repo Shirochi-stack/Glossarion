@@ -307,7 +307,8 @@ def mobile_prepare(r, tests=True, targets=None):
     r.step("build-mobile.yml", "prepare", "Compile app, tools and CI scripts (Python 3.13 syntax)")
     r.step("build-mobile.yml", "prepare", "Host import smoke (Android and iOS simulation)")
     if tests:
-        r.command(["uv", "run", "--locked", "pytest", "tests_host", "extensions/flet_glossarion_native/tests", "-q", "-m", "not online"], MOBILE)
+        r.command(["uv", "run", "--locked", "pytest", "tests_host", "extensions/flet_glossarion_native/tests",
+                   "-q", "-m", "not online", "--maxfail=1", "--junitxml", r.report / "host-tests.xml"], MOBILE)
     # Use a workspace-owned scratch folder; do not run the GitHub disk-cleanup steps.
     r.step("build-mobile.yml", "prepare", "Offline E2E on the collected bundle (fake OpenAI server)")
     if tests and not r.plan and r.env.get("CI_COMMIT_SHA") and r.env.get("CI_PIPELINE_ID"):
