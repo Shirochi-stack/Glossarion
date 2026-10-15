@@ -47,6 +47,12 @@ LEGACY_DIR = PARITY_DIR / "legacy_progress"
 BASE_SHA = "20b446b06b10e60195769dd9c2c9078249300a9c"
 SHA12 = BASE_SHA[:12]
 
+# The test process deliberately scrubs its environment while constructing
+# headless owners. Keep the CI fixture's Git object lookup independent of that
+# application sandbox, just as the original checkout's object store is.
+_ORACLE_GIT_ENV = {key: os.environ[key] for key in
+                   ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES") if key in os.environ}
+
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
@@ -62,7 +68,8 @@ FIXTURE_EPOCH_LIMIT = 1_500_000_000
 
 
 def _git_show(path, sha=BASE_SHA):
-    raw = subprocess.check_output(["git", "show", f"{sha}:{path}"], cwd=str(REPO_ROOT))
+    raw = subprocess.check_output(["git", "show", f"{sha}:{path}"], cwd=str(REPO_ROOT),
+                                  env={**os.environ, **_ORACLE_GIT_ENV})
     return raw.decode("utf-8")
 
 

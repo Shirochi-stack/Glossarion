@@ -66,6 +66,20 @@ class OraclePackageTests(unittest.TestCase):
                 sample = pinned["files"][0]
                 body = git("show", pinned["commit"] + ":" + sample["path"], env=env).stdout
                 self.assertEqual(hashlib.sha1(f"blob {len(body)}\0".encode() + body).hexdigest(), sample["oid"])
+            # Headless application tests intentionally scrub process variables;
+            # frozen-source reads must retain the fixture's isolated Git lookup.
+            with patch.dict(os.environ, env, clear=True):
+                progress_spec = importlib.util.spec_from_file_location("fixture_progress", ROOT / "tests/parity/progress_legacy.py")
+                progress = importlib.util.module_from_spec(progress_spec)
+                progress_spec.loader.exec_module(progress)
+                os.environ.pop("GIT_OBJECT_DIRECTORY", None)
+                os.environ.pop("GIT_ALTERNATE_OBJECT_DIRECTORIES", None)
+                with patch.object(progress, "REPO_ROOT", root):
+                    source = progress._git_show("src/Retranslation_GUI.py")
+                pinned = next(c for c in manifest["commits"] if c["commit"] == progress.BASE_SHA)
+                declared = next(f for f in pinned["files"] if f["path"] == "src/Retranslation_GUI.py")
+                body = source.encode("utf-8")
+                self.assertEqual(hashlib.sha1(f"blob {len(body)}\0".encode() + body).hexdigest(), declared["oid"])
             self.assertEqual(git("rev-parse", "HEAD").stdout, head)
             self.assertEqual(git("show-ref").stdout, refs)
             self.assertEqual(git("rev-list", "--all", "--count").stdout.strip(), b"1")
