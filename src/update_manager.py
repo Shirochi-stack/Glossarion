@@ -14,13 +14,47 @@ from packaging import version
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QRadioButton, QButtonGroup, QGroupBox, QTabWidget, QWidget,
-    QTextBrowser, QGridLayout, QProgressBar, QMessageBox, QApplication
+    QTextBrowser, QGridLayout, QProgressBar, QMessageBox, QApplication, QLayout
 )
 from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QUrl, QRunnable, QThreadPool
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PySide6.QtGui import QFont, QIcon, QPixmap, QTextCursor, QTextDocument, QImage, QDesktopServices
 from datetime import datetime
 from update_core import UpdateCoreMixin, HeadlessUpdateChecker, UpdateCancelled, UpdateVerificationError
+
+
+def _expand_release_emoji_aliases(line):
+    """Render the two release-heading aliases without rewriting code or URLs."""
+    aliases = {':tools:': '🛠️', ':package:': '📦'}
+    tokens = (r'(?P<code>(?P<ticks>`+).*?(?P=ticks))|(?P<escaped>\\.)|'
+              r'(?P<destination>\]\([^)]*\)|<[^>]*>|https?://\S+)|'
+              r'(?P<alias>:(?:tools|package):)')
+    return re.sub(tokens, lambda match: aliases[match.group()] if match.lastgroup == 'alias'
+                  else match.group(), line)
+
+
+def _windows_update_script(current_exe, update_file):
+    """Restore same-name staging after shutdown; keep both files if still locked."""
+    staged = os.path.normcase(os.path.abspath(update_file)) == os.path.normcase(os.path.abspath(current_exe + '.new'))
+    launch_path = current_exe if staged else update_file
+    # Batch expands percent signs even inside quotes. Delayed expansion stays off.
+    current, downloaded, launch = (path.replace('%', '%%') for path in (current_exe, update_file, launch_path))
+    lines = ['@echo off', 'setlocal DisableDelayedExpansion',
+             'echo Waiting for current version to close...', 'ping -n 4 127.0.0.1 > nul']
+    if staged:
+        lines += ['set "update_attempt=0"', ':replace_current',
+                  f'move /y "{downloaded}" "{current}" > nul 2>&1',
+                  'if not errorlevel 1 goto start_new', 'set /a update_attempt+=1',
+                  'if %update_attempt% GEQ 15 goto update_failed',
+                  'ping -n 3 127.0.0.1 > nul', 'goto replace_current', ':start_new']
+    else:
+        lines += [f'if exist "{current}" (', f'    del /f /q "{current}"',
+                  f'    if exist "{current}" (', '        ping -n 3 127.0.0.1 > nul',
+                  f'        del /f /q "{current}"', '    )', ')']
+    lines += [f'start "" "{launch}"', 'goto cleanup', ':update_failed',
+              'echo Update could not replace the running file; both files were kept.',
+              ':cleanup', '(goto) 2>nul & del "%~f0"', '']
+    return '\n'.join(lines), launch_path
 
 
 class _ReleaseImageSignals(QObject):
@@ -109,7 +143,8 @@ class ReleaseNotesBrowser(QTextBrowser):
                     alt = (attrs.get('alt') or '').replace('[', '\\[').replace(']', '\\]')
                     lines.extend(['', f'![{alt}](<{source}>)', ''])
                     continue
-            lines.append(line)
+            lines.append(line if fence is not None or line.startswith(('    ', '\t'))
+                         else _expand_release_emoji_aliases(line))
         self.setMarkdown('\n'.join(lines))
         self._fit_images()
 
@@ -727,9 +762,13 @@ class UpdateManager(UpdateCoreMixin, QObject):
         parent = None
         if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
             parent = self.dialog
+        elif isinstance(self.main_gui, QWidget):
+            parent = self.main_gui
         
         # Create loading dialog
         self.loading_dialog = QDialog(parent)
+        if parent:
+            self.loading_dialog.setFont(parent.font())
         self.loading_dialog.setWindowTitle("Checking for Updates")
         # Size by screen ratio for HiDPI friendliness
         screen_rect = QApplication.primaryScreen().geometry()
@@ -757,22 +796,26 @@ class UpdateManager(UpdateCoreMixin, QObject):
         main_layout = QVBoxLayout(self.loading_dialog)
         main_layout.setContentsMargins(20, 24, 20, 24)
         main_layout.setSpacing(16)
+        main_layout.setSizeConstraint(QLayout.SetMinimumSize)
         
-        # Try to load and resize the icon (HiDPI-aware 72x72 logical)
+        # Try to load and resize the icon (HiDPI-aware 96x96 logical)
         try:
             icon_pixmap = self._load_halgakos_pixmap(96)
             if icon_pixmap:
                 icon_label = QLabel()
+                icon_label.setObjectName("update_loading_icon")
+                icon_label.setStyleSheet("padding: 0px; margin: 0px; border: none;")
                 icon_label.setPixmap(icon_pixmap)
                 icon_label.setAlignment(Qt.AlignCenter)
                 icon_label.setFixedSize(96, 96)
                 main_layout.addWidget(icon_label, 0, Qt.AlignHCenter)
-                main_layout.addSpacing(24)
         except Exception as e:
             print(f"Could not load loading icon: {e}")
         
         # Add loading text
         self.loading_text = QLabel("Checking for updates...")
+        self.loading_text.setObjectName("update_loading_text")
+        self.loading_text.setWordWrap(True)
         self.loading_text.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.loading_text)
         
@@ -811,7 +854,14 @@ class UpdateManager(UpdateCoreMixin, QObject):
         # Start text animation
         animate_text()
         
-        # Show the dialog
+        # Resolve the inherited font/style before calculating room for all rows.
+        self.loading_dialog.ensurePolished()
+        main_layout.activate()
+        minimum = main_layout.minimumSize().expandedTo(self.loading_dialog.minimumSize())
+        self.loading_dialog.setMinimumSize(minimum)
+        self.loading_dialog.resize(self.loading_dialog.sizeHint().expandedTo(minimum))
+        if parent:
+            self.loading_dialog.move(parent.geometry().center() - self.loading_dialog.rect().center())
         self.loading_dialog.show()
     
     def _close_loading_dialog(self):
@@ -1810,29 +1860,7 @@ class UpdateManager(UpdateCoreMixin, QObject):
                 # Create a batch file to handle the update
                 # Note: uses ping instead of timeout for compatibility
                 # with CREATE_NO_WINDOW (timeout requires console input)
-                batch_content = f"""@echo off
-echo Updating Glossarion...
-echo Waiting for current version to close...
-ping -n 4 127.0.0.1 > nul
-
-:: Delete the old executable
-echo Deleting old version...
-if exist "{current_exe}" (
-    del /f /q "{current_exe}"
-    if exist "{current_exe}" (
-        echo Failed to delete old version, retrying...
-        ping -n 3 127.0.0.1 > nul
-        del /f /q "{current_exe}"
-    )
-)
-
-:: Start the new version
-echo Starting new version...
-start "" "{update_file}"
-
-:: Clean up this batch file
-(goto) 2>nul & del "%~f0"
-"""
+                batch_content, launch_path = _windows_update_script(current_exe, update_file)
                 batch_path = os.path.join(current_dir, "update_glossarion.bat")
                 with open(batch_path, 'w') as f:
                     f.write(batch_content)
@@ -1855,8 +1883,8 @@ start "" "{update_file}"
                 
                 print(f"[DEBUG] Update batch file created: {batch_path}")
                 print(f"[DEBUG] Batch process PID: {proc.pid}")
-                print(f"[DEBUG] Will delete: {current_exe}")
-                print(f"[DEBUG] Will start: {update_file}")
+                print(f"[DEBUG] Current executable: {current_exe}")
+                print(f"[DEBUG] Will start: {launch_path}")
             else:
                 # Running as script, just start the new exe
                 import subprocess

@@ -168,3 +168,35 @@ def test_update_manager_uses_two_columns_and_keeps_asset_selection(app, tmp_path
     assert dialog.findChild(update_manager.ReleaseNotesBrowser).height() > group.height()
     dialog.close()
     window.deleteLater()
+
+
+
+def test_release_heading_emoji_aliases_render_without_changing_authored_text(app):
+    browser = update_manager.ReleaseNotesBrowser()
+    notes = "## :tools: Fixes\n\n## :package: Packages\n\n- my exact release note\n\n## \U0001f6e0\ufe0f Existing emoji"
+    browser.set_release_notes(notes)
+    rendered = browser.toPlainText()
+    assert '\U0001f6e0\ufe0f Fixes' in rendered
+    assert '\U0001f4e6 Packages' in rendered
+    assert 'my exact release note' in rendered
+    assert ':tools:' not in rendered and ':package:' not in rendered
+    assert '\U0001f6e0\ufe0f Existing emoji' in rendered
+    browser.close()
+
+
+def test_release_emoji_aliases_leave_code_escaped_text_and_urls_unchanged(app):
+    browser = update_manager.ReleaseNotesBrowser()
+    notes = ('## :tools: Fixes\n\n`:tools:` and ``:package:``\n\n'
+             '```text\n:tools: :package:\n```\n\n'
+             '~~~text\n:package:\n~~~\n\n'
+             '[link](https://example.com/:package:)\n\n'
+             r'\:tools: stays literal' + '\n\nhttps://example.com/:tools:')
+    browser.set_release_notes(notes)
+    plain = browser.toPlainText()
+    assert '\U0001f6e0\ufe0f Fixes' in plain
+    assert ':tools: and :package:' in plain
+    assert ':tools: :package:' in plain
+    assert ':tools: stays literal' in plain
+    assert 'https://example.com/:tools:' in plain
+    assert 'https://example.com/:package:' in browser.toHtml()
+    browser.close()

@@ -247,3 +247,34 @@ def test_cached_background_check_preserves_previous_release_without_writes(ui, m
     pump_until(lambda: not manager._check_in_progress)
     assert manager.latest_release['tag_name'] == 'v9.15.0' and manager.update_available
     assert not events['saves'] and not events['shown'] and not events['messages']
+
+
+
+@pytest.mark.parametrize('font_points', [10, 16, 24])
+def test_checking_dialog_keeps_icon_text_progress_and_cancel_separate(ui, font_points):
+    app, gui, button, manager, events = ui
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QLabel, QProgressBar
+    font = gui.font()
+    font.setPointSize(font_points)
+    gui.setFont(font)
+    gui.setStyleSheet(f'QLabel {{ padding: 14px; font-size: {font_points}pt; }}')
+    manager.base_dir = str(Path(__file__).resolve().parents[1] / 'src')
+    manager._show_loading_dialog()
+    QTest.qWait(30)
+    dialog = manager.loading_dialog
+    icon = dialog.findChild(QLabel, 'update_loading_icon')
+    text = dialog.findChild(QLabel, 'update_loading_text')
+    assert text.font().pointSize() == font_points
+    progress = dialog.findChild(QProgressBar)
+    cancel = dialog.findChild(QPushButton, 'cancel_update_check')
+    assert icon is not None and not icon.pixmap().isNull()
+    controls = [icon, text, progress, cancel]
+    for control in controls:
+        rect = control.geometry()
+        rect.moveTopLeft(control.mapTo(dialog, QPoint(0, 0)))
+        assert dialog.rect().contains(rect), (font_points, control.objectName(), rect, dialog.rect())
+    for above, below in zip(controls, controls[1:]):
+        assert above.mapTo(dialog, QPoint(0, above.height())).y() + 8 <= below.mapTo(dialog, QPoint(0, 0)).y()
+    assert not dialog.isModal()
+    manager._close_loading_dialog()

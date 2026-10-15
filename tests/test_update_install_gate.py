@@ -68,3 +68,45 @@ def test_verified_macos_package_opens_without_windows_replacement(manager, tmp_p
     monkeypatch.setattr(update_manager.QDesktopServices, 'openUrl', lambda url: opened.append(url.toLocalFile()) or True)
     manager.install_update(str(path))
     assert opened == [str(path).replace('\\', '/')]
+
+
+
+@pytest.mark.parametrize('same_name', [True, False])
+def test_frozen_install_launches_normal_exe_and_preserves_staging_until_shutdown(manager, tmp_path, monkeypatch, same_name):
+    from types import SimpleNamespace
+    current = tmp_path / 'Glossarion v9.14.6.exe'
+    current.write_bytes(b'running old executable')
+    update = Path(str(current) + '.new') if same_name else tmp_path / 'Glossarion v9.14.7.exe'
+    payload = b'verified executable bytes fixture'
+    update.write_bytes(payload)
+    manager._verified_download_asset = {'size': len(payload), '_sha256': hashlib.sha256(payload).hexdigest()}
+    monkeypatch.setattr(manager, '_detect_platform', lambda: 'windows')
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(current))
+    calls = []
+    monkeypatch.setattr(subprocess, 'Popen', lambda args, **kw: calls.append(('launch', args)) or SimpleNamespace(pid=12345))
+    monkeypatch.setattr(os, '_exit', lambda code: calls.append(('exit', code)))
+    manager.install_update(str(update))
+    script_path = tmp_path / 'update_glossarion.bat'
+    script = script_path.read_text()
+    target = current if same_name else update
+    assert f'start "" "{target}"' in script
+    assert f'start "" "{update}"' not in script if same_name else True
+    assert calls == [('launch', ['cmd.exe', '/c', str(script_path)]), ('exit', 0)]
+    # Creating the handoff must never touch the locked current file or staged bytes.
+    assert current.read_bytes() == b'running old executable'
+    assert update.read_bytes() == payload
+    if same_name:
+        assert f'move /y "{update}" "{current}"' in script
+        assert 'if %update_attempt% GEQ 15 goto update_failed' in script
+        assert f'del /f /q "{current}"' not in script
+        assert script.index('goto start_new') < script.index('goto update_failed') < script.index(':start_new')
+
+
+def test_windows_handoff_escapes_percent_paths_and_disables_delayed_expansion():
+    current = r'C:\owner%name!\Glossarion.exe'
+    staged = current + '.new'
+    script, launch = update_manager._windows_update_script(current, staged)
+    assert launch == current
+    assert 'setlocal DisableDelayedExpansion' in script
+    assert 'owner%%name!' in script and 'owner%name!' not in script

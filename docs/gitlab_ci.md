@@ -297,3 +297,8 @@ Historical desktop source readers retain the reviewed fixture lookup while
 application tests scrub their environment. The source-check job verifies all
 declared fixture paths after that scrub and confirms refs and checkout objects
 are unchanged. It also runs the native-environment regressions.
+
+Linux packaging containers explicitly install `libdbus-1-3` and `libopengl0`
+and check their shared libraries before installing Python build dependencies.
+This supplies the Qt WebEngine baseline present on the original Ubuntu runner;
+the earlier minimal Debian image failed its Qt import check without DBus.
