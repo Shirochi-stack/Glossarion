@@ -493,8 +493,9 @@ def check_onnxruntime(ctx: Context) -> dict[str, Any]:
 
 
 def check_llama_engine(ctx: Context) -> dict[str, Any]:
-    """The built-in llama.cpp engine: ``llama_cpp`` imports at ``ENGINE_VERSION`` and its four native
-    libraries load (``llama_print_system_info``). Host without llama-cpp-python: skipped."""
+    """The built-in llama.cpp engine: ``llama_cpp`` imports at ``ENGINE_VERSION``, its native libraries load
+    (``llama_print_system_info``) and so does libmtmd, the vision models' image encoder (our own
+    llama-cpp-python build). Host without llama-cpp-python: skipped."""
     ctx.need("llama_cpp")
     from glossarion_mobile.services.local_llm.selfcheck import engine_check
 
@@ -509,6 +510,17 @@ def check_llama_suite(ctx: Context) -> dict[str, Any]:
     from glossarion_mobile.services.local_llm.selfcheck import llama_suite
 
     return llama_suite(emit=rb.emit_marker, log=lambda text: print(text, flush=True))
+
+
+def check_llama_vision(ctx: Context) -> dict[str, Any]:
+    """Suite ``llama``, second check: the same preset with its vision projector describes a tiny test
+    picture through ``UnifiedClient.send_image`` (the chat's Vision mode / image jobs) -> ``local/`` ->
+    libmtmd; prints the GLOSSARION_LLAMA_VISION line."""
+    ctx.require_bootstrap()
+    ctx.need("llama_cpp")
+    from glossarion_mobile.services.local_llm.selfcheck import llama_vision_suite
+
+    return llama_vision_suite(emit=rb.emit_marker, log=lambda text: print(text, flush=True))
 
 
 def check_thread_stack(ctx: Context) -> dict[str, Any]:
@@ -669,7 +681,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("llama_engine", check_llama_engine),
     ),
     "e2e": _e2e_checks(),
-    "llama": (("llama_download_generate", check_llama_suite),),
+    "llama": (("llama_download_generate", check_llama_suite), ("llama_vision_describe", check_llama_vision)),
 }
 
 

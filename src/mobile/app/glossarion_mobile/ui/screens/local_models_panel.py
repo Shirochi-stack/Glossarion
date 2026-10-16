@@ -6,15 +6,22 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   defaults (Prefs ``local_llm_settings``) and the engine's system info after the first load. Without
   llama-cpp-python (a desktop dev run) the card says the engine is unavailable; nothing crashes.
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
-  model. Download (one tap: Hugging Face file, download with progress, load, use as the model) /
-  progress with Pause and Cancel / Resume / Use / In use / Retry. The ⋮ menu edits, removes the preset
-  or deletes the file; Add preset and Restore defaults close the card.
+  model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
+  projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
+  Cancel / Resume / Use / In use / Retry. Rows of models that read images say so ("Reads images").
+  The ⋮ menu edits, removes the preset, adds the image support to a text-only download or deletes the
+  file; Add preset and Restore defaults close the card.
 * **Add from Hugging Face**: any repo, repo:quant or huggingface.co link; the usual quant is picked
   (else a file chooser), optionally saved as a preset.
 * **Downloaded models**: files no preset covers, and paused downloads (Resume / Cancel).
 
 Models are ``local/<stem>`` (the GGUF file name), routed by the shared ``local/`` route to the in-app
-endpoint, so the chosen model works for chat, translation, glossary and every other job.
+endpoint, so the chosen model works for chat, translation, glossary and every other job (a vision model
+also for the chat's Vision mode and image jobs).
+
+``OnDeviceFlow`` is the one-tap logic without the tab's controls (presets, download incl. the projector,
+RAM hint, load, use): ``LocalModelsPanel`` is built on it, and the Welcome page's "Run on this phone"
+buttons use it as it is (``on_change`` re-renders them).
 """
 
 from __future__ import annotations
@@ -32,12 +39,16 @@ from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.theme import HIT_TARGET, semantic
 
-__all__ = ["FileChooser", "LocalModelsPanel", "LocalPresetEditor"]
+__all__ = ["FileChooser", "LocalModelsPanel", "LocalPresetEditor", "OnDeviceFlow", "RAM_HINTS"]
 
 log = logging.getLogger("glossarion.models")
 
 HF_HINT = "unsloth/Qwen3.5-2B-GGUF · …/resolve/main/x.gguf"
 STATE_TEXT = {"idle": "Not loaded", "loading": "Loading…", "ready": "Ready", "generating": "Generating…"}
+VISION_TEXT = "Reads images"
+#: ``service.preset_ram_check`` verdict -> (mark, words) of the RAM hint
+RAM_HINTS = {"ok": ("✓", "fits this phone"), "confirm": ("⚠", "tight on free RAM"), "refuse": ("✕", "too big for this phone"),
+             "unknown": ("", "")}
 
 
 def _push(*controls: Any) -> None:
@@ -152,17 +163,19 @@ class FileChooser:
         page.show_dialog(self.dialog)
 
 
-class LocalModelsPanel:
-    """The On-device tab. ``build()`` returns its control; nothing runs until ``did_show()``.
+class OnDeviceFlow:
+    """The one-tap on-device flow over ``service`` (the app's ``LocalEngineService``; downloads outlive any
+    screen): presets, Hugging Face lookup, model + vision projector download, the RAM hint, load and use.
 
-    ``service``: the app's ``LocalEngineService`` (downloads outlive this screen). ``confirm(title, body,
-    label)`` and ``choose(repo, files)`` (tests) replace the dialogs."""
+    ``confirm(title, body, label)`` and ``choose(repo, files)`` (tests) replace the dialogs; ``on_change()``
+    runs after every state change a screen shows (``LocalModelsPanel`` re-renders itself instead)."""
 
     def __init__(self, *, service: Any, prefs: Any = None, page: Any = None,
                  use_model: Optional[Callable[[str], Any]] = None, add_model: Optional[Callable[[str], Any]] = None,
                  current_model: Optional[Callable[[], str]] = None, notify: Optional[Callable[..., Any]] = None,
                  spawn: Optional[Callable[[Any], Any]] = None,
-                 confirm: Optional[Callable[..., Any]] = None, choose: Optional[Callable[..., Any]] = None) -> None:
+                 confirm: Optional[Callable[..., Any]] = None, choose: Optional[Callable[..., Any]] = None,
+                 on_change: Optional[Callable[[], Any]] = None) -> None:
         self.service = service
         self.prefs = prefs
         self.page = page
@@ -178,9 +191,17 @@ class LocalModelsPanel:
         self.errors: dict = {}  # preset key -> last error (the row shows Retry)
         self.preset_stems: dict = {}  # preset key -> stem of its download (file-less presets)
         self.busy: set = set()  # preset keys whose one-tap flow runs
+        self.on_change = on_change
         self.editor: Optional[LocalPresetEditor] = None
         self.last_dialog: Any = None
         self.control: Optional[ft.Control] = None
+
+    def render(self, push: bool = True) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:
+                log.debug("on-device flow listener failed", exc_info=True)
 
     # ---- helpers ----------------------------------------------------------------------------------
 
@@ -200,6 +221,33 @@ class LocalModelsPanel:
     @staticmethod
     def preset_key(preset: dict) -> str:
         return f"{str(preset.get('repo') or '').casefold()}|{preset.get('file') or preset.get('quant') or ''}"
+
+    def active_download(self, stem: Optional[str]) -> Optional[dl.DownloadState]:
+        """The running or paused download of ``stem``: the model's, else its vision projector's."""
+        if not stem:
+            return None
+        for key in (stem, self.service.registry.projector_key(stem)):
+            state = self.downloads.states.get(key)
+            if state is not None and (state.running or state.paused):
+                return state
+        return None
+
+    def ram_hint(self, preset: dict) -> tuple:
+        """``(verdict, mark, text)`` of ``preset`` on this phone (``service.preset_ram_check``: the engine's
+        RAM gate for the model's size; "unknown" without a known size)."""
+        try:
+            verdict, message = self.service.preset_ram_check(preset)
+        except Exception:
+            verdict, message = "unknown", ""
+        mark, words = RAM_HINTS.get(verdict, ("", ""))
+        return verdict, mark, message or words
+
+    def is_vision_preset(self, preset: dict, stem: Optional[str] = None) -> bool:
+        """The preset's model reads images: downloaded with its projector, or the preset names one."""
+        stem = stem or self.stem_of_preset(preset)
+        if stem and self.service.registry.resolve(stem):
+            return bool(self.service.is_vision(stem))
+        return bool(preset.get("mmproj"))
 
     def stem_of_preset(self, preset: dict) -> Optional[str]:
         """The downloaded (or downloading) stem of ``preset``."""
@@ -247,6 +295,169 @@ class LocalModelsPanel:
         self.last_dialog = chooser
         chooser.show(self.page)
         return await chooser.future
+
+    # ---- the one-tap flow -------------------------------------------------------------------------
+
+    async def fetch(self, ref: hf.HfRef, *, preset: Optional[dict] = None) -> Optional[str]:
+        """Resolve ``ref`` on Hugging Face, ask for big files, download the model and, when the preset or
+        the repository has one, its vision projector (the same tap); the stem, or None (cancelled /
+        failed: the row or status line says why). A failed projector keeps the model (text only)."""
+        try:
+            listing = await self.service.resolve(ref)
+            file = hf.pick_file(listing.files, quant=ref.quant, file=ref.file)
+            if file is None:
+                file = await self.choose(ref.repo, list(listing.files))
+                if file is None:
+                    return None
+                if file.split:
+                    raise hf.HfError("Split GGUF files are not supported yet")
+        except hf.HfError as exc:
+            raise _Failed(str(exc)) from exc
+        projector = hf.pick_projector(listing.projectors, (preset or {}).get("mmproj") or None)
+        registry = self.service.registry
+        existing = registry.find(ref.repo, file.path)
+        stem = existing or self.service.spec_for(ref.repo, listing.commit, file).stem
+        if preset is not None:
+            self.preset_stems[self.preset_key(preset)] = stem
+        need_projector = projector is not None and not (existing and self.service.is_vision(existing))
+        total = (0 if existing else int(file.size or 0)) + (int(projector.size or 0) if need_projector else 0)
+        pending = self.downloads.pending_spec(stem) or self.downloads.pending_spec(registry.projector_key(stem))
+        if total >= dl.CONFIRM_BYTES and not pending:
+            names = ([] if existing else [file.name]) + ([f"{projector.name} (image support)"] if need_projector else [])
+            if not await self.ask("Download model", f"Download {dl.format_bytes(total)} from Hugging Face?\n\n"
+                                                    f"{ref.repo} · {' + '.join(names)}", "Download"):
+                return None
+        self.render()
+        if not existing:
+            state = await self.service.download(self.service.spec_for(ref.repo, listing.commit, file))
+            if state.error:
+                raise _Failed(state.error)
+            if not state.done:
+                return None
+        if need_projector:
+            state = await self.service.download(self.service.projector_spec_for(stem, ref.repo, listing.commit,
+                                                                                projector))
+            if state.error:
+                self.say(f"Image support was not downloaded ({state.error}); the model still works for text")
+            elif not state.done:
+                return None
+        return stem
+
+    async def activate(self, stem: str, label: str = "") -> bool:
+        """Load ``stem`` (asking when RAM is tight) and make ``local/<stem>`` the model."""
+        verdict, message = self.service.ram_check(stem)
+        if verdict == "refuse":
+            raise _Failed(message)
+        force = False
+        if verdict == "confirm":
+            if not await self.ask("Load model", message, "Load anyway"):
+                return False
+            force = True
+        available, reason = self.service.engine_status()
+        if available:
+            ok, error = await self.service.load(stem, force=force)
+            if not ok:
+                raise _Failed(error or "Could not load the model")
+        model = f"local/{stem}"
+        if self.add_model is not None:
+            try:
+                self.add_model(model)
+            except Exception:
+                pass
+        if self.use_model is not None:
+            try:
+                self.use_model(model)
+            except Exception as exc:
+                raise _Failed(f"Could not switch the model: {exc}") from exc
+        suffix = "" if available else " (the engine is not available in this build)"
+        self.say(f"Model: {model}{f' ({label})' if label else ''}{suffix}")
+        self.render()
+        return True
+
+    async def add_vision(self, index: int) -> bool:
+        """Menu "Add image support": download the projector of a text-only download (the model reloads
+        with it on the next request)."""
+        rows = self.presets()
+        if not 0 <= index < len(rows):
+            return False
+        preset = rows[index]
+        stem = self.stem_of_preset(preset)
+        if not stem or not self.service.registry.resolve(stem):
+            return False
+        key = self.preset_key(preset)
+        self.busy.add(key)
+        self.render()
+        try:
+            ref = hf.HfRef(preset["repo"], preset.get("file") or None, quant=preset.get("quant") or None)
+            await self.fetch(ref, preset=preset)
+            if not self.service.is_vision(stem):
+                self.say(f"{preset['repo']} has no vision projector: this model reads text only")
+                return False
+            self.say(f"local/{stem} reads images now")
+            return True
+        except _Failed as exc:
+            self.say(str(exc))
+            return False
+        finally:
+            self.busy.discard(key)
+            self.render()
+
+    async def get_preset(self, index: int) -> Optional[str]:
+        """The one-tap action: download if needed, load, use. Returns the model id or None."""
+        rows = self.presets()
+        if not 0 <= index < len(rows):
+            return None
+        preset = rows[index]
+        key = self.preset_key(preset)
+        if key in self.busy:
+            return None
+        self.busy.add(key)
+        self.errors.pop(key, None)
+        self.render()
+        try:
+            stem = self.stem_of_preset(preset)
+            if not stem or self.service.registry.resolve(stem) is None:
+                if stem and self.downloads.running(stem):
+                    return None
+                ref = hf.HfRef(preset["repo"], preset.get("file") or None, quant=preset.get("quant") or None)
+                stem = await self.fetch(ref, preset=preset)
+                if not stem:
+                    return None
+            if await self.activate(stem, preset["name"]):
+                return f"local/{stem}"
+            return None
+        except _Failed as exc:
+            self.errors[key] = str(exc)
+            self.say(str(exc))
+            return None
+        finally:
+            self.busy.discard(key)
+            self.render()
+
+    def row_state(self, preset: dict, stem: Optional[str]) -> tuple:
+        """(state, status text) of a preset row: download | downloading | paused | use | in_use | error | busy."""
+        key = self.preset_key(preset)
+        state = self.active_download(stem)
+        current = str(self.current_model() if self.current_model else "") or ""
+        if state is not None and state.running:
+            return "downloading", _download_status(state)
+        if stem and self.service.registry.resolve(stem):
+            loaded = self.service.loaded_stem == stem
+            if current.lower() == f"local/{stem}".lower():
+                return "in_use", "Loaded · in use" if loaded else "In use · loads on the first request"
+            return "use", "Loaded" if loaded else "On this device"
+        if state is not None and state.paused:
+            return "paused", _download_status(state)
+        if key in self.errors:
+            return "error", f"Failed: {self.errors[key]}"
+        if key in self.busy:
+            return "busy", "Looking up the model on Hugging Face…"
+        size = presets.download_size(preset)
+        return "download", f"Not downloaded · {dl.format_bytes(size)}" if size else "Not downloaded"
+
+
+class LocalModelsPanel(OnDeviceFlow):
+    """The On-device tab. ``build()`` returns its control; nothing runs until ``did_show()``."""
 
     # ---- build ------------------------------------------------------------------------------------
 
@@ -341,6 +552,8 @@ class LocalModelsPanel:
         text = STATE_TEXT.get(snap.state, snap.state)
         if snap.model and snap.state != "idle":
             text = f"{text} · {snap.model}"
+            if getattr(snap, "vision", False):
+                text += " · reads images"
         if snap.queue:
             text += f" · {snap.queue} waiting"
         self.engine_state.value = text
@@ -381,99 +594,6 @@ class LocalModelsPanel:
         if self.control is None:
             return
         self.render()
-
-    async def fetch(self, ref: hf.HfRef, *, preset: Optional[dict] = None) -> Optional[str]:
-        """Resolve ``ref`` on Hugging Face, ask for big files, download; the stem, or None (cancelled /
-        failed: the row or status line says why)."""
-        try:
-            commit, files = await self.service.resolve(ref)
-            file = hf.pick_file(files, quant=ref.quant, file=ref.file)
-            if file is None:
-                file = await self.choose(ref.repo, files)
-                if file is None:
-                    return None
-                if file.split:
-                    raise hf.HfError("Split GGUF files are not supported yet")
-        except hf.HfError as exc:
-            raise _Failed(str(exc)) from exc
-        existing = self.service.registry.find(ref.repo, file.path)
-        if existing:
-            return existing
-        spec = self.service.spec_for(ref.repo, commit, file)
-        if preset is not None:
-            self.preset_stems[self.preset_key(preset)] = spec.stem
-        if file.size >= dl.CONFIRM_BYTES and not self.downloads.pending_spec(spec.stem):
-            if not await self.ask("Download model", f"Download {dl.format_bytes(file.size)} from Hugging Face?\n\n"
-                                                    f"{ref.repo} · {file.name}", "Download"):
-                return None
-        self.render()
-        state = await self.service.download(spec)
-        if state.error:
-            raise _Failed(state.error)
-        return spec.stem if state.done else None
-
-    async def activate(self, stem: str, label: str = "") -> bool:
-        """Load ``stem`` (asking when RAM is tight) and make ``local/<stem>`` the model."""
-        verdict, message = self.service.ram_check(stem)
-        if verdict == "refuse":
-            raise _Failed(message)
-        force = False
-        if verdict == "confirm":
-            if not await self.ask("Load model", message, "Load anyway"):
-                return False
-            force = True
-        available, reason = self.service.engine_status()
-        if available:
-            ok, error = await self.service.load(stem, force=force)
-            if not ok:
-                raise _Failed(error or "Could not load the model")
-        model = f"local/{stem}"
-        if self.add_model is not None:
-            try:
-                self.add_model(model)
-            except Exception:
-                pass
-        if self.use_model is not None:
-            try:
-                self.use_model(model)
-            except Exception as exc:
-                raise _Failed(f"Could not switch the model: {exc}") from exc
-        suffix = "" if available else " (the engine is not available in this build)"
-        self.say(f"Model: {model}{f' ({label})' if label else ''}{suffix}")
-        self.render()
-        return True
-
-    async def get_preset(self, index: int) -> Optional[str]:
-        """The one-tap action: download if needed, load, use. Returns the model id or None."""
-        rows = self.presets()
-        if not 0 <= index < len(rows):
-            return None
-        preset = rows[index]
-        key = self.preset_key(preset)
-        if key in self.busy:
-            return None
-        self.busy.add(key)
-        self.errors.pop(key, None)
-        self.render()
-        try:
-            stem = self.stem_of_preset(preset)
-            if not stem or self.service.registry.resolve(stem) is None:
-                if stem and self.downloads.running(stem):
-                    return None
-                ref = hf.HfRef(preset["repo"], preset.get("file") or None, quant=preset.get("quant") or None)
-                stem = await self.fetch(ref, preset=preset)
-                if not stem:
-                    return None
-            if await self.activate(stem, preset["name"]):
-                return f"local/{stem}"
-            return None
-        except _Failed as exc:
-            self.errors[key] = str(exc)
-            self.say(str(exc))
-            return None
-        finally:
-            self.busy.discard(key)
-            self.render()
 
     async def download_typed(self) -> Optional[str]:
         text = (self.hf_field.value or "").strip()
@@ -573,6 +693,8 @@ class LocalModelsPanel:
             stem = self.stem_of_preset(preset)
             if stem:
                 listed.add(stem)
+                if self.row_state(preset, stem)[0] in ("downloading", "paused"):  # the row shows its projector too
+                    listed.add(self.service.registry.projector_key(stem))
             rows.append(self._preset_row(index, preset, stem))
         self.preset_column.controls = rows
         others: list = []
@@ -588,29 +710,12 @@ class LocalModelsPanel:
         if push:
             _push(self.preset_column, self.other_card)
 
-    def row_state(self, preset: dict, stem: Optional[str]) -> tuple:
-        """(state, status text) of a preset row: download | downloading | paused | use | in_use | error | busy."""
-        key = self.preset_key(preset)
-        state = self.downloads.states.get(stem) if stem else None
-        current = str(self.current_model() if self.current_model else "") or ""
-        if state is not None and state.running:
-            return "downloading", state.status
-        if stem and self.service.registry.resolve(stem):
-            loaded = self.service.loaded_stem == stem
-            if current.lower() == f"local/{stem}".lower():
-                return "in_use", "Loaded · in use" if loaded else "In use · loads on the first request"
-            return "use", "Loaded" if loaded else "On this device"
-        if state is not None and state.paused:
-            return "paused", state.status
-        if key in self.errors:
-            return "error", f"Failed: {self.errors[key]}"
-        if key in self.busy:
-            return "busy", "Looking up the model on Hugging Face…"
-        size = preset.get("size")
-        return "download", f"Not downloaded · {dl.format_bytes(size)}" if size else "Not downloaded"
-
     def _preset_row(self, index: int, preset: dict, stem: Optional[str]) -> ft.Control:
         state, status = self.row_state(preset, stem)
+        if state == "download":
+            _verdict, mark, words = self.ram_hint(preset)
+            if mark:
+                status += f" · {mark} {RAM_HINTS[_verdict][1]}"
         lines: list = [
             ft.Text(preset["name"], weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             ft.Text(_preset_ref(preset), theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=1,
@@ -618,6 +723,8 @@ class LocalModelsPanel:
         ]
         if preset.get("note"):
             lines.append(_small(preset["note"], max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+        if self.is_vision_preset(preset, stem):
+            lines.append(_vision_line(f"local-preset-vision-{index}"))
         status_text = _small(status, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, key=f"local-preset-status-{index}")
         if state == "error":
             status_text.color = ft.Colors.ERROR
@@ -625,22 +732,27 @@ class LocalModelsPanel:
             status_text.color = semantic("success")
         lines.append(status_text)
         body: list = [ft.Row([ft.Column(lines, spacing=0, tight=True, expand=True)], spacing=0)]
-        download = self.downloads.states.get(stem) if stem else None
+        download = self.active_download(stem)
         if state in ("downloading", "paused") and download is not None:
             body.append(ft.ProgressBar(value=download.fraction, border_radius=4, key=f"local-preset-progress-{index}"))
         trailing: list = [self._action(index, state, stem)]
         if state == "downloading" and stem:
             trailing.append(ft.IconButton(icon=ft.Icons.PAUSE, tooltip="Pause", size_constraints=HIT_TARGET,
-                                          key=f"local-preset-pause-{index}", on_click=lambda e, s=stem: self.pause(s)))
+                                          key=f"local-preset-pause-{index}",
+                                          on_click=lambda e, s=(download.stem if download else stem): self.pause(s)))
         if state in ("downloading", "paused") and stem:
             trailing.append(ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Cancel", size_constraints=HIT_TARGET,
-                                          key=f"local-preset-cancel-{index}", on_click=lambda e, s=stem: self.cancel(s)))
+                                          key=f"local-preset-cancel-{index}",
+                                          on_click=lambda e, s=(download.stem if download else stem): self.cancel(s)))
         items = [
             ft.PopupMenuItem(content="Edit / rename", icon=ft.Icons.EDIT_OUTLINED,
                              on_click=lambda e, i=index: self.open_editor(i)),
             ft.PopupMenuItem(content="Remove preset", icon=ft.Icons.PLAYLIST_REMOVE,
                              on_click=lambda e, i=index: self.confirm_remove(i)),
         ]
+        if state in ("use", "in_use") and stem and not self.service.is_vision(stem):
+            items.append(ft.PopupMenuItem(content="Add image support", icon=ft.Icons.IMAGE_OUTLINED,
+                                          on_click=lambda e, i=index: self.spawn(self.add_vision(i))))
         if state in ("use", "in_use") and stem:
             items.append(ft.PopupMenuItem(content="Delete file", icon=ft.Icons.DELETE_OUTLINE,
                                           on_click=lambda e, s=stem: self.confirm_delete(s)))
@@ -677,7 +789,8 @@ class LocalModelsPanel:
         if not 0 <= index < len(rows):
             return None
         stem = self.stem_of_preset(rows[index])
-        if stem and await self.resume(stem):
+        paused = self.active_download(stem)
+        if paused is not None and await self.resume(paused.stem):
             return await self.get_preset(index)
         return None
 
@@ -686,12 +799,14 @@ class LocalModelsPanel:
         current = str(self.current_model() if self.current_model else "") or ""
         in_use = current.lower() == f"local/{stem}".lower()
         status = ("Loaded · " if loaded else "") + ("in use · " if in_use else "") + dl.format_bytes(entry.get("size"))
+        vision = [_vision_line(f"local-other-vision-{stem}")] if entry.get("mmproj") else []
         return ft.Container(
             key=f"local-other-{stem}", border_radius=12, bgcolor=ft.Colors.SURFACE_CONTAINER,
             padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
             content=ft.Column([
                 ft.Text(f"local/{stem}", weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 _small(f"{entry.get('repo', '')} · {status}", max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                *vision,
                 ft.Row([
                     ft.TextButton(content="In use" if in_use else "Use", disabled=in_use, key=f"local-other-use-{stem}",
                                   on_click=lambda e, s=stem: self.spawn(self._use_other(s))),
@@ -722,8 +837,8 @@ class LocalModelsPanel:
             key=f"local-dl-{stem}", border_radius=12, bgcolor=ft.Colors.SURFACE_CONTAINER,
             padding=ft.Padding.only(left=12, top=6, bottom=6, right=0),
             content=ft.Column([
-                ft.Text(f"local/{stem}", weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                _small(state.status, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(f"local/{_owner(stem)}", weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                _small(_download_status(state), max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 ft.ProgressBar(value=state.fraction, border_radius=4),
                 ft.Row(buttons, spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END),
             ], spacing=2, tight=True),
@@ -793,3 +908,19 @@ class LocalModelsPanel:
 
 class _Failed(Exception):
     """A step of the one-tap flow that failed (the message is shown)."""
+
+
+def _owner(key: str) -> str:
+    """The model stem of a download key (``<stem>.mmproj`` is its vision projector)."""
+    return key[: -len(dl.PROJECTOR_SUFFIX)] if key.endswith(dl.PROJECTOR_SUFFIX) else key
+
+
+def _download_status(state: dl.DownloadState) -> str:
+    return f"Image support · {state.status}" if state.stem.endswith(dl.PROJECTOR_SUFFIX) else state.status
+
+
+def _vision_line(key: str) -> ft.Control:
+    """The "Reads images" mark of a vision model's row."""
+    return ft.Row([ft.Icon(ft.Icons.IMAGE_OUTLINED, size=14, color=semantic("success")),
+                   _small(VISION_TEXT, color=semantic("success"), max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)],
+                  spacing=4, tight=True, key=key)

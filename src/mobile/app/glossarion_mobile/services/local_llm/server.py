@@ -8,8 +8,10 @@ appends ``/chat/completions``, so the token travels in the path and the dummy Be
 
 * ``GET /<token>/v1/models``: the downloaded models;
 * ``POST /<token>/v1/chat/completions``: streaming (SSE, ``data: [DONE]``) and plain answers in the
-  OpenAI schema with ``usage``. Errors use the OpenAI error shape (404 ``model_not_found``, 400
-  ``context_length_exceeded`` / no vision, 409 busy with a job's model, 503 queue full);
+  OpenAI schema with ``usage``. A vision model (downloaded with its projector) takes ``image_url``
+  parts with ``data:`` URLs; a text-only model answers 400 "no vision support". Errors use the OpenAI
+  error shape (404 ``model_not_found``, 400 ``context_length_exceeded`` / no vision / bad image, 409
+  busy with a job's model, 503 queue full);
 * ``GET /<token>/health``: ``{"state", "model", "queue"}``.
 
 A generation stops within a few tokens when the client goes away (Stop in the app closes the
@@ -41,7 +43,7 @@ log = logging.getLogger("glossarion.local_llm")
 
 __all__ = ["ChatRun", "LocalLLMError", "LocalLLMServer", "ThinkStripper", "client_gone"]
 
-MAX_BODY_BYTES = 16 * 1024 * 1024
+MAX_BODY_BYTES = 32 * 1024 * 1024  # base64 photos (the service scales them down)
 MAX_DRAIN_BYTES = 1024 * 1024
 
 

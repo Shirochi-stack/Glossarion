@@ -4,8 +4,12 @@ Storage (``models_dir()`` = ``GLOSSARION_MODELS_DIR``, ``<data>/models`` on the 
 
 * ``<stem>.gguf``: a verified model; ``<stem>`` is the file name without ``.gguf`` (``-<owner>`` is
   appended when another repository already brought that name). The model id is ``local/<stem>``.
-* ``models.json``: the registry ``{stem: {repo, file, revision, sha256, size, downloaded_at}}``,
+* ``models.json``: the registry ``{stem: {repo, file, revision, sha256, size, downloaded_at[, mmproj]}}``,
   written atomically (temp file, fsync, ``os.replace``).
+* ``<stem>.mmproj.gguf``: the vision projector of a multimodal model (``mmproj-*.gguf`` of the same
+  repository), downloaded right after the model in the same tap with the same resume / sha256 rules
+  (``DownloadSpec(kind="mmproj", owner=<stem>)``, download key ``<stem>.mmproj``) and recorded as the
+  model's ``mmproj`` entry ``{file, revision, sha256, size, downloaded_at}``. A model with one sees images.
 * ``<stem>.gguf.part`` + ``<stem>.gguf.part.json``: an unfinished download and what it is
   (``{url, repo, file, revision, size, sha256, stem}``). Pause keeps both, Cancel deletes both; a part
   found at start is listed as paused and never resumes on its own.
@@ -47,6 +51,8 @@ __all__ = [
 MODELS_ENV = "GLOSSARION_MODELS_DIR"
 REGISTRY_NAME = "models.json"
 PART_SUFFIX = ".part"
+#: ``<stem>.mmproj``: the download key and file stem of a model's vision projector
+PROJECTOR_SUFFIX = ".mmproj"
 CHUNK = 1024 * 1024
 CONNECT_TIMEOUT = 30.0
 READ_TIMEOUT = 60.0
@@ -102,6 +108,28 @@ class Registry:
     def file_path(self, stem: str) -> str:
         return os.path.join(self.root, f"{stem}.gguf")
 
+    @staticmethod
+    def projector_key(stem: str) -> str:
+        """The download key (and file stem) of ``stem``'s vision projector."""
+        return f"{stem}{PROJECTOR_SUFFIX}"
+
+    def projector_path(self, stem: str) -> Optional[str]:
+        """The vision projector file of a downloaded ``stem``, or None (a text-only model)."""
+        entry = self.load().get(stem) or {}
+        return self.file_path(self.projector_key(stem)) if entry.get("mmproj") else None
+
+    def attach_projector(self, stem: str, entry: dict) -> bool:
+        """Record a finished projector download on its model (False when the model is gone: the
+        projector file is deleted then)."""
+        with self._lock:
+            entries = self.load()
+            if stem not in entries:
+                _remove(self.file_path(self.projector_key(stem)))
+                return False
+            entries[stem] = dict(entries[stem], mmproj=dict(entry))
+            self.save(entries)
+            return True
+
     def load(self) -> dict:
         with self._lock:
             try:
@@ -114,7 +142,11 @@ class Registry:
             out: dict = {}
             for stem, entry in data.items():
                 if isinstance(entry, dict) and os.path.isfile(self.file_path(str(stem))):
-                    out[str(stem)] = dict(entry)
+                    entry = dict(entry)
+                    if entry.get("mmproj") and not (isinstance(entry["mmproj"], dict) and os.path.isfile(
+                            self.file_path(self.projector_key(str(stem))))):
+                        entry.pop("mmproj", None)  # a projector file that went away: text only
+                    out[str(stem)] = entry
             return out
 
     def save(self, entries: dict) -> None:
@@ -137,6 +169,7 @@ class Registry:
                 found = True
             except FileNotFoundError:
                 pass
+            _remove(self.file_path(self.projector_key(stem)))
             self.save(entries)
             return found
 
@@ -227,7 +260,9 @@ class DownloadSpec:
     revision: str
     size: int
     sha256: Optional[str]
-    stem: str
+    stem: str  # the download key and file stem (``<owner>.mmproj`` for a projector)
+    kind: str = "model"  # model | mmproj
+    owner: str = ""  # mmproj: the model's stem
 
     @property
     def url(self) -> str:
@@ -294,7 +329,7 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
     part = final + PART_SUFFIX
     sidecar = part + ".json"
     meta = {"url": spec.url, "repo": spec.repo, "file": spec.file, "revision": spec.revision,
-            "size": spec.size, "sha256": spec.sha256, "stem": spec.stem}
+            "size": spec.size, "sha256": spec.sha256, "stem": spec.stem, "kind": spec.kind, "owner": spec.owner}
     try:
         with open(sidecar, encoding="utf-8") as handle:
             old = json.load(handle)
@@ -430,7 +465,11 @@ def download_blocking(spec: DownloadSpec, registry: Registry, *, progress: Calla
     _remove(sidecar)
     entry = {"repo": spec.repo, "file": spec.file, "revision": spec.revision, "sha256": digest, "size": have,
              "downloaded_at": int(time.time())}
-    registry.add(spec.stem, entry)
+    if spec.kind == "mmproj":
+        if not registry.attach_projector(spec.owner, entry):
+            raise DownloadError(f"local/{spec.owner} was deleted while its vision part downloaded")
+    else:
+        registry.add(spec.stem, entry)
     return entry
 
 
@@ -543,8 +582,12 @@ class DownloadManager:
         if not meta:
             return None
         try:
+            kind = "mmproj" if meta.get("kind") == "mmproj" else "model"
+            owner = str(meta.get("owner") or "") if kind == "mmproj" else ""
+            if kind == "mmproj" and not owner:
+                return None
             return DownloadSpec(str(meta["repo"]), str(meta["file"]), str(meta["revision"]), int(meta.get("size") or 0),
-                                meta.get("sha256") or None, stem)
+                                meta.get("sha256") or None, stem, kind, owner)
         except (KeyError, TypeError, ValueError):
             return None
 

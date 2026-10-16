@@ -15,14 +15,16 @@
 # Promoting a suite once it has passed in CI is that one line.
 #
 # wheels-android / wheels-ios (.github/workflows/mobile-wheels.yml) build the security pins'
-# mobile wheels (cryptography 50.0.2, Pillow 12.3.0; src/mobile/ci/wheels/wheelhouse.toml), which
+# mobile wheels (cryptography 50.0.2, Pillow 12.3.0) and the on-device engine with vision
+# (llama-cpp-python 0.3.32 with libmtmd; src/mobile/ci/wheels/wheelhouse.toml), which
 # no index has. Android needs prepare + wheels-android, the iOS jobs prepare + wheels-ios. Each
 # build job hands them to flet build through .github/actions/mobile-wheelhouse (strict check +
 # PIP_FIND_LINKS) and checks after every flet build that pip installed them
 # (check_mobile_wheels.py --verify-installed). The smoke jobs assert the versions on the device.
-# The built-in engine's llama-cpp-python comes from pypi.flet.dev; after every flet build
-# `wheels.py verify-site-packages --package llama-cpp-python` checks what pip installed (pinned
-# build, the four libraries, 16 KB alignment, NEEDED / dylibs, resolvable imports, one libc++_shared).
+# The built-in engine's llama-cpp-python is our own build (wheelhouse, build 1000: pypi.flet.dev's
+# build 2 has no libmtmd); after every flet build `wheels.py verify-site-packages --package
+# llama-cpp-python` checks what pip installed (that build, the five libraries incl. libmtmd, 16 KB
+# alignment, NEEDED / dylibs, resolvable imports, one libc++_shared).
 #
 # Optional secrets:
 #   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS (default "upload"),
@@ -77,7 +79,7 @@ on:
         type: boolean
         default: false
       llama_suite:
-        description: Built-in llama.cpp engine suite on the emulator (downloads Qwen3.5 0.8B; auto = ANDROID_LLAMA_SUITE_POLICY decides)
+        description: Built-in llama.cpp engine suite on the emulator (downloads Qwen3.5 0.8B + its vision projector; auto = ANDROID_LLAMA_SUITE_POLICY decides)
         type: choice
         options: [auto, 'on', 'off']
         default: auto
@@ -148,7 +150,8 @@ env:
   IOS_SIMULATOR_SMOKE_POLICY: required
   ANDROID_UI_TESTS_POLICY: optional
   # The built-in llama.cpp engine suite (android-smoke, suite=llama: downloads the Garbage preset GGUF
-  # from Hugging Face, loads it, generates through the in-app server). Optional until it has passed
+  # from Hugging Face, loads it, generates through the in-app server; then adds its vision projector
+  # and describes a tiny test picture through the app's vision path). Optional until it has passed
   # once in CI.
   ANDROID_LLAMA_SUITE_POLICY: optional
 

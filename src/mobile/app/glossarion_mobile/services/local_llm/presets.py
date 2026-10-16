@@ -1,7 +1,10 @@
 """On-device model presets: editable data in Prefs (``PREF_KEY``), never code.
 
 A row is ``{"name", "repo", "file", "quant", "note", "n_ctx"}`` plus, when known, the file's ``size``
-and ``sha256`` (Hugging Face's LFS oid; the download re-reads both from Hugging Face). ``file`` may be
+and ``sha256`` (Hugging Face's LFS oid; the download re-reads both from Hugging Face), and for a vision
+model its projector: ``mmproj`` (the ``mmproj-*.gguf`` file of the same repository, downloaded in the
+same tap), ``mmproj_size`` and ``mmproj_sha256``. Without ``mmproj`` the repository's own projector is
+used when it has one (``hf.pick_projector``). ``file`` may be
 empty (the auto-pick of ``hf.pick_file`` applies), ``quant`` may name one (``Q5_K_M``), ``n_ctx`` 0
 means the engine default. ``DEFAULT_PRESETS`` are only the first-run data; a saved list (even an empty
 one) wins.
@@ -24,7 +27,7 @@ from glossarion_mobile.services.local_llm import hf
 log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
-    "DEFAULT_PRESETS", "LEGACY_PREF_KEY", "MAX_PRESETS", "PREF_KEY", "load_presets", "migrate_legacy",
+    "DEFAULT_PRESETS", "LEGACY_PREF_KEY", "MAX_PRESETS", "PREF_KEY", "download_size", "load_presets", "migrate_legacy",
     "restore_defaults", "save_presets", "validate_preset",
 ]
 
@@ -33,21 +36,31 @@ LEGACY_PREF_KEY = "ollama_presets"
 MAX_PRESETS = 50
 MAX_CTX = 262144
 
-#: First-run presets (verified on Hugging Face 2026-10-16: size and sha256 = the LFS oid). Apache-2.0,
-#: architecture ``qwen35``, 262,144 trained context.
+#: First-run presets (verified on Hugging Face 2026-10-16: size and sha256 = the LFS oid; the vision
+#: projectors 2026-10-17). Apache-2.0, architecture ``qwen35``, 262,144 trained context. Qwen3.5 is
+#: natively multimodal: with its ``mmproj-F16.gguf`` (llama.cpp's mtmd, libmtmd in our own
+#: llama-cpp-python build) the same model reads images, for the chat's Vision mode and image jobs.
 DEFAULT_PRESETS: tuple = (
     {"name": "Garbage", "repo": "unsloth/Qwen3.5-0.8B-GGUF", "file": "Qwen3.5-0.8B-Q4_K_M.gguf", "quant": "",
      "note": "Qwen3.5 0.8B · fastest, rough translations · ~1 GB RAM", "n_ctx": 0, "size": 532517120,
-     "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"},
+     "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+     "mmproj": "mmproj-F16.gguf", "mmproj_size": 204987232,
+     "mmproj_sha256": "56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453"},
     {"name": "Light", "repo": "unsloth/Qwen3.5-2B-GGUF", "file": "Qwen3.5-2B-Q4_K_M.gguf", "quant": "",
      "note": "Qwen3.5 2B · quick drafts on most phones · ~2 GB RAM", "n_ctx": 0, "size": 1280835840,
-     "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"},
+     "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+     "mmproj": "mmproj-F16.gguf", "mmproj_size": 668227264,
+     "mmproj_sha256": "7035e9cb8d7c6a9681d07eef9a364783e86ea4cd73faab2eabb4f43a101830c7"},
     {"name": "Medium", "repo": "unsloth/Qwen3.5-4B-GGUF", "file": "Qwen3.5-4B-Q4_K_M.gguf", "quant": "",
      "note": "Qwen3.5 4B · better quality · needs ~4 GB free RAM", "n_ctx": 0, "size": 2740937888,
-     "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"},
+     "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+     "mmproj": "mmproj-F16.gguf", "mmproj_size": 672423616,
+     "mmproj_sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"},
     {"name": "Heavy", "repo": "unsloth/Qwen3.5-9B-GGUF", "file": "Qwen3.5-9B-Q4_K_M.gguf", "quant": "",
      "note": "Qwen3.5 9B · best of the four · needs ~8 GB free RAM", "n_ctx": 0, "size": 5680522464,
-     "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"},
+     "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+     "mmproj": "mmproj-F16.gguf", "mmproj_size": 918166080,
+     "mmproj_sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"},
 )
 #: The old Ollama presets' tags and the default row each one became.
 LEGACY_TAGS = {"qwen3.5:0.8b": 0, "qwen3.5:2b": 1, "qwen3.5:4b": 2, "qwen3.5:9b": 3}
@@ -82,7 +95,25 @@ def _clean(row: Any) -> Optional[dict]:
         out["size"] = size
     if _SHA_RE.match(sha):
         out["sha256"] = sha
+    mmproj = str(row.get("mmproj") or "").strip()
+    if mmproj:
+        try:
+            out["mmproj"] = hf._check_file(mmproj)
+        except hf.HfError:
+            mmproj = ""
+    if mmproj:
+        mmproj_size = _int(row.get("mmproj_size"), 1, 1 << 40)
+        mmproj_sha = str(row.get("mmproj_sha256") or "").strip().lower()
+        if mmproj_size:
+            out["mmproj_size"] = mmproj_size
+        if _SHA_RE.match(mmproj_sha):
+            out["mmproj_sha256"] = mmproj_sha
     return out
+
+
+def download_size(row: dict) -> int:
+    """Bytes one tap downloads for ``row`` when known: the model plus its vision projector."""
+    return int(row.get("size") or 0) + int(row.get("mmproj_size") or 0)
 
 
 def _defaults() -> list:
@@ -189,6 +220,10 @@ def validate_preset(row: dict, presets: Sequence[dict], index: Optional[int] = N
         old = presets[index]
         if old.get("repo") == clean["repo"] and old.get("file") == clean["file"] and clean["file"]:
             for key in ("size", "sha256"):
+                if old.get(key):
+                    clean[key] = old[key]
+        if old.get("repo") == clean["repo"]:  # the same repository keeps its vision projector
+            for key in ("mmproj", "mmproj_size", "mmproj_sha256"):
                 if old.get(key):
                     clean[key] = old[key]
     return clean, None

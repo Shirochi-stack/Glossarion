@@ -8,6 +8,9 @@ Accepted (``parse_ref``):
 * ``https://huggingface.co/user/repo``, ``…/tree/<rev>``, ``…/blob/<rev>/<file>.gguf``,
   ``…/resolve/<rev>/<file>.gguf``.
 
+``list_repo`` lists a repository's runnable GGUF files and, apart, its vision projectors
+(``mmproj-*.gguf``); ``pick_projector`` chooses the one downloaded with a model (F16 first).
+
 The API base is ``HF_ENDPOINT`` (env ``HF_ENDPOINT``, default ``https://huggingface.co``) so tests and
 mirrors can point it elsewhere. Downloads always use the resolved commit, so a resumed transfer fetches
 the same bytes.
@@ -22,8 +25,8 @@ from typing import Any, Iterable, Optional, Sequence
 from urllib.parse import quote, unquote, urlsplit
 
 __all__ = [
-    "HF_ENDPOINT", "HfError", "HfFile", "HfRef", "QUANT_ORDER", "list_files", "parse_ref", "pick_file",
-    "repo_url", "resolve_url",
+    "HF_ENDPOINT", "HfError", "HfFile", "HfRef", "PROJECTOR_ORDER", "QUANT_ORDER", "RepoFiles", "list_files",
+    "list_repo", "parse_ref", "pick_file", "pick_projector", "repo_url", "resolve_url",
 ]
 
 HF_ENDPOINT = (os.environ.get("HF_ENDPOINT") or "https://huggingface.co").rstrip("/")
@@ -178,6 +181,12 @@ def _get_json(session: Any, url: str, repo: str) -> tuple:
         raise HfError("Hugging Face sent an unreadable answer") from exc
 
 
+def _is_projector(path: str) -> bool:
+    """A vision projector (``mmproj-*.gguf``, unsplit): the image encoder of a multimodal model."""
+    name = path.rsplit("/", 1)[-1].lower()
+    return name.endswith(".gguf") and name.startswith("mmproj") and not _SPLIT_RE.search(name)
+
+
 def _is_candidate(path: str) -> bool:
     name = path.rsplit("/", 1)[-1].lower()
     if not name.endswith(".gguf"):
@@ -185,14 +194,23 @@ def _is_candidate(path: str) -> bool:
     return not (name.startswith("mmproj") or "imatrix" in name)
 
 
-def list_files(ref: HfRef, *, session: Any = None) -> tuple:
-    """``(commit, [HfFile])``: the repo's runnable GGUF files at ``ref.revision`` (vision projectors,
-    imatrix files and split shards after the first are left out; a first shard has ``split=True``)."""
+@dataclasses.dataclass(frozen=True)
+class RepoFiles:
+    """One listing of a repository at a commit: runnable GGUF files and vision projectors."""
+    commit: str
+    files: tuple
+    projectors: tuple
+
+
+def list_repo(ref: HfRef, *, session: Any = None) -> RepoFiles:
+    """The repo's runnable GGUF files at ``ref.revision`` (imatrix files and split shards after the first
+    are left out; a first shard has ``split=True``) and, apart, its vision projectors (``mmproj-*``)."""
     info, _response = _get_json(session, f"{HF_ENDPOINT}/api/models/{ref.repo}/revision/{quote(ref.revision, safe='')}",
                                 ref.repo)
     commit = str((info or {}).get("sha") or ref.revision)
     url: Optional[str] = f"{HF_ENDPOINT}/api/models/{ref.repo}/tree/{quote(commit, safe='')}?recursive=1"
     files: list = []
+    projectors: list = []
     pages = 0
     while url and pages < 20:
         pages += 1
@@ -201,7 +219,8 @@ def list_files(ref: HfRef, *, session: Any = None) -> tuple:
             if not isinstance(entry, dict) or entry.get("type", "file") != "file":
                 continue
             path = str(entry.get("path") or "")
-            if not _is_candidate(path):
+            projector = _is_projector(path)
+            if not projector and not _is_candidate(path):
                 continue
             split = _SPLIT_RE.search(path)
             if split and split.group(1) != "00001":
@@ -209,11 +228,38 @@ def list_files(ref: HfRef, *, session: Any = None) -> tuple:
             lfs = entry.get("lfs") if isinstance(entry.get("lfs"), dict) else {}
             sha = str(lfs.get("oid") or "").lower() or None
             size = int(lfs.get("size") or entry.get("size") or 0)
-            files.append(HfFile(path, size, sha if sha and re.fullmatch(r"[0-9a-f]{64}", sha) else None,
-                                bool(split)))
+            item = HfFile(path, size, sha if sha and re.fullmatch(r"[0-9a-f]{64}", sha) else None, bool(split))
+            (projectors if projector else files).append(item)
         url = _next_link(getattr(response, "headers", {}) or {})
     files.sort(key=lambda f: f.path.lower())
-    return commit, files
+    projectors.sort(key=lambda f: f.path.lower())
+    return RepoFiles(commit, tuple(files), tuple(projectors))
+
+
+def list_files(ref: HfRef, *, session: Any = None) -> tuple:
+    """``(commit, [HfFile])``: the repo's runnable GGUF files (``list_repo`` without the projectors)."""
+    listing = list_repo(ref, session=session)
+    return listing.commit, list(listing.files)
+
+
+#: Projector precision order: F16 (what llama.cpp's own conversions ship; the CPU build runs it),
+#: then BF16, Q8_0 (smaller, slightly worse), F32 (twice the size).
+PROJECTOR_ORDER = ("F16", "BF16", "Q8_0", "F32")
+
+
+def pick_projector(projectors: Iterable[HfFile], file: Optional[str] = None) -> Optional[HfFile]:
+    """The vision projector to download with a model: ``file`` when the preset names one (None when the
+    repository does not have it), else the first of ``PROJECTOR_ORDER``, else the smallest; None when
+    the repository has none (a text-only model)."""
+    projectors = [p for p in projectors if not p.split]
+    if file:
+        wanted = file.strip("/").lower()
+        return next((p for p in projectors if p.path.lower() == wanted or p.name.lower() == wanted), None)
+    for name in PROJECTOR_ORDER:
+        found = _matches(projectors, name)
+        if found:
+            return found[0]
+    return min(projectors, key=lambda p: (p.size or 0, p.path)) if projectors else None
 
 
 def _next_link(headers: Any) -> Optional[str]:

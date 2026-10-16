@@ -661,3 +661,35 @@ B's acceptance:
 | iOS memory kills for 4B/9B | owner's device check; the RAM gate refuses above 50% of RAM | preset notes say so; the gate prevents a load that would be killed |
 | Client timeout during long CPU generations or queue waits | Windows check with a long chapter; e2e | the local route uses the ollama/lmstudio timeouts; batch off for `local/` jobs |
 | HF changes the resolve/redirect behaviour | download tests against the real HF in the Windows check and the `llama` suite | `hf.py` isolates the URLs and `HF_ENDPOINT` is overridable |
+
+## 8. Vision (2026-10-17, branch `llama-vision`)
+
+Findings:
+
+1. llama-cpp-python 0.3.32's `llama_chat_format.py` has the generic `MTMDChatHandler` (libmtmd; renders
+   the GGUF's own chat template, so `enable_thinking=False` reaches Qwen3.5's template like the text
+   path), `Gemma4ChatHandler(MTMDChatHandler)` and the older llava-style handlers (`Llava15ChatHandler`,
+   `MiniCPMv26ChatHandler`, `Qwen25VLChatHandler`, ...). The vendored llama.cpp's `tools/mtmd` knows the
+   Qwen3-VL family projector (`PROJECTOR_TYPE_QWEN3VL`, deepstack), which the unsloth Qwen3.5
+   `mmproj-*.gguf` files use.
+2. **0.3.32 runs Qwen3.5 vision.** On Windows with the abetlen CPU wheel (which ships `mtmd.dll`),
+   Qwen3.5-0.8B-Q4_K_M + `mmproj-F16.gguf` described a red disc correctly through `LocalEngineService`,
+   the OpenAI SDK (plain and streaming) and `UnifiedClient.send_image` (prompt 825 tokens, ~8 s).
+3. **pypi.flet.dev's mobile wheels cannot**: forge's recipe builds with `-DLLAVA_BUILD=OFF`, so the
+   0.3.32 build 2 wheels hold only libggml-base, libggml-cpu, libggml and libllama; `llama_cpp.mtmd_cpp`
+   fails to load. No newer llama-cpp-python has mobile wheels there (0.3.32 builds 1 and 2 only).
+
+Decision: keep 0.3.32 and Qwen3.5, and build the wheels ourselves (the section 1 contingency A' with the
+same version): `ci/wheels/recipes/llama-cpp-python` = forge's recipe + `LLAVA_BUILD=ON`,
+`MTMD_VIDEO=OFF` (no ffmpeg subprocess in an app), unversioned libmtmd, build tag 1000 (outranks
+build 2). `wheelhouse.toml` gained `sdist_url` (a device-only pin has no uv.lock entry) and
+`requires_dist_<platform>` (flet-libcpp-shared on Android only). The first build (mobile-wheels runs
+38959532238 Android, 38959536281 iOS) passed verify-native on all five targets with libmtmd.
+
+App side: presets carry `mmproj` / `mmproj_size` / `mmproj_sha256`; the projector is downloaded in the
+same tap as `<stem>.mmproj.gguf` (`DownloadSpec(kind="mmproj")`) and recorded on the model; the engine
+loads it lazily with the first image (`MTMDChatHandler`); the service accepts `image_url` `data:` parts
+for vision models only, scales them to 896 px with `safe_image`, re-checks RAM with the projector, and
+primes the generation so an overflow is a 400. Welcome page 1 gained "Run on this phone (no account
+needed)" over the Model manager's `OnDeviceFlow`. CI: the `llama` suite's second check
+`llama_vision_describe` (`GLOSSARION_LLAMA_VISION`).

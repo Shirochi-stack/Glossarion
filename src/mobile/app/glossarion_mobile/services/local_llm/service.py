@@ -10,6 +10,11 @@
 * **RAM gate** before every load: ``need = size * 1.15 + n_ctx * 64 KiB + 400 MiB``. Android refuses
   above total RAM and asks above available RAM (jobs fail with that message instead of asking); iOS
   refuses above half of the RAM (the jetsam limit of an app without the increased-memory entitlement).
+  The first image request of a vision model checks again with its projector added
+  (``projector_need``): the projector loads only then.
+* **Vision:** a model downloaded with its ``mmproj`` projector takes OpenAI ``image_url`` parts
+  (``data:`` URLs); the images are decoded with ``safe_image``, scaled to at most 896 px and re-encoded
+  before the engine sees them (``vision.prepare_messages``). Text-only models keep the clear 400.
 * **Unload policy:** after ``IDLE_UNLOAD`` seconds without a request or running job; at once when iOS
   hides the app with no job running; after ``BACKGROUND_UNLOAD`` seconds in the background on Android
   unless a job runs (its foreground service keeps the process); ``detach`` unloads and stops the server.
@@ -29,11 +34,12 @@ from typing import Any, Callable, Optional
 from glossarion_mobile.services.local_llm import downloads as dl
 from glossarion_mobile.services.local_llm import engine as eng
 from glossarion_mobile.services.local_llm import hf, presets, stem_of
+from glossarion_mobile.services.local_llm import vision as vis
 from glossarion_mobile.services.local_llm.server import ChatRun, LocalLLMError, LocalLLMServer
 
 log = logging.getLogger("glossarion.local_llm")
 
-__all__ = ["EngineSnapshot", "LocalEngineService", "default_service", "model_block", "ram_need",
+__all__ = ["EngineSnapshot", "LocalEngineService", "default_service", "model_block", "projector_need", "ram_need",
            "set_default_service"]
 
 URL_ENV = "GLOSSARION_LOCAL_LLM_URL"
@@ -45,6 +51,7 @@ WATCH_INTERVAL = 15.0
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 NOT_DOWNLOADED = "Download it in Model manager › On-device"
+NO_VISION = "This on-device model has no vision support"
 #: seconds a forced unload / delete waits for a running generation to stop (it checks every 8 tokens)
 FORCE_UNLOAD_WAIT = 10.0
 
@@ -77,6 +84,11 @@ def model_block(model: Any) -> Optional[tuple]:
 
 def ram_need(size: int, n_ctx: int) -> int:
     return int(int(size) * 1.15 + int(n_ctx) * 64 * 1024 + 400 * MIB)
+
+
+def projector_need(size: int) -> int:
+    """What a vision projector adds once it is loaded: its weights plus the image encoder's buffers."""
+    return int(int(size) * 1.2 + 256 * MIB) if size else 0
 
 
 def _gb(count: float) -> str:
@@ -200,6 +212,7 @@ class EngineSnapshot:
     unavailable_reason: Optional[str] = None
     load_seconds: Optional[float] = None
     running: bool = False  # the endpoint is up
+    vision: bool = False  # the loaded model has a vision projector
 
 
 class LocalEngineService:
@@ -245,6 +258,17 @@ class LocalEngineService:
             return True, None
         return eng.engine_status()
 
+    def vision_status(self) -> tuple:
+        """``(available, reason)`` of image input (libmtmd in this build's llama-cpp-python)."""
+        if self._engine_factory is not None:
+            return True, None
+        available, reason = self.engine_status()
+        return eng.vision_status() if available else (False, reason)
+
+    def is_vision(self, stem: str) -> bool:
+        """``stem`` was downloaded with its vision projector."""
+        return bool((self.registry.load().get(stem) or {}).get("mmproj"))
+
     def _engine(self) -> Any:
         if self.engine is None:
             self.engine = self._engine_factory() if self._engine_factory is not None else eng.LlamaEngine()
@@ -257,10 +281,12 @@ class LocalEngineService:
 
     def snapshot(self) -> EngineSnapshot:
         available, reason = self.engine_status()
-        return EngineSnapshot(self._state if (self.loaded_stem or self._state == "loading") else "idle",
-                              self._stem if (self.loaded_stem or self._state == "loading") else None,
+        loaded = self.loaded_stem
+        return EngineSnapshot(self._state if (loaded or self._state == "loading") else "idle",
+                              self._stem if (loaded or self._state == "loading") else None,
                               self.gate.waiting(), self._error, self._system_info, available, reason,
-                              self._load_seconds, self.server.running)
+                              self._load_seconds, self.server.running,
+                              bool(loaded and getattr(self.engine, "vision", False)))
 
     def health(self) -> dict:
         snap = self.snapshot()
@@ -396,8 +422,8 @@ class LocalEngineService:
 
     # ---- RAM gate --------------------------------------------------------------------------------
 
-    def ram_check(self, stem: str, n_ctx: Optional[int] = None) -> tuple:
-        """``("ok"|"confirm"|"refuse", message)`` for loading ``stem``."""
+    def ram_check(self, stem: str, n_ctx: Optional[int] = None, *, vision: bool = False) -> tuple:
+        """``("ok"|"confirm"|"refuse", message)`` for loading ``stem`` (``vision``: with its projector)."""
         entry = self.registry.load().get(stem) or {}
         size = int(entry.get("size") or 0)
         if not size:
@@ -406,8 +432,24 @@ class LocalEngineService:
             except OSError:
                 size = 0
         need = ram_need(size, n_ctx or self.context_for(stem))
-        total, available = self.memory()
+        projector = entry.get("mmproj") if isinstance(entry.get("mmproj"), dict) else {}
+        if vision and projector:
+            need += projector_need(int(projector.get("size") or 0))
         name = (self.preset_for(stem) or {}).get("name") or stem
+        return self.ram_verdict(need, f"{name} with its image support" if vision and projector else name)
+
+    def preset_ram_check(self, preset: dict) -> tuple:
+        """``ram_check`` for a preset that may not be downloaded yet (its known size; the Welcome and
+        Model manager hints): ``("ok"|"confirm"|"refuse"|"unknown", message)``."""
+        size = int(preset.get("size") or 0)
+        if not size or not self.memory()[0]:
+            return "unknown", ""
+        n_ctx = int(preset.get("n_ctx") or 0) or self.settings()["n_ctx"] or (8192 if size < 4 * GIB else 4096)
+        return self.ram_verdict(ram_need(size, n_ctx), str(preset.get("name") or "This model"))
+
+    def ram_verdict(self, need: int, name: str) -> tuple:
+        """The RAM gate for ``need`` bytes (see the module docstring)."""
+        total, available = self.memory()
         if not total:
             return "ok", ""
         if self.platform == "ios":
@@ -424,9 +466,12 @@ class LocalEngineService:
 
     # ---- load / unload (callers hold the gate) ---------------------------------------------------------
 
-    def _ensure_loaded(self, stem: str, *, force: bool = False, interactive: bool = False) -> None:
+    def _ensure_loaded(self, stem: str, *, force: bool = False, interactive: bool = False,
+                       vision: bool = False) -> None:
         engine = self._engine()
         if self._stem == stem and engine.loaded:
+            if vision and not engine.vision_loaded:  # the projector loads with the first image
+                self._gate_ram(stem, engine.n_ctx or self.context_for(stem), force, interactive, vision=True)
             return
         available, reason = self.engine_status()
         if not available:
@@ -435,17 +480,13 @@ class LocalEngineService:
         if not os.path.isfile(path):
             raise LocalLLMError(404, "model_not_found", f"local/{stem} is not downloaded. {NOT_DOWNLOADED}.")
         n_ctx = self.context_for(stem)
-        verdict, message = self.ram_check(stem, n_ctx)
-        if verdict == "refuse" or (verdict == "confirm" and not force):
-            if verdict == "confirm" and not interactive:
-                message = message.replace(" Load anyway?", " Load it in Model manager › On-device to run it anyway.")
-            raise LocalLLMError(507, "insufficient_memory", message, "server_error")
+        self._gate_ram(stem, n_ctx, force, interactive, vision=vision)
         if engine.loaded:
             self._unload_locked()
         self._set("loading", stem)
         started = time.monotonic()
         try:
-            engine.load(path, n_ctx, self.threads())
+            engine.load(path, n_ctx, self.threads(), mmproj=self.registry.projector_path(stem))
         except Exception as exc:
             self._set("idle", None, f"Could not load {stem}: {exc}")
             log.exception("loading %s failed", stem)
@@ -458,6 +499,13 @@ class LocalEngineService:
             self._system_info = eng.system_info()
         self.last_used = self.clock()
         self._set("ready", stem)
+
+    def _gate_ram(self, stem: str, n_ctx: int, force: bool, interactive: bool, *, vision: bool) -> None:
+        verdict, message = self.ram_check(stem, n_ctx, vision=vision)
+        if verdict == "refuse" or (verdict == "confirm" and not force):
+            if verdict == "confirm" and not interactive:
+                message = message.replace(" Load anyway?", " Load it in Model manager › On-device to run it anyway.")
+            raise LocalLLMError(507, "insufficient_memory", message, "server_error")
 
     def _unload_locked(self) -> None:
         engine = self.engine
@@ -510,7 +558,8 @@ class LocalEngineService:
         out = []
         for stem, entry in sorted(self.registry.load().items(), key=lambda kv: kv[0].casefold()):
             out.append({"id": stem, "created": int(entry.get("downloaded_at") or 0), "size": int(entry.get("size") or 0),
-                        "repo": entry.get("repo"), "file": entry.get("file"), "loaded": stem == loaded})
+                        "repo": entry.get("repo"), "file": entry.get("file"), "loaded": stem == loaded,
+                        "vision": bool(entry.get("mmproj"))})
         return out
 
     def _pinned_stem(self) -> Optional[str]:
@@ -540,11 +589,20 @@ class LocalEngineService:
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
             raise LocalLLMError(400, "invalid_request", "messages must be a non-empty list")
-        for message in messages:
-            content = message.get("content") if isinstance(message, dict) else None
-            if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") not in (None, "text")
-                                                 for p in content):
-                raise LocalLLMError(400, "unsupported_content", "This on-device model has no vision support")
+        images = vis.image_count(messages)
+        problem = vis.check_parts(messages)
+        if images and not self.is_vision(stem):
+            raise LocalLLMError(400, "unsupported_content", NO_VISION)
+        if problem:
+            raise LocalLLMError(400, "unsupported_content", problem)
+        if images:
+            available, reason = self.vision_status()
+            if not available:
+                raise LocalLLMError(400, "unsupported_content", reason or eng.NO_MTMD)
+            try:
+                messages = vis.prepare_messages(messages)  # before the gate: decoding never holds the engine
+            except vis.VisionInputError as exc:
+                raise LocalLLMError(400, "invalid_image", str(exc)) from exc
         pinned = self._pinned_stem()
         if pinned and pinned.casefold() != stem.casefold():
             raise LocalLLMError(409, "engine_busy", f"The on-device engine is busy with {pinned} for a running job")
@@ -563,7 +621,7 @@ class LocalEngineService:
             self._notify()
 
         try:
-            self._ensure_loaded(stem)
+            self._ensure_loaded(stem, vision=bool(images))
             engine = self.engine
             n_ctx = int(engine.n_ctx or self.context_for(stem))
             prompt_tokens = int(engine.count_prompt(messages))
@@ -574,7 +632,7 @@ class LocalEngineService:
             params = self._params(body, n_ctx - prompt_tokens)
             self._set("generating", stem)
             abort = self._abort
-            deltas = engine.chat(messages, params, lambda: abort.is_set() or should_stop())
+            deltas = _primed(engine.chat(messages, params, lambda: abort.is_set() or should_stop()), n_ctx)
         except BaseException:
             release()
             raise
@@ -603,17 +661,25 @@ class LocalEngineService:
 
     # ---- downloads -----------------------------------------------------------------------------------
 
-    async def resolve(self, ref: hf.HfRef) -> tuple:
-        """``(commit, files)`` of ``ref`` (Hugging Face, off the loop)."""
-        return await self._io(lambda: hf.list_files(ref, session=self.downloads.session))
+    async def resolve(self, ref: hf.HfRef) -> hf.RepoFiles:
+        """The files and vision projectors of ``ref`` (Hugging Face, off the loop)."""
+        return await self._io(lambda: hf.list_repo(ref, session=self.downloads.session))
 
     def spec_for(self, repo: str, commit: str, file: hf.HfFile) -> dl.DownloadSpec:
         return dl.DownloadSpec(repo, file.path, commit, int(file.size or 0), file.sha256,
                                self.registry.stem_for(repo, file.path))
 
+    def projector_spec_for(self, stem: str, repo: str, commit: str, file: hf.HfFile) -> dl.DownloadSpec:
+        """The download of ``stem``'s vision projector ``file`` (same repository and commit)."""
+        return dl.DownloadSpec(repo, file.path, commit, int(file.size or 0), file.sha256,
+                               self.registry.projector_key(stem), kind="mmproj", owner=stem)
+
     async def download(self, spec: dl.DownloadSpec) -> dl.DownloadState:
         state = await self.downloads.download(spec)
         if state.done:
+            if spec.kind == "mmproj" and self.loaded_stem == spec.owner and self.engine is not None \
+                    and not self.engine.vision:
+                self.unload()  # loaded text-only: the next request loads it again with its projector
             self.request_catalog_refresh()
         return state
 
@@ -673,3 +739,35 @@ class LocalEngineService:
                 self.tick()
             except Exception:
                 log.debug("unload policy failed", exc_info=True)
+
+
+def _primed(deltas: Any, n_ctx: int) -> Any:
+    """Run the generation up to its first delta here, so loading the projector, evaluating the prompt and
+    their errors happen before the endpoint answers (a 400 instead of a broken stream)."""
+    import itertools
+
+    try:
+        first = next(deltas)
+    except StopIteration:
+        return iter(())
+    except eng.ContextOverflow as exc:
+        deltas.close()
+        raise LocalLLMError(400, "context_length_exceeded",
+                            f"This model's maximum context length is {n_ctx} tokens. However, your messages with "
+                            f"their images did not fit ({exc}). Please reduce the length of the messages.") from exc
+    except eng.EngineUnavailable as exc:
+        deltas.close()
+        raise LocalLLMError(400, "unsupported_content", str(exc)) from exc
+    rest = itertools.chain([first], deltas)
+
+    class _Run:
+        def __iter__(self) -> Any:
+            return rest
+
+        def __next__(self) -> Any:
+            return next(rest)
+
+        def close(self) -> None:
+            deltas.close()
+
+    return _Run()

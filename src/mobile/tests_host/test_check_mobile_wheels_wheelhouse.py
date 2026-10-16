@@ -1910,3 +1910,45 @@ def test_build_tag_parsing_is_pip_compatible():
     assert cmw.parse_build_tag("1000") == (1000, "")
     assert cmw.parse_build_tag("11b") == (11, "b")
     assert cmw.parse_build_tag("") == () and cmw.parse_build_tag("x1") == ()
+
+
+def _zip_tree(arch: Path, wheel: Path) -> Path:
+    import zipfile
+
+    with zipfile.ZipFile(wheel, "w") as zf:
+        for path in sorted(arch.rglob("*")):
+            if path.is_file() and "opt/lib" not in path.as_posix():   # flet-libcpp-shared is another wheel
+                zf.write(path, path.relative_to(arch).as_posix())
+    return wheel
+
+
+def test_verify_native_checks_the_llama_wheels_like_the_installed_copy(tmp_path):
+    """verify-native on our llama-cpp-python wheels: the five libraries (libmtmd included), checked against
+    the NDK's libc++_shared.so on Android (flet-libcpp-shared ships it on the device) and like
+    verify-site-packages on iOS."""
+    ndk = make_ndk(tmp_path / "ndk", LLAMA_NDK_EXPORTS)
+    for triple in wh.NDK_TRIPLE.values():
+        d = ndk / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "sysroot" / "usr" / "lib" / triple
+        (d / "libc++_shared.so").write_bytes(make_elf(needed=("libc.so",), symbols=[("_ZNSt6__ndk14cout", GLOBAL, DEF)]))
+    stubs = wh.NdkStubs(ndk)
+    arch = make_llama_android(tmp_path / "sp", "x86_64")
+    wheel = _zip_tree(arch, tmp_path / "llama_cpp_python-0.3.32-1000-cp313-cp313-android_24_x86_64.whl")
+    errors, notes = wh.verify_native_wheel(wheel, "llama-cpp-python", "x86_64", "3.5.9", (13, 0), stubs)
+    assert errors == [] and any("lib/libmtmd.so NEEDED" in n for n in notes)
+    # no libmtmd (pypi.flet.dev's build 2) and an import nothing provides are both errors
+    arch = make_llama_android(tmp_path / "sp2", "x86_64", libs=LLAMA_LIBS[:4], unresolved=("ggml_metal_init",))
+    wheel = _zip_tree(arch, tmp_path / "old.whl")
+    errors, _ = wh.verify_native_wheel(wheel, "llama-cpp-python", "x86_64", "3.5.9", (13, 0), stubs)
+    text = "\n".join(errors)
+    assert "expected exactly ['libggml', 'libggml-base', 'libggml-cpu', 'libllama', 'libmtmd']" in text
+    assert "['ggml_metal_init']" in text
+    # without an NDK the Android imports cannot be checked: an error, not a pass
+    errors, _ = wh.verify_native_wheel(_zip_tree(make_llama_android(tmp_path / "sp3", "x86_64"), tmp_path / "x.whl"),
+                                       "llama-cpp-python", "x86_64", "3.5.9", (13, 0), None)
+    assert errors and "no NDK" in "\n".join(errors)
+    # iOS slices
+    for target in IOS_SLICES:
+        arch = make_llama_ios(tmp_path / "ios", target)
+        wheel = _zip_tree(arch, tmp_path / f"{target}.whl")
+        errors, notes = wh.verify_native_wheel(wheel, "llama-cpp-python", target, "3.5.9", (13, 0), None)
+        assert errors == [] and any("lib/libmtmd.dylib" in n for n in notes), (target, errors)
