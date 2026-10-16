@@ -290,6 +290,29 @@ def test_send_image_reaches_a_vision_model_through_the_local_route(vision_servic
         assert seen.size == (597, 896)
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_send_image_to_a_text_only_model_fails_at_once_with_the_clear_message(vision_service, monkeypatch, stream):
+    """The 400 "no vision support" cannot change on a retry: one request, the endpoint's own message."""
+    import time
+
+    import unified_api_client as uac
+
+    service, _engine = vision_service
+    monkeypatch.setenv("ENABLE_STREAMING", "1" if stream else "0")
+    calls = []
+    chat = service.chat
+    monkeypatch.setattr(service, "chat", lambda *a, **k: calls.append(a[0]) or chat(*a, **k))
+    png = io.BytesIO()
+    Image.new("RGB", (64, 64), (10, 200, 10)).save(png, format="PNG")
+    client = uac.UnifiedClient(api_key="", model="local/blind")
+    started = time.monotonic()
+    with pytest.raises(uac.UnifiedClientError) as caught:
+        client.send_image([{"role": "user", "content": "What is in it?"}], base64.b64encode(png.getvalue()).decode(),
+                          temperature=0.2, max_tokens=64)
+    assert "This on-device model has no vision support" in str(caught.value)
+    assert len(calls) == 1 and time.monotonic() - started < 10
+
+
 def test_a_projector_downloaded_while_loaded_text_only_reloads_with_it(tmp_path, monkeypatch):
     server = fakes.FakeHF()
     server.add(REPO, {MODEL: PAYLOAD, "mmproj-F16.gguf": PROJECTOR})

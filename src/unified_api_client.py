@@ -3125,6 +3125,21 @@ class UnifiedClient:
     }
     _LOCAL_OPENAI_PROVIDERS = ('ollama', 'lmstudio', 'local')
     _LOCAL_LLM_URL_ENV = 'GLOSSARION_LOCAL_LLM_URL'
+    # OpenAI error codes of a local endpoint (Glossarion Mobile's on-device engine) for a request that
+    # can never run there: an image for a text-only model, an unreadable image, a model not downloaded.
+    _LOCAL_PERMANENT_ERROR_CODES = ('unsupported_content', 'invalid_image', 'model_not_found')
+
+    @classmethod
+    def _local_permanent_error(cls, provider: str, http_status: Optional[int], err: Exception) -> Optional[str]:
+        """The local endpoint's own message when ``err`` is a 400/404 that a retry cannot fix, else None."""
+        if provider not in cls._LOCAL_OPENAI_PROVIDERS or http_status not in (400, 404):
+            return None
+        body = getattr(err, 'body', None)
+        body = body if isinstance(body, dict) else {}
+        code = getattr(err, 'code', None) or body.get('code')
+        if code not in cls._LOCAL_PERMANENT_ERROR_CODES:
+            return None
+        return str(body.get('message') or err)
 
     @classmethod
     def _local_openai_base_url(cls, provider: str) -> str:
@@ -11187,6 +11202,10 @@ class UnifiedClient:
 
                 if self.client_type == "authza" and e.error_type == "entitlement_error":
                     print("AuthZA plan quota/entitlement error - not retrying")
+                    raise
+
+                if e.error_type == "local_request_error":
+                    print("The local model cannot run this request - not retrying")
                     raise
 
                 if self.client_type == "autharena" and e.error_type == "autharena_verification_error":
@@ -26477,6 +26496,11 @@ class UnifiedClient:
                                 "Use the paid tier (oc/) with an OPENCODE_API_KEY, or choose a different provider.",
                                 error_type="auth_error",
                             )
+
+                        local_error = self._local_permanent_error(provider, http_status, e)
+                        if local_error:
+                            raise UnifiedClientError(local_error, error_type="local_request_error",
+                                                     http_status=http_status)
 
                         # If graceful stop is active, do not schedule any further API calls (including retries).
                         # Graceful stop is different from force-stop: it lets in-flight calls finish, but blocks new ones.
