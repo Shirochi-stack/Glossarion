@@ -12,8 +12,9 @@ display-only and never written), badges (locked purple 🔒 reason, a
 ``ReasonChip`` when ``is_available`` says no, "not used" when a
 ``visible_if`` rule is off), ⓘ opening an ``InfoSheet`` with the full help,
 key, env names, default and recorded desktop discrepancies; long-press resets
-to default (removes the key, with Undo). The outer ``Container`` carries
-``key=ft.ScrollKey(<config key>)`` so search can ``scroll_to`` it.
+to default (removes the key, with Undo). A zero-size marker at the top of the
+tile carries ``key=ft.ScrollKey(<config key>)`` so search can ``scroll_to`` it
+(``components.scroll_anchor``: never the tile itself, whose field would lose focus).
 
 Edits go through ``SchemaAccess.coerce`` and ``MobileConfigStore.set``; a
 validation error is shown under the tile and nothing is stored.
@@ -48,6 +49,7 @@ from glossarion_mobile.state.setting_writes import (
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.scroll_anchor import anchored_column
 from glossarion_mobile.ui.settings.editors import (
     EntryTypePickerEditor,
     EntryTypesEditor,
@@ -314,9 +316,10 @@ class SettingTile:
         if self.editor_row is not None:
             body.append(ft.Container(content=self.editor_row, padding=ft.Padding.only(left=12, right=12, bottom=8)))
         body.append(ft.Container(content=self.error_text, padding=ft.Padding.only(left=12, right=12)))
+        # the ScrollKey (search's scroll_to target) sits on a marker, not on the tile: Flet 1.0.3 re-keys a
+        # ScrollKey'd widget on every build, which remounted the tile and closed the keyboard of its field
         self.control = ft.Container(
-            key=ft.ScrollKey(self.key),
-            content=ft.Column(body, spacing=0, tight=True),
+            content=anchored_column(self.key, body, horizontal_alignment=ft.CrossAxisAlignment.START),
             border_radius=tokens.RADII["tile"],
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
         )

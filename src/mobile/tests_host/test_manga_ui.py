@@ -768,6 +768,10 @@ class FakeEditorSession:
     def save_and_update_overlay(self, image=None, *, owner=None):
         self._step("render", image, owner)
 
+    def rerender_boxes(self, indexes=(), image_path=None, *, owner=None):
+        self._step("rerender_boxes", image_path, owner)
+        self.calls.append(("rerender_boxes_indexes", tuple(indexes)))
+
     def import_ocr(self, path, images=None, *, owner=None, render=True):
         self._step("import_ocr", path, owner)
         return {"matched": 1, "files": len(images or ()), "translated_regions": 2, "rendered": {}}
@@ -2810,6 +2814,7 @@ def test_bindings_match_the_shared_core_contracts():
         "save_and_update_overlay": ("image_path", "owner"),
         "add_box": ("x", "y", "width", "height", "shape", "polygon"),
         "update_box": ("index", "x", "y", "width", "height", "rerender"), "delete_box": ("index",),
+        "rerender_boxes": ("indexes", "image_path", "owner"), "clear_page": ("image_path", "include_cleaned"),
         "set_box_free_text": ("index", "free_text"), "set_box_excluded": ("index", "excluded"),
         "set_box_iterations": ("index", "value"), "edit_box_text": ("index", "ocr_text", "translation"),
         "ocr_box": ("index", "owner"), "translate_box": ("index", "owner"), "clean_box": ("index", "owner"),
@@ -3065,8 +3070,11 @@ def test_editor_keeps_the_box_selected_with_handles_a_move_tab_and_live_text(iso
         assert jobs.specs[-1].params["step"] == "translate"
         await asyncio.sleep(0.4)
         await _settle()
-        assert jobs.specs[-1].params["step"] == "render" and tab.busy
-        jobs.finish(manga.step_job_id, result={"manga_step": "render"})
+        # (the desktop's rectangle-moved auto save for the moved box: the post-move render must not lock
+        # it to its last render position, which Save & Update Overlay does)
+        assert jobs.specs[-1].params["step"] == "rerender_boxes" and jobs.specs[-1].params["boxes"] == [0]
+        assert tab.busy
+        jobs.finish(manga.step_job_id, result={"manga_step": "rerender_boxes"})
         await _settle()
         assert tab.live == {}
         # the Move tab: exact numbers, nudges by the step, saved like a drag

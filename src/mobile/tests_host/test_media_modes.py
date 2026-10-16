@@ -1472,7 +1472,9 @@ def test_transcript_cards_stay_live_across_rerenders(app_env, desktop_store_cls,
             assert all(isinstance(s, CardSlot) for s in view.transcript.messages)
             assert view.transcript.messages == slots and all(a is b for a, b in zip(view.transcript.cards, cards))
             assert not any(hasattr(c, "_frozen") for c in view.transcript.messages + view.transcript.cards)
-            assert all(slot.key.value == slot.slot_key and slot.card.key is None for slot in view.transcript.messages)
+            # the ScrollKey sits on the slot's top marker (owner #6: a ScrollKey'd slot is remounted by Flet)
+            assert all(slot.key is None and slot.content.controls[0].key.value == slot.slot_key
+                       and slot.card.key is None for slot in view.transcript.messages)
 
             # ---- AudioCard: play, pause and position events after the re-renders --------------------
             card = audio_card(view)

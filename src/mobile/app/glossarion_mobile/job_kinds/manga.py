@@ -48,7 +48,7 @@ _STOP_POLL = 0.25
 _STEP_PHASES = {"detect": "Detecting text", "clean": "Cleaning", "recognize": "Recognizing text",
                 "translate": "Translating", "translate_all": "Translating pages",
                 "render": "Rendering overlay", "ocr_box": "Recognizing box", "translate_box": "Translating box",
-                "clean_box": "Cleaning box", "import_ocr": "Importing OCR"}
+                "clean_box": "Cleaning box", "import_ocr": "Importing OCR", "rerender_boxes": "Rendering overlay"}
 
 
 def _job_error(message: str) -> Exception:
@@ -317,6 +317,8 @@ def _call_step(session: Any, step: str, params: Mapping[str, Any], owner: Any) -
         return session.translate_all(params.get("images") or None, owner=owner)
     if step == "render":
         return session.save_and_update_overlay(image, owner=owner)
+    if step == "rerender_boxes":
+        return session.rerender_boxes(params.get("boxes") or (), image, owner=owner)
     if step == "import_ocr":
         return session.import_ocr(params.get("path"), params.get("images") or None, owner=owner, render=True)
     current = session.current_page

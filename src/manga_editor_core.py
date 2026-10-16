@@ -8266,6 +8266,48 @@ def _delete_translated_outputs(self):
                             print(f"[CLEAR] Failed to delete translated output: {e}")
 
 
+def _delete_cleaned_outputs(self):
+    """The mobile editor's "Delete page data": delete the page's cleaned image(s), the files Clear
+    Boxes keeps (``_delete_translated_outputs``' folders, ``_cleaned`` names only, plus the page
+    state's ``cleaned_image_path`` when it is this page's). ``self`` is the preview widget."""
+    if not self.current_image_path:
+        return []
+    override_dir = None
+    if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+        override_dir = self.main_gui.config.get('output_directory', '')
+    if not override_dir:
+        override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+    source_name_no_ext = os.path.splitext(os.path.basename(self.current_image_path))[0]
+    image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+    targets = []
+    for check_dir in ([override_dir] if override_dir else []) + [os.path.dirname(self.current_image_path)]:
+        translated_folder = os.path.join(check_dir, f"{source_name_no_ext}_translated")
+        if not os.path.isdir(translated_folder):
+            continue
+        for filename in os.listdir(translated_folder):
+            name_lower = filename.lower()
+            if (name_lower.startswith(source_name_no_ext.lower()) and name_lower.endswith(image_extensions)
+                    and '_cleaned' in name_lower):
+                targets.append(os.path.join(translated_folder, filename))
+    manager = getattr(self.manga_integration, 'image_state_manager', None)
+    saved = (manager.get_state(self.current_image_path) or {}).get('cleaned_image_path') if manager else None
+    if saved and os.path.isfile(saved):
+        saved_base = os.path.splitext(os.path.basename(saved))[0].replace('_cleaned', '')
+        if saved_base == source_name_no_ext and '_cleaned' in os.path.basename(saved).lower():
+            targets.append(saved)
+    deleted = []
+    for path in targets:
+        if path in deleted or not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            deleted.append(path)
+            print(f"[CLEAR] Deleted cleaned output: {os.path.basename(path)}")
+        except Exception as e:
+            print(f"[CLEAR] Failed to delete cleaned output: {e}")
+    return deleted
+
+
 def _clear_saved_page_state(self):
     """Clear Boxes: drop the page's saved OCR / translation / overlay / box state and flush it (lifted
     verbatim from manga_image_preview's ``_on_clear_boxes_clicked`` in U9; ``self`` is the preview
@@ -9885,15 +9927,133 @@ class MangaEditorSession:
             return output
 
     def delete_box(self, index):
-        """Delete Selected (ImageRenderer._handle_delete_rectangle)."""
+        """Delete Selected (ImageRenderer._handle_delete_rectangle, then the desktop toolbar 🗑's
+        ``rectangle_deleted`` -> ``_persist_rectangles_state``: the page state loses the box even when
+        it was the last one). The boxes after it move up one place, so the page state's per-box
+        entries (OCR text, translation, render position, iterations) move up with them: the deleted
+        box's texts never come back on the next box after a reopen or a re-render."""
         with self._op_lock:
-            _handle_delete_rectangle(self, int(index), self._box(index))
+            index = int(index)
+            box = self._box(index)
+            regions = getattr(self, '_current_regions', None)
+            regions_before = len(regions) if isinstance(regions, list) else None
+            _handle_delete_rectangle(self, index, box)
+            regions = getattr(self, '_current_regions', None)
+            if isinstance(regions, list) and len(regions) == regions_before and 0 <= index < len(regions):
+                regions.pop(index)  # (the state's list was a copy: the handler popped only that one)
+            self._forget_region(index)
+            self.image_preview_widget._persist_rectangles_state()
             self._finish()
 
-    def clear_page(self, image_path=None):
+    def _forget_region(self, index):
+        """Box ``index`` was deleted: drop its entries and renumber the later boxes' ones (region
+        indexes, the in-memory text maps and the page state's per-box lists / maps)."""
+        index = int(index)
+
+        def renumber(value):
+            value = int(value)
+            return value - 1 if value > index else value
+
+        def shift_map(mapping):
+            out = {}
+            for key, value in mapping.items():
+                try:
+                    number = int(key)
+                except (TypeError, ValueError):
+                    out[key] = value
+                    continue
+                if number == index:
+                    continue
+                new = renumber(number)
+                out[str(new) if isinstance(key, str) else new] = value
+            return out
+
+        def entry_index(entry, position):
+            if isinstance(entry, dict) and not entry.get('deleted'):
+                original = entry.get('original')
+                if isinstance(original, dict) and 'region_index' in original:
+                    return original.get('region_index')
+                if 'region_index' in entry:
+                    return entry.get('region_index')
+            return position
+
+        def shift_list(entries):
+            out = []
+            for position, entry in enumerate(entries):
+                try:
+                    number = int(entry_index(entry, position))
+                except (TypeError, ValueError):
+                    number = position
+                if number == index:
+                    continue
+                if isinstance(entry, dict) and number > index:
+                    entry = copy.deepcopy(entry)
+                    if isinstance(entry.get('original'), dict) and 'region_index' in entry['original']:
+                        entry['original']['region_index'] = renumber(number)
+                    if 'region_index' in entry:
+                        entry['region_index'] = renumber(number)
+                out.append(entry)
+            return out
+
+        for position, box in enumerate(self.image_preview_widget.viewer.rectangles):
+            box.region_index = position
+        for name in ('_recognition_data', '_translation_data'):
+            data = getattr(self, name, None)
+            if isinstance(data, dict):
+                shifted = shift_map(data)
+                data.clear()
+                data.update(shifted)
+        for name in ('_recognized_texts', '_translated_texts'):
+            entries = getattr(self, name, None)
+            if isinstance(entries, list):
+                entries[:] = shift_list(entries)
+        page = self.image_preview_widget.current_image_path
+        if not page:
+            return
+        state = self.image_state_manager.get_state(page) or {}
+        for key in ('recognized_texts', 'translated_texts'):
+            if isinstance(state.get(key), list):
+                state[key] = shift_list(state[key])
+        for key in ('last_render_positions', 'overlay_offsets', 'inpaint_iterations'):
+            if isinstance(state.get(key), dict):
+                state[key] = shift_map(state[key])
+        self.image_state_manager.set_state(page, state, save=True)
+
+    def rerender_boxes(self, indexes=(), image_path=None, *, owner=None):
+        """The desktop's rectangle-moved auto save (``_on_rectangle_moved`` -> ``_save_position_async``:
+        ``_get_translation_text_for_region`` + ``_update_single_text_overlay``) for boxes moved with
+        ``update_box(rerender=False)``: each translated box is rendered at its new place, the other
+        regions stay at their last render positions, and that place becomes the box's last render
+        position. With no ``indexes`` the page is rendered from the text maps at the last render
+        positions (a deleted box's text goes away). Returns the rendered path (None: nothing rendered)."""
+        with self._op_lock:
+            page = self._begin(owner, image_path)
+            boxes = self.image_preview_widget.viewer.rectangles
+            wanted = []
+            for value in indexes or ():
+                if 0 <= int(value) < len(boxes) and int(value) not in wanted:
+                    wanted.append(int(value))
+            rendered = False
+            if wanted:
+                for index in wanted:
+                    trans_text = _get_translation_text_for_region(self, index)
+                    if trans_text and _update_single_text_overlay(self, index, trans_text):
+                        rendered = True
+                    self.pump_updates()
+            elif _update_single_text_overlay(self, None, ''):
+                rendered = True
+                self.pump_updates()
+            self._finish()
+            if not rendered:
+                return None
+            self.output_revision += 1
+            return (self.image_state_manager.get_state(page) or {}).get('rendered_image_path')
+
+    def clear_page(self, image_path=None, *, include_cleaned=False):
         """Clear Boxes (manga_image_preview's ``_on_clear_boxes_clicked``): every box of the page, its
         detection / OCR / translation state and its translated output image (the cleaned image stays),
-        then the page reloads from the cleaned or source image."""
+        then the page reloads from the cleaned or source image. ``include_cleaned`` (the mobile
+        editor's "Delete page data") also deletes the page's cleaned image and forgets it."""
         with self._op_lock:
             preview = self.image_preview_widget
             page = os.path.abspath(image_path) if image_path else preview.current_image_path
@@ -9917,6 +10077,16 @@ class MangaEditorSession:
                     _clear_saved_page_state(preview)
             except Exception:
                 pass
+            if include_cleaned:
+                try:
+                    _delete_cleaned_outputs(preview)
+                except Exception as e:
+                    self._log(f"[CLEAR] Error deleting cleaned output: {e}", "warning")
+                state = self.image_state_manager.get_state(page) or {}
+                for key in ('cleaned_image_path', 'rendered_image_path', 'translated_image_path'):
+                    state.pop(key, None)
+                self.image_state_manager.set_state(page, state, save=True)
+                self._cleaned_image_path = None
             preview._persist_rectangles_state()
             self._current_regions = []
             self._rendered_images_map.pop(page, None)

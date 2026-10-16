@@ -738,9 +738,14 @@ class CatalogSnapshot:
         return [m for m in self.models if self.is_polled(m)]
 
     def is_polling(self, provider: Optional[str] = None) -> bool:
+        """Any poll (None), or a poll of ``provider``: the full refresh, the provider itself, or one of its
+        account slots (a group header ``authgpt`` covers the ``authgpt:2`` poll of ``authgpt2/`` models)."""
         if provider is None:
             return bool(self.polling)
-        return provider in self.polling or "*" in self.polling
+        if provider in self.polling or "*" in self.polling:
+            return True
+        return not provider.startswith("custom:") and any(
+            not tag.startswith("custom:") and tag.split(":", 1)[0] == provider for tag in self.polling)
 
 
 @dataclass(frozen=True)

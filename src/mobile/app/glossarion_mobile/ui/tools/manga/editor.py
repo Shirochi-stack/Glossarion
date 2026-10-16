@@ -20,8 +20,9 @@ same code the desktop preview runs):
   a box or its top-left move handle; its bottom-right handle resizes; the handles show in this
   tool only), Box, Circle and Lasso; Delete and Exclude from Clean act on the selected box. A
   box stays selected until another box is picked, ✕ / Back, or Select/Move is left. A moved
-  translated box carries its rendered text along at once; the page is re-rendered (Save & Update
-  Overlay) a moment after the last move.
+  translated box carries its rendered text along at once (a deleted one's text is covered at
+  once); the page is re-rendered a moment after the last move / delete (the desktop's
+  rectangle-moved auto save, ``rerender_boxes``: the moved boxes at their new places).
 * **Workflow buttons** Detect · Clean · Recognize · Translate · Translate all · Save & Update
   Overlay, and the per-box OCR / Translate / Clean actions — ``manga_step`` jobs on the
   JobService: OCR and translation need the job's HeadlessOwner (plan §1), which only exists on
@@ -32,7 +33,8 @@ same code the desktop preview runs):
   page, at the bottom or the top, away from the box (the page keeps its size): OCR and
   Translated tabs, each text edited in place, and Move (exact position / size, nudges). The toolbar's ⋯ holds Share, Import OCR
   (renders imported translations: a job) / Export OCR (``manga_ocr_io`` JSON in the OCR Text
-  folder) / the auto-saved OCR files and Files.
+  folder) / the auto-saved OCR files and Files, and the trash: Delete page data (every OCR, clean
+  and translation result of the page, confirmed first).
 * The editor rewrites the same output file on every render, so the cleaned / translated views show
   a versioned copy (``page_<id>_v3_<mtime>.png``): Flet's ``Image`` cache never shows an old render.
 
@@ -94,7 +96,7 @@ VIEWS = (("translated", "✒️", "Showing translated output (click to cycle)", 
          ("original", "📄", "Showing original images (click to cycle)", "#6c757d"))
 VIEW_MODES = tuple(view[0] for view in VIEWS)
 #: Steps after which the desktop shows the translated output.
-TRANSLATED_STEPS = ("translate", "render", "translate_all", "translate_box", "import_ocr")
+TRANSLATED_STEPS = ("translate", "render", "translate_all", "translate_box", "import_ocr", "rerender_boxes")
 MIN_ZOOM, MAX_ZOOM = 1.0, 8.0
 GUTTER = 2  # dp around the editor: the page takes the full width
 #: The viewer's fling friction (Flutter's default ``interactionEndFrictionCoefficient``): a fling
@@ -375,8 +377,11 @@ class EditorTab(MangaTab):
         # moved / resized translated boxes until the page is rendered again: {index: {"origin": the
         # box's (x, y, w, h) in the render, "hole": cv.Image, "text": cv.Image}} — the text cut from
         # the render follows the box, the page under it covers where it was (instant, like the
-        # desktop's overlay moving with its rectangle), then Save & Update Overlay renders it for real
+        # desktop's overlay moving with its rectangle), then ``rerender_boxes`` renders it for real
         self.live: dict = {}
+        # deleted translated boxes until the page is rendered again: [{"origin": (x, y, w, h), "hole":
+        # cv.Image}] — the page under the deleted text covers it at once
+        self.holes: list = []
         self._render_token = 0
 
     # ---- build --------------------------------------------------------------------------------------
@@ -425,6 +430,10 @@ class EditorTab(MangaTab):
                                           on_click=lambda e: self.ctx.spawn(self.clear_boxes()))
         self.share_item = ft.PopupMenuItem(content="Share or save the translated page", icon=ft.Icons.IOS_SHARE,
                                            key="me-share", on_click=lambda e: self.share_translated())
+        # the trash: every OCR, clean and translation result of the open page (confirmed first)
+        self.delete_page_item = ft.PopupMenuItem(content="Delete page data (OCR, clean, translation)",
+                                                 icon=ft.Icons.DELETE_FOREVER, key="me-delete-page",
+                                                 on_click=lambda e: self.ctx.spawn(self.delete_page_data()))
         self.more_menu = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT, tooltip="More editor actions", key="me-more", size_constraints=HIT_TARGET,
             items=[
@@ -438,11 +447,15 @@ class EditorTab(MangaTab):
                                  on_click=lambda e: self.ctx.spawn(self.open_ocr_files())),
                 ft.PopupMenuItem(content="Files", icon=ft.Icons.PHOTO_LIBRARY, key="me-files",
                                  on_click=lambda e: self.screen.select_tab("files") if self.screen else None),
+                ft.PopupMenuItem(),
+                self.delete_page_item,
             ])
         # the preview toolbar: one row, the display-mode button first and the ⋯ last (pinned), the
-        # tools between them scroll on a narrow phone
-        self.tools_row = ft.Row([*tool_controls, ft.VerticalDivider(width=8), self.exclude_button,
-                                 self.delete_button, self.clear_button], scroll=ft.ScrollMode.AUTO, spacing=0,
+        # tools between them scroll on a narrow phone. Delete box comes right after the tools (the
+        # desktop's 🗑 Delete Selected), so it is on screen next to them on a phone, ahead of
+        # Exclude from Clean (⊘: it only greys the box out)
+        self.tools_row = ft.Row([*tool_controls, ft.VerticalDivider(width=8), self.delete_button,
+                                 self.exclude_button, self.clear_button], scroll=ft.ScrollMode.AUTO, spacing=0,
                                 expand=True, key="me-tools")
         self.toolbar = ft.Row([self.view_button, self.tools_row, self.more_menu], spacing=0,
                               vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-toolbar")
@@ -687,6 +700,7 @@ class EditorTab(MangaTab):
         for button in (self.delete_button, self.exclude_button):
             button.disabled = busy or not box_selected
         self.clear_button.disabled = busy or not has_page or not self.boxes
+        self.delete_page_item.disabled = busy or not has_page
         self._render_view_button()
         self.share_item.disabled = not (has_page and self.translated_view)
         hint = self._view_hint_text() if has_page else ""
@@ -854,6 +868,14 @@ class EditorTab(MangaTab):
     def _shapes(self) -> list:
         shapes: list = []
         scale = self.geometry.scale
+        if self.holes and self.translated_view and self.background() == self.translated_view:
+            for entry in self.holes:
+                hole = entry.get("hole")
+                if hole is None:
+                    continue
+                ox, oy, ow, oh = entry["origin"]
+                hole.x, hole.y, hole.width, hole.height = ox * scale, oy * scale, ow * scale, oh * scale
+                shapes.append(hole)
         if self.live and self.translated_view and self.background() == self.translated_view:
             for index, entry in self.live.items():
                 if not (0 <= index < len(self.boxes)) or entry.get("text") is None:
@@ -967,6 +989,7 @@ class EditorTab(MangaTab):
             on_interaction_end=self._on_view_end, key=f"me-iv-{self._gen}")
         self.view_transform.reset()
         self.live.clear()
+        self.holes.clear()
         self._apply_layout(*(self._viewport or self._estimated_viewport()), push_now=False)
         self.canvas.shapes = self._shapes()
         self._surface_mode = None
@@ -1348,7 +1371,9 @@ class EditorTab(MangaTab):
 
         async def cut() -> None:
             try:
-                hole, text = await self.ctx.io(crop_patches, translated, background, origin, size)
+                # crop_patches gives (the rendered text, the page under it): the text follows the box,
+                # the page patch covers where the text was
+                text, hole = await self.ctx.io(crop_patches, translated, background, origin, size)
             except Exception:
                 hole = text = None
             if self.live.get(index) is not entry or hole is None or text is None:
@@ -1359,11 +1384,40 @@ class EditorTab(MangaTab):
 
         self.ctx.spawn(cut())
 
+    def _begin_hole(self, index: int) -> None:
+        """A translated box is being deleted: cut the page under its rendered text (the cleaned /
+        original page) once, so the text is gone at once; the page is rendered again shortly after."""
+        if not (0 <= index < len(self.boxes)) or not self.translated_view:
+            return
+        box = self.boxes[index]
+        if not str(box.get("translation") or "").strip():
+            return
+        moved = self.live.get(index)  # a moved box's text is still where the last render drew it
+        origin = moved["origin"] if moved else (float(box["x"]), float(box["y"]), float(box["width"]),
+                                                float(box["height"]))
+        entry: dict = {"origin": origin, "hole": None}
+        self.holes.append(entry)
+        translated = self.translated_view
+        background = self.cleaned_view or self.image_path
+        size = (self.geometry.image_w, self.geometry.image_h)
+
+        async def cut() -> None:
+            try:
+                _text, hole = await self.ctx.io(crop_patches, translated, background, origin, size)
+            except Exception:
+                hole = None
+            if hole is None or not any(item is entry for item in self.holes):
+                return
+            entry["hole"] = cv.Image(src=hole, x=0, y=0, width=1, height=1)
+            self._redraw()
+
+        self.ctx.spawn(cut())
+
     def _schedule_render(self) -> None:
-        """Re-render the page (Save & Update Overlay, the desktop's rectangle-moved auto save)
-        ``RENDER_DELAY`` seconds after the last move of a translated box; another edit first
-        postpones it."""
-        if not self.live:
+        """Re-render the page (the desktop's rectangle-moved auto save, ``rerender_boxes``: the moved
+        boxes at their new places, a deleted box's text gone) ``RENDER_DELAY`` seconds after the last
+        move / delete of a translated box; another edit first postpones it."""
+        if not self.live and not self.holes:
             return
         self._render_token += 1
         self.ctx.spawn(self._render_later(self._render_token))
@@ -1372,9 +1426,10 @@ class EditorTab(MangaTab):
         import asyncio
 
         await asyncio.sleep(RENDER_DELAY)
-        if token != self._render_token or self.drag or self.busy or self._editing or not self.live:
+        if token != self._render_token or self.drag or self.busy or self._editing or not (self.live or self.holes):
             return None
-        return await self.run_step("render")
+        moved = sorted(index for index in self.live if 0 <= index < len(self.boxes))
+        return await self.run_step("rerender_boxes", extra={"boxes": moved})
 
     # ---- box actions ------------------------------------------------------------------------------------
 
@@ -1394,32 +1449,64 @@ class EditorTab(MangaTab):
             await self._apply_snapshot(await self._snapshot())
 
     async def delete_selected(self) -> bool:
+        """Delete box (the toolbar 🗑 and the box panel's ⋯ › Delete box; the desktop's 🗑 Delete
+        Selected): the box goes with its OCR text and translation, in the page state too, and a
+        translated box's text leaves the rendered page (at once, then re-rendered)."""
         index = self.selected
         es = self.session.editor
-        if index is None or es is None:
+        if index is None or es is None or not (0 <= index < len(self.boxes)):
             return False
+        if not self._can_edit():
+            self.ctx.say("Wait for the running step" if self.busy else "Open a page first")
+            return False
+        self._render_token += 1  # a pending re-render waits for this edit
+        self._begin_hole(index)
+        # the moved boxes after it move up one place (their moves still wait for the re-render)
+        self.live = {(i - 1 if i > index else i): entry for i, entry in self.live.items() if i != index}
         self.selected = None
-        self.live.clear()
-        return await self._box_call(lambda: es.delete_box(index))
+        if not await self._box_call(lambda: es.delete_box(index)):
+            return False
+        self._schedule_render()
+        return True
 
-    async def clear_boxes(self, *, confirm: bool = True) -> bool:
+    async def clear_boxes(self, *, confirm: bool = True, include_cleaned: bool = False) -> bool:
         """Clear Boxes (desktop ``_on_clear_boxes_clicked``, shared through manga_editor_core): every box
-        of the page with its OCR text and translation, and the page's translated image."""
+        of the page with its OCR text and translation, and the page's translated image.
+        ``include_cleaned``: ⋮ › Delete page data, which also deletes the page's cleaned image."""
         es = self.session.editor
         if es is None or not self.image_path:
             return False
         if confirm:
             from glossarion_mobile.ui.tools.common import ask
 
-            answer = await ask(self.ctx, "Clear boxes",
-                               "Remove every box on this page with its OCR text and translation? The page's "
-                               "translated image is deleted; the cleaned image stays.",
-                               (("no", "Cancel", "text"), ("yes", "Clear", "filled")), key="me-clear-confirm")
+            if include_cleaned:
+                answer = await ask(self.ctx, "Delete page data",
+                                   "Delete all OCR, clean and translation data of this page? Every box with its "
+                                   "OCR text and translation, the cleaned image and the translated image are "
+                                   "deleted; the original page stays.",
+                                   (("no", "Cancel", "text"), ("yes", "Delete", "destructive")),
+                                   key="me-delete-page-confirm")
+            else:
+                answer = await ask(self.ctx, "Clear boxes",
+                                   "Remove every box on this page with its OCR text and translation? The page's "
+                                   "translated image is deleted; the cleaned image stays.",
+                                   (("no", "Cancel", "text"), ("yes", "Clear", "filled")), key="me-clear-confirm")
             if answer != "yes":
                 return False
         self.selected = None
         self.live.clear()
+        self.holes.clear()
+        self._render_token += 1  # nothing left to re-render
+        if include_cleaned:
+            return await self._box_call(lambda: es.clear_page(include_cleaned=True))
         return await self._box_call(lambda: es.clear_page())
+
+    async def delete_page_data(self, *, confirm: bool = True) -> bool:
+        """⋮ › Delete page data (the trash): every OCR, clean and translation result of the open page."""
+        if self.busy:
+            self.ctx.say("Wait for the running step")
+            return False
+        return await self.clear_boxes(confirm=confirm, include_cleaned=True)
 
     async def toggle_exclude(self) -> bool:
         index = self.selected
@@ -1600,8 +1687,9 @@ class EditorTab(MangaTab):
         self.step_progress_text = ""
         if step in TRANSLATED_STEPS or step in ("detect", "clean"):
             self.live.clear()  # the page was rendered (or its boxes replaced): the render shows it
-        elif self.live:
-            self._schedule_render()  # a move waited for this step
+            self.holes.clear()
+        elif self.live or self.holes:
+            self._schedule_render()  # a move / delete waited for this step
         self.ctx.spawn(self._reload_after_step(step))
 
     async def _reload_after_step(self, step: str) -> None:

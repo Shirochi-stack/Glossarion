@@ -116,7 +116,7 @@ from glossarion_mobile.ui.chat.output_modes import (
 )
 from glossarion_mobile.ui.chat.plan_card import ChooseChaptersSheet, RunOptionsPanel, destination_label, destination_sheet
 from glossarion_mobile.ui.chat.plan_model import NO_FILES_TEXT, batch_files, glossary_chip_label, plan_facts, range_preview
-from glossarion_mobile.ui.chat.run_request import attachment_record
+from glossarion_mobile.ui.chat.run_request import attachment_record, run_config_of
 from glossarion_mobile.ui.chat.send_state import (
     BLOCK_ATTACHMENT_MISSING,
     BLOCK_GLOSSARY_PENDING,
@@ -978,8 +978,10 @@ class ChatView:
         runs = self.env.runs
         last = runs.run_for(self.cid) if runs is not None else None
         ended = None
+        ended_params: Any = None  # the JobSpec params of the job this card ended with (its Run options)
         if last is not None and not last.live and self._run_turn(last) == item.index:
             ended = ended_card(last.state if last.state in ("stopped", "failed") else "done", last.last_snapshot)
+            ended_params = getattr(last, "params", None)
         elif runs is not None:
             # After a relaunch (no run in this session) JobService still knows how the turn's
             # job ended: Interrupted (killed) / Stopped / Failed offer Resume, whatever cards
@@ -987,6 +989,7 @@ class ChatView:
             remembered = runs.persisted_job(self.cid, item.index)
             if remembered is not None:
                 ended = ended_card(ended_kind(remembered), remembered)
+                ended_params = getattr(getattr(remembered, "spec", None), "params", None)
         if ended is not None:
             phase, status = CardPhase(ended[0]), ended[1]
         segments = self._saved_request_segments(item, messages)
@@ -1013,6 +1016,13 @@ class ChatView:
         slot = self._card(slot_key, ("job", self.cid, item, record, phase, status, segments, report, failed, row_page),
                           build)
         card = slot.card
+        # owner #5: a Result that offers Resume / Retry failed keeps the Plan card's Run options (the values the
+        # job ran with), so they can be changed before resuming; the same panel object across renders
+        panel = self._resume_panel(item, ended_params) if card.offers_resume else None
+        control = panel.control if panel is not None else None
+        shown = card.options_box.controls
+        if (shown[0] if shown else None) is not control:
+            card.set_run_options(control)
         # UI_SPEC §2.12.4 Result: the turn's output files as chips (its own workspace, on the io pool)
         key = ("outputs", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report,
                item.actions, phase.name)
@@ -1740,6 +1750,34 @@ class ChatView:
             self.run_panels[key] = panel
         return panel
 
+    def _resume_panel(self, item: Any, params: Any) -> Optional[RunOptionsPanel]:
+        """Owner #5: the Run options of an ended turn's card (stopped / failed / interrupted, or done with
+        failed chapters), starting from what its job ran with (``run_request.run_config_of``); Resume /
+        Retry failed resubmits with them (``_resume_turn``). None when the job's params are unknown."""
+        if not isinstance(params, Mapping) or not isinstance(params.get("run"), Mapping) or self.env is None:
+            return None
+        from glossarion_mobile.ui.chat.run_controller import turn_key
+
+        key = (self.cid, "resume", item.index, turn_key(params))
+        panel = self.run_panels.get(key)
+        if panel is None:
+            panel = RunOptionsPanel(self.env, values=run_config_of(params.get("config_overrides")),
+                                    key=f"resume-run-options-{item.index}")
+            for stale in [k for k in self.run_panels if k[:3] == key[:3] and k != key]:
+                self.run_panels.pop(stale, None)
+            self.run_panels[key] = panel
+        return panel
+
+    def _take_resume_config(self, item: Any) -> tuple:
+        """``(run options, run key)`` a card's Resume / Retry failed runs with: its panel's values and the
+        ``turn_key`` of the job they were seeded from (the panel is released so the next ended card starts
+        from the resumed job); ``(None, None)`` without a panel (the job's own values)."""
+        if item is None:
+            return None, None
+        keys = [k for k in self.run_panels if k[:3] == (self.cid, "resume", item.index)]
+        panels = [self.run_panels.pop(k) for k in keys]
+        return (panels[-1].config_overrides(), keys[-1][3]) if panels else (None, None)
+
     def _refresh_range_chips(self) -> None:
         for chip, panel in list(getattr(self, "_range_chips", {}).values()):
             try:
@@ -2389,11 +2427,12 @@ class ChatView:
         """Resume / Retry failed of a Result card: a workspace that moved into the Library continues in
         the Library's translate sheet (``ChatEnv.library_translate``: its own progress file); the chat's
         run root otherwise (``ChatRuns.resubmit``)."""
+        run_config, run_key = self._take_resume_config(item)
         folder, in_attachments = await self.env.run_io(self._job_workspace_state, item)
         hand_off = getattr(self.env, "library_translate", None)
         if folder and not in_attachments and hand_off is not None:
             return await self._await(hand_off(folder, self._turn_source(item)))
-        self._resume_last()
+        self._resume_last(run_config, run_key)
         return None
 
     async def _open_reader(self, item: Any = None) -> None:
@@ -2557,8 +2596,10 @@ class ChatView:
             label = "PDF" if kind == "compile_pdf" else "EPUB"
             self.notify(f"Compiling {label} · see Jobs", action_label="Jobs", on_action=lambda: self.navigate("jobs"))
 
-    def _resume_last(self) -> None:
-        """Resume / Retry failed: resubmit the chat's last run (same run root -> resumes from progress)."""
+    def _resume_last(self, run_config: Optional[dict] = None, run_key: Optional[str] = None) -> None:
+        """Resume / Retry failed: resubmit the chat's last run (same run root -> resumes from progress);
+        ``run_config``: the card's Run options (owner #5), None keeps the run's own; ``run_key``: the run
+        they belong to (``resubmit`` ignores them for another run, e.g. an older turn's card)."""
         if self.env is None or self.env.runs is None:
             return
 
@@ -2566,7 +2607,9 @@ class ChatView:
 
         async def go() -> None:
             try:
-                run = await self.env.runs.resubmit(cid, profile_check=lambda name: self.resume_profile(cid, name))
+                kwargs = {"run_config": run_config, "run_config_for": run_key} if run_config is not None else {}
+                run = await self.env.runs.resubmit(cid, profile_check=lambda name: self.resume_profile(cid, name),
+                                                   **kwargs)
             except Exception as exc:
                 self.notify(f"Could not resume: {exc}")
                 return

@@ -747,6 +747,8 @@ class JobCard(ft.Container):
         self.u10_handler: Optional[Callable[[str], Any]] = None
         self.u10_state: dict = {}
         self.u10_builds = 0
+        # owner #5: a stopped / failed / interrupted Result's Run options (the Plan card's panel, for Resume)
+        self.options_box = ft.Column([], spacing=0, tight=True, visible=False, key="job-run-options")
         self.buttons = ft.Row([], wrap=True, spacing=8, run_spacing=4)
         self.action_buttons: dict = {}
         # ``icon`` / ``meta``: a tool job's card (a QA scan) names its own icon and summary line
@@ -774,6 +776,7 @@ class JobCard(ft.Container):
                 self.report_tile,
                 self.outputs_row,
                 self.u10_box,
+                self.options_box,
                 self.buttons,
             ],
             spacing=6,
@@ -930,6 +933,22 @@ class JobCard(ft.Container):
             if name in ("stopped", "interrupted"):
                 buttons.insert(0, self._button("resume", "Resume", "filled"))
         self.buttons.controls = buttons
+        if hasattr(self, "options_box"):
+            self.options_box.visible = bool(self.options_box.controls) and self.offers_resume
+
+    @property
+    def offers_resume(self) -> bool:
+        """The Result offers Resume or Retry failed (a run that can be resubmitted with other Run options)."""
+        name = self.phase.name
+        if self.phase.live or name in ("plan", "queued"):
+            return False
+        return name != "done" or "failed" in (self.status or "")
+
+    def set_run_options(self, control: Optional[ft.Control]) -> None:
+        """Owner #5: the Run options panel (``plan_card.RunOptionsPanel.control``) shown above the buttons of a
+        Result that offers Resume / Retry failed; None removes it."""
+        self.options_box.controls = [control] if control is not None else []
+        self.options_box.visible = control is not None and self.offers_resume
 
     def set_issue(self, label: str) -> None:
         """The running card's issue chip (empty: hidden)."""

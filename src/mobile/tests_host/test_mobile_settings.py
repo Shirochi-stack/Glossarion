@@ -817,7 +817,9 @@ def test_renderer_builds_every_section_and_tile_kind(tmp_path):
             # U12 item 1: keys that cannot work on mobile are not listed at all
             assert screen.visible_keys == [k for k in section.keys if ctx.schema.availability(k)[0]]
             for key, tile in screen.tiles.items():
-                assert tile.control.key == __import__("flet").ScrollKey(key)
+                # search's scroll_to target is the tile's top marker, never the tile (its field keeps focus)
+                assert tile.control.content.controls[0].key == __import__("flet").ScrollKey(key)
+                assert tile.control.key is None
         page.update()
         assert conn.bytes_sent > 0
         assert kinds == set(TILE_CLASSES)

@@ -64,6 +64,7 @@ from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
+from glossarion_mobile.ui.components.poll_border import PollBorder
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
 from glossarion_mobile.ui.theme import HIT_TARGET, semantic
@@ -249,6 +250,35 @@ def _dot(color: str, tooltip: str) -> ft.Control:
     return ft.Container(width=10, height=10, border_radius=5, bgcolor=color, tooltip=tooltip)
 
 
+REFRESH_LABEL = "Refresh online models"
+REFRESHING_LABEL = "Refreshing online models…"
+REFRESH_PROVIDER_LABEL = "Refresh this provider"
+REFRESHING_PROVIDER_LABEL = "Refreshing this provider…"
+REFRESH_BUSY_REASON = "A refresh of this provider is running"
+#: How long an explicit refresh waits for a poll of the same provider already running (the sheet's own
+#: 24 h auto-poll on open) before it polls again itself.
+REFRESH_WAIT_S = 60.0
+_MODEL_COUNT = re.compile(r"(\d+)\s+models?\b")
+
+
+def refresh_outcome_text(provider: str, outcome: Any) -> str:
+    """The sheet's status line for a finished explicit refresh: "N models found · M new", or why not."""
+    label = mc.provider_label(str(provider or ""))
+    if outcome is None:
+        return f"⚠ {label}: the refresh did not finish"
+    statuses = dict(getattr(outcome, "statuses", {}) or {})
+    status = str(statuses.get(provider, "") or "").strip()
+    if getattr(outcome, "skipped", False):
+        return f"{label}: {outcome.message or 'a catalog poll is already running'}"
+    if getattr(outcome, "ok", False):
+        found = _MODEL_COUNT.search(status) or _MODEL_COUNT.search(str(getattr(outcome, "message", "") or ""))
+        count = f"{found.group(1)} models found" if found else (status or "refreshed")
+        new = int(getattr(outcome, "new_models", 0) or 0)
+        return f"✓ {label}: {count} · {new} new"
+    reason = status or str(getattr(outcome, "message", "") or "") or "no online catalog responded"
+    return f"⚠ {label}: {reason}"
+
+
 # ---- the sheet ------------------------------------------------------------------------------------
 
 
@@ -308,6 +338,9 @@ class ModelSheet:
         else:
             self.snapshot = CatalogSnapshot(models=tuple(models), loaded=bool(models))
         self._keyless: set = set()
+        self._refreshing: dict = {}  # catalog provider -> its label, for this sheet's own explicit refreshes
+        self.refresh_note = ""  # the last explicit refresh's outcome (the status line under the chips)
+        self.refresh_tasks: list = []
         self._build()
         self.refresh()
 
@@ -318,12 +351,13 @@ class ModelSheet:
                                   expand=True)
         self.hide_item = ft.PopupMenuItem(content="Hide unpolled models", icon=ft.Icons.FILTER_ALT_OUTLINED,
                                           checked=self.snapshot.hide_unpolled, on_click=self._toggle_hide_unpolled)
+        self.refresh_item = ft.PopupMenuItem(content=REFRESH_LABEL, icon=ft.Icons.PUBLIC,
+                                             on_click=lambda e: self.refresh_selected_provider())
         self.menu = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
             tooltip="More",
             items=[
-                ft.PopupMenuItem(content="Refresh online models", icon=ft.Icons.PUBLIC,
-                                 on_click=lambda e: self.refresh_selected_provider()),
+                self.refresh_item,
                 ft.PopupMenuItem(content="Manage models", icon=ft.Icons.TUNE, on_click=lambda e: self._nav("settings.models")),
                 self.hide_item,
             ],
@@ -339,6 +373,8 @@ class ModelSheet:
                                    on_change=lambda e: self.set_query(e.control.value or ""),
                                    on_submit=self.submit_query,
                                    border_radius=tokens.RADII["field"])
+        # desktop: the animated border round the model field while an online catalog polls
+        self.search_border = PollBorder(self.search, radius=tokens.RADII["field"], key="model-search-border")
         self.chips: dict = {}
         for chip_id, label in PROVIDER_CHIPS:
             self.chips[chip_id] = ft.Chip(label=ft.Text(label), selected=chip_id == self.chip,
@@ -378,7 +414,7 @@ class ModelSheet:
                     [
                         ft.Row([self.title_text, self.menu], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                         self.tabs,
-                        self.search,
+                        self.search_border.control,
                         self.chip_row,
                         self.chat_switch,
                         self.status_text,
@@ -396,6 +432,16 @@ class ModelSheet:
             draggable=True,
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
         )
+        # swiped away / back gesture: the poll border stops and catalog updates stop repainting a closed sheet
+        # (set before show_dialog: Flet wraps the handler present when the dialog opens)
+        self.dialog.on_dismiss = self._on_dismiss
+
+    def _on_dismiss(self, e: Any = None) -> None:
+        self.closed = True
+        self.search_border.stop()
+        if self._unsub is not None:
+            self._unsub()
+            self._unsub = None
 
     # ---- state helpers -----------------------------------------------------------------------------
 
@@ -581,7 +627,8 @@ class ModelSheet:
                                           key=f"group-{provider or title}")
         if polling:
             # a static tint under reduce motion (UI_SPEC §6.3)
-            header = motion.shimmer(header, base_color=ft.Colors.PRIMARY_CONTAINER, highlight_color=ft.Colors.SURFACE)
+            header = motion.shimmer(header, base_color=ft.Colors.PRIMARY_CONTAINER, highlight_color=ft.Colors.SURFACE,
+                                    key=f"group-{provider or title}-polling")
         if provider is not None:
             self.group_headers[provider] = header
         return header
@@ -759,6 +806,7 @@ class ModelSheet:
         self._favorites_cache = None
         model_tab = self.tab == "model"
         self.search.visible = model_tab or self.tab == "language"
+        self.search_border.control.visible = self.search.visible
         self.search.hint_text = "Search models" if model_tab else "Search or type a language"
         self.chip_row.visible = model_tab
         # the model is always this chat's own (U13); profile and language may still apply to every chat
@@ -774,6 +822,34 @@ class ModelSheet:
             rows = self.language_rows()
         self.list_view.controls = rows
         self._refresh_route_row()
+        self._sync_poll_state()
+
+    def _sync_poll_state(self) -> None:
+        """The online-refresh indicators: the animated search border while any catalog poll runs (the
+        desktop border also turns for automatic polls), the ⋯ item relabelled and disabled while the
+        selected model's provider polls, and the status line (what is polling, else the last outcome)."""
+        polling = set(self.snapshot.polling)
+        busy = bool(polling or self._refreshing) and not self.closed
+        if busy:
+            self.search_border.start(self.env.spawn)
+        else:
+            self.search_border.stop()
+        selected = self._selected_catalog_provider() if (polling or self._refreshing) else None
+        selected_busy = bool(selected) and self._provider_busy(selected)
+        self.refresh_item.content = REFRESHING_LABEL if selected_busy else REFRESH_LABEL
+        self.refresh_item.disabled = selected_busy
+        if self._refreshing:
+            text = f"Refreshing online models: {', '.join(self._refreshing.values())}…"
+        elif polling:
+            names = sorted("all providers" if tag == "*" else mc.provider_label(tag) for tag in polling)
+            text = f"Checking online models: {', '.join(names)}…"
+        else:
+            text = self.refresh_note
+        self.status_text.value = text
+        self.status_text.visible = bool(text)
+
+    def _provider_busy(self, provider: str) -> bool:
+        return provider in self._refreshing or self.snapshot.is_polling(provider)
 
     def _push_all(self) -> None:
         _push(self.dialog)
@@ -1293,7 +1369,7 @@ class ModelSheet:
         self.refresh()
         self._push_all()
 
-    def refresh_selected_provider(self) -> Any:
+    def _selected_catalog_provider(self) -> str:
         provider = mc.provider_of(self.current["model"], list(self.snapshot.custom_routes))
         catalog = self.env.catalog
         if catalog is not None:
@@ -1301,30 +1377,104 @@ class ModelSheet:
                 provider = catalog.options.catalog_provider_for_model(self.current["model"], list(self.snapshot.custom_routes)) or provider
             except Exception:
                 pass
-        return self.refresh_provider(provider)
+        return provider
+
+    def refresh_selected_provider(self) -> Any:
+        return self.refresh_provider(self._selected_catalog_provider())
+
+    def _note(self, message: str) -> None:
+        """Feedback the user can see: the sheet's status line while it is open (a SnackBar would sit
+        under the modal sheet), else a SnackBar."""
+        if self.closed:
+            self._say(message)
+            return
+        self.refresh_note = message
+        self._sync_poll_state()
+        _push(self.status_text, self.refresh_item)
 
     def refresh_provider(self, provider: str) -> Any:
+        """Explicit online refresh of one catalog provider (the ⋯ item, a group's 🌐, a row's "Refresh this
+        provider"): ``ModelCatalogService.refresh`` off the UI loop (the shared ``model_options`` poll).
+        The search border turns and the status line says what polls until it ends, whatever the outcome;
+        then the line says how many models were found, or why not. A poll of the same provider already
+        running (the 24 h auto-poll the sheet starts on open) is waited for, then polled again."""
         catalog = self.env.catalog
         if catalog is None:
-            self._say("Online model refresh needs the model catalog service")
+            self._note("Online model refresh needs the model catalog service")
+            return None
+        if not provider:
+            self._note("This model has no online catalog to refresh")
             return None
         if mc.provider_excluded(provider):
-            self._say(f"{mc.provider_label(provider)} isn't available on mobile")
+            self._note(f"{mc.provider_label(provider)} isn't available on mobile")
             return None
+        if provider in self._refreshing:
+            return None  # this sheet is already refreshing it (the indicators say so)
+        self._refreshing[provider] = mc.provider_label(provider)
+        self.refresh_note = ""
+        self._sync_poll_state()
+        self._push_all()
 
         async def run() -> Any:
-            outcome = await catalog.refresh(provider, explicit=True)
-            if outcome.message:
-                self._say(outcome.message)
-            return outcome
+            outcome = None
+            try:
+                outcome = await catalog.refresh(provider, explicit=True)
+                if outcome.skipped:
+                    await self._wait_for_poll(catalog, provider)
+                    outcome = await catalog.refresh(provider, explicit=True)
+                return outcome
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("online model refresh of %s failed: %s", provider, exc, exc_info=True)
+                outcome = mc.RefreshOutcome(provider, False, message=f"Catalog refresh failed: {exc}")
+                return outcome
+            finally:
+                self._finish_refresh(provider, outcome)
 
         spawn = self.env.spawn
         coro = run()
-        if spawn is not None:
-            return spawn(coro)
-        import asyncio
+        try:
+            task = spawn(coro) if spawn is not None else asyncio.ensure_future(coro)
+        except Exception:
+            coro.close()
+            self._refreshing.pop(provider, None)
+            self._note("Online model refresh could not start")
+            raise
+        self.refresh_tasks = [t for t in self.refresh_tasks if not t.done()] + [task]
+        return task
 
-        return asyncio.ensure_future(coro)
+    async def _wait_for_poll(self, catalog: Any, provider: str) -> None:
+        """Until no poll of ``provider`` (or a full one) runs, at most REFRESH_WAIT_S. Exact tags, as
+        ``ModelCatalogService.refresh`` skips on them (another account slot's poll does not block this one)."""
+        deadline = asyncio.get_running_loop().time() + REFRESH_WAIT_S
+
+        def blocked() -> bool:
+            polling = catalog.snapshot.polling
+            return provider in polling or "*" in polling
+
+        while blocked() and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.2)
+
+    def _finish_refresh(self, provider: str, outcome: Any) -> None:
+        """Always runs (finally): the indicators stop and the outcome is shown."""
+        self._refreshing.pop(provider, None)
+        catalog = self.env.catalog
+        snap = getattr(catalog, "snapshot", None) if catalog is not None else None
+        if isinstance(snap, CatalogSnapshot) and snap.loaded:
+            self.snapshot = snap  # the published list (a listener post may still be queued)
+        message = refresh_outcome_text(provider, outcome)
+        if self.closed:
+            self.search_border.stop()
+            self._say(message)
+            return
+        self.refresh_note = message
+        try:
+            self.refresh()
+        except Exception:
+            log.debug("model sheet repaint after a refresh failed", exc_info=True)
+            self._sync_poll_state()
+        self._push_all()
 
     def open_row_actions(self, model: str) -> ActionSheet:
         favorite = model in self.favorites()
@@ -1340,9 +1490,15 @@ class ModelSheet:
                        icon="STAR_OUTLINE"),
             ActionItem("Copy id", lambda: self._copy(model), icon="CONTENT_COPY"),
             ActionItem("Provider info", lambda: self.open_provider_info(provider=provider), icon="INFO_OUTLINE"),
-            ActionItem("Refresh this provider", (lambda: self.refresh_provider(catalog_provider)) if catalog_provider else None,
-                       icon="PUBLIC", disabled_reason=None if catalog_provider else "No online catalog for this route"),
         ]
+        if catalog_provider and self._provider_busy(catalog_provider):
+            items.append(ActionItem(REFRESHING_PROVIDER_LABEL, None, icon="PUBLIC", disabled_reason=REFRESH_BUSY_REASON,
+                                    key="refresh-provider"))
+        else:
+            items.append(ActionItem(REFRESH_PROVIDER_LABEL,
+                                    (lambda: self.refresh_provider(catalog_provider)) if catalog_provider else None,
+                                    icon="PUBLIC", key="refresh-provider",
+                                    disabled_reason=None if catalog_provider else "No online catalog for this route"))
         sheet = ActionSheet(items, title=model, subtitle=mc.provider_label(provider), tablet=bool(self.env.tablet()))
         if self._page is not None:
             sheet.show(self._page)
@@ -1435,6 +1591,7 @@ class ModelSheet:
 
     def close(self) -> None:
         self.closed = True
+        self.search_border.stop()
         if self._unsub is not None:
             self._unsub()
             self._unsub = None

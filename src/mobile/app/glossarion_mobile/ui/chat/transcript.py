@@ -44,6 +44,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET, EmptyState
 from glossarion_mobile.ui.components.pull_to_refresh import is_overscroll, is_top_pull
+from glossarion_mobile.ui.components.scroll_anchor import anchored_column
 
 __all__ = ["CardSlot", "EARLIER_TEMPLATE", "EDGE_LOAD_PX", "EMPTY_BODY", "EMPTY_TITLE", "LATE_LAYOUT_SECONDS",
            "LATER_TEMPLATE", "SUGGESTIONS", "Transcript"]
@@ -75,15 +76,27 @@ LATE_LAYOUT_SECONDS = 0.6
 
 
 class CardSlot(ft.Container):
-    """The stable, ``ScrollKey``-keyed place of one transcript card (its ``content``)."""
+    """The stable place of one transcript card (``card``), reachable by ``ScrollKey(slot_key)``.
+
+    The ScrollKey sits on a zero-size marker above the card (``components.scroll_anchor``), never on
+    the slot itself: Flet 1.0.3 gives a ScrollKey'd control a new Flutter GlobalKey on every build, so a
+    keyed slot remounted its whole card whenever the transcript was laid out again (the soft keyboard
+    shrinking the list): a text field in the card (Plan / Run options) lost its focus and the keyboard
+    closed as soon as it opened."""
 
     def __init__(self, key: str) -> None:
-        super().__init__(key=ft.ScrollKey(key))
+        super().__init__()
         self.slot_key = key
+        self.content = anchored_column(key, [])
 
     @property
     def card(self) -> Any:
-        return self.content
+        controls = self.content.controls
+        return controls[1] if len(controls) > 1 else None
+
+    @card.setter
+    def card(self, card: Any) -> None:
+        self.content.controls = [self.content.controls[0], card]
 
 
 @ft.control
@@ -157,8 +170,8 @@ class Transcript(ft.ListView):
         slot = self._slots.get(key)
         if slot is None:
             slot = self._slots[key] = CardSlot(key)
-        if slot.content is not card:
-            slot.content = card
+        if slot.card is not card:
+            slot.card = card
         return slot
 
     def slot_for(self, key: Any) -> Optional[CardSlot]:

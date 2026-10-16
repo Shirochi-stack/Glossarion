@@ -3193,13 +3193,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         # Check if it contains honorifics
         for honorific in honorifics_to_exclude:
-            _check_filter_stop()
             if honorific in term or (honorific.startswith('-') and term.endswith(honorific[1:])):
                 return True
         
         # Check if it matches title patterns
         for pattern in title_patterns:
-            _check_filter_stop()
             if pattern.search(term):
                 return True
         
@@ -3215,68 +3213,57 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         if primary_lang == 'chinese' and len(term) >= 2:
             # Check if it's a cultivation term - these should NOT be excluded
             for category in PM.CHINESE_CULTIVATION_TERMS.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep cultivation terms!
             
             # Check if it's a wuxia term - these should NOT be excluded
             for category in PM.CHINESE_WUXIA_TERMS.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep wuxia terms!
             
             # Check relationship terms (important character relationships)
             for category in PM.CHINESE_RELATIONSHIP_TERMS.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep relationship terms!
             
             # Check mythological terms (creatures, artifacts, legendary beings)
             for category in PM.CHINESE_MYTHOLOGICAL_TERMS.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep mythological terms!
             
             # Check elemental/natural force terms
             for category in PM.CHINESE_ELEMENTAL_TERMS.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep elemental terms!
             
             # Check physique/spiritual root terms
             for category in PM.CHINESE_PHYSIQUE_TERMS.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep physique terms!
             
             # Check treasure grades
             for category in PM.CHINESE_TREASURE_GRADES.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep treasure grade terms!
             
             # Check power system terms (levels, stars, etc.)
             for category in PM.CHINESE_POWER_SYSTEMS.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep power system terms!
             
             # Check location types
             for category in PM.CHINESE_LOCATION_TYPES.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep location terms!
             
             # Check battle terms
             for category in PM.CHINESE_BATTLE_TERMS.values():
-                _check_filter_stop()
                 if term in category:
                     return False  # Keep battle terms!
 
             # Check novel terms (common raw Chinese terms)
             if hasattr(PM, 'CHINESE_NOVEL_TERMS'):
                 for category in PM.CHINESE_NOVEL_TERMS.values():
-                    _check_filter_stop()
                     if term in category:
                         return False
         
@@ -3438,7 +3425,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # (Glossarion Mobile has no worker processes; this gate also keeps the
         # sentence-scoring pool further down on threads.)
         use_process_pool = len(sentences) > 5000 and mobile_runtime.processes_available()  # Remove subprocess check!
-        
+        # Without process pools (mobile) a large dataset still runs the desktop's
+        # large-dataset batch worker, on threads, so both extract the same terms.
+        use_extraction_worker_on_threads = False
+
         if use_process_pool:
             # Check if we're in a daemonic process (can't spawn children)
             is_daemon = multiprocessing.current_process().daemon if hasattr(multiprocessing.current_process(), 'daemon') else False
@@ -3490,7 +3480,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 use_mp_pool = True  # Flag to use different API
         else:
             _check_filter_stop()
-            print(f"📁 Using ThreadPoolExecutor for sentence processing (dataset < 5000 sentences)")
+            if len(sentences) > 5000:
+                use_extraction_worker_on_threads = True
+                print(f"📁 Using ThreadPoolExecutor for sentence processing (process pools unavailable on this platform)")
+            else:
+                print(f"📁 Using ThreadPoolExecutor for sentence processing (dataset < 5000 sentences)")
             executor_class = ThreadPoolExecutor
             executor_kwargs = {'max_workers': extraction_workers}
             use_mp_pool = False
@@ -3587,7 +3581,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 futures = []
                 
                 # Prepare data for ProcessPoolExecutor if needed
-                if use_process_pool:
+                if use_process_pool or use_extraction_worker_on_threads:
                     # Serialize exclusion check data for process pool
                     exclude_check_data = (
                         list(honorifics_to_exclude),
@@ -3595,10 +3589,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         PM.COMMON_WORDS,
                         PM.CHINESE_NUMS
                     )
-                
+
                 for idx, batch in enumerate(batches):
                     _check_filter_stop()
-                    if use_process_pool:
+                    if use_process_pool or use_extraction_worker_on_threads:
                         # Use module-level function for ProcessPoolExecutor
                         future = executor.submit(_process_sentence_batch_for_extraction, 
                                                (batch, idx, combined_pattern, exclude_check_data))
@@ -3614,12 +3608,33 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Collect results with progress
                 completed_batches = 0
                 batch_start_time = time.time()
+                batch_results = {}
                 for future in _filter_completed(futures):
                     # Get result without timeout - as_completed already handles waiting
                     _check_filter_stop()
                     local_word_freq, local_important, local_seen, batch_idx = future.result()
-                    
-                    # Merge results
+                    batch_results[batch_idx] = (local_word_freq, local_important)
+
+                    processed_count += len(batches[batch_idx])
+                    completed_batches += 1
+
+                    # Show progress more frequently for better user feedback
+                    progress_interval = 1 if len(batches) <= 50 else (5 if len(batches) <= 100 else 10)
+
+                    if completed_batches % progress_interval == 0 or completed_batches == len(batches):
+                        progress = (processed_count / total_sentences) * 100
+                        elapsed = time.time() - batch_start_time
+                        rate = (processed_count / elapsed) if elapsed > 0 else 0
+                        _check_filter_stop()
+                        print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
+
+                    # Yield to GUI after each batch completes
+                    time.sleep(0.001)
+
+                # Merge in batch order (as the process pool's map_async does), so the
+                # result does not depend on which thread finished first.
+                for batch_idx in sorted(batch_results):
+                    local_word_freq, local_important = batch_results[batch_idx]
                     word_freq.update(local_word_freq)
                     for sentence in local_important:
                         _check_filter_stop()
@@ -3627,22 +3642,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         if sentence_key not in seen_contexts:
                             important_sentences.append(sentence)
                             seen_contexts.add(sentence_key)
-                    
-                    processed_count += len(batches[batch_idx])
-                    completed_batches += 1
-                    
-                    # Show progress more frequently for better user feedback
-                    progress_interval = 1 if len(batches) <= 20 else (5 if len(batches) <= 100 else 10)
-                    
-                    if completed_batches % progress_interval == 0 or completed_batches == len(batches):
-                        progress = (processed_count / total_sentences) * 100
-                        elapsed = time.time() - batch_start_time
-                        rate = (processed_count / elapsed) if elapsed > 0 else 0
-                        _check_filter_stop()
-                        print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
-                    
-                    # Yield to GUI after each batch completes
-                    time.sleep(0.001)
     else:
         # Sequential processing with progress
         for idx, sentence in enumerate(sentences):
@@ -4161,11 +4160,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 new_filtered = []
                 with _filter_executor(ProcessPoolExecutor, max_workers=extraction_workers) as executor:
                     # Use the module-level function _check_sentence_batch_for_terms
-                    futures = [executor.submit(_check_sentence_batch_for_terms, (batch, term_set)) 
+                    futures = [executor.submit(_check_sentence_batch_for_terms, (batch, term_set))
                               for batch in check_batches]
-                    
+
                     for future in _filter_completed(futures):
                         _check_filter_stop()
+                        future.result()
+                    # Keep sentence order (batch order), not completion order.
+                    for future in futures:
                         new_filtered.extend(future.result())
             else:
                 _check_filter_stop()
@@ -4177,7 +4179,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         # Simple substring check - much faster than regex
                         _check_filter_stop()
                         for term in term_set:
-                            _check_filter_stop()
                             if term in sentence:
                                 result.append(sentence)
                                 break
@@ -4186,9 +4187,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 new_filtered = []
                 with _filter_executor(ThreadPoolExecutor, max_workers=extraction_workers) as executor:
                     futures = [executor.submit(check_batch_simple, batch) for batch in check_batches]
-                    
+
                     for future in _filter_completed(futures):
                         _check_filter_stop()
+                        future.result()
+                    # Keep sentence order (batch order), not completion order.
+                    for future in futures:
                         new_filtered.extend(future.result())
             
             filtered_sentences = new_filtered
@@ -4202,7 +4206,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             for i, sentence in enumerate(filtered_sentences):
                 _check_filter_stop()
                 for term in top_terms:
-                    _check_filter_stop()
                     if term in sentence:
                         new_filtered.append(sentence)
                         break
@@ -4285,7 +4288,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 _check_filter_stop()
                 sentence_scores[idx] = 1.0
                 for term in frequent_terms:
-                    _check_filter_stop()
                     if term in sent:
                         term_to_sentences.setdefault(term, []).append(idx)
         # Parallelize scoring if dataset is large enough and gender context is ON
@@ -4424,7 +4426,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 sentence_scores[idx] = score
                 
                 for term in frequent_terms:
-                    _check_filter_stop()
                     if term in sent:
                         if term not in term_to_sentences:
                             term_to_sentences[term] = []
@@ -7006,13 +7007,11 @@ def _process_sentence_batch_for_extraction(args):
         
         # Check if it contains honorifics
         for honorific in honorifics_to_exclude:
-            _check_filter_stop()
             if honorific in term or (honorific.startswith('-') and term.endswith(honorific[1:])):
                 return True
         
         # Check if it matches title patterns
         for pattern in title_patterns:
-            _check_filter_stop()
             if pattern.search(term):
                 return True
         

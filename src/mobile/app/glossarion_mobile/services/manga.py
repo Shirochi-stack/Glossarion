@@ -1840,7 +1840,7 @@ class ModelManager:
 
 #: Editor steps that run as MANGA_STEP jobs (the session method each one calls on the job thread).
 STEPS = ("detect", "clean", "recognize", "translate", "translate_all", "render", "ocr_box", "translate_box",
-         "clean_box", "import_ocr")
+         "clean_box", "import_ocr", "rerender_boxes")
 STEP_LABELS = {
     "detect": "Detect",
     "clean": "Clean",
@@ -1852,6 +1852,8 @@ STEP_LABELS = {
     "translate_box": "Translate this text",
     "clean_box": "Clean this box",
     "import_ocr": "Import OCR",
+    # the desktop's rectangle-moved auto save (params ``boxes``: the moved boxes; none: a box was deleted)
+    "rerender_boxes": "Update overlay",
 }
 BOX_STEPS = frozenset({"ocr_box", "translate_box", "clean_box"})
 

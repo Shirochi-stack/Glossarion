@@ -26,7 +26,8 @@ from pathlib import Path
 import re
 import threading
 import time
-from contextlib import contextmanager
+import uuid
+from contextlib import contextmanager, nullcontext
 
 import browser_driver
 import cdp_browser
@@ -178,14 +179,19 @@ def _access_token(log_fn):
 
 
 def _refreshed_token(rejected):
-    """A new access token after chatgpt.com rejected ``rejected``, or None."""
+    """A new access token after chatgpt.com rejected ``rejected``, or None.
+
+    Runs under the token store's own lock: concurrent requests (batch translation) that all
+    got the rejection refresh once, and the others take that new token. Two refreshes with
+    the same refresh token would rotate it twice and lose the login."""
     try:
         store = _token_store()
-        tokens = store.load_tokens() or {}
-        if tokens.get("access_token") and tokens["access_token"] != rejected:
-            return tokens["access_token"]  # another request already refreshed it
-        refreshed = store._try_refresh(tokens) if tokens else None
-        return (refreshed or {}).get("access_token")
+        with getattr(store, "_lock", None) or nullcontext():
+            tokens = store.load_tokens() or {}
+            if tokens.get("access_token") and tokens["access_token"] != rejected:
+                return tokens["access_token"]  # another request already refreshed it
+            refreshed = store._try_refresh(tokens) if tokens else None
+            return (refreshed or {}).get("access_token")
     except Exception:
         return None
 
@@ -237,7 +243,67 @@ _CHALLENGE = "document.title === 'Just a moment...'"
 _NOT_LOADED = "ChatGPT page did not finish loading. Check your connection and try again."
 
 
+class _CookieReset:
+    """Desktop: every tab of the route's browser shares chatgpt.com's cookies.
+
+    A tab stuck on Cloudflare's check starts them over (clear + reload). Concurrent tabs
+    (batch translation) must not each clear them again, wiping the clearance another tab just
+    earned, nor clear them while a tab is sending its message (its sentinel / Turnstile
+    requests need them). So resets run one at a time, wait for sending tabs, and a tab whose
+    wait began before another tab's reset only reloads."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.generation = 0  # resets done
+        self.resetting = False
+        self.sending = 0  # tabs between composer and conversation request
+
+    def _wait(self, cancel_check):
+        self.cond.wait(.2)
+        _check(cancel_check)
+
+    @contextmanager
+    def sending_message(self, cancel_check=None):
+        with self.cond:
+            while self.resetting:
+                self._wait(cancel_check)
+            self.sending += 1
+        try:
+            yield
+        finally:
+            with self.cond:
+                self.sending -= 1
+                self.cond.notify_all()
+
+    def reset(self, page, seen, cancel_check=None, drain=45):
+        """Start the cookies over unless another tab did since generation ``seen``; then reload."""
+        with self.cond:
+            while self.resetting:
+                self._wait(cancel_check)
+            fresh = self.generation == seen
+            if fresh:
+                deadline = time.monotonic() + drain
+                while self.sending and time.monotonic() < deadline:
+                    self._wait(cancel_check)
+                self.resetting = True
+        try:
+            if fresh:
+                page.call("Network.clearBrowserCookies")
+                page.call("Network.setCookie", _APP_COOKIE)
+            page.call("Page.reload")
+        finally:
+            if fresh:
+                with self.cond:
+                    self.resetting = False
+                    self.generation += 1
+                    self.cond.notify_all()
+
+
+_COOKIES = _CookieReset()
+
+
 def _tab_ready(page, cancel_check):
+    seen = _COOKIES.generation
     try:
         cdp_browser.wait_until(page, _READY, timeout=40, check=_check, error=AuthChatGPTError,
                                cancel_check=cancel_check, message=_NOT_LOADED)
@@ -246,9 +312,7 @@ def _tab_ready(page, cancel_check):
         if exc.error_type == "cancelled" or not page.evaluate(_CHALLENGE):
             raise
     # A Cloudflare check that never clears is tied to the profile's cookies: start them over.
-    page.call("Network.clearBrowserCookies")
-    page.call("Network.setCookie", _APP_COOKIE)
-    page.call("Page.reload")
+    _COOKIES.reset(page, seen, cancel_check)
     cdp_browser.wait_until(page, _READY, timeout=45, check=_check, error=AuthChatGPTError,
                            cancel_check=cancel_check, message=_NOT_LOADED)
 
@@ -319,12 +383,78 @@ def _frame_script(config):
             f" {_hook(config, 'frame.contentWindow')}; return true;}})()")
 
 
+#: Seconds a phone gets for each page wait (a cold WebView, a busy UI loop, a Cloudflare check).
+_DRIVER_TIMEOUT = 90
+#: The chat iframe's app is gone for good: a finished chatgpt.com document in a window without
+#: the hook. Cloudflare's check, once passed, reloads the frame into a new window (the hook was
+#: on the first one); chatgpt.com may also reload itself (a new build). Waiting cannot fix it.
+_FRAME_LOST = ("!window.__glossarionGPT && location.href !== 'about:blank' && "
+               "document.readyState === 'complete' && " + _CHALLENGE.replace("===", "!=="))
+
+
+def _driver_wait(wrapped, predicate, cancel_check):
+    cdp_browser.wait_until(wrapped, predicate, timeout=_DRIVER_TIMEOUT, check=_check, error=AuthChatGPTError,
+                           cancel_check=cancel_check, message=_NOT_LOADED,
+                           tolerate=("browser_error", "timeout"), interval=.3)
+
+
 def _driver_load(wrapped, url, cancel_check):
-    wrapped.page.load(url)
-    cdp_browser.wait_until(
-        wrapped, "document.readyState !== 'loading' && location.origin === 'https://chatgpt.com'", timeout=45,
-        check=_check, error=AuthChatGPTError, cancel_check=cancel_check, message=_NOT_LOADED,
-        tolerate=("browser_error", "timeout"), interval=.3)
+    """Navigate to ``url`` and wait for the document that navigation brings, loading it once
+    more before failing.
+
+    The current document is marked first: ``load`` only starts the navigation, and the page's
+    old chatgpt.com document (the same URL reloaded, or the host page after the app) is already
+    loaded, so without the mark it passed for the new one and scripts ran on a page about to go.
+    """
+    mark = uuid.uuid4().hex
+    try:
+        wrapped.evaluate(f"(window.__glossarionNav = '{mark}', true)")
+    except AuthChatGPTError as exc:
+        if exc.error_type == "cancelled":
+            raise
+    loaded = ("document.readyState !== 'loading' && location.origin === 'https://chatgpt.com' && "
+              f"window.__glossarionNav !== '{mark}'")
+    for attempt in range(2):
+        try:
+            wrapped.page.load(url)
+        except browser_driver.BrowserCancelled as exc:
+            raise AuthChatGPTError("AuthChatGPT: translation stopped by user", "cancelled") from exc
+        except Exception as exc:  # the UI loop did not start the navigation in time
+            if attempt:
+                raise AuthChatGPTError(_NOT_LOADED, "browser_error") from exc
+            continue
+        try:
+            _driver_wait(wrapped, loaded, cancel_check)
+            return
+        except AuthChatGPTError as exc:
+            if exc.error_type == "cancelled" or attempt:
+                raise
+
+
+def _driver_frame_ready(wrapped, config, cancel_check):
+    """Waits until the chat iframe runs the hooked app. A frame whose app lost the hook, or
+    that is still not ready at the deadline, is inserted again once before failing."""
+    recovered = False
+    deadline = time.monotonic() + _DRIVER_TIMEOUT
+    while True:
+        _check(cancel_check)
+        try:
+            if wrapped.evaluate(_READY):
+                return
+            lost = wrapped.evaluate(_FRAME_LOST) is True
+        except AuthChatGPTError as exc:
+            if exc.error_type == "cancelled":
+                raise
+            lost = False
+        if lost or time.monotonic() >= deadline:
+            if recovered:
+                raise AuthChatGPTError(_NOT_LOADED, "browser_error")
+            recovered = True
+            wrapped.framed = False
+            wrapped.evaluate(_frame_script(config))
+            wrapped.framed = True
+            deadline = time.monotonic() + _DRIVER_TIMEOUT
+        time.sleep(.3)
 
 
 def _driver_frame(wrapped, config, cancel_check):
@@ -333,16 +463,12 @@ def _driver_frame(wrapped, config, cancel_check):
     if not wrapped.evaluate("document.cookie.indexOf('oai-did=') >= 0"):
         # A first visit: chatgpt.com sets up its device cookies on a top-level page load.
         _driver_load(wrapped, BASE_URL + "/", cancel_check)
-        cdp_browser.wait_until(wrapped, "document.cookie.indexOf('oai-did=') >= 0", timeout=30, check=_check,
-                               error=AuthChatGPTError, cancel_check=cancel_check, message=_NOT_LOADED,
-                               tolerate=("browser_error", "timeout"), interval=.3)
+        _driver_wait(wrapped, "document.cookie.indexOf('oai-did=') >= 0", cancel_check)
         _driver_load(wrapped, _HOST_URL, cancel_check)
     wrapped.evaluate(_APP_COOKIE_JS)
     wrapped.evaluate(_frame_script(config))
     wrapped.framed = True
-    cdp_browser.wait_until(wrapped, _READY, timeout=60, check=_check, error=AuthChatGPTError,
-                           cancel_check=cancel_check, message=_NOT_LOADED,
-                           tolerate=("browser_error", "timeout"), interval=.3)
+    _driver_frame_ready(wrapped, config, cancel_check)
     wrapped.evaluate("window.__glossarionGPT.watch()")
 
 
@@ -370,9 +496,14 @@ def _driver_tab(config, cancel_check=None):
             if not wrapped.evaluate("document.cookie.indexOf('__Secure-next-auth.session-token=') >= 0"):
                 wrapped.evaluate(_APP_COOKIE_JS)
                 _driver_load(wrapped, BASE_URL + "/", cancel_check)
-            cdp_browser.wait_until(wrapped, "!!document.querySelector('#prompt-textarea')", timeout=45,
-                                   check=_check, error=AuthChatGPTError, cancel_check=cancel_check,
-                                   message=_NOT_LOADED, tolerate=("browser_error", "timeout"), interval=.3)
+            composer = "!!document.querySelector('#prompt-textarea')"
+            try:
+                _driver_wait(wrapped, composer, cancel_check)
+            except AuthChatGPTError as exc:
+                if exc.error_type == "cancelled":
+                    raise
+                _driver_load(wrapped, BASE_URL + "/", cancel_check)  # one reload before failing
+                _driver_wait(wrapped, composer, cancel_check)
             wrapped.evaluate("(" + _hook(config) + ", true)")
         yield wrapped
     finally:
@@ -918,7 +1049,8 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
               image_output=False):
     if images:
         _attach(page, images, cancel_check)
-    _submit(page, cancel_check, before_send_callback)
+    with _COOKIES.sending_message(cancel_check):
+        _submit(page, cancel_check, before_send_callback)
     parser = StreamParser()
     parser.on_thinking = on_thinking
     started = time.monotonic()

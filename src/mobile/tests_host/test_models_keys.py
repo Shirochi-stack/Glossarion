@@ -1032,7 +1032,10 @@ def test_model_sheet_rows_sections_selection_and_route_row(tmp_path):
         # per-group refresh and the ⋯ refresh of the selected provider
         await sheet.refresh_provider("openai")
         await sheet.refresh_selected_provider()
-        assert catalog.refreshed == ["openai", "authgpt"] and notes[-1].startswith("authgpt")
+        # the outcome shows in the open sheet (a SnackBar would sit under the modal sheet)
+        assert catalog.refreshed == ["openai", "authgpt"]
+        assert sheet.status_text.visible and "3 models found" in sheet.status_text.value
+        assert not sheet.search_border.active and sheet.refresh_item.content == "Refresh online models"
         # route row: sign-in chip for the default model; thinking tiles of the GPT family
         sheet.set_query("")
         assert any(getattr(c, "key", "") == "route-login-authgpt" for row in sheet.route_row.controls

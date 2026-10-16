@@ -43,8 +43,8 @@ from typing import Any, Mapping
 from glossarion_mobile.job_kinds import owner_method
 from glossarion_mobile.job_kinds.translate import check_inputs, run_translation
 
-__all__ = ["FINISH_ENV_KEYS", "KINDS", "apply_run_environment", "build_options", "run", "run_result",
-           "skip_forced_streaming", "streaming_allowed"]
+__all__ = ["FINISH_ENV_KEYS", "KINDS", "apply_run_environment", "build_options", "keep_shared_glossary_root",
+           "run", "run_result", "skip_forced_streaming", "streaming_allowed"]
 
 
 def build_options(params: Mapping[str, Any], input_path: str) -> Any:
@@ -76,6 +76,17 @@ def skip_forced_streaming(owner: Any) -> None:
     shared ``apply_direct_text_run_environment``, which calls it unconditionally (the owner is this job's)."""
     owner._force_stream_all = False
     owner._apply_forced_streaming_environment = _no_forced_streaming
+
+
+def keep_shared_glossary_root(owner: Any) -> None:
+    """Auto-mapping (``_guess_glossary_for_input_file``) searches ``<OUTPUT_DIRECTORY>/Glossary``, then
+    ``<owner.base_dir>/Glossary`` and ``<app dir>/Glossary``. A Direct Text run points ``OUTPUT_DIRECTORY``
+    at its own run root. On desktop the shared ``Glossary/`` stays reachable as the app folder (the GUI's
+    ``base_dir``); on mobile it lives under the platform output root (the Library's ``Glossary/<book>/``),
+    so this job's owner gets that root as its ``base_dir`` before the run environment hides it."""
+    root = str(os.environ.get("OUTPUT_DIRECTORY", "") or "").strip()
+    if root and not getattr(owner, "base_dir", ""):
+        owner.base_dir = os.path.abspath(root)
 
 
 def apply_run_environment(owner: Any, params: Mapping[str, Any]) -> None:
@@ -124,6 +135,7 @@ def run(ctx: Any) -> dict:
     owner_method(owner, "_prepare_translation_run")  # fail early when the pipeline is missing
     options = build_options(params, files[0])
     options.apply_to(owner)
+    keep_shared_glossary_root(owner)
     apply_run_environment(owner, params)
     try:
         return run_translation(ctx, files)

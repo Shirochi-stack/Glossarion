@@ -65,8 +65,10 @@ __all__ = [
     "job_params",
     "prepare_direct_text_run",
     "replace_profile",
+    "run_config_of",
     "run_options_dict",
     "user_turn",
+    "with_run_config",
 ]
 
 DIRECT_TEXT_JOB_KIND = "direct_text"
@@ -249,6 +251,24 @@ def replace_profile(overrides: Optional[Mapping[str, Any]], profile: Optional[st
             out.pop("text_extraction_method")
     out.update(config_overrides({"profile": profile} if profile else {}))
     return out
+
+
+#: ``config_overrides`` keys the chat itself writes (``config_overrides``: model, profile, target and the
+#: extraction method the profile switches); every other key of a chat job's overrides is its Run options.
+CHAT_OVERRIDE_KEYS = frozenset((*OVERRIDE_CONFIG_KEYS.values(), "text_extraction_method"))
+
+
+def run_config_of(overrides: Optional[Mapping[str, Any]]) -> dict:
+    """The Run options a chat job ran with: its ``config_overrides`` without the chat's own keys (what
+    ``ChatRuns.send`` merged in from the Plan card's ``config_extra``)."""
+    return {k: v for k, v in dict(overrides or {}).items() if k not in CHAT_OVERRIDE_KEYS}
+
+
+def with_run_config(overrides: Optional[Mapping[str, Any]], run_config: Optional[Mapping[str, Any]]) -> dict:
+    """A job's ``config_overrides`` with its Run options replaced by ``run_config`` (a stopped card's
+    Run options before Resume); the chat's keys stay and win, as at Send (``ChatRuns.send``)."""
+    chat = {k: v for k, v in dict(overrides or {}).items() if k in CHAT_OVERRIDE_KEYS}
+    return {**dict(run_config or {}), **chat}
 
 
 def job_params(

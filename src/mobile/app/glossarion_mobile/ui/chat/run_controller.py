@@ -79,6 +79,7 @@ from glossarion_mobile.ui.chat.run_request import (
     prepare_direct_text_run,
     replace_profile,
     user_turn,
+    with_run_config,
 )
 from glossarion_mobile.ui.chat.stream_bridge import RunStream
 
@@ -838,7 +839,9 @@ class ChatRuns:
         return params
 
     async def resubmit(self, cid: Any, *,
-                       profile_check: Optional[Callable[[str], Optional[str]]] = None) -> Optional[ChatRun]:
+                       profile_check: Optional[Callable[[str], Optional[str]]] = None,
+                       run_config: Optional[Mapping[str, Any]] = None,
+                       run_config_for: Optional[str] = None) -> Optional[ChatRun]:
         """Resume / Retry failed: the same JobSpec params (same run root), so the pipeline continues
         from its ``translation_progress.json`` and only redoes missing or failed chapters.
 
@@ -851,7 +854,13 @@ class ChatRuns:
         use the first profile (owner decisions #15 / #16). A profile that still exists stays as sent.
 
         An Interrupted job (killed app) is resumed through ``JobService.resume``, which resolves
-        its Interrupted entry, so the Jobs page and the launch banner cannot run it again."""
+        its Interrupted entry, so the Jobs page and the launch banner cannot run it again.
+
+        ``run_config`` (owner #5: the Run options of a stopped / failed / interrupted card): the run's
+        Run options are replaced by these (``run_request.with_run_config``; {} runs with the config's
+        values), None keeps the ones it was sent with. ``run_config_for``: the ``turn_key`` of the run those
+        Run options were taken from; when it is not the run resubmitted here (an older turn's card), they
+        are ignored and the run keeps its own."""
         cid = str(cid)
         if self.live_run(cid) is not None:
             return None
@@ -864,6 +873,8 @@ class ChatRuns:
             return None  # the run's turn was deleted: nothing to resume into
         params = dict(params)
         params["user_index"] = user_index  # a new submission records the turn where it is now
+        if run_config is not None and (run_config_for is None or run_config_for == turn_key(params)):
+            params["config_overrides"] = with_run_config(params.get("config_overrides"), run_config)
         counter = getattr(self.store, "request_count", None)
         if "request_number" in params and callable(counter):
             params["request_number"] = counter(cid) + 1

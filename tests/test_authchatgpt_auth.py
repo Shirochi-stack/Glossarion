@@ -517,3 +517,218 @@ def test_every_mobile_script_is_one_expression(tmp_path, monkeypatch):
     out = subprocess.run([node, str(source)], capture_output=True, text=True, timeout=20)
     assert out.returncode == 0, out.stderr[-2000:]
     assert int(out.stdout) == len(scripts) > 20
+
+
+class NavPage:
+    """A mobile page whose navigations commit a new document only a few polls after ``load``
+    (a real WebView keeps the old document meanwhile). Frame scripts answer from ``frames``."""
+
+    def __init__(self, frames=()):
+        self.doc = {"id": 0, "url": None, "mark": None}
+        self.pending = None
+        self.cookie = False
+        self.hooked_doc = None
+        self.frames = list(frames)  # per inserted frame: a callable(poll) -> {"ready", "lost"}
+        self.inserted = 0
+        self.frame_polls = 0
+        self.loaded = []
+        self.closed = False
+
+    def load(self, url):
+        self.loaded.append(url)
+        self.pending = [url, 5]
+
+    def run_js(self, script, js_timeout_ms=15000):
+        if self.pending:
+            self.pending[1] -= 1
+            if not self.pending[1]:
+                self.doc = {"id": self.doc["id"] + 1, "url": self.pending[0], "mark": None}
+                self.pending = None
+        framed = script.startswith("((window, document) => (")
+        inner = script[len("((window, document) => ("):script.rindex("))(" + gpt._FRAME)] if framed else script
+        if framed:
+            self.frame_polls += 1
+            state = self.frames[self.inserted - 1](self.frame_polls) if self.inserted else {}
+            if inner == gpt._READY:
+                return state.get("ready", False)
+            if inner == gpt._FRAME_LOST:
+                return state.get("lost", False)
+            return True
+        if inner.startswith("(window.__glossarionNav = '"):
+            self.doc["mark"] = inner.split("'")[1]
+            return True
+        if "__glossarionNav !== '" in inner:
+            return self.doc["url"] is not None and self.doc["mark"] != inner.split("__glossarionNav !== '")[1][:32]
+        if inner.startswith("document.readyState !== 'loading'"):  # a load wait without the mark
+            return self.doc["url"] is not None
+        if inner == gpt._APP_COOKIE_JS:
+            self.cookie = True
+            return True
+        if "next-auth.session-token=') >= 0" in inner:
+            return self.cookie
+        if "createElement('iframe')" in inner:
+            self.inserted += 1
+            self.frame_polls = 0
+            return True
+        if "__glossarionGPT = " in inner:
+            self.hooked_doc = self.doc["id"]
+        return True
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr(gpt.time, "sleep", lambda seconds: None)
+
+
+def test_mobile_reload_waits_for_the_new_document(monkeypatch, no_sleep):
+    """The cookie reload loads the same URL: the old, already loaded document passed for the new
+    one, so the hook went into a page about to be replaced ("did not finish loading")."""
+    page = NavPage()
+    mobile_driver(monkeypatch, page)
+    with gpt._open_tab({"token": None, "prompt": "p", "model": "auto", "temporary": False}):
+        pass
+    assert page.loaded == [gpt.BASE_URL + "/"] * 2
+    assert page.hooked_doc == page.doc["id"] == 2 and page.closed
+
+
+def test_mobile_logged_in_first_visit_frames_the_host_page(monkeypatch, no_sleep):
+    """A first visit loads the app, then the host page again: the frame belongs in that host page."""
+    page = NavPage(frames=[lambda poll: {"ready": poll > 2}])
+    real = page.run_js
+
+    def run_js(script, js_timeout_ms=15000):
+        if "oai-did=') >= 0" in script:
+            return page.doc["url"] == gpt.BASE_URL + "/" or page.doc["id"] > 2
+        if "createElement('iframe')" in script:
+            page.frame_doc = page.doc["id"]
+        return real(script, js_timeout_ms)
+    page.run_js = run_js
+    mobile_driver(monkeypatch, page)
+    with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
+        pass
+    assert page.loaded == [gpt._HOST_URL, gpt.BASE_URL + "/", gpt._HOST_URL]
+    assert page.frame_doc == 3 and page.inserted == 1
+
+
+def test_mobile_frame_that_lost_its_hook_is_inserted_again(monkeypatch, no_sleep):
+    """Cloudflare's check passes and reloads the chat iframe into a new window without the hook:
+    waiting never helps (the next request, with the clearance cookie, worked), so the frame is
+    inserted again at once."""
+    page = NavPage(frames=[lambda poll: {"lost": poll > 4}, lambda poll: {"ready": poll > 2}])
+    mobile_driver(monkeypatch, page)
+    with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
+        pass
+    assert page.inserted == 2
+
+
+def test_mobile_frame_gets_one_recovery_then_fails(monkeypatch, no_sleep):
+    page = NavPage(frames=[lambda poll: {}, lambda poll: {}])
+    mobile_driver(monkeypatch, page)
+    monkeypatch.setattr(gpt, "_DRIVER_TIMEOUT", 0.05)
+    with pytest.raises(gpt.AuthChatGPTError, match="did not finish loading"):
+        with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
+            pass
+    assert page.inserted == 2 and page.closed
+    lost = gpt._FRAME_LOST
+    assert "__glossarionGPT" in lost and "about:blank" in lost and "Just a moment" in lost
+
+
+def test_mobile_lost_frame_twice_fails_without_waiting(monkeypatch, no_sleep):
+    page = NavPage(frames=[lambda poll: {"lost": True}, lambda poll: {"lost": True}])
+    mobile_driver(monkeypatch, page)
+    with pytest.raises(gpt.AuthChatGPTError, match="did not finish loading"):
+        with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
+            pass
+    assert page.inserted == 2
+
+
+class CdpCalls:
+    def __init__(self, order):
+        self.order = order
+
+    def call(self, method, params=None, timeout=20):
+        self.order.append(method)
+        return {}
+
+
+def test_desktop_cookie_reset_runs_once_for_concurrent_tabs():
+    """Two tabs stuck on the same Cloudflare check: the second must not clear the clearance the
+    first just earned; it only reloads."""
+    resets = gpt._CookieReset()
+    first, second = [], []
+    seen = resets.generation
+    resets.reset(CdpCalls(first), seen)
+    resets.reset(CdpCalls(second), seen)
+    assert first == ["Network.clearBrowserCookies", "Network.setCookie", "Page.reload"]
+    assert second == ["Page.reload"]
+
+
+def test_desktop_cookie_reset_waits_for_a_sending_tab():
+    import threading
+    resets = gpt._CookieReset()
+    order = []
+    sending, release, waiting = threading.Event(), threading.Event(), threading.Event()
+    real_wait = resets._wait
+
+    def wait(cancel_check):
+        waiting.set()
+        real_wait(cancel_check)
+    resets._wait = wait
+
+    def sender():
+        with resets.sending_message():
+            sending.set()
+            release.wait(10)
+            order.append("sent")
+    threads = [threading.Thread(target=sender)]
+    threads[0].start()
+    assert sending.wait(10)
+    threads.append(threading.Thread(target=resets.reset, args=(CdpCalls(order), resets.generation)))
+    threads[1].start()
+    assert waiting.wait(10)  # the reset is held while the other tab sends
+    assert order == []
+    release.set()
+    for thread in threads:
+        thread.join(10)
+    assert order == ["sent", "Network.clearBrowserCookies", "Network.setCookie", "Page.reload"]
+
+
+def test_concurrent_rejections_refresh_the_login_once(monkeypatch):
+    """Batch requests all rejected with the same token: one refresh (a second one would reuse the
+    rotated refresh token); the others take the new access token."""
+    import threading
+    inside, release, second_loaded = threading.Event(), threading.Event(), threading.Event()
+
+    class Store:
+        _lock = threading.RLock()
+        tokens = {"access_token": "old", "refresh_token": "r1"}
+        refreshes = 0
+        loads = 0
+
+        def load_tokens(self):
+            Store.loads += 1
+            if Store.loads == 2:
+                second_loaded.set()
+            return dict(Store.tokens)
+
+        def _try_refresh(self, tokens):
+            Store.refreshes += 1
+            inside.set()
+            release.wait(10)
+            Store.tokens = {"access_token": "new" + str(Store.refreshes), "refresh_token": "r2"}
+            return dict(Store.tokens)
+    monkeypatch.setattr(gpt, "_token_store", lambda: Store())
+    results = []
+    first = threading.Thread(target=lambda: results.append(gpt._refreshed_token("old")))
+    first.start()
+    assert inside.wait(10)
+    second = threading.Thread(target=lambda: results.append(gpt._refreshed_token("old")))
+    second.start()
+    second_loaded.wait(.5)  # without the lock the second request reads the old tokens here
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert Store.refreshes == 1 and results == ["new1", "new1"]
