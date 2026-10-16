@@ -30235,9 +30235,10 @@ class UnifiedClient:
                         claim_note = f" ({claim.get('message')})"
                     raise UnifiedClientError(
                         f"AuthZA{acct_label}: Z.AI has no {access_label} quota for '{actual_model}' "
-                        f"on this login (error 1005: none claimed, or used up){claim_note}. Wait for "
-                        "the quota to reset, sign in with another Z.AI account using an authzaN/ "
-                        "slot, or switch AuthZA to General API.",
+                        f"on this login (error 1005){claim_note}. ZCode's free trial quota lasts only "
+                        "5 days after a Z.AI login first connects, and other free plans must be "
+                        "claimed. Sign in with another Z.AI account using an authzaN/ slot, or "
+                        "switch AuthZA to General API.",
                         error_type="entitlement_error"
                     )
 
