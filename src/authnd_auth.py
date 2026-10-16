@@ -848,6 +848,11 @@ def _catalog_model_id(entry: Dict[str, Any]) -> Optional[str]:
         or entry.get("name")
         or ""
     ).strip("/")
+    # displayName is usually the model slug, but some endpoints carry a human
+    # label there ("Step 5 Preview"); their slug is then only in name.
+    slug_name = str(entry.get("name") or "").strip("/")
+    if any(character.isspace() for character in display_name) and slug_name:
+        display_name = slug_name
     # NVIDIA's Build catalog exposes new Z.ai GLM versions using URL-slug
     # spelling (glm-5-3[-flash]), while their OpenAI-compatible payload IDs
     # use dotted version spelling (glm-5.3[-flash]).  Return the usable model
