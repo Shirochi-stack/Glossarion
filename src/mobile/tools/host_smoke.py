@@ -141,6 +141,9 @@ BLOCKED_PACKAGES: Dict[str, str] = {
     "sklearn": "scikit-learn (sentence-transformers only)",
 }
 BLOCKED_IOS_ONLY: Dict[str, str] = {"psutil": "no iOS wheel (Android-only dependency)"}
+# Smoke checks of device-only pins ([tool.flet.android/ios].dependencies, never in the host uv env):
+# skipped here when their module is missing; the emulator / simulator smoke runs them strictly.
+DEVICE_ONLY_CHECKS: Dict[str, str] = {"llama_engine": "llama_cpp"}
 
 # Stdlib modules that implement a spawn API; frames inside them are skipped when
 # deciding who asked for the process.
@@ -1537,6 +1540,11 @@ class Smoke:
         strict = not self.args.lenient
         results = []
         for group, name in self._selected_checks(selftest):
+            module = DEVICE_ONLY_CHECKS.get(name)
+            if module and importlib.util.find_spec(module) is None:
+                results.append({"name": name, "group": group, "status": "skip", "secs": 0.0,
+                                "reason": f"{module} is a device-only dependency (not in the host env)"})
+                continue
             ctx = selftest.Context(strict=strict)
             status, detail, exc, secs = self._run(f"check:{name}", lambda f=funcs[name], c=ctx: f(c))
             self.capture.restore()
