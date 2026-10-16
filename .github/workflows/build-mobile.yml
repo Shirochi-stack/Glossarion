@@ -39,8 +39,8 @@
 # the AAB stays a run artifact: only the Play Store takes it, phones cannot install it);
 # without one it uploads nothing. Every run also keeps the files as run artifacts for 7 days.
 #
-# Artifacts: X_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
-# Z_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
+# Artifacts: X_Glossarion-Android-APK, Z_Glossarion-Android-AAB, X_Glossarion-iOS-Unsigned,
+# X_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
 # mobile-backend-report, mobile-apk-size-report, mobile-smoke-logs-android, mobile-smoke-logs-ios,
 # mobile-ui-test-logs, mobile-wheelhouse-android, mobile-wheelhouse-ios (+ mobile-wheels-logs-* on
 # failure).
@@ -970,19 +970,19 @@ jobs:
       - name: Package unsigned IPA
         env:
           IOS_OUT: ${{ steps.build.outputs.output-path }}
-        run: bash src/mobile/ci/package_unsigned_ipa.sh "$IOS_OUT" "dist/${ARTIFACT_PREFIX}_iOS_unsigned.ipa"
+        run: bash src/mobile/ci/package_unsigned_ipa.sh "$IOS_OUT" "dist/X_${ARTIFACT_PREFIX}_iOS_unsigned.ipa"
 
       - name: Verify IPA (bundle id, versions, document types, background ids, URL scheme)
         run: >-
           uv run --no-project python src/mobile/ci/verify_ipa.py
-          "dist/${ARTIFACT_PREFIX}_iOS_unsigned.ipa"
+          "dist/X_${ARTIFACT_PREFIX}_iOS_unsigned.ipa"
           --bundle-id "$APP_PACKAGE" --version "$BUILD_VERSION" --build-number "$BUILD_NUMBER"
           --pyproject src/mobile/pyproject.toml --expect-unsigned
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v7
         with:
-          name: Z_Glossarion-iOS-Unsigned
+          name: X_Glossarion-iOS-Unsigned
           path: dist/*.ipa
           if-no-files-found: error
           compression-level: 0
@@ -1139,19 +1139,19 @@ jobs:
             echo "::error title=IPA output::Expected exactly one .ipa in $IOS_OUT, found ${#ipas[@]}."
             exit 1
           fi
-          cp "${ipas[0]}" "dist/${ARTIFACT_PREFIX}_iOS.ipa"
+          cp "${ipas[0]}" "dist/X_${ARTIFACT_PREFIX}_iOS.ipa"
 
       - name: Verify signed IPA
         run: >-
           uv run --no-project python src/mobile/ci/verify_ipa.py
-          "dist/${ARTIFACT_PREFIX}_iOS.ipa"
+          "dist/X_${ARTIFACT_PREFIX}_iOS.ipa"
           --bundle-id "$APP_PACKAGE" --version "$BUILD_VERSION" --build-number "$BUILD_NUMBER"
           --pyproject src/mobile/pyproject.toml --expect-signed
 
       - name: Upload signed IPA
         uses: actions/upload-artifact@v7
         with:
-          name: Z_Glossarion-iOS-Signed
+          name: X_Glossarion-iOS-Signed
           path: dist/*.ipa
           if-no-files-found: error
           compression-level: 0

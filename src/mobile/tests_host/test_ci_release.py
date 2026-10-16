@@ -468,8 +468,8 @@ def test_device_artifacts_keep_seven_days(wf):
                 name = step["with"]["name"]
                 if str(name).startswith(("X_Glossarion-", "Z_Glossarion-")):
                     seen[name] = step["with"].get("retention-days")
-    assert set(seen) == {"X_Glossarion-Android-APK", "Z_Glossarion-Android-AAB", "Z_Glossarion-iOS-Unsigned",
-                         "Z_Glossarion-iOS-Signed", "Z_Glossarion-iOS-Simulator"}
+    assert set(seen) == {"X_Glossarion-Android-APK", "Z_Glossarion-Android-AAB", "X_Glossarion-iOS-Unsigned",
+                         "X_Glossarion-iOS-Signed", "Z_Glossarion-iOS-Simulator"}
     assert set(seen.values()) == {7}
 
 
@@ -481,7 +481,7 @@ def test_signed_builds_still_upload_their_artifacts(wf):
     ios_signed = wf["jobs"]["ios-signed"]
     assert ios_signed["if"] == "needs.prepare.outputs.run_ios == 'true' && needs.prepare.outputs.has_ios_signing == 'true'"
     upload = next(step for step in ios_signed["steps"] if step.get("name") == "Upload signed IPA")
-    assert upload["with"]["name"] == "Z_Glossarion-iOS-Signed" and upload["with"]["path"] == "dist/*.ipa"
+    assert upload["with"]["name"] == "X_Glossarion-iOS-Signed" and upload["with"]["path"] == "dist/*.ipa"
     ctx = {"needs": {"prepare": {"outputs": {"run_ios": "true", "has_ios_signing": "true"}}}}
     assert gh_eval(ios_signed["if"], ctx) is True
     ctx["needs"]["prepare"]["outputs"]["has_ios_signing"] = "false"

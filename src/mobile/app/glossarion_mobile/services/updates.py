@@ -14,8 +14,8 @@ asset is offered only when it carries a name the build jobs write:
 
     [X_]<prefix>_Android_<abi>[_debugsigned].apk   Android, one per ABI (arm64-v8a, x86_64)
     <prefix>_Android.aab                       Play bundle (never offered in the app)
-    <prefix>_iOS_unsigned.ipa                  unsigned IPA (sideloading)
-    <prefix>_iOS.ipa                           signed IPA (devices in the provisioning profile)
+    [X_]<prefix>_iOS_unsigned.ipa              unsigned IPA (sideloading)
+    [X_]<prefix>_iOS.ipa                       signed IPA (devices in the provisioning profile)
 
 Nothing here installs anything: a download link opens in the browser. Importing this module
 imports no backend module.

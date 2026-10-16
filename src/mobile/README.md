@@ -178,7 +178,7 @@ self-test deep link, then the offline E2E suite; blocking) → `ios` (unsigned I
 release job: the workflow never publishes (see "Releases").
 
 Artifacts: `X_Glossarion-Android-APK`, `Z_Glossarion-Android-AAB`,
-`Z_Glossarion-iOS-Unsigned` (AltStore/SideStore), `Z_Glossarion-iOS-Signed`,
+`X_Glossarion-iOS-Unsigned` (AltStore/SideStore), `X_Glossarion-iOS-Signed`,
 `Z_Glossarion-iOS-Simulator` (7 days); internal: `mobile-prepared`, `mobile-backend-report`,
 `mobile-apk-size-report`, `mobile-smoke-logs-*`, `mobile-ui-test-logs`.
 `tests_host/test_ci_release.py` (also run by `python-app.yml` on every push) pins the triggers,
@@ -263,7 +263,7 @@ workflow was removed). `build-mobile.yml` has no release job, no publish input a
 `contents: read`, so neither a manual run nor a `workflow_call` can create or change a GitHub
 release, and no other workflow uploads a mobile file. To get a build, download the APK/IPA
 artifact from the Build Mobile run (Actions › Build Mobile › the run › Artifacts:
-`X_Glossarion-Android-APK`, `Z_Glossarion-iOS-Unsigned`, …); artifacts are kept 7 days.
+`X_Glossarion-Android-APK`, `X_Glossarion-iOS-Unsigned`, …); artifacts are kept 7 days.
 
 ### In-app updates (About › Updates)
 
@@ -335,7 +335,7 @@ and `IOS_TEAM_ID` set, `ios-signed` builds a second, signed IPA next to the unsi
    `debugging` / `development`; `IOS_SIGNING_CERTIFICATE` overrides the certificate name;
 4. `flet build ipa --ios-team-id … --ios-signing-certificate … --ios-provisioning-profile <uuid>
    --ios-export-method …`, then `ci/verify_ipa.py --expect-signed` (embedded profile + code
-   signature) and the artifact `Z_Glossarion-iOS-Signed`.
+   signature) and the artifact `X_Glossarion-iOS-Signed`.
 
 A distribution certificate: Keychain Access › Certificate Assistant › Request a Certificate
 from a Certificate Authority, upload the CSR at developer.apple.com › Certificates (Apple

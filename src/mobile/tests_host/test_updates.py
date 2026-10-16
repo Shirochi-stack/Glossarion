@@ -85,6 +85,8 @@ def _desktop_release(tag: str = "v9.15.0") -> dict:
     (f"{PREFIX}_Android_x86_64_debugsigned.apk", "apk"),
     (f"{PREFIX}_Android.aab", "aab"),
     (f"{PREFIX}_iOS_unsigned.ipa", "ipa"),
+    (f"X_{PREFIX}_iOS_unsigned.ipa", "ipa"),  # build-mobile.yml names since 2026-10-17
+    (f"X_{PREFIX}_iOS.ipa", "ipa_signed"),
     (f"{PREFIX}_iOS.ipa", "ipa_signed"),
     # written only by the removed release job: never a mobile asset now
     ("altstore-source.json", None),
