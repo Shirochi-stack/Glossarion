@@ -1810,7 +1810,7 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
 ### 4.11 Model picker and Model Manager
 
 - **Picker:** ModelSheet (§2.2). The same component, in field mode (`ModelPicker`), is used in KeyEditor, Manga, Glossary and QA AI-Hunter settings.
-- **Model Manager (`/settings/models`):** `TabBar` **Models · Custom prefixes**.
+- **Model Manager (`/settings/models`):** `SegmentedButton` **Models · Sign-ins · Prefixes · On-device** (the row scrolls on narrow phones).
   - **Models:**
     - search; chips Polled only (`hide_unpolled`), Custom, Removed;
     - "🌐 Poll providers" with a per-provider status chip row;
@@ -1818,6 +1818,13 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
     - The search runs 250 ms after typing stops. Catalog changes paint once; nothing paints while another screen covers it. While Poll providers runs, its own publishes update only the header and the list updates once at the end; the user's search, chips and edits still update the list at once. Loading shows skeleton rows, a failed load an ErrorCard with Retry, "Still loading…" with Retry after 10 s (Retry shares a load still in flight, and "Still loading…" returns if it stays stuck).
     - Swipe removes (tombstone). In Removed, swipe restores. FAB "Add model".
   - **Custom prefixes:** route list; an add/edit sheet with prefix, endpoint type, base URL, key and model override, validated by the shared normalizer.
+  - **On-device** (`local_models_panel.LocalModelsPanel`, `services/local_llm`): the built-in llama.cpp engine (llama-cpp-python, run inside the app; no server app, no account). Models are `local/<GGUF file name>` and go through the shared keyless `local/` route to the in-app OpenAI-compatible endpoint on 127.0.0.1 (`GLOSSARION_LOCAL_LLM_URL`), so they work for chat, translation, glossaries and every other job. Cards:
+    - **Engine:** Not loaded / Loading… / Ready · `<model>` / Generating (with the queue), Unload, Context and Threads defaults (Prefs `local_llm_settings`; empty = auto: 8192 tokens under 4 GB of file, else 4096; `max(2, min(4, cores - 2))` threads), load time and llama.cpp's system info. Without llama-cpp-python the card says the engine is unavailable.
+    - **Models (presets):** editable Prefs data `local_model_presets` (defaults Garbage / Light / Medium / Heavy = unsloth Qwen3.5 0.8B / 2B / 4B / 9B Q4_K_M; the old Ollama presets migrate once with the user's names). ONE button per row: **Download** (one tap: Hugging Face file, resumable download with %, MB/s and ETA, load, use as the model) → progress with Pause and Cancel → **Resume** → **Use** → **In use**; a failure shows **Retry** and the reason. ⋮ Edit / rename, Remove preset, Delete file; Add preset (also the FAB) and Restore defaults.
+    - **Add from Hugging Face:** a repo, `repo:quant`, file path or huggingface.co link; Q4_K_M is picked first (then Q4_K_S, Q4_0, IQ4_XS, Q5_K_M, Q8_0), else a file chooser; projectors (mmproj), imatrix files and split GGUFs are not offered. "Save as a preset" is on by default. Files over 1 GB ask first ("Download 5.7 GB from Hugging Face?"); free space is checked before every start or resume.
+    - **Other downloads:** downloaded files no preset names (Use, Delete) and paused downloads (Resume, Cancel).
+    - Lifecycle: one model loaded at a time; it unloads after 10 minutes idle, at once when iOS hides the app, after 60 s in the background on Android (never while a job runs). A RAM check runs before every load (Android asks when free RAM is short and refuses above total RAM; iOS refuses above half of the RAM). A `local/` job runs with batch translation off and one extraction worker.
+  - The ModelSheet's Local group ends with "Get on-device models…", which opens this tab.
 
 ### 4.12 Multi-Key Manager (`/settings/keys`, `/settings/keys/<pool>`)
 

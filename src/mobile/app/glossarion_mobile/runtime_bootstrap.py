@@ -236,6 +236,8 @@ class AppPaths:
             "GLOSSARION_LIBRARY_DIR": str(self.library),
             "GLOSSARION_LOG_DIR": str(self.logs),
             "GLOSSARION_MODEL_CATALOG_CACHE": str(self.model_catalog_cache),
+            # on-device GGUF models (services.local_llm; Model manager › On-device), next to the manga models
+            "GLOSSARION_MODELS_DIR": str(self.models),
             "XDG_CACHE_HOME": str(self.cache),
             "TMPDIR": str(self.temp),
             "TEMP": str(self.temp),

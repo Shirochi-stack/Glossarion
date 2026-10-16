@@ -735,6 +735,12 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
     ProviderCatalogSpec(
         "lmstudio", "lmstudio/", "http://localhost:1234/v1/models", public=True,
     ),
+    # local/: a llama.cpp-style server (llama-server on the desktop; Glossarion Mobile's built-in
+    # on-device engine sets GLOSSARION_LOCAL_LLM_URL to its loopback address).
+    ProviderCatalogSpec(
+        "local", "local/", "http://127.0.0.1:8080/v1/models", public=True,
+        base_url_env="GLOSSARION_LOCAL_LLM_URL",
+    ),
     # The local proxy is queried only if it is already running. Catalog
     # discovery must never start the proxy or open an OAuth browser window.
     ProviderCatalogSpec("autharena", "autharena/", "http://127.0.0.1/v1/models", public=True),
@@ -759,6 +765,7 @@ _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("ollamapull/", "ollamapull"),
     ("ollama/", "ollama"),
     ("lmstudio/", "lmstudio"),
+    ("local/", "local"),
     ("autharena/", "autharena"),
     ("authchatgpt/", "authchatgpt"),
     ("authgem-vertex/", "static"),
@@ -1662,7 +1669,7 @@ def provider_model_catalog_refresh_due(
         try:
             if expected_variant is None or attempt_variants.get(provider) == expected_variant:
                 attempted_at = float(attempts.get(provider, 0) or 0)
-                if provider not in {"ollamapull", "ollama", "lmstudio"} or (
+                if provider not in {"ollamapull", "ollama", "lmstudio", "local"} or (
                     time.time() - attempted_at
                     < min(max(0, int(max_age)), _OLLAMAPULL_OFFLINE_RETRY_SECONDS)
                 ):
@@ -1701,13 +1708,23 @@ def local_catalog_available(provider: str) -> bool:
     This is used on the GUI thread only for automatic catalog polling. Explicit
     refreshes still reach the worker and report the server's actual response.
     """
-    ports = {"ollama": 11434, "lmstudio": 1234}
+    ports = {"ollama": 11434, "lmstudio": 1234, "local": 8080}
     provider_name = str(provider or "").strip().casefold()
     port = ports.get(provider_name)
     if port is None:
         return False
+    host = "localhost"
+    if provider_name == "local":
+        override = str(os.getenv("GLOSSARION_LOCAL_LLM_URL", "") or "").strip()
+        if override:
+            try:
+                parts = urllib.parse.urlsplit(override)
+                host = parts.hostname or host
+                port = parts.port or (443 if parts.scheme == "https" else 80)
+            except ValueError:
+                return False
     try:
-        with socket.create_connection(("localhost", port), timeout=0.1):
+        with socket.create_connection((host, port), timeout=0.1):
             return True
     except OSError:
         return False
@@ -1744,7 +1761,7 @@ def due_provider_catalog_for_model(
         # for releases, or install Ollama just to decide whether to auto-poll.
         if not ollamapull_installed():
             return None
-    elif provider in {"ollama", "lmstudio"} and not local_catalog_available(provider):
+    elif provider in {"ollama", "lmstudio", "local"} and not local_catalog_available(provider):
         return None
 
     # AuthGrok uses its existing account session and checks it without opening
@@ -2099,12 +2116,14 @@ PROVIDER_INFO_HTML = """<h3>API Provider Shortcuts</h3>
         temporary. Logged out, ChatGPT offers <code>auto</code> and <code>gpt-6-instant</code> with guest limits.
         Runs in Chrome or Edge on desktop and in the in-app browser on mobile.</p>
 
-        <h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>
+        <h4>Local models (ollamapull/, ollama/, lmstudio/, local/)</h4>
         <p>Use models running on your computer without an API key or custom endpoint toggle.</p>
         <ul>
             <li><b>ollamapull/llama3.2</b> - Install Ollama and download the model as needed</li>
             <li><b>ollama/llama3.2</b> - Connect to Ollama at <code>http://localhost:11434/v1</code></li>
             <li><b>lmstudio/model-id</b> - Connect to LM Studio at <code>http://localhost:1234/v1</code></li>
+            <li><b>local/model-id</b> - Connect to llama.cpp's llama-server at <code>http://127.0.0.1:8080/v1</code>
+            (Glossarion Mobile: the on-device models of Model manager › On-device)</li>
         </ul>
         <p>Start the local server and load the model first when using <code>ollama/</code> or <code>lmstudio/</code>.
            The <b>🦙 Download Ollama</b> button is available for <code>ollamapull/</code>.</p>

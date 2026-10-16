@@ -17,9 +17,10 @@ passive catalog merge).
 **Custom prefixes** (tab "Prefixes"): the ``custom_prefix_routes`` table (prefix → base URL → endpoint
 type) with an add/edit sheet validated like the desktop table.
 
-**Ollama** (``ollama_panel.OllamaPanel``): Ollama in Termux on this phone (one-tap RUN_COMMAND setup or
-copy + open Termux), downloads of any Ollama tag / Hugging Face GGUF id with progress, and the editable
-model presets (Prefs data; the Qwen3.5 0.8B/2B/4B/9B defaults).
+**On-device** (``local_models_panel.LocalModelsPanel``): the built-in llama.cpp engine
+(``services.local_llm``). One tap on a model downloads its GGUF from Hugging Face (resumable, with
+progress), loads it and makes ``local/<file>`` the model; any Hugging Face GGUF id or link can be
+added; the editable presets are Prefs data (the Qwen3.5 0.8B/2B/4B/9B defaults).
 
 ``ModelsKeysFeature.install(app)`` wires the catalog service, the ModelSheet environment and the
 screens for ``settings.models``, ``settings.keys``, ``settings.keys.pool`` and
@@ -58,8 +59,8 @@ log = logging.getLogger("glossarion.models")
 SCREEN_ROUTES = ("settings.models", "settings.keys", "settings.keys.pool", "settings.endpoints")
 #: Settings home pages this feature ships (merged into ``SettingsHome.implemented`` once installed).
 IMPLEMENTED_ROUTES = frozenset(("settings.models", "settings.keys", "settings.endpoints"))
-#: (value, label) of the page's tabs; "ollama" is ``ollama_panel.OllamaPanel`` (Termux, pulls, presets).
-TABS = (("models", "Models"), ("auths", "Sign-ins"), ("prefixes", "Prefixes"), ("ollama", "Ollama"))
+#: (value, label) of the page's tabs; "local" is ``local_models_panel.LocalModelsPanel`` (on-device models).
+TABS = (("models", "Models"), ("auths", "Sign-ins"), ("prefixes", "Prefixes"), ("local", "On-device"))
 READY_TEXT = "Ready to poll online catalogs\n✓ marks models confirmed within 7 days"
 RESET_TEXT = ("Replace the current list with the built-in default model catalog?\n\n"
               "Any custom models you added will be lost.")
@@ -118,15 +119,17 @@ class ModelManagerScreen(Screen):
                  signed_in_keys: Optional[Callable[[], Any]] = None, sign_in: Optional[Callable[..., Any]] = None,
                  use_model: Optional[Callable[[str], Any]] = None, prefs: Any = None, native: Any = None,
                  copy_text: Optional[Callable[[str], Any]] = None,
-                 launch_url: Optional[Callable[[str], Any]] = None, ollama_pulls: Any = None) -> None:
+                 launch_url: Optional[Callable[[str], Any]] = None, local_engine: Any = None,
+                 current_model: Optional[Callable[[], str]] = None, tab: Optional[str] = None) -> None:
         super().__init__(match)
-        # the Ollama tab (Termux on this phone, pulls, presets): ollama_panel.OllamaPanel, built when first shown
+        # the On-device tab (local_models_panel.LocalModelsPanel), built when first shown
         self.prefs = prefs
         self.native = native
         self.copy_text = copy_text
         self.launch_url = launch_url
-        self.ollama_pulls = ollama_pulls  # the feature's PullManager: downloads outlive this screen
-        self.ollama: Any = None
+        self.local_engine = local_engine  # the feature's LocalEngineService: downloads outlive this screen
+        self.current_model = current_model
+        self.local: Any = None
         # U11 item 3, the Sign-ins tab: who is signed in, sign in / accounts, use the recommended model
         self.signed_in_keys = signed_in_keys
         self.sign_in = sign_in
@@ -138,7 +141,7 @@ class ModelManagerScreen(Screen):
         self.run_io = run_io
         self.tablet = tablet
         self.is_top = is_top  # shell: is this screen shown (top of the stack)? Hidden screens do not paint
-        self.tab = "models"
+        self.tab = tab if tab in dict(TABS) else "models"
         self.query = ""  # the search the list shows (the field's text applies SEARCH_DEBOUNCE later)
         self.filter = "all"  # all | custom | removed
         self.poll_status = READY_TEXT
@@ -271,7 +274,7 @@ class ModelManagerScreen(Screen):
                                                key="mm-add")
         self.core_notice = ft.Container(visible=not self.catalog.core.available, content=ReasonChip(
             reason="Editing needs the model catalog core", detail=mc.CORE_MISSING), padding=ft.Padding.only(left=12))
-        self.ollama_box = ft.Container(visible=False, expand=True, key="mm-ollama")
+        self.local_box = ft.Container(visible=False, expand=True, key="mm-local")
         self.body_column = ft.Column([
             ft.Container(content=ft.Row([self.tabs], scroll=ft.ScrollMode.AUTO),
                          padding=ft.Padding.symmetric(horizontal=12, vertical=6)),
@@ -280,7 +283,7 @@ class ModelManagerScreen(Screen):
             self.state_box,
             self.rows.control,
             self.prefix_list,
-            self.ollama_box,
+            self.local_box,
             ft.Container(content=ft.Row([self.add_fab], alignment=ft.MainAxisAlignment.END),
                          padding=ft.Padding.only(right=16, bottom=16)),
         ], expand=True, spacing=4)
@@ -312,8 +315,8 @@ class ModelManagerScreen(Screen):
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
-        if self.ollama is not None:
-            self.ollama.dispose()
+        if self.local is not None:
+            self.local.dispose()
         for task in (self._search_task, self._stale_task, self._slow_task):
             if task is not None and hasattr(task, "cancel"):
                 task.cancel()
@@ -517,20 +520,20 @@ class ModelManagerScreen(Screen):
         self.auth_panel.visible = self.tab == "auths"
         if self.tab == "auths":
             self.auth_panel.controls = self._auth_rows(snap)
-        ollama_tab = self.tab == "ollama"
+        local_tab = self.tab == "local"
         self.models_header.visible = models_tab
         self.rows.control.visible = models_tab
         self.prefix_list.visible = self.tab == "prefixes"
-        self.ollama_box.visible = ollama_tab
-        self.add_fab.content = "Add model" if models_tab else ("Add preset" if ollama_tab else "Add prefix")
+        self.local_box.visible = local_tab
+        self.add_fab.content = "Add model" if models_tab else ("Add preset" if local_tab else "Add prefix")
         self._sync_header(snap)
         list_changed = False
         if models_tab and sync_list:
             list_changed = self._sync_list(snap)
         elif self.tab == "prefixes":
             self.prefix_list.controls = self._prefix_rows()
-        elif ollama_tab:
-            self._show_ollama()
+        elif local_tab:
+            self._show_local()
         self._sync_state(snap)
         if not push:
             return
@@ -538,29 +541,41 @@ class ModelManagerScreen(Screen):
             _push(self.body_column)
         elif models_tab:
             _push(self.models_header, self.state_box, self.rows.control if list_changed else None)
-        elif ollama_tab:
+        elif local_tab:
             _push(self.state_box)
         else:
             _push(self.state_box, self.prefix_list)
 
-    def ollama_panel(self) -> Any:
-        """The Ollama tab's panel, built on first use."""
-        if self.ollama is None:
-            from glossarion_mobile.ui.screens.ollama_panel import OllamaPanel
+    def local_panel(self) -> Any:
+        """The On-device tab's panel, built on first use."""
+        if self.local is None:
+            from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
 
             def add(model: str) -> None:
                 if model not in self.catalog.snapshot.models:
                     self._edit(self.catalog.add_model(model))
 
-            self.ollama = OllamaPanel(prefs=self.prefs, native=self.native, page=self.page, copy_text=self.copy_text,
-                                      use_model=self.use_model, add_model=add, notify=self._toast,
-                                      spawn=self.spawn, run_io=self.run_io, launch_url=self.launch_url,
-                                      pulls=self.ollama_pulls)
-            self.ollama_box.content = self.ollama.build()
-        return self.ollama
+            engine = self.local_engine
+            if engine is None:  # a screen built without the feature (tests): a private service
+                from glossarion_mobile.services.local_llm.service import LocalEngineService
 
-    def _show_ollama(self) -> None:
-        panel = self.ollama_panel()
+                engine = self.local_engine = LocalEngineService(prefs=self.prefs, run_io=self.run_io, watch=False)
+            self.local = LocalModelsPanel(service=engine, prefs=self.prefs, page=self.page, use_model=self.use_model,
+                                          add_model=add, current_model=self._current_model, notify=self._toast,
+                                          spawn=self.spawn)
+            self.local_box.content = self.local.build()
+        return self.local
+
+    def _current_model(self) -> str:
+        if self.current_model is not None:
+            try:
+                return str(self.current_model() or "")
+            except Exception:
+                return ""
+        return ""
+
+    def _show_local(self) -> None:
+        panel = self.local_panel()
         panel.did_show()
 
     def _sync_header(self, snap: CatalogSnapshot) -> None:
@@ -960,8 +975,8 @@ class ModelManagerScreen(Screen):
     def open_add(self) -> Any:
         if self.tab == "prefixes":
             return self.open_prefix_editor(None)
-        if self.tab == "ollama":
-            return self.ollama_panel().open_editor(None)
+        if self.tab == "local":
+            return self.local_panel().open_editor(None)
         field = ft.TextField(hint_text="Type a model ID to add…", autofocus=True, dense=True,
                              on_submit=lambda e: submit())
 
@@ -1223,9 +1238,8 @@ class ModelsKeysFeature:
         self.store = getattr(app, "config_store", None)
         self.prefs = getattr(app, "prefs", None)
         self.catalog = ModelCatalogService(self.store, run_io=self.run_io, post=self._post)
-        from glossarion_mobile.services.ollama_termux import PullManager
-
-        self.ollama_pulls = PullManager(run_io=self.run_io)  # Model manager › Ollama downloads (any visit)
+        self.local_engine = self._make_local_engine()  # Model manager › On-device (downloads outlive visits)
+        self._next_tab: Optional[str] = None
         from glossarion_mobile.ui.screens.endpoints import run_in_run_env
         from glossarion_mobile.ui.screens.keys import KeyBackend, KeysController
 
@@ -1254,6 +1268,7 @@ class ModelsKeysFeature:
             run_io=self.run_io, spawn=self.spawn, sign_in=self.sign_in, signed_in_keys=self.signed_in_keys,
             test_key=self.test_key, tablet=self._tablet, next_slot=self.next_slot,
             gemini_status=self.gemini_status, gcp_project_picker=self.gcp_project_picker,
+            open_local_models=self.open_local_models,
         ))
         shell = getattr(app, "shell", None)
         if shell is not None and self._fallback_factory is None:
@@ -1275,6 +1290,84 @@ class ModelsKeysFeature:
                 # desktop: a model change auto-polls that provider once its 24 h TTL is due (debounced)
                 self._unsubs.append(observe(("model", "api_key"), lambda key, value: self._post(self._schedule_auto_poll)))
         self.spawn(self.catalog.load())
+        self.start_local_engine()
+
+    # ---- the on-device engine (services.local_llm) ---------------------------------------------------
+
+    def _make_local_engine(self) -> Any:
+        try:
+            from glossarion_mobile.services.local_llm import downloads as dl
+            from glossarion_mobile.services.local_llm.service import LocalEngineService
+
+            paths = getattr(self.app, "paths", None)
+            root = os.environ.get(dl.MODELS_ENV) or (str(paths.models) if paths is not None else None)
+            return LocalEngineService(prefs=self.prefs, registry=dl.Registry(root), run_io=self.run_io,
+                                      post=self._post, refresh_catalog=self.refresh_local_catalog,
+                                      active_job_model=self.active_job_model)
+        except Exception:
+            log.exception("the on-device engine is unavailable")
+            return None
+
+    def start_local_engine(self) -> None:
+        engine = self.local_engine
+        if engine is None or engine.server.running:
+            return
+        try:
+            engine.start()
+        except Exception:
+            log.exception("starting the on-device endpoint failed")
+            return
+        native = getattr(self.app, "native", None)
+        exclude = getattr(native, "exclude_from_backup", None)
+        if exclude is not None and not getattr(native, "is_stub", True):
+            async def mark() -> None:
+                try:
+                    os.makedirs(engine.registry.root, exist_ok=True)
+                    await exclude(engine.registry.root)
+                except Exception:
+                    log.debug("exclude_from_backup failed", exc_info=True)
+
+            try:
+                self.spawn(mark())
+            except RuntimeError:
+                pass
+
+    def refresh_local_catalog(self) -> None:
+        """Poll the ``local`` catalog (the endpoint's ``/v1/models``) after a download, delete or start."""
+        try:
+            self.spawn(self.catalog.refresh(provider="local", explicit=True))
+        except RuntimeError:  # no running loop
+            pass
+
+    def active_job_model(self) -> Optional[str]:
+        """The running job's model (None without a running job): the engine keeps it loaded."""
+        jobs = getattr(self.app, "job_service", None) or getattr(self.app, "jobs", None)
+        snapshot = getattr(jobs, "snapshot", None)
+        if snapshot is None:
+            return None
+        try:
+            snap = snapshot()
+        except Exception:
+            return None
+        if snap is None or getattr(snap, "finished", None):
+            return None
+        spec = getattr(snap, "spec", None)
+        if str(getattr(spec, "kind", "") or "") in mc.MODEL_FREE_JOB_KINDS:
+            return ""
+        return mc.job_model(getattr(spec, "params", None) or {}, getattr(self.store, "get", None)) or ""
+
+    def current_model(self) -> str:
+        try:
+            return str(self.store.get("model", "") or "") if self.store is not None else ""
+        except Exception:
+            return ""
+
+    def open_local_models(self) -> None:
+        """ModelSheet › "Get on-device models…": Model manager on its On-device tab."""
+        self._next_tab = "local"
+        navigate = getattr(self.app, "navigate_to", None)
+        if navigate is not None:
+            navigate("settings.models")
 
     def gcp_project_picker(self, model: str) -> Any:
         """ModelSheet route row of ``authgem-vertex/`` models: the Accounts GCP project picker
@@ -1314,6 +1407,11 @@ class ModelsKeysFeature:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        if self.local_engine is not None:
+            try:
+                self.local_engine.stop()
+            except Exception:
+                log.debug("stopping the on-device engine failed", exc_info=True)
 
     # ---- plumbing ---------------------------------------------------------------------------------------
 
@@ -1462,7 +1560,9 @@ class ModelsKeysFeature:
                                              native=getattr(self.app, "native", None),
                                              copy_text=getattr(self.app, "_copy_text", None),
                                              launch_url=getattr(getattr(self.app, "opener", None), "launch", None),
-                                             ollama_pulls=self.ollama_pulls)
+                                             local_engine=self.local_engine, current_model=self.current_model,
+                                             tab=self._next_tab)
+            self._next_tab = None
         elif match.name in ("settings.keys", "settings.keys.pool"):
             from glossarion_mobile.ui.screens.keys import KeysScreen
             from glossarion_mobile.ui.sheets.model_sheet import sheet_env

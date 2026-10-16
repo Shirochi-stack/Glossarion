@@ -11,11 +11,17 @@
 #     translate / graceful + force stop / kill & resume jobs against the app's built-in fake
 #     OpenAI server on 127.0.0.1, see glossarion_mobile/diagnostics/e2e.py) and wait for
 #     GLOSSARION_SELFTEST PASS {"suite":"e2e" (blocking; E2E_TIMEOUT, default 20 min);
-#  6. always save logcat (flet.python + full + crash buffer), meminfo, pidof, package dump, the
+#  6. with RUN_LLAMA=1 only: the built-in llama.cpp engine suite glossarion://app/__selftest__?suite=llama
+#     (downloads the GLOSSARION_LLAMA_SUITE_PRESET GGUF from Hugging Face, default "Garbage"
+#     = Qwen3.5 0.8B, loads it, generates a few tokens through the in-app OpenAI-compatible
+#     server, unloads), waits for GLOSSARION_SELFTEST PASS {"suite":"llama" (LLAMA_TIMEOUT,
+#     default 30 min) and saves the GLOSSARION_LLAMA {json} line to llama_result.txt;
+#  7. always save logcat (flet.python + full + crash buffer), meminfo, pidof, package dump, the
 #     app's last self-test report (debuggable builds) and a screenshot into the log dir.
 #
 # Environment overrides: GLOSSARION_PACKAGE, READY_TIMEOUT (300), SELFTEST_TIMEOUT (900),
-# SELFTEST_URL, RUN_E2E (1; 0 skips step 5), E2E_TIMEOUT (1200), E2E_URL, LOGCAT_TAG (flet.python).
+# SELFTEST_URL, RUN_E2E (1; 0 skips step 5), E2E_TIMEOUT (1200), E2E_URL, RUN_LLAMA (0; 1 runs step 6),
+# LLAMA_TIMEOUT (1800), LLAMA_URL, LOGCAT_TAG (flet.python).
 set -uo pipefail
 
 APK="${1:?usage: android_smoke.sh <x86_64.apk> [log-dir]}"
@@ -27,6 +33,9 @@ SELFTEST_URL="${SELFTEST_URL:-glossarion://app/__selftest__?suite=smoke}"
 RUN_E2E="${RUN_E2E:-1}"
 E2E_TIMEOUT="${E2E_TIMEOUT:-1200}"
 E2E_URL="${E2E_URL:-glossarion://app/__selftest__?suite=e2e}"
+RUN_LLAMA="${RUN_LLAMA:-0}"
+LLAMA_TIMEOUT="${LLAMA_TIMEOUT:-1800}"
+LLAMA_URL="${LLAMA_URL:-glossarion://app/__selftest__?suite=llama}"
 TAG="${LOGCAT_TAG:-flet.python}"
 
 mkdir -p "$LOG_DIR"
@@ -185,6 +194,9 @@ collect_diagnostics() {
     adb exec-out run-as "$PKG" cat "$report" > "$LOG_DIR/selftest-last.json" 2>/dev/null || rm -f "$LOG_DIR/selftest-last.json"
   fi
   grep -a -h -o -E 'GLOSSARION_[A-Z_]+( (PASS|FAIL))?' "$TAG_LOG" "$FULL_LOG" 2>/dev/null | sort | uniq -c > "$LOG_DIR/markers.txt" || true
+  if [ "$RUN_LLAMA" = "1" ] && [ ! -s "$LOG_DIR/llama_result.txt" ]; then
+    grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA')" "$TAG_LOG" "$FULL_LOG" 2>/dev/null | tail -n 1 > "$LOG_DIR/llama_result.txt" || true
+  fi
   grep -a -c -F 'Traceback (most recent call last)' "$TAG_LOG" > "$LOG_DIR/python_tracebacks_count.txt" 2>/dev/null || true
   log "result: $RESULT (exit $exit_code)"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -276,6 +288,16 @@ if [ "$RUN_E2E" = "1" ]; then
   run_suite e2e "$E2E_URL" "$E2E_TIMEOUT"
 else
   log "RUN_E2E=$RUN_E2E: skipping the end-to-end suite"
+fi
+
+if [ "$RUN_LLAMA" = "1" ]; then
+  # The suite prints GLOSSARION_LLAMA {"model":...,"sha256_ok":...,"load_s":...,"tok_s":...} before
+  # its PASS line; keep it even when the suite fails (the EXIT trap still collects the rest).
+  run_suite llama "$LLAMA_URL" "$LLAMA_TIMEOUT"
+  grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA')" "$TAG_LOG" "$FULL_LOG" | tail -n 1 > "$LOG_DIR/llama_result.txt" || true
+  log "llama suite: $(cut -c1-500 "$LOG_DIR/llama_result.txt" 2>/dev/null)"
+else
+  log "RUN_LLAMA=$RUN_LLAMA: skipping the built-in engine (llama) suite"
 fi
 
 STAGE="post"

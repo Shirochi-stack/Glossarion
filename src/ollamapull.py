@@ -29,8 +29,8 @@ import mobile_runtime
 BASE_URL = "http://127.0.0.1:11434"
 #: Glossarion Mobile cannot install or start Ollama: it uses an Ollama server on the user's PC
 #: (``OLLAMAPULL_BASE_URL``), where models are pulled through the same API.
-MOBILE_HINT = ("ollamapull/ on mobile uses Ollama in Termux on the phone (Model manager › Ollama › Set up in Termux) "
-               "or the Ollama server on your PC: start Ollama there (with OLLAMA_HOST=0.0.0.0 "
+MOBILE_HINT = ("ollamapull/ on mobile uses the Ollama server on your PC (for a model on the phone itself, use "
+               "Model manager › On-device): start Ollama there (with OLLAMA_HOST=0.0.0.0 "
                "so the phone can reach it) and set its address in Settings › Local AI")
 
 

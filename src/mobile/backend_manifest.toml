@@ -248,6 +248,7 @@ files = []
 [baseline.lazy_gui_edges]
 "ai_hunter_enhanced->PySide6" = { count = 2, reason = "AIHunterConfigGUI settings dialog; the detection code is GUI-free" }
 "authnd_auth->PySide6" = { count = 3, reason = "_mint_captcha_token_qt: desktop QtWebEngine hCaptcha; mobile mints through the registered browser_driver (WebViewBridge, U9)" }
+"glm_proxy->PySide6" = { count = 4, reason = "_captcha_window_main: the desktop QtWebEngine window for the AuthZA free-plan captcha (--authza-captcha child process); never reached on mobile, see glm_proxy:_solve_captcha_in_window" }
 "gemini_free->PySide6" = { count = 10, reason = "desktop QtWebEngine helpers for search/gemini; mobile searches through the registered browser_driver (WebViewBridge, U9)" }
 "metadata_batch_translator->PySide6" = { count = 5, reason = "MetadataBatchTranslatorUI dialogs; mobile uses metadata_defaults (U1)" }
 "multi_api_key_manager->PySide6" = { count = 10, reason = "MultiAPIKeyDialog / RefusalPatternsDialog; mobile uses key_pool_service (U4)" }
@@ -274,6 +275,7 @@ files = []
 "authcd_auth:run_claude_cli_login" = { apis = ["subprocess.Popen"], count = 1, reason = "Claude Code CLI login (excluded on mobile)" }
 "chapter_extraction_manager:ChapterExtractionManager._run_extraction_subprocess" = { apis = ["subprocess.Popen"], count = 1, reason = "gated in the caller: TransateKRtoEN use_async_extraction requires processes_available() (P2)" }
 "epub_converter:EPUBCompiler._compress_images" = { apis = ["subprocess.Popen"], count = 1, reason = "P16: `_sp.Popen` alias in a loop of `num_workers if subprocesses_available() else 0` workers -> sequential in-process fallback" }
+"glm_proxy:_solve_captcha_in_window" = { apis = ["subprocess.Popen"], count = 1, reason = "AuthZA free-plan captcha window (desktop); gated in the caller: _claim_free_plan_once returns early unless subprocesses_available()" }
 "local_inpainter:<module>" = { apis = ["multiprocessing.Process"], count = 1, reason = "class _LocalInpainterWorker(mp.Process); only started by _start_worker (P17)" }
 "local_inpainter:LocalInpainter._start_worker" = { apis = ["multiprocessing.get_context"], count = 1, reason = "P17: only called when self._mp_enabled, which requires processes_available()" }
 "pdf_extractor:extract_pdf_with_formatting" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P9: _pdf_extraction_worker_count() is 1 without processes -> sequential branch" }

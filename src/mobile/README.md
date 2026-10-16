@@ -80,6 +80,11 @@ the build jobs verify the built wheels (`--verify-installed`: OpenSSL version, u
 symbols). The first all-green Build Mobile with these wheels was run 37728461336 (96da1ec6).
 Do not downgrade these pins or bypass the wheel check to make a release.
 
+The wheel check reads a pypi.flet.dev wheel's dependencies from the wheel's own METADATA (HTTP
+range reads of the zip's tail; the index serves no PEP 658 metadata), because flet's builds can
+declare more than the PyPI release: llama-cpp-python's Android wheels add `flet-libcpp-shared`.
+When the METADATA cannot be read it falls back to PyPI's JSON.
+
 Untrusted Pillow image reads use `safe_image.open_image`, which restricts
 parsers before opening headers. EPS, JPEG2000 and McIdas input is rejected;
 ordinary PNG/JPEG/WebP/GIF/BMP/TIFF inputs and Pillow's pixel-bomb guard remain
@@ -108,6 +113,36 @@ cd app && python -m glossarion_mobile.diagnostics.e2e --strict --json ../build/e
 client (no window), including an Android simulation with the real
 `flet_glossarion_native` Python class.
 
+### On-device engine (llama.cpp)
+
+Model manager › On-device runs GGUF models inside the app through **llama-cpp-python 0.3.32**
+(`[tool.flet.android]` / `[tool.flet.ios]` dependencies; device-only, so the host `uv sync` never
+builds its sdist). There is no own build: pypi.flet.dev has cp313 wheels for all five targets,
+built by flet-dev/mobile-forge `recipes/llama-cpp-python` (build tag 2, the one with the mobile
+ctypes loader fixes). They are CPU-only (`GGML_NATIVE=OFF`, no Metal / Vulkan / OpenMP) and pure
+ctypes over four libraries in `llama_cpp/lib`: libggml-base, libggml-cpu, libggml and libllama.
+
+* Size: about 2 MB of native libraries per ABI, plus jinja2, MarkupSafe and diskcache (about 1 MB
+  of Python, resolved by pip). Android also installs `flet-libcpp-shared` (`libc++_shared.so`,
+  which must exist exactly once in the APK: Gradle merges jniLibs).
+* After every `flet build` CI runs `ci/wheels/wheels.py verify-site-packages --platform <p>
+  --package llama-cpp-python build/site-packages`: the pinned version and build >= 2, exactly the
+  four libraries, then per arch the ELF machine, 16 KB LOAD alignment, NEEDED (siblings,
+  libc++_shared, libc/libm/libdl/liblog) and every strong import resolved by a sibling,
+  libc++_shared or the NDK API-24 stubs (Android); the slice's CPU and platform, minos <= 13.0
+  (14.0 on the arm64 simulator), only sibling and `/usr/lib` dylibs and no DYNAMIC_LOOKUP binds (iOS).
+* The app's `ENGINE_VERSION` equals the pin (a host test checks it); the smoke suite's
+  `llama_engine` check imports `llama_cpp` and loads the four libraries on the emulator and the
+  iOS simulator.
+* Models are GGUF files in `GLOSSARION_MODELS_DIR` (`<data>/models`, app-internal; excluded from
+  iCloud backup on iOS; on Android a model over Auto Backup's 25 MB quota just stops the app's backup).
+* RAM: a model needs roughly its file size × 1.15 + the KV cache + 400 MB. Android refuses a load
+  above the phone's total RAM and asks first above the available RAM; iOS refuses above half the
+  RAM (unsigned / AltStore IPAs cannot carry the increased-memory-limit entitlement). Qwen3.5 4B
+  wants about 4 GB free and 9B about 8 GB.
+* If an index wheel ever fails on a device, the fallback is our own build of the forge recipe
+  (`ci/wheels/recipes/llama-cpp-python`, a `[[wheel]]` in `wheelhouse.toml`, mobile-wheels.yml).
+
 ## Building
 
 Device builds need Flutter, a JDK 17 and the Android SDK (Android) or Xcode (iOS);
@@ -132,8 +167,8 @@ Version: `--build-version` = `APP_VERSION` from `src/app_version.py`, `--build-n
 
 Triggers: **manual dispatch only** (plus `workflow_call`, which nothing uses: `build-all.yml`
 does not build mobile). There is no push or tag trigger. Dispatch inputs: `targets`
-(all/android/ios), `emulator_smoke`, `ios_simulator_smoke` and `ui_tests` (auto/on/off) and
-`android_legacy_packaging` (the APK size experiment).
+(all/android/ios), `emulator_smoke`, `ios_simulator_smoke`, `ui_tests` and `llama_suite`
+(auto/on/off) and `android_legacy_packaging` (the APK size experiment).
 
 Jobs: `prepare` (version, wheel plan, backend bundle, host tests, offline E2E) →
 `wheels-android` / `wheels-ios` (the self-built cryptography/Pillow wheels) → `android`
@@ -156,9 +191,10 @@ artifact retention and the suite policies.
 |---|---|---|---|---|
 | iOS simulator smoke | `ios-simulator-smoke` | `IOS_SIMULATOR_SMOKE_POLICY` | `required` (U9: passed in Build Mobile run 37728461336 on 96da1ec6) | the app on an iPhone simulator, launched with `SIMCTL_CHILD_GLOSSARION_CI_SELFTEST=smoke` (never `simctl openurl`: its "Open in …?" alert is never tapped); waits for `GLOSSARION_SELFTEST_START` (120 s) and `GLOSSARION_SELFTEST PASS` |
 | Android UI tests | `android-ui-tests` | `ANDROID_UI_TESTS_POLICY` | `optional` until `flet test android` has passed once in CI | `flet test android` on the emulator (`ci/android_ui_tests.sh`, tests in `tests/`) |
+| Built-in engine (llama) | `android-smoke` (its own emulator step) | `ANDROID_LLAMA_SUITE_POLICY` | `optional` until it has passed once in CI | a second emulator run of `ci/android_smoke.sh` with `RUN_E2E=0 RUN_LLAMA=1`: the smoke suite, then `glossarion://app/__selftest__?suite=llama` (downloads the `GLOSSARION_LLAMA_SUITE_PRESET` GGUF, default Garbage = Qwen3.5 0.8B, loads it with `n_ctx` 2048, generates a few tokens through the in-app server, unloads); the `GLOSSARION_LLAMA {json}` line goes to `mobile-smoke-logs/llama/llama_result.txt` |
 
 `optional`: the suite runs only when its dispatch input is `on`, and a failure never
-fails the run (`continue-on-error`). `required`: `auto` runs it whenever its platform is
+fails the run (`continue-on-error`; for the llama suite on its step). `required`: `auto` runs it whenever its platform is
 built and a failure fails the run.
 
 **Promoting a suite** once it has passed in CI is one line in `build-mobile.yml`, e.g.
@@ -321,6 +357,7 @@ the Dart VM while Python keeps running).
   `GLOSSARION_HEADLESS_KEY_MANAGER=1`, `GLOSSARION_APP_DIR`/`GLOSSARION_DATA_DIR=<data>`,
   `CONFIG_FILE=<data>/config.json`, `HOME=<data>/home`, `OUTPUT_DIRECTORY=<docs>/Output`,
   `GLOSSARION_LIBRARY_DIR=<docs>/Library`, `GLOSSARION_LOG_DIR=<data>/logs`,
+  `GLOSSARION_MODELS_DIR=<data>/models` (on-device GGUF models + `models.json`, created on demand),
   `GLOSSARION_MODEL_CATALOG_CACHE=<cache>/model_catalog_cache.json`, `XDG_CACHE_HOME=<cache>`,
   `TMPDIR/TEMP/TMP=<temp>`, `TIKTOKEN_CACHE_DIR=<cache>/tiktoken` (seeded from
   `assets/tiktoken`, checked against its `MANIFEST.toml`), `SSL_CERT_FILE` =
@@ -353,6 +390,7 @@ os_log (iOS) plus `console.log`. (`sys.__stderr__` is fd 2 = `/dev/null` on Andr
 | `GLOSSARION_SELFTEST_START {json}` | self-test started (suite, source) |
 | `GLOSSARION_SELFTEST PASS {json}` / `FAIL {json}` | self-test finished (deep link or button) |
 | `GLOSSARION_SPIKE …` | U0 spike results (FGS ticks every 60 s, events) |
+| `GLOSSARION_LLAMA {json}` | the `llama` suite's result (model, sha256_ok, load_s, tokens, tok_s, system_info) |
 
 ```bash
 adb logcat -s flet.python

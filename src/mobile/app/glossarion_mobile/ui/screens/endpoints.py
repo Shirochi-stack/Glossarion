@@ -88,7 +88,7 @@ DESKTOP_ONLY_ROWS = (
     ("AuthZA / GLM access mode", "Z.AI login and the GLM access modes use desktop-only routes (excluded on mobile)."),
     ("🦙 Load Ollama (ollamapull/)", "Managed Ollama installs and pulls models with a desktop Ollama binary. "
                                     "Use Local AI to reach an Ollama or LM Studio server on your network, or "
-                                    "Model manager › Ollama to run Ollama in Termux on this phone."),
+                                    "Model manager › On-device to run a model on this phone."),
 )
 
 

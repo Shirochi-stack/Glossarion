@@ -269,7 +269,8 @@ def test_expression_evaluator_semantics():
 
 BUILD_JOBS = {"prepare", "wheels-android", "wheels-ios", "android", "android-smoke", "android-ui-tests", "ios",
               "ios-signed", "ios-simulator-smoke"}
-DISPATCH_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests", "android_legacy_packaging"}
+DISPATCH_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests", "android_legacy_packaging",
+                   "llama_suite"}
 CALL_INPUTS = {"targets", "emulator_smoke", "ios_simulator_smoke", "ui_tests"}
 SIGNING_SECRETS = {"ANDROID_KEYSTORE_BASE64", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD",
                    "IOS_DIST_CERT_P12_BASE64", "IOS_DIST_CERT_PASSWORD", "IOS_PROVISIONING_PROFILE_BASE64",
@@ -572,8 +573,10 @@ def test_suite_policies_today(wf):
     # Android UI tests stay optional until `flet test android` has passed once in CI.
     assert wf["env"]["IOS_SIMULATOR_SMOKE_POLICY"] == "required"
     assert wf["env"]["ANDROID_UI_TESTS_POLICY"] == "optional"
+    # The built-in llama.cpp engine suite stays optional until it has passed once in CI.
+    assert wf["env"]["ANDROID_LLAMA_SUITE_POLICY"] == "optional"
     inputs = _triggers(wf)["workflow_dispatch"]["inputs"]
-    for name in ("ios_simulator_smoke", "ui_tests"):
+    for name in ("ios_simulator_smoke", "ui_tests", "llama_suite"):
         assert inputs[name]["type"] == "choice" and inputs[name]["default"] == "auto"
         assert inputs[name]["options"] == ["auto", "on", "off"]
 
@@ -584,6 +587,7 @@ def test_suites_resolve_per_input(tmp_path, wf):
     # the required iOS smoke runs by default and blocks; the optional UI tests stay off
     assert (base["ios_simulator_smoke"], base["ios_simulator_smoke_blocking"]) == ("true", "true")
     assert (base["ui_tests"], base["ui_tests_blocking"]) == ("false", "false")
+    assert (base["llama_suite"], base["llama_suite_blocking"]) == ("false", "false")
     assert base["android_legacy_packaging"] == "false"
     on = _run_opts(tmp_path, wf, targets="all", ios_simulator_smoke="on", ui_tests="on", android_legacy_packaging=True)
     assert (on["ios_simulator_smoke"], on["ios_simulator_smoke_blocking"]) == ("true", "true")
@@ -638,6 +642,70 @@ def test_promoting_a_suite_is_one_line(tmp_path, wf, policy, suite, platform_inp
     assert gh_eval(job["continue-on-error"], ctx) is False
     assert gh_eval(job["continue-on-error"], {"needs": {"prepare": {"outputs": {f"{suite}_blocking": "false"}}}}) is True
     assert gh_eval(job["if"], {"needs": {"prepare": {"outputs": {suite: out[suite]}}}}) is True
+
+
+def _llama_step(workflow: dict) -> dict:
+    return next(step for step in workflow["jobs"]["android-smoke"]["steps"]
+                if "android_smoke.sh" in str(step.get("with", {}).get("script", ""))
+                and "RUN_LLAMA=1" in str(step["with"]["script"]))
+
+
+def test_llama_suite_resolves_and_promotes_in_one_line(tmp_path, wf):
+    """suite=llama (the built-in engine on the emulator) follows ANDROID_LLAMA_SUITE_POLICY like the other
+    suites; it needs the emulator smoke job, so emulator_smoke false or an iOS-only run turns it off."""
+    on = _run_opts(tmp_path, wf, llama_suite="on")
+    assert (on["llama_suite"], on["llama_suite_blocking"]) == ("true", "false")
+    assert _run_opts(tmp_path, wf, llama_suite="on", emulator_smoke=False)["llama_suite"] == "false"
+    assert _run_opts(tmp_path, wf, llama_suite="on", targets="ios")["llama_suite"] == "false"
+    assert _run_opts(tmp_path, wf, llama_suite="maybe").get("__rc__")
+    step = _llama_step(wf)
+    outputs = {"llama_suite": "true", "llama_suite_blocking": "false"}
+    assert gh_eval(step["if"], {"needs": {"prepare": {"outputs": outputs}}}) is True
+    assert gh_eval(step["continue-on-error"], {"needs": {"prepare": {"outputs": outputs}}}) is True
+    assert gh_eval(step["if"], {"needs": {"prepare": {"outputs": {"llama_suite": "false"}}}}) is False
+    script = step["with"]["script"]
+    assert "\n" not in script.strip() and "RUN_E2E=0" in script and "mobile-smoke-logs/llama" in script
+    # promotion: one line makes it default-on and blocking
+    text = BUILD_MOBILE.read_text(encoding="utf-8")
+    flipped_text = _flip(text, "ANDROID_LLAMA_SUITE_POLICY")
+    assert len([1 for a, b in zip(text.splitlines(), flipped_text.splitlines()) if a != b]) == 1
+    flipped = yaml.safe_load(flipped_text)
+    out = _run_opts(tmp_path, flipped)
+    assert (out["llama_suite"], out["llama_suite_blocking"]) == ("true", "true")
+    ctx = {"needs": {"prepare": {"outputs": {k: out[k] for k in ("llama_suite", "llama_suite_blocking")}}}}
+    assert gh_eval(_llama_step(flipped)["continue-on-error"], ctx) is False
+    assert _run_opts(tmp_path, flipped, llama_suite="off")["llama_suite"] == "false"
+    # the smoke job gets the extra time only when the suite runs
+    job = wf["jobs"]["android-smoke"]
+    assert gh_eval(job["timeout-minutes"], ctx) == 130
+    assert gh_eval(job["timeout-minutes"], {"needs": {"prepare": {"outputs": {"llama_suite": "false"}}}}) == 75
+
+
+def test_android_smoke_script_runs_the_llama_suite_only_when_asked():
+    text = (MOBILE_DIR / "ci" / "android_smoke.sh").read_bytes().decode("utf-8")
+    assert "\r\n" not in text
+    assert 'RUN_LLAMA="${RUN_LLAMA:-0}"' in text and 'LLAMA_TIMEOUT="${LLAMA_TIMEOUT:-1800}"' in text
+    assert 'LLAMA_URL="${LLAMA_URL:-glossarion://app/__selftest__?suite=llama}"' in text
+    assert 'run_suite llama "$LLAMA_URL" "$LLAMA_TIMEOUT"' in text
+    assert text.count("llama_result.txt") >= 2 and "marker_regex 'GLOSSARION_LLAMA'" in text
+
+
+def test_every_flet_build_checks_the_llama_engine_libraries(wf):
+    """After each flet build (APK, AAB, unsigned / signed / simulator iOS) wheels.py verify-site-packages
+    checks the llama-cpp-python pypi.flet.dev installed, right after the self-built wheel check."""
+    expected = {"android": ["android", "android"], "ios": ["ios"], "ios-signed": ["ios"], "ios-simulator-smoke": ["ios"]}
+    for job_id, platforms in expected.items():
+        steps = wf["jobs"][job_id]["steps"]
+        runs = [str(step.get("run", "")) for step in steps]
+        checks = [r for r in runs if "verify-site-packages" in r]
+        assert [re.search(r"--platform (\w+)", r).group(1) for r in checks] == platforms, job_id
+        for r in checks:
+            assert "--package llama-cpp-python src/mobile/build/site-packages" in r
+        installed = [i for i, r in enumerate(runs) if "--verify-installed" in r]
+        llama = [i for i, r in enumerate(runs) if "verify-site-packages" in r]
+        assert [i + 1 for i in installed] == llama, job_id
+        for i in llama:   # same condition as the build it checks (the AAB only with a keystore)
+            assert steps[i].get("if") == steps[i - 1].get("if"), job_id
 
 
 def test_ios_simulator_smoke_keeps_the_launch_env_trigger(wf):

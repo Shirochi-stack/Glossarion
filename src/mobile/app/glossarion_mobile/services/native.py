@@ -192,15 +192,9 @@ class NativeStub:
     async def take_document_results(self) -> list:
         return []
 
-    # ---- Termux (Model manager › Ollama): nothing to drive off-device ------------------------------
+    # ---- backups (on-device models): nothing to mark off-device ------------------------------------
 
-    async def termux_status(self) -> dict:
-        return {"installed": False, "permission": False}
-
-    async def termux_run(self, *args: Any, **kwargs: Any) -> dict:
-        return {"ok": False, "error": "unavailable", "message": self.reason}
-
-    async def open_termux(self) -> bool:
+    async def exclude_from_backup(self, path: str) -> bool:
         return False
 
 
@@ -562,21 +556,8 @@ class NativeBridge:
     async def finish_continued_processing(self, success: bool) -> None:
         await self.call("finish_continued_processing", success)
 
-    # ---- Termux (Model manager › Ollama, ``services.ollama_termux``) ------------------------------------
+    # ---- backups (Model manager › On-device, ``services.local_llm``) ------------------------------------
 
-    async def termux_status(self) -> dict:
-        """``{"installed", "permission"}``: Termux (com.termux) and its RUN_COMMAND permission (Android)."""
-        result = await self.call("termux_status", default=None)
-        out = {"installed": False, "permission": False}
-        if isinstance(result, dict):
-            out.update(result)
-        return out
-
-    async def termux_run(self, command: str, *, label: str = "", background: bool = False) -> dict:
-        """Run ``command`` with Termux's bash (com.termux.RUN_COMMAND): ``{"ok": True}`` or
-        ``{"ok": False, "error": "unavailable" | "not_installed" | "permission" | "failed", ...}``."""
-        result = await self.call("termux_run", command, label=label, background=background, default=None)
-        return result if isinstance(result, dict) else {"ok": False, "error": "unavailable"}
-
-    async def open_termux(self) -> bool:
-        return bool(await self.call("open_termux", default=False))
+    async def exclude_from_backup(self, path: str) -> bool:
+        """iOS: keep ``path`` (the models folder) out of iCloud / device backups; False elsewhere."""
+        return bool(await self.call("exclude_from_backup", str(path), default=False))

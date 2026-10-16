@@ -183,6 +183,14 @@ startup_message = "Starting translation engine…"
 [tool.flet.flutter.pubspec.dependency_overrides]
 jni_flutter = "1.0.3"
 
+# llama-cpp-python (the built-in on-device engine, Model manager › On-device) is device-only too,
+# so the host `uv sync` never builds its 70 MB sdist. pypi.flet.dev ships cp313 builds for all five
+# targets (build tag 2: flet-dev/mobile-forge recipes/llama-cpp-python with the Flet 0.86 ctypes
+# loader fixes; CPU only, GGML_NATIVE=OFF, 16 KB pages on Android). It is pure ctypes over
+# libggml-base/libggml-cpu/libggml/libllama; the Android build adds flet-libcpp-shared (libc++_shared.so)
+# and the pip resolve adds jinja2, markupsafe and diskcache. ENGINE_VERSION in the app equals this pin;
+# ci/wheels/wheels.py verify-site-packages checks the installed libraries after every `flet build`.
+#
 # RapidOCR (manga OCR provider, U8) is a device-only dependency, so the host `uv sync` keeps
 # only opencv-python-headless: rapidocr-onnxruntime requires opencv-python, which pypi.flet.dev
 # builds from the same OpenCV 5.0.0.93 as the headless wheel. Both install the same `cv2` package
@@ -199,6 +207,7 @@ extract_packages = ["langdetect", "certifi", "cv2", "tiktoken_ext", "rapidocr_on
 dependencies = [
   "psutil==7.2.2",                             # Android only; every use is guarded
   "rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2",
+  "llama-cpp-python==0.3.32",                  # built-in engine (note above)
 ]
 
 [tool.flet.android.permission]
@@ -209,9 +218,6 @@ dependencies = [
 "android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
 "android.permission.WAKE_LOCK" = true
 "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" = true
-# Model manager › Ollama: Termux's RUN_COMMAND ("pkg install ollama; ollama serve" with one tap). Termux's own
-# permission; also declared by the flet_glossarion_native manifest, asked for at runtime on first use.
-"com.termux.permission.RUN_COMMAND" = true
 "android.permission.READ_EXTERNAL_STORAGE" = false
 "android.permission.WRITE_EXTERNAL_STORAGE" = false
 "android.permission.MANAGE_EXTERNAL_STORAGE" = false
@@ -229,7 +235,10 @@ networkSecurityConfig = "@xml/glossarion_network_security_config"
 
 [tool.flet.ios]
 export_method = "release-testing"   # used only when CI passes signing flags
-dependencies = ["rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2"]  # RapidOCR, see [tool.flet.android]
+dependencies = [
+  "rapidocr-onnxruntime==1.2.3", "pyclipper==1.4.0", "shapely==2.1.2",   # RapidOCR, see [tool.flet.android]
+  "llama-cpp-python==0.3.32",                                            # built-in engine, see [tool.flet.android]
+]
 
 [tool.flet.ios.info]
 # CFBundleDisplayName comes from [tool.flet].product (flet v1.0.3 ios/Runner/Info.plist template);
