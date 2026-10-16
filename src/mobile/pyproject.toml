@@ -218,9 +218,6 @@ dependencies = [
 "android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
 "android.permission.WAKE_LOCK" = true
 "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" = true
-# Model manager › Ollama: Termux's RUN_COMMAND ("pkg install ollama; ollama serve" with one tap). Termux's own
-# permission; also declared by the flet_glossarion_native manifest, asked for at runtime on first use.
-"com.termux.permission.RUN_COMMAND" = true
 "android.permission.READ_EXTERNAL_STORAGE" = false
 "android.permission.WRITE_EXTERNAL_STORAGE" = false
 "android.permission.MANAGE_EXTERNAL_STORAGE" = false

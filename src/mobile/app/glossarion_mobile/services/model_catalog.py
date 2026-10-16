@@ -154,7 +154,16 @@ def model_block(model: Optional[str]) -> Optional[tuple]:
     """``(reason, detail)`` when ``model`` is a route excluded on mobile (the chat Send rule,
     ``send_state.excluded_route_reason``: "ocz/ isn't available on mobile"), else None."""
     reason = excluded_route(model)
-    return (reason, excluded_detail(model) or reason) if reason else None
+    if reason:
+        return reason, excluded_detail(model) or reason
+    if str(model or "").strip().lower().startswith("local/"):
+        # the on-device engine (services.local_llm): a model that is not downloaded cannot run
+        try:
+            from glossarion_mobile.services.local_llm.service import model_block as local_block
+        except Exception:
+            return None
+        return local_block(model)
+    return None
 
 
 def job_model(params: Optional[Mapping[str, Any]] = None, config_get: Optional[Callable[..., Any]] = None) -> str:
@@ -233,14 +242,14 @@ _CHIP_BY_PROVIDER = {
     "mistral": "mistral",
     "openrouter": "openrouter",
     "nvidia": "nvidia", "authnd": "nvidia", "authchatgpt": "openai",
-    "ollama": "local", "lmstudio": "local", "ollamapull": "local",
+    "ollama": "local", "lmstudio": "local", "ollamapull": "local", "local": "local",
 }
 _PROVIDER_LABELS = {
     "openai": "OpenAI", "authgpt": "ChatGPT (sign-in)", "gemini": "Google Gemini", "authgem": "Gemini (sign-in)",
     "authgem-vertex": "Gemini Vertex (sign-in)", "authgem-key": "Gemini key route", "vertex": "Vertex AI",
     "anthropic": "Anthropic", "authcd": "Claude (sign-in)", "deepseek": "DeepSeek", "authds": "DeepSeek web (sign-in)", "chutes": "Chutes",
     "xai": "xAI", "authgrok": "Grok (sign-in)", "mistral": "Mistral", "openrouter": "OpenRouter",
-    "nvidia": "NVIDIA NIM", "authnd": "NVIDIA Build (browser)", "authchatgpt": "ChatGPT web (browser)", "ollama": "Ollama", "lmstudio": "LM Studio",
+    "nvidia": "NVIDIA NIM", "authnd": "NVIDIA Build (browser)", "authchatgpt": "ChatGPT web (browser)", "ollama": "Ollama", "lmstudio": "LM Studio", "local": "On this device",
     "ollamapull": "Managed Ollama", "groq": "Groq", "literouter": "LiteRouter", "opencode": "OpenCode Go",
     "opencode-zen": "OpenCode Zen", "electronhub": "ElectronHub", "nanogpt": "NanoGPT", "sambanova": "SambaNova",
     "together": "Together AI", "zai": "Z.AI", "zhipu": "Zhipu", "fireworks": "Fireworks", "cohere": "Cohere",

@@ -492,6 +492,25 @@ def check_onnxruntime(ctx: Context) -> dict[str, Any]:
     return {"version": getattr(ort, "__version__", None), "providers": providers}
 
 
+def check_llama_engine(ctx: Context) -> dict[str, Any]:
+    """The built-in llama.cpp engine: ``llama_cpp`` imports at ``ENGINE_VERSION`` and its four native
+    libraries load (``llama_print_system_info``). Host without llama-cpp-python: skipped."""
+    ctx.need("llama_cpp")
+    from glossarion_mobile.services.local_llm.selfcheck import engine_check
+
+    return engine_check()
+
+
+def check_llama_suite(ctx: Context) -> dict[str, Any]:
+    """Suite ``llama``: download (or reuse) the GLOSSARION_LLAMA_SUITE_PRESET model, load it, generate
+    through the ``local/`` route, unload; prints the GLOSSARION_LLAMA line."""
+    ctx.require_bootstrap()
+    ctx.need("llama_cpp")
+    from glossarion_mobile.services.local_llm.selfcheck import llama_suite
+
+    return llama_suite(emit=rb.emit_marker, log=lambda text: print(text, flush=True))
+
+
 def check_thread_stack(ctx: Context) -> dict[str, Any]:
     """Deep C recursion (json/repr of nested lists) on a fresh worker thread."""
     outcome: dict[str, Any] = {}
@@ -647,8 +666,10 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("library_reader", check_library_reader),
         ("glossary_qa", check_glossary_qa),
         ("share_link_crypto", check_share_link_crypto),
+        ("llama_engine", check_llama_engine),
     ),
     "e2e": _e2e_checks(),
+    "llama": (("llama_download_generate", check_llama_suite),),
 }
 
 

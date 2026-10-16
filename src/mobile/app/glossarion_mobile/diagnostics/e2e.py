@@ -1800,7 +1800,17 @@ class E2ESession:
                 "ocr_requests": len(vision), "translation_requests": len(translations),
                 "ocr_export": exports[-1].name, "secs": round(outcome.secs, 1)}
 
-    # ---- scenario 9: hygiene ----------------------------------------------------------------------------------------
+    # ---- scenario 9: the on-device engine's local/ route (FakeEngine, offline) ----------------------------------
+
+    def local_route_fake_engine(self) -> dict:
+        """``LocalLLMServer`` + ``FakeEngine`` + ``UnifiedClient`` (``local/fake-echo``), plain and streaming."""
+        from glossarion_mobile.services.local_llm.selfcheck import fake_route_check
+
+        detail = fake_route_check(self.root / "local_llm")
+        self.log(f"local/ route: {detail['plain']!r} / {detail['streamed']!r}")
+        return detail
+
+    # ---- scenario 10: hygiene ---------------------------------------------------------------------------------------
 
     def process_hygiene(self) -> dict:
         self.setup()
@@ -1856,6 +1866,7 @@ SCENARIOS = (
     ("e2e_retranslate_resolve_qa", "retranslate_resolve_qa"),
     ("e2e_vision_and_generate", "vision_and_generate"),
     ("e2e_manga_cbz", "manga_cbz"),
+    ("local_route_fake_engine", "local_route_fake_engine"),
     ("e2e_process_hygiene", "process_hygiene"),
 )
 

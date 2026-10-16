@@ -106,9 +106,7 @@ ALL_DEFAULTS = [
     ("update_continued_processing", (1, 2), None),
     ("finish_continued_processing", (True,), None),
     ("save_to_downloads", ("/tmp/a.epub", "a.epub", "application/epub+zip"), None),
-    ("termux_status", (), {"installed": False, "permission": False}),
-    ("termux_run", ("ollama serve",), {"ok": False, "error": "unavailable"}),
-    ("open_termux", (), False),
+    ("exclude_from_backup", ("/data/models",), False),
 ]
 
 
@@ -139,6 +137,7 @@ def test_contract_method_names_exist():
         "is_job_service_running", "begin_background_task", "end_background_task",
         "background_time_remaining", "start_continued_processing",
         "update_continued_processing", "finish_continued_processing", "save_to_downloads",
+        "exclude_from_backup",
     ]:
         assert asyncio.iscoroutinefunction(getattr(GlossarionNative, name)), name
 
@@ -259,40 +258,32 @@ def test_android_forwards_and_converts_results():
     assert by_name["save_to_downloads"][1] >= 600  # large exports get a long timeout
 
 
-def test_termux_calls_forward_on_android_and_match_the_platform_side():
+def test_exclude_from_backup_forwards_on_ios_and_matches_the_platform_side():
     native = GlossarionNative()
-    attach(native, ft.PagePlatform.ANDROID)
-    calls = recording_client(native, results={
-        "termux_status": {"installed": True, "permission": False},
-        "termux_run": {"ok": False, "error": "permission", "requested": True},
-        "open_termux": True,
-    })
-    assert run(native.termux_status()) == {"installed": True, "permission": False}
-    assert run(native.termux_run("ollama serve", label="Ollama", background=True)) == {
-        "ok": False, "error": "permission", "requested": True}
-    assert run(native.open_termux()) is True
-    by_name = {name: args for name, args, _timeout in calls}
-    assert by_name["termux_run"] == {"command": "ollama serve", "label": "Ollama", "background": True}
-    # a non-dict answer is never passed on as success
-    recording_client(native, results={"termux_run": "weird"})
-    assert run(native.termux_run("ls")) == {"ok": False, "error": "unavailable"}
-
+    attach(native, ft.PagePlatform.IOS)
+    calls = recording_client(native, results={"exclude_from_backup": True})
+    assert run(native.exclude_from_backup("/var/mobile/models")) is True
+    assert {name: args for name, args, _timeout in calls}["exclude_from_backup"] == {"path": "/var/mobile/models"}
+    recording_client(native, results={"exclude_from_backup": "yes"})  # never a truthy non-bool
+    assert run(native.exclude_from_backup("/x")) is False
     dart = DART_SERVICE.read_text(encoding="utf-8")
-    kotlin = KOTLIN_PLUGIN.read_text(encoding="utf-8")
-    for method in ("termux_status", "termux_run", "open_termux"):
-        assert f"case '{method}':" in dart and f'"{method}" ->' in kotlin, method
-    for text in ('"com.termux.RUN_COMMAND"', '"com.termux.app.RunCommandService"', "RUN_COMMAND_ARGUMENTS",
-                 '"com.termux.permission.RUN_COMMAND"', "requestPermissions", "getLaunchIntentForPackage"):
-        assert text in kotlin, text
+    swift = SWIFT_PLUGIN.read_text(encoding="utf-8")
+    assert "case 'exclude_from_backup':" in dart
+    assert 'case "exclude_from_backup":' in swift and "isExcludedFromBackup = true" in swift
+
+
+def test_no_termux_left_anywhere():
+    """The "Ollama in Termux" route is gone (built-in llama.cpp engine instead): no Termux
+    permission, package query, method or bridge call in the extension or the app's pyproject."""
+    mobile = ROOT.parents[1]
+    sources = [MANIFEST, KOTLIN_PLUGIN, DART_SERVICE, SWIFT_PLUGIN, ROOT / "src" / "flet_glossarion_native" / "native.py",
+               mobile / "app" / "glossarion_mobile" / "services" / "native.py", mobile / "pyproject.toml"]
+    for path in sources:
+        text = path.read_text(encoding="utf-8").lower()
+        assert "termux" not in text and "run_command" not in text, path
     root = ET.parse(MANIFEST).getroot()
     permissions = {p.get(ANDROID_NS + "name") for p in root.findall("uses-permission")}
-    assert "com.termux.permission.RUN_COMMAND" in permissions
-    packages = {p.get(ANDROID_NS + "name") for q in root.findall("queries") for p in q.findall("package")}
-    assert "com.termux" in packages
-    import tomllib
-
-    pyproject = tomllib.loads((ROOT.parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
-    assert pyproject["tool"]["flet"]["android"]["permission"]["com.termux.permission.RUN_COMMAND"] is True
+    assert not any("termux" in str(p) for p in permissions)
 
 
 def test_reserved_job_service_id_is_rejected():

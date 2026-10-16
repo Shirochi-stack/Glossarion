@@ -24,7 +24,6 @@ import android.provider.OpenableColumns
 import android.system.Os
 import android.util.Log
 import android.webkit.MimeTypeMap
-import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -49,8 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Android side of GlossarionNative (MethodChannel `glossarion_native/platform`).
  *
  * Dart -> Kotlin: attach, get_platform_info, clear_shared, init_notifications,
- * show_notification, cancel_notification, save_to_downloads, termux_status,
- * termux_run, open_termux (Termux RUN_COMMAND), and the document
+ * show_notification, cancel_notification, save_to_downloads, and the document
  * destination methods handled by [DocumentDestinations] (pick_folder, ...).
  * Kotlin -> Dart: `share` {items}, `notification` {notification_id, action_id,
  * payload, launched_app}, `document` {type, op_id, ...}.
@@ -360,9 +358,6 @@ class GlossarionNativePlugin :
                     result.success(null)
                 }
                 "save_to_downloads" -> saveToDownloadsAsync(context, call, result)
-                "termux_status" -> result.success(termuxStatus(context))
-                "termux_run" -> result.success(termuxRun(context, call))
-                "open_termux" -> result.success(openTermux(context))
                 else -> result.notImplemented()
             }
         } catch (e: Exception) {
@@ -563,89 +558,6 @@ class GlossarionNativePlugin :
             ch.invokeMethod("notification", event)
         } else {
             pendingNotifications.add(event)
-        }
-    }
-
-    // ---------------------------------------------------------------- Termux
-    //
-    // Model manager › Ollama: Termux's RunCommandService runs a command for another app when
-    // Termux has allow-external-apps=true and the caller holds the dangerous permission
-    // com.termux.permission.RUN_COMMAND (requested here on first use). <queries> in the manifest
-    // makes com.termux visible on Android 11+.
-
-    private fun termuxInstalled(context: Context): Boolean = try {
-        context.packageManager.getPackageInfo(TERMUX_PACKAGE, 0)
-        true
-    } catch (e: PackageManager.NameNotFoundException) {
-        false
-    }
-
-    private fun termuxPermission(context: Context): Boolean =
-        ContextCompat.checkSelfPermission(context, TERMUX_RUN_PERMISSION) == PackageManager.PERMISSION_GRANTED
-
-    private fun termuxStatus(context: Context): Map<String, Any?> = hashMapOf(
-        "installed" to termuxInstalled(context),
-        "permission" to termuxPermission(context),
-    )
-
-    private fun termuxRun(context: Context, call: MethodCall): Map<String, Any?> {
-        val command = call.argument<String>("command")
-        if (command.isNullOrBlank()) {
-            return hashMapOf("ok" to false, "error" to "failed", "message" to "no command")
-        }
-        if (!termuxInstalled(context)) return hashMapOf("ok" to false, "error" to "not_installed")
-        if (!termuxPermission(context)) {
-            val activity = activityBinding?.activity
-            if (activity != null) {
-                ActivityCompat.requestPermissions(activity, arrayOf(TERMUX_RUN_PERMISSION), TERMUX_PERMISSION_REQUEST)
-            }
-            return hashMapOf("ok" to false, "error" to "permission", "requested" to (activity != null))
-        }
-        val intent = Intent(TERMUX_RUN_ACTION).apply {
-            setClassName(TERMUX_PACKAGE, TERMUX_RUN_SERVICE)
-            putExtra("com.termux.RUN_COMMAND_PATH", TERMUX_BASH)
-            putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
-            putExtra("com.termux.RUN_COMMAND_WORKDIR", TERMUX_HOME)
-            putExtra("com.termux.RUN_COMMAND_BACKGROUND", call.argument<Boolean>("background") == true)
-            putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0")
-            call.argument<String>("label")?.takeIf { it.isNotBlank() }?.let {
-                putExtra("com.termux.RUN_COMMAND_LABEL", it)
-            }
-        }
-        return try {
-            val started = try {
-                context.startService(intent)
-            } catch (e: IllegalStateException) {
-                // Background start restrictions (Android 8+): RunCommandService calls startForeground itself.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent) else throw e
-            }
-            if (started == null) {
-                hashMapOf("ok" to false, "error" to "failed", "message" to "Termux has no RUN_COMMAND service (update Termux)")
-            } else {
-                hashMapOf("ok" to true, "error" to null)
-            }
-        } catch (e: SecurityException) {
-            Log.w(TAG, "termux_run refused", e)
-            hashMapOf("ok" to false, "error" to "permission", "message" to e.toString())
-        } catch (e: Exception) {
-            Log.w(TAG, "termux_run failed", e)
-            hashMapOf("ok" to false, "error" to "failed", "message" to e.toString())
-        }
-    }
-
-    private fun openTermux(context: Context): Boolean {
-        val launch = context.packageManager.getLaunchIntentForPackage(TERMUX_PACKAGE) ?: return false
-        return try {
-            val activity = activityBinding?.activity
-            if (activity != null) {
-                activity.startActivity(launch)
-            } else {
-                context.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "open_termux failed", e)
-            false
         }
     }
 
@@ -865,14 +777,6 @@ class GlossarionNativePlugin :
         private const val DEFAULT_CHANNEL = "jobs.done"
         private const val COPY_BUFFER = 256 * 1024
         private const val MAX_NAME_LENGTH = 120
-
-        private const val TERMUX_PACKAGE = "com.termux"
-        private const val TERMUX_RUN_SERVICE = "com.termux.app.RunCommandService"
-        private const val TERMUX_RUN_ACTION = "com.termux.RUN_COMMAND"
-        private const val TERMUX_RUN_PERMISSION = "com.termux.permission.RUN_COMMAND"
-        private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
-        private const val TERMUX_HOME = "/data/data/com.termux/files/home"
-        private const val TERMUX_PERMISSION_REQUEST = 0x7E4D
 
         const val ACTION_NOTIFICATION = "com.glossarion.flet_glossarion_native.action.NOTIFICATION"
         const val EXTRA_NOTIFICATION_ID = "com.glossarion.flet_glossarion_native.extra.NOTIFICATION_ID"

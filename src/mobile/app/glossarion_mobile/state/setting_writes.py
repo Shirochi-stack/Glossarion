@@ -271,6 +271,10 @@ def default_batch_size(model: Any) -> int:
     return 1 if str(model or "").strip().lower().startswith(_SERIAL_BATCH_ROUTES) else _BATCH_SIZE
 
 
+#: Job config of a ``local/`` (on-device) model, whatever the saved settings say.
+LOCAL_ENGINE_JOB_CONFIG = {"batch_translation": False, "enable_parallel_extraction": False, "extraction_workers": 1}
+
+
 def with_mobile_streaming_defaults(config: Any) -> Any:
     """A job's config snapshot (changed in place and returned) with the mobile defaults for absent keys:
     Streaming on, the 16,384-token budget, the model (``MOBILE_DEFAULT_MODEL``) and the model's batch
@@ -286,6 +290,10 @@ def with_mobile_streaming_defaults(config: Any) -> Any:
         config["model"] = MOBILE_DEFAULT_MODEL
     if config.get("batch_size") in (None, ""):
         config["batch_size"] = default_batch_size(config.get("model"))
+    if str(config.get("model") or "").strip().lower().startswith("local/"):
+        # the on-device engine (services.local_llm) answers one request at a time: parallel requests would
+        # only queue at its endpoint and spend the client's timeout waiting
+        config.update(LOCAL_ENGINE_JOB_CONFIG)
     if bool(config.get("stream_thinking_logs")) and not bool(config.get("enable_thoughts", THOUGHTS_DEFAULT)):
         rules = _rules()
         try:

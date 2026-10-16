@@ -153,8 +153,26 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
     case "save_to_downloads":
       // Android only: iOS exports go through Share / the Files app.
       result(nil)
+    case "exclude_from_backup":
+      // On-device models (GLOSSARION_MODELS_DIR): gigabytes of GGUF files stay out of iCloud backups.
+      result(GlossarionNativePlugin.excludeFromBackup(args["path"] as? String))
     default:
       result(FlutterMethodNotImplemented)
+    }
+  }
+
+  /// Sets NSURLIsExcludedFromBackupKey on `path` (a file or folder; its contents follow).
+  static func excludeFromBackup(_ path: String?) -> Bool {
+    guard let path = path, !path.isEmpty else { return false }
+    var url = URL(fileURLWithPath: path)
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    do {
+      try url.setResourceValues(values)
+      return true
+    } catch {
+      NSLog("GlossarionNative: exclude_from_backup failed: \(error)")
+      return false
     }
   }
 

@@ -537,36 +537,15 @@ class GlossarionNative(ft.Service):
             return {"uri": str(uri), "name": str(name) if name else None}
         return {"uri": str(result), "name": None} if result else None
 
-    # ------------------------------------------------------------------ Termux
+    # ------------------------------------------------------------ backups
     #
-    # Android only: Termux (com.termux) runs a command for Glossarion through
-    # its RUN_COMMAND service. Termux must allow it (allow-external-apps=true in
-    # ~/.termux/termux.properties) and the user must grant Glossarion the
-    # com.termux.permission.RUN_COMMAND permission (requested on first use).
+    # iOS only: on-device models (gigabytes of GGUF files under the app's data
+    # folder) are kept out of iCloud / device backups. Android keeps them in
+    # app-internal storage, where Auto Backup's 25 MB quota simply stops.
 
-    async def termux_status(self) -> dict[str, Any]:
-        """``{"installed": bool, "permission": bool}``; both False off Android."""
-        out: dict[str, Any] = {"installed": False, "permission": False}
-        result = await self._call("termux_status", default=None)
-        if isinstance(result, dict):
-            out.update(result)
-        return out
-
-    async def termux_run(self, command: str, *, label: str = "", background: bool = False) -> dict[str, Any]:
-        """Run ``command`` with Termux's ``bash -lc`` in a new session (``background``: no session window).
-
-        ``{"ok": True}`` once Termux accepted it, else ``{"ok": False, "error": ...}`` with
-        ``unavailable`` (not Android), ``not_installed``, ``permission`` (the permission was just
-        requested: ask again after the user allowed it) or ``failed`` (``message`` says why)."""
-        args = {"command": str(command or ""), "label": str(label or ""), "background": bool(background)}
-        result = await self._call("termux_run", args, default=None)
-        if isinstance(result, dict):
-            return dict(result)
-        return {"ok": False, "error": "unavailable"}
-
-    async def open_termux(self) -> bool:
-        """Bring Termux to the front; False when it is not installed (or off Android)."""
-        return (await self._call("open_termux", default=False)) is True
+    async def exclude_from_backup(self, path: str) -> bool:
+        """Mark ``path`` (a file or folder) as excluded from backups; False off iOS or on failure."""
+        return (await self._call("exclude_from_backup", {"path": str(path or "")}, default=False)) is True
 
     # ---------------------------------------------------- document destinations
     #

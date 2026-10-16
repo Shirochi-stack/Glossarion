@@ -870,6 +870,12 @@ class GlossarionApp:
                 cloud.on_lifecycle(name)  # hidden: Android drains only under a foreground service; resume: drain
             except Exception:
                 log.exception("cloud sync lifecycle failed")
+        local_engine = getattr(getattr(self, "models_keys", None), "local_engine", None)
+        if local_engine is not None:
+            try:
+                local_engine.on_lifecycle(name)  # iOS hide: unload; Android: unload after 60 s; detach: stop
+            except Exception:
+                log.exception("on-device engine lifecycle failed")
         if self.spike is not None:
             await self.spike.on_lifecycle(e)
 

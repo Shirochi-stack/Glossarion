@@ -222,6 +222,8 @@ class SheetEnv:
     # U9: (model) -> an ``accounts.GcpProjectPicker`` for the route row of authgem-vertex/ models (the Accounts
     # project dropdown: billing marks, desktop selection rule, authgem_auth project cache)
     gcp_project_picker: Optional[Callable[[str], Any]] = None
+    # Model manager › On-device (the Local group's "Get on-device models…" row)
+    open_local_models: Optional[Callable[[], Any]] = None
 
 
 _SHEET_ENV: Optional[SheetEnv] = None
@@ -560,7 +562,7 @@ class ModelSheet:
         if self._keyless:
             return model not in self._keyless
         lowered = str(model or "").lower()
-        return not lowered.startswith(("ollama/", "lmstudio/", "google-translate-free", "search/"))
+        return not lowered.startswith(("ollama/", "lmstudio/", "local/", "google-translate-free", "search/"))
 
     # ---- rows --------------------------------------------------------------------------------------
 
@@ -690,6 +692,7 @@ class ModelSheet:
         routes = list(self.snapshot.custom_routes)
         groups = mc.group_models(models, routes, polled=self.is_polled)
         budget = MAX_ROWS
+        get_local = self.env.open_local_models is not None and self.chip in ("all", "local")
         for group in groups:
             if budget <= 0:
                 break
@@ -697,12 +700,31 @@ class ModelSheet:
             for model in group.models[:budget]:
                 out.append(self._model_row(model))
             budget -= len(group.models)
+            if get_local and group.chip == "local":
+                out.append(self.local_models_row())
+                get_local = False
+        if get_local and self.chip == "local":
+            out.append(self.local_models_row())
         if not models and not out:
             message = "No models match this filter." if (self.chip != "all" or self.snapshot.hide_unpolled) else \
                 "Loading the model list…"
             out.append(ft.Container(content=ft.Text(message, color=ft.Colors.ON_SURFACE_VARIANT),
                                     padding=ft.Padding.all(12), key="models-empty"))
         return out
+
+    def local_models_row(self) -> ft.Control:
+        """The Local group's "Get on-device models…" row: Model manager › On-device."""
+        def open_manager() -> None:
+            self.close()
+            opener = self.env.open_local_models
+            if opener is not None:
+                opener()
+
+        return ft.ListTile(title=ft.Text("Get on-device models…"),
+                           subtitle=ft.Text("Download a model that runs on this device",
+                                            theme_style=ft.TextThemeStyle.BODY_SMALL),
+                           leading=ft.Icon(ft.Icons.DOWNLOAD_FOR_OFFLINE_OUTLINED), dense=True, min_height=48,
+                           on_click=lambda e: open_manager(), key="model-get-local")
 
     def typed_model(self) -> str:
         """The search text as a model id when no listed model is exactly that (the desktop model box is an
