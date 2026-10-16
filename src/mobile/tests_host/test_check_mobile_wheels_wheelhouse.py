@@ -175,6 +175,14 @@ def full_wheelhouse(directory: Path, targets_crypto=None, targets_pillow=None) -
     return directory
 
 
+def _serve_range(blob: bytes, byte_range: str) -> bytes:
+    """The body of a 206 for ``bytes=-N`` / ``bytes=A-B`` / ``bytes=A-``."""
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", byte_range)
+    if m.group(1) == "":
+        return blob[-int(m.group(2)):]
+    return blob[int(m.group(1)):int(m.group(2)) + 1 if m.group(2) else None]
+
+
 class FakeIndex:
     """PyPI simple/JSON + pypi.flet.dev served from memory (stands in for Fetcher._get)."""
 
@@ -182,14 +190,22 @@ class FakeIndex:
         self.pypi: dict[str, list] = {}
         self.flet: dict[str, list] = {}
         self.meta: dict[tuple, list] = {}
+        self.blobs: dict[str, bytes] = {}       # flet file URL -> wheel bytes (served with Range support)
+        self.ranges: list[str] = []
 
     def add(self, source: str, name: str, *filenames: str, requires=None, version=None):
         getattr(self, source).setdefault(name, []).extend(filenames)
         if requires is not None:
             self.meta[(name, version)] = list(requires)
 
-    def get(self, fetcher, url: str, accept=None):
+    def get(self, fetcher, url: str, accept=None, byte_range=None):
         fetcher.requests += 1
+        if byte_range is not None:
+            self.ranges.append(byte_range)
+            blob = self.blobs.get(url)
+            if blob is None:
+                return 404, b""
+            return 206, _serve_range(blob, byte_range)
         if url == f"{cmw.FLET_INDEX}/":
             links = "".join(f'<a href="{cmw.FLET_INDEX}/{n}/">{n}</a>\n' for n in self.flet)
             return 200, f"<html><body>{links}</body></html>".encode()
@@ -243,7 +259,8 @@ def proj(tmp_path, monkeypatch):
     (root / "uv.lock").write_text(UV_LOCK, encoding="utf-8")
     (root / "wheelhouse.toml").write_text(MANIFEST, encoding="utf-8")
     index = default_index()
-    monkeypatch.setattr(cmw.Fetcher, "_get", lambda self, url, accept=None: index.get(self, url, accept))
+    monkeypatch.setattr(cmw.Fetcher, "_get",
+                        lambda self, url, accept=None, byte_range=None: index.get(self, url, accept, byte_range))
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     return {"root": root, "index": index, "tmp": tmp_path}
 
@@ -292,6 +309,112 @@ def test_legacy_ranking_still_prefers_flet_files():
 
     legacy = cmw.Resolver(target, F(), set(), set()).pick("lib")
     assert legacy.file.source == "flet"
+
+
+# --------------------------------------------------------------------------- pypi.flet.dev wheel METADATA
+def _engine_index(proj, tmp_path, *, libcpp=True):
+    """A pin like llama-cpp-python: PyPI's JSON lacks the Android-only flet-libcpp-shared that the
+    flet wheels' METADATA declares."""
+    index = proj["index"]
+    pypi_reqs = ["typing-extensions>=4.5.0", "jinja2>=2.11.3"]
+    index.add("pypi", "engine", "engine-0.3.32.tar.gz", requires=pypi_reqs, version="0.3.32")
+    for t in ANDROID + IOS:
+        reqs = pypi_reqs + (["flet-libcpp-shared>=27.2.12479018"] if t in ANDROID else [])
+        w = make_wheel(tmp_path / "flet", "engine", "0.3.32", f"cp313-cp313-{LABEL[t]}", build="2", requires=reqs)
+        index.add("flet", "engine", w.name)
+        index.blobs[f"{cmw.FLET_INDEX}/files/{w.name}"] = w.read_bytes()
+    index.add("pypi", "typing-extensions", "typing_extensions-4.16.0-py3-none-any.whl", requires=[], version="4.16.0")
+    index.add("pypi", "jinja2", "jinja2-3.1.6-py3-none-any.whl", requires=["MarkupSafe>=2.0"], version="3.1.6")
+    index.add("pypi", "markupsafe", "markupsafe-3.0.3-py3-none-any.whl", requires=[], version="3.0.3")
+    if libcpp:
+        index.add("flet", "flet-libcpp-shared",
+                  *(f"flet_libcpp_shared-27.3.13750724-1-py3-none-{LABEL[t]}.whl" for t in ANDROID))
+        index.meta[("flet-libcpp-shared", "27.3.13750724")] = []
+    root = proj["root"]
+    text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    (root / "pyproject.toml").write_text(text.replace('"app-pure==1.0",', '"app-pure==1.0",\n  "engine==0.3.32",'),
+                                         encoding="utf-8")
+    return index
+
+
+def test_flet_wheel_metadata_adds_dependencies_pypi_json_lacks(proj, tmp_path):
+    _engine_index(proj, tmp_path)
+    rc, data = run_main(proj, "--wheelhouse-plan")
+    assert rc == 0, errors_text(data)
+    for key in ("android-arm64", "android-x86_64"):
+        row = data["targets"][key]
+        assert row["engine"]["source"] == "flet"
+        assert row["flet-libcpp-shared"]["version"] == "27.3.13750724"
+        assert "engine" in row["flet-libcpp-shared"]["parents"]
+        assert row["markupsafe"]["version"] == "3.0.3"
+    for key in ("ios-device", "ios-sim-arm64", "ios-sim-x86_64"):
+        assert "flet-libcpp-shared" not in data["targets"][key] and "jinja2" in data["targets"][key]
+    # one suffix read per wheel: the .dist-info members sit in the last 64 KiB
+    assert proj["index"].ranges and set(proj["index"].ranges) == {"bytes=-65536"}
+
+
+def test_flet_wheel_dependency_without_a_wheel_is_an_error(proj, tmp_path):
+    _engine_index(proj, tmp_path, libcpp=False)
+    rc, data = run_main(proj, "--wheelhouse-plan")
+    assert rc == 1
+    errs = errors_text(data)
+    assert "[android-arm64] flet-libcpp-shared" in errs and "needed by engine" in errs
+    assert "[ios-device] flet-libcpp-shared" not in errs
+
+
+def test_unreadable_flet_wheel_falls_back_to_pypi_json(proj, tmp_path):
+    index = _engine_index(proj, tmp_path, libcpp=False)
+    index.blobs.clear()                       # 404 on every ranged read
+    rc, data = run_main(proj, "--wheelhouse-plan")
+    assert rc == 0, errors_text(data)
+    assert "flet-libcpp-shared" not in data["targets"]["android-arm64"]
+    assert "jinja2" in data["targets"]["android-arm64"]
+
+
+def test_remote_metadata_before_the_tail_and_stored_members(tmp_path):
+    """METADATA written first and a large incompressible member after it: the reader follows the
+    central directory to ranged reads before the 64 KiB tail; stored (method 0) members work too."""
+    path = tmp_path / "big-1.0-1-cp313-cp313-android_24_x86_64.whl"
+    meta = (b"Metadata-Version: 2.1\nName: big\nVersion: 1.0\nRequires-Dist: flet-libcpp-shared>=27\n"
+            b"Requires-Dist: numpy\n\nbody\n")
+    f = cmw.parse_filename(path.name, "big", "flet")
+    f.url = "https://pypi.flet.dev/-/x/" + path.name
+    for method in (zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED):
+        with zipfile.ZipFile(path, "w", method) as zf:
+            zf.writestr("big-1.0.dist-info/METADATA", meta)
+            zf.writestr("big/blob.bin", os.urandom(300_000))
+            zf.writestr("big-1.0.dist-info/WHEEL", b"Wheel-Version: 1.0\n")
+        blob = path.read_bytes()
+        ranges = []
+
+        class F(cmw.Fetcher):
+            def _get(self, url, accept=None, byte_range=None):
+                ranges.append(byte_range)
+                return 206, _serve_range(blob, byte_range)
+
+        assert F().wheel_requires_dist(f) == ["flet-libcpp-shared>=27", "numpy"]
+        assert ranges[0] == "bytes=-65536" and len(ranges) >= 2
+
+    class Junk(cmw.Fetcher):
+        def _get(self, url, accept=None, byte_range=None):
+            return 206, b"not a zip"
+
+    assert Junk().wheel_requires_dist(f) is None   # the caller then falls back to PyPI JSON
+
+
+def test_flet_index_links_keep_their_url():
+    class F(cmw.Fetcher):
+        def _get(self, url, accept=None, byte_range=None):
+            if url == f"{cmw.FLET_INDEX}/":
+                return 200, b'<a href="https://pypi.flet.dev/x/">x</a>'
+            if "pypi.org" in url:
+                return 404, b""
+            return 200, (b'<a rel="internal" href="https://pypi.flet.dev/-/ver_1/x-1.0-2-cp313-cp313-android_24_x86_64.whl'
+                         b'#sha256=00" data-requires-python="&gt;=3.8">x-1.0-2-cp313-cp313-android_24_x86_64.whl</a>')
+
+    (df,) = F().files("x")
+    assert df.url == "https://pypi.flet.dev/-/ver_1/x-1.0-2-cp313-cp313-android_24_x86_64.whl"
+    assert df.requires_python == ">=3.8" and df.build == (2, "")
 
 
 # --------------------------------------------------------------------------- pip ranking
@@ -1585,6 +1708,171 @@ def test_workflow_and_action_wiring():
     assert "persist-credentials: false" in text
     act = action.read_text(encoding="utf-8")
     assert "PIP_FIND_LINKS=$RUNNER_TEMP/wheelhouse" in act and "--wheelhouse \"$RUNNER_TEMP/wheelhouse\"" in act
+
+
+# --------------------------------------------------------------------------- wheels.py verify-site-packages
+LLAMA_LIBS = ("libggml-base", "libggml-cpu", "libggml", "libllama")
+LLAMA_NEEDED = {"libggml-base": (), "libggml-cpu": ("libggml-base.so",),
+                "libggml": ("libggml-cpu.so", "libggml-base.so"),
+                "libllama": ("libggml.so", "libggml-cpu.so", "libggml-base.so")}
+
+
+def _llama_dist_info(arch_dir: Path, build="2", version="0.3.32", tag="cp313-cp313-x"):
+    di = arch_dir / f"llama_cpp_python-{version}.dist-info"
+    di.mkdir(parents=True)
+    (di / "WHEEL").write_text(f"Wheel-Version: 1.0\nBuild: {build}\nTag: {tag}\n", encoding="utf-8")
+    (di / "METADATA").write_text(f"Name: llama_cpp_python\nVersion: {version}\n", encoding="utf-8")
+
+
+def make_llama_android(sp: Path, target="x86_64", build="2", align=0x4000, extra_needed=(), unresolved=(),
+                       libs=LLAMA_LIBS, cxx_copies=1) -> Path:
+    """build/site-packages/<target> with llama-cpp-python's four ELF libraries + flet-libcpp-shared."""
+    arch = sp / target
+    _llama_dist_info(arch, build)
+    lib = arch / "llama_cpp" / "lib"
+    lib.mkdir(parents=True)
+    machine = wh.ELF_MACHINE[target]
+    for stem in libs:
+        needed = LLAMA_NEEDED.get(stem, ()) + ("libc++_shared.so", "libm.so", "libdl.so", "libc.so") + tuple(extra_needed)
+        imports = [("malloc", GLOBAL, UND), ("_ZNSt6__ndk14cout", GLOBAL, UND), ("getauxval", WEAK, UND)]
+        imports += [(f"{dep[3:-3]}_api", GLOBAL, UND) for dep in LLAMA_NEEDED.get(stem, ())]
+        imports += [(n, GLOBAL, UND) for n in unresolved if stem == "libllama"]
+        (lib / f"{stem}.so").write_bytes(make_elf(machine=machine, align=align, needed=needed,
+                                                  symbols=imports + [(f"{stem[3:]}_api", GLOBAL, DEF)]))
+    (lib / "cmake").mkdir()
+    for i in range(cxx_copies):
+        d = arch / ("opt/lib" if i == 0 else f"other{i}")
+        d.mkdir(parents=True)
+        (d / "libc++_shared.so").write_bytes(make_elf(machine=machine, needed=("libc.so",),
+                                                       symbols=[("_ZNSt6__ndk14cout", GLOBAL, DEF)]))
+    return arch
+
+
+LLAMA_NDK_EXPORTS = {"libc.so": ["malloc"], "libm.so": ["sqrtf"], "libdl.so": ["dlopen"]}
+
+
+def _verify_llama(sp, platform, ndk=None, **kw):
+    stubs = wh.NdkStubs(ndk) if platform == "android" else None
+    return wh.verify_site_packages(sp, platform, "llama-cpp-python", "0.3.32", stubs, (13, 0), **kw)
+
+
+def test_verify_site_packages_android_accepts_the_index_build(tmp_path):
+    sp = tmp_path / "site-packages"
+    make_llama_android(sp, "x86_64")
+    make_llama_android(sp, "arm64-v8a")
+    errors, notes = _verify_llama(sp, "android", make_ndk(tmp_path / "ndk", LLAMA_NDK_EXPORTS))
+    assert errors == []
+    assert any("x86_64: llama-cpp-python 0.3.32 build 2" in n for n in notes)
+    assert any("arm64-v8a: lib/libllama.so NEEDED" in n for n in notes)
+
+
+@pytest.mark.parametrize("change, message", [
+    ({"build": "1"}, "has WHEEL Build 1; need build >= 2"),
+    ({"align": 0x1000}, "LOAD alignment ['0x1000']"),
+    ({"extra_needed": ("libvulkan.so",)}, "NEEDED ['libvulkan.so'] beyond"),
+    ({"unresolved": ("ggml_backend_metal_init",)}, "1 undefined symbols ['ggml_backend_metal_init']"),
+    ({"libs": LLAMA_LIBS[:3]}, "holds ['libggml', 'libggml-base', 'libggml-cpu'], expected exactly"),
+    ({"cxx_copies": 2}, "2 copies of libc++_shared.so"),
+    ({"cxx_copies": 0}, "0 copies of libc++_shared.so"),
+])
+def test_verify_site_packages_android_rejects(tmp_path, change, message):
+    sp = tmp_path / "site-packages"
+    make_llama_android(sp, "x86_64", **change)
+    errors, _ = _verify_llama(sp, "android", make_ndk(tmp_path / "ndk", LLAMA_NDK_EXPORTS))
+    assert any(message in e for e in errors), errors
+
+
+def test_verify_site_packages_android_wrong_machine_version_and_no_ndk(tmp_path):
+    sp = tmp_path / "site-packages"
+    arch = make_llama_android(sp, "x86_64")
+    (arch / "llama_cpp" / "lib" / "libggml.so").write_bytes(make_elf(machine=183, needed=("libc.so",)))
+    (arch / "llama_cpp_python-0.3.32.dist-info").rename(arch / "llama_cpp_python-0.3.31.dist-info")
+    errors, _ = _verify_llama(sp, "android", None)
+    text = "\n".join(errors)
+    assert "ELF machine 183 is not x86_64" in text
+    assert "llama-cpp-python 0.3.31 is installed, pyproject pins 0.3.32" in text
+    assert "cannot resolve the imports against the NDK API 24 stubs" in text and "no NDK" in text
+
+
+def test_verify_site_packages_needs_an_arch_directory_and_the_package(tmp_path):
+    errors, _ = _verify_llama(tmp_path, "ios")
+    assert errors == [f"{tmp_path}: no arch directory of the ios targets"]
+    (tmp_path / "iphoneos.arm64").mkdir()
+    errors, _ = _verify_llama(tmp_path, "ios")
+    assert errors == ["iphoneos.arm64: 0 llama-cpp-python dist-info directories in "
+                      f"{tmp_path / 'iphoneos.arm64'} (expected one)"]
+    # targets the project does not build are not looked at
+    errors, notes = _verify_llama(tmp_path, "ios", targets=["iphonesimulator.arm64"])
+    assert errors == [f"{tmp_path}: no arch directory of the ios targets"] and len(notes) == 1
+
+
+IOS_SLICES = {"iphoneos.arm64": (ARM64, 2, (13, 0, 0)), "iphonesimulator.arm64": (ARM64, 7, (14, 0, 0)),
+              "iphonesimulator.x86_64": (X86_64, 7, (13, 0, 0))}
+
+
+def make_llama_ios(sp: Path, target: str, minos=None, extra_dylib=None, lookup=False) -> Path:
+    arch = sp / target
+    _llama_dist_info(arch)
+    lib = arch / "llama_cpp" / "lib"
+    lib.mkdir(parents=True)
+    cpu, platform, default_minos = IOS_SLICES[target]
+    for stem in LLAMA_LIBS:
+        dylibs = [f"@rpath/{d[:-3]}.dylib" for d in LLAMA_NEEDED[stem]] + ["/usr/lib/libc++.1.dylib",
+                                                                          "/usr/lib/libSystem.B.dylib"]
+        if extra_dylib and stem == "libllama":
+            dylibs.append(extra_dylib)
+        imports = [("_malloc", len(dylibs)), ("__ZNSt3__14cout", len(dylibs) - 1)]
+        if lookup and stem == "libllama":
+            imports.append(("_ggml_backend_metal_init", 0xFE))
+        (lib / f"{stem}.dylib").write_bytes(make_macho(cputype=cpu, platform=platform, minos=minos or default_minos,
+                                                       dylibs=tuple(dylibs), imports=imports))
+    return arch
+
+
+def test_verify_site_packages_ios_accepts_the_index_build(tmp_path):
+    for target in IOS_SLICES:
+        make_llama_ios(tmp_path, target)
+    errors, notes = _verify_llama(tmp_path, "ios")
+    assert errors == []
+    assert any("iphonesimulator.arm64: lib/libllama.dylib IOSSIMULATOR 14.0.0" in n for n in notes)
+
+
+@pytest.mark.parametrize("change, message", [
+    ({"minos": (14, 0, 0)}, "minos 14.0.0 (LC_BUILD_VERSION) is above 13.0"),
+    ({"extra_dylib": "@rpath/libvulkan.dylib"}, "links ['@rpath/libvulkan.dylib'] (only its siblings and /usr/lib)"),
+    ({"lookup": True}, "_ggml_backend_metal_init (DYNAMIC_LOOKUP_ORDINAL)"),
+])
+def test_verify_site_packages_ios_rejects(tmp_path, change, message):
+    make_llama_ios(tmp_path, "iphoneos.arm64", **change)
+    errors, _ = _verify_llama(tmp_path, "ios")
+    assert any(message in e for e in errors), errors
+
+
+def test_verify_site_packages_ios_slice_mixup(tmp_path):
+    arch = make_llama_ios(tmp_path, "iphonesimulator.x86_64")
+    (arch / "llama_cpp" / "lib" / "libggml.dylib").write_bytes(make_macho(cputype=ARM64, platform=2))
+    errors, _ = _verify_llama(tmp_path, "ios")
+    text = "\n".join(errors)
+    assert "cputype 0x100000c is not iphonesimulator.x86_64" in text and "platform IOS (LC_BUILD_VERSION)" in text
+
+
+def test_verify_site_packages_command_reads_the_pin(proj, tmp_path, capsys):
+    root = proj["root"]
+    text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    (root / "pyproject.toml").write_text(text.replace('"app-pure==1.0",', '"app-pure==1.0",\n  "llama-cpp-python==0.3.32",'),
+                                         encoding="utf-8")
+    sp = tmp_path / "site-packages"
+    make_llama_android(sp, "x86_64")
+    make_llama_android(sp, "arm64-v8a")
+    ndk = make_ndk(tmp_path / "ndk", LLAMA_NDK_EXPORTS)
+    argv = ["--manifest", str(root / "wheelhouse.toml"), "--pyproject", str(root / "pyproject.toml"),
+            "verify-site-packages", "--platform", "android", "--package", "llama-cpp-python", "--ndk", str(ndk), str(sp)]
+    assert wh.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "verify-site-packages (android, llama-cpp-python 0.3.32): 0 errors" in out
+    (root / "pyproject.toml").write_text(text, encoding="utf-8")
+    assert wh.main(argv) == 1   # no pin
+    assert "no == pin of llama-cpp-python" in capsys.readouterr().err
 
 
 def test_build_tag_parsing_is_pip_compatible():

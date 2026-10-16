@@ -22,6 +22,10 @@ Used by ``build_wheels.sh`` and ``.github/workflows/mobile-wheels.yml``:
     verify-native    static checks of every native binary in the wheelhouse (ELF / Mach-O),
                      including its undefined symbols: what the device's dynamic linker must
                      resolve (Android: against the NDK's API-level stub libraries)
+    verify-site-packages
+                     after `flet build`: an index-installed native package (llama-cpp-python, the
+                     built-in engine) in build/site-packages/<arch> is the pinned build with the
+                     expected libraries, alignment, NEEDED / dylibs and resolvable imports
     assert-selftest  check the device self-test for the shipped versions: a report (selftest-*.json)
                      or a device log with the smoke suite's GLOSSARION_WHEELS line (logcat)
 
@@ -1108,6 +1112,214 @@ def cmd_verify_native(ctx: Ctx, args) -> int:
     return 1 if errors else 0
 
 
+# ============================================================================ installed index packages
+# Native packages `flet build` installs from pypi.flet.dev (not from our wheelhouse) whose libraries we
+# check after every build: what pip put into build/site-packages/<arch> is what the app loads.
+SITE_PROFILES = {
+    # The built-in llama.cpp engine: pure ctypes over four shared libraries (flet-dev/mobile-forge
+    # recipes/llama-cpp-python; build 2 has the Flet 0.86 loader fixes). Android also needs
+    # libc++_shared.so, which flet-libcpp-shared installs (one copy only: Gradle merges jniLibs).
+    "llama-cpp-python": {
+        "lib_dir": "llama_cpp/lib",
+        "libs": ("libggml-base", "libggml-cpu", "libggml", "libllama"),
+        "min_build": 2,
+        "android_system": ("libc.so", "libm.so", "libdl.so", "liblog.so"),
+        "android_cxx": "libc++_shared.so",
+    },
+}
+
+
+def _any_ndk(ctx: Ctx) -> Path | None:
+    """default_ndk, else the newest NDK under $ANDROID_HOME/ndk (the API-24 stubs barely change)."""
+    found = default_ndk(ctx)
+    if found is not None:
+        return found
+    for var in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        root = os.environ.get(var)
+        if root and (Path(root) / "ndk").is_dir():
+            ndks = sorted((p for p in (Path(root) / "ndk").iterdir() if p.is_dir()),
+                          key=lambda p: [int(x) if x.isdigit() else 0 for x in p.name.split(".")])
+            if ndks:
+                return ndks[-1]
+    return None
+
+
+def _shared_libs(lib_dir: Path, platform: str) -> dict:
+    """{stem: path} of the shared libraries directly in ``lib_dir`` (libfoo.so / libfoo.dylib)."""
+    suffix = ".so" if platform == "android" else ".dylib"
+    return {p.name[:-len(suffix)]: p for p in sorted(lib_dir.iterdir()) if p.is_file() and p.name.endswith(suffix)}
+
+
+def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: dict, stubs) -> tuple:
+    errors, notes = [], []
+    siblings = {f"{stem}.so" for stem in libs}
+    cxx_name = profile["android_cxx"]
+    allowed = siblings | {cxx_name} | set(profile["android_system"])
+    cxx = sorted(arch_dir.rglob(cxx_name))
+    exports, system_needed = set(), set()
+    if len(cxx) != 1:
+        errors.append(f"{target}: {len(cxx)} copies of {cxx_name} in {arch_dir} "
+                      f"{[str(p.relative_to(arch_dir)) for p in cxx]} (expected exactly one, from flet-libcpp-shared)")
+    else:
+        try:
+            exports |= {n for n, bind, defined in elf_dynsym(cxx[0].read_bytes())
+                        if defined and bind in (STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE)}
+        except (ValueError, struct.error) as e:
+            errors.append(f"{target}: {cxx[0].relative_to(arch_dir)}: cannot read the dynamic symbols ({e})")
+    imports = {}
+    for stem, path in libs.items():
+        name = f"{path.parent.name}/{path.name}"
+        data = path.read_bytes()
+        try:
+            elf, symbols = parse_elf(data), elf_dynsym(data)
+        except (ValueError, struct.error) as e:
+            errors.append(f"{target}: {name}: {e}")
+            continue
+        if elf["machine"] != ELF_MACHINE[target]:
+            errors.append(f"{target}: {name}: ELF machine {elf['machine']} is not {target} ({ELF_MACHINE[target]})")
+        if not elf["load_aligns"] or any(a < ANDROID_PAGE for a in elf["load_aligns"]):
+            errors.append(f"{target}: {name}: LOAD alignment {[hex(a) for a in elf['load_aligns']]} "
+                          f"(need >= {ANDROID_PAGE:#x} for 16 KB page devices)")
+        extra = sorted(set(elf["needed"]) - allowed)
+        if extra:
+            errors.append(f"{target}: {name}: NEEDED {extra} beyond {sorted(allowed)}")
+        system_needed |= set(elf["needed"]) & set(profile["android_system"])
+        exports |= {n for n, bind, defined in symbols if defined and bind in (STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE)}
+        imports[name] = [n for n, bind, defined in symbols if not defined and bind != STB_WEAK]
+        notes.append(f"{target}: {name} NEEDED {elf['needed']}; {len(imports[name])} strong imports")
+    api = cmw.TARGETS[target].max_version[0]
+    system, problem = stubs.exports(target, sorted(system_needed)) if stubs is not None else (None, "no NDK given")
+    if system is None:
+        errors.append(f"{target}: cannot resolve the imports against the NDK API {api} stubs of "
+                      f"{sorted(system_needed)}: {problem}")
+    else:
+        for name, wanted in imports.items():
+            missing = [n for n in wanted if n not in exports and n not in system]
+            if missing:
+                errors.append(f"{target}: {name}: {len(missing)} undefined symbols {_brief(missing)} are exported by "
+                              f"none of its siblings, {cxx_name} or {sorted(system_needed)} at API {api}: "
+                              f"dlopen fails on them")
+    return errors, notes
+
+
+def _check_ios_site_libs(target: str, libs: dict, minos: tuple) -> tuple:
+    errors, notes = [], []
+    allowed = re.compile(r"^(@rpath/(" + "|".join(re.escape(s) for s in libs) + r")\.dylib|/usr/lib/.+)$")
+    cputype, platform = MACHO_EXPECT[target]
+    limit = ios_minos_limit(target, minos)
+    for stem, path in libs.items():
+        name = f"{path.parent.name}/{path.name}"
+        try:
+            macho = parse_macho(path.read_bytes())
+        except (ValueError, struct.error) as e:
+            errors.append(f"{target}: {name}: {e}")
+            continue
+        if macho["cputype"] != cputype:
+            errors.append(f"{target}: {name}: cputype {macho['cputype']:#x} is not {target}")
+        plats = macho_platforms(macho)
+        if len(plats) != 1:
+            errors.append(f"{target}: {name}: {len(plats)} platform load commands (expected one)")
+        for plat, version, cmd in plats:
+            if plat != platform:
+                errors.append(f"{target}: {name}: platform {MACHO_PLATFORMS.get(plat, plat)} ({cmd}) is not "
+                              f"{MACHO_PLATFORMS[platform]}")
+            if version[:2] > limit:
+                errors.append(f"{target}: {name}: minos {'.'.join(map(str, version))} ({cmd}) is above "
+                              f"{'.'.join(map(str, limit))}")
+        bad = [d for d in macho["dylibs"] if not allowed.match(d)]
+        if bad:
+            errors.append(f"{target}: {name}: links {bad} (only its siblings and /usr/lib)")
+        if not macho["flags"] & MH_TWOLEVEL:
+            errors.append(f"{target}: {name}: flat namespace (MH_TWOLEVEL not set)")
+        if macho["undefined"] is None:
+            errors.append(f"{target}: {name}: no LC_SYMTAB, so its imports cannot be checked")
+        unbound = [f"{s} ({MACHO_SPECIAL_ORDINALS.get(o, f'ordinal {o}')})" for s, o in macho["undefined"] or []
+                   if not 1 <= o <= len(macho["dylibs"])]
+        if unbound:
+            errors.append(f"{target}: {name}: {len(unbound)} undefined symbols bound to none of its dylibs "
+                          f"{_brief(unbound)} (DYNAMIC_LOOKUP: dyld fails on them at run time)")
+        notes.append(f"{target}: {name} {describe_macho(macho)}")
+    return errors, notes
+
+
+def verify_site_packages(site_packages, platform: str, package: str, version: str, stubs=None,
+                         minos: tuple = (13, 0), targets=None) -> tuple:
+    """(errors, notes): the index-installed native ``package`` in each arch directory of a flet build's
+    site-packages (build/site-packages/<target>) is the pinned build with the expected libraries."""
+    name = cmw.canonical(package)
+    profile = SITE_PROFILES.get(name)
+    if profile is None:
+        raise WheelsError(f"verify-site-packages knows no profile for {package} (known: {', '.join(SITE_PROFILES)})")
+    site_packages = Path(site_packages)
+    errors, notes, seen = [], [], False
+    for target in cmw.TARGETS:
+        if not cmw.on_platform(target, platform) or (targets is not None and target not in targets):
+            continue
+        arch_dir = site_packages / target
+        if not arch_dir.is_dir():
+            notes.append(f"{target}: no {arch_dir} (not built for this arch)")
+            continue
+        seen = True
+        found = cmw._installed_dist_info(arch_dir, name)
+        if len(found) != 1:
+            errors.append(f"{target}: {len(found)} {name} dist-info directories in {arch_dir} (expected one)")
+            continue
+        dist_info, installed = found[0]
+        if cmw.parse_version(installed) != cmw.parse_version(version):
+            errors.append(f"{target}: {name} {installed} is installed, pyproject pins {version}")
+        try:
+            wheel = cmw.HeaderParser().parsestr((dist_info / "WHEEL").read_text(encoding="utf-8"))
+        except OSError as e:
+            errors.append(f"{target}: cannot read {dist_info.name}/WHEEL ({e})")
+            continue
+        build = (wheel.get("Build") or "").strip()
+        tags = sorted(t.strip() for t in wheel.get_all("Tag") or [])
+        parsed = cmw.parse_build_tag(build)
+        if not parsed or parsed[0] < profile["min_build"]:
+            errors.append(f"{target}: {name} {installed} has WHEEL Build {build or '(none)'}; need build "
+                          f">= {profile['min_build']} (the mobile loader fixes)")
+        lib_dir = arch_dir / profile["lib_dir"]
+        if not lib_dir.is_dir():
+            errors.append(f"{target}: no {profile['lib_dir']}/ in {arch_dir}")
+            continue
+        libs = _shared_libs(lib_dir, platform)
+        if sorted(libs) != sorted(profile["libs"]):
+            others = sorted(p.name for p in lib_dir.iterdir())
+            errors.append(f"{target}: {profile['lib_dir']} holds {sorted(libs)}, expected exactly "
+                          f"{sorted(profile['libs'])} (directory: {others})")
+            libs = {k: v for k, v in libs.items() if k in profile["libs"]}
+        notes.append(f"{target}: {name} {installed} build {build} {', '.join(tags)}")
+        if platform == "android":
+            errs, ns = _check_android_site_libs(target, arch_dir, libs, profile, stubs)
+        else:
+            errs, ns = _check_ios_site_libs(target, libs, minos)
+        errors += errs
+        notes += ns
+    if not seen:
+        errors.append(f"{site_packages}: no arch directory of the {platform} targets")
+    return errors, notes
+
+
+def cmd_verify_site_packages(ctx: Ctx, args) -> int:
+    version = pinned_version(ctx.pyproject, args.package)
+    if version is None:
+        raise WheelsError(f"{ctx.pyproject}: no == pin of {args.package}")
+    stubs = None
+    if ctx.platform == "android":
+        ndk = Path(args.ndk) if args.ndk else _any_ndk(ctx)
+        stubs = NdkStubs(ndk)
+        print(f"NDK for the import checks: {ndk or 'none (pass --ndk, or set NDK_HOME or ANDROID_HOME)'}")
+    project = cmw.load_project(ctx.pyproject)
+    errors, notes = verify_site_packages(args.site_packages, ctx.platform, args.package, version, stubs,
+                                         ctx.ios_deployment_target, project.android_archs + project.ios_archs)
+    for n in notes:
+        print(f"ok      {n}")
+    for e in errors:
+        print(f"ERROR   {e}")
+    print(f"verify-site-packages ({ctx.platform}, {cmw.canonical(args.package)} {version}): {len(errors)} errors")
+    return 1 if errors else 0
+
+
 # ============================================================================ device self-test report
 def check_selftest_report(report: dict, platform: str, crypto_version: str, openssl: str,
                           pillow_version: str) -> list:
@@ -1324,6 +1536,11 @@ def main(argv=None) -> int:
     p.add_argument("--ndk", help="Android NDK whose API-level stub libraries resolve the imports "
                                  "(default: $NDK_HOME, else $ANDROID_HOME/ndk/<toolchain.android_ndk>)")
     p.add_argument("wheelhouse")
+    p = add("verify-site-packages", "static checks of an index-installed native package after flet build")
+    p.add_argument("--package", required=True, choices=sorted(SITE_PROFILES))
+    p.add_argument("--ndk", help="Android NDK for the import checks (default: $NDK_HOME, else an NDK under "
+                                 "$ANDROID_HOME/ndk)")
+    p.add_argument("site_packages", help="build/site-packages (holds one directory per target arch)")
     p = add("assert-selftest", "check the device self-test (a report, or a log with the GLOSSARION_WHEELS line)")
     p.add_argument("report", nargs="+",
                    help="selftest-smoke.json or a device log (logcat); the first that yields a report is used")
@@ -1347,6 +1564,8 @@ def main(argv=None) -> int:
             cmd_assemble(ctx, args)
         elif args.cmd == "provenance":
             cmd_provenance(ctx, args)
+        elif args.cmd == "verify-site-packages":
+            return cmd_verify_site_packages(ctx, args)
         elif args.cmd == "verify-native":
             return cmd_verify_native(ctx, args)
         elif args.cmd == "assert-selftest":

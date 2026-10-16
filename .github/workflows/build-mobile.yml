@@ -9,6 +9,7 @@
 # Optional device suites (policy lines in the workflow env below; README "Optional device suites"):
 #   ios-simulator-smoke  IOS_SIMULATOR_SMOKE_POLICY  self-test on an iPhone simulator (required since U9)
 #   android-ui-tests     ANDROID_UI_TESTS_POLICY     `flet test` UI tests (src/mobile/tests) on the emulator
+#   android-smoke/llama  ANDROID_LLAMA_SUITE_POLICY  built-in llama.cpp engine: download a GGUF, load, generate
 # 'optional' = runs only when its dispatch input says 'on', and never fails the run (continue-on-error).
 # 'required' = runs by default ('auto') for its platform and fails the run.
 # Promoting a suite once it has passed in CI is that one line.
@@ -19,6 +20,9 @@
 # build job hands them to flet build through .github/actions/mobile-wheelhouse (strict check +
 # PIP_FIND_LINKS) and checks after every flet build that pip installed them
 # (check_mobile_wheels.py --verify-installed). The smoke jobs assert the versions on the device.
+# The built-in engine's llama-cpp-python comes from pypi.flet.dev; after every flet build
+# `wheels.py verify-site-packages --package llama-cpp-python` checks what pip installed (pinned
+# build, the four libraries, 16 KB alignment, NEEDED / dylibs, resolvable imports, one libc++_shared).
 #
 # Optional secrets:
 #   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS (default "upload"),
@@ -72,6 +76,11 @@ on:
         description: APK size experiment - compressed native libraries (smaller APK, bigger install)
         type: boolean
         default: false
+      llama_suite:
+        description: Built-in llama.cpp engine suite on the emulator (downloads Qwen3.5 0.8B; auto = ANDROID_LLAMA_SUITE_POLICY decides)
+        type: choice
+        options: [auto, 'on', 'off']
+        default: auto
   workflow_call:
     inputs:
       targets:
@@ -138,6 +147,10 @@ env:
   # `flet test android` has passed once in CI.
   IOS_SIMULATOR_SMOKE_POLICY: required
   ANDROID_UI_TESTS_POLICY: optional
+  # The built-in llama.cpp engine suite (android-smoke, suite=llama: downloads the Garbage preset GGUF
+  # from Hugging Face, loads it, generates through the in-app server). Optional until it has passed
+  # once in CI.
+  ANDROID_LLAMA_SUITE_POLICY: optional
 
 jobs:
   # ==========================================================================
@@ -158,6 +171,8 @@ jobs:
       ios_simulator_smoke_blocking: ${{ steps.opts.outputs.ios_simulator_smoke_blocking }}
       ui_tests: ${{ steps.opts.outputs.ui_tests }}
       ui_tests_blocking: ${{ steps.opts.outputs.ui_tests_blocking }}
+      llama_suite: ${{ steps.opts.outputs.llama_suite }}
+      llama_suite_blocking: ${{ steps.opts.outputs.llama_suite_blocking }}
       android_legacy_packaging: ${{ steps.opts.outputs.android_legacy_packaging }}
       has_android_keystore: ${{ steps.probe.outputs.has_android_keystore }}
       has_ios_signing: ${{ steps.probe.outputs.has_ios_signing }}
@@ -174,6 +189,7 @@ jobs:
           IN_IOS_SIMULATOR_SMOKE: ${{ inputs.ios_simulator_smoke }}
           IN_UI_TESTS: ${{ inputs.ui_tests }}
           IN_ANDROID_LEGACY_PACKAGING: ${{ inputs.android_legacy_packaging }}
+          IN_LLAMA_SUITE: ${{ inputs.llama_suite }}
         run: |
           targets="${IN_TARGETS:-all}"
           case "$targets" in
@@ -210,7 +226,10 @@ jobs:
             suite ios_simulator_smoke "$IN_IOS_SIMULATOR_SMOKE" "$IOS_SIMULATOR_SMOKE_POLICY" "$run_ios") || exit 1
           read -r ui_tests ui_tests_blocking < <(
             suite ui_tests "$IN_UI_TESTS" "$ANDROID_UI_TESTS_POLICY" "$run_android") || exit 1
-          if [ -z "$ios_simulator_smoke" ] || [ -z "$ui_tests" ]; then exit 1; fi
+          # The llama suite runs inside the emulator smoke job, so it needs that job.
+          read -r llama_suite llama_suite_blocking < <(
+            suite llama_suite "$IN_LLAMA_SUITE" "$ANDROID_LLAMA_SUITE_POLICY" "$emulator_smoke") || exit 1
+          if [ -z "$ios_simulator_smoke" ] || [ -z "$ui_tests" ] || [ -z "$llama_suite" ]; then exit 1; fi
           android_legacy_packaging=false
           if [ "${IN_ANDROID_LEGACY_PACKAGING:-false}" = true ]; then android_legacy_packaging=true; fi
           {
@@ -222,6 +241,8 @@ jobs:
             echo "ios_simulator_smoke_blocking=$ios_simulator_smoke_blocking"
             echo "ui_tests=$ui_tests"
             echo "ui_tests_blocking=$ui_tests_blocking"
+            echo "llama_suite=$llama_suite"
+            echo "llama_suite_blocking=$llama_suite_blocking"
             echo "android_legacy_packaging=$android_legacy_packaging"
           } | tee -a "$GITHUB_OUTPUT"
 
@@ -531,6 +552,11 @@ jobs:
           uv run --no-project python src/mobile/tools/check_mobile_wheels.py
           --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform android
 
+      - name: Check the APK build's llama.cpp engine libraries
+        run: >-
+          uv run --no-project python src/mobile/ci/wheels/wheels.py verify-site-packages --platform android
+          --package llama-cpp-python src/mobile/build/site-packages
+
       - name: Collect APKs
         env:
           APK_OUT: ${{ steps.apk.outputs.output-path }}
@@ -589,6 +615,12 @@ jobs:
           uv run --no-project python src/mobile/tools/check_mobile_wheels.py
           --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform android
 
+      - name: Check the AAB build's llama.cpp engine libraries
+        if: env.HAS_KEYSTORE == 'true'
+        run: >-
+          uv run --no-project python src/mobile/ci/wheels/wheels.py verify-site-packages --platform android
+          --package llama-cpp-python src/mobile/build/site-packages
+
       - name: Collect AAB
         if: env.HAS_KEYSTORE == 'true'
         env:
@@ -638,7 +670,8 @@ jobs:
     needs: [prepare, android]
     if: needs.prepare.outputs.emulator_smoke == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    # + up to 45 min for the llama suite (GGUF download, load, generation on the emulator's CPU)
+    timeout-minutes: ${{ needs.prepare.outputs.llama_suite == 'true' && 130 || 75 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -713,6 +746,25 @@ jobs:
           # versions come from src/mobile/ci/wheels/wheelhouse.toml and src/mobile/pyproject.toml.
           python3 src/mobile/ci/wheels/wheels.py assert-selftest --platform android \
             mobile-smoke-logs/logcat_flet_python.txt mobile-smoke-logs/logcat_full_stream.txt
+
+      # ANDROID_LLAMA_SUITE_POLICY: optional = only with llama_suite 'on' and never fails the run;
+      # required = by default and blocking. A second emulator run (fresh install, smoke suite, then
+      # suite=llama; RUN_E2E=0), so an optional failure cannot fail the blocking smoke step above.
+      - name: Built-in llama.cpp engine suite (suite=llama, ${{ needs.prepare.outputs.llama_suite_blocking == 'true' && 'required' || 'optional' }})
+        if: needs.prepare.outputs.llama_suite == 'true'
+        continue-on-error: ${{ needs.prepare.outputs.llama_suite_blocking != 'true' }}
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          disk-size: 6144M
+          force-avd-creation: false
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: RUN_E2E=0 RUN_LLAMA=1 LLAMA_TIMEOUT=2400 bash src/mobile/ci/android_smoke.sh "$SMOKE_APK" "$GITHUB_WORKSPACE/mobile-smoke-logs/llama"
 
       - name: Upload smoke logs
         if: always()
@@ -910,6 +962,11 @@ jobs:
           uv run --no-project python src/mobile/tools/check_mobile_wheels.py
           --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform ios
 
+      - name: Check the unsigned iOS build's llama.cpp engine libraries
+        run: >-
+          uv run --no-project python src/mobile/ci/wheels/wheels.py verify-site-packages --platform ios
+          --package llama-cpp-python src/mobile/build/site-packages
+
       - name: Package unsigned IPA
         env:
           IOS_OUT: ${{ steps.build.outputs.output-path }}
@@ -1066,6 +1123,11 @@ jobs:
           uv run --no-project python src/mobile/tools/check_mobile_wheels.py
           --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform ios
 
+      - name: Check the signed iOS build's llama.cpp engine libraries
+        run: >-
+          uv run --no-project python src/mobile/ci/wheels/wheels.py verify-site-packages --platform ios
+          --package llama-cpp-python src/mobile/build/site-packages
+
       - name: Collect signed IPA
         env:
           IOS_OUT: ${{ steps.build.outputs.output-path }}
@@ -1171,6 +1233,11 @@ jobs:
         run: >-
           uv run --no-project python src/mobile/tools/check_mobile_wheels.py
           --verify-installed src/mobile/build/site-packages --wheelhouse "$RUNNER_TEMP/wheelhouse" --platform ios
+
+      - name: Check the simulator build's llama.cpp engine libraries
+        run: >-
+          uv run --no-project python src/mobile/ci/wheels/wheels.py verify-site-packages --platform ios
+          --package llama-cpp-python src/mobile/build/site-packages
 
       - name: Package simulator app
         env:

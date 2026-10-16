@@ -77,11 +77,13 @@ import io
 import json
 import os
 import re
+import struct
 import sys
 import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from email.parser import HeaderParser
@@ -505,6 +507,7 @@ class DistFile:
     build: tuple = ()        # wheel build tag as pip compares it: (number, suffix), () when absent
     requires_dist: list | None = None   # own metadata (wheelhouse / planned); None: ask PyPI JSON
     path: str = ""           # local file (wheelhouse)
+    url: str = ""            # download URL without the #fragment (pypi.flet.dev files)
 
     @property
     def pure(self) -> bool:
@@ -641,8 +644,9 @@ class Fetcher:
         # canonical name -> [DistFile] from --wheelhouse / --wheelhouse-plan, offered next to the index files
         self.extra_files: dict[str, list] = {}
 
-    def _get(self, url: str, accept: str | None = None) -> tuple[int, bytes]:
-        key = hashlib.sha1(f"{url}|{accept}".encode()).hexdigest()
+    def _get(self, url: str, accept: str | None = None, byte_range: str | None = None) -> tuple[int, bytes]:
+        """GET ``url`` (cached); ``byte_range`` is a Range value such as ``bytes=-65536`` (206 expected)."""
+        key = hashlib.sha1(f"{url}|{accept}".encode() + (f"|{byte_range}".encode() if byte_range else b"")).hexdigest()
         if self.cache_dir:
             p = self.cache_dir / key
             if p.exists() and time.time() - p.stat().st_mtime < self.ttl:
@@ -651,6 +655,8 @@ class Fetcher:
         headers = {"User-Agent": USER_AGENT}
         if accept:
             headers["Accept"] = accept
+        if byte_range:
+            headers["Range"] = byte_range   # urllib keeps it across pypi.flet.dev's 302 to the file store
         last = None
         for attempt in range(4):
             try:
@@ -659,8 +665,8 @@ class Fetcher:
                     status, body = r.status, r.read()
                 break
             except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    status, body = 404, b""
+                if e.code in (404, 416):
+                    status, body = e.code, b""
                     break
                 last = e
             except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -710,6 +716,9 @@ class Fetcher:
                     df = parse_filename(text.strip(), project, "flet", html.unescape(rp.group(1)) if rp else "",
                                         "data-yanked" in attrs)
                     if df:
+                        link = re.search(r'href="([^"]+)"', attrs)
+                        if link:
+                            df.url = html.unescape(link.group(1)).split("#", 1)[0]
                         out.append(df)
         self._mem[key] = out
         return out
@@ -725,6 +734,80 @@ class Fetcher:
             result = list(info.get("requires_dist") or [])
         self._mem[key] = result
         return result
+
+    def wheel_requires_dist(self, f: DistFile):
+        """Requires-Dist from a remote wheel's own METADATA, or None when it cannot be read.
+
+        pypi.flet.dev serves no PEP 658 ``.metadata`` files, and its wheels may declare more than the
+        PyPI release (llama-cpp-python's Android builds add flet-libcpp-shared), so the METADATA member
+        is read with HTTP range requests: the last 64 KiB (end of central directory, and usually the
+        .dist-info members, which wheels store last), then the central directory and the member
+        itself when they lie before that tail.
+        """
+        if f.kind != "wheel" or not f.url:
+            return None
+        key = f"wheelmeta:{f.url}"
+        if key in self._mem:
+            return self._mem[key]
+        try:
+            result = self._read_remote_wheel_metadata(f.url)
+        except (RuntimeError, ValueError, zlib.error, struct.error, UnicodeDecodeError):
+            result = None
+        self._mem[key] = result
+        return result
+
+    def _ranged(self, url: str, start: int, length: int) -> bytes:
+        status, body = self._get(url, byte_range=f"bytes={start}-{start + length - 1}")
+        if status == 206:
+            return body
+        if status == 200:   # the server ignored the Range header
+            return body[start:start + length]
+        raise RuntimeError(f"GET {url} (range) returned HTTP {status}")
+
+    def _read_remote_wheel_metadata(self, url: str):
+        tail_size = 65536
+        status, tail = self._get(url, byte_range=f"bytes=-{tail_size}")
+        if status not in (200, 206) or not tail:
+            return None
+        at = tail.rfind(b"PK\x05\x06")
+        if at < 0 or len(tail) - at < 22:
+            return None
+        _sig, _d, _cd, _n1, entries, cd_size, cd_off, _c = struct.unpack("<4s4H2IH", tail[at:at + 22])
+        if cd_off == 0xFFFFFFFF or entries == 0xFFFF:
+            return None   # zip64: not worth supporting here (wheels this size have no METADATA problem)
+        tail_off = cd_off + cd_size - at   # file offset of tail[0] (no data before the archive)
+        if tail_off < 0:
+            return None
+
+        def read(start: int, length: int) -> bytes:
+            if start >= tail_off and start + length <= tail_off + len(tail):
+                return tail[start - tail_off:start - tail_off + length]
+            return self._ranged(url, start, length)
+
+        cd = read(cd_off, cd_size)
+        pos, member = 0, None
+        while pos + 46 <= len(cd) and cd[pos:pos + 4] == b"PK\x01\x02":
+            (_s, _vm, _vn, _fl, method, _t, _dt, _crc, csize, _usize, nlen, xlen, clen, _ds, _ia, _ea,
+             loff) = struct.unpack("<4s6H3I5H2I", cd[pos:pos + 46])
+            name = cd[pos + 46:pos + 46 + nlen].decode("utf-8")
+            if re.fullmatch(r"[^/]+\.dist-info/METADATA", name):
+                member = (method, csize, loff)
+                break
+            pos += 46 + nlen + xlen + clen
+        if member is None:
+            return None
+        method, csize, loff = member
+        head = read(loff, 30)
+        if head[:4] != b"PK\x03\x04":
+            return None
+        nlen, xlen = struct.unpack("<2H", head[26:30])
+        raw = read(loff + 30 + nlen + xlen, csize)
+        if method == 8:
+            raw = zlib.decompressobj(-15).decompress(raw)
+        elif method != 0:
+            return None
+        meta = HeaderParser().parsestr(raw.decode("utf-8"))
+        return [r.strip() for r in meta.get_all("Requires-Dist") or []]
 
     def prefetch(self, fn, items) -> None:
         items = list(items)
@@ -821,9 +904,17 @@ class Resolver:
         return c is not None and c.file is not None and c.file.requires_dist is not None
 
     def _deps(self, name: str, version: Version):
-        """Requires-Dist of the chosen file: its own metadata (wheelhouse / planned) or PyPI JSON."""
+        """Requires-Dist of the chosen file: its own metadata (wheelhouse / planned), the METADATA of a
+        pypi.flet.dev wheel (read remotely; flet's builds may add dependencies such as
+        flet-libcpp-shared), else PyPI JSON."""
         if self._own_metadata(name):
             return list(self.chosen[name].file.requires_dist)
+        c = self.chosen.get(name)
+        reader = getattr(self.f, "wheel_requires_dist", None)   # stand-in fetchers may not have it
+        if reader and c is not None and c.file is not None and c.file.source == "flet" and c.version == version:
+            own = reader(c.file)
+            if own is not None:
+                return own
         return self.f.requires_dist(name, version)
 
     def resolve(self, roots: list) -> None:
@@ -852,8 +943,8 @@ class Resolver:
                     changed.append((n, c.version, extras))
             if not self.transitive:
                 continue
-            self.f.prefetch(self.f.requires_dist, [(n, v) for n, v, _ in changed
-                                                    if v is not None and not self._own_metadata(n)])
+            self.f.prefetch(self._deps, [(n, v) for n, v, _ in changed
+                                         if v is not None and not self._own_metadata(n)])
             for n, v, extras in changed:
                 self.walked[n] = (v, extras)
                 if v is None:
