@@ -81,6 +81,7 @@ def _desktop_release(tag: str = "v9.15.0") -> dict:
 
 @pytest.mark.parametrize("name,kind", [
     (f"{PREFIX}_Android_arm64-v8a.apk", "apk"),
+    (f"X_{PREFIX}_Android_arm64-v8a.apk", "apk"),  # build-mobile.yml names since 2026-10-17
     (f"{PREFIX}_Android_x86_64_debugsigned.apk", "apk"),
     (f"{PREFIX}_Android.aab", "aab"),
     (f"{PREFIX}_iOS_unsigned.ipa", "ipa"),

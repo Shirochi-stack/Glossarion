@@ -49,7 +49,7 @@ if /i "%APK%"=="latest" (
     echo Downloading the APK of Build Mobile run !RUNID! ...
     if exist "%WORK%\apk" rmdir /s /q "%WORK%\apk"
     mkdir "%WORK%\apk"
-    gh run download !RUNID! --repo Shirochi-stack/Glossarion --name Z_Glossarion-Android-APK --dir "%WORK%\apk" || exit /b 1
+    gh run download !RUNID! --repo Shirochi-stack/Glossarion --name X_Glossarion-Android-APK --dir "%WORK%\apk" || exit /b 1
     set "APK="
     for /r "%WORK%\apk" %%F in (*x86_64*.apk) do set "APK=%%F"
     if not defined APK (echo No x86_64 APK in that run. & exit /b 1)

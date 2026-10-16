@@ -39,7 +39,7 @@
 # the AAB stays a run artifact: only the Play Store takes it, phones cannot install it);
 # without one it uploads nothing. Every run also keeps the files as run artifacts for 7 days.
 #
-# Artifacts: Z_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
+# Artifacts: X_Glossarion-Android-APK, Z_Glossarion-Android-AAB, Z_Glossarion-iOS-Unsigned,
 # Z_Glossarion-iOS-Signed, Z_Glossarion-iOS-Simulator; internal: mobile-prepared,
 # mobile-backend-report, mobile-apk-size-report, mobile-smoke-logs-android, mobile-smoke-logs-ios,
 # mobile-ui-test-logs, mobile-wheelhouse-android, mobile-wheelhouse-ios (+ mobile-wheels-logs-* on
@@ -572,7 +572,7 @@ jobs:
               echo "::error title=APK output::Expected exactly one $abi APK in $APK_OUT, found ${#matches[@]}."
               exit 1
             fi
-            cp "${matches[0]}" "dist/${ARTIFACT_PREFIX}_Android_${abi}${suffix}.apk"
+            cp "${matches[0]}" "dist/X_${ARTIFACT_PREFIX}_Android_${abi}${suffix}.apk"
           done
           ls -la dist
 
@@ -645,7 +645,7 @@ jobs:
       - name: Upload APKs
         uses: actions/upload-artifact@v7
         with:
-          name: Z_Glossarion-Android-APK
+          name: X_Glossarion-Android-APK
           path: dist/*.apk
           if-no-files-found: error
           compression-level: 0
@@ -679,7 +679,7 @@ jobs:
       - name: Download APKs
         uses: actions/download-artifact@v8
         with:
-          name: Z_Glossarion-Android-APK
+          name: X_Glossarion-Android-APK
           path: apk
 
       - name: Select the x86_64 APK

@@ -568,7 +568,7 @@ src/config.json is never touched: the driver passes model and settings explicitl
   `ANDROID_LLAMA_SUITE_POLICY: optional`, and `RUN_LLAMA=1` passed to the android-smoke job when
   the suite is on. The emulator already has 4 GB RAM and a 6 GB disk (APK ~0.3 GB + model
   0.53 GB). `test_ci_release.py` pins the input, the policy line and the one-line promotion.
-- **Locally:** `gh run download <run> -n Z_Glossarion-Android-APK` from the branch's Build Mobile
+- **Locally:** `gh run download <run> -n X_Glossarion-Android-APK` from the branch's Build Mobile
   run. Start the AVD (`glossarion`, API 35 x86_64, 2 GB RAM; enough for 0.8B at `n_ctx` 2048), then
   run `RUN_LLAMA=1 PATH="$LOCALAPPDATA/Android/Sdk/platform-tools:$PATH" bash src/mobile/ci/android_smoke.sh <x86_64.apk> <scratch logdir>`.
   Then check by hand with `adb`:

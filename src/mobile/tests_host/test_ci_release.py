@@ -466,9 +466,9 @@ def test_device_artifacts_keep_seven_days(wf):
         for step in job.get("steps", []):
             if str(step.get("uses", "")).startswith("actions/upload-artifact"):
                 name = step["with"]["name"]
-                if str(name).startswith("Z_Glossarion-"):
+                if str(name).startswith(("X_Glossarion-", "Z_Glossarion-")):
                     seen[name] = step["with"].get("retention-days")
-    assert set(seen) == {"Z_Glossarion-Android-APK", "Z_Glossarion-Android-AAB", "Z_Glossarion-iOS-Unsigned",
+    assert set(seen) == {"X_Glossarion-Android-APK", "Z_Glossarion-Android-AAB", "Z_Glossarion-iOS-Unsigned",
                          "Z_Glossarion-iOS-Signed", "Z_Glossarion-iOS-Simulator"}
     assert set(seen.values()) == {7}
 

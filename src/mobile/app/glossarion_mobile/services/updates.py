@@ -12,7 +12,7 @@ What is mobile-only is the asset choice. Mobile builds are never published (owne
 are desktop-only and "no file for this phone" is the ordinary answer, never an error. A release
 asset is offered only when it carries a name the build jobs write:
 
-    <prefix>_Android_<abi>[_debugsigned].apk   Android, one per ABI (arm64-v8a, x86_64)
+    [X_]<prefix>_Android_<abi>[_debugsigned].apk   Android, one per ABI (arm64-v8a, x86_64)
     <prefix>_Android.aab                       Play bundle (never offered in the app)
     <prefix>_iOS_unsigned.ipa                  unsigned IPA (sideloading)
     <prefix>_iOS.ipa                           signed IPA (devices in the provisioning profile)

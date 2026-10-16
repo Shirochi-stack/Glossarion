@@ -177,7 +177,7 @@ self-test deep link, then the offline E2E suite; blocking) → `ios` (unsigned I
 `ios-signed` (only with the Apple secrets) → the optional device suites below. There is no
 release job: the workflow never publishes (see "Releases").
 
-Artifacts: `Z_Glossarion-Android-APK`, `Z_Glossarion-Android-AAB`,
+Artifacts: `X_Glossarion-Android-APK`, `Z_Glossarion-Android-AAB`,
 `Z_Glossarion-iOS-Unsigned` (AltStore/SideStore), `Z_Glossarion-iOS-Signed`,
 `Z_Glossarion-iOS-Simulator` (7 days); internal: `mobile-prepared`, `mobile-backend-report`,
 `mobile-apk-size-report`, `mobile-smoke-logs-*`, `mobile-ui-test-logs`.
@@ -263,7 +263,7 @@ workflow was removed). `build-mobile.yml` has no release job, no publish input a
 `contents: read`, so neither a manual run nor a `workflow_call` can create or change a GitHub
 release, and no other workflow uploads a mobile file. To get a build, download the APK/IPA
 artifact from the Build Mobile run (Actions › Build Mobile › the run › Artifacts:
-`Z_Glossarion-Android-APK`, `Z_Glossarion-iOS-Unsigned`, …); artifacts are kept 7 days.
+`X_Glossarion-Android-APK`, `Z_Glossarion-iOS-Unsigned`, …); artifacts are kept 7 days.
 
 ### In-app updates (About › Updates)
 
