@@ -560,7 +560,8 @@ class TextJobsMixin(JobHooksMixin):
                     from unified_api_client import UnifiedClientError
                     if isinstance(e, UnifiedClientError):
                         is_cancelled = getattr(e, 'error_type', None) == 'cancelled'
-                        is_config_error = getattr(e, 'error_type', None) == 'config_error'
+                        # Setup and plan-quota errors already say what to do.
+                        is_config_error = getattr(e, 'error_type', None) in ('config_error', 'entitlement_error')
                 except Exception:
                     pass
 
