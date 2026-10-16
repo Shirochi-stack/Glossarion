@@ -116,6 +116,20 @@ class BuildBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ci.PrerequisiteError, "Signing prerequisite missing"):
             ci.signing_gate({"CI_COMMIT_REF_PROTECTED": "true", "GLOSSARION_SIGNING_APPROVED": "true"}, ["FIXTURE_KEY_FILE"])
 
+    def test_upload_keystore_signs_apks_like_github_and_falls_back_to_debug(self):
+        import base64
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()), patch.object(ci.shutil, "which", return_value=None):
+            self.assertEqual(ci.upload_keystore({}, directory), {})
+            for env in ({"ANDROID_KEYSTORE_BASE64": "AAAA"}, {"ANDROID_KEYSTORE_PASSWORD": "secret12"},
+                        {"ANDROID_KEYSTORE_BASE64": "not base64!", "ANDROID_KEYSTORE_PASSWORD": "secret12"}):
+                with self.subTest(env=sorted(env)), self.assertRaises(ci.PrerequisiteError):
+                    ci.upload_keystore(env, directory)
+            encoded = base64.b64encode(b"fixture keystore").decode()
+            signing = ci.upload_keystore({"ANDROID_KEYSTORE_BASE64": encoded[:8] + "\n" + encoded[8:],
+                                          "ANDROID_KEYSTORE_PASSWORD": "secret12"}, directory)
+            self.assertEqual(Path(signing["FLET_ANDROID_SIGNING_KEY_STORE"]).read_bytes(), b"fixture keystore")
+            self.assertEqual((signing["FLET_ANDROID_SIGNING_KEY_ALIAS"], signing["FLET_ANDROID_SIGNING_KEY_PASSWORD"]), ("upload", "secret12"))
+
     def test_prepared_bundle_requires_same_commit_pipeline_and_success(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(ci, "ROOT", Path(directory)):
             marker = Path(directory) / "artifacts/mobile-check/prepared.json"

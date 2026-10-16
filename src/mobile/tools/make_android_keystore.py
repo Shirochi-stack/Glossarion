@@ -13,6 +13,11 @@ It writes ``glossarion-upload.jks`` (PKCS12, alias ``upload``, RSA 4096, 30 year
 keystore, and with ``--set-secrets`` runs ``gh secret set`` for ANDROID_KEYSTORE_BASE64 and
 ANDROID_KEYSTORE_PASSWORD (values passed on stdin). Keep the keystore and its password backed up:
 losing them means installed copies cannot be updated again (only uninstall + reinstall).
+
+For GitLab, store the SAME keystore as the project's masked, protected CI/CD variables (the GitLab
+Android build signs with them, see docs/gitlab_ci.md)::
+
+    py -3.12 src/mobile/tools/make_android_keystore.py --existing --gitlab-variables
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import sys
 from pathlib import Path
 
 REPO = "Shirochi-stack/Glossarion"
+GITLAB_REPO = "shirochi-stack/Glossarion"
 ALIAS = "upload"
 
 
@@ -84,14 +90,41 @@ def set_secret(name: str, value: str) -> None:
     subprocess.run(["gh", "secret", "set", name, "--repo", REPO], input=value.encode(), check=True)
 
 
+def set_gitlab_variable(name: str, value: str) -> None:
+    subprocess.run(["glab", "variable", "set", name, "--masked", "--protected", "--raw", "-R", GITLAB_REPO],
+                   input=value.encode(), check=True)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--out", type=Path, default=default_out(), help="where to write the keystore")
     parser.add_argument("--set-secrets", action="store_true", help="store it as the repo's Android signing secrets")
+    parser.add_argument("--existing", action="store_true", help="use the keystore already at --out (never create one)")
+    parser.add_argument("--gitlab-variables", action="store_true", help="store it as the GitLab project's Android signing variables")
     parser.add_argument("--password-env", help=argparse.SUPPRESS)  # tests only: read the password from this env var
     args = parser.parse_args(argv)
 
     out: Path = args.out
+    if args.existing:
+        if not out.is_file():
+            print(f"{out} does not exist; pass --out with the keystore your installs use.")
+            return 1
+        data = out.read_bytes()
+        password = os.environ[args.password_env] if args.password_env else getpass.getpass("Keystore password (hidden): ")
+        try:
+            print(f"Certificate SHA-256: {fingerprint(data, password)}")
+        except ValueError:
+            print("The password does not open this keystore.")
+            return 1
+        if args.set_secrets:
+            set_secret("ANDROID_KEYSTORE_BASE64", base64.b64encode(data).decode())
+            set_secret("ANDROID_KEYSTORE_PASSWORD", password)
+            print(f"Secrets ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD set on {REPO}.")
+        if args.gitlab_variables:
+            set_gitlab_variable("ANDROID_KEYSTORE_BASE64", base64.b64encode(data).decode())
+            set_gitlab_variable("ANDROID_KEYSTORE_PASSWORD", password)
+            print(f"Masked, protected variables ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD set on {GITLAB_REPO}.")
+        return 0
     if out.exists():
         print(f"{out} already exists; not overwriting it (it may be the key your users' installs depend on).")
         return 1
@@ -106,6 +139,10 @@ def main(argv=None) -> int:
         set_secret("ANDROID_KEYSTORE_BASE64", base64.b64encode(data).decode())
         set_secret("ANDROID_KEYSTORE_PASSWORD", password)
         print(f"Secrets ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD set on {REPO}.")
+    if args.gitlab_variables:
+        set_gitlab_variable("ANDROID_KEYSTORE_BASE64", base64.b64encode(data).decode())
+        set_gitlab_variable("ANDROID_KEYSTORE_PASSWORD", password)
+        print(f"Masked, protected variables ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD set on {GITLAB_REPO}.")
     print("Back up the keystore file and its password somewhere safe (not in the repo).")
     return 0
 

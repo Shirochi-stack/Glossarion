@@ -349,6 +349,36 @@ def signing_gate(env, required):
         require(bool(env.get(name)), "Signing prerequisite missing: " + name)
 
 
+def upload_keystore(env, directory):
+    """build-mobile.yml's optional upload-keystore signing: with the owner's masked
+    ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD variables every APK carries the
+    same key, so a new build installs over the previous one. Without them the build
+    stays debug-signed (a throw-away key per runner). Returns the FLET signing env."""
+    data, password = env.get("ANDROID_KEYSTORE_BASE64", ""), env.get("ANDROID_KEYSTORE_PASSWORD", "")
+    if not data and not password:
+        print("Android signing: no ANDROID_KEYSTORE_BASE64 variable; the APKs will be debug-signed.", flush=True)
+        return {}
+    require(data and password, "ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD must both be set.")
+    import base64
+    import binascii
+    try:
+        raw = base64.b64decode("".join(data.split()), validate=True)
+    except (binascii.Error, ValueError):
+        raise PrerequisiteError("ANDROID_KEYSTORE_BASE64 is not valid base64.") from None
+    keystore = Path(directory) / "glossarion-upload.jks"
+    keystore.write_bytes(raw)
+    alias = env.get("ANDROID_KEY_ALIAS") or "upload"
+    if shutil.which("keytool"):
+        check = subprocess.run(["keytool", "-list", "-keystore", str(keystore), "-storepass:env", "ANDROID_KEYSTORE_PASSWORD",
+                                "-alias", alias], env={**os.environ, "ANDROID_KEYSTORE_PASSWORD": password},
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        require(check.returncode == 0, "The keystore does not open with ANDROID_KEYSTORE_PASSWORD or has no alias '" + alias + "'.")
+    print("Android signing: using the upload keystore (alias " + alias + ").", flush=True)
+    return {"FLET_ANDROID_SIGNING_KEY_STORE": str(keystore), "FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD": password,
+            "FLET_ANDROID_SIGNING_KEY_PASSWORD": env.get("ANDROID_KEY_PASSWORD") or password,
+            "FLET_ANDROID_SIGNING_KEY_ALIAS": alias}
+
+
 def native_build_environment(r):
     # Test-only objects must not redirect Git operations in the Flutter SDK or
     # other repositories opened by its packaging tools.
@@ -384,6 +414,7 @@ def native_build_environment(r):
 def mobile_build(r, target, signed=False):
     target_platform = "android" if target in ("apk", "aab") else "ios"
     mobile_prerequisites(r, target_platform)
+    upload_signed = False
     if not r.plan:
         require_tests("src/mobile/tests_host", "src/mobile/extensions/flet_glossarion_native/tests")
         prepare_oracles(r)
@@ -396,6 +427,10 @@ def mobile_build(r, target, signed=False):
         else:
             for name in list(r.env):
                 if name.startswith("FLET_ANDROID_SIGNING_"): r.env.pop(name)
+            if target == "apk":
+                signing = upload_keystore(r.env, tempfile.mkdtemp(prefix="glossarion-signing-"))
+                r.env.update(signing)
+                upload_signed = bool(signing)
         if target == "aab": require(signed, "AAB requires an explicitly requested signed build.")
     wheelhouse = ROOT / "artifacts" / ("wheelhouse-" + target_platform)
     r.env["PIP_FIND_LINKS"] = str(wheelhouse)
@@ -410,7 +445,7 @@ def mobile_build(r, target, signed=False):
     info = r.command([sys.executable, "src/mobile/tools/version_info.py", "--json"], capture=True)
     version = json.loads(info) if not r.plan else {"build_version": "PLAN", "build_number": 1, "artifact_prefix": "PLAN"}
     r.env.update(BUILD_VERSION=str(version["build_version"]), BUILD_NUMBER=str(version["build_number"]),
-                 ARTIFACT_PREFIX=version["artifact_prefix"], APP_PACKAGE="com.glossarion.app", HAS_KEYSTORE="true" if signed else "false")
+                 ARTIFACT_PREFIX=version["artifact_prefix"], APP_PACKAGE="com.glossarion.app", HAS_KEYSTORE="true" if signed or upload_signed else "false")
     command = ["uv", "run", "--locked", "python", "tools/build.py", target, "--skip-prepare"]
     # flet-build-action supplies noninteractive setup and the bundled Python
     # version on GitHub. Pass the same contract through our local build driver.

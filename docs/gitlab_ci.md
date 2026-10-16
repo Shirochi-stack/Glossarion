@@ -156,6 +156,15 @@ fake GitLab signing result: that action requires a GitHub artifact ID and the
 provider's approved provenance integration. A GitLab SignPath integration is
 a separate provider/configuration decision. macOS notarization is not added.
 
+Ordinary APK builds (`android-apk`, release builds) follow `build-mobile.yml`:
+with the masked, protected project variables `ANDROID_KEYSTORE_BASE64` and
+`ANDROID_KEYSTORE_PASSWORD` (optional `ANDROID_KEY_ALIAS`, default `upload`;
+`ANDROID_KEY_PASSWORD`, default the keystore password) every APK is signed with
+the owner's upload keystore, so new builds install over earlier ones. Without
+them the APKs stay `_debugsigned` with a per-runner key, and Android refuses to
+update an installed copy. Set them once with
+`py -3.12 src/mobile/tools/make_android_keystore.py --gitlab-variables --existing`.
+
 For a signed mobile job, use a protected ref, select the signed task, set
 `GLOSSARION_SIGNING_APPROVED=true`, then explicitly start the blocking manual
 job. Use `signing_approved=true`. Provision protected/masked variables through the platform's secure
