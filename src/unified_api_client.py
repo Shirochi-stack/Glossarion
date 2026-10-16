@@ -3026,6 +3026,7 @@ class UnifiedClient:
         'ollamapull/': 'ollamapull',
         'ollama/': 'ollama',
         'lmstudio/': 'lmstudio',
+        'local/': 'local',
         'lr/': 'literouter',
         'lr': 'literouter',
         'ocz/': 'opencode-zen',  # OpenCode Zen free-tier; routed through the OpenCode CLI binary
@@ -3097,7 +3098,7 @@ class UnifiedClient:
     # Models/prefixes that authenticate without a traditional API key
     _NO_API_KEY_PREFIXES = (
         'ollamapull/',
-        'ollama/', 'lmstudio/',
+        'ollama/', 'lmstudio/', 'local/',
         'autharena/', 'autharena',
         'authgpt/', 'authgpt',
         'authnan/',
@@ -3114,17 +3115,34 @@ class UnifiedClient:
 
     # These routes use an already-running local OpenAI-compatible server.
     # Unlike ollamapull/, they do not install software or download models.
+    # local/ is any llama.cpp-style OpenAI-compatible server: a user's own llama-server on the
+    # desktop (default address below), or Glossarion Mobile's built-in on-device engine, which
+    # publishes its loopback address in GLOSSARION_LOCAL_LLM_URL.
     _LOCAL_OPENAI_ROUTES = {
         'ollama/': ('ollama', 'http://localhost:11434/v1'),
         'lmstudio/': ('lmstudio', 'http://localhost:1234/v1'),
+        'local/': ('local', 'http://127.0.0.1:8080/v1'),
     }
+    _LOCAL_OPENAI_PROVIDERS = ('ollama', 'lmstudio', 'local')
+    _LOCAL_LLM_URL_ENV = 'GLOSSARION_LOCAL_LLM_URL'
+
+    @classmethod
+    def _local_openai_base_url(cls, provider: str) -> str:
+        """The base URL of a keyless local route (``local`` honours GLOSSARION_LOCAL_LLM_URL)."""
+        prefix = f'{provider}/'
+        default = cls._LOCAL_OPENAI_ROUTES[prefix][1]
+        if provider == 'local':
+            override = str(os.environ.get(cls._LOCAL_LLM_URL_ENV, '') or '').strip().rstrip('/')
+            if override:
+                return override
+        return default
 
     @classmethod
     def _local_openai_route(cls, model: str) -> Optional[Tuple[str, str, str]]:
         model_lower = str(model or '').strip().lower()
-        for prefix, (provider, base_url) in cls._LOCAL_OPENAI_ROUTES.items():
+        for prefix, (provider, _default_url) in cls._LOCAL_OPENAI_ROUTES.items():
             if model_lower.startswith(prefix):
-                return prefix, provider, base_url
+                return prefix, provider, cls._local_openai_base_url(provider)
         return None
 
     @staticmethod
@@ -19322,6 +19340,7 @@ class UnifiedClient:
             'ollamapull': self._send_ollamapull,
             'ollama': self._send_openai_provider_router,
             'lmstudio': self._send_openai_provider_router,
+            'local': self._send_openai_provider_router,
             'custom_openai': self._send_openai_provider_router,
             'gemini': self._send_gemini,
             'deepseek': self._send_openai_provider_router,  # Consolidated
@@ -23961,11 +23980,11 @@ class UnifiedClient:
             if custom_prefix_route:
                 effective_model = self._strip_custom_route_prefix(effective_model, custom_prefix_route)
                 base_url = custom_prefix_route.get('routing', base_url).rstrip('/')
-        elif provider in ('ollama', 'lmstudio'):
+        elif provider in self._LOCAL_OPENAI_PROVIDERS:
             local_route = self._local_openai_route(effective_model)
             if local_route and local_route[1] == provider:
                 effective_model = effective_model[len(local_route[0]):].strip()
-            base_url = self._LOCAL_OPENAI_ROUTES[f'{provider}/'][1]
+            base_url = self._local_openai_base_url(provider)
             if not effective_model:
                 raise UnifiedClientError(f"Enter a model name after {provider}/", error_type='validation')
         # Provider-specific model normalization (transport-only)
@@ -24030,7 +24049,7 @@ class UnifiedClient:
         # Never override OpenRouter base_url with custom endpoint
         # CRITICAL: Also skip if individual endpoint was already applied
         skip_custom = getattr(self, '_skip_global_custom_endpoint', False)
-        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter", "opencode", "custom_openai", "ollama", "lmstudio") and not skip_custom:
+        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter", "opencode", "custom_openai", *self._LOCAL_OPENAI_PROVIDERS) and not skip_custom:
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             if custom_base_url:
                 if not actual_api_key:
@@ -24206,7 +24225,7 @@ class UnifiedClient:
         # Route image/video output mode through the dedicated image edit endpoint
         # without changing where normal text requests go.
         try:
-            image_edit_base_url = '' if not allow_endpoint_override or provider in ('ollama', 'lmstudio') or self._should_suppress_custom_image_edit_endpoint() else (
+            image_edit_base_url = '' if not allow_endpoint_override or provider in self._LOCAL_OPENAI_PROVIDERS or self._should_suppress_custom_image_edit_endpoint() else (
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
@@ -24240,7 +24259,7 @@ class UnifiedClient:
             is_local_endpoint = True
             if not actual_api_key:
                 actual_api_key = "dummy-key-for-local-llm"
-        if provider in ('ollama', 'lmstudio'):
+        if provider in self._LOCAL_OPENAI_PROVIDERS:
             # Never forward a configured cloud key to an unauthenticated local server.
             is_local_endpoint = True
             actual_api_key = "dummy-key-for-local-llm"
@@ -24283,7 +24302,7 @@ class UnifiedClient:
                 )
 
         # Use OpenAI SDK for providers known to work well with it
-        sdk_compatible = ['openai', 'ollama', 'lmstudio', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq',
+        sdk_compatible = ['openai', 'ollama', 'lmstudio', 'local', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq',
                          'electronhub', 'openrouter', 'literouter', 'opencode', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova', 'custom_openai']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
@@ -26578,7 +26597,7 @@ class UnifiedClient:
                     use_responses_api = True
                 elif provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
                     use_responses_api = True
-                elif provider not in ('ollama', 'lmstudio') and (model_leaf.endswith("-instruct") or "instruct" in model_leaf):
+                elif provider not in self._LOCAL_OPENAI_PROVIDERS and (model_leaf.endswith("-instruct") or "instruct" in model_leaf):
                     use_text_completions = True
             except Exception:
                 use_responses_api = False
