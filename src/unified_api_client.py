@@ -11165,6 +11165,10 @@ class UnifiedClient:
                     print("OpenCode Zen model/setup error - choose an available free model; not retrying")
                     raise
 
+                if self.client_type == "authza" and e.error_type == "entitlement_error":
+                    print("AuthZA plan quota/entitlement error - not retrying")
+                    raise
+
                 if self.client_type == "autharena" and e.error_type == "autharena_verification_error":
                     print("🔐 Arena rejected browser verification; this does not mean the saved login was lost.")
                     raise
@@ -30199,6 +30203,20 @@ class UnifiedClient:
                         error_type="entitlement_error"
                     )
 
+                # Z.AI error 1005: this login's plan quota for the model is used
+                # up (e.g. the free daily Start Plan grant). Retrying cannot help.
+                if (
+                    '"code":1005' in error_str.replace(" ", "")
+                    or "exceed quota limit" in error_lower
+                ):
+                    raise UnifiedClientError(
+                        f"AuthZA{acct_label}: Z.AI says this login's {access_label} quota for "
+                        f"'{actual_model}' is used up (error 1005). Wait for the quota to reset, "
+                        "sign in with another Z.AI account using an authzaN/ slot, or switch "
+                        "AuthZA to General API.",
+                        error_type="entitlement_error"
+                    )
+
                 if "3006" in error_str or "model not allowed" in error_lower:
                     raise UnifiedClientError(
                         f"AuthZA{acct_label}: model '{actual_model}' is not granted to this "
@@ -30251,6 +30269,7 @@ class UnifiedClient:
 
                 last_error = exc
                 if attempt < max_retries - 1:
+                    print(f"⚠️ {label} error (attempt {attempt+1}/{max_retries}): {error_str}")
                     if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
                         raise UnifiedClientError("AuthZA: Translation stopped by user", error_type="cancelled")
                     continue
