@@ -81,6 +81,7 @@ LOGIN_PLAN_CHAT_ENDPOINT = (
     "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages"
 )
 LOGIN_PLAN_MODELS_ENDPOINT = "https://zcode.z.ai/api/v1/zcode-plan/billing/balance"
+LOGIN_PLAN_CLIENT_CONFIGS_ENDPOINT = "https://zcode.z.ai/api/v1/client/configs"
 GENERAL_API_BASE = "https://api.z.ai/api/paas/v4"
 GENERAL_API_CHAT_ENDPOINT = f"{GENERAL_API_BASE}/chat/completions"
 GENERAL_API_MODELS_ENDPOINT = f"{GENERAL_API_BASE}/models"
@@ -105,103 +106,107 @@ DEFAULT_MODELS = (
     "glm-5.3",
 )
 
-# Keep the login JWT inside the JavaScript credential store. This probe mirrors
-# current ZCode desktop's account-specific model discovery from
-# data.balances[].capabilities entries named "model:*".
+# ZCode desktop takes its login-plan model list from the public client config
+# (data.builtinModels: the models every login can use, including the free
+# daily Start Plan). Paid ZCode credit packages can grant more, listed as
+# "model:*" capabilities in billing/balance. Keep the login JWT inside the
+# JavaScript credential store for that second call.
 _LOGIN_PLAN_MODEL_CATALOG_SCRIPT = r'''
 import os from "node:os";
 import { loadCredential } from "./src/auth/store.ts";
 
-const credential = await loadCredential();
-if (!credential?.jwt) throw new Error("Z.AI login JWT is unavailable; sign in again");
 const appVersion = process.env.ZCODE_APP_VERSION || "3.14.0";
-const endpoint = new URL(process.env.ZCODE_LOGIN_PLAN_MODELS_ENDPOINT);
-endpoint.searchParams.set("app_version", appVersion);
+const timeoutMs = Math.max(1000, Number(process.env.ZCODE_MODEL_CATALOG_TIMEOUT_MS || "10000"));
 // The billing gateway rejects the call with "parameter error" (HTTP 400)
 // unless `platform` accompanies `app_version`. ZCode's own claim client sends
 // the `${platform}-${arch}` fingerprint, so mirror it here.
 const platform = `${process.env.ZCODE_IDENTITY_PLATFORM || process.platform}-${process.env.ZCODE_IDENTITY_ARCH || os.arch()}`;
-endpoint.searchParams.set("platform", platform);
-// The billing gateway wants the full desktop identity fingerprint, not just a
-// bearer token — it requires a stable X-Device-Mid and rejects a request that
-// is missing it. Build the headers with zcode-api's own helper so this probe
-// cannot drift from the shape the proxy uses everywhere else.
-let headers = {
-  "Authorization": `Bearer ${credential.jwt}`,
-  "HTTP-Referer": "https://zcode.z.ai",
-  "User-Agent": `ZCode/${appVersion}`,
-  "X-Title": "Z Code@glossarion",
-  "X-ZCode-App-Version": appVersion,
-  "X-Platform": platform,
-  "Accept": "application/json",
-};
-try {
-  const [{ buildIdentityHeaders }, { loadConfig }] = await Promise.all([
-    import("./src/proxy/identity.ts"),
-    import("./src/config/loader.ts"),
-  ]);
-  const config = loadConfig(process.env.ZCODE_PROXY_CONFIG);
-  const identityHeaders = buildIdentityHeaders(config.identity);
-  // The claim client drops X-ZCode-Agent for zcode.z.ai control-plane calls;
-  // the billing gateway follows the same precedent.
-  delete identityHeaders["X-ZCode-Agent"];
-  headers = {
-    ...identityHeaders,
-    "Authorization": `Bearer ${credential.jwt}`,
-    "Accept": "application/json",
-  };
-} catch (error) {
-  // Older runtimes may not expose these modules; the literal headers above
-  // still carry the fingerprint fields the gateway checks.
-  console.error(`identity headers unavailable: ${String(error).slice(0, 200)}`);
-}
-const timeoutMs = Number(process.env.ZCODE_MODEL_CATALOG_TIMEOUT_MS || "10000");
-const response = await fetch(endpoint, {
-  headers,
-  signal: AbortSignal.timeout(Math.max(1000, timeoutMs)),
-});
-const text = await response.text();
-let payload = {};
-try { payload = JSON.parse(text); } catch {}
-if (!response.ok || (payload.code !== undefined && ![0, 200].includes(payload.code))) {
-  const detail = payload.msg || payload.message || text.slice(0, 300) || "unknown error";
-  const code = payload.code !== undefined ? ` code=${payload.code}` : "";
-  throw new Error(
-    `Z.AI model catalog HTTP ${response.status}${code}: ${detail} (${endpoint.toString()})`,
-  );
-}
 const models = [];
 const seen = new Set();
-const capabilityModels = (entry) =>
-  (Array.isArray(entry?.capabilities) ? entry.capabilities : [])
-    .filter((item) => typeof item === "string" && item.toLowerCase().startsWith("model:"))
-    .map((item) => item.slice(6).trim())
-    .filter(Boolean);
 const addModels = (candidates) => {
-  for (const model of candidates) {
-    const key = model.toLowerCase();
-    if (model && !seen.has(key)) {
-      seen.add(key);
+  for (const raw of candidates) {
+    const model = String(raw || "").trim().toLowerCase();
+    if (model && !seen.has(model)) {
+      seen.add(model);
       models.push(model);
     }
   }
 };
-const balances = Array.isArray(payload?.data?.balances) ? payload.data.balances : [];
-const plans = Array.isArray(payload?.data?.plans) ? payload.data.plans : [];
-for (const balance of balances) {
-  const fromCapabilities = capabilityModels(balance);
-  addModels(fromCapabilities.length ? fromCapabilities : [String(balance?.show_name || "").trim()]);
+const fetchEnvelope = async (url, headers) => {
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  const text = await response.text();
+  let payload = {};
+  try { payload = JSON.parse(text); } catch {}
+  if (!response.ok || (payload.code !== undefined && ![0, 200].includes(payload.code))) {
+    const detail = payload.msg || payload.message || text.slice(0, 300) || "unknown error";
+    const code = payload.code !== undefined ? ` code=${payload.code}` : "";
+    throw new Error(`Z.AI HTTP ${response.status}${code}: ${detail} (${url.toString()})`);
+  }
+  return payload;
+};
+
+const configsUrl = new URL(process.env.ZCODE_CLIENT_CONFIGS_ENDPOINT);
+configsUrl.searchParams.set("app_version", appVersion);
+let catalogError = null;
+try {
+  const configs = await fetchEnvelope(configsUrl, {
+    "User-Agent": `ZCode/${appVersion}`,
+    "Accept": "application/json",
+  });
+  addModels((configs?.data?.builtinModels || []).map((entry) => entry?.modelId));
+} catch (error) {
+  catalogError = error;
 }
-// Active plans can grant models that have no balance row yet.
-for (const plan of plans) addModels(capabilityModels(plan));
-if (!balances.length && !plans.length) {
-  // A used-up or expired ZCode credit package drops out of billing/balance
-  // entirely, so an empty response means the login has nothing to spend.
-  throw new Error(
-    "Z.AI login plan: this login has no active ZCode plan credits (billing balance is empty). "
-    + "Sign in with the account that has the plan, or switch AuthZA to General API.",
-  );
+
+const credential = await loadCredential();
+if (credential?.jwt) {
+  const balanceUrl = new URL(process.env.ZCODE_LOGIN_PLAN_MODELS_ENDPOINT);
+  balanceUrl.searchParams.set("app_version", appVersion);
+  balanceUrl.searchParams.set("platform", platform);
+  // The billing gateway wants the full desktop identity fingerprint, not just a
+  // bearer token — it requires a stable X-Device-Mid and rejects a request that
+  // is missing it. Build the headers with zcode-api's own helper so this probe
+  // cannot drift from the shape the proxy uses everywhere else.
+  let headers = {
+    "Authorization": `Bearer ${credential.jwt}`,
+    "HTTP-Referer": "https://zcode.z.ai",
+    "User-Agent": `ZCode/${appVersion}`,
+    "X-Title": "Z Code@glossarion",
+    "X-ZCode-App-Version": appVersion,
+    "X-Platform": platform,
+    "Accept": "application/json",
+  };
+  try {
+    const [{ buildIdentityHeaders }, { loadConfig }] = await Promise.all([
+      import("./src/proxy/identity.ts"),
+      import("./src/config/loader.ts"),
+    ]);
+    const config = loadConfig(process.env.ZCODE_PROXY_CONFIG);
+    const identityHeaders = buildIdentityHeaders(config.identity);
+    // The claim client drops X-ZCode-Agent for zcode.z.ai control-plane calls;
+    // the billing gateway follows the same precedent.
+    delete identityHeaders["X-ZCode-Agent"];
+    headers = { ...identityHeaders, "Authorization": `Bearer ${credential.jwt}`, "Accept": "application/json" };
+  } catch (error) {
+    // Older runtimes may not expose these modules; the literal headers above
+    // still carry the fingerprint fields the gateway checks.
+    console.error(`identity headers unavailable: ${String(error).slice(0, 200)}`);
+  }
+  try {
+    const billing = await fetchEnvelope(balanceUrl, headers);
+    for (const entry of [...(billing?.data?.balances || []), ...(billing?.data?.plans || [])]) {
+      addModels(
+        (Array.isArray(entry?.capabilities) ? entry.capabilities : [])
+          .filter((item) => typeof item === "string" && item.toLowerCase().startsWith("model:"))
+          .map((item) => item.slice(6)),
+      );
+    }
+  } catch (error) {
+    // Paid packages only add models; the client catalog above still stands.
+    console.error(`billing models unavailable: ${String(error).slice(0, 300)}`);
+  }
 }
+if (!models.length && catalogError) throw catalogError;
 process.stdout.write("GLOSSARION_MODELS=" + JSON.stringify(models));
 '''.strip()
 
@@ -1950,8 +1955,9 @@ def fetch_available_models(
         catalog_script = _GENERAL_API_MODEL_CATALOG_SCRIPT
     else:
         env["ZCODE_LOGIN_PLAN_MODELS_ENDPOINT"] = LOGIN_PLAN_MODELS_ENDPOINT
+        env["ZCODE_CLIENT_CONFIGS_ENDPOINT"] = LOGIN_PLAN_CLIENT_CONFIGS_ENDPOINT
         catalog_script = _LOGIN_PLAN_MODEL_CATALOG_SCRIPT
-    endpoint = GENERAL_API_MODELS_ENDPOINT if general_api else LOGIN_PLAN_MODELS_ENDPOINT
+    endpoint = GENERAL_API_MODELS_ENDPOINT if general_api else LOGIN_PLAN_CLIENT_CONFIGS_ENDPOINT
     mode_label = "general API" if general_api else "login plan"
     _log(
         f"🌐 AuthZA: polling {mode_label} models from {endpoint} "
