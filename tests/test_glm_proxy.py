@@ -158,27 +158,6 @@ def test_runtime_patch_redirects_current_upstream_store(tmp_path):
     assert 'join(STORE_DIR, "credentials.json")' in patched
 
 
-def test_runtime_patch_forces_numbered_login_through_zai_account_switch(tmp_path):
-    index = tmp_path / "src" / "index.ts"
-    index.parent.mkdir(parents=True)
-    index.write_text(
-        "function openBrowser(url: string): void {\n"
-        "  console.log(url);\n"
-        "}\n",
-        encoding="utf-8",
-    )
-
-    glm_proxy._patch_numbered_account_switch(str(tmp_path))
-    glm_proxy._patch_numbered_account_switch(str(tmp_path))
-    patched = index.read_text(encoding="utf-8")
-
-    assert patched.count("GLOSSARION_AUTHZA_ACCOUNT_SWITCH") == 1
-    assert 'ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION === "1"' in patched
-    assert "https://chat.z.ai/auth?redirect=" in patched
-    assert "&switch_account=true" in patched
-    assert 'authorizeTarget.hostname === "chat.z.ai"' in patched
-
-
 def test_runtime_patch_uses_login_jwt_without_provisioning_api_key(tmp_path):
     index = tmp_path / "src" / "index.ts"
     index.parent.mkdir(parents=True)
@@ -314,13 +293,14 @@ def test_login_uses_isolated_credentials_and_upstream_cli(tmp_path, monkeypatch)
     assert observed["command"] == ["bun", "run", str(entry), "auth", "login", "zai"]
     assert observed["env"]["ZCODE_PROXY_CREDENTIALS_PATH"] == glm_proxy._credentials_path(4)
     assert observed["env"]["ZCODE_PROXY_CONFIG"] == glm_proxy._config_path(4)
-    assert observed["env"]["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] == "1"
+    # Z.AI ignores the old forced switch, so the login URL opens unchanged.
+    assert "ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION" not in observed["env"]
     assert "popen_kwargs" in observed
     if glm_proxy.sys.platform == "win32":
         assert observed["popen_kwargs"]["creationflags"] & 0x08000000
 
 
-def test_default_authza_login_does_not_force_account_switch(tmp_path, monkeypatch):
+def test_login_log_explains_switching_google_accounts(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     entry = runtime / "src" / "index.ts"
     entry.parent.mkdir(parents=True)
@@ -339,9 +319,10 @@ def test_default_authza_login_does_not_force_account_switch(tmp_path, monkeypatc
         return {"returncode": 0, "output": "logged in", "timed_out": False}
 
     monkeypatch.setattr(glm_proxy, "run_logged_subprocess", fake_run)
-    glm_proxy._login(0)
+    logs = []
+    glm_proxy._login(0, log_fn=logs.append)
 
-    assert observed["env"]["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] == "0"
+    assert any("Switch account" in line and "Add another account" in line for line in logs)
 
 
 def test_general_api_login_enables_key_provisioning_and_separate_store(tmp_path, monkeypatch):

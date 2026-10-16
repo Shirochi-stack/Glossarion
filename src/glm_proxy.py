@@ -58,7 +58,7 @@ PROXY_DEFAULT_REVISION = "9cec45e7268190050b4af6074ea4d852f8241b8a"
 PROXY_DEFAULT_VERSION = "2.6.0"
 PROXY_UPDATE_CHECK_INTERVAL_SECONDS = 300
 PROXY_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 90
-RUNTIME_PATCH_VERSION = "2026-09-20-zcode-dual-access-v7"
+RUNTIME_PATCH_VERSION = "2026-10-16-zcode-dual-access-v8"
 # Must track zcode-api's DEFAULT_APP_VERSION; the control plane validates
 # `app_version` on the billing endpoints.
 ZCODE_APP_VERSION = "3.14.0"
@@ -737,55 +737,6 @@ def _patch_credentials_store(runtime_dir: str) -> None:
     Path(store_path).write_text(patched, encoding="utf-8")
 
 
-def _patch_numbered_account_switch(runtime_dir: str) -> None:
-    """Route numbered logins through Z.AI's own switch-account screen."""
-    # zcode-api 4.x moved the launcher out of the CLI entrypoint into its own
-    # shared module; keep accepting either location.
-    candidates = [
-        os.path.join(runtime_dir, "src", "runtime", "open-browser.ts"),
-        os.path.join(runtime_dir, "src", "index.ts"),
-    ]
-    index_path = None
-    source = ""
-    for candidate in candidates:
-        try:
-            text = Path(candidate).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if "function openBrowser" in text:
-            index_path, source = candidate, text
-            break
-    if index_path is None:
-        raise RuntimeError("Downloaded zcode-api has no browser launcher")
-    marker = "GLOSSARION_AUTHZA_ACCOUNT_SWITCH"
-    if marker in source:
-        return
-
-    insertion = f'''// {marker}
-  // Z.AI's consent page otherwise reuses the browser's current account. Its
-  // own "Switch account" control routes through this login URL while keeping
-  // the original authorize target as the post-login redirect.
-  if (process.env.ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION === "1") {{
-    try {{
-      const authorizeTarget = new URL(url);
-      if (authorizeTarget.protocol === "https:" && authorizeTarget.hostname === "chat.z.ai") {{
-        const redirect = `${{authorizeTarget.pathname}}${{authorizeTarget.search}}`;
-        url = `https://chat.z.ai/auth?redirect=${{encodeURIComponent(redirect)}}&switch_account=true`;
-      }}
-    }} catch {{ /* retain the original authorize URL */ }}
-  }}
-'''
-    patched, count = re.subn(
-        r"(function\s+openBrowser\(url:\s*string\):\s*void\s*\{\s*)",
-        lambda match: match.group(1) + insertion,
-        source,
-        count=1,
-    )
-    if not count:
-        raise RuntimeError("Could not patch zcode-api for numbered account switching")
-    Path(index_path).write_text(patched, encoding="utf-8")
-
-
 def _patch_login_plan_only_auth(runtime_dir: str) -> None:
     """Support JWT-only login while retaining opt-in API-key provisioning."""
     index_path = os.path.join(runtime_dir, "src", "index.ts")
@@ -940,7 +891,6 @@ def _download_proxy_runtime(release: Dict[str, Any], runtime_dir: str, log_fn=No
             archive.extractall(extract_dir)
         archive_root = _find_archive_root(extract_dir)
         _patch_credentials_store(archive_root)
-        _patch_numbered_account_switch(archive_root)
         _patch_login_plan_only_auth(archive_root)
         _patch_zcode_login_plan_endpoint(archive_root)
         _write_runtime_metadata(archive_root, release)
@@ -1202,12 +1152,13 @@ def _login(account_id: Optional[int] = None, log_fn=None) -> None:
         _log = log_fn or _log_noop
         label = "default account" if account == 0 else f"account #{account}"
         login_env = _runtime_env(account)
-        # A numbered route represents a different account slot, so take the same
-        # account-selection path as Z.AI's visible "Switch account" control.
-        login_env["ZCODE_OAUTH_FORCE_ACCOUNT_SELECTION"] = "1" if account > 0 else "0"
         _log(f"🔐 GLM proxy: opening Z.AI login for {label}...")
-        if account > 0:
-            _log(f"🔁 GLM proxy: forcing Z.AI account selection for account #{account}...")
+        # Z.AI's consent page reuses the browser's Z.AI account, and its Google
+        # sign-in never asks Google to show the account chooser. Google only
+        # shows it when the browser holds more than one Google sign-in.
+        _log("💡 GLM proxy: wrong Z.AI account? Press Switch account on the Z.AI page. If Google "
+             "signs you back in as the same account, first sign in to the other Google account "
+             "in this browser (accounts.google.com > Add another account), then try again.")
         result = run_logged_subprocess(
             [*bun, "run", _runtime_entrypoint(runtime_dir), "auth", "login", "zai"],
             log_fn=_log,
