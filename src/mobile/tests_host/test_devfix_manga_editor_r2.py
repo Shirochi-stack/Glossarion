@@ -260,9 +260,10 @@ def test_a_deleted_box_stays_deleted_and_its_texts_never_move_to_the_next_box(is
         await tab.box_action("save", 1, {"translation": "Third!"})
         assert [b["translation"] for b in tab.boxes] == ["Second", "Third!"]
         # the box panel's ⋯ › Delete box, down to the last box: the page stays empty after a reopen
-        for remaining in (1, 0):
-            tab.long_press_at(10, 110)
-            tab.panel.act("delete")
+        for remaining, (px, py) in ((1, (10, 110)), (0, (60, 110))):
+            panel = tab.long_press_at(px, py)
+            assert panel is not None and tab.selected == 0
+            panel.act("delete")
             await wait_for(lambda: len(tab.boxes) == remaining and not tab._editing)
         assert tab.boxes == []
         await tab.step_page(1)
