@@ -1549,7 +1549,10 @@ def _ocagy_has_account() -> bool:
     import ocagy_cli
 
     summary = ocagy_cli.get_account_summary()
-    return bool(int(summary.get("account_count", 0) or 0))
+    if int(summary.get("account_count", 0) or 0):
+        return True
+    # Other providers signed in through OCAGY Login are polled too.
+    return any(name != "google" for name in ocagy_cli._signed_in_providers())
 
 
 def _fetch_ocagy_catalog(timeout: float) -> List[str]:

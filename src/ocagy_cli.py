@@ -1295,26 +1295,65 @@ def poll_zen_models(timeout: float = 8.0) -> List[str]:
     return models
 
 
-def poll_models(timeout: float = 8.0) -> List[str]:
-    """Poll OpenCode's Google catalog using the existing OcAgy OAuth account."""
-    _require_oauth_account()
+def _signed_in_providers() -> List[str]:
+    """Provider IDs OpenCode holds a login for (auth.json keys; secrets are not read)."""
+    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     try:
-        listing = _run_short(
-            ["models", "google"],
-            timeout=max(1, int(round(float(timeout)))),
+        payload = json.loads((data_home / "opencode" / "auth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [str(key) for key in payload] if isinstance(payload, dict) else []
+
+
+def poll_models(timeout: float = 8.0) -> List[str]:
+    """Poll every model the ocagy/ route can run.
+
+    That is the Antigravity OAuth models (google/antigravity-*) plus all models
+    of each other provider OpenCode is signed in to through OCAGY Login,
+    offered as ocagy/<provider>/<model>.
+    """
+    others = [name for name in _signed_in_providers() if name != "google"]
+    try:
+        _require_oauth_account()
+        has_google = True
+    except OcAgyError:
+        if not others:
+            raise
+        has_google = False
+    seconds = max(1, int(round(float(timeout))))
+    models: List[str] = []
+    if has_google:
+        try:
+            listing = _run_short(["models", "google"], timeout=seconds)
+        except subprocess.TimeoutExpired as exc:
+            raise OcAgyError("OpenCode model polling timed out") from exc
+        combined = _clean_text((listing.stdout or "") + "\n" + (listing.stderr or ""))
+        if listing.returncode != 0:
+            raise _classify_error(
+                combined or f"opencode models exited with code {listing.returncode}",
+                listing.returncode,
+            )
+        models = normalize_polled_models(re.findall(r"google/[A-Za-z0-9._-]+", combined))
+    for provider in others:
+        # Each extra provider is optional: its failure must not hide the others.
+        try:
+            listing = _run_short(["models", provider], timeout=seconds)
+        except subprocess.TimeoutExpired:
+            continue
+        if listing.returncode != 0:
+            continue
+        # Only catalog rows, never model IDs that appear inside diagnostic log lines.
+        # Zen's free models refuse this route ("free tier can only be used from
+        # within OpenCode"); ocz/ runs them.
+        models.extend(
+            f"ocagy/{row.strip()}"
+            for row in _clean_text(listing.stdout or "").splitlines()
+            if re.fullmatch(re.escape(provider) + r"/[A-Za-z0-9._:-]+", row.strip())
+            and not row.strip().endswith("-free")
         )
-    except subprocess.TimeoutExpired as exc:
-        raise OcAgyError("OpenCode model polling timed out") from exc
-    combined = _clean_text((listing.stdout or "") + "\n" + (listing.stderr or ""))
-    if listing.returncode != 0:
-        raise _classify_error(
-            combined or f"opencode models exited with code {listing.returncode}",
-            listing.returncode,
-        )
-    raw_models = re.findall(r"google/[A-Za-z0-9._-]+", combined)
-    models = normalize_polled_models(raw_models)
+    models = list(dict.fromkeys(models))
     if not models:
-        raise OcAgyError("OpenCode returned no usable Antigravity OAuth model IDs")
+        raise OcAgyError("OpenCode returned no usable model IDs for the ocagy/ route")
     return models
 
 
@@ -1427,9 +1466,10 @@ def resolve_model(model: str) -> Tuple[str, Optional[str]]:
     _account_number, suffix = parse_account_route(model)
     value = suffix.lower()
 
-    direct = re.match(r"^google/(.+)$", value)
+    # provider/model runs any model of a provider OpenCode is signed in to.
+    direct = re.match(r"^([a-z0-9][a-z0-9-]*)/(.+)$", suffix.strip())
     if direct:
-        return "google/" + direct.group(1), None
+        return direct.group(1).lower() + "/" + direct.group(2), None
 
     mappings: List[Tuple[str, str, Optional[str]]] = [
         ("gemini-3.1-pro-high", "google/antigravity-gemini-3.1-pro", "high"),
@@ -2394,9 +2434,13 @@ def _send_chat_completion_buffered(
     logger = log_fn or (lambda _message: None)
     exe = ensure_opencode_installed(log_fn=logger)
     account_number, _model_suffix = parse_account_route(model)
-    selected = _require_oauth_account(account_number)
-    ensure_auth_plugin_installed(exe, log_fn=logger)
     model_id, variant = resolve_model(model)
+    if model_id.startswith("google/"):
+        selected = _require_oauth_account(account_number)
+    else:
+        # Other providers use OpenCode's own stored login, not an Antigravity slot.
+        account_number, selected = 0, None
+    ensure_auth_plugin_installed(exe, log_fn=logger)
     prompt = build_prompt(messages)
     timeout_seconds = max(1.0, float(timeout or 1800))
 
@@ -2560,9 +2604,13 @@ def send_chat_completion(
     logger = log_fn or (lambda _message: None)
     exe = ensure_opencode_installed(log_fn=logger)
     account_number, _model_suffix = parse_account_route(model)
-    selected = _require_oauth_account(account_number)
-    ensure_auth_plugin_installed(exe, log_fn=logger)
     model_id, variant = resolve_model(model)
+    if model_id.startswith("google/"):
+        selected = _require_oauth_account(account_number)
+    else:
+        # Other providers use OpenCode's own stored login, not an Antigravity slot.
+        account_number, selected = 0, None
+    ensure_auth_plugin_installed(exe, log_fn=logger)
     prompt = build_prompt(messages)
     timeout_seconds = max(1.0, float(timeout or 1800))
 
