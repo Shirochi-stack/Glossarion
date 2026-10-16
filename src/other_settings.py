@@ -3004,7 +3004,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(gpt_row3)
     
     # Store reference to description label for enable/disable
-    self.gpt_desc_label = QLabel("Controls reasoning for GPT-5, OpenRouter, OpenCode, NIM/AuthND, DeepSeek V4, and NanoGPT.\nOpenRouter uses Effort for reasoning models; its optional token budget replaces Effort when selected.\nDeepSeek V4: xhigh→max. NanoGPT Chat Completions uses Effort, not Tokens.")
+    self.gpt_desc_label = QLabel("Controls reasoning for GPT-5, OpenRouter, OpenCode, NIM/AuthND, DeepSeek V4, NanoGPT, and AuthZA.\nOpenRouter uses Effort for reasoning models; its optional token budget replaces Effort when selected.\nDeepSeek V4: xhigh→max. NanoGPT Chat Completions uses Effort, not Tokens.")
     self.gpt_desc_label.setStyleSheet("color: gray; font-size: 9pt;")
     self.gpt_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gpt_desc_label)

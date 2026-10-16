@@ -1508,7 +1508,23 @@ def _payload(
         payload["max_tokens"] = int(max_tokens)
     if stream:
         payload["stream_options"] = {"include_usage": True}
+    payload.update(_thinking_fields())
     return payload
+
+
+def _thinking_fields() -> Dict[str, Any]:
+    """Map the shared GPT / OR / NIM / OC thinking setting onto the proxy request.
+
+    Without these fields zcode-api applies its own defaults (max effort for
+    GLM-5.3, a 1024-token budget for other reasoning models).
+    """
+    enabled = os.environ.get("ENABLE_GPT_THINKING", "0") == "1"
+    effort = (os.environ.get("GPT_EFFORT", "medium") or "medium").strip().lower()
+    if effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        effort = "medium"
+    if not enabled or effort == "none":
+        return {"thinking": {"type": "disabled"}, "reasoning_effort": "none"}
+    return {"thinking": {"type": "enabled"}, "reasoning_effort": effort}
 
 
 def _content_text(value: Any) -> str:
