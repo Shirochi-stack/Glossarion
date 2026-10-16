@@ -1407,6 +1407,10 @@ def make_glossary_progress_model(
             # than appearing from nowhere mid-run.
             if not _gp_minimal_pass_toggle_enabled():
                 return None
+            # Removed from progress by the user: stay hidden until the pass
+            # runs again (that writes a new `minimal_pass` record).
+            if _d.get('minimal_pass_removed'):
+                return None
             info = {'status': 'not_completed'}
         raw_status = str(info.get('status') or 'unknown').strip().lower()
         status = 'failed' if raw_status in ('failed', 'error') else raw_status
@@ -2522,9 +2526,13 @@ def make_glossary_progress_model(
             refinement_keys_to_remove = set(value for _, (kind, value) in removable_targets if kind == 'refinement')
             remove_minimal_pass = any(kind == 'minimal_pass' for _, (kind, _value) in removable_targets)
             changed = False
-            if remove_minimal_pass and 'minimal_pass' in _d:
-                del _d['minimal_pass']
-                changed = True
+            if remove_minimal_pass:
+                if 'minimal_pass' in _d:
+                    del _d['minimal_pass']
+                    changed = True
+                if not _d.get('minimal_pass_removed'):
+                    _d['minimal_pass_removed'] = True
+                    changed = True
             if indices_to_remove:
                 removed_indices = _d.get('manual_removed_indices', [])
                 if not isinstance(removed_indices, list):

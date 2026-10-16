@@ -118,7 +118,13 @@ BLOCKS = [
     (22543, 22649, 4, 0, []),
     (23524, 23574, 8, 0, []),
     (23575, 24546, 8, 0, [("(_d or gp_data).get('chapter_numbers', {})",
-                           "(_d or _current_gp_data()).get('chapter_numbers', {})")]),
+                           "(_d or _current_gp_data()).get('chapter_numbers', {})"),
+                          # owner fix 2026-10-16: a removed Minimal pass stays hidden until it runs again
+                          ("            if not _gp_minimal_pass_toggle_enabled():\n                return None\n",
+                           "            if not _gp_minimal_pass_toggle_enabled():\n                return None\n"
+                           "            # Removed from progress by the user: stay hidden until the pass\n"
+                           "            # runs again (that writes a new `minimal_pass` record).\n"
+                           "            if _d.get('minimal_pass_removed'):\n                return None\n")]),
     (24872, 24896, 8, 0, []),
     (24932, 25139, 8, 0, [("        if changed:\n            with open(_rp, 'w', encoding='utf-8') as _f:\n"
                            "                json.dump(_d, _f, ensure_ascii=False, indent=2)\n",
@@ -127,7 +133,12 @@ BLOCKS = [
     (25575, 25799, 8, 0, []),
     (25817, 25842, 8, 0, []),
     (26443, 26481, 8, 0, []),
-    (26165, 26232, 8, 0, []),
+    (26165, 26232, 8, 0, [("            if remove_minimal_pass and 'minimal_pass' in _d:\n"
+                           "                del _d['minimal_pass']\n                changed = True\n",
+                           "            if remove_minimal_pass:\n                if 'minimal_pass' in _d:\n"
+                           "                    del _d['minimal_pass']\n                    changed = True\n"
+                           "                if not _d.get('minimal_pass_removed'):\n"
+                           "                    _d['minimal_pass_removed'] = True\n                    changed = True\n")]),
 ]
 
 
@@ -404,7 +415,12 @@ def test_glossary_progress_actions_match_frozen_desktop(action, gp_fixture, tmp_
         gp_dialog.hide()
         data["dialog"].hide()
     assert results[0][0] and results[0][0] == results[1][0]
-    assert results[1][1] == results[0][1]
+    # owner fix 2026-10-16: removing the Minimal pass also records minimal_pass_removed
+    # (the row then stays hidden until the pass runs again); everything else is unchanged.
+    current = dict(results[1][1])
+    if action == "remove" and "minimal_pass_removed" not in results[0][1]:
+        current.pop("minimal_pass_removed", None)
+    assert current == results[0][1]
     assert results[1][2] == results[0][2]
 
 
@@ -510,6 +526,9 @@ def test_mobile_mark_and_remove_match_the_desktop(gp_fixture, tmp_path):
             targets = [row for row in targets if row.status != "completed"]
         operation(model, targets)
         saved = pl.normalize_progress(json.loads(Path(model.gp_path).read_text(encoding="utf-8")))
+        if action == "remove" and "minimal_pass_removed" not in desktop[action]:
+            # owner fix 2026-10-16 (frozen desktop predates it): removing the Minimal pass records it
+            assert saved.pop("minimal_pass_removed", None) in (None, True)
         assert saved == desktop[action], action
 
 
