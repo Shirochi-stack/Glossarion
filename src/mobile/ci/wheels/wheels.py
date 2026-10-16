@@ -335,6 +335,9 @@ def fetch_plan(ctx: Ctx, packages, dest: Path) -> list:
     lock = cmw.load_uv_lock_sdists(lock_path)
     for w in ctx.wheels(packages):
         entry = lock.get((w.name, w.version))
+        if (entry is None or not entry[0]) and w.sdist_url:
+            # a device-only pin (llama-cpp-python) is in no uv.lock; check_manifest_pins allows that
+            entry = (w.sdist_url, w.sdist_sha256)
         if entry is None or not entry[0]:
             raise WheelsError(f"{lock_path}: no sdist for {w.name} {w.version}")
         url, locked = entry
@@ -815,6 +818,17 @@ class NdkStubs:
             out |= self._exports[path]
         return out, None
 
+    def libcxx(self, target: str) -> tuple:
+        """(the NDK's libc++_shared.so for ``target`` or None, why not): what flet-libcpp-shared ships
+        (built from this NDK release line), for the import checks of a wheel that needs it."""
+        if self.ndk is None:
+            return None, "no NDK (pass --ndk, or set NDK_HOME or ANDROID_HOME)"
+        triple = NDK_TRIPLE.get(target)
+        found = sorted(self.ndk.glob(f"toolchains/llvm/prebuilt/*/sysroot/usr/lib/{triple}/libc++_shared.so"))
+        if not found:
+            return None, f"no sysroot/usr/lib/{triple}/libc++_shared.so under {self.ndk}"
+        return found[0], None
+
 
 def parse_macho(data: bytes) -> dict:
     """cputype, header flags, LC_BUILD_VERSION / LC_VERSION_MIN_* versions, dylib dependencies and
@@ -1063,6 +1077,8 @@ def check_ios_binary(name: str, data: bytes, target: str, package: str, openssl:
 
 def verify_native_wheel(path: Path, package: str, target: str, openssl: str, minos: tuple, stubs=None) -> tuple:
     """(errors, notes) for one wheel. ``stubs``: NdkStubs for the Android import checks."""
+    if package in SITE_PROFILES:
+        return verify_profile_wheel(path, package, target, minos, stubs)
     errors, notes = [], []
     with zipfile.ZipFile(path) as zf:
         sos = sorted(n for n in zf.namelist() if n.endswith(".so"))
@@ -1116,13 +1132,15 @@ def cmd_verify_native(ctx: Ctx, args) -> int:
 # Native packages `flet build` installs from pypi.flet.dev (not from our wheelhouse) whose libraries we
 # check after every build: what pip put into build/site-packages/<arch> is what the app loads.
 SITE_PROFILES = {
-    # The built-in llama.cpp engine: pure ctypes over four shared libraries (flet-dev/mobile-forge
-    # recipes/llama-cpp-python; build 2 has the Flet 0.86 loader fixes). Android also needs
-    # libc++_shared.so, which flet-libcpp-shared installs (one copy only: Gradle merges jniLibs).
+    # The built-in llama.cpp engine: pure ctypes over five shared libraries (our own build of forge's
+    # recipes/llama-cpp-python with LLAVA_BUILD=ON, wheelhouse.toml build_tag 1000: the four of
+    # pypi.flet.dev's build 2 plus libmtmd for vision models). Android also needs libc++_shared.so,
+    # which flet-libcpp-shared installs (one copy only: Gradle merges jniLibs). verify-native checks
+    # the wheels against the same profile (libc++_shared.so from the NDK there).
     "llama-cpp-python": {
         "lib_dir": "llama_cpp/lib",
-        "libs": ("libggml-base", "libggml-cpu", "libggml", "libllama"),
-        "min_build": 2,
+        "libs": ("libggml-base", "libggml-cpu", "libggml", "libllama", "libmtmd"),
+        "min_build": 1000,
         "android_system": ("libc.so", "libm.so", "libdl.so", "liblog.so"),
         "android_cxx": "libc++_shared.so",
     },
@@ -1150,22 +1168,25 @@ def _shared_libs(lib_dir: Path, platform: str) -> dict:
     return {p.name[:-len(suffix)]: p for p in sorted(lib_dir.iterdir()) if p.is_file() and p.name.endswith(suffix)}
 
 
-def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: dict, stubs) -> tuple:
+def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: dict, stubs, cxx=None) -> tuple:
+    """``cxx``: the libc++_shared.so to resolve against (verify-native: the NDK's); None: the one copy
+    in ``arch_dir`` (verify-site-packages: what flet-libcpp-shared installed)."""
     errors, notes = [], []
     siblings = {f"{stem}.so" for stem in libs}
     cxx_name = profile["android_cxx"]
     allowed = siblings | {cxx_name} | set(profile["android_system"])
-    cxx = sorted(arch_dir.rglob(cxx_name))
+    cxx = sorted(arch_dir.rglob(cxx_name)) if cxx is None else list(cxx)
     exports, system_needed = set(), set()
     if len(cxx) != 1:
         errors.append(f"{target}: {len(cxx)} copies of {cxx_name} in {arch_dir} "
-                      f"{[str(p.relative_to(arch_dir)) for p in cxx]} (expected exactly one, from flet-libcpp-shared)")
+                      f"{[str(p.relative_to(arch_dir)) if _is_within(p, arch_dir) else str(p) for p in cxx]} "
+                      f"(expected exactly one, from flet-libcpp-shared)")
     else:
         try:
             exports |= {n for n, bind, defined in elf_dynsym(cxx[0].read_bytes())
                         if defined and bind in (STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE)}
         except (ValueError, struct.error) as e:
-            errors.append(f"{target}: {cxx[0].relative_to(arch_dir)}: cannot read the dynamic symbols ({e})")
+            errors.append(f"{target}: {cxx[0].name}: cannot read the dynamic symbols ({e})")
     imports = {}
     for stem, path in libs.items():
         name = f"{path.parent.name}/{path.name}"
@@ -1239,6 +1260,43 @@ def _check_ios_site_libs(target: str, libs: dict, minos: tuple) -> tuple:
             errors.append(f"{target}: {name}: {len(unbound)} undefined symbols bound to none of its dylibs "
                           f"{_brief(unbound)} (DYNAMIC_LOOKUP: dyld fails on them at run time)")
         notes.append(f"{target}: {name} {describe_macho(macho)}")
+    return errors, notes
+
+
+def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, stubs=None) -> tuple:
+    """verify-native for a ctypes package with a SITE_PROFILES entry (llama-cpp-python): the wheel holds
+    exactly the profile's libraries, checked like verify-site-packages checks the installed copy (on
+    Android against the NDK's libc++_shared.so, which flet-libcpp-shared ships on the device)."""
+    import tempfile
+
+    profile = SITE_PROFILES[package]
+    platform = cmw.platform_of(target)
+    errors, notes = [], []
+    with tempfile.TemporaryDirectory(prefix="verify-native-") as tmp:
+        root = Path(tmp)
+        prefix = profile["lib_dir"].rstrip("/") + "/"
+        with zipfile.ZipFile(path) as zf:
+            members = [n for n in zf.namelist() if n.startswith(prefix) and "/" not in n[len(prefix):]
+                       and n.endswith(".so" if platform == "android" else ".dylib")]
+            for name in members:
+                dest = root / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(name))
+        lib_dir = root / profile["lib_dir"]
+        libs = _shared_libs(lib_dir, platform) if lib_dir.is_dir() else {}
+        if sorted(libs) != sorted(profile["libs"]):
+            errors.append(f"{path.name}: {profile['lib_dir']} holds {sorted(libs)}, expected exactly "
+                          f"{sorted(profile['libs'])}")
+            libs = {k: v for k, v in libs.items() if k in profile["libs"]}
+        if platform == "android":
+            cxx, problem = stubs.libcxx(target) if stubs is not None else (None, "no NDK given")
+            if cxx is None:
+                errors.append(f"{path.name}: cannot check the imports against {profile['android_cxx']}: {problem}")
+            errs, ns = _check_android_site_libs(target, root, libs, profile, stubs, cxx=[cxx] if cxx else [])
+        else:
+            errs, ns = _check_ios_site_libs(target, libs, minos)
+    errors += [f"{path.name}: {e}" for e in errs if not (platform == "android" and cxx is None and "copies of" in e)]
+    notes += [f"{path.name}: {n}" for n in ns]
     return errors, notes
 
 

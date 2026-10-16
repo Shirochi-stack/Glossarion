@@ -1,0 +1,93 @@
+# Glossarion overlay of recipes/llama-cpp-python/meta.yaml from flet-dev/mobile-forge
+# (https://github.com/flet-dev/mobile-forge at 0fadbfab0d63d11164030dfddc955ed980e32e2c,
+# BSD-3-Clause, see ../LICENSE.mobile-forge). build_wheels.sh runs forge on this directory
+# in place (forge <host> <path>), so the forge checkout itself is never patched.
+#
+# Why: pypi.flet.dev's llama_cpp_python-0.3.32-2 wheels are built with the llava/mtmd build off, so they
+# ship no libmtmd and no on-device model can see images. Same version (0.3.32, the pyproject pin),
+# same CMake flags and loader patch, plus the multimodal library:
+#   - build number 1000 (wheelhouse.toml build_tag; outranks the index's build 2);
+#   - LLAVA_BUILD=ON: llama-cpp-python builds vendor/llama.cpp/tools/mtmd as libmtmd (clip + the
+#     vision projectors: Qwen2/2.5/3-VL and Qwen3.5, Gemma 3/4, SmolVLM, MiniCPM-V, ...), loaded by
+#     llama_cpp.mtmd_cpp. It links only ggml and llama (never llama.cpp's `common`);
+#   - MTMD_VIDEO=OFF: video decoding spawns an ffmpeg process (sheredom/subprocess.h), which an app
+#     sandbox cannot do;
+#   - patches/mobile.patch: upstream's patch plus unversioned libmtmd (no SONAME);
+#   - IPHONEOS_DEPLOYMENT_TARGET=13.0 in the iOS branch (wheels.py checks it in every iOS recipe).
+package:
+  name: llama-cpp-python
+  version: "0.3.32"
+
+build:
+  number: 1000
+  script_env:
+# {% if sdk == 'android' %}
+    CMAKE_ARGS: >-
+      -DCMAKE_TOOLCHAIN_FILE={NDK_ROOT}/build/cmake/android.toolchain.cmake
+      -DANDROID_ABI={ANDROID_ABI}
+      -DANDROID_NATIVE_API_LEVEL={ANDROID_API_LEVEL}
+      -DANDROID_STL=c++_shared
+      -DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/env
+      -DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384
+      -DCMAKE_MODULE_LINKER_FLAGS=-Wl,-z,max-page-size=16384
+      -DLLAVA_BUILD=ON
+      -DMTMD_VIDEO=OFF
+      -DCMAKE_INSTALL_LIBDIR=llama_cpp/lib
+      -DGGML_NATIVE=OFF
+      -DGGML_OPENMP=OFF
+      -DGGML_LLAMAFILE=OFF
+      -DGGML_BLAS=OFF
+      -DGGML_ACCELERATE=OFF
+      -DGGML_METAL=OFF
+      -DGGML_CUDA=OFF
+      -DGGML_HIP=OFF
+      -DGGML_VULKAN=OFF
+      -DGGML_OPENCL=OFF
+      -DGGML_RPC=OFF
+# {% else %}
+    # The `ninja` pip package crashes importing on the iOS crossenv python
+    # (sysconfig.get_preferred_scheme('user') -> 'posix_user' invalid on iOS),
+    # so use the Makefiles generator on iOS; scikit-build-core then never imports
+    # ninja. (Android keeps Ninja, which works there.)
+    CMAKE_GENERATOR: Unix Makefiles
+    IPHONEOS_DEPLOYMENT_TARGET: '13.0'
+    CMAKE_ARGS: >-
+      -DCMAKE_SYSTEM_NAME=iOS
+      -DCMAKE_OSX_SYSROOT={{ sdk }}
+      -DCMAKE_OSX_DEPLOYMENT_TARGET={{ sdk_version }}
+      -DCMAKE_OSX_ARCHITECTURES={{ arch }}
+      -DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/env
+      -DLLAVA_BUILD=ON
+      -DMTMD_VIDEO=OFF
+      -DCMAKE_INSTALL_LIBDIR=llama_cpp/lib
+      -DGGML_NATIVE=OFF
+      -DGGML_OPENMP=OFF
+      -DGGML_LLAMAFILE=OFF
+      -DGGML_BLAS=OFF
+      -DGGML_ACCELERATE=OFF
+      -DGGML_METAL=OFF
+      -DGGML_METAL_EMBED_LIBRARY=OFF
+      -DGGML_CUDA=OFF
+      -DGGML_HIP=OFF
+      -DGGML_VULKAN=OFF
+      -DGGML_OPENCL=OFF
+      -DGGML_RPC=OFF
+# {% endif %}
+
+requirements:
+  build:
+    # llama-cpp-python builds via scikit-build-core + CMake; with forge's
+    # `--no-isolation` these must be in the build venv. scikit-build-core comes
+    # from the package's own build-system.requires. Android keeps Ninja; iOS
+    # uses the Makefiles generator (see CMAKE_GENERATOR above).
+    - cmake
+    - ninja
+# {% if sdk == 'android' %}
+  host:
+    # llama.cpp/ggml is C++; the bundled libllama.so / libggml*.so / libmtmd.so link
+    # libc++_shared.so, which the device runtime doesn't provide unless bundled.
+    - flet-libcpp-shared >=27.2.12479018
+# {% endif %}
+
+patches:
+  - mobile.patch

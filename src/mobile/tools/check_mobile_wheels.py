@@ -1089,6 +1089,15 @@ class PromisedWheel:
     sdist_sha256: str
     targets: tuple           # TARGETS keys
     requires_dist: tuple     # Requires-Dist without extra markers
+    # Per-platform Requires-Dist (requires_dist_android / requires_dist_ios) where the wheels differ
+    # (llama-cpp-python: flet-libcpp-shared on Android only); None: ``requires_dist`` everywhere.
+    requires_by_platform: tuple = ()   # ((platform, (requirement, ...)), ...)
+    # The sdist's URL for a device-only pin uv.lock does not hold (sdist_url); "" = from uv.lock.
+    sdist_url: str = ""
+
+    def requires_for(self, target_key: str) -> tuple:
+        """The Requires-Dist (without extras) the wheel for ``target_key`` carries."""
+        return dict(self.requires_by_platform).get(platform_of(target_key), self.requires_dist)
 
     def filename(self, target_key: str, build_tag: int) -> str:
         cp = f"cp{TARGET_PYTHON[0]}{TARGET_PYTHON[1]}"
@@ -1143,21 +1152,32 @@ def load_wheelhouse_manifest(path) -> WheelhouseManifest:
         if not isinstance(targets, list) or not targets or len(set(targets)) != len(targets) or \
                 any(t not in TARGETS for t in targets):
             raise ManifestError(f"{where}: targets must be distinct keys of {sorted(TARGETS)} (got {targets!r})")
-        reqs = entry.get("requires_dist", [])
-        if not isinstance(reqs, list) or not all(isinstance(r, str) for r in reqs):
-            raise ManifestError(f"{where}: requires_dist must be a list of strings")
-        for r in reqs:
-            try:
-                req = parse_requirement(r)
-            except ValueError as e:
-                raise ManifestError(f"{where}: {e}") from e
-            if has_extra_marker(req):
-                raise ManifestError(f"{where}: requires_dist lists only what installs without extras ({r!r})")
+        def requirements(key: str) -> list:
+            reqs = entry.get(key, [])
+            if not isinstance(reqs, list) or not all(isinstance(r, str) for r in reqs):
+                raise ManifestError(f"{where}: {key} must be a list of strings")
+            for r in reqs:
+                try:
+                    req = parse_requirement(r)
+                except ValueError as e:
+                    raise ManifestError(f"{where}: {e}") from e
+                if has_extra_marker(req):
+                    raise ManifestError(f"{where}: {key} lists only what installs without extras ({r!r})")
+            return reqs
+
+        reqs = requirements("requires_dist")
+        by_platform = tuple((p, tuple(requirements(f"requires_dist_{p}"))) for p in ("android", "ios")
+                            if f"requires_dist_{p}" in entry)
         recipe = entry.get("recipe", "")
         if not isinstance(recipe, str):
             raise ManifestError(f"{where}: recipe must be a string")
+        sdist_url = entry.get("sdist_url", "")
+        if not isinstance(sdist_url, str) or (sdist_url and not re.fullmatch(
+                r"https://files\.pythonhosted\.org/packages/[0-9a-f/]+/[A-Za-z0-9_.-]+\.tar\.gz", sdist_url)):
+            raise ManifestError(f"{where}: sdist_url must be a files.pythonhosted.org .tar.gz URL")
         seen.add(canonical(name))
-        wheels.append(PromisedWheel(canonical(name), version, recipe, sdist, tuple(targets), tuple(reqs)))
+        wheels.append(PromisedWheel(canonical(name), version, recipe, sdist, tuple(targets), tuple(reqs),
+                                    by_platform, sdist_url))
     if not wheels:
         raise ManifestError(f"{path}: no [[wheel]] entries")
     return WheelhouseManifest(path, build_tag, wheels, data)
@@ -1199,8 +1219,12 @@ def check_manifest_pins(manifest: WheelhouseManifest, project: Project, uv_lock:
                 errors.append(f"{w.name}: {manifest.path.name} builds {w.version} but pyproject has {r.raw!r}")
         if lock is not None:
             locked = lock.get((w.name, w.version), (None, None))[1]
-            if locked is None:
-                errors.append(f"{w.name} {w.version}: no sdist hash in {uv_lock.name}")
+            device_only = bool(pins) and not any(r.key == w.name for r in project.common)
+            if locked is None and w.sdist_url and device_only:
+                pass  # a device-only pin (no uv.lock entry): sdist_url + sdist_sha256 come from the manifest
+            elif locked is None:
+                errors.append(f"{w.name} {w.version}: no sdist hash in {uv_lock.name}"
+                              + (" (sdist_url is only for device-only pins)" if w.sdist_url else ""))
             elif locked != w.sdist_sha256:
                 errors.append(f"{w.name} {w.version}: sdist_sha256 {w.sdist_sha256} differs from {uv_lock.name} "
                               f"({locked})")
@@ -1344,11 +1368,11 @@ def check_wheels_against_manifest(wheels: list, manifest: WheelhouseManifest, pl
             got = runtime_requirements(ww.requires_dist)
         except ValueError:
             got = None
-        want = runtime_requirements(w.requires_dist)
+        want = runtime_requirements(w.requires_for(target))
         if got is not None and got != want:
             errors.append(f"{ww.filename}: Requires-Dist without extras is "
                           f"{sorted(r for r in ww.requires_dist if not has_extra_marker(parse_requirement(r)))}, "
-                          f"{manifest.path.name} promises {list(w.requires_dist)}")
+                          f"{manifest.path.name} promises {list(w.requires_for(target))}")
         found.setdefault((w.name, target), []).append(ww.filename)
     for (name, target), files in sorted(found.items()):
         if len(files) > 1:
@@ -1547,7 +1571,7 @@ class Wheelhouse:
             for w in self.manifest.wheels:
                 for t in w.targets:
                     df = parse_filename(w.filename(t, self.manifest.build_tag), w.name, "planned")
-                    df.requires_dist = list(w.requires_dist)
+                    df.requires_dist = list(w.requires_for(t))
                     out.setdefault(w.name, []).append(df)
             return out
         for ww in self.wheels:
