@@ -1191,11 +1191,12 @@ def test_welcome_flow_state():
 
     flow = WelcomeFlow()
     assert flow.step_id == "sign_in" and flow.glossary_mode == "balanced"
-    assert flow.next() == "providers" and flow.skipped_sign_in  # Skip for now
+    assert flow.next() == "language_glossary" and flow.skipped_sign_in  # Next without a sign-in
     assert flow.back() == "sign_in"
-    # owner U15: a sign-in keeps step 1 on screen and Next goes through step 2 (the dots count it)
+    # owner U15: a sign-in keeps step 1 on screen; Next goes on (owner 2026-10-16: step 2 "Other
+    # providers" is part of step 1 now)
     assert flow.mark_signed_in() == "sign_in" and flow.signed_in and not flow.skipped_sign_in
-    assert flow.next() == "providers" and flow.next() == "language_glossary"
+    assert flow.next() == "language_glossary"
     flow.select_mode("full")
     flow.select_mode("bogus")
     assert flow.glossary_mode == "full"
@@ -1205,7 +1206,7 @@ def test_welcome_flow_state():
     assert updates == {"auto_glossary_mode": "full", "enable_auto_glossary": True, "append_glossary": True,
                        "append_glossary_auto_load": True, "output_language": "Japanese",
                        "glossary_mode_dialog_shown": True}
-    assert flow.finished and len(STEPS) == 5
+    assert flow.finished and STEPS == ("sign_in", "language_glossary", "permissions", "done")
     assert WelcomeFlow().skip_updates() == {"glossary_mode_dialog_shown": True}
     assert welcome_glossary_updates("off_no_automap") == {
         "auto_glossary_mode": "off_no_automap", "enable_auto_glossary": False, "append_glossary_auto_load": False}

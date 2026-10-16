@@ -19,6 +19,7 @@ variable points at tmp_path and downloads go to 127.0.0.1.
 """
 
 import ast
+import copy
 import hashlib
 import http.server
 import importlib.util
@@ -694,10 +695,12 @@ def test_apply_mobile_run_defaults_puts_the_phone_defaults_into_a_runs_config(en
     assert fresh["manga_settings"]["advanced"] == {"hd_strategy_resize_limit": 1024, "max_workers": 1,
                                                    "panel_max_workers": 1, "unload_models_after_translation": True}
     assert [s.key for s in mm.required_models(fresh)] == [s.key for s in mm.required_models({})]  # the UI's models
-    # a stored value always wins (blank / None count as not stored); other keys stay untouched
+    # a stored value always wins (blank / None count as not stored); other keys stay untouched. A
+    # larger detector / inpainter is kept only when it was picked on the phone (mobile_model_guard)
     stored = {"manga_settings": {"ocr": {"rtdetr_onnx_variant": "detector_int8.onnx", "bubble_detection_enabled": False},
                                  "advanced": {"max_workers": 3, "hd_strategy_resize_limit": None, "x": 1}},
-              "manga_local_inpaint_model": "lama_onnx", "other": "kept"}
+              "manga_local_inpaint_model": "lama_onnx", "other": "kept",
+              mm.MOBILE_MODEL_CHOICE_KEY: {"detector": "detector_int8.onnx", "inpaint": "lama_onnx"}}
     mm.apply_mobile_run_defaults(stored)
     assert stored["manga_settings"]["ocr"] == {"rtdetr_onnx_variant": "detector_int8.onnx",
                                                "bubble_detection_enabled": False}
@@ -706,7 +709,8 @@ def test_apply_mobile_run_defaults_puts_the_phone_defaults_into_a_runs_config(en
     assert stored["other"] == "kept"
     # the local inpainter is stored twice: the run follows the top-level value Settings shows
     assert stored["manga_settings"]["inpainting"]["local_method"] == "lama_onnx"
-    nested_only = {"manga_settings": {"inpainting": {"local_method": "anime_onnx"}}}
+    nested_only = {"manga_settings": {"inpainting": {"local_method": "anime_onnx"}},
+                   mm.MOBILE_MODEL_CHOICE_KEY: {"inpaint": "anime_onnx"}}
     mm.apply_mobile_run_defaults(nested_only)
     assert nested_only["manga_local_inpaint_model"] == "anime_onnx"
     both = {"manga_local_inpaint_model": "aot_onnx", "manga_settings": {"inpainting": {"local_method": "anime_onnx"}}}
@@ -729,7 +733,10 @@ def test_required_models(env, monkeypatch):
     assert keys({}) == ["rtdetr_v4_s_int8", "aot_onnx"]
     cfg = {"manga_settings": {"ocr": {"rtdetr_onnx_variant": "detector_int8.onnx"}},
            "manga_local_inpaint_model": "lama_onnx"}
-    assert keys(cfg) == ["rtdetr_int8", "lama_onnx"]
+    assert keys(cfg) == ["rtdetr_v4_s_int8", "aot_onnx"]  # not picked on the phone (an imported config)
+    cfg[mm.MOBILE_MODEL_CHOICE_KEY] = {"detector": "detector_int8.onnx", "inpaint": "lama_onnx"}
+    assert keys(cfg) == ["rtdetr_int8", "lama_onnx"]  # picked in the phone's Settings
+    assert cfg["manga_settings"]["ocr"]["rtdetr_onnx_variant"] == "detector_int8.onnx"  # (never changed)
     assert keys({"manga_skip_inpainting": True}) == ["rtdetr_v4_s_int8"]
     assert keys({"manga_inpaint_method": "cloud"}) == ["rtdetr_v4_s_int8"]
     assert keys({"manga_settings": {"ocr": {"bubble_detection_enabled": False}}}) == ["aot_onnx"]
@@ -739,6 +746,44 @@ def test_required_models(env, monkeypatch):
     assert keys({"manga_aot_onnx_model_path": str(own)}) == ["rtdetr_v4_s_int8"]  # the user's own file
     missing = mm.missing_models({})
     assert [s.key for s in missing] == ["rtdetr_v4_s_int8", "aot_onnx"]
+
+
+def test_mobile_model_guard_never_runs_an_imported_heavy_model(env, monkeypatch):
+    """Owner 2026-10-16: a phone run defaulted to the 161 MB detector: a config imported from the
+    desktop stores its defaults (detector.onnx / anime_onnx), and a stored value used to win."""
+    desktop_cfg = {"manga_settings": {"ocr": {"rtdetr_onnx_variant": "detector.onnx"},
+                                      "inpainting": {"local_method": "anime_onnx"}},
+                   "manga_local_inpaint_model": "anime_onnx"}
+    _mobile(monkeypatch, False)
+    untouched = copy.deepcopy(desktop_cfg)
+    assert mm.mobile_model_guard(untouched) == [] and untouched == desktop_cfg  # desktop: never changed
+    assert [s.key for s in mm.required_models(desktop_cfg)] == ["rtdetr", "anime_onnx"]
+    _mobile(monkeypatch)
+    assert [s.key for s in mm.required_models(desktop_cfg)] == ["rtdetr_v4_s_int8", "aot_onnx"]
+    run = copy.deepcopy(desktop_cfg)
+    assert mm.mobile_model_guard(run) == [("detector", "detector.onnx", "detector-v4-s_int8.onnx"),
+                                          ("inpaint", "anime_onnx", "aot_onnx")]
+    assert run["manga_settings"]["ocr"]["rtdetr_onnx_variant"] == "detector-v4-s_int8.onnx"
+    assert run["manga_local_inpaint_model"] == run["manga_settings"]["inpainting"]["local_method"] == "aot_onnx"
+    assert mm.mobile_model_guard(run) == []  # idempotent
+    run = mm.apply_mobile_run_defaults(copy.deepcopy(desktop_cfg))
+    assert (run["manga_settings"]["ocr"]["rtdetr_onnx_variant"], run["manga_local_inpaint_model"]) == \
+        ("detector-v4-s_int8.onnx", "aot_onnx")
+    # an export bubble_detector does not know would fall back to detector.onnx: the phone default
+    odd = {"manga_settings": {"ocr": {"rtdetr_onnx_variant": "weird.onnx"}}}
+    assert mm.mobile_model_guard(odd)[0][2] == "detector-v4-s_int8.onnx"
+    # picked in the phone's Settings: kept (a different heavy one synced from the desktop is not)
+    picked = copy.deepcopy(desktop_cfg)
+    picked[mm.MOBILE_MODEL_CHOICE_KEY] = {"detector": "detector.onnx", "inpaint": "lama_onnx"}
+    assert mm.mobile_model_guard(picked) == [("inpaint", "anime_onnx", "aot_onnx")]
+    assert picked["manga_settings"]["ocr"]["rtdetr_onnx_variant"] == "detector.onnx"
+    # the user's own model file on the phone is kept; non-registry methods are never touched
+    own = env / "lama.onnx"
+    own.write_bytes(b"\x08x")
+    mine = {"manga_local_inpaint_model": "anime_onnx", "manga_anime_onnx_model_path": str(own)}
+    assert mm.mobile_model_guard(mine) == [] and mine["manga_local_inpaint_model"] == "anime_onnx"
+    edit = {"manga_local_inpaint_model": "custom-image-edit"}
+    assert mm.mobile_model_guard(edit) == [] and edit["manga_local_inpaint_model"] == "custom-image-edit"
 
 
 # =========================================================================== load / unload

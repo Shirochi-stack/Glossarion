@@ -30,7 +30,8 @@ same code the desktop preview runs):
   io pool; editing waits while a step runs (the session runs one step at a time). A step that
   loads a model not on the device yet (detector / ONNX inpainter) offers its download first.
 * **The selected box** (tap in an edit mode, long-press in Pan) → ``BoxPanel`` floating over the
-  page, at the bottom or the top, away from the box (the page keeps its size): OCR and
+  page, always right under the box (a box at the bottom of the page gets blank room under the page
+  and is scrolled up with its panel; the page keeps its size): OCR and
   Translated tabs, each text edited in place, and Move (exact position / size, nudges). The toolbar's ⋯ holds Share, Import OCR
   (renders imported translations: a job) / Export OCR (``manga_ocr_io`` JSON in the OCR Text
   folder) / the auto-saved OCR files and Files, and the trash: Delete page data (every OCR, clean
@@ -103,6 +104,27 @@ GUTTER = 2  # dp around the editor: the page takes the full width
 #: glides velocity / -ln(friction) further.
 FRICTION = 0.0000135
 DEFAULT_VIEWPORT = (360.0, 480.0)  # dp, until the viewer reports its size
+PANEL_GAP = 6.0  # dp between the selected box's bottom edge and its panel
+PANEL_H = 200.0  # dp: the box panel's height until it reports its own (it only grows)
+#: s a programmatic pan waits after the page frame changed height: InteractiveViewer.pan clamps to
+#: the laid-out child, so a pan sent before Flutter lays out the frame with the panel's room is lost
+PAN_SETTLE = 0.15
+#: The preview toolbar's buttons (display mode, five tools, Delete / Exclude / Clear, ⋯): ten
+#: TOOL_BUTTON-wide buttons and a TOOL_DIVIDER fit the 356 dp a 360 dp phone leaves (GUTTER), so
+#: none scrolls off the right edge (a 48 dp hit target each needed 488 dp).
+TOOL_BUTTON = 34.0
+TOOL_ICON = 20.0
+TOOL_DIVIDER = 4.0
+#: the selected tool: a tonal rounded square inside the button's own 34 dp (no wider pill)
+TOOL_STYLE = ft.ButtonStyle(padding=ft.Padding.all(0), visual_density=ft.VisualDensity.COMPACT,
+                            shape=ft.RoundedRectangleBorder(radius=8),
+                            bgcolor={ft.ControlState.SELECTED: ft.Colors.SECONDARY_CONTAINER,
+                                     ft.ControlState.DEFAULT: ft.Colors.TRANSPARENT})
+#: the display-mode and ⋯ buttons (their own colour: no state background)
+PLAIN_TOOL_STYLE = ft.ButtonStyle(padding=ft.Padding.all(0), visual_density=ft.VisualDensity.COMPACT,
+                                  shape=ft.RoundedRectangleBorder(radius=8))
+TOOL_CONSTRAINTS = ft.BoxConstraints(min_width=TOOL_BUTTON, min_height=TOOL_BUTTON, max_width=TOOL_BUTTON,
+                                     max_height=TOOL_BUTTON)
 
 
 def next_view(view: str) -> str:
@@ -201,21 +223,47 @@ def place_box(box: dict, x: float, y: float, width: float, height: float,
 class PageLayout:
     """The page in the viewer: always the viewer's full width (``page_w`` × ``page_h``), in a content
     frame at least as tall as the viewer with the page centred in it. A page taller than the
-    viewer pans vertically; one that fits does not move until it is zoomed."""
+    viewer pans vertically; one that fits does not move until it is zoomed.
+
+    ``extra``: blank space added under that frame while a box is selected, so the box panel always
+    fits under a box at the bottom of the page (the page itself does not move: it stays centred in
+    the frame without the extra space)."""
     viewport_w: float
     viewport_h: float
     page_w: float
     page_h: float
     content_h: float
+    extra: float = 0.0
 
     @property
     def page_top(self) -> float:
-        return (self.content_h - self.page_h) / 2
+        return (self.content_h - self.extra - self.page_h) / 2
 
     @classmethod
-    def fit(cls, viewport_w: float, viewport_h: float, aspect: float) -> "PageLayout":
+    def fit(cls, viewport_w: float, viewport_h: float, aspect: float, room: float = 0.0) -> "PageLayout":
+        """``room``: dp wanted under the page's bottom edge (the box panel's height and gap)."""
         page_h = viewport_w / aspect if aspect else viewport_h
-        return cls(viewport_w, viewport_h, viewport_w, page_h, max(viewport_h, page_h))
+        base = max(viewport_h, page_h)
+        extra = max(0.0, float(room or 0.0) - (base - page_h) / 2)
+        return cls(viewport_w, viewport_h, viewport_w, page_h, base + extra, extra)
+
+
+def panel_placement(transform: "ViewTransform", box_bottom: float, panel_h: float,
+                    gap: float = 0.0) -> tuple:
+    """Where the box panel goes: always right under the selected box. ``box_bottom`` is the box's
+    bottom edge in content (unzoomed frame) dp. Returns ``(pan_dy, top)``: the vertical pan (view
+    dp, <= 0 moves the page up, clamped to what the content allows) that makes the box's bottom
+    plus the panel fit in the viewer, and the panel's top in the viewer after that pan."""
+    scale = transform.scale or 1.0
+    ty = transform.ty
+    bottom = ty + box_bottom * scale
+    need = bottom + gap + panel_h - transform.viewport_h
+    pan = 0.0
+    if need > 0.5:
+        low = min(0.0, transform.viewport_h - transform.content_h * scale)
+        pan = max(low, ty - need) - ty
+        pan = min(0.0, pan)
+    return (pan, max(0.0, ty + pan + box_bottom * scale + gap))
 
 
 @dataclass
@@ -372,7 +420,9 @@ class EditorTab(MangaTab):
         self.view_transform = ViewTransform()  # the viewer's pan / zoom (from its gestures)
         self.layout: Optional[PageLayout] = None
         self._viewport: Optional[tuple] = None  # the viewer's reported (width, height)
-        self.panel_side = "bottom"  # where the box panel floats over the viewer (away from the box)
+        self.panel_side = "below"  # the box panel always sits right under the selected box
+        self.panel_h = PANEL_H  # the box panel's height (dp; it reports its own, only growing)
+        self._panel_for: Optional[tuple] = None  # (page, box) the panel was last placed for
         self.nudge_step: Optional[int] = None  # the Move tab's step, kept across panels
         # moved / resized translated boxes until the page is rendered again: {index: {"origin": the
         # box's (x, y, w, h) in the render, "hole": cv.Image, "text": cv.Image}} — the text cut from
@@ -393,14 +443,14 @@ class EditorTab(MangaTab):
                                  key="me-strip")
         # the desktop display-mode button: one button, the current state, cycling on each tap
         self.view_emoji = ft.Text(VIEWS[0][1], size=16)
-        self.view_button = ft.IconButton(icon=self.view_emoji, tooltip=VIEWS[0][2],
-                                         size_constraints=HIT_TARGET, key="me-view",
+        self.view_button = ft.IconButton(icon=self.view_emoji, tooltip=VIEWS[0][2], style=PLAIN_TOOL_STYLE,
+                                         size_constraints=TOOL_CONSTRAINTS, padding=0, key="me-view",
                                          on_click=lambda e: self.cycle_view())
         self.view_hint = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                  visible=False, key="me-view-hint")
-        # the selected box's panel floats over the page (top or bottom, away from the box): the page
-        # keeps its size when a box is picked
-        self.panel_holder = ft.Container(left=0, right=0, bottom=0, key="me-box-panel-holder")
+        # the selected box's panel floats over the page, right under the box (``_place_panel``): the
+        # page keeps its size when a box is picked
+        self.panel_holder = ft.Container(left=0, right=0, top=0, key="me-box-panel-holder")
         self.page_label = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, key="me-page-label")
         self.prev_button = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous page", key="me-prev",
                                          size_constraints=HIT_TARGET,
@@ -414,19 +464,23 @@ class EditorTab(MangaTab):
         tool_controls: list = []
         for tool_id, label, icon, reason in TOOLS:
             button = ft.IconButton(icon=getattr(ft.Icons, icon, ft.Icons.EDIT), tooltip=reason or label,
-                                   size_constraints=HIT_TARGET, selected=tool_id == self.tool,
+                                   icon_size=TOOL_ICON, style=TOOL_STYLE, padding=0,
+                                   size_constraints=TOOL_CONSTRAINTS, selected=tool_id == self.tool,
                                    disabled=reason is not None, key=f"me-tool-{tool_id}",
                                    on_click=lambda e, t=tool_id: self.set_tool(t))
             self.tool_buttons[tool_id] = button
             tool_controls.append(button)
         self.exclude_button = ft.IconButton(icon=ft.Icons.BLOCK, tooltip="Exclude from Clean", key="me-exclude",
-                                            size_constraints=HIT_TARGET,
+                                            icon_size=TOOL_ICON, style=TOOL_STYLE, padding=0,
+                                            size_constraints=TOOL_CONSTRAINTS,
                                             on_click=lambda e: self.ctx.spawn(self.toggle_exclude()))
         self.delete_button = ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Delete box", key="me-delete",
-                                           size_constraints=HIT_TARGET,
+                                           icon_size=TOOL_ICON, style=TOOL_STYLE, padding=0,
+                                           size_constraints=TOOL_CONSTRAINTS,
                                            on_click=lambda e: self.ctx.spawn(self.delete_selected()))
         self.clear_button = ft.IconButton(icon=ft.Icons.CLEAR_ALL, tooltip="Clear boxes", key="me-clear-boxes",
-                                          size_constraints=HIT_TARGET,
+                                          icon_size=TOOL_ICON, style=TOOL_STYLE, padding=0,
+                                          size_constraints=TOOL_CONSTRAINTS,
                                           on_click=lambda e: self.ctx.spawn(self.clear_boxes()))
         self.share_item = ft.PopupMenuItem(content="Share or save the translated page", icon=ft.Icons.IOS_SHARE,
                                            key="me-share", on_click=lambda e: self.share_translated())
@@ -435,7 +489,8 @@ class EditorTab(MangaTab):
                                                  icon=ft.Icons.DELETE_FOREVER, key="me-delete-page",
                                                  on_click=lambda e: self.ctx.spawn(self.delete_page_data()))
         self.more_menu = ft.PopupMenuButton(
-            icon=ft.Icons.MORE_VERT, tooltip="More editor actions", key="me-more", size_constraints=HIT_TARGET,
+            icon=ft.Icons.MORE_VERT, tooltip="More editor actions", key="me-more", icon_size=TOOL_ICON,
+            size_constraints=TOOL_CONSTRAINTS, padding=0, style=PLAIN_TOOL_STYLE,
             items=[
                 self.share_item,
                 ft.PopupMenuItem(),
@@ -450,13 +505,13 @@ class EditorTab(MangaTab):
                 ft.PopupMenuItem(),
                 self.delete_page_item,
             ])
-        # the preview toolbar: one row, the display-mode button first and the ⋯ last (pinned), the
-        # tools between them scroll on a narrow phone. Delete box comes right after the tools (the
+        # the preview toolbar: one row, the display-mode button first and the ⋯ last, every button
+        # TOOL_BUTTON wide so all of them fit a 360 dp phone (no scrolling). Delete box comes right after the tools (the
         # desktop's 🗑 Delete Selected), so it is on screen next to them on a phone, ahead of
         # Exclude from Clean (⊘: it only greys the box out)
-        self.tools_row = ft.Row([*tool_controls, ft.VerticalDivider(width=8), self.delete_button,
-                                 self.exclude_button, self.clear_button], scroll=ft.ScrollMode.AUTO, spacing=0,
-                                expand=True, key="me-tools")
+        self.tools_row = ft.Row([*tool_controls, ft.VerticalDivider(width=TOOL_DIVIDER), self.delete_button,
+                                 self.exclude_button, self.clear_button], spacing=0,
+                                alignment=ft.MainAxisAlignment.SPACE_EVENLY, expand=True, key="me-tools")
         self.toolbar = ft.Row([self.view_button, self.tools_row, self.more_menu], spacing=0,
                               vertical_alignment=ft.CrossAxisAlignment.CENTER, key="me-toolbar")
         self.viewer_holder = ft.Container(left=0, top=0, right=0, bottom=0, key="me-viewer-holder")
@@ -726,10 +781,16 @@ class EditorTab(MangaTab):
             self.panel = None
             self.panel_holder.content = None
             self.panel_holder.visible = False
+            self._panel_for = None
+            self._sync_panel_room()
             return
         self.panel_holder.visible = True
-        self._place_panel()
         index = int(self.selected)
+        anchor = (self.image_path, index)
+        ensure = anchor != self._panel_for  # a newly selected box: scroll it and its panel into view
+        self._panel_for = anchor
+        self._sync_panel_room()
+        self._place_panel(ensure=ensure)
         box = self.boxes[index]
         reasons = (self._busy_reason(), self._steps_reason())
         panel = self.panel
@@ -752,25 +813,92 @@ class EditorTab(MangaTab):
             panel.keep_typing(typing)
             panel.set_geometry(box)
         panel._reasons = reasons
+        panel.control.on_size_change = self._on_panel_size  # (the panel is not the positioned child)
         self.panel = panel
         self.ctx.extras["manga_box_panel"] = panel
         self.panel_holder.content = panel.control
 
-    def _place_panel(self) -> str:
-        """The box panel floats at the bottom of the viewer, or at its top when the selected box
-        is shown in the viewer's lower half (it never covers the box being edited)."""
-        side = "bottom"
+    def _sync_panel_room(self) -> None:
+        """The page frame gets (or gives back) the blank room under the page for the box panel."""
         layout = self.layout
-        if layout is not None and self.selected is not None and 0 <= self.selected < len(self.boxes):
-            box = self.boxes[self.selected]
-            scale = self.geometry.scale
-            centre = (float(box.get("y", 0)) + float(box.get("height", 0)) / 2) * scale + layout.page_top
-            _x, y = self.view_transform.to_view(0.0, centre)
-            side = "top" if y > layout.viewport_h / 2 else "bottom"
-        self.panel_side = side
-        self.panel_holder.top = 0 if side == "top" else None
-        self.panel_holder.bottom = 0 if side == "bottom" else None
-        return side
+        if layout is None or getattr(self, "stack", None) is None:
+            return
+        wanted = PageLayout.fit(layout.viewport_w, layout.viewport_h, self._aspect(), self._panel_room())
+        if abs(wanted.content_h - layout.content_h) > 0.5:
+            before = self.view_transform.ty
+            self._apply_layout(layout.viewport_w, layout.viewport_h)
+            # the room went away while the page was panned into it: the viewer follows the clamp
+            # (Flutter does not re-clamp a shrunk child until the next gesture)
+            if self.view_transform.ty - before > 0.5:
+                self._pan_viewer(self.view_transform.ty - before)
+
+    def _box_selected(self) -> bool:
+        return bool(self.image_path) and self.selected is not None and 0 <= self.selected < len(self.boxes)
+
+    def _panel_room(self) -> float:
+        """dp the page frame keeps under the page while a box is selected (the panel and its gap)."""
+        return PANEL_GAP + self.panel_h if self._box_selected() else 0.0
+
+    def _place_panel(self, ensure: bool = False) -> str:
+        """The box panel always sits right under the selected box (never above it, never flipping).
+        ``ensure`` (a newly selected box, the viewer resized by the keyboard, the panel grew): when
+        the box's bottom plus the panel do not fit in the viewer, the page is panned up just enough
+        (the frame has ``_panel_room`` of blank space under the page for a box at its bottom). Pan
+        and zoom, re-renders and typing only move the panel along with the box."""
+        self.panel_side = "below"
+        layout = self.layout
+        if layout is None or not self._box_selected():
+            return self.panel_side
+        box = self.boxes[self.selected]
+        bottom = (float(box.get("y", 0)) + float(box.get("height", 0))) * self.geometry.scale + layout.page_top
+        if ensure:
+            pan, _top = panel_placement(self.view_transform, bottom, self.panel_h, PANEL_GAP)
+            if pan < 0:
+                self.view_transform.ty += pan
+                self.view_transform.clamp()
+                self._pan_viewer(pan)
+        top = max(0.0, self.view_transform.to_view(0.0, bottom)[1] + PANEL_GAP)
+        self.panel_holder.top = round(top, 1)
+        self.panel_holder.bottom = None
+        return self.panel_side
+
+    def _pan_viewer(self, dy: float) -> None:
+        """Pan the viewer by ``dy`` view dp (Flet's ``InteractiveViewer.pan`` translates the matrix
+        in content dp, so the zoom divides it)."""
+        interactive = getattr(self, "interactive", None)
+        if interactive is None or not dy:
+            return
+        scale = self.view_transform.scale or 1.0
+        settle = PAN_SETTLE if getattr(self, "_relayout_pending", False) else 0.0
+        self._relayout_pending = False
+
+        async def run() -> None:
+            try:
+                if settle > 0:  # let Flutter lay out the resized frame first (pan clamps to it)
+                    import asyncio
+
+                    await asyncio.sleep(settle)
+                await interactive.pan(0, dy / scale)
+            except Exception:
+                log.debug("panning the page viewer failed", exc_info=True)
+
+        try:
+            self.ctx.spawn(run())
+        except Exception:
+            log.debug("panning the page viewer failed", exc_info=True)
+
+    def _on_panel_size(self, e: Any) -> None:
+        """The panel reported its height: it only grows (no jumping while typing shrinks a field);
+        a taller panel gets more room under the page and stays on screen."""
+        height = float(getattr(e, "height", 0) or 0)
+        if height <= self.panel_h + 1:
+            return
+        self.panel_h = height
+        if self._viewport is not None and getattr(self, "stack", None) is not None:
+            self._apply_layout(*self._viewport)
+        if self.panel is not None:
+            self._place_panel(ensure=True)
+            push(self.panel_holder)
 
     def deselect(self) -> None:
         """✕ on the box panel (and Back): no box selected."""
@@ -981,7 +1109,7 @@ class EditorTab(MangaTab):
                          bottom=0, key=f"me-image-{self._gen}")
         self.page_image = image
         self.stack = ft.Stack([image, self.canvas], key=f"me-stack-{self._gen}")
-        self.frame = ft.Container(content=self.stack, alignment=ft.Alignment.CENTER, key=f"me-frame-{self._gen}")
+        self.frame = ft.Container(content=self.stack, alignment=ft.Alignment.TOP_CENTER, key=f"me-frame-{self._gen}")
         self.interactive = ft.InteractiveViewer(
             content=self.frame, constrained=False, min_scale=MIN_ZOOM, max_scale=MAX_ZOOM,
             boundary_margin=ft.Margin.all(0), interaction_update_interval=50,
@@ -1020,12 +1148,17 @@ class EditorTab(MangaTab):
 
     def _apply_layout(self, viewport_w: float, viewport_h: float, push_now: bool = True) -> PageLayout:
         """Size the page stack and its frame for a viewer of this size (full width, centred)."""
-        layout = PageLayout.fit(float(viewport_w), float(viewport_h), self._aspect())
+        layout = PageLayout.fit(float(viewport_w), float(viewport_h), self._aspect(), self._panel_room())
+        previous = self.layout
+        if previous is None or abs(previous.content_h - layout.content_h) > 0.5:
+            self._relayout_pending = True  # (``_pan_viewer`` waits for Flutter's layout)
         self.layout = layout
         stack, frame = getattr(self, "stack", None), getattr(self, "frame", None)
         if stack is not None and frame is not None:
             stack.width, stack.height = layout.page_w, layout.page_h
             frame.width, frame.height = layout.viewport_w, layout.content_h
+            # the page keeps its place when the panel's room is added under it
+            frame.padding = ft.Padding.only(top=max(0.0, layout.page_top))
         self.view_transform.resize(layout.viewport_w, layout.viewport_h, layout.viewport_w, layout.content_h)
         if push_now and frame is not None:
             push(frame)
@@ -1041,7 +1174,8 @@ class EditorTab(MangaTab):
             if abs(layout.page_w - self.geometry.display_w) > 0.5:  # (the canvas reports it too)
                 self.geometry.display_w = layout.page_w
                 self._redraw()
-            if self.panel is not None and self._place_panel():
+            if self.panel is not None:  # (the keyboard shrank the viewer: the panel stays on screen)
+                self._place_panel(ensure=True)
                 push(self.panel_holder)
 
     @staticmethod
@@ -1055,13 +1189,18 @@ class EditorTab(MangaTab):
     def _on_view_update(self, e: Any) -> None:
         self.view_transform.update(*self._point(getattr(e, "local_focal_point", None)),
                                    float(getattr(e, "scale", 1.0) or 1.0))
+        if self.panel is not None and self.panel_holder.visible:  # the panel follows the box
+            before = self.panel_holder.top
+            self._place_panel()
+            if before is None or abs(float(self.panel_holder.top or 0) - float(before)) > 0.5:
+                push(self.panel_holder)
 
     def _on_view_end(self, e: Any) -> None:
         self.view_transform.end(*self._point(getattr(e, "velocity", None)))
         self._after_view_change()
 
     def _after_view_change(self) -> None:
-        """Pan / zoom ended: the handles keep their size, the box panel moves off the box."""
+        """Pan / zoom ended: the handles keep their size, the box panel stays under the box."""
         if self.selected is not None:
             self._redraw()
             if self.panel is not None:

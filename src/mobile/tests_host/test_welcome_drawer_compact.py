@@ -1,0 +1,212 @@
+"""Owner 2026-10-16 (phone ~412 dp wide):
+
+1. "The welcome screen page 2 should be merged with page 1, just use a smaller font and better UI
+   arrangement." Step 2 ("Other providers": Choose another model, API key + Save, Ollama / LM Studio)
+   is part of step 1 now; there is no second page or dot for it, and step 1 fits a 360-412 dp phone
+   at 100 % text without scrolling (it still scrolls at large text).
+2. "Users shouldn't need to scroll to the right to see other tools. Make this section more compact by
+   using a smaller font size." The drawer's destination row (Library, Jobs, Glossaries, Tools) never
+   scrolls sideways: one row of equal cells (icon over a LABEL_SMALL label) that fits a 288-330 dp
+   drawer (360-412 dp phones), each cell >= 40 dp tall.
+
+The layout math is an estimate of Flutter's: Roboto advances (lowercase ~0.52 em, capitals ~0.66 em,
+both above Roboto's real averages), the theme's TYPE_SCALE sizes and line heights, Material's 48 dp tap
+target for buttons and the M3 dense text field.
+"""
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+MOBILE_DIR = Path(__file__).resolve().parents[1]
+for entry in (str(MOBILE_DIR / "app"), str(MOBILE_DIR.parent)):
+    if entry not in sys.path:
+        sys.path.insert(0, entry)
+
+ft = pytest.importorskip("flet")
+
+from glossarion_mobile.state.app_state import AppState  # noqa: E402
+from glossarion_mobile.ui import tokens  # noqa: E402
+from glossarion_mobile.ui.responsive import drawer_width  # noqa: E402
+from glossarion_mobile.ui.router import parse_route  # noqa: E402
+from glossarion_mobile.ui.screens.welcome import KEYLESS, SIGN_INS, WelcomeScreen  # noqa: E402
+from glossarion_mobile.ui.screens.welcome_flow import STEPS, WelcomeFlow  # noqa: E402
+from glossarion_mobile.ui.shell import drawer as drawer_mod  # noqa: E402
+from glossarion_mobile.ui.shell.drawer import DESTINATIONS, ChatDrawer  # noqa: E402
+
+PHONES = (360, 412)  # dp widths
+#: phone heights (dp) for those widths: a 360 x 800 phone and the owner's 412 x 915
+HEIGHTS = {360: 800, 412: 915}
+HIT = tokens.SIZES["hit_target"]
+
+
+def walk(root):
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        for name in ("controls", "content"):
+            child = getattr(node, name, None)
+            if isinstance(child, list):
+                stack.extend(reversed([c for c in child if isinstance(c, ft.Control)]))
+            elif isinstance(child, ft.Control):
+                stack.append(child)
+
+
+def by_key(root) -> dict:
+    return {getattr(c, "key", None): c for c in walk(root) if getattr(c, "key", None)}
+
+
+def text_width(text: str, size: float) -> float:
+    return sum((0.66 if ch.isupper() else 0.30 if ch == " " else 0.52) * size for ch in str(text))
+
+
+def style_of(control) -> tokens.TypeStyle:
+    name = getattr(getattr(control, "theme_style", None), "name", None) or "BODY_MEDIUM"
+    return tokens.TYPE_SCALE[name.lower()]
+
+
+def text_height(control, width: float, scale: float = 1.0) -> float:
+    style = style_of(control)
+    lines = max(1, math.ceil(text_width(control.value, style.size * scale) / max(1.0, width)))
+    if control.max_lines:
+        lines = min(lines, control.max_lines)
+    return lines * style.line * scale
+
+
+# ==========================================================================
+# 1. Welcome: one page for sign-in + other providers
+# ==========================================================================
+
+
+def screen(**kw) -> WelcomeScreen:
+    s = WelcomeScreen(parse_route("/welcome"), oauth=object(), navigate=lambda r: None, **kw)
+    s.get_body()
+    return s
+
+
+def test_steps_have_no_separate_providers_page():
+    assert "providers" not in STEPS and STEPS == ("sign_in", "language_glossary", "permissions", "done")
+    flow = WelcomeFlow()
+    assert flow.next() == "language_glossary" and flow.skipped_sign_in
+    s = screen()
+    assert len(s.dots.controls) == len(STEPS) == 4
+    with pytest.raises(ValueError):
+        WelcomeFlow().go("providers")
+
+
+def test_page_one_has_every_former_page_two_action(monkeypatch):
+    chosen, keys_saved, routes = [], [], []
+    s = WelcomeScreen(parse_route("/welcome"), oauth=object(), navigate=routes.append,
+                      on_choose_model=lambda: chosen.append(True), on_api_key=keys_saved.append)
+    s.get_body()
+    rows = by_key(s.page_area.content)
+    for provider, _label in SIGN_INS:
+        if provider != "authds":  # DeepSeek needs the in-app browser (a ReasonChip without it)
+            assert f"welcome-signin-{provider}" in rows
+    for provider, _label in KEYLESS:
+        assert f"welcome-keyless-{provider}" in rows
+    assert s.api_key_field in list(walk(s.page_area.content))
+    s.api_key_field.value = "sk-test"
+    rows["welcome-save-key"].on_click(None)
+    rows["welcome-choose-model"].on_click(None)
+    rows["welcome-local"].on_click(None)
+    assert keys_saved == ["sk-test"] and chosen == [True] and routes == ["settings.endpoints"]
+    # smaller type: no headline on page 1 (it was HEADLINE_SMALL 22 sp over a 96 dp logo)
+    texts = [c for c in walk(s.page_area.content) if isinstance(c, ft.Text)]
+    assert not any(getattr(t, "theme_style", None) == ft.TextThemeStyle.HEADLINE_SMALL for t in texts)
+    images = [c for c in walk(s.page_area.content) if isinstance(c, ft.Image)]
+    assert images and all(i.height <= 64 for i in images)
+
+
+def _page_height(s: WelcomeScreen, width: float, scale: float = 1.0) -> float:
+    """Estimated height of step 1 (its top-level children plus the column spacing)."""
+    column = s.page_area.content
+    total = 0.0
+    for child in column.controls:
+        if isinstance(child, ft.Text):
+            total += text_height(child, width, scale)
+        elif isinstance(child, ft.ResponsiveRow):
+            cells = len(child.controls)
+            per_row = 2  # xs=6: two per row on a phone
+            rows = math.ceil(cells / per_row)
+            total += rows * HIT * max(1.0, scale * 0.9) + (rows - 1) * (child.run_spacing or 0)
+        elif child.key == "welcome-header":
+            logo = child.controls[0].height
+            text_w = width - logo - child.spacing
+            title, tagline = child.controls[1].controls
+            total += max(logo, text_height(title, text_w, scale) + 2 + text_height(tagline, text_w, scale))
+        elif isinstance(child, ft.Row):
+            total += HIT * max(1.0, scale * 0.9)
+        else:
+            raise AssertionError(f"unexpected step-1 child {type(child).__name__}")
+    return total + (len(column.controls) - 1) * column.spacing
+
+
+@pytest.mark.parametrize("width", PHONES)
+def test_page_one_fits_the_phone_without_scrolling(width):
+    s = screen()
+    content_w = width - 32  # the Welcome body's 16 dp padding
+    # chrome: status bar 24, app bar 56, 3-button navigation 48, body padding 32, dots 8, the
+    # Skip/Back/Next row 48 and the body column's 2 x 10 spacing
+    budget = HEIGHTS[width] - (24 + 56 + 48 + 32 + 8 + 48 + 20)
+    height = _page_height(s, content_w)
+    assert height <= budget, (width, height, budget)
+    # the cells are half the row: the longest short label fits its button (8 dp padding each side)
+    cell = (content_w - 8) / 2
+    for _provider, label in SIGN_INS + KEYLESS:
+        short = label.replace("Sign in with ", "")
+        assert text_width(short, tokens.TYPE_SCALE["label_large"].size) + 16 + 2 <= cell, (short, cell)
+    # at 200 % text the page may scroll (it keeps ScrollMode.AUTO) rather than clip
+    assert s.page_area.content.scroll == ft.ScrollMode.AUTO
+
+
+def test_page_one_signed_in_row_takes_the_whole_width():
+    s = screen()
+    s.provider_status["authgem"] = {"email": "gem@example.com"}
+    s.render()
+    grid = by_key(s.page_area.content)["welcome-sign-ins"]
+    cols = {c.content.key: c.col for c in grid.controls if getattr(c.content, "key", None)}
+    assert cols["welcome-signed-authgem"] == {"xs": 12}
+    assert all(v == {"xs": 6} for k, v in cols.items() if k != "welcome-signed-authgem")
+
+
+# ==========================================================================
+# 2. Drawer destinations: no sideways scroll
+# ==========================================================================
+
+
+def test_drawer_destinations_never_scroll_and_fit_360_and_412():
+    drawer = ChatDrawer(state=AppState(), clock=lambda: 200.0)
+    row = by_key(drawer.content)["drawer-destinations"]
+    assert isinstance(row, ft.Row) and row.scroll is None and not row.wrap
+    cells = row.controls
+    assert [c.key for c in cells] == [f"dest-{d[0]}" for d in DESTINATIONS]
+    assert all(c.expand for c in cells)  # equal shares of the row: the row is never wider than the drawer
+    for width in PHONES:
+        inner = drawer_width(width) - 2 * drawer_mod.DEST_ROW_PADDING - (len(cells) - 1) * drawer_mod.DEST_SPACING
+        per_cell = inner / len(cells)
+        for cell in cells:
+            icon, label = cell.content.controls
+            assert label.theme_style == ft.TextThemeStyle.LABEL_SMALL and label.max_lines == 1
+            assert label.overflow == ft.TextOverflow.ELLIPSIS  # 200 % text: an ellipsis, never a scroll
+            need = max(icon.size, text_width(label.value, tokens.TYPE_SCALE["label_small"].size)) + 4
+            assert need <= per_cell, (width, label.value, need, per_cell)
+            height = (2 * drawer_mod.DEST_PAD_V + icon.size + cell.content.spacing
+                      + tokens.TYPE_SCALE["label_small"].line)
+            assert height >= 40
+
+
+def test_drawer_destination_cells_navigate_and_carry_the_jobs_badge():
+    went = []
+    state = AppState()
+    drawer = ChatDrawer(state=state, on_navigate=went.append, clock=lambda: 200.0)
+    for dest_id, _label, _icon, route in DESTINATIONS:
+        drawer.destination_chips[dest_id].on_click(None)
+    assert went == [d[3] for d in DESTINATIONS]
+    state.jobs_badge.value = type(state.jobs_badge.value)(running=3)
+    drawer.refresh()
+    assert drawer.destination_chips["jobs"].badge is not None

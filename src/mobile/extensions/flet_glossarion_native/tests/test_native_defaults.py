@@ -106,6 +106,9 @@ ALL_DEFAULTS = [
     ("update_continued_processing", (1, 2), None),
     ("finish_continued_processing", (True,), None),
     ("save_to_downloads", ("/tmp/a.epub", "a.epub", "application/epub+zip"), None),
+    ("termux_status", (), {"installed": False, "permission": False}),
+    ("termux_run", ("ollama serve",), {"ok": False, "error": "unavailable"}),
+    ("open_termux", (), False),
 ]
 
 
@@ -254,6 +257,42 @@ def test_android_forwards_and_converts_results():
     assert note["progress"] == [3, 10]
     assert note["actions"] == [{"id": "share", "title": "Share"}]
     assert by_name["save_to_downloads"][1] >= 600  # large exports get a long timeout
+
+
+def test_termux_calls_forward_on_android_and_match_the_platform_side():
+    native = GlossarionNative()
+    attach(native, ft.PagePlatform.ANDROID)
+    calls = recording_client(native, results={
+        "termux_status": {"installed": True, "permission": False},
+        "termux_run": {"ok": False, "error": "permission", "requested": True},
+        "open_termux": True,
+    })
+    assert run(native.termux_status()) == {"installed": True, "permission": False}
+    assert run(native.termux_run("ollama serve", label="Ollama", background=True)) == {
+        "ok": False, "error": "permission", "requested": True}
+    assert run(native.open_termux()) is True
+    by_name = {name: args for name, args, _timeout in calls}
+    assert by_name["termux_run"] == {"command": "ollama serve", "label": "Ollama", "background": True}
+    # a non-dict answer is never passed on as success
+    recording_client(native, results={"termux_run": "weird"})
+    assert run(native.termux_run("ls")) == {"ok": False, "error": "unavailable"}
+
+    dart = DART_SERVICE.read_text(encoding="utf-8")
+    kotlin = KOTLIN_PLUGIN.read_text(encoding="utf-8")
+    for method in ("termux_status", "termux_run", "open_termux"):
+        assert f"case '{method}':" in dart and f'"{method}" ->' in kotlin, method
+    for text in ('"com.termux.RUN_COMMAND"', '"com.termux.app.RunCommandService"', "RUN_COMMAND_ARGUMENTS",
+                 '"com.termux.permission.RUN_COMMAND"', "requestPermissions", "getLaunchIntentForPackage"):
+        assert text in kotlin, text
+    root = ET.parse(MANIFEST).getroot()
+    permissions = {p.get(ANDROID_NS + "name") for p in root.findall("uses-permission")}
+    assert "com.termux.permission.RUN_COMMAND" in permissions
+    packages = {p.get(ANDROID_NS + "name") for q in root.findall("queries") for p in q.findall("package")}
+    assert "com.termux" in packages
+    import tomllib
+
+    pyproject = tomllib.loads((ROOT.parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["flet"]["android"]["permission"]["com.termux.permission.RUN_COMMAND"] is True
 
 
 def test_reserved_job_service_id_is_rejected():

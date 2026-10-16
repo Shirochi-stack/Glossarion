@@ -29,7 +29,8 @@ import mobile_runtime
 BASE_URL = "http://127.0.0.1:11434"
 #: Glossarion Mobile cannot install or start Ollama: it uses an Ollama server on the user's PC
 #: (``OLLAMAPULL_BASE_URL``), where models are pulled through the same API.
-MOBILE_HINT = ("ollamapull/ on mobile uses the Ollama server on your PC: start Ollama there (with OLLAMA_HOST=0.0.0.0 "
+MOBILE_HINT = ("ollamapull/ on mobile uses Ollama in Termux on the phone (Model manager › Ollama › Set up in Termux) "
+               "or the Ollama server on your PC: start Ollama there (with OLLAMA_HOST=0.0.0.0 "
                "so the phone can reach it) and set its address in Settings › Local AI")
 
 
@@ -62,6 +63,59 @@ def native_model_name(model_name: str) -> str:
     if not name:
         raise OllamaPullError("Enter an Ollama model after 'ollamapull/'.")
     return name
+
+
+_HF_PART = r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}"
+_HF_RE = re.compile(rf"^hf\.co/({_HF_PART})/({_HF_PART})(?::([A-Za-z0-9][A-Za-z0-9._-]{{0,63}}))?$")
+_LIBRARY_RE = re.compile(r"^(?:[a-z0-9][a-z0-9._-]{0,63}/){0,2}[a-z0-9][a-z0-9._-]{0,95}"
+                         r"(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$")
+
+
+def normalize_pull_name(text: str) -> str:
+    """The name ``ollama pull`` / ``/api/pull`` takes for what a user typed or pasted.
+
+    Accepts an Ollama library tag (``qwen3.5:2b``, ``user/model:tag``), a Hugging Face GGUF repo in
+    Ollama's syntax (``hf.co/<user>/<repo>[:<quant>]``), a ``huggingface.co`` link to one, or a bare
+    ``<user>/<repo>-GGUF[:<quant>]`` id. An ``ollamapull/`` prefix is dropped. Raises
+    ``OllamaPullError`` with a short reason for anything else."""
+    value = str(text or "").strip()
+    if value.lower().startswith("ollamapull/"):
+        value = value[len("ollamapull/"):].strip()
+    link = False
+    for scheme in ("https://", "http://"):
+        if value.lower().startswith(scheme):
+            value = value[len(scheme):]
+            link = True
+    if link and not value.lower().startswith(("huggingface.co/", "www.huggingface.co/", "hf.co/")):
+        raise OllamaPullError("Only Hugging Face links can be pulled; enter other models as name:tag.")
+    if not value:
+        raise OllamaPullError("Enter an Ollama model tag or a Hugging Face id.")
+    if any(ch.isspace() for ch in value):
+        raise OllamaPullError("A model name cannot contain spaces.")
+    lowered = value.lower()
+    for host in ("www.huggingface.co/", "huggingface.co/", "hf.co/"):
+        if lowered.startswith(host):
+            value = "hf.co/" + value[len(host):]
+            break
+    else:
+        repo = value.split(":", 1)[0]
+        if repo.count("/") == 1 and repo.lower().endswith("-gguf"):
+            value = "hf.co/" + value
+    if value.startswith("hf.co/"):
+        # a pasted page link: hf.co/<user>/<repo>/tree/main, /blob/main/<file>.gguf ...
+        head, _, quant = value.partition(":")
+        parts = head.split("/")
+        if len(parts) > 3:
+            head = "/".join(parts[:3])
+        value = f"{head}:{quant}" if quant else head
+        if not _HF_RE.match(value):
+            raise OllamaPullError("A Hugging Face id looks like hf.co/<user>/<repo> or hf.co/<user>/<repo>:<quant>.")
+        return value
+    value = value.lower()  # library names and tags are lowercase (ollama.com/library)
+    if not _LIBRARY_RE.match(value):
+        raise OllamaPullError("An Ollama model looks like name:tag (for example qwen3.5:2b) "
+                              "or hf.co/<user>/<repo>:<quant>.")
+    return value
 
 
 def load_settings() -> dict[str, Any]:

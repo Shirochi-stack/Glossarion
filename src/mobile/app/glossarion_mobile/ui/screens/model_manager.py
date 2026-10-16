@@ -14,8 +14,12 @@ Every edit is saved at once through ``ModelCatalogService`` → ``model_catalog_
 saves on "Save"; tombstones are computed the same way, so removed models never come back from a
 passive catalog merge).
 
-**Custom prefixes**: the ``custom_prefix_routes`` table (prefix → base URL → endpoint type) with an
-add/edit sheet validated like the desktop table.
+**Custom prefixes** (tab "Prefixes"): the ``custom_prefix_routes`` table (prefix → base URL → endpoint
+type) with an add/edit sheet validated like the desktop table.
+
+**Ollama** (``ollama_panel.OllamaPanel``): Ollama in Termux on this phone (one-tap RUN_COMMAND setup or
+copy + open Termux), downloads of any Ollama tag / Hugging Face GGUF id with progress, and the editable
+model presets (Prefs data; the Qwen3.5 0.8B/2B/4B/9B defaults).
 
 ``ModelsKeysFeature.install(app)`` wires the catalog service, the ModelSheet environment and the
 screens for ``settings.models``, ``settings.keys``, ``settings.keys.pool`` and
@@ -54,6 +58,8 @@ log = logging.getLogger("glossarion.models")
 SCREEN_ROUTES = ("settings.models", "settings.keys", "settings.keys.pool", "settings.endpoints")
 #: Settings home pages this feature ships (merged into ``SettingsHome.implemented`` once installed).
 IMPLEMENTED_ROUTES = frozenset(("settings.models", "settings.keys", "settings.endpoints"))
+#: (value, label) of the page's tabs; "ollama" is ``ollama_panel.OllamaPanel`` (Termux, pulls, presets).
+TABS = (("models", "Models"), ("auths", "Sign-ins"), ("prefixes", "Prefixes"), ("ollama", "Ollama"))
 READY_TEXT = "Ready to poll online catalogs\n✓ marks models confirmed within 7 days"
 RESET_TEXT = ("Replace the current list with the built-in default model catalog?\n\n"
               "Any custom models you added will be lost.")
@@ -110,8 +116,17 @@ class ModelManagerScreen(Screen):
                  run_io: Optional[Callable[..., Any]] = None, tablet: bool = False,
                  is_top: Optional[Callable[[Any], bool]] = None,
                  signed_in_keys: Optional[Callable[[], Any]] = None, sign_in: Optional[Callable[..., Any]] = None,
-                 use_model: Optional[Callable[[str], Any]] = None) -> None:
+                 use_model: Optional[Callable[[str], Any]] = None, prefs: Any = None, native: Any = None,
+                 copy_text: Optional[Callable[[str], Any]] = None,
+                 launch_url: Optional[Callable[[str], Any]] = None, ollama_pulls: Any = None) -> None:
         super().__init__(match)
+        # the Ollama tab (Termux on this phone, pulls, presets): ollama_panel.OllamaPanel, built when first shown
+        self.prefs = prefs
+        self.native = native
+        self.copy_text = copy_text
+        self.launch_url = launch_url
+        self.ollama_pulls = ollama_pulls  # the feature's PullManager: downloads outlive this screen
+        self.ollama: Any = None
         # U11 item 3, the Sign-ins tab: who is signed in, sign in / accounts, use the recommended model
         self.signed_in_keys = signed_in_keys
         self.sign_in = sign_in
@@ -208,10 +223,11 @@ class ModelManagerScreen(Screen):
 
     def build_body(self) -> ft.Control:
         self._capture_loop()
+        # Four short segments without the selected check fit a 360 dp phone; the row scrolls instead of
+        # overflowing at large text scales.
         self.tabs = ft.SegmentedButton(
-            segments=[ft.Segment(value="models", label="Models"), ft.Segment(value="auths", label="Sign-ins"),
-                      ft.Segment(value="prefixes", label="Custom prefixes")],
-            selected=[self.tab], on_change=self._on_tab,
+            segments=[ft.Segment(value=value, label=label) for value, label in TABS],
+            selected=[self.tab], on_change=self._on_tab, show_selected_icon=False,
         )
         self.search = ft.TextField(hint_text="Search models", prefix_icon=ft.Icons.SEARCH, dense=True,
                                    on_change=lambda e: self._on_search_change(e.control.value or ""),
@@ -255,13 +271,16 @@ class ModelManagerScreen(Screen):
                                                key="mm-add")
         self.core_notice = ft.Container(visible=not self.catalog.core.available, content=ReasonChip(
             reason="Editing needs the model catalog core", detail=mc.CORE_MISSING), padding=ft.Padding.only(left=12))
+        self.ollama_box = ft.Container(visible=False, expand=True, key="mm-ollama")
         self.body_column = ft.Column([
-            ft.Container(content=self.tabs, padding=ft.Padding.symmetric(horizontal=12, vertical=6)),
+            ft.Container(content=ft.Row([self.tabs], scroll=ft.ScrollMode.AUTO),
+                         padding=ft.Padding.symmetric(horizontal=12, vertical=6)),
             self.core_notice,
             ft.Container(content=self.models_header, padding=ft.Padding.symmetric(horizontal=12)),
             self.state_box,
             self.rows.control,
             self.prefix_list,
+            self.ollama_box,
             ft.Container(content=ft.Row([self.add_fab], alignment=ft.MainAxisAlignment.END),
                          padding=ft.Padding.only(right=16, bottom=16)),
         ], expand=True, spacing=4)
@@ -293,6 +312,8 @@ class ModelManagerScreen(Screen):
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+        if self.ollama is not None:
+            self.ollama.dispose()
         for task in (self._search_task, self._stale_task, self._slow_task):
             if task is not None and hasattr(task, "cancel"):
                 task.cancel()
@@ -496,16 +517,20 @@ class ModelManagerScreen(Screen):
         self.auth_panel.visible = self.tab == "auths"
         if self.tab == "auths":
             self.auth_panel.controls = self._auth_rows(snap)
+        ollama_tab = self.tab == "ollama"
         self.models_header.visible = models_tab
         self.rows.control.visible = models_tab
-        self.prefix_list.visible = not models_tab
-        self.add_fab.content = "Add model" if models_tab else "Add prefix"
+        self.prefix_list.visible = self.tab == "prefixes"
+        self.ollama_box.visible = ollama_tab
+        self.add_fab.content = "Add model" if models_tab else ("Add preset" if ollama_tab else "Add prefix")
         self._sync_header(snap)
         list_changed = False
         if models_tab and sync_list:
             list_changed = self._sync_list(snap)
-        elif not models_tab:
+        elif self.tab == "prefixes":
             self.prefix_list.controls = self._prefix_rows()
+        elif ollama_tab:
+            self._show_ollama()
         self._sync_state(snap)
         if not push:
             return
@@ -513,8 +538,30 @@ class ModelManagerScreen(Screen):
             _push(self.body_column)
         elif models_tab:
             _push(self.models_header, self.state_box, self.rows.control if list_changed else None)
+        elif ollama_tab:
+            _push(self.state_box)
         else:
             _push(self.state_box, self.prefix_list)
+
+    def ollama_panel(self) -> Any:
+        """The Ollama tab's panel, built on first use."""
+        if self.ollama is None:
+            from glossarion_mobile.ui.screens.ollama_panel import OllamaPanel
+
+            def add(model: str) -> None:
+                if model not in self.catalog.snapshot.models:
+                    self._edit(self.catalog.add_model(model))
+
+            self.ollama = OllamaPanel(prefs=self.prefs, native=self.native, page=self.page, copy_text=self.copy_text,
+                                      use_model=self.use_model, add_model=add, notify=self._toast,
+                                      spawn=self.spawn, run_io=self.run_io, launch_url=self.launch_url,
+                                      pulls=self.ollama_pulls)
+            self.ollama_box.content = self.ollama.build()
+        return self.ollama
+
+    def _show_ollama(self) -> None:
+        panel = self.ollama_panel()
+        panel.did_show()
 
     def _sync_header(self, snap: CatalogSnapshot) -> None:
         self.polled_chip.selected = snap.hide_unpolled
@@ -730,7 +777,7 @@ class ModelManagerScreen(Screen):
         self.set_tab(selected[0] if selected else "models")
 
     def set_tab(self, tab: str) -> None:
-        self.tab = tab if tab in ("models", "auths", "prefixes") else "models"
+        self.tab = tab if tab in dict(TABS) else "models"
         self.tabs.selected = [self.tab]
         self._render_now(whole=True)
 
@@ -913,6 +960,8 @@ class ModelManagerScreen(Screen):
     def open_add(self) -> Any:
         if self.tab == "prefixes":
             return self.open_prefix_editor(None)
+        if self.tab == "ollama":
+            return self.ollama_panel().open_editor(None)
         field = ft.TextField(hint_text="Type a model ID to add…", autofocus=True, dense=True,
                              on_submit=lambda e: submit())
 
@@ -1174,6 +1223,9 @@ class ModelsKeysFeature:
         self.store = getattr(app, "config_store", None)
         self.prefs = getattr(app, "prefs", None)
         self.catalog = ModelCatalogService(self.store, run_io=self.run_io, post=self._post)
+        from glossarion_mobile.services.ollama_termux import PullManager
+
+        self.ollama_pulls = PullManager(run_io=self.run_io)  # Model manager › Ollama downloads (any visit)
         from glossarion_mobile.ui.screens.endpoints import run_in_run_env
         from glossarion_mobile.ui.screens.keys import KeyBackend, KeysController
 
@@ -1406,7 +1458,11 @@ class ModelsKeysFeature:
             screen: Any = ModelManagerScreen(match, catalog=self.catalog, page=self.page, notify=notify,
                                              spawn=self.spawn, run_io=self.run_io, tablet=self._tablet(),
                                              is_top=self._is_shown, signed_in_keys=self.signed_in_keys,
-                                             sign_in=self.sign_in, use_model=self.use_model)
+                                             sign_in=self.sign_in, use_model=self.use_model, prefs=self.prefs,
+                                             native=getattr(self.app, "native", None),
+                                             copy_text=getattr(self.app, "_copy_text", None),
+                                             launch_url=getattr(getattr(self.app, "opener", None), "launch", None),
+                                             ollama_pulls=self.ollama_pulls)
         elif match.name in ("settings.keys", "settings.keys.pool"):
             from glossarion_mobile.ui.screens.keys import KeysScreen
             from glossarion_mobile.ui.sheets.model_sheet import sheet_env

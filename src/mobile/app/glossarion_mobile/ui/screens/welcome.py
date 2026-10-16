@@ -1,21 +1,21 @@
-"""First-run Welcome (``/welcome``, UI_SPEC §4.17): 5 steps, re-runnable from About.
+"""First-run Welcome (``/welcome``, UI_SPEC §4.17): 4 steps, re-runnable from About.
 
-1. **Welcome · Sign in** - ChatGPT, Claude, Gemini and Grok side by side (U11 item 1: no
-   provider is pushed; LoginSheet through the OAuthBridge, Grok shows its device code). After a
-   sign-in the provider's models are polled (``ModelCatalogService.refresh``): ChatGPT keeps the
-   default ``authgpt/gpt-6-luna`` while the provider still lists it, otherwise (and for the other
-   providers) the model becomes that provider's most cost-efficient one
-   (``model_catalog.recommended_model``: Sonnet, the newest Flash, the newest Grok); "Change
-   model" opens the ModelSheet on that provider's models. "Use an API key or a local model" goes
-   to step 2; "Skip for now" moves on.
-2. **Other providers** - choose another model (ModelSheet), paste an API key (the desktop main
-   key field, ``api_key``), or set up a local Ollama / LM Studio host (Settings › Endpoints).
-3. **Target language and glossary mode** - the desktop first-run "Choose Your
+1. **Welcome · Sign in** (one page; the former step 2 "Other providers" merged in, owner 2026-10-16) -
+   ChatGPT, Claude, Gemini, Grok, NanoGPT and DeepSeek two per row (U11 item 1: no provider is pushed;
+   LoginSheet through the OAuthBridge, Grok shows its device code). After a sign-in the provider's models
+   are polled (``ModelCatalogService.refresh``): ChatGPT keeps the default ``authgpt/gpt-6-luna`` while
+   the provider still lists it, otherwise (and for the other providers) the model becomes that
+   provider's most cost-efficient one (``model_catalog.recommended_model``: Sonnet, the newest Flash,
+   the newest Grok); "Change model" opens the ModelSheet on that provider's models. Below them: the
+   keyless routes, then your own API key (the desktop main key field, ``api_key``), "Choose another
+   model" (ModelSheet) and a local Ollama / LM Studio host (Settings › Endpoints). Next moves on
+   (without a sign-in it counts as skipped).
+2. **Target language and glossary mode** - the desktop first-run "Choose Your
    Glossary Mode" cards (same eight modes, copy and ``balanced`` preselected) and
    the target language (``output_language``).
-4. **Permissions** - notifications, battery optimisation (Android), the iOS
+3. **Permissions** - notifications, battery optimisation (Android), the iOS
    background limits note.
-5. **Done** - try-chips: Paste text to translate · Import a book · Open Library.
+4. **Done** - try-chips: Paste text to translate · Import a book · Open Library.
 
 Finishing writes what the desktop welcome's final "Get Started" writes for the
 glossary page (``welcome_glossary_updates``) plus ``glossary_mode_dialog_shown``;
@@ -61,8 +61,9 @@ SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude
 OTHER_SIGN_INS = SIGN_INS[1:]
 #: Step 1 keyless routes (U13): (provider, button label). Their models are polled before the user picks one.
 #: ocz/ (OpenCode Zen) runs through the desktop OpenCode CLI and cannot run on a phone.
-KEYLESS = (("authchatgpt", "ChatGPT web chat (authchatgpt/, no sign-in)"),
-           ("authnd", "NVIDIA Build free models (authnd/, no sign-in)"))
+KEYLESS = (("authchatgpt", "ChatGPT web chat"), ("authnd", "NVIDIA free models"))
+#: the Halgakos logo beside the step-1 title (was 96 dp above it)
+WELCOME_LOGO = 56
 #: output-token slider range (the mobile default is 16,384; the field takes any value)
 TOKEN_SLIDER = (1024, 131072)
 #: batch-size slider range; the field takes any larger value
@@ -173,35 +174,66 @@ class WelcomeScreen(Screen):
             except Exception:
                 self.oauth = None
 
+    @staticmethod
+    def _section(text: str) -> ft.Control:
+        return ft.Text(text, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, color=ft.Colors.PRIMARY)
+
+    @staticmethod
+    def _note(text: str, **kw: Any) -> ft.Control:
+        return ft.Text(text, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT, **kw)
+
     def _page_sign_in(self) -> ft.Control:
+        """Step 1, one page (owner 2026-10-16: the former step 2 "Other providers" merged in): a compact
+        header, the sign-ins two per row, the keyless routes, then your own API key / another model /
+        a local host. Small type so it fits a 360-412 dp phone at 100 % text; it scrolls at large text."""
         self._ensure_oauth()
         return ft.Column(
             [
-                ft.Image(src=HALGAKOS_ASSET, width=96, height=96),
-                ft.Text(STEP_TITLES["sign_in"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
-                ft.Text(TAGLINE, theme_style=ft.TextThemeStyle.BODY_MEDIUM, text_align=ft.TextAlign.CENTER),
-                ft.Text("Sign in with an AI subscription you already have (no API key needed). Glossarion checks its "
-                        "models and picks its most cost-efficient one; you can change it any time.",
-                        theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
-                        text_align=ft.TextAlign.CENTER),
-                *[self._sign_in_row(provider, label) for provider, label in SIGN_INS],
-                ft.Text("No account needed", theme_style=ft.TextThemeStyle.TITLE_SMALL),
-                *[self._keyless_row(provider, label) for provider, label in KEYLESS],
-                ft.TextButton(content="Use an API key or a local model", on_click=lambda e: self.go("providers")),
-                ft.TextButton(content="Skip for now", on_click=lambda e: self.next()),
+                ft.Row([ft.Image(src=HALGAKOS_ASSET, width=WELCOME_LOGO, height=WELCOME_LOGO),
+                        ft.Column([ft.Text(STEP_TITLES["sign_in"], theme_style=ft.TextThemeStyle.TITLE_LARGE),
+                                   self._note(TAGLINE)], spacing=2, tight=True, expand=True)],
+                       spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="welcome-header"),
+                self._section("Sign in with an AI subscription · no API key needed"),
+                self._note("Glossarion checks its models and picks its most cost-efficient one; "
+                           "you can change it any time."),
+                ft.ResponsiveRow([self._sign_in_row(provider, label) for provider, label in SIGN_INS],
+                                 spacing=8, run_spacing=4, key="welcome-sign-ins"),
+                self._section("No account needed"),
+                ft.ResponsiveRow([self._keyless_row(provider, label) for provider, label in KEYLESS],
+                                 spacing=8, run_spacing=4, key="welcome-keyless"),
+                self._note("authchatgpt/ and authnd/: no sign-in"),
+                self._section("Your own API key or a local model"),
+                ft.Row([ft.Container(content=self.api_key_field, expand=True),
+                        ft.TextButton(content="Save", tooltip="Save API key", on_click=lambda e: self._save_key(),
+                                      key="welcome-save-key")],
+                       spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="welcome-api-key"),
+                ft.Row([ft.TextButton(content="Choose another model", on_click=lambda e: self._choose_model(),
+                                      key="welcome-choose-model"),
+                        self._local_control()], wrap=True, spacing=4, run_spacing=0),
             ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=10,
+            spacing=6,
             scroll=ft.ScrollMode.AUTO,
         )
 
+    def _local_control(self) -> ft.Control:
+        if self.navigate is not None:
+            return ft.TextButton(content="Ollama / LM Studio", tooltip="Set up Ollama / LM Studio on your network",
+                                 on_click=lambda e: self._go("settings.endpoints"), key="welcome-local")
+        return ft.Row([ft.Text("Ollama / LM Studio", theme_style=ft.TextThemeStyle.BODY_SMALL),
+                       ReasonChip(reason="Settings › Endpoints")], wrap=True, key="welcome-local")
+
     def _sign_in_row(self, provider: str, label: str) -> ft.Control:
+        """One sign-in cell: half the row (two per row on a phone); signed in, the whole row."""
+        control = self._sign_in_control(provider, label)
+        return ft.Container(content=control, col={"xs": 12 if provider in self.provider_status else 6})
+
+    def _sign_in_control(self, provider: str, label: str) -> ft.Control:
+        short = label.replace("Sign in with ", "")
         done = self.provider_status.get(provider) if provider in self.provider_status else None
         if provider in self.provider_status:
             who = done.get("email") or done.get("name") or ""
-            name = label.replace("Sign in with ", "")
             row: list[ft.Control] = [ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.PRIMARY),
-                                     ft.Text(f"{name} signed in" + (f" · {who}" if who else ""))]
+                                     ft.Text(f"{short} signed in" + (f" · {who}" if who else ""))]
             if self.on_use_provider is not None or self.on_choose_model is not None:
                 row.append(ft.TextButton(content="Change model", key=f"welcome-use-{provider}",
                                          on_click=lambda e, p=provider: self.use_provider(p)))
@@ -216,26 +248,34 @@ class WelcomeScreen(Screen):
 
             available, reason = webview_bridge.availability()
             if not available:
-                return ft.Row([ft.Text(label), ReasonChip(reason="Needs the in-app browser", detail=reason)],
+                return ft.Row([ft.Text(short, theme_style=ft.TextThemeStyle.BODY_SMALL),
+                               ReasonChip(reason="Needs the in-app browser", detail=reason)],
                               wrap=True, key="welcome-signin-authds")
-            return ft.OutlinedButton(content=label, on_click=lambda e: self.open_deepseek_sign_in(),
-                                     key="welcome-signin-authds")
+            return self._cell_button(short, label, lambda e: self.open_deepseek_sign_in(), "welcome-signin-authds")
         if self.oauth is None:
-            return ft.Row([ft.Text(label), ReasonChip(reason="Sign-in unavailable in this build")], wrap=True)
-        return ft.OutlinedButton(content=label, on_click=lambda e, p=provider: self.open_sign_in(p),
-                                 key=f"welcome-signin-{provider}")
+            return ft.Row([ft.Text(short, theme_style=ft.TextThemeStyle.BODY_SMALL),
+                           ReasonChip(reason="Sign-in unavailable in this build")], wrap=True)
+        return self._cell_button(short, label, lambda e, p=provider: self.open_sign_in(p),
+                                 f"welcome-signin-{provider}")
+
+    @staticmethod
+    def _cell_button(text: str, tooltip: str, on_click: Callable[[Any], Any], key: str) -> ft.Control:
+        """A half-row button: the provider's name only (the section title says what it does)."""
+        return ft.Row([ft.OutlinedButton(content=ft.Text(text, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                         tooltip=tooltip, on_click=on_click, key=key, expand=True,
+                                         style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8)))])
 
     def _keyless_row(self, provider: str, label: str) -> ft.Control:
         note = self.model_notes.get(provider)
-        lines: list[ft.Control] = [ft.OutlinedButton(content=label, key=f"welcome-keyless-{provider}",
-                                                     on_click=lambda e, p=provider: call_handler(self.use_keyless, p))]
+        lines: list[ft.Control] = [self._cell_button(label, label, lambda e, p=provider: call_handler(
+            self.use_keyless, p), f"welcome-keyless-{provider}")]
         if provider in self.keyless_chosen:
             lines.append(ft.TextButton(content="Change model", key=f"welcome-use-{provider}",
                                        on_click=lambda e, p=provider: self.use_provider(p)))
         if note:
             lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                  key=f"welcome-model-{provider}"))
-        return ft.Column(lines, spacing=2, tight=True)
+        return ft.Container(content=ft.Column(lines, spacing=2, tight=True), col={"xs": 6})
 
     async def use_keyless(self, provider: str) -> None:
         """A keyless route: poll its models first, then use its recommended model (authchatgpt/: auto; authnd/: the highest
@@ -420,29 +460,6 @@ class WelcomeScreen(Screen):
         field.on_change = from_field
         return ft.Row([slider, field], spacing=8, key="welcome-batch")
 
-    def _page_providers(self) -> ft.Control:
-        local: ft.Control
-        if self.navigate is not None:
-            local = ft.OutlinedButton(content="Set up Ollama / LM Studio on your network",
-                                      on_click=lambda e: self._go("settings.endpoints"), key="welcome-local")
-        else:
-            local = ft.Row([ft.Text("Ollama / LM Studio on your network"),
-                            ReasonChip(reason="Settings › Endpoints")], wrap=True)
-        return ft.Column(
-            [
-                ft.Text(STEP_TITLES["providers"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
-                ft.Text("Use another model with your own API key, or a model on your own network.",
-                        theme_style=ft.TextThemeStyle.BODY_MEDIUM),
-                ft.FilledTonalButton(content="Choose another model", on_click=lambda e: self._choose_model()),
-                self.api_key_field,
-                ft.TextButton(content="Save API key", on_click=lambda e: self._save_key()),
-                ft.Text("Local", theme_style=ft.TextThemeStyle.TITLE_SMALL),
-                local,
-            ],
-            spacing=10,
-            scroll=ft.ScrollMode.AUTO,
-        )
-
     def _mode_card(self, card: tuple) -> ft.Control:
         value, emoji, title, subtitle, features, rec = card
         selected = value == self.flow.glossary_mode
@@ -571,7 +588,6 @@ class WelcomeScreen(Screen):
     def _page(self) -> ft.Control:
         return {
             "sign_in": self._page_sign_in,
-            "providers": self._page_providers,
             "language_glossary": self._page_language_glossary,
             "permissions": self._page_permissions,
             "done": self._page_done,

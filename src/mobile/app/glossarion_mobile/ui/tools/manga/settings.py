@@ -631,7 +631,7 @@ class SettingsTab(MangaTab):
         variants = manager.detector_variants() if manager.available and current == "rtdetr_onnx" else []
         if variants:
             # the desktop dialog's "ONNX Export" combo (the phone default is the small INT8 export)
-            variant = str(svc.effective_setting(cfg, svc.P_RTDETR_VARIANT, "") or "")
+            variant = str(svc.effective_setting(svc.run_model_view(cfg), svc.P_RTDETR_VARIANT, "") or "")
             controls.append(ft.Text("ONNX export", theme_style=ft.TextThemeStyle.TITLE_SMALL))
             for selector, title, description, size in variants:
                 selected = selector == variant
@@ -654,6 +654,7 @@ class SettingsTab(MangaTab):
     def _select_variant(self, selector: str) -> None:
         """The RT-DETR ONNX export the runs load (its download row follows)."""
         self.set(svc.P_RTDETR_VARIANT, selector)
+        self.set_many(svc.model_choice_updates("detector", selector))  # kept on the phone's runs
         self.refresh()
 
     def _select_detector(self, value: str) -> None:
@@ -943,12 +944,15 @@ class SettingsTab(MangaTab):
             if reason:
                 self.ctx.say(reason)
                 return False
+        picked = local is not None
         if method == "local" and local is None:
             local = svc.current_inpaint_choice(self.config())[1]
             if svc.value_reason(svc.K_LOCAL_MODEL, local):
-                local = "anime_onnx"
+                local = svc.phone_local_model()
         for key, value in svc.inpaint_choice_updates(method, local).items():
             self.set(key, value)
+        if picked and method == "local" and local:
+            self.set_many(svc.model_choice_updates("inpaint", local))  # kept on the phone's runs
         if local == "custom-image-edit" and method == "local":
             endpoint = str(self.config().get(svc.K_EDIT_ENDPOINT) or "")
             self.set(svc.K_USE_EDIT_ENDPOINT, bool(endpoint))

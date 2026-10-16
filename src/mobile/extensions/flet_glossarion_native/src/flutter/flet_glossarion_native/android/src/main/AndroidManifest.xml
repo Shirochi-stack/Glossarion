@@ -19,6 +19,11 @@
     picked folder (resolveContentProvider) and keeps third-party document
     providers reachable after a reboot ("Unknown authority" otherwise). No
     storage permission is added; the system picker grants access per folder.
+  * com.termux.permission.RUN_COMMAND + <queries> com.termux (Model manager ›
+    Ollama): Termux's RunCommandService runs "pkg install ollama; ollama serve"
+    for the app. The permission is Termux's own (dangerous level: the app asks
+    for it on first use); Termux must also set allow-external-apps=true. The
+    package query lets the app see and open Termux on Android 11+.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -26,8 +31,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
     <queries>
+        <package android:name="com.termux" />
         <intent>
             <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
         </intent>

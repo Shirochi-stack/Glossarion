@@ -72,6 +72,7 @@ __all__ = [
     "DESKTOP_CACHE_DEFAULTS",
     "MOBILE_DETECTOR_KEY",
     "MOBILE_INPAINTER_KEY",
+    "MOBILE_MODEL_CHOICE_KEY",
     "MOBILE_MANGA_SETTINGS_OVERRIDES",
     "MOBILE_TOP_LEVEL_OVERRIDES",
     "get_spec",
@@ -107,6 +108,7 @@ __all__ = [
     "apply_mobile_defaults",
     "apply_mobile_top_level_defaults",
     "apply_mobile_run_defaults",
+    "mobile_model_guard",
     "MOBILE_DEFAULT_FONTS",
     "MOBILE_CJK_FONTS",
     "mobile_default_font",
@@ -558,6 +560,7 @@ def apply_mobile_run_defaults(config: Dict[str, Any], *, force: bool = False) ->
         inpainting["local_method"] = top
     elif not _unset(nested):
         config[top_key] = nested
+    mobile_model_guard(config, force=True)
     _fill_unset(manga, MOBILE_MANGA_SETTINGS_OVERRIDES)
     _fill_unset(config, MOBILE_TOP_LEVEL_OVERRIDES)
     if _unset(config.get("manga_font_path")):  # Rendering › Font "Default": a scalable system font
@@ -565,6 +568,58 @@ def apply_mobile_run_defaults(config: Dict[str, Any], *, force: bool = False) ->
         if font:
             config["manga_font_path"] = font
     return config
+
+
+#: Mobile only: the RT-DETR export / local inpainting model the user picked in the phone's manga
+#: Settings, ``{"detector": <rtdetr_onnx_variant>, "inpaint": <local method>}`` (written by the
+#: mobile settings next to the desktop keys). A config imported from (or synced with) the desktop
+#: stores the desktop defaults ``detector.onnx`` (161 MB) / ``anime_onnx`` (197 MB); a phone run
+#: used them as "stored values" and downloaded the heavy models. ``mobile_model_guard`` keeps a
+#: heavy registered model only when it is the one recorded here.
+MOBILE_MODEL_CHOICE_KEY = "manga_mobile_model_choice"
+
+
+def _mobile_choice(config: Dict[str, Any], kind: str) -> str:
+    choice = config.get(MOBILE_MODEL_CHOICE_KEY)
+    return str(choice.get(kind) or "").strip() if isinstance(choice, dict) else ""
+
+
+def mobile_model_guard(config: Dict[str, Any], *, force: bool = False) -> List[tuple]:
+    """On a phone run's config (in place; mobile only, or ``force``): a stored detector export or
+    local inpainting model that is a registered non-phone-default (heavy) model, or a detector
+    export bubble_detector does not know (it would fall back to ``detector.onnx``), becomes the
+    phone default unless the user picked exactly that model in the mobile Settings
+    (``MOBILE_MODEL_CHOICE_KEY``). A local inpainting model with an existing file of the user's own
+    (``manga_<method>_model_path``) is kept. Returns ``(kind, old, new)`` for every replacement."""
+    if not isinstance(config, dict) or not (force or mobile_runtime.is_mobile()):
+        return []
+    changes: List[tuple] = []
+    manga = config.get("manga_settings") if isinstance(config.get("manga_settings"), dict) else {}
+    ocr = manga.get("ocr") if isinstance(manga.get("ocr"), dict) else None
+    if ocr is not None and not _unset(ocr.get("rtdetr_onnx_variant")):
+        variant = str(ocr.get("rtdetr_onnx_variant"))
+        spec = spec_for_detector_variant(variant)
+        if spec is None or (not spec.phone_default and _mobile_choice(config, KIND_DETECTOR) != spec.selector):
+            new = REGISTRY[MOBILE_DETECTOR_KEY].selector
+            ocr["rtdetr_onnx_variant"] = new
+            changes.append((KIND_DETECTOR, variant, new))
+    inpainting = manga.get("inpainting") if isinstance(manga.get("inpainting"), dict) else None
+    slots = [(config, "manga_local_inpaint_model")]
+    if inpainting is not None:
+        slots.append((inpainting, "local_method"))
+    new = REGISTRY[MOBILE_INPAINTER_KEY].selector
+    for holder, key in slots:
+        value = holder.get(key)
+        spec = spec_for_inpaint_method(value) if not _unset(value) else None
+        if spec is None or spec.phone_default or _mobile_choice(config, KIND_INPAINTER) == spec.selector:
+            continue
+        custom = str(config.get(f"manga_{spec.selector}_model_path") or config.get(f"{spec.selector}_model_path") or "")
+        if custom and os.path.isfile(custom):
+            continue
+        holder[key] = new
+        if not any(c[0] == KIND_INPAINTER and c[1] == value for c in changes):
+            changes.append((KIND_INPAINTER, str(value), new))
+    return changes
 
 
 def _default_for(path: tuple, desktop_default: Any) -> Any:
@@ -588,6 +643,9 @@ def required_models(config: Optional[Dict[str, Any]]) -> List[ModelSpec]:
     desktop GUI's defaults, or the phone defaults on mobile.
     """
     config = config if isinstance(config, dict) else {}
+    if mobile_runtime.is_mobile():  # what a phone run loads (apply_mobile_run_defaults' guard)
+        config = copy.deepcopy(config)
+        mobile_model_guard(config)
     manga = config.get("manga_settings") if isinstance(config.get("manga_settings"), dict) else {}
     out: List[ModelSpec] = []
 

@@ -910,6 +910,23 @@ def test_grok_device_login_resumes_after_the_app_was_killed(fake_auth):
     assert resumed == [2] and "WXYZ-1234" in states
 
 
+def _welcome_controls(root) -> list:
+    """Every control under a Welcome page, depth first (the sign-ins sit in a ResponsiveRow)."""
+    import flet as ft
+
+    out, stack = [], [root]
+    while stack:
+        control = stack.pop(0)
+        out.append(control)
+        for name in ("controls", "content"):
+            child = getattr(control, name, None)
+            if isinstance(child, (list, tuple)):
+                stack[:0] = [c for c in child if isinstance(c, ft.Control)]
+            elif isinstance(child, ft.Control):
+                stack.insert(0, child)
+    return out
+
+
 @needs_flet
 def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     """U11 item 1: step 1 offers every sign-in side by side; after one the provider's models are polled and
@@ -939,11 +956,10 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
                            current_model=lambda: "authgpt/gpt-6-luna", on_set_model=chosen.append)
     screen.get_body()
     assert screen.oauth is fake_auth.bridge  # taken from the LoginPanel factory
-    keys = [getattr(c, "key", None) for c in screen.page_area.content.controls]
+    keys = [getattr(c, "key", None) for c in _welcome_controls(screen.page_area.content)]
     assert [f"welcome-signin-{p}" for p, _label in SIGN_INS] == [k for k in keys if str(k).startswith("welcome-signin")]
-    screen.go("providers")
-    keys = [getattr(c, "key", None) for c in screen.page_area.content.controls]
-    assert "welcome-local" in keys and not any(str(k).startswith("welcome-signin") for k in keys)
+    # owner 2026-10-16: the former step 2 (API key, another model, local AI) is on the same page
+    assert {"welcome-local", "welcome-api-key", "welcome-choose-model"} <= set(keys)
     sheet = screen.open_sign_in("authgem")
     assert isinstance(sheet, LoginSheet) and sheet.panel.provider == "authgem" and sheet.panel.account_id == 0
     screen._go("settings.endpoints")
@@ -953,7 +969,7 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     screen.flow.signed_in = True
     assert asyncio.run(screen.check_model("authgem")) == "authgem/gemini-3.5-flash"
     assert polled == ["authgem"] and chosen == ["authgem/gemini-3.5-flash"] and queries == []
-    rows = {getattr(c, "key", None): c for c in screen.page_area.content.controls}
+    rows = {getattr(c, "key", None): c for c in _welcome_controls(screen.page_area.content)}
     signed = rows["welcome-signed-authgem"]
     texts = [getattr(c, "value", "") for c in signed.controls]
     assert any("gemini-3.5-flash" in str(v) for v in texts), texts
@@ -969,8 +985,10 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     # without a bridge no sign-in buttons are offered
     bare = WelcomeScreen(parse_route("/welcome"))
     bare.get_body()
-    bare.go("providers")
-    assert not any(str(getattr(c, "key", "")).startswith("welcome-signin") for c in bare.page_area.content.controls)
+    controls = _welcome_controls(bare.page_area.content)
+    assert not any(str(getattr(c, "key", "")).startswith("welcome-signin") for c in controls
+                   if getattr(c, "key", None) != "welcome-signin-authds")  # DeepSeek: the in-app browser
+    assert any(getattr(c, "key", None) == "welcome-local" for c in controls)
 
 
 # ==========================================================================

@@ -23,10 +23,9 @@ __all__ = [
     "welcome_glossary_updates",
 ]
 
-STEPS = ("sign_in", "providers", "language_glossary", "permissions", "done")
+STEPS = ("sign_in", "language_glossary", "permissions", "done")  # "providers" merged into "sign_in" (2026-10-16)
 STEP_TITLES = {
     "sign_in": "Welcome to Glossarion",
-    "providers": "Other providers",
     "language_glossary": "Choose Your Glossary Mode",
     "permissions": "Permissions",
     "done": "You're ready",
@@ -112,7 +111,7 @@ class WelcomeFlow:
     def next(self) -> str:
         if self.step_id == "sign_in" and not self.signed_in:
             self.skipped_sign_in = True
-        if not self.is_last:  # step 2 (other providers) is shown even after a sign-in: the dots count it
+        if not self.is_last:
             return self.go(STEPS[self.step + 1])
         return self.step_id
 

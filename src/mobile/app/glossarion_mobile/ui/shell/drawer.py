@@ -2,8 +2,8 @@
 
 Top to bottom: header row (Halgakos avatar, "Glossarion", New chat, New scratch
 chat) · unified search field (results replace the body, grouped Chats · Books ·
-Glossaries · Files) · destination chips Library · Jobs (badge) · Glossaries ·
-Tools · Pinned (hidden when empty) · Recents (Today / Yesterday / Previous 7
+Glossaries · Files) · destinations Library · Jobs (badge) · Glossaries ·
+Tools (one row of equal cells, icon over a small label, never scrolled sideways) · Pinned (hidden when empty) · Recents (Today / Yesterday / Previous 7
 days / <Month YYYY>) · footer: status chip, Settings, API keys, Help. Settings
 lives in the footer, not among the destination chips (§1.3 item 3); so does
 the Keys button (owner request 17, device report 2026-10-08): it opens the
@@ -81,6 +81,11 @@ SEARCH_GROUPS = (
     ("glossaries", "Glossaries", None),
     ("files", "Files", None),
 )
+#: The destination row: side padding, gap between cells and icon size (dp).
+DEST_ROW_PADDING = 8
+DEST_SPACING = 4
+DEST_ICON = 20
+DEST_PAD_V = 6
 SEARCH_DEBOUNCE = 0.25
 SEARCH_LIMIT = 30
 
@@ -178,13 +183,11 @@ class ChatDrawer:
             content_padding=ft.Padding.symmetric(horizontal=12, vertical=10),
             on_change=lambda e: self.set_query(e.control.value or ""),
         )
-        self.destination_chips: dict[str, ft.Chip] = {
-            dest_id: ft.Chip(
-                label=ft.Text(label),
-                leading=ft.Icon(icon_data(icon), size=18),
-                on_click=lambda e, r=route: self._navigate(r),
-                key=f"dest-{dest_id}",
-            )
+        #: One equal-width cell per destination (icon over a small label) in a non-scrolling row: every
+        #: destination is visible on a 288-360 dp drawer without scrolling sideways (owner, 2026-10-16:
+        #: the chip row scrolled on a 412 dp phone and Tools was cut off).
+        self.destination_chips: dict[str, ft.Container] = {
+            dest_id: self._destination_cell(label, icon, route, f"dest-{dest_id}")
             for dest_id, label, icon, route in DESTINATIONS
         }
         self.body = ft.ListView(expand=True, spacing=0, padding=ft.Padding.symmetric(vertical=4))
@@ -220,8 +223,9 @@ class ChatDrawer:
                 ft.Container(padding=ft.Padding.symmetric(horizontal=12), content=ft.Column(
                     [self.search_field, self.search_progress], spacing=2, tight=True)),
                 ft.Container(
-                    padding=ft.Padding.symmetric(horizontal=12),
-                    content=ft.Row(list(self.destination_chips.values()), scroll=ft.ScrollMode.AUTO, spacing=6),
+                    padding=ft.Padding.symmetric(horizontal=DEST_ROW_PADDING),
+                    content=ft.Row(list(self.destination_chips.values()), spacing=DEST_SPACING,
+                                   key="drawer-destinations"),  # no scroll: every cell is an equal share
                 ),
                 self.body,
                 self.footer,
@@ -232,6 +236,29 @@ class ChatDrawer:
         self.section_titles: list[str] = []
         self.chat_rows: dict[str, ft.ListTile] = {}
         self.refresh()
+
+    def _destination_cell(self, label: str, icon: str, route: str, key: str) -> ft.Container:
+        """A destination: icon over a one-line LABEL_SMALL label, an equal share of the row, 48 dp tall
+        (it grows at large text; a label too wide for its cell ends in an ellipsis, never scrolls)."""
+        return ft.Container(
+            content=ft.Column(
+                [ft.Icon(icon_data(icon), size=DEST_ICON),
+                 ft.Text(label, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, no_wrap=True,
+                         overflow=ft.TextOverflow.ELLIPSIS, text_align=ft.TextAlign.CENTER)],
+                spacing=2, tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            expand=True,
+            # 6 + 20 icon + 2 + 14 label line + 6 = 48 dp (``hit_target``); no fixed height, so it grows at 200 % text
+            padding=ft.Padding.symmetric(horizontal=2, vertical=DEST_PAD_V),
+            border_radius=tokens.RADII["chip"],
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            alignment=ft.Alignment.CENTER,
+            ink=True,
+            tooltip=label,
+            on_click=lambda e, r=route: self._navigate(r),
+            key=key,
+        )
 
     # ---- subscriptions -----------------------------------------------------------
 

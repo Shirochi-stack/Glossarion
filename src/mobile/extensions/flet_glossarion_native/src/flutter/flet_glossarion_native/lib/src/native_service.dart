@@ -355,6 +355,13 @@ class GlossarionNativeService extends FletService {
           return null;
         case 'save_to_downloads':
           return _isAndroid ? await _platform('save_to_downloads', args) : null;
+        case 'termux_status':
+        case 'termux_run':
+          if (!_isAndroid) return _defaultResult(name);
+          final dynamic termux = await _platform(name, args);
+          return termux is Map ? termux : _defaultResult(name);
+        case 'open_termux':
+          return _isAndroid ? (await _platform('open_termux', args)) == true : false;
         case 'pick_folder':
         case 'pick_save_location':
         case 'pick_document':
@@ -408,6 +415,11 @@ class GlossarionNativeService extends FletService {
       };
     }
     switch (name) {
+      case 'termux_status':
+        return <String, dynamic>{'installed': false, 'permission': false};
+      case 'termux_run':
+        return <String, dynamic>{'ok': false, 'error': 'unavailable'};
+      case 'open_termux':
       case 'release':
       case 'cancel_document_op':
         return false;

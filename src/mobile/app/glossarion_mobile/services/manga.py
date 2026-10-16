@@ -135,8 +135,11 @@ __all__ = [
     "manga_output_view",
     "mask_preset_rows",
     "mask_preset_updates",
+    "model_choice_updates",
     "model_info_text",
     "merged_manga_settings",
+    "phone_local_model",
+    "run_model_view",
     "natural_sort_key",
     "new_editor_session",
     "now_stamp",
@@ -618,8 +621,9 @@ def local_model_rows(*, mobile: Optional[bool] = None) -> list:
 
 
 def current_inpaint_choice(config: Mapping[str, Any]) -> tuple:
-    """(method, local model) as the inpainting group shows them: Skip wins (``manga_skip_inpainting``)."""
-    cfg = config or {}
+    """(method, local model) as the inpainting group shows them: Skip wins (``manga_skip_inpainting``).
+    On a phone the local model is the one a run loads (``run_model_view``)."""
+    cfg = run_model_view(config) if _is_mobile() else (config or {})
     if bool(effective_setting(cfg, K_SKIP_INPAINT, False)):
         method = "skip"
     else:
@@ -1799,7 +1803,7 @@ class ModelManager:
         module = self.module
         if module is None:
             return None
-        variant = str(effective_setting(config or {}, P_RTDETR_VARIANT, "") or "")
+        variant = str(effective_setting(run_model_view(config), P_RTDETR_VARIANT, "") or "")
         try:
             spec = module.spec_for_detector_variant(variant) if variant else None
             if spec is None:
@@ -2005,6 +2009,48 @@ def apply_phone_defaults(config: dict) -> dict:
     return config
 
 
+#: The desktop's export of the RT-DETR ONNX variant (app.py's manga env: ``RTDETR_ONNX_FILENAME``
+#: from ``manga_settings.ocr.rtdetr_onnx_variant``). ``BubbleDetector.normalize_rtdetr_onnx_filename``
+#: falls back to it when a caller passes no file name, as the editor's Detect does
+#: (``manga_editor_core._run_detect_background`` / ``_run_detection_sync``:
+#: ``load_rtdetr_onnx_model(model_source)``); without it every editor Detect on the phone loaded
+#: and downloaded the 161 MB ``detector.onnx`` whatever Settings showed.
+RTDETR_ENV = "RTDETR_ONNX_FILENAME"
+
+
+def export_detector_variant(config: Mapping[str, Any]) -> str:
+    """In a job (``job_runner.job_process_state`` puts the environment back when it ends): the
+    run's RT-DETR ONNX export into ``RTDETR_ONNX_FILENAME``, like the desktop. Returns it ('' when
+    the config has none)."""
+    variant = str(effective_setting(config or {}, P_RTDETR_VARIANT, "") or "").strip()
+    if variant:
+        os.environ[RTDETR_ENV] = os.path.basename(variant)
+    return variant
+
+
+def run_model_view(config: Mapping[str, Any]) -> dict:
+    """A copy of ``config`` with the detector export / local inpainting model a phone run loads
+    (``manga_models.mobile_model_guard``; mobile only), so Settings shows the model the run uses."""
+    view = copy.deepcopy(dict(config or {}))
+    guard = core_attr("manga_models", "mobile_model_guard")
+    if callable(guard) and _is_mobile():
+        guard(view)
+    return view
+
+
+def model_choice_updates(kind: str, value: Any) -> dict:
+    """The config write recording a model picked in the phone's Settings (``kind``: "detector" /
+    "inpaint"), so ``mobile_model_guard`` keeps a larger model the user chose here."""
+    key = core_attr("manga_models", "MOBILE_MODEL_CHOICE_KEY") or "manga_mobile_model_choice"
+    return {(key, kind): str(value or "")}
+
+
+def phone_local_model() -> str:
+    """The phone's default local inpainting model (``aot_onnx``)."""
+    overrides = core_attr("manga_models", "MOBILE_TOP_LEVEL_OVERRIDES") or {}
+    return str(overrides.get(K_LOCAL_MODEL) or "aot_onnx")
+
+
 def run_ocr_provider(config: Mapping[str, Any]) -> str:
     """The OCR provider a run starts with (the desktop tab's chain, ``manga_env.STARTUP_WIDGET_SOURCES``)."""
     return str((config or {}).get(K_PROVIDER) or (config or {}).get("ocr_provider") or "custom-api")
@@ -2076,7 +2122,13 @@ def prepare_run(config: dict) -> list:
     notes: list = []
     if not isinstance(config, dict) or not _is_mobile():
         return notes
+    guard = core_attr("manga_models", "mobile_model_guard")
+    for kind, old, new in (guard(config) if callable(guard) else ()):
+        what = "Detector" if kind == "detector" else "Inpainting model"
+        notes.append(f"ℹ️ {what} {old} → {new} on this phone (pick the larger model in Manga › Settings "
+                     "to use it here)")
     apply_phone_defaults(config)
+    export_detector_variant(config)
     notes.extend(cap_workers(config))
     config.pop("output_directory", None)
     filled = borrow_azure_credentials(config, mobile=True)
