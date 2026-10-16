@@ -7,9 +7,12 @@
    the provider still lists it, otherwise (and for the other providers) the model becomes that
    provider's most cost-efficient one (``model_catalog.recommended_model``: Sonnet, the newest Flash,
    the newest Grok); "Change model" opens the ModelSheet on that provider's models. Below them: the
-   keyless routes, then your own API key (the desktop main key field, ``api_key``), "Choose another
-   model" (ModelSheet) and a local Ollama / LM Studio host (Settings › Endpoints). Next moves on
-   (without a sign-in it counts as skipped).
+   keyless routes; "Run on this phone (no account needed)": the on-device presets as one-tap buttons
+   (size and a RAM hint for this phone from the engine's RAM gate, Light suggested, inline download
+   progress; one tap downloads, loads and selects the model through the Model manager's
+   ``OnDeviceFlow``); then your own API key (the desktop main key field, ``api_key``), "Choose another
+   model" (ModelSheet) and a local Ollama / LM Studio host on your PC (Settings › Endpoints). Next
+   moves on (without a sign-in or a model it counts as skipped).
 2. **Target language and glossary mode** - the desktop first-run "Choose Your
    Glossary Mode" cards (same eight modes, copy and ``balanced`` preselected) and
    the target language (``output_language``).
@@ -79,8 +82,15 @@ RATE_LIMIT_WARNING = ("Higher batch sizes send more requests at once and lower d
 PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "authgem", "authgrok": "authgrok/",
                         "authnan": "authnan/", "authds": "authds/", "authnd": "authnd/", "authchatgpt": "authchatgpt/"}
 
+#: the on-device preset Welcome suggests (Qwen3.5 2B: quick drafts on most phones)
+SUGGESTED_ONDEVICE = "Light"
+#: at most this many on-device presets on page 1 (one row)
+ONDEVICE_CELLS = 4
+
 __all__ = [
     "GLOSSARY_MODE_CARDS",
+    "ONDEVICE_CELLS",
+    "SUGGESTED_ONDEVICE",
     "OTHER_SIGN_INS",
     "SIGN_INS",
     "OFF_GLOSSARY_MODES",
@@ -122,6 +132,8 @@ class WelcomeScreen(Screen):
         default_max_tokens: Optional[int] = None,
         default_chunk_size: str = "",
         config_get: Optional[Callable[[str, Any], Any]] = None,  # saved delay / temperature / batch size
+        local_engine: Any = None,  # the app's LocalEngineService (or a callable returning it): "Run on this phone"
+        prefs: Any = None,  # the on-device presets (Prefs ``local_model_presets``)
     ) -> None:
         super().__init__(match)
         self.flow = flow or WelcomeFlow()
@@ -157,6 +169,11 @@ class WelcomeScreen(Screen):
         self.model_notes: dict = {}  # provider -> the model check's line
         self.keyless_chosen: set = set()  # keyless routes whose recommended model is in use
         self.changing_provider: Optional[str] = None  # the row whose "Change model" opened the ModelSheet
+        self.local_engine = local_engine
+        self.prefs = prefs
+        self.ondevice: Any = None  # OnDeviceFlow (local_models_panel), made on first render
+        self.ondevice_box = ft.Container(key="welcome-ondevice-box")
+        self._ondevice_unsub: Optional[Callable[[], None]] = None
         self.page_area = ft.Container(expand=True)
         self.dots = ft.Row([], alignment=ft.MainAxisAlignment.CENTER, spacing=6)
         self.back_button = ft.TextButton(content="Back", on_click=lambda e: self.back())
@@ -201,8 +218,9 @@ class WelcomeScreen(Screen):
                 self._section("No account needed"),
                 ft.ResponsiveRow([self._keyless_row(provider, label) for provider, label in KEYLESS],
                                  spacing=8, run_spacing=4, key="welcome-keyless"),
-                self._note("authchatgpt/ and authnd/: no sign-in"),
-                self._section("Your own API key or a local model"),
+                self._section("Run on this phone (no account needed)"),
+                self._ondevice_section(),
+                self._section("Your own API key or a model on your PC"),
                 ft.Row([ft.Container(content=self.api_key_field, expand=True),
                         ft.TextButton(content="Save", tooltip="Save API key", on_click=lambda e: self._save_key(),
                                       key="welcome-save-key")],
@@ -215,9 +233,151 @@ class WelcomeScreen(Screen):
             scroll=ft.ScrollMode.AUTO,
         )
 
+    # ---- "Run on this phone": the on-device presets (OnDeviceFlow of the Model manager) ------------------
+
+    def ondevice_flow(self) -> Any:
+        """The Model manager's ``OnDeviceFlow`` over the app's engine (None without one)."""
+        if self.ondevice is None:
+            service = self.local_engine() if callable(self.local_engine) else self.local_engine
+            if service is None:
+                return None
+            from glossarion_mobile.ui.screens.local_models_panel import OnDeviceFlow
+
+            self.ondevice = OnDeviceFlow(service=service, prefs=self.prefs, page=self.page,
+                                         use_model=self._use_local_model, current_model=self.current_model,
+                                         notify=self._ondevice_note, on_change=self.render_ondevice)
+            self._ondevice_unsub = service.downloads.subscribe(lambda state: self.render_ondevice())
+        return self.ondevice
+
+    def _ondevice_section(self) -> ft.Control:
+        self.ondevice_box.content = self._ondevice_content()
+        return self.ondevice_box
+
+    def _ondevice_content(self) -> ft.Control:
+        flow = self.ondevice_flow()
+        if flow is None:
+            return ft.Row([ft.Text("On-device models", theme_style=ft.TextThemeStyle.BODY_SMALL),
+                           ReasonChip(reason="Model manager › On-device")], wrap=True, key="welcome-ondevice")
+        rows = flow.presets()[:ONDEVICE_CELLS]
+        suggested = self.suggested_ondevice(rows)
+        cells = [self._ondevice_cell(flow, index, preset, preset.get("name") == suggested)
+                 for index, preset in enumerate(rows)]
+        lines: list[ft.Control] = [ft.ResponsiveRow(cells, spacing=6, run_spacing=4, key="welcome-ondevice")]
+        note = self.model_notes.get("local")
+        if note:
+            lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                                 key="welcome-model-local", max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+        return ft.Column(lines, spacing=2, tight=True) if len(lines) > 1 else lines[0]
+
+    def suggested_ondevice(self, rows: Sequence[dict]) -> Optional[str]:
+        """Light, unless it is too big for this phone: then the biggest preset that fits."""
+        flow = self.ondevice
+        verdicts = {row.get("name"): (flow.ram_hint(row)[0] if flow is not None else "unknown") for row in rows}
+        if any(row.get("name") == SUGGESTED_ONDEVICE for row in rows) and verdicts.get(SUGGESTED_ONDEVICE) != "refuse":
+            return SUGGESTED_ONDEVICE
+        fitting = [row for row in rows if verdicts.get(row.get("name")) == "ok"]
+        return str(max(fitting, key=lambda r: int(r.get("size") or 0)).get("name")) if fitting else None
+
+    @staticmethod
+    def ondevice_key(preset: dict) -> str:
+        slug = "".join(ch if ch.isalnum() else "-" for ch in str(preset.get("name") or "").lower()).strip("-")
+        return f"welcome-ondevice-{slug or 'model'}"
+
+    def _ondevice_cell(self, flow: Any, index: int, preset: dict, suggested: bool) -> ft.Control:
+        """One preset: its name (⭐ suggested) over its size and RAM mark, or its download progress; one
+        tap runs ``OnDeviceFlow.get_preset`` (download incl. image support, load, use)."""
+        from glossarion_mobile.services.local_llm import downloads as dl
+        from glossarion_mobile.services.local_llm import presets as lp
+
+        stem = flow.stem_of_preset(preset)
+        state, status = flow.row_state(preset, stem)
+        verdict, mark, words = flow.ram_hint(preset)
+        download = flow.active_download(stem)
+        if state == "downloading" and download is not None:
+            detail = f"{download.percent}%" if download.phase == "downloading" else "Checking…"
+        elif state == "paused":
+            detail = "Paused · tap"
+        elif state == "busy":
+            detail = "Starting…"
+        elif state == "error":
+            detail = "Retry"
+        elif state == "in_use":
+            detail = "✓ In use"
+        elif state == "use":
+            detail = "On phone · use"
+        else:
+            detail = " ".join(x for x in (dl.format_bytes(lp.download_size(preset)) if lp.download_size(preset)
+                                          else "", mark) if x)
+        name = f"{preset.get('name')} ⭐" if suggested else str(preset.get("name"))
+        color = {"refuse": ft.Colors.ERROR, "confirm": ft.Colors.TERTIARY}.get(verdict) if state == "download" else None
+        tooltip = " · ".join(x for x in (str(preset.get("note") or ""), words if state == "download" else status) if x)
+        lines: list[ft.Control] = [
+            ft.Text(name, theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            ft.Text(detail, theme_style=ft.TextThemeStyle.LABEL_SMALL, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                    color=color or ft.Colors.ON_SURFACE_VARIANT),
+        ]
+        if state in ("downloading", "paused") and download is not None:
+            lines.append(ft.ProgressBar(value=download.fraction, bar_height=3, border_radius=2))
+        return ft.Container(
+            content=ft.Column(lines, spacing=0, tight=True),
+            padding=ft.Padding.symmetric(horizontal=6, vertical=5),
+            border_radius=10,
+            border=ft.Border.all(2 if suggested else 1, ft.Colors.PRIMARY if suggested else ft.Colors.OUTLINE_VARIANT),
+            bgcolor=ft.Colors.SECONDARY_CONTAINER if state == "in_use" else None,
+            tooltip=tooltip or None,
+            on_click=lambda e, i=index: call_handler(self.use_ondevice, i),
+            key=self.ondevice_key(preset),
+            col={"xs": 3},
+        )
+
+    async def use_ondevice(self, index: int) -> Optional[str]:
+        """One tap: download (with its image support), load and select the preset's model; the Welcome
+        can then go on (it counts like a sign-in)."""
+        flow = self.ondevice_flow()
+        if flow is None:
+            return None
+        self.model_notes.pop("local", None)
+        if flow.page is None:  # the big-download / tight-RAM questions need the page (as open_sign_in finds it)
+            try:
+                flow.page = self.page or (self.body.page if self.body is not None else None)
+            except Exception:
+                flow.page = None
+        model = await flow.get_preset(index)
+        if model:
+            self.flow.signed_in = True
+            self.flow.skipped_sign_in = False
+            self.model_chosen(model)
+            self.model_notes["local"] = f"✓ Using {model} · runs on this phone"
+            self.render()
+        return model
+
+    def _use_local_model(self, model: str) -> None:
+        if self.on_set_model is not None:
+            call_handler(self.on_set_model, model)
+
+    def _ondevice_note(self, message: str) -> None:
+        if not str(message).startswith("Model: "):  # the flow's own "Model: …" line; use_ondevice says it
+            self.model_notes["local"] = str(message)
+
+    def render_ondevice(self) -> None:
+        """Re-render only the on-device row (download progress arrives several times a second)."""
+        if self.flow.step_id != "sign_in" or self.ondevice_box.content is None:
+            return
+        self.ondevice_box.content = self._ondevice_content()
+        try:
+            self.ondevice_box.update()
+        except Exception:
+            pass
+
+    def dispose(self) -> None:
+        if self._ondevice_unsub is not None:
+            self._ondevice_unsub()
+            self._ondevice_unsub = None
+        super().dispose()
+
     def _local_control(self) -> ft.Control:
         if self.navigate is not None:
-            return ft.TextButton(content="Ollama / LM Studio", tooltip="Set up Ollama / LM Studio on your network",
+            return ft.TextButton(content="Ollama / LM Studio", tooltip="Set up Ollama / LM Studio on your PC or network",
                                  on_click=lambda e: self._go("settings.endpoints"), key="welcome-local")
         return ft.Row([ft.Text("Ollama / LM Studio", theme_style=ft.TextThemeStyle.BODY_SMALL),
                        ReasonChip(reason="Settings › Endpoints")], wrap=True, key="welcome-local")

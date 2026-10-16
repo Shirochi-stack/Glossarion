@@ -9,6 +9,11 @@
    scrolls sideways: one row of equal cells (icon over a LABEL_SMALL label) that fits a 288-330 dp
    drawer (360-412 dp phones), each cell >= 40 dp tall.
 
+3. (owner 2026-10-17) Page 1 gains "Run on this phone (no account needed)": the on-device presets as one
+   row of one-tap cells (size + RAM hint, Light suggested, inline progress) through the Model manager's
+   OnDeviceFlow; "authchatgpt/ and authnd/: no sign-in" went (the section title says it), and the page
+   still fits 360 x 800 and 412 x 915 at 100 % text with the engine present.
+
 The layout math is an estimate of Flutter's: Roboto advances (lowercase ~0.52 em, capitals ~0.66 em,
 both above Roboto's real averages), the theme's TYPE_SCALE sizes and line heights, Material's 48 dp tap
 target for buttons and the M3 dense text field.
@@ -122,18 +127,29 @@ def test_page_one_has_every_former_page_two_action(monkeypatch):
     assert images and all(i.height <= 64 for i in images)
 
 
+def _grid_height(child, scale: float = 1.0) -> float:
+    """A ResponsiveRow of cells: rows of 48 dp (xs=6: two per row on a phone, xs=3: four)."""
+    cells = len(child.controls)
+    per_row = max(1, 12 // int((child.controls[0].col or {}).get("xs", 6))) if cells else 1
+    rows = math.ceil(cells / per_row)
+    return rows * HIT * max(1.0, scale * 0.9) + (rows - 1) * (child.run_spacing or 0)
+
+
 def _page_height(s: WelcomeScreen, width: float, scale: float = 1.0) -> float:
     """Estimated height of step 1 (its top-level children plus the column spacing)."""
     column = s.page_area.content
     total = 0.0
     for child in column.controls:
+        if child.key == "welcome-ondevice-box":  # "Run on this phone": the preset cells (+ a note line)
+            child = child.content
+            if isinstance(child, ft.Column):
+                total += sum(_grid_height(c, scale) if isinstance(c, ft.ResponsiveRow) else text_height(c, width, scale)
+                             for c in child.controls) + (len(child.controls) - 1) * child.spacing
+                continue
         if isinstance(child, ft.Text):
             total += text_height(child, width, scale)
         elif isinstance(child, ft.ResponsiveRow):
-            cells = len(child.controls)
-            per_row = 2  # xs=6: two per row on a phone
-            rows = math.ceil(cells / per_row)
-            total += rows * HIT * max(1.0, scale * 0.9) + (rows - 1) * (child.run_spacing or 0)
+            total += _grid_height(child, scale)
         elif child.key == "welcome-header":
             logo = child.controls[0].height
             text_w = width - logo - child.spacing
@@ -147,8 +163,11 @@ def _page_height(s: WelcomeScreen, width: float, scale: float = 1.0) -> float:
 
 
 @pytest.mark.parametrize("width", PHONES)
-def test_page_one_fits_the_phone_without_scrolling(width):
-    s = screen()
+@pytest.mark.parametrize("with_engine", [False, True])
+def test_page_one_fits_the_phone_without_scrolling(width, with_engine, tmp_path):
+    s = screen(**(_engine_kwargs(tmp_path)[0] if with_engine else {}))
+    if with_engine:
+        assert by_key(s.page_area.content)["welcome-ondevice"].controls[0].col == {"xs": 3}
     content_w = width - 32  # the Welcome body's 16 dp padding
     # chrome: status bar 24, app bar 56, 3-button navigation 48, body padding 32, dots 8, the
     # Skip/Back/Next row 48 and the body column's 2 x 10 spacing
@@ -160,6 +179,13 @@ def test_page_one_fits_the_phone_without_scrolling(width):
     for _provider, label in SIGN_INS + KEYLESS:
         short = label.replace("Sign in with ", "")
         assert text_width(short, tokens.TYPE_SCALE["label_large"].size) + 16 + 2 <= cell, (short, cell)
+    # the on-device cells are a quarter of the row: name and size line fit (6 dp padding each side)
+    quarter = (content_w - 3 * 6) / 4 - 12
+    if with_engine:
+        for cell in by_key(s.page_area.content)["welcome-ondevice"].controls:
+            name, detail = cell.content.controls[:2]
+            assert text_width(name.value, tokens.TYPE_SCALE["label_medium"].size) <= quarter, (name.value, quarter)
+            assert text_width(detail.value, tokens.TYPE_SCALE["label_small"].size) <= quarter, (detail.value, quarter)
     # at 200 % text the page may scroll (it keeps ScrollMode.AUTO) rather than clip
     assert s.page_area.content.scroll == ft.ScrollMode.AUTO
 
@@ -210,3 +236,101 @@ def test_drawer_destination_cells_navigate_and_carry_the_jobs_badge():
     state.jobs_badge.value = type(state.jobs_badge.value)(running=3)
     drawer.refresh()
     assert drawer.destination_chips["jobs"].badge is not None
+
+
+# ==========================================================================
+# 3. Welcome: "Run on this phone" (the Model manager's OnDeviceFlow)
+# ==========================================================================
+
+GB = 1_000_000_000
+
+
+def _engine_kwargs(tmp_path, total=8 * 1024 ** 3, available=6 * 1024 ** 3, platform="android"):
+    """WelcomeScreen kwargs with a LocalEngineService (FakeEngine, a phone with ``total`` / ``available`` RAM)."""
+    import local_llm_fakes as fakes
+    from glossarion_mobile.services.local_llm import downloads as dl
+    from glossarion_mobile.services.local_llm import engine as eng
+    from glossarion_mobile.services.local_llm import service as svc
+
+    engine = eng.FakeEngine()
+    prefs = fakes.FakePrefs()
+    service = svc.LocalEngineService(prefs=prefs, registry=dl.Registry(str(tmp_path / "models")),
+                                     engine_factory=lambda: engine, watch=False, platform=platform,
+                                     memory=lambda: (total, available))
+    return {"local_engine": lambda: service, "prefs": prefs}, service, engine
+
+
+def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path):
+    kwargs, _service, _engine = _engine_kwargs(tmp_path, total=6 * 1024 ** 3, available=3 * 1024 ** 3)
+    s = screen(**kwargs)
+    rows = by_key(s.page_area.content)
+    assert "welcome-local" in rows  # Ollama / LM Studio stays: the PC option
+    texts = [c.value for c in walk(s.page_area.content) if isinstance(c, ft.Text)]
+    assert "Run on this phone (no account needed)" in texts
+    assert "authchatgpt/ and authnd/: no sign-in" not in texts
+    cells = {k: rows[k] for k in ("welcome-ondevice-garbage", "welcome-ondevice-light", "welcome-ondevice-medium",
+                                  "welcome-ondevice-heavy")}
+    lines = {k: [t.value for t in c.content.controls if isinstance(t, ft.Text)] for k, c in cells.items()}
+    # model + its image support; the engine's RAM gate on a 6 GB phone with 3 GB free
+    assert lines["welcome-ondevice-garbage"] == ["Garbage", "738 MB ✓"]
+    assert lines["welcome-ondevice-light"] == ["Light ⭐", "1.9 GB ✓"]
+    assert lines["welcome-ondevice-medium"] == ["Medium", "3.4 GB ⚠"]
+    assert lines["welcome-ondevice-heavy"] == ["Heavy", "6.6 GB ✕"]
+    assert "Android may close Glossarion" in cells["welcome-ondevice-medium"].tooltip
+    assert "Pick a smaller model" in cells["welcome-ondevice-heavy"].tooltip
+    # a 2 GB phone: Light does not fit, the biggest preset that does is suggested instead
+    kwargs, _service, _engine = _engine_kwargs(tmp_path / "small", total=2 * 1024 ** 3, available=1536 * 1024 ** 2)
+    small = screen(**kwargs)
+    names = [c.content.controls[0].value for c in by_key(small.page_area.content)["welcome-ondevice"].controls]
+    assert names == ["Garbage ⭐", "Light", "Medium", "Heavy"]
+
+
+def test_page_one_on_device_without_an_engine_points_to_the_model_manager():
+    s = screen()
+    row = by_key(s.page_area.content)["welcome-ondevice"]
+    assert isinstance(row, ft.Row) and any("Model manager" in str(getattr(c, "reason", "")) for c in row.controls)
+
+
+def test_page_one_on_device_one_tap_downloads_loads_and_selects(tmp_path, monkeypatch):
+    """One tap on a cell: the Model manager's flow downloads the GGUF and its vision projector (inline
+    progress in the cell), loads it and selects local/<stem>; the Welcome then counts as set up."""
+    import asyncio
+    import hashlib
+    import os
+
+    import local_llm_fakes as fakes
+    from glossarion_mobile.services.local_llm import hf, presets
+
+    payload = os.urandom(300_000)
+    server = fakes.FakeHF()
+    server.add("tester/Tiny-GGUF", {"Tiny-Q4_K_M.gguf": payload, "mmproj-F16.gguf": b"projector"})
+    monkeypatch.setattr(hf, "HF_ENDPOINT", server.url)
+    try:
+        kwargs, service, engine = _engine_kwargs(tmp_path)
+        kwargs["prefs"].set(presets.PREF_KEY, [
+            {"name": "Light", "repo": "tester/Tiny-GGUF", "file": "Tiny-Q4_K_M.gguf", "note": "test", "n_ctx": 0,
+             "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}])
+        chosen = []
+        s = screen(on_set_model=chosen.append, current_model=lambda: chosen[-1] if chosen else "", **kwargs)
+        assert not s.flow.signed_in
+        server.chunk_delay = 0.005
+        seen = []
+        service.downloads.throttle = 0
+
+        def progress(state):
+            if state.running and state.phase == "downloading" and not state.stem.endswith(".mmproj"):
+                cell = by_key(s.page_area.content)["welcome-ondevice-light"]
+                seen.append((cell.content.controls[1].value, isinstance(cell.content.controls[-1], ft.ProgressBar)))
+
+        service.downloads.subscribe(progress)
+        model = asyncio.run(s.use_ondevice(0))
+        assert model == "local/Tiny-Q4_K_M" and chosen == ["local/Tiny-Q4_K_M"]
+        assert any(text.endswith("%") and bar for text, bar in seen), seen
+        assert service.loaded_stem == "Tiny-Q4_K_M" and service.is_vision("Tiny-Q4_K_M")
+        assert s.flow.signed_in and s.model_notes["local"] == "✓ Using local/Tiny-Q4_K_M · runs on this phone"
+        cell = by_key(s.page_area.content)["welcome-ondevice-light"]
+        assert cell.content.controls[1].value == "✓ In use"
+        assert by_key(s.page_area.content)["welcome-model-local"].value.startswith("✓ Using local/Tiny-Q4_K_M")
+        s.dispose()
+    finally:
+        server.close()
