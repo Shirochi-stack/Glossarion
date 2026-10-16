@@ -219,7 +219,11 @@ def list_files(ref: HfRef, *, session: Any = None) -> tuple:
 def _next_link(headers: Any) -> Optional[str]:
     link = str(headers.get("Link") or headers.get("link") or "")
     match = re.search(r'<([^>]+)>;\s*rel="next"', link)
-    return match.group(1) if match else None
+    if not match:
+        return None
+    url = match.group(1)
+    # follow only Hugging Face's own API pages (never a host a header names)
+    return url if url.startswith(f"{HF_ENDPOINT}/api/models/") else None
 
 
 def _quant_re(quant: str) -> re.Pattern:

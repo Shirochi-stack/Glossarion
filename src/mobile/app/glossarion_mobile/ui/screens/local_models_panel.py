@@ -540,9 +540,12 @@ class LocalModelsPanel:
         return stem if state.done else None
 
     def delete_file(self, stem: str) -> bool:
+        busy = self.service.busy_with(stem)
         removed = self.service.delete(stem)
         if removed:
             self.say(f"Deleted local/{stem}")
+        elif busy:
+            self.say("The model is busy; delete it when the current answer is done")
         self.render()
         return removed
 

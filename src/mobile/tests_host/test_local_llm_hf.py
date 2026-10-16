@@ -113,3 +113,11 @@ def test_pick_file_order_and_choices():
 def test_resolve_url_pins_the_commit():
     assert hf.resolve_url("unsloth/Qwen3.5-2B-GGUF", "abc123", "sub dir/x.gguf") == (
         f"{hf.HF_ENDPOINT}/unsloth/Qwen3.5-2B-GGUF/resolve/abc123/sub%20dir/x.gguf")
+
+
+def test_pagination_follows_only_hugging_face_api_pages():
+    ok = f'<{hf.HF_ENDPOINT}/api/models/u/r/tree/abc?cursor=x>; rel="next"'
+    assert hf._next_link({"Link": ok}) == f"{hf.HF_ENDPOINT}/api/models/u/r/tree/abc?cursor=x"
+    assert hf._next_link({"Link": '<https://evil.example/api/models/u/r>; rel="next"'}) is None
+    assert hf._next_link({"Link": f'<{hf.HF_ENDPOINT}.evil.example/api/models/x>; rel="next"'}) is None
+    assert hf._next_link({}) is None

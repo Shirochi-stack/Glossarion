@@ -45,6 +45,8 @@ WATCH_INTERVAL = 15.0
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 NOT_DOWNLOADED = "Download it in Model manager › On-device"
+#: seconds a forced unload / delete waits for a running generation to stop (it checks every 8 tokens)
+FORCE_UNLOAD_WAIT = 10.0
 
 _DEFAULT: Optional["LocalEngineService"] = None
 
@@ -168,6 +170,24 @@ class _Gate:
             self._busy = False
             self._cond.notify_all()
 
+    def take_over(self, abort: threading.Event, timeout: float) -> bool:
+        """Forced unload / delete: set ``abort`` (the running generation's stop check sees it), wait up
+        to ``timeout`` s for the holder to let go and take the gate ahead of the waiters. False when the
+        holder did not let go (the caller must then leave the engine alone)."""
+        abort.set()
+        deadline = time.monotonic() + timeout
+        try:
+            with self._cond:
+                while self._busy:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        return False
+                    self._cond.wait(min(left, 0.25))
+                self._busy = True
+                return True
+        finally:
+            abort.clear()
+
 
 @dataclasses.dataclass(frozen=True)
 class EngineSnapshot:
@@ -215,6 +235,7 @@ class LocalEngineService:
         self._watch = watch
         self._watcher: Optional[threading.Thread] = None
         self._stop_watch = threading.Event()
+        self._abort = threading.Event()  # a forced unload / delete stops the running generation
         self.log: list = []  # (stem, load seconds) of every load (diagnostics)
 
     # ---- engine ----------------------------------------------------------------------------------
@@ -463,14 +484,14 @@ class LocalEngineService:
         return await self._io(lambda: self.load_blocking(stem, force=force))
 
     def unload(self, *, force: bool = False) -> bool:
-        """Unload now (False when a generation holds the engine, unless ``force``)."""
+        """Unload now (False when a generation holds the engine, unless ``force``: then the running
+        generation is stopped first and the model is unloaded once it has let go; never while native
+        code still uses it)."""
         if self.engine is None or not self.engine.loaded:
             return False
         if not self.gate.try_acquire():
-            if not force:
+            if not force or not self.gate.take_over(self._abort, FORCE_UNLOAD_WAIT):
                 return False
-            self._unload_locked()
-            return True
         try:
             self._unload_locked()
             return True
@@ -552,7 +573,8 @@ class LocalEngineService:
                                     f"resulted in {prompt_tokens} tokens. Please reduce the length of the messages.")
             params = self._params(body, n_ctx - prompt_tokens)
             self._set("generating", stem)
-            deltas = engine.chat(messages, params, should_stop)
+            abort = self._abort
+            deltas = engine.chat(messages, params, lambda: abort.is_set() or should_stop())
         except BaseException:
             release()
             raise
@@ -596,12 +618,19 @@ class LocalEngineService:
         return state
 
     def delete(self, stem: str) -> bool:
-        """Delete a downloaded model (unloads it first)."""
-        if self._stem == stem and self.engine is not None and self.engine.loaded:
-            self.unload(force=True)
+        """Delete a downloaded model (unloads it first). False without deleting anything while the model
+        is loading or answering (``busy_with(stem)``): its file must not go away under native code."""
+        if self.busy_with(stem):
+            return False
+        if self._stem == stem and self.engine is not None and self.engine.loaded and not self.unload():
+            return False
         removed = self.registry.remove(stem)
         self.request_catalog_refresh()
         return removed
+
+    def busy_with(self, stem: str) -> bool:
+        """True while ``stem`` is loading or generating (a delete must wait)."""
+        return self._stem == stem and (self.gate.busy or self._state in ("loading", "generating"))
 
     # ---- unload policy -------------------------------------------------------------------------------
 

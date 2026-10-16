@@ -181,6 +181,9 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "GlossarionLLM"
     sys_version = ""
+    # socket timeout per read/write: an idle or stalled connection (another app that never sends a
+    # request line) frees its thread; generation itself does no socket reads, so it is not limited
+    timeout = 60
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         log.debug("llm http: " + format, *args)

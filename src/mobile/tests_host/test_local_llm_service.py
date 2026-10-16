@@ -166,6 +166,33 @@ def test_download_refreshes_the_catalog_and_delete_unloads(tmp_path, monkeypatch
     assert service.list_models() == [] and service.registry.resolve("local/Tiny-Q4_K_M") is None
 
 
+def test_delete_and_forced_unload_never_free_a_model_mid_answer(tmp_path):
+    """A delete while the model answers is refused; a forced unload (detach) stops the answer first and
+    unloads only once the generation has let go of the engine."""
+    import threading
+
+    service, engine = make_service(tmp_path, engine=eng.FakeEngine(delay=0.01, reply=lambda m: "w " * 400))
+    run = service.chat("local/fake-echo", {"messages": [{"role": "user", "content": "hi"}]}, lambda: False)
+    first = next(iter(run.deltas))
+    assert first and service.busy_with("fake-echo")
+    assert service.delete("fake-echo") is False and os.path.isfile(service.registry.file_path("fake-echo"))
+    assert service.unload() is False and engine.loaded  # a plain unload waits for the answer
+
+    seen = []
+
+    def consume():
+        with run:
+            seen.extend(run.deltas)
+
+    worker = threading.Thread(target=consume)
+    worker.start()
+    assert service.unload(force=True) and not engine.loaded
+    worker.join(5)
+    assert not worker.is_alive() and len(seen) < 399  # stopped early, not run to the end
+    assert not service._abort.is_set() and not service.gate.busy
+    assert service.delete("fake-echo") and service.registry.resolve("fake-echo") is None
+
+
 def test_model_block_only_while_the_app_service_runs(tmp_path, monkeypatch):
     from glossarion_mobile.services import model_catalog as mc
 
