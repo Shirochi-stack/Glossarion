@@ -172,15 +172,12 @@ if (!response.ok || (payload.code !== undefined && ![0, 200].includes(payload.co
 }
 const models = [];
 const seen = new Set();
-for (const balance of payload?.data?.balances || []) {
-  const capabilities = Array.isArray(balance?.capabilities) ? balance.capabilities : [];
-  const capabilityModels = capabilities
+const capabilityModels = (entry) =>
+  (Array.isArray(entry?.capabilities) ? entry.capabilities : [])
     .filter((item) => typeof item === "string" && item.toLowerCase().startsWith("model:"))
     .map((item) => item.slice(6).trim())
     .filter(Boolean);
-  const candidates = capabilityModels.length
-    ? capabilityModels
-    : [String(balance?.show_name || "").trim()];
+const addModels = (candidates) => {
   for (const model of candidates) {
     const key = model.toLowerCase();
     if (model && !seen.has(key)) {
@@ -188,6 +185,22 @@ for (const balance of payload?.data?.balances || []) {
       models.push(model);
     }
   }
+};
+const balances = Array.isArray(payload?.data?.balances) ? payload.data.balances : [];
+const plans = Array.isArray(payload?.data?.plans) ? payload.data.plans : [];
+for (const balance of balances) {
+  const fromCapabilities = capabilityModels(balance);
+  addModels(fromCapabilities.length ? fromCapabilities : [String(balance?.show_name || "").trim()]);
+}
+// Active plans can grant models that have no balance row yet.
+for (const plan of plans) addModels(capabilityModels(plan));
+if (!balances.length && !plans.length) {
+  // A used-up or expired ZCode credit package drops out of billing/balance
+  // entirely, so an empty response means the login has nothing to spend.
+  throw new Error(
+    "Z.AI login plan: this login has no active ZCode plan credits (billing balance is empty). "
+    + "Sign in with the account that has the plan, or switch AuthZA to General API.",
+  );
 }
 process.stdout.write("GLOSSARION_MODELS=" + JSON.stringify(models));
 '''.strip()
