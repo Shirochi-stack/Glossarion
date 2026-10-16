@@ -2027,3 +2027,278 @@ def fetch_available_models(
         mode_label = "general API" if general_api else "login plan"
         raise RuntimeError(f"Z.AI {mode_label} returned no model IDs")
     return models
+
+
+# ---------------------------------------------------------------------------
+# Free ZCode plan claim (login plan)
+# ---------------------------------------------------------------------------
+# ZCode hands out its free plans (the daily Start Plan and weekend/campaign
+# plans) as claimable previews. A claim needs an Aliyun captcha token, which
+# the user solves in a visible window: Glossarion never solves it itself.
+
+CLAIM_ORIGIN = "https://zcode.z.ai"
+CLAIM_RETRY_AFTER_SECONDS = 15 * 60
+CAPTCHA_WINDOW_TIMEOUT_SECONDS = 300
+_CAPTCHA_RESULT_PREFIX = "GLOSSARION_CAPTCHA="
+_ALIYUN_CAPTCHA_SDK = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"
+
+# The JWT stays inside zcode-api's credential store; this reuses the runtime's
+# own claim client so the request shape tracks zcode-api.
+_CLAIM_SCRIPT = r'''
+import os from "node:os";
+import { loadCredential } from "./src/auth/store.ts";
+import { loadConfig } from "./src/config/loader.ts";
+import { createClaimClient } from "./src/claim/client.ts";
+
+const credential = await loadCredential();
+if (!credential?.jwt) throw new Error("Z.AI login JWT is unavailable; sign in again");
+const config = loadConfig(process.env.ZCODE_PROXY_CONFIG);
+const client = createClaimClient({
+  origin: process.env.ZCODE_CLAIM_ORIGIN,
+  jwt: credential.jwt,
+  appVersion: config.identity?.appVersion || process.env.ZCODE_APP_VERSION || "3.14.0",
+  platform: `${process.platform}-${os.arch()}`,
+  deviceMid: config.identity?.deviceMid,
+});
+let result;
+if (process.env.ZCODE_CLAIM_MODE === "claim") {
+  result = await client.claim(process.env.ZCODE_CLAIM_PLAN_ID, {
+    verifyParam: process.env.ZCODE_CLAIM_CAPTCHA,
+    region: process.env.ZCODE_CLAIM_CAPTCHA_REGION || undefined,
+  });
+} else {
+  result = { plans: await client.getPreviews() };
+}
+process.stdout.write("GLOSSARION_CLAIM=" + JSON.stringify(result));
+'''.strip()
+
+_claim_locks: Dict[int, threading.Lock] = {}
+_claim_locks_guard = threading.Lock()
+_last_claim: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+
+_CLAIM_FAILURE_MESSAGES = {
+    "already_claimed": "this free plan is already claimed on this login",
+    "quota_exhausted": "today's free claims are all taken; try again in the next claim window",
+    "ineligible": "this Z.AI login is not eligible for the free plan",
+    "unavailable": "the free plan is not available right now",
+    "not_found": "the free plan is no longer offered",
+    "captcha": "Z.AI rejected the captcha; try again",
+    "login_required": "the Z.AI login expired; sign in again",
+}
+
+
+def _run_claim_script(account: int, extra_env: Dict[str, str]) -> Dict[str, Any]:
+    runtime_dir, bun = _ensure_runtime_and_dependencies()
+    env = _runtime_env(account)
+    env.update({"ZCODE_CLAIM_ORIGIN": CLAIM_ORIGIN, "ZCODE_APP_VERSION": ZCODE_APP_VERSION, **extra_env})
+    result = run_logged_subprocess(
+        [*bun, "-e", _CLAIM_SCRIPT],
+        log_fn=None,
+        timeout=40,
+        cwd=runtime_dir,
+        env=env,
+        popen_kwargs=_no_window_process_kwargs(),
+    )
+    output = str(result.get("output") or "")
+    if result["returncode"] != 0:
+        raise RuntimeError(_catalog_subprocess_error_detail(output, "Z.AI plan claim request failed"))
+    marker = next((line for line in reversed(output.splitlines()) if line.startswith("GLOSSARION_CLAIM=")), "")
+    try:
+        return json.loads(marker.partition("=")[2])
+    except ValueError as exc:
+        raise RuntimeError("Z.AI plan claim returned invalid JSON") from exc
+
+
+def _captcha_config() -> Dict[str, Any]:
+    response = requests.get(
+        LOGIN_PLAN_CLIENT_CONFIGS_ENDPOINT,
+        params={"app_version": ZCODE_APP_VERSION},
+        headers={"User-Agent": f"ZCode/{ZCODE_APP_VERSION}"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    captcha = (((response.json() or {}).get("data") or {}).get("configs") or {}).get("captcha") or {}
+    if not (captcha.get("enabled") and captcha.get("prefix") and captcha.get("sceneId")):
+        raise RuntimeError("Z.AI did not publish a captcha configuration for plan claims")
+    return {"prefix": captcha["prefix"], "sceneId": captcha["sceneId"], "region": captcha.get("region") or "sgp"}
+
+
+def _captcha_window_command(config: Dict[str, Any]) -> List[str]:
+    payload = json.dumps(config, separators=(",", ":"))
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--authza-captcha", payload]
+    return [sys.executable, os.path.abspath(__file__), "--authza-captcha", payload]
+
+
+def _solve_captcha_in_window(config: Dict[str, Any], plan_name: str, cancel_check=None) -> str:
+    """Show the captcha in a visible window and return the token the user earned."""
+    env = dict(os.environ)
+    env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+    proc = subprocess.Popen(
+        _captcha_window_command({**config, "planName": plan_name}),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        **_no_window_process_kwargs(),
+    )
+    deadline = time.monotonic() + CAPTCHA_WINDOW_TIMEOUT_SECONDS
+    try:
+        while proc.poll() is None:
+            if (callable(cancel_check) and cancel_check()) or is_cancelled():
+                raise RuntimeError("stream cancelled")
+            if time.monotonic() > deadline:
+                raise RuntimeError("the captcha window timed out")
+            time.sleep(0.2)
+        output = proc.stdout.read() if proc.stdout else ""
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    marker = next((line for line in reversed(output.splitlines()) if line.startswith(_CAPTCHA_RESULT_PREFIX)), "")
+    try:
+        result = json.loads(marker[len(_CAPTCHA_RESULT_PREFIX):]) if marker else {}
+    except ValueError:
+        result = {}
+    token = str(result.get("verifyParam") or "")
+    if not token:
+        raise RuntimeError(str(result.get("error") or "the captcha window was closed before it was solved"))
+    return token
+
+
+def claim_free_plan(account_id: Optional[int] = None, log_fn=None, cancel_check=None) -> Dict[str, Any]:
+    """Claim the free ZCode plan this login is offered, with a user-solved captcha.
+
+    Returns ``{"claimed": bool, "active": bool, "message": str}``. Concurrent
+    callers share one attempt, and a finished attempt is reused for
+    ``CLAIM_RETRY_AFTER_SECONDS`` so a failed claim never reopens the window
+    for every request.
+    """
+    account = _normalize_account_id(account_id)
+    _log = log_fn or _log_console
+    with _claim_locks_guard:
+        lock = _claim_locks.setdefault(account, threading.Lock())
+    with lock:
+        cached = _last_claim.get(account)
+        if cached and time.monotonic() - cached[0] < CLAIM_RETRY_AFTER_SECONDS:
+            return cached[1]
+        outcome = _claim_free_plan_once(account, _log, cancel_check)
+        _last_claim[account] = (time.monotonic(), outcome)
+        return outcome
+
+
+def _claim_free_plan_once(account: int, _log, cancel_check) -> Dict[str, Any]:
+    if not mobile_runtime.subprocesses_available() or _external_proxy_url(account):
+        return {"claimed": False, "active": False,
+                "message": "free plans can only be claimed on the PC that runs the GLM proxy"}
+    plans = _run_claim_script(account, {"ZCODE_CLAIM_MODE": "preview"}).get("plans") or []
+    if not plans:
+        return {"claimed": False, "active": False,
+                "message": "Z.AI is not offering a free plan to claim right now"}
+    plan = max(plans, key=lambda item: item.get("priority") or 0)
+    name = str(plan.get("name") or plan.get("planId") or "free plan")
+    _log(f"🧩 AuthZA: '{name}' can be claimed - solve the captcha in the window that opened…")
+    config = _captcha_config()
+    token = _solve_captcha_in_window(config, name, cancel_check)
+    outcome = _run_claim_script(account, {
+        "ZCODE_CLAIM_MODE": "claim",
+        "ZCODE_CLAIM_PLAN_ID": str(plan.get("planId") or ""),
+        "ZCODE_CLAIM_CAPTCHA": token,
+        "ZCODE_CLAIM_CAPTCHA_REGION": str(config.get("region") or ""),
+    })
+    if not outcome.get("ok"):
+        kind = str(outcome.get("failureKind") or "")
+        reason = _CLAIM_FAILURE_MESSAGES.get(kind) or str(outcome.get("message") or "the claim was refused")
+        return {"claimed": False, "active": kind == "already_claimed",
+                "message": f"claiming '{name}' failed: {reason}"}
+    starts_at = outcome.get("startsAt")
+    if isinstance(starts_at, (int, float)) and starts_at > time.time() + 5:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(starts_at))
+        return {"claimed": True, "active": False, "message": f"claimed '{name}'; it activates at {when}"}
+    _log(f"✅ AuthZA: claimed '{name}'")
+    return {"claimed": True, "active": True, "message": f"claimed '{name}'"}
+
+
+_CAPTCHA_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  body { font-family: Segoe UI, sans-serif; margin: 32px; color: #222; }
+  button { font-size: 15px; padding: 10px 22px; cursor: pointer; }
+  #status { margin-top: 16px; color: #555; }
+</style></head><body>
+<h2>Claim a free Z.AI plan</h2>
+<p>Your AuthZA login has no quota. Solve the captcha to claim <b id="plan"></b> for this Z.AI login.</p>
+<button id="btn">Verify and claim</button>
+<div id="cap"></div><div id="status"></div>
+<script>
+  const cfg = __CONFIG__;
+  document.getElementById("plan").textContent = cfg.planName;
+  window.AliyunCaptchaConfig = { region: cfg.region, prefix: cfg.prefix };
+</script>
+<script src="__SDK__"></script>
+<script>
+  const done = (value) => console.log("__PREFIX__" + JSON.stringify(value));
+  window.initAliyunCaptcha({
+    SceneId: cfg.sceneId, mode: "popup", element: "#cap", button: "#btn", language: "en",
+    success: (result) => done({ verifyParam: typeof result === "string" ? result : JSON.stringify(result) }),
+    fail: () => { document.getElementById("status").textContent = "Verification failed - try again."; },
+    onError: (err) => done({ error: "captcha error: " + JSON.stringify(err) }),
+  });
+</script></body></html>"""
+
+
+def _captcha_window_main(config_json: str) -> int:
+    """Visible QtWebEngine window: prints the captcha token, then exits."""
+    if sys.stdout is None and os.name == "nt":
+        # Windowed PyInstaller builds drop stdio even when the parent passed a pipe.
+        import ctypes
+        import msvcrt
+        handle = ctypes.windll.kernel32.GetStdHandle(-11 & 0xFFFFFFFF)
+        sys.stdout = os.fdopen(msvcrt.open_osfhandle(handle, 0), "w", encoding="utf-8", buffering=1)
+    from PySide6.QtCore import QTimer, QUrl
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWidgets import QApplication
+
+    config = json.loads(config_json)
+    app = QApplication(["Glossarion"])
+    finished = {"done": False}
+
+    def emit(payload: Dict[str, Any]) -> None:
+        if finished["done"]:
+            return
+        finished["done"] = True
+        sys.stdout.write(_CAPTCHA_RESULT_PREFIX + json.dumps(payload) + "\n")
+        sys.stdout.flush()
+        QTimer.singleShot(300, app.quit)
+
+    class Page(QWebEnginePage):
+        def javaScriptConsoleMessage(self, level, message, line, source):
+            if message.startswith(_CAPTCHA_RESULT_PREFIX):
+                try:
+                    emit(json.loads(message[len(_CAPTCHA_RESULT_PREFIX):]))
+                except ValueError:
+                    emit({"error": "the captcha page returned an unreadable result"})
+
+    class View(QWebEngineView):
+        def closeEvent(self, event):
+            emit({"error": "the captcha window was closed before it was solved"})
+            super().closeEvent(event)
+
+    view = View()
+    view.setPage(Page(view))
+    view.setWindowTitle("Glossarion - claim a free Z.AI plan")
+    view.resize(560, 640)
+    html = (_CAPTCHA_PAGE.replace("__CONFIG__", json.dumps(config))
+            .replace("__SDK__", _ALIYUN_CAPTCHA_SDK)
+            .replace("__PREFIX__", _CAPTCHA_RESULT_PREFIX))
+    # Aliyun serves ZCode's captcha scene only to pages on ZCode's origin.
+    view.setHtml(html, QUrl(CLAIM_ORIGIN + "/"))
+    view.show()
+    view.raise_()
+    view.activateWindow()
+    return app.exec()
+
+
+if __name__ == "__main__" and "--authza-captcha" in sys.argv:
+    sys.exit(_captcha_window_main(sys.argv[sys.argv.index("--authza-captcha") + 1]))

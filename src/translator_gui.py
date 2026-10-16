@@ -39,6 +39,11 @@ if __name__ == '__main__':
         from autharena_proxy import _qt_browser_helper
         raise SystemExit(_qt_browser_helper("--visible" in _early_sys.argv))
 
+    # AuthZA's free-plan claim window (the user solves Z.AI's captcha there).
+    if "--authza-captcha" in _early_sys.argv:
+        from glm_proxy import _captcha_window_main
+        raise SystemExit(_captcha_window_main(_early_sys.argv[_early_sys.argv.index("--authza-captcha") + 1]))
+
     # PyInstaller-safe AuthND token helper entrypoint.  authnd_auth.py cannot
     # run itself via ``sys.executable script.py`` once bundled because
     # sys.executable is the Glossarion app exe.  Handle this tiny helper command

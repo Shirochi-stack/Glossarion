@@ -1594,6 +1594,7 @@ try:
     from glm_proxy import capture_cancel_generation as _authza_capture_cancel_generation
     from glm_proxy import is_cancel_generation_cancelled as _authza_generation_cancelled
     from glm_proxy import open_login as _authza_open_login
+    from glm_proxy import claim_free_plan as _authza_claim_free_plan
     from glm_proxy import uses_general_api as _authza_uses_general_api
     from glm_proxy import ensure_proxy_running as _authza_ensure_running
     from glm_proxy import get_local_chat_endpoint as _authza_get_local_chat_endpoint
@@ -1606,6 +1607,7 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
     _authza_capture_cancel_generation = None
     _authza_generation_cancelled = None
     _authza_open_login = None
+    _authza_claim_free_plan = None
     _authza_uses_general_api = None
     _authza_ensure_running = None
     _authza_get_local_chat_endpoint = None
@@ -30084,6 +30086,7 @@ class UnifiedClient:
                 f"API call in progress{self._get_thinking_status_label()}"
             )
 
+        claim_attempted = False
         for attempt in range(max_retries):
             # Retry attempts must stop for both immediate and graceful Stop.
             if authza_operation_cancelled():
@@ -30209,11 +30212,32 @@ class UnifiedClient:
                     '"code":1005' in error_str.replace(" ", "")
                     or "exceed quota limit" in error_lower
                 ):
+                    claim_note = ""
+                    if not general_api and _authza_claim_free_plan is not None and not claim_attempted:
+                        # Login-plan quota comes from free ZCode plans that must be
+                        # claimed; offer the captcha window once per request.
+                        claim_attempted = True
+                        try:
+                            claim = _authza_claim_free_plan(
+                                proxy_account_id,
+                                log_fn=print,
+                                cancel_check=authza_operation_cancelled,
+                            )
+                        except Exception as claim_exc:
+                            if authza_operation_cancelled():
+                                raise UnifiedClientError(
+                                    "AuthZA: Translation stopped by user", error_type="cancelled"
+                                )
+                            claim = {"active": False, "message": f"claiming a free plan failed: {claim_exc}"}
+                        if claim.get("active"):
+                            print(f"🔄 {label}: {claim.get('message')} - retrying request…")
+                            continue
+                        claim_note = f" ({claim.get('message')})"
                     raise UnifiedClientError(
-                        f"AuthZA{acct_label}: Z.AI says this login's {access_label} quota for "
-                        f"'{actual_model}' is used up (error 1005). Wait for the quota to reset, "
-                        "sign in with another Z.AI account using an authzaN/ slot, or switch "
-                        "AuthZA to General API.",
+                        f"AuthZA{acct_label}: Z.AI has no {access_label} quota for '{actual_model}' "
+                        f"on this login (error 1005: none claimed, or used up){claim_note}. Wait for "
+                        "the quota to reset, sign in with another Z.AI account using an authzaN/ "
+                        "slot, or switch AuthZA to General API.",
                         error_type="entitlement_error"
                     )
 

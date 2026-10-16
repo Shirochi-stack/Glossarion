@@ -376,6 +376,7 @@ def kill_helper_subprocesses():
                         or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
                         or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s
                         or "--authnd-mint-token" in cmd_s or "--mint-token" in cmd_s
+                        or "--authza-captcha" in cmd_s
                         or "--gemini-free-search" in cmd_s or "--search-helper" in cmd_s):
                     processes_to_terminate.append(child)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
