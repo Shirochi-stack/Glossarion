@@ -37,7 +37,7 @@ from glossarion_mobile.state.app_state import AppState  # noqa: E402
 from glossarion_mobile.ui import tokens  # noqa: E402
 from glossarion_mobile.ui.responsive import drawer_width  # noqa: E402
 from glossarion_mobile.ui.router import parse_route  # noqa: E402
-from glossarion_mobile.ui.screens.welcome import KEYLESS, SIGN_INS, WelcomeScreen  # noqa: E402
+from glossarion_mobile.ui.screens.welcome import KEYLESS, ONDEVICE_LABELS, SIGN_INS, WelcomeScreen  # noqa: E402
 from glossarion_mobile.ui.screens.welcome_flow import STEPS, WelcomeFlow  # noqa: E402
 from glossarion_mobile.ui.shell import drawer as drawer_mod  # noqa: E402
 from glossarion_mobile.ui.shell.drawer import DESTINATIONS, ChatDrawer  # noqa: E402
@@ -186,6 +186,9 @@ def test_page_one_fits_the_phone_without_scrolling(width, with_engine, tmp_path)
             name, detail = cell.content.controls[:2]
             assert text_width(name.value, tokens.TYPE_SCALE["label_medium"].size) <= quarter, (name.value, quarter)
             assert text_width(detail.value, tokens.TYPE_SCALE["label_small"].size) <= quarter, (detail.value, quarter)
+        # the other states' lines too, with room to spare: the estimate runs ~10 % short on a device
+        for label in ONDEVICE_LABELS.values():
+            assert text_width(label, tokens.TYPE_SCALE["label_small"].size) * 1.15 <= quarter, (label, quarter)
     # at 200 % text the page may scroll (it keeps ScrollMode.AUTO) rather than clip
     assert s.page_area.content.scroll == ft.ScrollMode.AUTO
 

@@ -86,6 +86,9 @@ PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "
 SUGGESTED_ONDEVICE = "Light"
 #: at most this many on-device presets on page 1 (one row)
 ONDEVICE_CELLS = 4
+#: a cell's second line by ``OnDeviceFlow.row_state`` (short: a quarter of a 360 dp row)
+ONDEVICE_LABELS = {"checking": "Checking…", "paused": "Resume", "busy": "Starting…", "error": "Retry",
+                   "in_use": "✓ In use", "use": "Tap to use"}
 
 __all__ = [
     "GLOSSARY_MODE_CARDS",
@@ -294,17 +297,9 @@ class WelcomeScreen(Screen):
         verdict, mark, words = flow.ram_hint(preset)
         download = flow.active_download(stem)
         if state == "downloading" and download is not None:
-            detail = f"{download.percent}%" if download.phase == "downloading" else "Checking…"
-        elif state == "paused":
-            detail = "Paused · tap"
-        elif state == "busy":
-            detail = "Starting…"
-        elif state == "error":
-            detail = "Retry"
-        elif state == "in_use":
-            detail = "✓ In use"
-        elif state == "use":
-            detail = "On phone · use"
+            detail = f"{download.percent}%" if download.phase == "downloading" else ONDEVICE_LABELS["checking"]
+        elif state in ONDEVICE_LABELS:
+            detail = ONDEVICE_LABELS[state]
         else:
             detail = " ".join(x for x in (dl.format_bytes(lp.download_size(preset)) if lp.download_size(preset)
                                           else "", mark) if x)
