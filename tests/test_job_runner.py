@@ -558,6 +558,10 @@ def test_stop_control_parts_are_the_desktop_statements():
     psutil_legacy = legacy_proto[legacy_proto.index("import psutil"):legacy_proto.index("print(f'Error terminating")]
     kill = ast.unparse(_function("stop_control", "kill_helper_subprocesses"))
     psutil_new = kill[kill.index("import psutil"):kill.index("print(f'Error terminating")]
+    # 5b6c49e8 (owner, AuthZA captcha window): Stop also kills the --authza-captcha helper
+    added = " or ('--authza-captcha' in cmd_s)"
+    assert psutil_new.count(added) == 1
+    psutil_new = psutil_new.replace(added, "")
     assert textwrap.dedent(psutil_new).split() == textwrap.dedent(psutil_legacy).split()
 
 

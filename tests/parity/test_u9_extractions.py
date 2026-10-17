@@ -177,13 +177,23 @@ def test_provider_info_is_the_frozen_text():
     node = method_node(frozen("src/translator_gui.py"), "TranslatorGUI", "_show_model_info_dialog")
     assign = next(n for n in node.body if isinstance(n, ast.Assign)
                   and any(isinstance(t, ast.Name) and t.id == "info_text" for t in n.targets))
-    # sections the owner added after the move (19ff9fe8 authds, bf89c022 authnan, authchatgpt); the rest stays frozen
+    # sections the owner added after the move (19ff9fe8 authds, bf89c022 authnan, authchatgpt) and the
+    # local/ edits below; the rest stays frozen
     current_html = model_options.PROVIDER_INFO_HTML
     for title in ("<h4>DeepSeek web chat (authds/)</h4>", "<h4>NanoGPT Subscription (authnan/)</h4>",
                   "<h4>ChatGPT web chat (authchatgpt/)</h4>"):
         start = current_html.index(title)
         end = current_html.find("<h4>", start + len(title))
         current_html = current_html[:start] + current_html[end:]
+    # 90d94167 (keyless local/ route): the local-models section names local/ and gains its bullet
+    for added, frozen_text in (
+            ("<h4>Local models (ollamapull/, ollama/, lmstudio/, local/)</h4>",
+             "<h4>Local models (ollamapull/, ollama/, lmstudio/)</h4>"),
+            ("\n            <li><b>local/model-id</b> - Connect to llama.cpp's llama-server at "
+             "<code>http://127.0.0.1:8080/v1</code>\n"
+             "            (Glossarion Mobile: the on-device models of Model manager › On-device)</li>", "")):
+        assert current_html.count(added) == 1, added
+        current_html = current_html.replace(added, frozen_text)
     assert current_html == ast.literal_eval(assign.value)
     assert model_options.provider_info_html() == model_options.PROVIDER_INFO_HTML
     rewired = methods(current("translator_gui.py"), "TranslatorGUI")["_show_model_info_dialog"]
