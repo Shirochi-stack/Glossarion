@@ -460,6 +460,44 @@ class OnDeviceFlow:
             self.busy.discard(key)
             self.render()
 
+    def other_models(self, preset_rows: Optional[list] = None) -> tuple:
+        """What no preset row shows: ``([(stem, registry entry)], [(key, running or paused DownloadState)])``
+        (user-added Hugging Face files, and their downloads)."""
+        listed: set = set()
+        for preset in self.presets() if preset_rows is None else preset_rows:
+            stem = self.stem_of_preset(preset)
+            if stem:
+                listed.add(stem)
+                if self.row_state(preset, stem)[0] in ("downloading", "paused"):  # the row shows its projector too
+                    listed.add(self.service.registry.projector_key(stem))
+        downloaded: list = []
+        for stem, entry in sorted(self.service.registry.load().items(), key=lambda kv: kv[0].casefold()):
+            if stem not in listed:
+                downloaded.append((stem, entry))
+                listed.add(stem)
+        pending = [(stem, state) for stem, state in list(self.downloads.states.items())
+                   if stem not in listed and (state.running or state.paused)]
+        return downloaded, pending
+
+    async def get_preset_resume(self, index: int) -> Optional[str]:
+        """Resume the preset's paused download, then load and use it (the Resume button)."""
+        rows = self.presets()
+        if not 0 <= index < len(rows):
+            return None
+        stem = self.stem_of_preset(rows[index])
+        paused = self.active_download(stem)
+        if paused is not None and await self.resume(paused.stem):
+            return await self.get_preset(index)
+        return None
+
+    async def _use_other(self, stem: str) -> bool:
+        """Load and use a downloaded model no preset names (a user-added Hugging Face file)."""
+        try:
+            return await self.activate(stem)
+        except _Failed as exc:
+            self.say(str(exc))
+            return False
+
     def row_state(self, preset: dict, stem: Optional[str]) -> tuple:
         """(state, status text) of a preset row: download | downloading | paused | use | in_use | error | busy."""
         key = self.preset_key(preset)
@@ -693,26 +731,15 @@ class LocalModelsPanel(OnDeviceFlow):
         if self.control is None:
             return
         rows: list = []
-        listed: set = set()
         preset_rows = self.presets()
         if not preset_rows:
             rows.append(_small("No presets. Add one, or restore the defaults.", key="local-presets-empty"))
         for index, preset in enumerate(preset_rows):
-            stem = self.stem_of_preset(preset)
-            if stem:
-                listed.add(stem)
-                if self.row_state(preset, stem)[0] in ("downloading", "paused"):  # the row shows its projector too
-                    listed.add(self.service.registry.projector_key(stem))
-            rows.append(self._preset_row(index, preset, stem))
+            rows.append(self._preset_row(index, preset, self.stem_of_preset(preset)))
         self.preset_column.controls = rows
-        others: list = []
-        for stem, entry in sorted(self.service.registry.load().items(), key=lambda kv: kv[0].casefold()):
-            if stem not in listed:
-                others.append(self._other_row(stem, entry))
-                listed.add(stem)
-        for stem, state in list(self.downloads.states.items()):
-            if stem not in listed and (state.running or state.paused):
-                others.append(self._download_row(stem, state))
+        downloaded, pending = self.other_models(preset_rows)
+        others: list = [self._other_row(stem, entry) for stem, entry in downloaded]
+        others.extend(self._download_row(stem, state) for stem, state in pending)
         self.other_column.controls = others
         self.other_card.visible = bool(others)
         if push:
@@ -795,16 +822,6 @@ class LocalModelsPanel(OnDeviceFlow):
         label = "Downloading…" if state == "downloading" else "Working…"
         return ft.FilledTonalButton(content=label, key=key, disabled=True)
 
-    async def get_preset_resume(self, index: int) -> Optional[str]:
-        rows = self.presets()
-        if not 0 <= index < len(rows):
-            return None
-        stem = self.stem_of_preset(rows[index])
-        paused = self.active_download(stem)
-        if paused is not None and await self.resume(paused.stem):
-            return await self.get_preset(index)
-        return None
-
     def _other_row(self, stem: str, entry: dict) -> ft.Control:
         loaded = self.service.loaded_stem == stem
         current = str(self.current_model() if self.current_model else "") or ""
@@ -826,13 +843,6 @@ class LocalModelsPanel(OnDeviceFlow):
                 ], spacing=0, wrap=True, alignment=ft.MainAxisAlignment.END),
             ], spacing=2, tight=True),
         )
-
-    async def _use_other(self, stem: str) -> bool:
-        try:
-            return await self.activate(stem)
-        except _Failed as exc:
-            self.say(str(exc))
-            return False
 
     def _download_row(self, stem: str, state: dl.DownloadState) -> ft.Control:
         buttons: list = []
