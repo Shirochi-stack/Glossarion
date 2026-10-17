@@ -347,6 +347,36 @@ class UpdateCoreMixin:
         except (requests.RequestException, ValueError, TypeError):
             return []
 
+    def _github_latest_with_retries(self):
+        """Return (latest_json, gitlab_releases, last_github_error).
+
+        After the first GitHub failure, check GitLab's version. A mirror newer than this
+        build gets one more GitHub try before it is used; otherwise GitHub gets up to 3 retries."""
+        mirror, retries, last_exc = None, 3, None
+        for attempt in range(4):
+            try:
+                return self._json(self.GITHUB_LATEST_URL), None, None
+            except (requests.RequestException, ValueError) as exc:
+                if not self._can_fallback(exc):
+                    raise
+                last_exc = exc
+            if attempt == 0:
+                try:
+                    mirror = releases = self._gitlab_releases()
+                except (requests.RequestException, ValueError) as exc:
+                    if not self._can_fallback(exc):
+                        raise
+                    releases = []  # mirror stays None: the fallback path re-checks GitLab
+                if releases and (self._release_version(releases[0]['tag_name'])
+                                 > self._release_version(self.CURRENT_VERSION)):
+                    retries = 1
+            if attempt >= retries:
+                break
+            print(f"[DEBUG] GitHub update check failed ({last_exc}); retry {attempt + 1}/{retries}")
+            self._check_abort()
+            time.sleep(1)
+        return None, mirror, last_exc
+
     def _check_for_updates_core(self, force_show=False):
         self._update_check_performed = False
         if not force_show and time.time() - self._last_check_time < self._check_cache_duration:
@@ -354,10 +384,13 @@ class UpdateCoreMixin:
         self._update_check_performed = True
         self.update_available = False
         self._update_check_deadline = time.monotonic() + getattr(self, '_update_check_timeout', 30)
-        history = None
+        history = mirror_releases = None
         try:
             try:
-                release = self._normalise_release(self._json(self.GITHUB_LATEST_URL), 'github')
+                latest, mirror_releases, github_exc = self._github_latest_with_retries()
+                if latest is None:
+                    raise github_exc
+                release = self._normalise_release(latest, 'github')
                 self._release_provider = 'github'
                 if (getattr(self, '_build_variant', '') != 'Mobile'
                         and self._release_version(release['tag_name']) > self._release_version(self.CURRENT_VERSION)
@@ -377,9 +410,15 @@ class UpdateCoreMixin:
             except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
                 if not self._can_fallback(exc):
                     raise
-                releases = self._gitlab_releases()
+                # None means GitLab was not checked during the GitHub retries.
+                releases = mirror_releases if mirror_releases is not None else self._gitlab_releases()
                 if not releases:
                     raise ValueError('GitHub is unavailable and GitLab has no stable tagged releases.') from exc
+                # Never fall back to a mirror that lags this build: report the GitHub failure instead.
+                if self._release_version(releases[0]['tag_name']) <= self._release_version(self.CURRENT_VERSION):
+                    print(f"[DEBUG] GitLab mirror {releases[0]['tag_name']} is not newer than "
+                          f"{self.CURRENT_VERSION}; not falling back")
+                    raise exc
                 release = releases[0]
                 self._release_provider = 'gitlab'
                 history = releases
