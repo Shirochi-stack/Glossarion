@@ -159,6 +159,21 @@ def vision_service(tmp_path, monkeypatch):
     svc.set_default_service(None)
 
 
+def test_deleting_a_model_cancels_its_paused_image_support(vision_service):
+    service, _engine = vision_service
+    key = service.registry.projector_key("blind")
+    part = service.registry.file_path(key) + dl.PART_SUFFIX
+    with open(part, "wb") as handle:
+        handle.write(b"P" * 100)
+    with open(part + ".json", "w", encoding="utf-8") as handle:
+        json.dump({"url": "x", "repo": "t/blind", "file": "mmproj-F16.gguf", "revision": "r", "size": 1000,
+                   "sha256": None, "stem": key, "kind": "mmproj", "owner": "blind"}, handle)
+    assert service.downloads.pending_spec(key).owner == "blind"
+    assert service.delete("blind")
+    assert not os.path.exists(part) and not os.path.exists(part + ".json")
+    assert service.downloads.pending_spec(key) is None and key not in service.downloads.states
+
+
 def test_models_say_which_ones_read_images(vision_service):
     service, _engine = vision_service
     data = json.loads(_raw(service, "GET", f"/{service.server.token}/v1/models")[1])["data"]
@@ -192,6 +207,35 @@ def test_image_parts_reach_a_vision_model_scaled_down_as_jpeg(vision_service):
     url = engine.calls[-1]["messages"][0]["content"][1]["image_url"]["url"]
     with Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))) as seen:
         assert seen.size == (40, 30) and seen.mode == "RGB"
+
+
+def test_a_phone_photo_is_decoded_small_and_turned_upright(monkeypatch):
+    # a portrait camera JPEG: landscape pixels + EXIF orientation 6 (rotate 90 degrees clockwise)
+    photo = Image.new("RGB", (4000, 3000), (30, 30, 200))
+    photo.paste((220, 20, 20), (0, 0, 4000, 300))  # the photo's top edge (right once turned upright)
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    out = io.BytesIO()
+    photo.save(out, format="JPEG", exif=exif.tobytes())
+    url = "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
+    from PIL import ImageOps
+
+    decoded: list = []
+    real_transpose = ImageOps.exif_transpose
+
+    def transpose(image, *args, **kwargs):
+        decoded.append(image.size)
+        return real_transpose(image, *args, **kwargs)
+
+    monkeypatch.setattr(ImageOps, "exif_transpose", transpose)
+    prepared = vis.prepare_image_url(url)
+    # libjpeg decoded at half scale (2000 x 1500), never below the 896 px the model gets
+    assert decoded == [(2000, 1500)]
+    with Image.open(io.BytesIO(base64.b64decode(prepared.split(",", 1)[1]))) as seen:
+        assert seen.size == (672, 896)  # portrait, as the camera held it
+        red, _green, blue = seen.convert("RGB").getpixel((640, 448))
+        assert red > 150 and blue < 100  # the top band is on the right after a clockwise turn
+        assert not seen.getexif().get(0x0112)
 
 
 def test_image_requests_that_cannot_run_get_clear_400s(vision_service):

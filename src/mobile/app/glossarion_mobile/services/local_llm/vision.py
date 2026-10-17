@@ -4,7 +4,8 @@
 * ``check_parts(messages)``: ``None`` or why the parts cannot run here (an unknown part type, an
   ``http(s)`` URL: the endpoint never fetches anything, so a request cannot make the app download);
 * ``prepare_messages(messages)``: every image decoded with the shared ``safe_image.open_image`` (only
-  the formats Glossarion accepts), its longest side scaled down to ``MAX_SIDE`` px and re-encoded as
+  the formats Glossarion accepts; a JPEG is decoded at a reduced scale with ``draft`` and turned upright
+  by its EXIF orientation), its longest side scaled down to ``MAX_SIDE`` px and re-encoded as
   JPEG (stb_image in libmtmd reads JPEG/PNG, not WebP; a phone photo becomes a few hundred KB and the
   projector's work stays bounded);
 * ``IMAGE_TOKENS``: the context estimate per image (Qwen3.5 at 896 px: 56 x 56 patches merged 2 x 2,
@@ -86,17 +87,21 @@ def prepare_image_url(url: str, max_side: int = MAX_SIDE) -> str:
     """``url`` (a ``data:`` URL) as a JPEG ``data:`` URL whose longest side is at most ``max_side``."""
     raw = _decode_data_url(url)
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
 
         from safe_image import open_image
     except ImportError as exc:  # pragma: no cover - Pillow ships with the app
         raise VisionInputError(f"Images cannot be read in this build ({exc})") from exc
     try:
         with open_image(io.BytesIO(raw)) as image:
+            if image.format == "JPEG":  # a phone photo decodes at 1/2..1/8 scale, never below max_side
+                image.draft("RGB", (max_side, max_side))
             image.load()
             if getattr(image, "is_animated", False):
                 image.seek(0)
-            frame = image.convert("RGBA") if "A" in image.getbands() or image.mode == "P" else image.convert("RGB")
+            upright = ImageOps.exif_transpose(image)  # a camera's EXIF rotation (lost in the re-encode)
+            frame = upright.convert("RGBA") if "A" in upright.getbands() or upright.mode == "P" \
+                else upright.convert("RGB")
     except Exception as exc:
         raise VisionInputError(f"The image could not be read ({type(exc).__name__})") from exc
     if frame.mode == "RGBA":  # transparent areas become white, as a page would show them

@@ -691,6 +691,7 @@ class LocalEngineService:
         if self._stem == stem and self.engine is not None and self.engine.loaded and not self.unload():
             return False
         removed = self.registry.remove(stem)
+        self.downloads.cancel(self.registry.projector_key(stem))  # its image support's running / paused part
         self.request_catalog_refresh()
         return removed
 
