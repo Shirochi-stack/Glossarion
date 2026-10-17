@@ -192,6 +192,8 @@ import threading
 from temperature_compatibility import (
     is_temperature_rejection, model_rejects_temperature,
     remember_temperature_rejection, strip_temperature, omit_claude_sampling_parameters,
+    claude_requires_adaptive_thinking, claude_uses_adaptive_thinking,
+    is_adaptive_required_rejection, remember_adaptive_required,
 )
 import uuid
 import wave
@@ -7870,6 +7872,29 @@ class UnifiedClient:
                     self._dedicated_override_lock.release()
                 except Exception:
                     pass
+
+    def _switch_anthropic_payload_to_adaptive(self, payload: dict, endpoint_cache_key: str = None):
+        """Rewrite budget thinking as adaptive and cache the model as adaptive-only."""
+        model_name = str(payload.get('model') or '')
+        remember_adaptive_required(model_name)
+        try:
+            with self.__class__._adaptive_unsupported_lock:
+                self.__class__._adaptive_unsupported_models.discard(model_name)
+                if endpoint_cache_key:
+                    self.__class__._adaptive_unsupported_models.discard(endpoint_cache_key)
+        except Exception:
+            pass
+        effort = (os.getenv('ANTHROPIC_EFFORT', 'high') or 'high').strip().lower()
+        if effort not in ('low', 'medium', 'high', 'xhigh', 'max'):
+            effort = 'high'
+        payload['thinking'] = {'type': 'adaptive', 'display': 'summarized'}
+        output_config = payload.get('output_config')
+        if not isinstance(output_config, dict):
+            output_config = {}
+        output_config['effort'] = effort
+        payload['output_config'] = output_config
+        strip_temperature(payload)
+        omit_claude_sampling_parameters(payload, model_name)
 
     @staticmethod
     def _temperature_parameter_disabled() -> bool:
@@ -17281,12 +17306,7 @@ class UnifiedClient:
             if os.getenv('ENABLE_ANTHROPIC_THINKING', '0') != '1':
                 return ""
             force_adaptive = os.getenv('ANTHROPIC_FORCE_ADAPTIVE', '0') == '1'
-            is_adaptive_model = (
-                'opus-4-6' in model_lower or 'opus-4.6' in model_lower
-                or 'opus-4-7' in model_lower or 'opus-4.7' in model_lower
-                or 'sonnet-4-6' in model_lower or 'sonnet-4.6' in model_lower
-            )
-            if is_adaptive_model or force_adaptive:
+            if claude_uses_adaptive_thinking(model_lower) or force_adaptive:
                 effort = (os.getenv('ANTHROPIC_EFFORT', 'high') or 'high').strip().lower()
                 if effort not in ('low', 'medium', 'high', 'xhigh', 'max'):
                     effort = 'high'
@@ -18077,8 +18097,19 @@ class UnifiedClient:
                         raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                     continue
                 
+                # Check for budget thinking rejected on an adaptive-only model (Anthropic)
+                if json and is_adaptive_required_rejection(status, resp.text):
+                    print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
+                    model_name = json.get('model')
+                    print(f"    🧠 {model_name} requires adaptive thinking — retrying with adaptive (cached for session)")
+                    self._switch_anthropic_payload_to_adaptive(json, f"{url}:{model_name}")
+                    # Don't count this as a failed attempt
+                    attempt = max(0, attempt - 1)
+                    continue
+
                 # Check for adaptive thinking not supported error (Anthropic)
-                if status == 400 and "adaptive thinking is not supported" in resp.text.lower():
+                if status == 400 and "adaptive thinking is not supported" in resp.text.lower() \
+                        and not (json and claude_requires_adaptive_thinking(json.get('model'))):
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
                     # Cache this model as not supporting adaptive thinking
                     model_name = json.get('model') if json else None
@@ -19212,24 +19243,22 @@ class UnifiedClient:
                 model_lower = (self.model or '').lower()
                 force_adaptive = os.getenv('ANTHROPIC_FORCE_ADAPTIVE', '0') == '1'
                 # Models that use adaptive thinking with output_config effort:
-                # opus-4-6 (only supports adaptive), opus-4-7, sonnet-4-6
-                is_adaptive_model = (
-                    'opus-4-6' in model_lower or 'opus-4.6' in model_lower
-                    or 'opus-4-7' in model_lower or 'opus-4.7' in model_lower
-                    or 'sonnet-4-6' in model_lower or 'sonnet-4.6' in model_lower
-                )
-                
+                # every Claude model after 4.6 (adaptive only) plus opus/sonnet 4.6
+                is_adaptive_model = claude_uses_adaptive_thinking(model_lower)
+
                 # Check if model is cached as not supporting adaptive thinking
+                # (never for adaptive-only models, which reject budget thinking)
                 adaptive_blocked = False
-                try:
-                    with self.__class__._adaptive_unsupported_lock:
-                        if self.model in self.__class__._adaptive_unsupported_models:
-                            adaptive_blocked = True
-                except Exception:
-                    pass
-                
+                if not claude_requires_adaptive_thinking(model_lower):
+                    try:
+                        with self.__class__._adaptive_unsupported_lock:
+                            if self.model in self.__class__._adaptive_unsupported_models:
+                                adaptive_blocked = True
+                    except Exception:
+                        pass
+
                 # Determine thinking mode:
-                # - opus-4-6 / opus-4-7 / sonnet-4-6: always adaptive
+                # - models after 4.6, opus-4-6 / sonnet-4-6: always adaptive
                 # - force_adaptive toggle: adaptive for all models
                 # - default: enabled with budget_tokens
                 # - adaptive_blocked: model doesn't support adaptive, fall through to standard
@@ -19239,6 +19268,9 @@ class UnifiedClient:
                 
                 if use_adaptive:
                     data["thinking"] = {"type": "adaptive"}
+                    # Models after 4.6 default to display "omitted" (empty thinking text)
+                    if claude_requires_adaptive_thinking(model_lower):
+                        data["thinking"]["display"] = "summarized"
                     # Add effort level via output_config (low/medium/high/xhigh/max)
                     effort = (os.getenv('ANTHROPIC_EFFORT', 'high') or 'high').lower()
                     if effort not in ('low', 'medium', 'high', 'xhigh', 'max'):
@@ -23390,7 +23422,8 @@ class UnifiedClient:
             # Log thinking status when starting stream
             thinking_mode = data.get('thinking', {}).get('type', None) if isinstance(data.get('thinking'), dict) else None
             # Pre-flight: skip adaptive thinking if this endpoint+model is cached as unsupported
-            if thinking_mode == 'adaptive':
+            # (adaptive-only models reject budget thinking, so they never fall back)
+            if thinking_mode == 'adaptive' and not claude_requires_adaptive_thinking(data.get('model')):
                 _adaptive_cache_key = f"{api_url}:{data.get('model', '')}"
                 try:
                     with self.__class__._adaptive_unsupported_lock:
@@ -23503,9 +23536,30 @@ class UnifiedClient:
                         print(f"🛰️ [anthropic] SSE stream re-opened after stripping thinking (status={raw_resp.status_code})")
                     start_ts = _t.time()  # reset timing baseline to successful re-open
 
-                elif (raw_resp.status_code == 400 and "adaptive thinking is not supported" in err_lower) or \
+                elif is_adaptive_required_rejection(raw_resp.status_code, err_body):
+                    model_name = data.get('model')
+                    print(f"🧠 [anthropic] {model_name} requires adaptive thinking — retrying with adaptive (cached for session)")
+                    self._switch_anthropic_payload_to_adaptive(data, f"{api_url}:{model_name}")
+                    try:
+                        _hx_client = _httpx.Client(timeout=_httpx_timeout)
+                        _hx_req = _hx_client.build_request("POST", api_url, headers=headers, json=data)
+                        raw_resp = _hx_client.send(_hx_req, stream=True)
+                    except Exception as e:
+                        if self._is_stop_requested():
+                            self._cancelled = True
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
+                    if raw_resp.status_code != 200:
+                        raw_resp.read()
+                        raise UnifiedClientError(f"Anthropic streaming error after switching to adaptive thinking: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
+                    if not self._is_stop_requested():
+                        print(f"🛰️ [anthropic] SSE stream re-opened with adaptive thinking (status={raw_resp.status_code})")
+                    start_ts = _t.time()  # reset timing baseline to successful re-open
+
+                elif not claude_requires_adaptive_thinking(data.get('model')) and (
+                     (raw_resp.status_code == 400 and "adaptive thinking is not supported" in err_lower) or
                      (raw_resp.status_code in (400, 422) and ("\"adaptive\"" in err_lower or "'adaptive'" in err_lower) and
-                      ("should be 'enabled'" in err_lower or "should be \"enabled\"" in err_lower or "literal_error" in err_lower)):
+                      ("should be 'enabled'" in err_lower or "should be \"enabled\"" in err_lower or "literal_error" in err_lower))):
                     print(f"🧠 [anthropic] Adaptive thinking not supported — falling back to standard extended thinking")
                     model_name = data.get('model')
                     _adaptive_cache_key = f"{api_url}:{model_name}" if model_name else None
@@ -23595,6 +23649,10 @@ class UnifiedClient:
                         current_block_type = cb.get("type", "")
                         if current_block_type == "thinking" and not self._is_stop_requested():
                             stream_thinking = self._stream_thinking_logging_enabled()
+                            # Time from block start: with display "omitted" the only
+                            # thinking delta arrives right before the block ends.
+                            if first_thinking_ts is None:
+                                first_thinking_ts = _t.time()
                             if not thinking_started:
                                 thinking_started = True
                                 # Don't print header yet — defer until threshold

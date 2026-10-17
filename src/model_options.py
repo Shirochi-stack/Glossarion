@@ -1400,6 +1400,17 @@ def _fetch_provider_catalog(
                 if isinstance(endpoints, list) and endpoints and not {"chat", "generate"}.intersection(endpoints):
                     continue
             model_id = next((entry.get(field) for field in spec.id_fields if entry.get(field)), None)
+            if spec.name == "anthropic" and model_id:
+                # The Models API reports which thinking types each model accepts;
+                # cache adaptive-only models so budget thinking is never sent to them.
+                try:
+                    thinking_types = entry["capabilities"]["thinking"]["types"]
+                    if (not thinking_types["enabled"]["supported"]
+                            and thinking_types["adaptive"]["supported"]):
+                        from temperature_compatibility import remember_adaptive_required
+                        remember_adaptive_required(model_id)
+                except Exception:
+                    pass
         else:
             model_id = None
         normalized = _normalize_catalog_model_id(spec, model_id)
