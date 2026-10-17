@@ -11720,7 +11720,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             def _refresh_minimal_pass_row(_d, keep_updates_disabled=False):
                 """Keep the Minimal-pass row as the first entry in the list."""
                 row_data = _gp_minimal_pass_row(_d)
-                fingerprint = tuple(row_data) if row_data else None
+                # () not None: callers reset the stored fingerprint to None to force
+                # a redraw, which must also take effect when the row goes away.
+                fingerprint = tuple(row_data) if row_data else ()
                 if fingerprint == panel_state.get('_minimal_pass_fingerprint'):
                     return False
                 if not keep_updates_disabled:
