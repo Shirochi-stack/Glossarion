@@ -401,6 +401,7 @@ class FrozenDesktopTables:
             ('stream_thinking_logs', ['stream_thinking_logs_checkbox', 'stream_thinking_logs_var'], False, bool),
             ('max_retries', ['max_retries_var'], 7, lambda v: safe_int(v, 7)),
             ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
+            ('respect_retry_after', ['respect_retry_after_var'], True, bool),
 
             # Retry settings
             ('retry_truncated', ['retry_truncated_var'], False, bool),
@@ -533,6 +534,7 @@ class FrozenDesktopTables:
             ('qa_auto_search_output_var', 'qa_auto_search_output', True),
             ('scan_phase_enabled_var', 'scan_phase_enabled', True),
             ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', False),
+            ('respect_retry_after_var', 'respect_retry_after', True),
             # Keep existing variables intact
             ('enable_image_translation_var', 'enable_image_translation', False),
             ('process_webnovel_images_var', 'process_webnovel_images', True),

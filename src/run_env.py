@@ -1523,6 +1523,7 @@ class RunEnvMixin:
             'IGNORE_RETRY_AFTER': '1' if (hasattr(self, 'ignore_retry_after_var') and self.ignore_retry_after_var) else '0',
             'MAX_RETRIES': str(resolved_max_retries),
             'INDEFINITE_RATE_LIMIT_RETRY': '1' if self.config.get('indefinite_rate_limit_retry', False) else '0',
+            'RESPECT_RETRY_AFTER': '1' if getattr(self, 'respect_retry_after_var', True) else '0',
             # Scanning/QA settings
             'SCAN_PHASE_ENABLED': '1' if getattr(self, 'scan_phase_enabled_var', self.config.get('scan_phase_enabled', False)) else '0',
             'SCAN_PHASE_MODE': self._get_scan_phase_mode(),
@@ -2576,6 +2577,7 @@ class RunEnvMixin:
                 # QA/meta preferences
                 ('QA_AUTO_SEARCH_OUTPUT', '1' if getattr(self, 'qa_auto_search_output_var', True) else '0'),
                 ('INDEFINITE_RATE_LIMIT_RETRY', '1' if getattr(self, 'indefinite_rate_limit_retry_var', False) else '0'),
+                ('RESPECT_RETRY_AFTER', '1' if getattr(self, 'respect_retry_after_var', True) else '0'),
 
                 # Post-translation scanning phase
                 ('SCAN_PHASE_ENABLED', '1' if getattr(self, 'scan_phase_enabled_var', False) else '0'),

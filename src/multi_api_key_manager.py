@@ -2968,6 +2968,51 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
 
+    def _bind_respect_retry_after_checkbox(self):
+        """Show the shared 'Always check and respect Retry-After' value and follow it live (the
+        Other Settings copy and sibling manager dialogs write it through the same rule)."""
+        owner = self.translator_gui
+        if not hasattr(owner, 'config'):
+            return
+        import settings_rules
+        if not hasattr(owner, 'respect_retry_after_var') or not hasattr(owner, 'ignore_retry_after_var'):
+            # an owner that never ran _init_variables (tests, tools): read the saved policy
+            owner.respect_retry_after_var, owner.ignore_retry_after_var = settings_rules.retry_after_policy(owner.config)
+        settings_rules.bind_retry_after_checkbox(
+            owner, self.respect_retry_after_checkbox, 'respect_retry_after',
+            on_change=self._apply_retry_after_cooldown_state)
+
+    def _on_respect_retry_after_toggled(self, checked):
+        owner = self.translator_gui
+        if not hasattr(owner, 'config'):
+            return
+        import settings_rules
+        settings_rules.set_retry_after_choice(owner, 'respect_retry_after', bool(checked))
+        if not getattr(self, '_initializing', False):
+            self._schedule_key_pool_config_flush('rotation', refresh_keys=False, refresh_parent=False)
+
+    def _apply_retry_after_cooldown_state(self, respect, ignore=False):
+        """Grey the default cooldown while the server's Retry-After takes priority over it."""
+        from settings_rules import RETRY_AFTER_COOLDOWN_HINT
+        enabled = not respect
+        tooltip = "" if enabled else RETRY_AFTER_COOLDOWN_HINT
+        for name in ('cooldown_label', 'cooldown_spinbox', 'cooldown_hint_label'):
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            try:
+                widget.setEnabled(enabled)
+                widget.setToolTip(tooltip)
+            except RuntimeError:
+                pass
+        checkbox = getattr(self, 'respect_retry_after_checkbox', None)
+        if checkbox is not None:
+            try:
+                checkbox.setToolTip(RETRY_AFTER_COOLDOWN_HINT if respect else
+                                    "Off: a rate-limited key rests for its own cooldown.")
+            except RuntimeError:
+                pass
+
     def _set_spinbox_from_config(self, spinbox, value):
         if spinbox is None:
             return
@@ -5394,7 +5439,8 @@ class MultiAPIKeyDialog(QDialog):
         add_grid.addWidget(self._wrap_model_with_ollama_settings(self.model_combo), 0, 4)
 
         # Row 1: Cooldown and buttons
-        add_grid.addWidget(QLabel("Cooldown (s):"), 1, 0, Qt.AlignLeft)
+        self.cooldown_label = QLabel("Cooldown (s):")
+        add_grid.addWidget(self.cooldown_label, 1, 0, Qt.AlignLeft)
         cooldown_widget = QWidget()
         cooldown_layout = QHBoxLayout(cooldown_widget)
         cooldown_layout.setContentsMargins(0, 0, 0, 0)
@@ -5406,11 +5452,18 @@ class MultiAPIKeyDialog(QDialog):
         self._disable_spinbox_mousewheel(self.cooldown_spinbox)  # Disable mousewheel
         cooldown_layout.addWidget(self.cooldown_spinbox)
 
-        cooldown_hint = QLabel("(10-3600)")
-        cooldown_hint.setStyleSheet("color: gray;")
-        cooldown_layout.addWidget(cooldown_hint)
+        self.cooldown_hint_label = QLabel("(10-3600)")
+        self.cooldown_hint_label.setStyleSheet("color: gray;")
+        cooldown_layout.addWidget(self.cooldown_hint_label)
         cooldown_layout.addStretch()
         add_grid.addWidget(cooldown_widget, 1, 1)
+
+        # The Other Settings "Always check and respect Retry-After" toggle, shown here too: one
+        # setting, both copies follow every change (settings_rules.set_retry_after_choice).
+        self.respect_retry_after_checkbox = self._create_styled_checkbox("Always check and respect Retry-After")
+        self.respect_retry_after_checkbox.toggled.connect(self._on_respect_retry_after_toggled)
+        add_grid.addWidget(self.respect_retry_after_checkbox, 1, 2, 1, 2, Qt.AlignLeft)
+        self._bind_respect_retry_after_checkbox()
 
         # Add button and Copy Current Key button
         button_widget = QWidget()

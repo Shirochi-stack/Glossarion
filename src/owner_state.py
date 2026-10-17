@@ -1509,6 +1509,10 @@ Text to analyze:
         for var_name, key, default in bool_vars:
             setattr(self, var_name, create_var(bool, key, default))
         self.use_header_as_output_var = False
+        if self.respect_retry_after_var and getattr(self, 'ignore_retry_after_var', False):
+            # 'Always check and respect Retry-After' contradicts 'Ignore server Retry-After header':
+            # a config holding both keeps the explicit ignore choice.
+            self.respect_retry_after_var = False
         
         self.translate_special_files_var = self.config.get('translate_special_files', False)
         self.skip_image_title_translation_var = bool(self.config.get('skip_image_title_translation', True))

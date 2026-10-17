@@ -160,7 +160,7 @@ CURATED_SECTIONS: tuple = (
         ("Streaming", ("streaming", "enable_streaming", "stream_thinking_logs", "allow_batch_stream_logs",
                        "allow_authgpt_batch_stream_logs", "enable_thoughts")),
         ("Retries", ("max_retries", "max_retry_tokens", "retry_timeout", "timeout_retry_attempts", "chunk_timeout",
-                     "indefinite_rate_limit_retry", "ignore_retry_after")),
+                     "indefinite_rate_limit_retry", "respect_retry_after", "ignore_retry_after")),
         ("Truncation", ("retry_truncated", "truncation_retry_attempts", "char_ratio_truncation_enabled",
                         "char_ratio_truncation_percent", "char_ratio_truncation_attempts",
                         "char_ratio_min_output_chars", "missing_finish_as_prohibited",

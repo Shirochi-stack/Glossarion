@@ -20,13 +20,19 @@ import autharena_proxy as arena
 SRC = Path(__file__).resolve().parents[1] / "src"
 
 
+def _unified_module():
+    import unified_api_client
+    return unified_api_client
+
+
 @lru_cache(maxsize=1)
 def _unified_handlers_code():
     source = ast.parse((SRC / "unified_api_client.py").read_text(encoding="utf-8"))
     client_node = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "UnifiedClient")
     error_node = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "UnifiedClientError")
     wanted = {"_send_autharena", "_send_internal", "_is_rate_limit_error", "_parse_retry_after",
-              "_indefinite_rate_limit_retry", "_blocked_for_session"}
+              "_indefinite_rate_limit_retry", "_blocked_for_session", "_server_retry_after",
+              "_respect_retry_after_wait"}
     client_node.body = [node for node in client_node.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), error_node, client_node], type_ignores=[])
     return compile(ast.fix_missing_locations(module), str(SRC / "unified_api_client.py"), "exec")
@@ -43,7 +49,12 @@ def handlers(tmp_path, monkeypatch):
                      _payloads_dir=lambda: str(tmp_path),
                      _get_current_run_id=lambda: None,
                      _api_watchdog_record_retry=lambda *args, **kwargs: None,
-                     _api_watchdog_update_model=lambda *args, **kwargs: None)
+                     _api_watchdog_update_model=lambda *args, **kwargs: None,
+                     # the key-context decorator and the module-level Retry-After helpers the handlers use
+                     route_key_context=lambda func: func,
+                     **{name: getattr(_unified_module(), name) for name in (
+                         "RETRY_AFTER_MAX_SECONDS", "respect_retry_after_enabled", "server_retry_after_seconds",
+                         "parse_retry_after_value")})
     exec(_unified_handlers_code(), namespace)
     client = namespace["UnifiedClient"]()
     tls = SimpleNamespace()

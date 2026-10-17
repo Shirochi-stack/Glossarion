@@ -98,6 +98,10 @@ __all__ = [
     # streaming (other_settings texts; the Glossarion Mobile Streaming switch)
     "STREAMING_TRUNCATION_WARNING", "FORCED_STREAM_NOTE", "STREAMING_ENV", "STREAMING_KEYS", "streaming_states",
     "streaming_mode", "apply_streaming",
+    # Retry-After policy (other_settings + Multi API Key Manager; the mobile Retries group)
+    "RETRY_AFTER_COOLDOWN_HINT",
+    "retry_after_policy", "apply_retry_after_choice", "set_retry_after_choice",
+    "add_retry_after_listener", "remove_retry_after_listener", "bind_retry_after_checkbox",
     # output mode (other_settings)
     "OUTPUT_MODES", "OUTPUT_MODE_INDEX", "OutputModeFlags", "normalize_output_mode", "output_mode_flags",
     "apply_output_mode", "current_output_mode", "output_mode_sub_settings",
@@ -1579,6 +1583,98 @@ def apply_streaming(config, on, unset=False):
 
 
 # =============================================================================================
+# 9c. Retry-After policy (other_settings "Always check and respect Retry-After" below Indefinite
+#     Rate Limit Retry, "Ignore server Retry-After header" under HTTP Timeouts; the same respect
+#     toggle in the Multi API Key Manager)
+# =============================================================================================
+
+#: Tooltip of the Multi API Key Manager cooldown while the respect toggle is in effect.
+RETRY_AFTER_COOLDOWN_HINT = (
+    "Server Retry-After takes priority: a rate-limited key rests for as long as the server asks.\n"
+    "This cooldown is used only when a 429 has no Retry-After.")
+
+
+def retry_after_policy(config):
+    """``(respect, ignore)`` as the desktop applies them: the two toggles contradict, so a config
+    holding both keeps the explicit ignore choice (owner_state._init_variables migrates it the
+    same way). 'Ignore' itself only acts while the HTTP overrides are enabled
+    (unified_api_client.respect_retry_after_enabled); with them off neither toggle overrides
+    the other at runtime and respect stays as saved."""
+    ignore = _flag(config, 'ignore_retry_after')
+    respect = _flag(config, 'respect_retry_after') and not ignore
+    return respect, ignore
+
+
+def apply_retry_after_choice(config, key, value):
+    """Turn *key* (respect_retry_after / ignore_retry_after) to *value* in place; turning one on
+    turns the other off. Returns the env exports."""
+    value = bool(value)
+    other = 'ignore_retry_after' if key == 'respect_retry_after' else 'respect_retry_after'
+    config[key] = value
+    if value:
+        config[other] = False
+    respect, ignore = retry_after_policy(config)
+    return {'RESPECT_RETRY_AFTER': '1' if respect else '0', 'IGNORE_RETRY_AFTER': '1' if ignore else '0'}
+
+
+def add_retry_after_listener(owner, callback):
+    """Call *callback()* after every :func:`set_retry_after_choice` on *owner* (the dialogs that
+    show the toggles register here, so every copy follows a change at once)."""
+    listeners = owner.__dict__.setdefault('_retry_after_listeners', [])
+    if callback not in listeners:
+        listeners.append(callback)
+
+
+def remove_retry_after_listener(owner, callback):
+    listeners = owner.__dict__.get('_retry_after_listeners') or []
+    if callback in listeners:
+        listeners.remove(callback)
+
+
+def set_retry_after_choice(owner, key, value):
+    """The one writer of the two toggles on the desktop owner: config, ``*_var`` mirrors and every
+    registered dialog (a listener that raises - e.g. a closed dialog - is dropped)."""
+    apply_retry_after_choice(owner.config, key, value)
+    owner.respect_retry_after_var, owner.ignore_retry_after_var = retry_after_policy(owner.config)
+    for callback in list(owner.__dict__.get('_retry_after_listeners') or []):
+        try:
+            callback()
+        except Exception:
+            remove_retry_after_listener(owner, callback)
+
+
+def bind_retry_after_checkbox(owner, checkbox, key, on_change=None):
+    """Keep *checkbox* (respect_retry_after / ignore_retry_after) showing the owner's value live:
+    it is set now and after every :func:`set_retry_after_choice`, with its signals blocked so a
+    sync never writes back. ``on_change(respect, ignore)`` runs after each sync (the Multi API
+    Key Manager greys its cooldown). Duck-typed: any object with setChecked / blockSignals."""
+    def sync():
+        respect = bool(getattr(owner, 'respect_retry_after_var', True))
+        ignore = bool(getattr(owner, 'ignore_retry_after_var', False))
+        respect = respect and not ignore
+        blocked = checkbox.blockSignals(True)
+        try:
+            checkbox.setChecked(respect if key == 'respect_retry_after' else ignore)
+        finally:
+            checkbox.blockSignals(bool(blocked))
+        redraw = getattr(checkbox, '_update_checkmark', None)  # the styled checkbox's ✓ overlay
+        if callable(redraw):
+            redraw()
+        if on_change is not None:
+            on_change(respect, ignore)
+
+    sync()
+    add_retry_after_listener(owner, sync)
+    destroyed = getattr(checkbox, 'destroyed', None)
+    if destroyed is not None:
+        try:
+            destroyed.connect(lambda *_args: remove_retry_after_listener(owner, sync))
+        except Exception:
+            pass
+    return sync
+
+
+# =============================================================================================
 # 10. Output mode (other_settings._set_output_mode and the Image Translation sub-settings)
 # =============================================================================================
 
@@ -1993,6 +2089,9 @@ _CHANGE_RULES.update({
     'auto_compression_factor': _change_auto_compression,
     'glossary_auto_compression': _change_glossary_compression_input('glossary_auto_compression'),
     'glossary_max_output_tokens': _change_glossary_compression_input('glossary_max_output_tokens'),
+    # turning one Retry-After toggle on turns the other off (both dialogs, Glossarion Mobile)
+    'respect_retry_after': lambda config, value: apply_retry_after_choice(config, 'respect_retry_after', value),
+    'ignore_retry_after': lambda config, value: apply_retry_after_choice(config, 'ignore_retry_after', value),
 })
 
 
