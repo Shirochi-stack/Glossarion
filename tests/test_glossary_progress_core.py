@@ -421,7 +421,13 @@ def test_glossary_progress_actions_match_frozen_desktop(action, gp_fixture, tmp_
     if action == "remove" and "minimal_pass_removed" not in results[0][1]:
         current.pop("minimal_pass_removed", None)
     assert current == results[0][1]
-    assert results[1][2] == results[0][2]
+    # owner fix 2026-10-17: the removed Minimal pass row now disappears at once; the frozen
+    # desktop left it on screen until a restart.
+    legacy_rows, legacy_labels = results[0][2]
+    if action == "remove":
+        legacy_rows = [[row for row in rows if not row[0].startswith("Minimal")] for rows in legacy_rows]
+        assert not any(row[0].startswith("Minimal") for rows in results[1][2][0] for row in rows)
+    assert results[1][2] == (legacy_rows, legacy_labels)
 
 
 # ===========================================================================
