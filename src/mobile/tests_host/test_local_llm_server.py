@@ -76,7 +76,10 @@ def test_token_and_host_guards(running):
     assert _raw(service, "GET", f"/{token}/nothing")[0] == 404
     assert os.environ[svc.URL_ENV] == service.server.base_url and service.server.base_url.endswith(f"/{token}/v1")
     status, data = _raw(service, "GET", f"/{token}/health")
-    assert status == 200 and json.loads(data) == {"state": "idle", "model": None, "queue": 0}
+    assert status == 200 and json.loads(data) == {"state": "idle", "model": None, "queue": 0, "busy": False,
+                                                  "load_seconds": None}
+    status, data = _raw(service, "GET", f"/{token}/health?model=local/FAKE-ECHO")
+    assert json.loads(data)["target"] == {"stem": "fake-echo", "size": 4, "loaded": False}
 
 
 def test_models_lists_downloaded_files(running):

@@ -231,7 +231,7 @@ path and the dummy Bearer key `UnifiedClient` sends is ignored. Endpoints:
     (`select.select([sock],[],[],0)` readable plus `recv(1, MSG_PEEK) == b""`). In streaming mode
     a failed write (`BrokenPipeError` / `ConnectionResetError`) also stops generation. Stop in
     the app closes the client connection, so generation stops within a few tokens;
-- `GET /<token>/health`: `{"state":"idle|loading|ready|generating","model":stem|null,"queue":n}`.
+- `GET /<token>/health`: `{"state":"idle|loading|ready|generating","model":stem|null,"queue":n}` (plus `busy`, `load_seconds`; `?model=` adds `target: {stem,size,loaded}`: the shared client logs "📱 On-device request", "⏳ Waiting for the on-device model…", "⏳ Loading on-device model <stem> (<size>)…" and "✓ On-device model <stem> loaded in N s" from it).
 
 ### Chat template and thinking
 
@@ -386,7 +386,16 @@ the real number below it).
   - lifecycle `hide`/`pause` on iOS with no active job: unload at once (jetsam);
   - on Android: unload after 60 s in the background unless a job is active (the job's foreground
     service keeps the process alive);
-  - `detach`: unload and stop the server;
+  - another model selected (`local/A` -> `local/B` or a cloud model; the Models & keys feature
+    observes `model`): unload A at once, or right after its current answer, unless a running job uses it;
+  - `detach`: unload unless a job runs, and keep the server up. Android destroys the activity (Back, or
+    memory pressure in the background) while the process and a job under its foreground service go on;
+    stopping the server there was the cause of the endless `[local] SDK call failed: Connection error.`
+    retries. A restarted server rebinds its port (same token), the app recreated in the same process
+    adopts the running service, and the shared client reads `GLOSSARION_LOCAL_LLM_URL` on every attempt;
+  - Stop: a queued request gives up on any job Stop (graceful or immediate) with 499 `client_closed`
+    (the client does not retry it); the running answer stops within 8 tokens on an immediate Stop or
+    disconnect and finishes on a graceful one;
   - wired from `GlossarionApp.on_lifecycle` (`app.py`) through `local_engine.on_lifecycle(name)`,
     like `cloud_sync`;
 - **JobService interplay:** jobs still run one at a time (unchanged). The active job's model is read

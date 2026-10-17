@@ -12,7 +12,10 @@ appends ``/chat/completions``, so the token travels in the path and the dummy Be
   parts with ``data:`` URLs; a text-only model answers 400 "no vision support". Errors use the OpenAI
   error shape (404 ``model_not_found``, 400 ``context_length_exceeded`` / no vision / bad image, 409
   busy with a job's model, 503 queue full);
-* ``GET /<token>/health``: ``{"state", "model", "queue"}``.
+* ``GET /<token>/health``: ``{"state", "model", "queue", "busy", "load_seconds"}``; ``?model=<name>`` adds
+  ``target`` (``{"stem", "size", "loaded"}``), which the shared client reads to log loading / waiting.
+
+``start()`` after ``stop()`` binds the same port again (same token): ``base_url`` does not change.
 
 A generation stops within a few tokens when the client goes away (Stop in the app closes the
 connection): the engine's stop check peeks at the socket, and a failed streaming write stops it too.
@@ -27,6 +30,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
 import secrets
 import select
 import socket
@@ -37,7 +41,7 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Iterator, Optional
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 log = logging.getLogger("glossarion.local_llm")
 
@@ -164,11 +168,16 @@ def client_gone(sock: Any) -> bool:
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # Linux / Android: rebinding the previous port right after a stop must not fail on the connections
+    # still in TIME_WAIT (SO_REUSEADDR there never lets two listeners share a port). Windows' SO_REUSEADDR
+    # does allow that, so it stays off there.
+    allow_reuse_address = os.name != "nt"
+    # several jobs' worker threads connect at once (manga: 4); the default 5 is the kernel's backlog
+    request_queue_size = 64
 
-    def __init__(self, owner: "LocalLLMServer") -> None:
+    def __init__(self, owner: "LocalLLMServer", port: int = 0) -> None:
         self.owner = owner
-        super().__init__((owner.host, 0), _Handler)
+        super().__init__((owner.host, int(port)), _Handler)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         error = sys.exc_info()[1]
@@ -235,7 +244,9 @@ class _Handler(BaseHTTPRequestHandler):
                 {"id": m["id"], "object": "model", "created": int(m.get("created") or 0), "owned_by": "local",
                  "meta": {k: v for k, v in m.items() if k not in ("id", "created")}} for m in models]})
         elif rest == ["health"]:
-            self._json(200, owner.backend.health())
+            query = parse_qs(urlsplit(self.path).query)
+            model = (query.get("model") or [None])[0]
+            self._json(200, owner.backend.health(model) if model else owner.backend.health())
         else:
             self._not_found()
 
@@ -393,6 +404,7 @@ class LocalLLMServer:
         self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._last_port = 0  # a restart binds it again: base_url (token and port) never changes
 
     @property
     def running(self) -> bool:
@@ -424,8 +436,16 @@ class LocalLLMServer:
         with self._lock:
             if self._server is not None:
                 return self.port
-            server = _Server(self)
+            server = None
+            if self._last_port:
+                try:
+                    server = _Server(self, self._last_port)
+                except OSError:
+                    log.info("on-device LLM endpoint: port %d is taken; using a new one", self._last_port)
+            if server is None:
+                server = _Server(self)
             self._server = server
+            self._last_port = int(server.server_address[1])
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.25},
                                       name="gl-llm-http", daemon=True)
             self._thread = thread

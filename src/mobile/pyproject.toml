@@ -180,8 +180,11 @@ startup_message = "Starting translation engine…"
 # generate bindings that assert jni ^1.1.0 (JniVersionCheck(1, 1)) and break the Dart compile on
 # Android and iOS. 1.0.3 is the last release whose bindings check jni 1.0 (JniVersionCheck(1, 0)).
 # Drop this pin once the template moves to jni 1.1.
+# shared_preferences_android 2.5.0 (2026-10-17) moved to jni bindings that also assert jni ^1.1.0;
+# 2.4.28 is the last release without the jni dependency. Drop it together with the jni_flutter pin.
 [tool.flet.flutter.pubspec.dependency_overrides]
 jni_flutter = "1.0.3"
+shared_preferences_android = "2.4.28"
 
 # llama-cpp-python (the built-in on-device engine, Model manager › On-device) is device-only too,
 # so the host `uv sync` never builds its 70 MB sdist. pypi.flet.dev ships cp313 builds for all five

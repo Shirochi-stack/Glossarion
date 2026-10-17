@@ -697,12 +697,15 @@ class OutputTab:
                                            on_click=lambda e: actions.open_settings()))
         else:
             reason = actions.cloud_reason(state)
+            # no wrap: Flet 1.0.3 wraps an ``expand`` child of any Row in Expanded, and an Expanded inside
+            # Flutter's Wrap (Row(wrap=True)) throws during layout: release builds draw the grey ErrorWidget
+            # in place of the whole section (the owner's "grey blob" under Cloud & sharing)
             controls.append(ft.Row([
                 ft.Text("No cloud destination yet" if reason == u10.NO_DESTINATION_REASON else "Cloud sync",
                         theme_style=ft.TextThemeStyle.BODY_MEDIUM, expand=True),
                 ft.TextButton(content="Set up", icon=ft.Icons.SETTINGS_OUTLINED, on_click=lambda e: actions.open_settings(),
                               key=f"out-cloud-setup-{n}"),
-            ], wrap=True, key=f"out-cloud-dest-{n}"))
+            ], spacing=8, key=f"out-cloud-dest-{n}"))
         send_reason = self.cloud_reason()
         override_label = dict((v, l) for v, l, _t in u10.OVERRIDES).get(override, "Default")
         buttons: list = [

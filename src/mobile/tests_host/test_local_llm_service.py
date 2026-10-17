@@ -83,13 +83,15 @@ def test_unload_policies(tmp_path):
     job["model"] = None
     service.on_lifecycle("resume")
     assert service.on_lifecycle("hide") == "unloaded" and service.loaded_stem is None
-    # detach: unload and stop the endpoint
+    # detach (Android may keep the process and its job): unload without a job, the endpoint stays up
     service.start()
     assert service.server.running and os.environ.get(svc.URL_ENV) == service.server.base_url
     _chat(service, "fake-echo")
-    assert service.on_lifecycle("detach") == "stopped"
-    assert not service.server.running and service.loaded_stem is None and svc.URL_ENV not in os.environ
-    assert svc.default_service() is None
+    assert service.on_lifecycle("detach") == "detached"
+    assert service.server.running and service.loaded_stem is None
+    assert os.environ.get(svc.URL_ENV) == service.server.base_url and svc.default_service() is service
+    service.stop()  # the explicit teardown still closes it
+    assert not service.server.running and svc.URL_ENV not in os.environ and svc.default_service() is None
 
 
 def test_ram_gate(tmp_path):

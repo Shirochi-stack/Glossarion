@@ -33,6 +33,7 @@ import asyncio
 import re
 import logging
 import os
+import threading
 from collections import OrderedDict
 from typing import Any, Callable, Optional
 
@@ -1268,7 +1269,7 @@ class ModelsKeysFeature:
             run_io=self.run_io, spawn=self.spawn, sign_in=self.sign_in, signed_in_keys=self.signed_in_keys,
             test_key=self.test_key, tablet=self._tablet, next_slot=self.next_slot,
             gemini_status=self.gemini_status, gcp_project_picker=self.gcp_project_picker,
-            open_local_models=self.open_local_models,
+            open_local_models=self.open_local_models, local_engine=self.local_engine,
         ))
         shell = getattr(app, "shell", None)
         if shell is not None and self._fallback_factory is None:
@@ -1289,16 +1290,30 @@ class ModelsKeysFeature:
                 self._unsubs.append(observe(keys, lambda key, value: self._post(self._schedule_reload)))
                 # desktop: a model change auto-polls that provider once its 24 h TTL is due (debounced)
                 self._unsubs.append(observe(("model", "api_key"), lambda key, value: self._post(self._schedule_auto_poll)))
+                # another model selected: the on-device engine frees the one it holds (off the UI loop)
+                self._unsubs.append(observe(("model",), lambda key, value: self._local_model_selected(value)))
         self.spawn(self.catalog.load())
         self.start_local_engine()
 
     # ---- the on-device engine (services.local_llm) ---------------------------------------------------
 
+    def _local_model_selected(self, model: Any) -> None:
+        engine = self.local_engine
+        if engine is None or getattr(engine, "loaded_stem", None) is None:
+            return
+        threading.Thread(target=engine.selected_model_changed, args=(model,), name="gl-llm-switch",
+                         daemon=True).start()
+
     def _make_local_engine(self) -> Any:
         try:
             from glossarion_mobile.services.local_llm import downloads as dl
-            from glossarion_mobile.services.local_llm.service import LocalEngineService
+            from glossarion_mobile.services.local_llm.service import LocalEngineService, default_service
 
+            existing = default_service()
+            if existing is not None and existing.server.running:
+                # Android recreated the activity (a new app in the same process): the process' engine, its
+                # endpoint (the URL running jobs use) and its loaded model go on with this app's hooks
+                return self._adopt_local_engine(existing)
             paths = getattr(self.app, "paths", None)
             root = os.environ.get(dl.MODELS_ENV) or (str(paths.models) if paths is not None else None)
             return LocalEngineService(prefs=self.prefs, registry=dl.Registry(root), run_io=self.run_io,
@@ -1307,6 +1322,27 @@ class ModelsKeysFeature:
         except Exception:
             log.exception("the on-device engine is unavailable")
             return None
+
+    def _adopt_local_engine(self, engine: Any) -> Any:
+        previous = engine.active_job_model
+        current = self.active_job_model
+
+        def active_job_model() -> Optional[str]:
+            for source in (current, previous):  # this app's job, else one the previous app still runs
+                try:
+                    model = source() if source is not None else None
+                except Exception:
+                    model = None
+                if model is not None:
+                    return model
+            return None
+
+        engine.listeners.clear()  # the previous page's controls
+        engine.post, engine.refresh_catalog, engine.run_io = self._post, self.refresh_local_catalog, self.run_io
+        engine.active_job_model = active_job_model
+        if hasattr(engine.downloads, "_run_io"):
+            engine.downloads._run_io = self.run_io
+        return engine
 
     def start_local_engine(self) -> None:
         engine = self.local_engine

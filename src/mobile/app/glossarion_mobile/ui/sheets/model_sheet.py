@@ -17,6 +17,11 @@ content in the sheet, capped at 420 dp wide):
   key, with an inline "Sign in" / "Add key" · grey + ReasonChip for routes excluded on mobile,
   which stay visible and keep a desktop value), provider badge, ✓ polled; long-press →
   ActionSheet (★ Favorite · Copy id · Provider info · Refresh this provider);
+* On-device tab (with the app's on-device engine; also in field / one-shot mode, next to Model): the
+  presets (Prefs) and every other downloaded ``local/`` model (user-added Hugging Face files), each with
+  its size, "Reads images", the RAM hint and one state button (Download, which asks first · Cancel while
+  it downloads · Resume · Retry · Use · In use) over Model manager › On-device's ``OnDeviceFlow`` (one tap
+  downloads, loads and picks ``local/<stem>``), then a link to Model manager › On-device;
 * route row for the selected model (``model_catalog.route_info`` = shared ``route_controls``):
   KeyField for the API key + Test, sign-in chip, Google credentials / Vertex location / GCP
   project (schema tiles), Poe setup, the excluded-route reason;
@@ -224,6 +229,8 @@ class SheetEnv:
     gcp_project_picker: Optional[Callable[[str], Any]] = None
     # Model manager › On-device (the Local group's "Get on-device models…" row)
     open_local_models: Optional[Callable[[], Any]] = None
+    # the app's LocalEngineService (or a callable returning it): the sheet's On-device tab (OnDeviceFlow)
+    local_engine: Any = None
 
 
 _SHEET_ENV: Optional[SheetEnv] = None
@@ -284,8 +291,15 @@ def refresh_outcome_text(provider: str, outcome: Any) -> str:
 # ---- the sheet ------------------------------------------------------------------------------------
 
 
+#: the On-device tab's segment label and the link under its rows
+ONDEVICE_TAB_LABEL = "On-device"
+ONDEVICE_MANAGER_LABEL = "Model manager › On-device"
+
+
 class ModelSheet:
-    TABS = ("model", "profile", "language")
+    TABS = ("model", "ondevice", "profile", "language")
+    #: the tabs of the field / one-shot sheet (a model is all it returns)
+    MODEL_TABS = ("model", "ondevice")
 
     def __init__(
         self,
@@ -318,7 +332,11 @@ class ModelSheet:
         self.one_shot = one_shot
         self.field_mode = field_mode
         self.heading = "Use once" if one_shot else (title or "Model")
-        self.tab = tab if tab in self.TABS and not field_mode else "model"
+        self.tab_ids = self._tab_ids()
+        self.tab = tab if tab in self.tab_ids else "model"
+        self.ondevice: Any = None  # OnDeviceFlow of Model manager › On-device, made when the tab first shows
+        self._ondevice_unsubs: list = []
+        self._ondevice_loading: set = set()  # stems of downloaded models whose load + use runs
         self.query = ""
         self.chip = "all"
         self.selected_value: Optional[str] = None
@@ -364,13 +382,17 @@ class ModelSheet:
                 self.hide_item,
             ],
         )
+        labels = {"model": "Model", "ondevice": ONDEVICE_TAB_LABEL, "profile": "Profile", "language": "Language"}
         self.tabs = ft.SegmentedButton(
-            segments=[ft.Segment(value="model", label="Model"), ft.Segment(value="profile", label="Profile"),
-                      ft.Segment(value="language", label="Language")],
+            segments=[ft.Segment(value=t, label=labels[t]) for t in self.tab_ids],
             selected=[self.tab],
             on_change=self._on_tab,
-            visible=not self.field_mode and not self.one_shot,
+            # four segments fit a 360 dp sheet only without the selected tick
+            show_selected_icon=len(self.tab_ids) < 4,
+            visible=len(self.tab_ids) > 1,
         )
+        # scrolls sideways rather than overflow on a narrower phone (320 dp)
+        self.tabs_row = ft.Row([self.tabs], scroll=ft.ScrollMode.AUTO, visible=self.tabs.visible, key="model-tabs")
         self.search = ft.TextField(hint_text="Search models", prefix_icon=ft.Icons.SEARCH, dense=True,
                                    on_change=lambda e: self.set_query(e.control.value or ""),
                                    on_submit=self.submit_query,
@@ -415,7 +437,7 @@ class ModelSheet:
                 content=scroll_column(
                     [
                         ft.Row([self.title_text, self.menu], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                        self.tabs,
+                        self.tabs_row,
                         self.search_border.control,
                         self.chip_row,
                         self.chat_switch,
@@ -444,6 +466,7 @@ class ModelSheet:
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+        self._stop_ondevice_updates()
 
     # ---- state helpers -----------------------------------------------------------------------------
 
@@ -726,6 +749,291 @@ class ModelSheet:
                            leading=ft.Icon(ft.Icons.DOWNLOAD_FOR_OFFLINE_OUTLINED), dense=True, min_height=48,
                            on_click=lambda e: open_manager(), key="model-get-local")
 
+    # ---- On-device tab (Model manager › On-device's OnDeviceFlow) ------------------------------------
+
+    def _tab_ids(self) -> tuple:
+        """Model · On-device · Profile · Language; field / one-shot mode: Model · On-device. On-device only
+        when the app has the on-device engine."""
+        tabs = self.MODEL_TABS if (self.field_mode or self.one_shot) else self.TABS
+        if self.local_service() is None:
+            tabs = tuple(t for t in tabs if t != "ondevice")
+        return tabs
+
+    def local_service(self) -> Any:
+        """The app's ``LocalEngineService`` (``SheetEnv.local_engine``, a service or a callable), else None."""
+        value = self.env.local_engine
+        if value is not None and callable(value) and not hasattr(value, "downloads"):
+            try:
+                value = value()
+            except Exception:
+                log.debug("the on-device engine is unavailable", exc_info=True)
+                value = None
+        return value if value is not None and hasattr(value, "downloads") else None
+
+    def ondevice_flow(self) -> Any:
+        """The Model manager's ``OnDeviceFlow`` over the app's engine (None without one): one tap downloads
+        (asking first), loads and selects; its progress repaints this tab while the sheet is open."""
+        if self.ondevice is None:
+            service = self.local_service()
+            if service is None:
+                return None
+            from glossarion_mobile.ui.screens.local_models_panel import OnDeviceFlow
+
+            self.ondevice = OnDeviceFlow(service=service, prefs=self.env.prefs, page=self._page,
+                                         use_model=self._use_local_model,
+                                         current_model=lambda: str(self.current.get("model") or ""),
+                                         notify=self._note, spawn=self.env.spawn, on_change=self.render_ondevice)
+            try:
+                service.downloads.scan()  # paused parts of an earlier run (Resume)
+            except Exception:
+                log.debug("scanning on-device downloads failed", exc_info=True)
+        if not self._ondevice_unsubs and not self.closed:
+            service = self.ondevice.service
+            self._ondevice_unsubs = [service.downloads.subscribe(lambda state: self.render_ondevice())]
+            subscribe = getattr(service, "subscribe", None)
+            if subscribe is not None:
+                self._ondevice_unsubs.append(subscribe(lambda snap: self.render_ondevice()))
+        return self.ondevice
+
+    def _stop_ondevice_updates(self) -> None:
+        for unsub in self._ondevice_unsubs:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._ondevice_unsubs = []
+
+    def _use_local_model(self, model: str) -> None:
+        """OnDeviceFlow's ``use_model``: the tapped on-device model becomes the picker's choice (closes the
+        sheet; a download that finishes after the sheet was swiped away still applies the tap)."""
+        self.select("model", model)
+
+    def render_ondevice(self) -> None:
+        """Repaint only the On-device rows (download progress arrives several times a second)."""
+        if self.closed or self.tab != "ondevice":
+            return
+        self.list_view.controls = self.ondevice_rows()
+        _push(self.list_view)
+
+    def _spawn(self, coro: Any) -> Any:
+        spawn = self.env.spawn
+        return spawn(coro) if spawn is not None else asyncio.ensure_future(coro)
+
+    def ondevice_rows(self) -> list:
+        """The On-device tab: every preset (Prefs) and every other downloaded ``local/`` model (user-added
+        Hugging Face files) with size, "Reads images", the RAM hint and one state button, then the link to
+        Model manager › On-device."""
+        flow = self.ondevice_flow()
+        if flow is None:
+            return [ft.Container(content=ft.Text("On-device models need the app's on-device engine.",
+                                                 color=ft.Colors.ON_SURFACE_VARIANT),
+                                 padding=ft.Padding.all(12), key="ondevice-none"), self._ondevice_manager_row()]
+        rows: list = []
+        try:
+            available, reason = flow.service.engine_status()
+        except Exception:
+            available, reason = False, ""
+        if not available:
+            rows.append(ft.Container(
+                content=ft.Text(reason or "The on-device engine is not available in this build.", color=ft.Colors.ERROR,
+                                theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
+                padding=ft.Padding.only(left=12, right=12, top=4), key="ondevice-unavailable"))
+        preset_rows = flow.presets()
+        rows.append(self._section_header("Presets", count=len(preset_rows)))
+        if not preset_rows:
+            rows.append(ft.Container(content=ft.Text("No presets. Add one in Model manager › On-device.",
+                                                     color=ft.Colors.ON_SURFACE_VARIANT,
+                                                     theme_style=ft.TextThemeStyle.BODY_SMALL),
+                                     padding=ft.Padding.only(left=12, top=4), key="ondevice-presets-empty"))
+        for index, preset in enumerate(preset_rows):
+            rows.append(self._ondevice_preset_row(flow, index, preset))
+        downloaded, pending = flow.other_models(preset_rows)
+        if downloaded or pending:
+            rows.append(self._section_header("Downloaded", count=len(downloaded) + len(pending)))
+            rows.extend(self._ondevice_file_row(flow, stem, entry) for stem, entry in downloaded)
+            rows.extend(self._ondevice_download_row(flow, stem, state) for stem, state in pending)
+        rows.append(self._ondevice_manager_row())
+        return rows
+
+    def _ondevice_manager_row(self) -> ft.Control:
+        return ft.ListTile(title=ft.Text(ONDEVICE_MANAGER_LABEL),
+                           subtitle=ft.Text("Add from Hugging Face, edit presets, engine settings",
+                                            theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2,
+                                            overflow=ft.TextOverflow.ELLIPSIS),
+                           leading=ft.Icon(ft.Icons.TUNE), dense=True, min_height=48,
+                           on_click=lambda e: self.open_ondevice_manager(), key="ondevice-manager")
+
+    def open_ondevice_manager(self) -> None:
+        opener = self.env.open_local_models
+        if opener is None:
+            self._nav("settings.models")
+            return
+        self.close()
+        opener()
+
+    @staticmethod
+    def _ram_text(verdict: str) -> str:
+        from glossarion_mobile.ui.screens.local_models_panel import RAM_HINTS
+
+        mark, words = RAM_HINTS.get(verdict, ("", ""))
+        return f"{mark} {words}".strip()
+
+    def _ondevice_card(self, key: str, title: str, lines: list, buttons: list, *, selected: bool = False,
+                       on_click: Optional[Callable[[Any], Any]] = None, progress: Optional[float] = None,
+                       progress_key: Optional[str] = None) -> ft.Control:
+        """One On-device row: text lines (they wrap / ellipsize) beside its buttons; at 360 dp the name keeps
+        about two thirds of the row."""
+        body: list = [ft.Text(title, weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                      *lines]
+        if progress is not None or progress_key is not None:
+            body.append(ft.ProgressBar(value=progress, bar_height=3, border_radius=2, key=progress_key))
+        return ft.Container(
+            content=ft.Row([ft.Column(body, spacing=0, tight=True, expand=True),
+                            ft.Row(buttons, spacing=0, tight=True)],
+                           spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.only(left=12, right=4, top=6, bottom=6), border_radius=12,
+            bgcolor=ft.Colors.SECONDARY_CONTAINER if selected else None,
+            on_click=on_click, key=key,
+        )
+
+    def _ondevice_preset_row(self, flow: Any, index: int, preset: dict) -> ft.Control:
+        from glossarion_mobile.services.local_llm import downloads as dl
+        from glossarion_mobile.services.local_llm import presets as lp
+        from glossarion_mobile.ui.screens.local_models_panel import _vision_line
+
+        stem = flow.stem_of_preset(preset)
+        state, status = flow.row_state(preset, stem)
+        loading = state in ("use", "in_use") and flow.preset_key(preset) in flow.busy
+        download = flow.active_download(stem)
+        target = download.stem if download is not None else stem
+        key = f"ondevice-preset-{index}"
+        entry = (flow.service.registry.load().get(stem) or {}) if stem and state in ("use", "in_use") else {}
+        size = int(entry.get("size") or 0) or lp.download_size(preset)
+        if stem and state in ("use", "in_use"):
+            verdict = self._file_ram(flow, stem)
+        else:
+            verdict = flow.ram_hint(preset)[0]
+        facts = " · ".join(x for x in (dl.format_bytes(size) if size else "", self._ram_text(verdict)) if x)
+        lines: list = [ft.Text(facts, theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=1, key=f"{key}-facts",
+                               overflow=ft.TextOverflow.ELLIPSIS,
+                               color=ft.Colors.ERROR if verdict == "refuse" else ft.Colors.ON_SURFACE_VARIANT)]
+        if flow.is_vision_preset(preset, stem):
+            lines.append(_vision_line(f"{key}-vision"))
+        if state not in ("download",):
+            color = ft.Colors.ERROR if state == "error" else (
+                semantic("success") if state in ("use", "in_use") else ft.Colors.ON_SURFACE_VARIANT)
+            lines.append(ft.Text("Loading…" if loading else status, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                 max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, color=color, key=f"{key}-status"))
+        action = f"{key}-action"
+        buttons: list
+        if loading:
+            buttons = [ft.FilledTonalButton(content="Loading…", disabled=True, key=action)]
+        elif state == "downloading" and target:
+            buttons = [ft.FilledTonalButton(content="Cancel", icon=ft.Icons.CLOSE, key=action,
+                                            on_click=lambda e, s=target: flow.cancel(s))]
+        elif state == "download":
+            buttons = [ft.FilledTonalButton(content="Download", key=action,
+                                            on_click=lambda e, i=index: self._spawn(flow.get_preset(i)))]
+        elif state == "error":
+            buttons = [ft.FilledTonalButton(content="Retry", key=action,
+                                            on_click=lambda e, i=index: self._spawn(flow.get_preset(i)))]
+        elif state == "paused":
+            buttons = [ft.FilledTonalButton(content="Resume", key=action,
+                                            on_click=lambda e, i=index: self._spawn(flow.get_preset_resume(i)))]
+            if target:
+                buttons.append(ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Cancel download", key=f"{key}-cancel",
+                                             size_constraints=HIT_TARGET, on_click=lambda e, s=target: flow.cancel(s)))
+        elif state == "use":
+            buttons = [ft.FilledButton(content="Use", key=action,
+                                       on_click=lambda e, i=index: self._spawn(flow.get_preset(i)))]
+        elif state == "in_use":
+            buttons = [ft.FilledTonalButton(content="In use", icon=ft.Icons.CHECK_CIRCLE, disabled=True, key=action)]
+        else:  # busy: looking the model up on Hugging Face
+            buttons = [ft.FilledTonalButton(content="Working…", disabled=True, key=action)]
+        on_click = None
+        if state == "use" and not loading:
+            on_click = lambda e, i=index: self._spawn(flow.get_preset(i))  # noqa: E731
+        elif state == "in_use" and stem:
+            on_click = lambda e, m=f"local/{stem}": self.select("model", m)  # noqa: E731
+        progress = download.fraction if state in ("downloading", "paused") and download is not None else None
+        return self._ondevice_card(key, str(preset.get("name") or stem or "Model"), lines, buttons,
+                                   selected=state == "in_use", on_click=on_click, progress=progress,
+                                   progress_key=f"{key}-progress" if state in ("downloading", "paused") else None)
+
+    @staticmethod
+    def _file_ram(flow: Any, stem: str) -> str:
+        try:
+            return str(flow.service.ram_check(stem, vision=bool(flow.service.is_vision(stem)))[0])
+        except Exception:
+            return "unknown"
+
+    def _ondevice_file_row(self, flow: Any, stem: str, entry: dict) -> ft.Control:
+        """A downloaded model no preset names (added from Hugging Face): Use loads it and picks local/<stem>."""
+        from glossarion_mobile.services.local_llm import downloads as dl
+        from glossarion_mobile.ui.screens.local_models_panel import _vision_line
+
+        model = f"local/{stem}"
+        key = f"ondevice-file-{stem}"
+        in_use = str(self.current.get("model") or "").lower() == model.lower()
+        loading = stem in self._ondevice_loading
+        verdict = self._file_ram(flow, stem)
+        facts = " · ".join(x for x in (dl.format_bytes(entry.get("size")) if entry.get("size") else "",
+                                       self._ram_text(verdict)) if x)
+        loaded = flow.service.loaded_stem == stem
+        status = "Loading…" if loading else (
+            ("Loaded · in use" if loaded else "In use") if in_use else ("Loaded" if loaded else "On this device"))
+        lines: list = [ft.Text(" · ".join(x for x in (str(entry.get("repo") or ""), facts) if x),
+                               theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
+                               key=f"{key}-facts",
+                               color=ft.Colors.ERROR if verdict == "refuse" else ft.Colors.ON_SURFACE_VARIANT)]
+        if flow.service.is_vision(stem):
+            lines.append(_vision_line(f"{key}-vision"))
+        lines.append(ft.Text(status, theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=1, color=semantic("success"),
+                             overflow=ft.TextOverflow.ELLIPSIS, key=f"{key}-status"))
+        action = f"{key}-action"
+        if loading:
+            buttons = [ft.FilledTonalButton(content="Loading…", disabled=True, key=action)]
+            on_click = None
+        elif in_use:
+            buttons = [ft.FilledTonalButton(content="In use", icon=ft.Icons.CHECK_CIRCLE, disabled=True, key=action)]
+            on_click = lambda e, m=model: self.select("model", m)  # noqa: E731
+        else:
+            buttons = [ft.FilledButton(content="Use", key=action,
+                                       on_click=lambda e, s=stem: self._spawn(self.use_downloaded(s)))]
+            on_click = lambda e, s=stem: self._spawn(self.use_downloaded(s))  # noqa: E731
+        return self._ondevice_card(key, model, lines, buttons, selected=in_use, on_click=on_click)
+
+    async def use_downloaded(self, stem: str) -> bool:
+        """Load a downloaded model (asking when RAM is tight) and pick ``local/<stem>`` (OnDeviceFlow)."""
+        flow = self.ondevice_flow()
+        if flow is None or stem in self._ondevice_loading:
+            return False
+        self._ondevice_loading.add(stem)
+        self.render_ondevice()
+        try:
+            return bool(await flow._use_other(stem))
+        finally:
+            self._ondevice_loading.discard(stem)
+            self.render_ondevice()
+
+    def _ondevice_download_row(self, flow: Any, stem: str, state: Any) -> ft.Control:
+        """A running or paused download no preset names: its progress with Cancel (running) or Resume."""
+        from glossarion_mobile.ui.screens.local_models_panel import _download_status, _owner
+
+        key = f"ondevice-dl-{stem}"
+        lines = [ft.Text(_download_status(state), theme_style=ft.TextThemeStyle.BODY_SMALL, max_lines=2,
+                         overflow=ft.TextOverflow.ELLIPSIS, color=ft.Colors.ON_SURFACE_VARIANT, key=f"{key}-status")]
+        if state.running:
+            buttons = [ft.FilledTonalButton(content="Cancel", icon=ft.Icons.CLOSE, key=f"{key}-action",
+                                            on_click=lambda e, s=stem: flow.cancel(s))]
+        else:
+            buttons = [ft.FilledTonalButton(content="Resume", key=f"{key}-action",
+                                            on_click=lambda e, s=stem: self._spawn(flow.resume(s))),
+                       ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Cancel download", key=f"{key}-cancel",
+                                     size_constraints=HIT_TARGET, on_click=lambda e, s=stem: flow.cancel(s))]
+        return self._ondevice_card(key, f"local/{_owner(stem)}", lines, buttons, progress=state.fraction,
+                                   progress_key=f"{key}-progress")
+
     def typed_model(self) -> str:
         """The search text as a model id when no listed model is exactly that (the desktop model box is an
         editable combo: any typed or pasted id is used as is), else ''."""
@@ -832,12 +1140,14 @@ class ModelSheet:
         self.search.hint_text = "Search models" if model_tab else "Search or type a language"
         self.chip_row.visible = model_tab
         # the model is always this chat's own (U13); profile and language may still apply to every chat
-        self.chat_switch.visible = not self.one_shot and not self.field_mode and self.tab != "model"
+        self.chat_switch.visible = not self.one_shot and not self.field_mode and self.tab in ("profile", "language")
         for chip_id, chip in self.chips.items():
             chip.selected = chip_id == self.chip
         self.hide_item.checked = bool(self.snapshot.hide_unpolled)
         if model_tab:
             rows = self.model_rows()
+        elif self.tab == "ondevice":
+            rows = self.ondevice_rows()
         elif self.tab == "profile":
             rows = self.profile_rows()
         else:
@@ -1569,6 +1879,8 @@ class ModelSheet:
         catalog = self.env.catalog
         if catalog is not None:
             self._unsub = catalog.subscribe(self.apply_snapshot)
+        if self.ondevice is not None:  # built before show (tab="ondevice"): its questions need the page
+            self.ondevice.page = page
         page.show_dialog(self.dialog)
         self._start_background()
 
@@ -1617,6 +1929,7 @@ class ModelSheet:
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+        self._stop_ondevice_updates()
         close_dialog(self._page, self.dialog)
 
 

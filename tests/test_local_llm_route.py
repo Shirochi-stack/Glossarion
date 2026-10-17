@@ -33,6 +33,16 @@ def test_route_resolution_and_env_override(monkeypatch):
     assert UC.MODEL_PROVIDERS["local/"] == "local" and "local" in UC._LOCAL_OPENAI_PROVIDERS
 
 
+def test_only_the_published_on_device_endpoint_is_treated_as_it(monkeypatch):
+    # the long read-timeout floor and /health preflight apply to Glossarion Mobile's endpoint only:
+    # a desktop ollama / lmstudio / llama-server keeps the configured CHUNK_TIMEOUT
+    monkeypatch.delenv("GLOSSARION_LOCAL_LLM_URL", raising=False)
+    assert UC._is_on_device_endpoint("http://127.0.0.1:8080/v1") is False
+    monkeypatch.setenv("GLOSSARION_LOCAL_LLM_URL", "http://127.0.0.1:5555/tok/v1/")
+    assert UC._is_on_device_endpoint("http://127.0.0.1:5555/tok/v1") is True
+    assert UC._is_on_device_endpoint("http://localhost:11434/v1") is False
+
+
 def test_local_models_need_no_key():
     assert UC._model_needs_api_key("local/Qwen3.5-0.8B-Q4_K_M") is False
     assert "local/" in UC._NO_API_KEY_PREFIXES
