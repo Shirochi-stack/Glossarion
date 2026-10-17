@@ -3128,8 +3128,8 @@ class UnifiedClient:
     # OpenAI error codes of a local endpoint (Glossarion Mobile's on-device engine) for a request that
     # can never run there: an image for a text-only model, an unreadable image, a model not downloaded.
     _LOCAL_PERMANENT_ERROR_CODES = ('unsupported_content', 'invalid_image', 'model_not_found')
-    # Smallest read timeout of a local route: its server answers after loading the model and after
-    # every request queued ahead (one generation at a time on a phone).
+    # Smallest read timeout of Glossarion Mobile's on-device endpoint: it answers after loading the model
+    # and after every request queued ahead (one generation at a time on a phone).
     _LOCAL_MIN_READ_TIMEOUT = 3600.0
 
     @staticmethod
@@ -3145,12 +3145,19 @@ class UnifiedClient:
                 return f"{head}://{host}/…/v1"
         return text
 
+    @classmethod
+    def _is_on_device_endpoint(cls, base_url: str) -> bool:
+        """True for the endpoint Glossarion Mobile's on-device engine published (GLOSSARION_LOCAL_LLM_URL);
+        never on desktop, where nothing publishes it."""
+        published = str(os.environ.get(cls._LOCAL_LLM_URL_ENV, '') or '').strip().rstrip('/')
+        base = str(base_url or '').rstrip('/')
+        return bool(published) and base == published and base.endswith('/v1')
+
     def _local_engine_health(self, base_url: str, model: str) -> Optional[dict]:
         """``GET <base>/../health?model=`` of Glossarion Mobile's on-device endpoint (None elsewhere:
         a user's own llama-server has no such route, so only the published endpoint is asked)."""
-        published = str(os.environ.get(self._LOCAL_LLM_URL_ENV, '') or '').strip().rstrip('/')
         base = str(base_url or '').rstrip('/')
-        if not published or base != published or not base.endswith('/v1'):
+        if not self._is_on_device_endpoint(base):
             return None
         try:
             import urllib.parse as _up
@@ -24484,9 +24491,10 @@ class UnifiedClient:
                     try:
                         if httpx is not None:
                             connect, read = self._get_timeouts()
-                            if provider in self._LOCAL_OPENAI_PROVIDERS and read is not None:
-                                # a local server answers only after loading the model and after the
-                                # requests queued ahead of this one: no short read timeout there
+                            if provider == 'local' and read is not None and self._is_on_device_endpoint(base_url):
+                                # the on-device engine answers only after loading the model and after the
+                                # requests queued ahead of this one: no short read timeout there (a
+                                # desktop ollama / lmstudio / llama-server keeps the configured timeout)
                                 read = max(float(read), self._LOCAL_MIN_READ_TIMEOUT)
                             timeout_obj = httpx.Timeout(connect=connect, read=read, write=read, pool=connect)
                         else:
