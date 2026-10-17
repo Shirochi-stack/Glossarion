@@ -1730,6 +1730,162 @@ class UnifiedClientError(Exception):
         self.details = details
 
 # ---------------------------------------------------------------------------
+# Server Retry-After hints (Other Settings "Always check and respect Retry-After")
+# One place reads how long a rate-limited server asked us to wait: the Retry-After header
+# (seconds or HTTP-date), retry-after-ms, a ``retry_after_seconds`` the route already put in
+# UnifiedClientError.details, Gemini's RetryInfo ``retryDelay`` and the "Please try again in
+# 1m30s" text Groq/OpenAI send. Every 429 path asks ``UnifiedClient._respect_retry_after_wait``
+# first and keeps its configured / built-in backoff when no hint is present.
+# ---------------------------------------------------------------------------
+#: Longest server-requested wait honoured in one go (a daily-quota Retry-After is capped here).
+RETRY_AFTER_MAX_SECONDS = 3600.0
+_RETRY_DELAY_RE = re.compile(r"""retryDelay['"]?\s*[:=]\s*['"]?(\d+(?:\.\d+)?)s""", re.IGNORECASE)
+_RETRY_AFTER_TEXT_RE = re.compile(r"""retry[-_ ]after([-_ ]ms)?['"]?\s*[:=]\s*['"]?(\d+(?:\.\d+)?)(?![\d.])""", re.IGNORECASE)
+_TRY_AGAIN_IN_RE = re.compile(r'please\s+try\s+again\s+in\s+((?:\d+(?:\.\d+)?\s*[hms]\s*)+)(?!\w)', re.IGNORECASE)
+
+
+def respect_retry_after_enabled() -> bool:
+    """RESPECT_RETRY_AFTER (default on), unless 'Ignore server Retry-After header' is in effect
+    (that toggle only acts while the HTTP overrides are enabled, see ENABLE_HTTP_TUNING)."""
+    if os.getenv("ENABLE_HTTP_TUNING", "0") == "1" and os.getenv("IGNORE_RETRY_AFTER", "0") == "1":
+        return False
+    return os.getenv("RESPECT_RETRY_AFTER", "1") == "1"
+
+
+def _positive_seconds(value) -> Optional[float]:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds != seconds or seconds in (float('inf'), float('-inf')) or seconds <= 0:
+        return None
+    return seconds
+
+
+def parse_retry_after_value(value, now: Optional[datetime] = None) -> Optional[float]:
+    """Seconds from a Retry-After value: delta-seconds or an HTTP-date. None when missing,
+    garbage or already in the past."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    seconds = _positive_seconds(text)
+    if seconds is not None or re.fullmatch(r'[-+]?\d+(?:\.\d+)?', text):
+        return seconds
+    try:
+        import email.utils
+        moment = email.utils.parsedate_to_datetime(text)
+    except Exception:
+        return None
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        from datetime import timezone
+        moment = moment.replace(tzinfo=timezone.utc)
+    current = now if now is not None else datetime.now(moment.tzinfo)
+    if current.tzinfo is None:
+        from datetime import timezone
+        current = current.replace(tzinfo=timezone.utc)
+    return _positive_seconds((moment - current).total_seconds())
+
+
+def _header_value(headers, name: str):
+    if not headers:
+        return None
+    try:
+        value = headers.get(name)
+    except Exception:
+        value = None
+    if value is not None:
+        return value
+    try:  # plain dicts are case-sensitive
+        for key, item in headers.items():
+            if str(key).lower() == name:
+                return item
+    except Exception:
+        pass
+    return None
+
+
+def retry_after_from_headers(headers, now: Optional[datetime] = None) -> Optional[float]:
+    """retry-after-ms (OpenAI/Azure) first, then Retry-After."""
+    seconds = _positive_seconds(_header_value(headers, 'retry-after-ms'))
+    if seconds is not None:
+        return seconds / 1000.0
+    return parse_retry_after_value(_header_value(headers, 'retry-after'), now=now)
+
+
+def _try_again_in_seconds(message: str) -> Optional[float]:
+    """'Please try again in 1m30.5s' (Groq / OpenAI rate-limit text) -> seconds."""
+    match = _TRY_AGAIN_IN_RE.search(message or '')
+    if not match:
+        return None
+    seconds = sum(
+        float(value) * {'h': 3600, 'm': 60, 's': 1}[unit.lower()]
+        for value, unit in re.findall(r'(\d+(?:\.\d+)?)\s*([hms])', match.group(1), re.IGNORECASE)
+    )
+    try:
+        import math
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    except Exception:
+        return None
+
+
+def server_retry_after_seconds(error=None, response=None) -> Optional[float]:
+    """How long the server asked us to wait (seconds, uncapped), or None when it gave no hint.
+
+    Looks at *response* and at *error* plus its ``__cause__`` / ``__context__`` chain (an SDK
+    exception wrapped into UnifiedClientError keeps its ``response.headers`` there)."""
+    seconds = retry_after_from_headers(getattr(response, 'headers', None)) if response is not None else None
+    if seconds is not None:
+        return seconds
+    chain, seen, current = [], set(), error
+    while current is not None and id(current) not in seen and len(chain) < 8:
+        seen.add(id(current))
+        chain.append(current)
+        current = getattr(current, '__cause__', None) or getattr(current, '__context__', None)
+    for exc in chain:
+        details = getattr(exc, 'details', None)
+        if isinstance(details, dict):
+            seconds = _positive_seconds(details.get('retry_after_seconds'))
+            if seconds is not None:
+                return seconds
+        for holder in (getattr(exc, 'response', None), exc):
+            seconds = retry_after_from_headers(getattr(holder, 'headers', None))
+            if seconds is not None:
+                return seconds
+    texts = []
+    for exc in chain:
+        texts.append(str(exc))
+        details = getattr(exc, 'details', None)
+        if details is not None and not isinstance(details, str):
+            texts.append(repr(details))
+        elif details:
+            texts.append(details)
+    try:
+        body = getattr(response, 'text', None) if response is not None else None
+        if body and isinstance(body, str):
+            texts.append(body[:20000])   # a 429 body (Gemini's OpenAI-compatible RetryInfo)
+    except Exception:
+        pass
+    for text in texts:
+        match = _RETRY_DELAY_RE.search(text)  # Gemini RetryInfo
+        if match:
+            seconds = _positive_seconds(match.group(1))
+            if seconds is not None:
+                return seconds
+        match = _RETRY_AFTER_TEXT_RE.search(text)
+        if match:
+            seconds = _positive_seconds(match.group(2))
+            if seconds is not None:
+                return seconds / 1000.0 if match.group(1) else seconds
+        seconds = _positive_seconds(_try_again_in_seconds(text))
+        if seconds is not None:
+            return seconds
+    return None
+
+# ---------------------------------------------------------------------------
 # Deferred batch log buffer
 # In batch mode, prompt-preparation logs (🎯 system prompt, 💬 combined prompt)
 # fire simultaneously across all threads, creating a noisy dump. These helpers
@@ -2569,6 +2725,40 @@ class UnifiedClient:
         """Retry rate limits without the attempt cap: the Indefinite Rate Limit Retry toggle, off
         unless the run exports it (a route-level block such as a DeepSeek mute is never retried)."""
         return os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "0") == "1"
+
+    def _server_retry_after(self, error=None, response=None) -> Optional[float]:
+        """The server's requested wait (capped at RETRY_AFTER_MAX_SECONDS) when 'Always check and
+        respect Retry-After' is in effect and the 429 carried a hint; else None."""
+        if not respect_retry_after_enabled():
+            return None
+        seconds = server_retry_after_seconds(error, response)
+        if seconds is None:
+            return None
+        return min(seconds, RETRY_AFTER_MAX_SECONDS)
+
+    def _respect_retry_after_wait(self, default_wait, error=None, response=None, label=None):
+        """Wait for a 429: the server's Retry-After when respected and present, else *default_wait*
+        (the configured / built-in backoff, unchanged)."""
+        seconds = self._server_retry_after(error, response)
+        if seconds is None:
+            return default_wait
+        name = label or getattr(self, 'client_type', None) or 'API'
+        print(f"⏳ {name}: Server asked to retry after {seconds:g} s")
+        return seconds
+
+    def _rest_key_for_server_wait(self, error) -> Optional[float]:
+        """Multi-key rotation: the rate-limited key rests for the server's Retry-After instead of
+        its own cooldown (``_handle_rate_limit_for_thread`` reads it); another key serves meanwhile.
+        A route that already set its own wait (authds/ mute) keeps it."""
+        seconds = self._server_retry_after(error)
+        if seconds is None:
+            return None
+        tls = self._get_thread_local_client()
+        if getattr(tls, 'rate_limit_retry_after', None):
+            return tls.rate_limit_retry_after
+        print(f"⏳ Server asked to retry after {seconds:g} s - resting this key for that long")
+        tls.rate_limit_retry_after = seconds
+        return seconds
 
     @staticmethod
     def _blocked_for_session(exc: Exception) -> bool:
@@ -7433,6 +7623,8 @@ class UnifiedClient:
                 try:
                     details = getattr(exc, 'details', None)
                     retry_after = details.get('retry_after_seconds') if isinstance(details, dict) else None
+                    if self._is_rate_limit_error(exc):
+                        retry_after = self._server_retry_after(exc) or retry_after
                     pool.mark_key_error(key_idx, 429 if self._is_rate_limit_error(exc) else None,
                                         cooldown=retry_after)
                 except Exception:
@@ -8493,6 +8685,7 @@ class UnifiedClient:
                                     raise
                             
                             try:
+                                self._rest_key_for_server_wait(e)
                                 # Rotate to next key
                                 self._handle_rate_limit_for_thread()
                                 print(f"🔄 Multi-key retry: Key rotation completed, preparing for next attempt...")
@@ -9850,7 +10043,7 @@ class UnifiedClient:
                     f"bytes={len(resp.content or b''):,}"
                 )
                 if resp.status_code == 429 and attempt < max_retries - 1:
-                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    wait = self._respect_retry_after_wait(min(2 ** attempt + random.uniform(0, 1), 30), response=resp, label='TTS')
                     print(f"⏳ TTS rate-limited, retrying in {wait:.1f}s")
                     if not self._sleep_with_cancel(wait, 0.1):
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
@@ -11254,6 +11447,7 @@ class UnifiedClient:
                         
                         # Add some jitter and cap the wait time
                         wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
+                        wait_time = self._respect_retry_after_wait(wait_time, error=e)
                         if self.client_type == "groq":
                             groq_delay = self._groq_retry_after_seconds(e)
                             if groq_delay is not None:
@@ -11273,7 +11467,7 @@ class UnifiedClient:
                     else:
                         # Always back off at least once even when indefinite retry is disabled
                         rate_limit_retry_count += 1
-                        wait_time = 60
+                        wait_time = self._respect_retry_after_wait(60, error=e)
                         if self.client_type == "groq":
                             groq_delay = self._groq_retry_after_seconds(e)
                             if groq_delay is not None:
@@ -11594,6 +11788,7 @@ class UnifiedClient:
                         
                         # Add some jitter and cap the wait time
                         wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
+                        wait_time = self._respect_retry_after_wait(wait_time, error=e)
                         if self.client_type == "groq":
                             groq_delay = self._groq_retry_after_seconds(e)
                             if groq_delay is not None:
@@ -11614,7 +11809,7 @@ class UnifiedClient:
                         attempt = max(0, attempt - 1)  # Don't count rate limit waits against retry budget
                         continue  # Retry the attempt
                     else:
-                        wait_time = 60
+                        wait_time = self._respect_retry_after_wait(60, error=e)
                         if self.client_type == "groq":
                             groq_delay = self._groq_retry_after_seconds(e)
                             if groq_delay is not None:
@@ -17459,38 +17654,12 @@ class UnifiedClient:
         message = str(error) if error is not None else ''
         if response is not None:
             message += ' ' + str(getattr(response, 'text', '') or '')
-        match = re.search(
-            r'please\s+try\s+again\s+in\s+((?:\d+(?:\.\d+)?\s*[hms]\s*)+)(?!\w)',
-            message, re.IGNORECASE,
-        )
-        if match:
-            seconds = sum(
-                float(value) * {'h': 3600, 'm': 60, 's': 1}[unit.lower()]
-                for value, unit in re.findall(r'(\d+(?:\.\d+)?)\s*([hms])', match.group(1), re.IGNORECASE)
-            )
-            return valid_seconds(seconds)
-        return None
+        return _try_again_in_seconds(message)
 
     def _parse_retry_after(self, value: str) -> int:
         """Parse Retry-After header (seconds or HTTP-date) into seconds."""
-        if not value:
-            return 0
-        value = value.strip()
-        if value.isdigit():
-            try:
-                return max(0, int(value))
-            except Exception:
-                return 0
-        try:
-            import email.utils
-            dt = email.utils.parsedate_to_datetime(value)
-            if dt is None:
-                return 0
-            now = datetime.now(dt.tzinfo)
-            secs = int((dt - now).total_seconds())
-            return max(0, secs)
-        except Exception:
-            return 0
+        seconds = parse_retry_after_value(value)
+        return int(seconds) if seconds else 0
 
     def _get_session(self, base_url: str):
         """Get or create a thread-local requests.Session for a base_url with connection pooling."""
@@ -17739,6 +17908,19 @@ class UnifiedClient:
                     groq_delay = self._groq_retry_after_seconds(response=resp)
                     if groq_delay is not None:
                         wait_time = groq_delay + 1.0
+                # Always check and respect Retry-After: wait exactly what the server asked for; in
+                # multi-key mode rest THIS key for that long and let the rotation serve another key.
+                server_wait = self._server_retry_after(response=resp)
+                if server_wait is not None:
+                    print(f"⏳ {provider}: Server asked to retry after {server_wait:g} s")
+                    wait_time = server_wait
+                    if self._multi_key_mode:
+                        resp_text = _sanitize_for_log(resp.text, 300)
+                        resp.close()
+                        raise UnifiedClientError(
+                            f"{provider} rate limit: {resp_text}", error_type="rate_limit", http_status=429,
+                            details={"retry_after_seconds": server_wait},
+                        )
                 
                 # During rate-limit waits, graceful stop should prevent any further retries from starting.
                 def _sleep_rate_limit(wait_seconds: float) -> None:
@@ -17778,7 +17960,8 @@ class UnifiedClient:
                         error_type="rate_limit", http_status=429,
                         details={"retry_after_seconds": self._groq_retry_after_seconds(response=resp)},
                     )
-                raise UnifiedClientError(f"{provider} rate limit: {_sanitize_for_log(resp.text, 300)}", error_type="rate_limit", http_status=429)
+                raise UnifiedClientError(f"{provider} rate limit: {_sanitize_for_log(resp.text, 300)}", error_type="rate_limit", http_status=429,
+                                         details={"retry_after_seconds": server_wait} if server_wait is not None else None)
 
             # Transient server errors with optional Retry-After
             if status in (500, 502, 503, 504) and attempt < max_retries - 1:
@@ -20665,10 +20848,12 @@ class UnifiedClient:
                     # In multi-key mode, don't retry here - let outer handler rotate keys
                     if self._multi_key_mode:
                         print(f"OpenAI rate limit hit in multi-key mode - passing to key rotation")
-                        raise UnifiedClientError(f"OpenAI rate limit: {e}", error_type="rate_limit")
+                        server_wait = self._server_retry_after(e)
+                        raise UnifiedClientError(f"OpenAI rate limit: {e}", error_type="rate_limit",
+                                                 details={"retry_after_seconds": server_wait} if server_wait is not None else None)
                     elif attempt < max_retries - 1:
-                        # Single key mode - wait and retry
-                        wait_time = api_delay * 10
+                        # Single key mode - wait and retry (the server's Retry-After first)
+                        wait_time = self._respect_retry_after_wait(api_delay * 10, error=e, label="OpenAI")
                         print(f"Rate limit hit, waiting {wait_time}s before retry")
                         if not self._sleep_with_cancel(wait_time, 0.1):
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
@@ -27115,9 +27300,10 @@ class UnifiedClient:
 
                 resp = _req.post(submit_url, headers=headers, json=payload, timeout=180)
                 if resp.status_code == 429 and attempt < max_retries - 1:
-                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    wait = self._respect_retry_after_wait(min(2 ** attempt + random.uniform(0, 1), 30), response=resp, label='fal')
                     print(f"⏳ [fal] Rate-limited, retrying in {wait:.1f}s...")
-                    time.sleep(wait)
+                    if not self._sleep_with_cancel(wait, 0.5):
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     continue
                 if resp.status_code not in (200, 201, 202):
                     raise UnifiedClientError(
@@ -27393,9 +27579,10 @@ class UnifiedClient:
                     resp = _req.post(url, json=payload, headers=headers, timeout=180)
 
                 if resp.status_code == 429:
-                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    wait = self._respect_retry_after_wait(min(2 ** attempt + random.uniform(0, 1), 30), response=resp, label='OpenAI Images')
                     print(f"\u23f3 [OpenAI Images] Rate-limited, retrying in {wait:.1f}s\u2026")
-                    time.sleep(wait)
+                    if not self._sleep_with_cancel(wait, 0.5):
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     continue
 
                 if resp.status_code not in (200, 201):
@@ -28318,7 +28505,11 @@ class UnifiedClient:
                                 quota_delay = int(_m.group(1))
                         except Exception:
                             pass
-                        if quota_delay and quota_delay > 0:
+                        server_wait = self._server_retry_after(exc)
+                        if server_wait is not None:
+                            delay = server_wait
+                            print(f"⏳ {label}: Server asked to retry after {delay:g} s (attempt {attempt+1}/{max_retries})")
+                        elif quota_delay and quota_delay > 0:
                             # Use quota reset time + small jitter
                             delay = quota_delay + random.uniform(0.5, 2.0)
                             print(f"⏳ {label} quota exhausted – waiting {delay:.0f}s for reset (attempt {attempt+1}/{max_retries})")
@@ -29182,7 +29373,7 @@ class UnifiedClient:
                 if self._is_rate_limit_error(exc) or "resource_exhausted" in error_str.lower() or "insufficient_quota" in error_str.lower():
                     last_error = exc
                     if attempt < max_retries - 1:
-                        delay = self._get_send_interval() * (attempt + 1)
+                        delay = self._respect_retry_after_wait(self._get_send_interval() * (attempt + 1), error=exc, label="Antigravity")
                         print(f"⏳ Antigravity: Rate limited – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
                         if not self._sleep_with_cancel(delay, 0.5):
                             raise UnifiedClientError("Antigravity: Translation stopped by user", error_type="cancelled")
@@ -30836,9 +31027,10 @@ class UnifiedClient:
                             print("[NanoGPT] Payload too large; retrying with image request quality compression enabled")
                         continue
                     if resp.status_code == 429:
-                        wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                        wait = self._respect_retry_after_wait(min(2 ** attempt + random.uniform(0, 1), 30), response=resp, label='NanoGPT')
                         print(f"⏳ [NanoGPT] Rate-limited, retrying in {wait:.1f}s…")
-                        time.sleep(wait)
+                        if not self._sleep_with_cancel(wait, 0.5):
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         continue
                     error_text = f"{err} {err_type}".lower()
                     if (

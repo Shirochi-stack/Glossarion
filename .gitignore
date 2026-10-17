@@ -245,6 +245,7 @@ tests/**
 # Device fixes part 2 (2026-10-08): Other Settings' streaming notes come from settings_rules (owner-approved
 # text move; the constants, an AST pin and an offscreen render of Response Handling).
 !tests/test_other_settings_streaming_texts.py
+!tests/test_respect_retry_after.py
 !tests/fixtures/
 !tests/fixtures/manga_editor/
 !tests/fixtures/manga_editor/**

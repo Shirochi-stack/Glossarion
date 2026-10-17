@@ -1457,6 +1457,7 @@ async def translate(
         os.environ['HTTP_POOL_CONNECTIONS'] = str(config.get('http_pool_connections', 20))
         os.environ['HTTP_POOL_MAXSIZE'] = str(config.get('http_pool_maxsize', 50))
         os.environ['IGNORE_RETRY_AFTER'] = '1' if config.get('ignore_retry_after', False) else '0'
+        os.environ['RESPECT_RETRY_AFTER'] = '1' if (config.get('respect_retry_after', True) and not config.get('ignore_retry_after', False)) else '0'
         # Cap retries for the Discord bot to keep runs predictable.
         os.environ['MAX_RETRIES'] = '3'
         # Set all glossary variables from GUI
@@ -2440,6 +2441,7 @@ async def extract(
         os.environ['HTTP_POOL_CONNECTIONS'] = str(config.get('http_pool_connections', 20))
         os.environ['HTTP_POOL_MAXSIZE'] = str(config.get('http_pool_maxsize', 50))
         os.environ['IGNORE_RETRY_AFTER'] = '1' if config.get('ignore_retry_after', False) else '0'
+        os.environ['RESPECT_RETRY_AFTER'] = '1' if (config.get('respect_retry_after', True) and not config.get('ignore_retry_after', False)) else '0'
         # Cap retries for the Discord bot to keep runs predictable.
         os.environ['MAX_RETRIES'] = '3'
 

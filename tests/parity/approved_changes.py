@@ -8,6 +8,36 @@ checked exactly. Each entry names the source rows and the recorded values it cha
 """
 from __future__ import annotations
 
+
+def _after(line, *added):
+    """Insert *added* lines after *line* (both without their newline)."""
+    return (line + "\n", line + "\n" + "".join(text + "\n" for text in added))
+
+
+# 2026-10-17 "Always check and respect Retry-After" (respect_retry_after / RESPECT_RETRY_AFTER)
+_RESPECT_SETTINGS_ROW = _after(
+    "            ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),",
+    "            ('respect_retry_after', ['respect_retry_after_var'], True, bool),")
+_RESPECT_SETTINGS_ROW_GUI = _after(
+    "                ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),",
+    "                ('respect_retry_after', ['respect_retry_after_var'], True, bool),")
+_RESPECT_BOOL_ROW = _after(
+    "            ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', False),",
+    "            ('respect_retry_after_var', 'respect_retry_after', True),")
+_RESPECT_MIGRATION = _after(
+    "            setattr(self, var_name, create_var(bool, key, default))\n"
+    "        self.use_header_as_output_var = False",
+    "        if self.respect_retry_after_var and getattr(self, 'ignore_retry_after_var', False):",
+    "            # 'Always check and respect Retry-After' contradicts 'Ignore server Retry-After header':",
+    "            # a config holding both keeps the explicit ignore choice.",
+    "            self.respect_retry_after_var = False")
+_RESPECT_ENV_DICT = _after(
+    "            'INDEFINITE_RATE_LIMIT_RETRY': '1' if self.config.get('indefinite_rate_limit_retry', False) else '0',",
+    "            'RESPECT_RETRY_AFTER': '1' if getattr(self, 'respect_retry_after_var', True) else '0',")
+_RESPECT_ENV_PAIR = _after(
+    "                ('INDEFINITE_RATE_LIMIT_RETRY', '1' if getattr(self, 'indefinite_rate_limit_retry_var', False) else '0'),",
+    "                ('RESPECT_RETRY_AFTER', '1' if getattr(self, 'respect_retry_after_var', True) else '0'),")
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -51,6 +81,20 @@ APPROVED = (
             "skip_pdf_title_translation_var": (False, True),
             "SKIP_PDF_TITLE_TRANSLATION": ("0", "1"),
         },
+    },
+    {
+        "date": "2026-10-17",
+        "what": "New 'Always check and respect Retry-After' toggle (on by default, below Indefinite Rate "
+                "Limit Retry); never on together with 'Ignore server Retry-After header'",
+        "source": {
+            "src/settings_persistence.py": [_RESPECT_SETTINGS_ROW],
+            "src/owner_state.py": [_RESPECT_BOOL_ROW, _RESPECT_MIGRATION],
+            "src/translator_gui.py": [_RESPECT_SETTINGS_ROW_GUI, _RESPECT_BOOL_ROW, _RESPECT_MIGRATION,
+                                      _RESPECT_ENV_DICT, _RESPECT_ENV_PAIR],
+            "src/run_env.py": [_RESPECT_ENV_DICT, _RESPECT_ENV_PAIR],
+        },
+        # a new key: nothing recorded before it existed changes value
+        "values": {},
     },
 )
 
