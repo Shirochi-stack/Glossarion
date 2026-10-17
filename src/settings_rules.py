@@ -1583,8 +1583,8 @@ def apply_streaming(config, on, unset=False):
 
 
 # =============================================================================================
-# 9c. Retry-After policy (other_settings "Always check and respect Retry-After" below Indefinite
-#     Rate Limit Retry, "Ignore server Retry-After header" under HTTP Timeouts; the same respect
+# 9c. Retry-After policy (other_settings "Respect provider wait time (Retry-After)" below Indefinite
+#     Rate Limit Retry, "Ignore provider wait time (Retry-After)" under HTTP Timeouts; the same respect
 #     toggle in the Multi API Key Manager)
 # =============================================================================================
 

@@ -4617,14 +4617,14 @@ def _create_response_handling_section(self, parent):
     if not hasattr(self, 'ignore_retry_after_var'):
         self.ignore_retry_after_var = bool(self.config.get('ignore_retry_after', str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1'))
     
-    self.ignore_retry_after_checkbox = self._create_styled_checkbox("Ignore server Retry-After header (use local backoff)")
+    self.ignore_retry_after_checkbox = self._create_styled_checkbox("Ignore provider wait time (Retry-After), use local backoff")
     try:
         self.ignore_retry_after_checkbox.setChecked(bool(self.ignore_retry_after_var))
     except Exception:
         pass
     def _on_ignore_retry_after_toggle(checked):
         try:
-            # turning it on turns "Always check and respect Retry-After" off (both dialogs follow)
+            # turning it on turns "Respect provider wait time (Retry-After)" off (both dialogs follow)
             settings_rules.set_retry_after_choice(self, 'ignore_retry_after', bool(checked))
         except Exception:
             pass
@@ -4796,11 +4796,11 @@ def _create_response_handling_section(self, parent):
     indefinite_desc.setContentsMargins(40, 2, 0, 5)
     section_v.addWidget(indefinite_desc)
 
-    # Always check and respect Retry-After (default ON; never on together with "Ignore server
+    # Respect provider wait time (Retry-After) (default ON; never on together with "Ignore server
     # Retry-After header" - the Multi API Key Manager shows the same toggle)
     if not hasattr(self, 'respect_retry_after_var'):
         self.respect_retry_after_var = bool(self.config.get('respect_retry_after', True))
-    self.respect_retry_after_checkbox = self._create_styled_checkbox("Always check and respect Retry-After")
+    self.respect_retry_after_checkbox = self._create_styled_checkbox("Respect provider wait time (Retry-After)")
     self.respect_retry_after_checkbox.setContentsMargins(20, 0, 0, 0)
     try:
         self.respect_retry_after_checkbox.setChecked(bool(self.respect_retry_after_var))
@@ -4816,7 +4816,7 @@ def _create_response_handling_section(self, parent):
     settings_rules.bind_retry_after_checkbox(self, self.respect_retry_after_checkbox, 'respect_retry_after')
 
     respect_desc = QLabel("On a 429, wait for the server's Retry-After (or retry-after-ms / provider retry hints) before using\n"
-                          "the configured or built-in backoff. Ignored while 'Ignore server Retry-After header' is on.")
+                          "the configured or built-in backoff. Ignored while 'Ignore provider wait time' is on.")
     respect_desc.setStyleSheet("color: gray; font-size: 10pt;")
     respect_desc.setContentsMargins(40, 2, 0, 5)
     section_v.addWidget(respect_desc)

@@ -1,10 +1,10 @@
-"""'Always check and respect Retry-After' (Other Settings > API Request Retries, default on).
+"""'Respect provider wait time (Retry-After)' (Other Settings > API Request Retries, default on).
 
 On a 429 every provider path first asks the server's Retry-After (seconds or HTTP-date),
 retry-after-ms, a ``retry_after_seconds`` a route already extracted, Gemini's RetryInfo
 ``retryDelay`` and the "Please try again in ..." hint, and only falls back to its configured /
 built-in backoff when there is none. The multi-key rotation rests THAT key for the server's
-wait. 'Ignore server Retry-After header' (HTTP overrides) and the new toggle are exclusive.
+wait. 'Ignore provider wait time (Retry-After)' (HTTP overrides) and the new toggle are exclusive.
 
 Run (repository root)::
 
@@ -338,7 +338,7 @@ def test_schema_and_mobile_list_the_new_setting():
 
     spec = settings_schema.spec("respect_retry_after")
     assert spec.default is True and spec.type == "bool"
-    assert spec.label == "Always check and respect Retry-After"
+    assert spec.label == "Respect provider wait time (Retry-After)"
     assert "RESPECT_RETRY_AFTER" in settings_schema.env_names("respect_retry_after")
     model = (SRC / "mobile" / "app" / "glossarion_mobile" / "ui" / "settings" / "model.py").read_text(encoding="utf-8")
     assert '"indefinite_rate_limit_retry", "respect_retry_after", "ignore_retry_after"' in model
@@ -390,7 +390,7 @@ _DIALOGS = textwrap.dedent(r"""
 """)
 
 
-def test_both_dialogs_follow_one_setting_live_and_grey_the_cooldown(tmp_path):
+def test_both_dialogs_follow_one_setting_live_and_explain_the_cooldown(tmp_path):
     pytest.importorskip("PySide6")
     env = dict(os.environ)
     for name in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "GLOSSARION_LIBRARY_DIR", "OUTPUT_DIRECTORY",
@@ -410,7 +410,8 @@ def test_both_dialogs_follow_one_setting_live_and_grey_the_cooldown(tmp_path):
     import settings_rules
     opened = states["open"]
     assert (opened["os_respect"], opened["os_ignore"], opened["mk_respect"]) == (True, False, True)
-    assert opened["cooldown_enabled"] is False and opened["label_enabled"] is False
+    # the cooldown stays editable (the fallback for a 429 without Retry-After); its tooltip explains it
+    assert opened["cooldown_enabled"] is True and opened["label_enabled"] is True
     assert opened["tooltip"] == settings_rules.RETRY_AFTER_COOLDOWN_HINT
     assert "only when a 429 has no Retry-After" in opened["tooltip"]
 
@@ -420,7 +421,8 @@ def test_both_dialogs_follow_one_setting_live_and_grey_the_cooldown(tmp_path):
     assert off["config"]["respect_retry_after"] is False and off["vars"] == [False, False]
 
     on = states["other settings on"]   # and the other way round
-    assert (on["os_respect"], on["mk_respect"], on["cooldown_enabled"]) == (True, True, False)
+    assert (on["os_respect"], on["mk_respect"], on["cooldown_enabled"]) == (True, True, True)
+    assert on["tooltip"] == settings_rules.RETRY_AFTER_COOLDOWN_HINT
 
     ignore = states["ignore on"]   # ignore turns respect off in both dialogs
     assert (ignore["os_respect"], ignore["os_ignore"], ignore["mk_respect"]) == (False, True, False)

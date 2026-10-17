@@ -2969,7 +2969,7 @@ class MultiAPIKeyDialog(QDialog):
             pass
 
     def _bind_respect_retry_after_checkbox(self):
-        """Show the shared 'Always check and respect Retry-After' value and follow it live (the
+        """Show the shared 'Respect provider wait time (Retry-After)' value and follow it live (the
         Other Settings copy and sibling manager dialogs write it through the same rule)."""
         owner = self.translator_gui
         if not hasattr(owner, 'config'):
@@ -2992,16 +2992,17 @@ class MultiAPIKeyDialog(QDialog):
             self._schedule_key_pool_config_flush('rotation', refresh_keys=False, refresh_parent=False)
 
     def _apply_retry_after_cooldown_state(self, respect, ignore=False):
-        """Grey the default cooldown while the server's Retry-After takes priority over it."""
+        """Explain the default cooldown while the server's Retry-After takes priority over it.
+
+        The cooldown stays editable: it is the fallback for a 429 without a Retry-After."""
         from settings_rules import RETRY_AFTER_COOLDOWN_HINT
-        enabled = not respect
-        tooltip = "" if enabled else RETRY_AFTER_COOLDOWN_HINT
+        tooltip = RETRY_AFTER_COOLDOWN_HINT if respect else ""
         for name in ('cooldown_label', 'cooldown_spinbox', 'cooldown_hint_label'):
             widget = getattr(self, name, None)
             if widget is None:
                 continue
             try:
-                widget.setEnabled(enabled)
+                widget.setEnabled(True)
                 widget.setToolTip(tooltip)
             except RuntimeError:
                 pass
@@ -3497,7 +3498,7 @@ class MultiAPIKeyDialog(QDialog):
 
     def _create_rotation_settings_section(self, parent_layout):
         """Create the global rotation settings shared by every key pool."""
-        self.rotation_frame = QGroupBox("Rotation Settings")
+        self.rotation_frame = QGroupBox("General Settings")
         rotation_frame_layout = QVBoxLayout(self.rotation_frame)
         rotation_frame_layout.setContentsMargins(15, 10, 15, 10)
 
@@ -3535,6 +3536,13 @@ class MultiAPIKeyDialog(QDialog):
         self.rotation_desc_label.setStyleSheet("color: #5a9fd4; font-style: italic;")
         rotation_frame_layout.addWidget(self.rotation_desc_label)
         self._update_rotation_display()
+
+        # The Other Settings "Respect provider wait time (Retry-After)" toggle, shown here too: one
+        # setting, both copies follow every change (settings_rules.set_retry_after_choice).
+        self.respect_retry_after_checkbox = self._create_styled_checkbox("Respect provider wait time (Retry-After)")
+        self.respect_retry_after_checkbox.toggled.connect(self._on_respect_retry_after_toggled)
+        rotation_frame_layout.addWidget(self.respect_retry_after_checkbox)
+        self._bind_respect_retry_after_checkbox()
 
         parent_layout.addWidget(self.rotation_frame)
 
@@ -5458,12 +5466,9 @@ class MultiAPIKeyDialog(QDialog):
         cooldown_layout.addStretch()
         add_grid.addWidget(cooldown_widget, 1, 1)
 
-        # The Other Settings "Always check and respect Retry-After" toggle, shown here too: one
-        # setting, both copies follow every change (settings_rules.set_retry_after_choice).
-        self.respect_retry_after_checkbox = self._create_styled_checkbox("Always check and respect Retry-After")
-        self.respect_retry_after_checkbox.toggled.connect(self._on_respect_retry_after_toggled)
-        add_grid.addWidget(self.respect_retry_after_checkbox, 1, 2, 1, 2, Qt.AlignLeft)
-        self._bind_respect_retry_after_checkbox()
+        # the cooldown's Retry-After tooltip (the checkbox lives in General Settings, built earlier)
+        if getattr(self, 'respect_retry_after_checkbox', None) is not None:
+            self._apply_retry_after_cooldown_state(self.respect_retry_after_checkbox.isChecked())
 
         # Add button and Copy Current Key button
         button_widget = QWidget()

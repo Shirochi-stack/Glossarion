@@ -1730,7 +1730,7 @@ class UnifiedClientError(Exception):
         self.details = details
 
 # ---------------------------------------------------------------------------
-# Server Retry-After hints (Other Settings "Always check and respect Retry-After")
+# Server Retry-After hints (Other Settings "Respect provider wait time (Retry-After)")
 # One place reads how long a rate-limited server asked us to wait: the Retry-After header
 # (seconds or HTTP-date), retry-after-ms, a ``retry_after_seconds`` the route already put in
 # UnifiedClientError.details, Gemini's RetryInfo ``retryDelay`` and the "Please try again in
@@ -1745,7 +1745,7 @@ _TRY_AGAIN_IN_RE = re.compile(r'please\s+try\s+again\s+in\s+((?:\d+(?:\.\d+)?\s*
 
 
 def respect_retry_after_enabled() -> bool:
-    """RESPECT_RETRY_AFTER (default on), unless 'Ignore server Retry-After header' is in effect
+    """RESPECT_RETRY_AFTER (default on), unless 'Ignore provider wait time (Retry-After)' is in effect
     (that toggle only acts while the HTTP overrides are enabled, see ENABLE_HTTP_TUNING)."""
     if os.getenv("ENABLE_HTTP_TUNING", "0") == "1" and os.getenv("IGNORE_RETRY_AFTER", "0") == "1":
         return False
@@ -17980,7 +17980,7 @@ class UnifiedClient:
                     groq_delay = self._groq_retry_after_seconds(response=resp)
                     if groq_delay is not None:
                         wait_time = groq_delay + 1.0
-                # Always check and respect Retry-After: wait exactly what the server asked for; in
+                # Respect provider wait time (Retry-After): wait exactly what the server asked for; in
                 # multi-key mode rest THIS key for that long and let the rotation serve another key.
                 server_wait = self._server_retry_after(response=resp)
                 if server_wait is not None:
