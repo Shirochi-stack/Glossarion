@@ -297,7 +297,9 @@ class WelcomeScreen(Screen):
         verdict, mark, words = flow.ram_hint(preset)
         download = flow.active_download(stem)
         if state == "downloading" and download is not None:
-            detail = f"{download.percent}%" if download.phase == "downloading" else ONDEVICE_LABELS["checking"]
+            # tapping a downloading cell offers to cancel it (use_ondevice)
+            detail = (f"{download.percent}% · ✕" if download.phase == "downloading"
+                      else ONDEVICE_LABELS["checking"])
         elif state in ONDEVICE_LABELS:
             detail = ONDEVICE_LABELS[state]
         else:
@@ -337,6 +339,20 @@ class WelcomeScreen(Screen):
                 flow.page = self.page or (self.body.page if self.body is not None else None)
             except Exception:
                 flow.page = None
+        rows = flow.presets()
+        if 0 <= index < len(rows):
+            stem = flow.stem_of_preset(rows[index])
+            state, _status = flow.row_state(rows[index], stem)
+            download = flow.active_download(stem)
+            if state == "downloading" and download is not None:
+                # a second tap on a downloading cell is the undo of a mis-tap
+                name = str(rows[index].get("name") or "this model")
+                if await flow.ask(f"Cancel the {name} download?",
+                                  f"{download.percent}% is downloaded. Cancelling deletes the partial file.",
+                                  "Cancel download", cancel_label="Keep downloading"):
+                    flow.cancel(download.stem)
+                    self.render_ondevice()
+                return None
         model = await flow.get_preset(index)
         if model:
             self.flow.signed_in = True

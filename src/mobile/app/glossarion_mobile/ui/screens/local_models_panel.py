@@ -222,6 +222,25 @@ class OnDeviceFlow:
     def preset_key(preset: dict) -> str:
         return f"{str(preset.get('repo') or '').casefold()}|{preset.get('file') or preset.get('quant') or ''}"
 
+    # pause / cancel / resume: the Model manager rows and the Welcome cells
+    def pause(self, stem: str) -> bool:
+        return self.downloads.pause(stem)
+
+    def cancel(self, stem: str) -> bool:
+        done = self.downloads.cancel(stem)
+        self.render()
+        return done
+
+    async def resume(self, stem: str) -> Optional[str]:
+        spec = self.downloads.pending_spec(stem)
+        if spec is None:
+            return None
+        state = await self.service.download(spec)
+        if state.error:
+            self.say(f"Download failed: {state.error}")
+        self.render()
+        return stem if state.done else None
+
     def active_download(self, stem: Optional[str]) -> Optional[dl.DownloadState]:
         """The running or paused download of ``stem``: the model's, else its vision projector's."""
         if not stem:
@@ -271,14 +290,14 @@ class OnDeviceFlow:
                     return stem
         return None
 
-    async def ask(self, title: str, body: str, label: str) -> bool:
+    async def ask(self, title: str, body: str, label: str, cancel_label: str = "Cancel") -> bool:
         if self.confirm_fn is not None:
             result = self.confirm_fn(title, body, label)
             return bool(await result) if asyncio.iscoroutine(result) else bool(result)
         if self.page is None:
             return True
         future: asyncio.Future = asyncio.get_running_loop().create_future()
-        dialog = ConfirmDialog(title=title, body=body, confirm_label=label,
+        dialog = ConfirmDialog(title=title, body=body, confirm_label=label, cancel_label=cancel_label,
                                on_confirm=lambda: future.done() or future.set_result(True),
                                on_cancel=lambda: future.done() or future.set_result(False))
         self.last_dialog = dialog
@@ -322,10 +341,17 @@ class OnDeviceFlow:
         need_projector = projector is not None and not (existing and self.service.is_vision(existing))
         total = (0 if existing else int(file.size or 0)) + (int(projector.size or 0) if need_projector else 0)
         pending = self.downloads.pending_spec(stem) or self.downloads.pending_spec(registry.projector_key(stem))
-        if total >= dl.CONFIRM_BYTES and not pending:
+        if total > 0 and not pending:
+            # Every download is confirmed (a mis-tap on a preset must never start one); big ones also
+            # warn about mobile data.
             names = ([] if existing else [file.name]) + ([f"{projector.name} (image support)"] if need_projector else [])
-            if not await self.ask("Download model", f"Download {dl.format_bytes(total)} from Hugging Face?\n\n"
-                                                    f"{ref.repo} · {' + '.join(names)}", "Download"):
+            label = str((preset or {}).get("name") or "").strip()
+            title = f"Download {label}?" if label else "Download model?"
+            body = f"Download {dl.format_bytes(total)} from Hugging Face?\n\n{ref.repo} · {' + '.join(names)}"
+            if total >= dl.CONFIRM_BYTES:
+                body += "\n\nThis is a large download: use Wi-Fi unless your mobile data plan allows it."
+            body += "\n\nYou can pause or cancel it while it downloads."
+            if not await self.ask(title, body, "Download"):
                 return None
         self.render()
         if not existing:
@@ -641,24 +667,6 @@ class LocalModelsPanel(OnDeviceFlow):
         self.hf_status.color = ft.Colors.ERROR if error else ft.Colors.ON_SURFACE_VARIANT
         _push(self.hf_status, self.hf_field)
 
-    def pause(self, stem: str) -> bool:
-        return self.downloads.pause(stem)
-
-    def cancel(self, stem: str) -> bool:
-        done = self.downloads.cancel(stem)
-        self.render()
-        return done
-
-    async def resume(self, stem: str) -> Optional[str]:
-        spec = self.downloads.pending_spec(stem)
-        if spec is None:
-            return None
-        state = await self.service.download(spec)
-        if state.error:
-            self.say(f"Download failed: {state.error}")
-        self.render()
-        return stem if state.done else None
-
     def delete_file(self, stem: str) -> bool:
         busy = self.service.busy_with(stem)
         removed = self.service.delete(stem)
@@ -735,15 +743,14 @@ class LocalModelsPanel(OnDeviceFlow):
         download = self.active_download(stem)
         if state in ("downloading", "paused") and download is not None:
             body.append(ft.ProgressBar(value=download.fraction, border_radius=4, key=f"local-preset-progress-{index}"))
-        trailing: list = [self._action(index, state, stem)]
+        target = download.stem if download else stem
+        trailing: list = [self._action(index, state, stem, target)]
         if state == "downloading" and stem:
-            trailing.append(ft.IconButton(icon=ft.Icons.PAUSE, tooltip="Pause", size_constraints=HIT_TARGET,
-                                          key=f"local-preset-pause-{index}",
-                                          on_click=lambda e, s=(download.stem if download else stem): self.pause(s)))
-        if state in ("downloading", "paused") and stem:
-            trailing.append(ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Cancel", size_constraints=HIT_TARGET,
-                                          key=f"local-preset-cancel-{index}",
-                                          on_click=lambda e, s=(download.stem if download else stem): self.cancel(s)))
+            trailing.append(ft.TextButton(content="Pause", icon=ft.Icons.PAUSE, key=f"local-preset-pause-{index}",
+                                          on_click=lambda e, s=target: self.pause(s)))
+        if state == "paused" and stem:
+            trailing.append(ft.TextButton(content="Cancel", icon=ft.Icons.CLOSE, key=f"local-preset-cancel-{index}",
+                                          on_click=lambda e, s=target: self.cancel(s)))
         items = [
             ft.PopupMenuItem(content="Edit / rename", icon=ft.Icons.EDIT_OUTLINED,
                              on_click=lambda e, i=index: self.open_editor(i)),
@@ -765,8 +772,12 @@ class LocalModelsPanel(OnDeviceFlow):
                               spacing=2, tight=True),
         )
 
-    def _action(self, index: int, state: str, stem: Optional[str]) -> ft.Control:
+    def _action(self, index: int, state: str, stem: Optional[str], target: Optional[str] = None) -> ft.Control:
         key = f"local-preset-action-{index}"
+        if state == "downloading" and stem:
+            # the main button while it downloads: an undo right where "Download" was tapped
+            return ft.FilledTonalButton(content="Cancel download", icon=ft.Icons.CLOSE, key=key,
+                                        on_click=lambda e, s=(target or stem): self.cancel(s))
         if state == "download":
             return ft.FilledTonalButton(content="Download", icon=ft.Icons.DOWNLOAD, key=key,
                                         on_click=lambda e, i=index: self.spawn(self.get_preset(i)))

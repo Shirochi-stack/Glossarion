@@ -107,6 +107,10 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Opening Glossarion ...
-"%ADB%" shell monkey -p %PKG% -c android.intent.category.LAUNCHER 1 >nul 2>&1
+rem Open the launcher activity with "am start" (monkey would also send one random tap).
+set "ACTIVITY="
+for /f "delims=" %%A in ('"%ADB%" shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER %PKG% ^| findstr /c:"/"') do set "ACTIVITY=%%A"
+if not defined ACTIVITY set "ACTIVITY=%PKG%/.MainActivity"
+"%ADB%" shell am start -n !ACTIVITY! >nul 2>&1
 echo Done. Close the emulator window when you are finished.
 exit /b 0

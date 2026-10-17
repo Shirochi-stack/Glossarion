@@ -147,13 +147,16 @@ def test_on_device_tab_one_tap_download_load_and_use(tmp_path, fake_hf):
         texts = _texts(panel.preset_column)
         assert "Tiny" in texts and f"Not downloaded · {dl.format_bytes(len(PAYLOAD))}" in texts
         assert _find(panel.preset_column, "local-preset-action-0").content == "Download"
+        asked = []
+        panel.confirm_fn = lambda title, body, label: asked.append(title) or True  # every download asks first
 
         # ONE tap: download (progress), load, use as the model
         states = []
         panel.downloads.subscribe(lambda s: states.append((s.phase, _find(panel.preset_column, "local-preset-action-0").content)))
         model = await panel.get_preset(0)
         assert model == "local/Tiny-Q4_K_M" and used == ["local/Tiny-Q4_K_M"]
-        assert ("downloading", "Downloading…") in states
+        assert ("downloading", "Cancel download") in states  # the undo sits where Download was tapped
+        assert asked == ["Download Tiny?"]
         assert engine_service.loaded_stem == "Tiny-Q4_K_M" and engine.loads
         assert "local/Tiny-Q4_K_M" in catalog.snapshot.models
         assert _find(panel.preset_column, "local-preset-action-0").content == "In use"
@@ -269,7 +272,14 @@ def test_add_from_hugging_face_saves_a_preset_and_asks_for_big_files(tmp_path, f
         panel.hf_field.value = "not a ref"
         assert await panel.download_typed() is None and "is not a Hugging Face repo id" in panel.hf_field.error
         panel.hf_field.value = f"https://huggingface.co/{REPO}"
-        assert await panel.download_typed() == "Tiny-Q4_K_M" and asked == []  # small: no question
+        # every download asks first, also a small one (a mis-tap never starts one); No downloads nothing
+        assert await panel.download_typed() is None and len(asked) == 1
+        assert asked[0][0] == "Download model?" and asked[0][1].startswith("Download ") and "pause or cancel" in asked[0][1]
+        assert "Wi-Fi" not in asked[0][1]  # the mobile-data note is for large downloads only
+        assert not any(f"/{REPO}/resolve/" in p for p, _r in fake_hf.requests)
+        answer["value"] = True
+        assert await panel.download_typed() == "Tiny-Q4_K_M" and len(asked) == 2
+        answer["value"] = False
         assert used == ["local/Tiny-Q4_K_M"] and panel.hf_status.value == "Downloaded local/Tiny-Q4_K_M ✓"
         assert presets.load_presets(prefs)[0]["name"] == "Tiny-Q4_K_M" and presets.load_presets(prefs)[0]["file"] == FILE
         # a 2 GB listing asks first; No downloads nothing
@@ -277,10 +287,12 @@ def test_add_from_hugging_face_saves_a_preset_and_asks_for_big_files(tmp_path, f
         panel.hf_field.value = "big/Big-GGUF"
         assert await panel.download_typed() is None
         assert asked and asked[-1][1].startswith("Download 2.0 GB from Hugging Face?") and "big/Big-GGUF" in asked[-1][1]
+        assert "Wi-Fi" in asked[-1][1]
         assert not any("/big/Big-GGUF/resolve/" in p for p, _r in fake_hf.requests)
         # no Q4_K_M and several files: the chooser picks
         fake_hf.add("odd/Odd-GGUF", {"Odd-F16.gguf": b"x" * 10, "Odd-Q3_K_S.gguf": b"y" * 12})
         panel.hf_field.value = "odd/Odd-GGUF"
+        answer["value"] = True
         assert await panel.download_typed() == "Odd-F16"
         # a gated / missing repo says why
         panel.hf_field.value = "nobody/Missing-GGUF"

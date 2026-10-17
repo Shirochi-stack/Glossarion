@@ -326,14 +326,66 @@ def test_page_one_on_device_one_tap_downloads_loads_and_selects(tmp_path, monkey
                 seen.append((cell.content.controls[1].value, isinstance(cell.content.controls[-1], ft.ProgressBar)))
 
         service.downloads.subscribe(progress)
+        asked = []
+        s.ondevice_flow().confirm_fn = lambda title, body, label: asked.append((title, body, label)) or True
         model = asyncio.run(s.use_ondevice(0))
+        assert asked and asked[0][0] == "Download Light?" and asked[0][2] == "Download"  # every download asks first
         assert model == "local/Tiny-Q4_K_M" and chosen == ["local/Tiny-Q4_K_M"]
-        assert any(text.endswith("%") and bar for text, bar in seen), seen
+        assert any(text.endswith("% · ✕") and bar for text, bar in seen), seen  # tap again to cancel
         assert service.loaded_stem == "Tiny-Q4_K_M" and service.is_vision("Tiny-Q4_K_M")
         assert s.flow.signed_in and s.model_notes["local"] == "✓ Using local/Tiny-Q4_K_M · runs on this phone"
         cell = by_key(s.page_area.content)["welcome-ondevice-light"]
         assert cell.content.controls[1].value == "✓ In use"
         assert by_key(s.page_area.content)["welcome-model-local"].value.startswith("✓ Using local/Tiny-Q4_K_M")
+        s.dispose()
+    finally:
+        server.close()
+
+
+def test_page_one_on_device_second_tap_cancels_a_download(tmp_path, monkeypatch):
+    """A mis-tap is undone with a second tap: the downloading cell asks "Cancel the Light download?" and
+    Cancel download stops it and deletes the partial file; "Keep downloading" leaves it running."""
+    import asyncio
+    import hashlib
+    import os
+
+    import local_llm_fakes as fakes
+    from glossarion_mobile.services.local_llm import hf, presets
+
+    payload = os.urandom(4_000_000)
+    server = fakes.FakeHF()
+    server.add("tester/Tiny-GGUF", {"Tiny-Q4_K_M.gguf": payload})
+    monkeypatch.setattr(hf, "HF_ENDPOINT", server.url)
+    try:
+        kwargs, service, _engine = _engine_kwargs(tmp_path)
+        kwargs["prefs"].set(presets.PREF_KEY, [
+            {"name": "Light", "repo": "tester/Tiny-GGUF", "file": "Tiny-Q4_K_M.gguf", "note": "test", "n_ctx": 0,
+             "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}])
+        s = screen(**kwargs)
+        server.chunk_delay = 0.05
+        service.downloads.throttle = 0
+        asked = []
+        answers = {"Download Light?": True, "Cancel the Light download?": False}
+        s.ondevice_flow().confirm_fn = lambda title, body, label: asked.append(title) or answers[title]
+
+        async def scenario():
+            first = asyncio.create_task(s.use_ondevice(0))
+            for _ in range(500):
+                await asyncio.sleep(0.01)
+                state = s.ondevice_flow().active_download(s.ondevice_flow().stem_of_preset(
+                    s.ondevice_flow().presets()[0]))
+                if state is not None and state.running and state.phase == "downloading":
+                    break
+            assert await s.use_ondevice(0) is None  # "Keep downloading": still running
+            assert asked[-1] == "Cancel the Light download?" and not first.done()
+            answers["Cancel the Light download?"] = True
+            assert await s.use_ondevice(0) is None  # "Cancel download"
+            return await asyncio.wait_for(first, 10)
+
+        assert asyncio.run(scenario()) is None
+        assert asked.count("Download Light?") == 1 and asked.count("Cancel the Light download?") == 2
+        assert not service.loaded_stem
+        assert not [p for p in tmp_path.rglob("*.part")]  # the partial file is gone
         s.dispose()
     finally:
         server.close()
