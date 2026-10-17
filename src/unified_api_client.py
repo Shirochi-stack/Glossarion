@@ -3128,6 +3128,71 @@ class UnifiedClient:
     # OpenAI error codes of a local endpoint (Glossarion Mobile's on-device engine) for a request that
     # can never run there: an image for a text-only model, an unreadable image, a model not downloaded.
     _LOCAL_PERMANENT_ERROR_CODES = ('unsupported_content', 'invalid_image', 'model_not_found')
+    # Smallest read timeout of a local route: its server answers after loading the model and after
+    # every request queued ahead (one generation at a time on a phone).
+    _LOCAL_MIN_READ_TIMEOUT = 3600.0
+
+    @staticmethod
+    def _redact_local_url(url: str) -> str:
+        """``http://127.0.0.1:<port>/<token>/v1`` -> ``http://127.0.0.1:<port>/…/v1`` (the path token
+        of the on-device endpoint never reaches a log)."""
+        text = str(url or '')
+        if os.environ.get(UnifiedClient._LOCAL_LLM_URL_ENV) and text.rstrip('/').endswith('/v1'):
+            head, _sep, rest = text.partition('://')
+            host, slash, path = rest.partition('/')
+            parts = path.strip('/').split('/')
+            if slash and len(parts) == 2 and parts[1] == 'v1':
+                return f"{head}://{host}/…/v1"
+        return text
+
+    def _local_engine_health(self, base_url: str, model: str) -> Optional[dict]:
+        """``GET <base>/../health?model=`` of Glossarion Mobile's on-device endpoint (None elsewhere:
+        a user's own llama-server has no such route, so only the published endpoint is asked)."""
+        published = str(os.environ.get(self._LOCAL_LLM_URL_ENV, '') or '').strip().rstrip('/')
+        base = str(base_url or '').rstrip('/')
+        if not published or base != published or not base.endswith('/v1'):
+            return None
+        try:
+            import urllib.parse as _up
+            import urllib.request as _ur
+            url = base[:-3] + '/health?' + _up.urlencode({'model': model})
+            with _ur.build_opener(_ur.ProxyHandler({})).open(url, timeout=3) as resp:
+                data = json.loads(resp.read().decode('utf-8') or '{}')
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _local_engine_preflight(self, base_url: str, model: str) -> Optional[dict]:
+        """One log line per on-device request, plus what the request will wait for: the requests ahead of
+        it ("⏳ Waiting for the on-device model…") and loading the model ("⏳ Loading on-device model …").
+        Returns the health answer when the model was not loaded yet (``_local_engine_loaded_note``)."""
+        health = self._local_engine_health(base_url, model)
+        if health is None:
+            return None
+        target = health.get('target') if isinstance(health.get('target'), dict) else {}
+        stem = target.get('stem') or model
+        print(f"📱 [local] On-device request: {stem}")
+        ahead = int(health.get('queue') or 0) + (1 if health.get('busy') else 0)
+        if ahead:
+            print(f"⏳ Waiting for the on-device model… ({ahead} request{'s' if ahead != 1 else ''} ahead)")
+        if target.get('stem') and not target.get('loaded'):
+            size = int(target.get('size') or 0)
+            shown = f" ({size / 1e9:.1f} GB)" if size >= 1e8 else (f" ({size / 1e6:.0f} MB)" if size else '')
+            print(f"⏳ Loading on-device model {stem}{shown}…")
+            return health
+        return None
+
+    def _local_engine_loaded_note(self, base_url: str, model: str, before: Optional[dict]) -> None:
+        """"✓ On-device model … loaded in N s" once the answer started after a load."""
+        if not before:
+            return
+        health = self._local_engine_health(base_url, model)
+        target = (health or {}).get('target') if isinstance((health or {}).get('target'), dict) else {}
+        if not target.get('loaded'):
+            return
+        seconds = health.get('load_seconds')
+        took = f" in {float(seconds):.1f} s" if isinstance(seconds, (int, float)) else ''
+        print(f"✓ On-device model {target.get('stem') or model} loaded{took}")
 
     @classmethod
     def _local_permanent_error(cls, provider: str, http_status: Optional[int], err: Exception) -> Optional[str]:
@@ -24387,6 +24452,10 @@ class UnifiedClient:
                     # Fix empty base_url for Groq
                     if provider == 'groq' and (not base_url or base_url.strip() == ''):
                         base_url = "https://api.groq.com/openai/v1"
+                    if provider == 'local':
+                        # Glossarion Mobile's on-device endpoint publishes its address at start: read it
+                        # again on every attempt so a retry never keeps knocking on an old address.
+                        base_url = self._local_openai_base_url(provider)
 
                     # NOTE: Do not reuse SDK clients across calls.
                     # We create a fresh OpenAI SDK client per attempt for ALL SDK providers (OpenAI + OpenAI-compatible),
@@ -24415,6 +24484,10 @@ class UnifiedClient:
                     try:
                         if httpx is not None:
                             connect, read = self._get_timeouts()
+                            if provider in self._LOCAL_OPENAI_PROVIDERS and read is not None:
+                                # a local server answers only after loading the model and after the
+                                # requests queued ahead of this one: no short read timeout there
+                                read = max(float(read), self._LOCAL_MIN_READ_TIMEOUT)
                             timeout_obj = httpx.Timeout(connect=connect, read=read, write=read, pool=connect)
                         else:
                             _, read = self._get_timeouts()
@@ -24953,14 +25026,19 @@ class UnifiedClient:
                     try:
                         import time as _t
                         start_ts = _t.time()
+                        local_loading = (self._local_engine_preflight(base_url, effective_model)
+                                         if provider == 'local' else None)
                         if use_streaming and self._should_show_api_lifecycle_logs():
-                            print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})", flush=True)
+                            shown_url = self._redact_local_url(base_url) if provider == 'local' else base_url
+                            print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={shown_url})", flush=True)
                         if use_responses_api:
                             resp = self._create_with_reasoning_retry(client.responses.create, call_kwargs, provider)
                         else:
                             resp = self._create_chat_completion_with_token_retry(
                                 client.chat.completions.create, call_kwargs, provider,
                             )
+                        if local_loading:
+                            self._local_engine_loaded_note(base_url, effective_model, local_loading)
                         # Register streaming response for proper cleanup
                         if use_streaming:
                             with self._active_streams_lock:
@@ -26431,6 +26509,9 @@ class UnifiedClient:
                                 f"OpenRouter HTTP fallback failed: {http_e}",
                                 error_type="parse_error"
                             )
+                    if provider in self._LOCAL_OPENAI_PROVIDERS and self._extract_http_status_from_exception(e) == 499:
+                        # the on-device engine dropped this queued request on Stop: never send it again
+                        raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                     if not self._multi_key_mode and attempt < max_retries - 1:
                         # Suppress cancellation errors when stop is requested
                         error_str = str(e).lower()

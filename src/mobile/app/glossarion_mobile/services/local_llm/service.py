@@ -17,7 +17,14 @@
   before the engine sees them (``vision.prepare_messages``). Text-only models keep the clear 400.
 * **Unload policy:** after ``IDLE_UNLOAD`` seconds without a request or running job; at once when iOS
   hides the app with no job running; after ``BACKGROUND_UNLOAD`` seconds in the background on Android
-  unless a job runs (its foreground service keeps the process); ``detach`` unloads and stops the server.
+  unless a job runs (its foreground service keeps the process); when the selected model moves off the
+  loaded one (``selected_model_changed``; after the current answer, never under a job using it);
+  ``detach`` (Android destroys the activity, the process and its job may go on) unloads without a job
+  but keeps the endpoint up: a job still running would otherwise get "Connection error" on every retry.
+  The endpoint's ``base_url`` never changes while the process lives (``LocalLLMServer`` rebinds its port).
+* **Stop:** a queued request gives up on the client closing its connection or any job Stop
+  (``process_stop_state``: graceful or immediate); the answer being generated stops within a few tokens
+  on an immediate Stop, a disconnect or a forced unload, and runs to its end on a graceful one.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ import collections
 import dataclasses
 import logging
 import os
+import sys
 import threading
 import time
 from typing import Any, Callable, Optional
@@ -79,6 +87,47 @@ def model_block(model: Any) -> Optional[tuple]:
     available, reason = service.engine_status()
     if not available:
         return "On-device engine unavailable", reason or eng.UNAVAILABLE
+    return None
+
+
+class _TokenRedactor(logging.Filter):
+    """Replaces the endpoint's path token in a logger's records (the job log shows httpx's lines)."""
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self.token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            text = record.getMessage()
+        except Exception:
+            return True
+        if self.token and self.token in text:
+            record.msg, record.args = text.replace(self.token, "…"), None
+        return True
+
+
+def _redact_token_in(logger_name: str, token: str) -> None:
+    logger = logging.getLogger(logger_name)
+    if not any(isinstance(f, _TokenRedactor) and f.token == token for f in logger.filters):
+        logger.addFilter(_TokenRedactor(token))
+
+
+def process_stop_state() -> Optional[str]:
+    """The app's job Stop as the endpoint sees it: ``"force"`` while the shared client's immediate stop
+    flags are set (``unified_api_client.global_stop_flag`` / ``UnifiedClient._global_cancelled``, the
+    ones its own ``_is_stop_requested`` checks), ``"graceful"`` while ``GRACEFUL_STOP=1``, else None.
+    Only peeks at an already-imported ``unified_api_client`` (never imports it)."""
+    client = sys.modules.get("unified_api_client")
+    if client is not None:
+        try:
+            if getattr(client, "global_stop_flag", False) or \
+                    getattr(getattr(client, "UnifiedClient", None), "_global_cancelled", False):
+                return "force"
+        except Exception:
+            pass
+    if os.environ.get("GRACEFUL_STOP") == "1":
+        return "graceful"
     return None
 
 
@@ -221,8 +270,10 @@ class LocalEngineService:
                  post: Optional[Callable[..., Any]] = None, refresh_catalog: Optional[Callable[[], Any]] = None,
                  active_job_model: Optional[Callable[[], Optional[str]]] = None, platform: Optional[str] = None,
                  clock: Callable[[], float] = time.monotonic, memory: Optional[Callable[[], tuple]] = None,
-                 watch: bool = True, downloads: Optional[dl.DownloadManager] = None) -> None:
+                 watch: bool = True, downloads: Optional[dl.DownloadManager] = None,
+                 stop_state: Callable[[], Optional[str]] = process_stop_state) -> None:
         self.prefs = prefs
+        self.stop_state = stop_state
         self.registry = registry or dl.Registry()
         self.downloads = downloads or dl.DownloadManager(registry=self.registry, run_io=run_io)
         self._engine_factory = engine_factory
@@ -249,6 +300,7 @@ class LocalEngineService:
         self._watcher: Optional[threading.Thread] = None
         self._stop_watch = threading.Event()
         self._abort = threading.Event()  # a forced unload / delete stops the running generation
+        self._unload_when_idle = False  # the selection moved off the loaded model while it answered
         self.log: list = []  # (stem, load seconds) of every load (diagnostics)
 
     # ---- engine ----------------------------------------------------------------------------------
@@ -288,9 +340,19 @@ class LocalEngineService:
                               self._load_seconds, self.server.running,
                               bool(loaded and getattr(self.engine, "vision", False)))
 
-    def health(self) -> dict:
+    def health(self, model: Optional[str] = None) -> dict:
+        """``{"state", "model", "queue"}`` (plus ``busy`` and ``load_seconds`` of the last load); with
+        ``model`` also ``target``: ``{"stem", "size", "loaded"}`` of that model (``stem`` None when it is
+        not downloaded). The shared client reads it before a request to log loading / waiting lines."""
         snap = self.snapshot()
-        return {"state": snap.state, "model": snap.model, "queue": snap.queue}
+        out = {"state": snap.state, "model": snap.model, "queue": snap.queue, "busy": bool(self.gate.busy),
+               "load_seconds": self._load_seconds}
+        if model:
+            stem = self.registry.resolve(model)
+            size = int((self.registry.load().get(stem) or {}).get("size") or 0) if stem else 0
+            out["target"] = {"stem": stem, "size": size,
+                             "loaded": bool(stem and snap.model == stem and snap.state != "loading")}
+        return out
 
     def subscribe(self, listener: Callable[[EngineSnapshot], Any]) -> Callable[[], None]:
         self.listeners.append(listener)
@@ -324,6 +386,7 @@ class LocalEngineService:
 
     def start(self) -> str:
         self.server.start()
+        _redact_token_in("httpx", self.server.token)  # "HTTP Request: POST http://127.0.0.1:<port>/<token>/v1/…"
         os.environ[URL_ENV] = self.server.base_url
         set_default_service(self)
         self.downloads.scan()
@@ -341,6 +404,9 @@ class LocalEngineService:
         self.unload(force=True)
         url = self.server.base_url if self.server.running else None
         self.server.stop()
+        logger = logging.getLogger("httpx")
+        for item in [f for f in logger.filters if isinstance(f, _TokenRedactor) and f.token == self.server.token]:
+            logger.removeFilter(item)
         if url is not None and os.environ.get(URL_ENV) == url:
             os.environ.pop(URL_ENV, None)
         if _DEFAULT is self:
@@ -483,7 +549,10 @@ class LocalEngineService:
         self._gate_ram(stem, n_ctx, force, interactive, vision=vision)
         if engine.loaded:
             self._unload_locked()
+        self._unload_when_idle = False
         self._set("loading", stem)
+        size = int((self.registry.load().get(stem) or {}).get("size") or 0)
+        log.info("loading on-device model %s (%s, n_ctx %d)", stem, _gb(size) if size else "size unknown", n_ctx)
         started = time.monotonic()
         try:
             engine.load(path, n_ctx, self.threads(), mmproj=self.registry.projector_path(stem))
@@ -546,6 +615,38 @@ class LocalEngineService:
         finally:
             self.gate.release()
 
+    def selected_model_changed(self, model: Any) -> Optional[str]:
+        """The app's selected model changed (``local/A`` -> ``local/B`` or a cloud model): the loaded model
+        is freed at once, or right after the answer it is giving (``"deferred"``), unless the new selection
+        is that model or a running job uses it. Returns ``"unloaded"`` / ``"deferred"`` / None."""
+        loaded = self.loaded_stem
+        text = str(model or "").strip()
+        stem = self.registry.resolve(text) if text.lower().startswith("local/") else None
+        if loaded is None or (stem and stem.casefold() == loaded.casefold()):
+            self._unload_when_idle = False
+            return None
+        pinned = self._pinned_stem()
+        if pinned and pinned.casefold() == loaded.casefold():
+            return None
+        if self.unload():
+            log.info("on-device model %s unloaded: the selected model is now %s", loaded, text or "none")
+            return "unloaded"
+        self._unload_when_idle = True
+        return "deferred"
+
+    def _deferred_unload(self) -> None:
+        """``selected_model_changed`` while the model answered: unload once nothing waits for it."""
+        if self.gate.busy or self.gate.waiting():
+            return
+        pinned = self._pinned_stem()
+        loaded = self.loaded_stem
+        if loaded is None or (pinned and pinned.casefold() == loaded.casefold()):
+            self._unload_when_idle = False
+            return
+        if self.unload():
+            self._unload_when_idle = False
+            log.info("on-device model %s unloaded after its answer: another model is selected", loaded)
+
     async def _io(self, fn: Callable[[], Any]) -> Any:
         if self.run_io is not None:
             return await self.run_io(fn)
@@ -606,7 +707,18 @@ class LocalEngineService:
         pinned = self._pinned_stem()
         if pinned and pinned.casefold() != stem.casefold():
             raise LocalLLMError(409, "engine_busy", f"The on-device engine is busy with {pinned} for a running job")
-        if not self.gate.acquire(should_stop, on_wait=self._notify):
+        stop_state = self.stop_state
+
+        def stop_waiting() -> bool:
+            # a queued request gives up on any Stop (graceful lets only the answer being generated finish)
+            return bool(should_stop() or stop_state())
+
+        def stop_generating() -> bool:
+            return bool(self._abort.is_set() or should_stop() or stop_state() == "force")
+
+        if stop_waiting():
+            raise LocalLLMError(499, "client_closed", "The request was cancelled (Stop)")
+        if not self.gate.acquire(stop_waiting, on_wait=self._notify):
             raise LocalLLMError(499, "client_closed", "The request was cancelled while waiting")
         released = [False]
 
@@ -619,6 +731,8 @@ class LocalEngineService:
                 self._set("ready", self._stem)
             self.gate.release()
             self._notify()
+            if self._unload_when_idle:
+                self._deferred_unload()
 
         try:
             self._ensure_loaded(stem, vision=bool(images))
@@ -631,8 +745,7 @@ class LocalEngineService:
                                     f"resulted in {prompt_tokens} tokens. Please reduce the length of the messages.")
             params = self._params(body, n_ctx - prompt_tokens)
             self._set("generating", stem)
-            abort = self._abort
-            deltas = _primed(engine.chat(messages, params, lambda: abort.is_set() or should_stop()), n_ctx)
+            deltas = _primed(engine.chat(messages, params, stop_generating), n_ctx)
         except BaseException:
             release()
             raise
@@ -706,6 +819,10 @@ class LocalEngineService:
         now = self.clock() if now is None else now
         if self.engine is None or not self.engine.loaded or self.gate.busy:
             return None
+        if self._unload_when_idle:
+            self._deferred_unload()
+            if self.loaded_stem is None:
+                return "switched"
         if self.job_active():
             return None
         if self.background_since is not None and self.platform == "android" \
@@ -730,8 +847,13 @@ class LocalEngineService:
             self.background_since = None
             return None
         if name == "detach":
-            self.stop()
-            return "stopped"
+            # Android destroys the activity (Back, or memory pressure in the background) while the process
+            # and a job under its foreground service go on: that job's requests still need the endpoint, so
+            # it stays up (an idle endpoint costs nothing; the process' end closes it). Without a job the
+            # model is freed now.
+            if not self.job_active():
+                self.unload()
+            return "detached"
         return None
 
     def _watch_loop(self) -> None:
