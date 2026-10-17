@@ -1972,6 +1972,8 @@ Context & memory (rolling summary), Response handling (translation, truncation r
 
 > Owner 2026-10-16: the former step 2 "Other providers" is merged into step 1 (one compact page: a 56 dp logo beside the title, the sign-ins two per row, the keyless routes, then API key + Save, "Choose another model" and Ollama / LM Studio). Steps are Sign in · Target language and glossary mode · Permissions · Done; Next on step 1 without a sign-in counts as skipping it. The list below keeps the original numbering for history.
 
+> Owner 2026-10-17: step 1 also has "Run on this phone (no account needed)" between the keyless routes and the API key: the first four on-device presets as one row of one-tap cells (`welcome-ondevice`, cells `welcome-ondevice-<preset>`; name with ⭐ on the suggested one: Light, or the biggest that fits when Light is too big; size of model + image support and the engine's RAM mark ✓ / ⚠ / ✕, details in the tooltip; inline progress while downloading; `welcome-model-local` says the result). One tap downloads (with the vision projector), loads and selects the model through the Model manager's `OnDeviceFlow`; it counts like a sign-in. "Ollama / LM Studio" stays as the PC option (section "Your own API key or a model on your PC"); the "authchatgpt/ and authnd/: no sign-in" line went. Page 1 still fits 360 x 800 and 412 x 915 at 100 % text.
+
 1. **Welcome · Sign in with ChatGPT (U3).**
    - Halgakos and "Translate novels, manga and documents with your own AI accounts and keys".
    - The default model is `authgpt/gpt-6-luna` (the desktop default), so the primary `FilledButton` is **Sign in with ChatGPT**. It opens the LoginSheet through OAuthBridge:

@@ -110,6 +110,16 @@ def _catalog_service() -> Any:
         return None
 
 
+def _local_engine() -> Any:
+    """The app's on-device engine (``LocalEngineService``, started by the Models & keys feature), or None."""
+    try:
+        from glossarion_mobile.services.local_llm.service import default_service
+
+        return default_service()
+    except Exception:
+        return None
+
+
 def _target_languages() -> tuple:
     try:
         from language_options import TARGET_LANGUAGES
@@ -729,6 +739,8 @@ class ChatFeature:
             default_max_tokens=int((env.config_get("max_output_tokens", None) if env else None) or 16384),
             default_chunk_size=str((env.config_get("manual_chunk_size", "") if env else "") or ""),
             config_get=env.config_get if env else None,
+            local_engine=_local_engine,  # "Run on this phone": the Model manager's on-device engine
+            prefs=getattr(self.app, "prefs", None),
         )
         if previous is not None:  # the sign-in rows, model lines and permission state of the same session
             for name in ("provider_status", "model_notes", "keyless_chosen", "permission_state"):

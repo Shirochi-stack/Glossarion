@@ -1,5 +1,7 @@
 # Self-built mobile wheels for the security pins: cryptography 50.0.2 (Android + iOS) and Pillow
-# 12.3.0 (Android). No index or release has Android/iOS cp313 wheels for these versions, so this
+# 12.3.0 (Android), and the on-device engine with vision: llama-cpp-python 0.3.32 with libmtmd
+# (Android + iOS; pypi.flet.dev's builds lack libmtmd). No index or release has Android/iOS cp313
+# wheels for these, so this
 # workflow builds them with flet-dev/mobile-forge (pinned in src/mobile/ci/wheels/wheelhouse.toml),
 # verifies them and uploads them as the artifact mobile-wheelhouse-<platform>. build-mobile.yml
 # calls it once per platform and hands the wheels to `flet build` through PIP_FIND_LINKS
@@ -13,7 +15,7 @@
 # Outputs: artifact mobile-wheelhouse-<platform> (wheels + SHA256SUMS + provenance.json, 7 days);
 # on failure, mobile-wheels-logs-<platform> (forge logs, 14 days).
 
-name: Mobile wheels (cryptography, Pillow)
+name: Mobile wheels (cryptography, Pillow, llama-cpp-python)
 
 on:
   workflow_call:
@@ -54,7 +56,8 @@ jobs:
   build:
     name: Build mobile wheels (${{ inputs.platform }})
     runs-on: ${{ inputs.platform == 'ios' && 'macos-26' || 'ubuntu-24.04' }}
-    timeout-minutes: 45
+    # llama.cpp + libmtmd per ABI / iOS slice is the long part (cached afterwards)
+    timeout-minutes: 120
     env:
       PLATFORM: ${{ inputs.platform }}
     steps:
@@ -87,8 +90,8 @@ jobs:
           uv run --no-project python src/mobile/ci/wheels/wheels.py env --platform "$PLATFORM" --format github | tee -a "$GITHUB_OUTPUT"
           # The cache steps below are written per package; fail if the manifest moved on without them.
           case "$PLATFORM" in
-            android) expected="cryptography pillow" ;;
-            *) expected="cryptography" ;;
+            android) expected="cryptography pillow llama-cpp-python" ;;
+            *) expected="cryptography llama-cpp-python" ;;
           esac
           packages="$(uv run --no-project python src/mobile/ci/wheels/wheels.py packages --platform "$PLATFORM")"
           if [ "$packages" != "$expected" ]; then
@@ -112,15 +115,25 @@ jobs:
           path: ${{ runner.temp }}/wheelcache/pillow
           key: mobile-wheels-v1-${{ inputs.platform }}-pillow-${{ hashFiles('src/mobile/ci/wheels/wheelhouse.toml', 'src/mobile/ci/wheels/build_wheels.sh', 'src/mobile/ci/wheels/wheels.py', 'src/mobile/ci/wheels/recipes/pillow/**') }}
 
+      - name: Restore cached llama-cpp-python wheels
+        id: cache-llama-cpp-python
+        if: ${{ !inputs.fresh }}
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/wheelcache/llama-cpp-python
+          key: mobile-wheels-v1-${{ inputs.platform }}-llama-cpp-python-${{ hashFiles('src/mobile/ci/wheels/wheelhouse.toml', 'src/mobile/ci/wheels/build_wheels.sh', 'src/mobile/ci/wheels/wheels.py', 'src/mobile/ci/wheels/recipes/llama-cpp-python/**') }}
+
       - name: Packages to build
         id: todo
         env:
           HIT_CRYPTOGRAPHY: ${{ steps.cache-cryptography.outputs.cache-hit }}
           HIT_PILLOW: ${{ steps.cache-pillow.outputs.cache-hit }}
+          HIT_LLAMA: ${{ steps.cache-llama-cpp-python.outputs.cache-hit }}
         run: |
           todo=""
           if [ "$HIT_CRYPTOGRAPHY" != true ]; then todo="cryptography"; fi
           if [ "$PLATFORM" = android ] && [ "$HIT_PILLOW" != true ]; then todo="${todo:+$todo }pillow"; fi
+          if [ "$HIT_LLAMA" != true ]; then todo="${todo:+$todo }llama-cpp-python"; fi
           echo "packages=$todo" | tee -a "$GITHUB_OUTPUT"
           if [ -z "$todo" ]; then
             echo "All wheels for $PLATFORM come from the cache." >> "$GITHUB_STEP_SUMMARY"
@@ -198,6 +211,13 @@ jobs:
         with:
           path: ${{ runner.temp }}/wheelcache/pillow
           key: mobile-wheels-v1-${{ inputs.platform }}-pillow-${{ hashFiles('src/mobile/ci/wheels/wheelhouse.toml', 'src/mobile/ci/wheels/build_wheels.sh', 'src/mobile/ci/wheels/wheels.py', 'src/mobile/ci/wheels/recipes/pillow/**') }}
+
+      - name: Save llama-cpp-python wheels to the cache
+        if: success() && contains(steps.todo.outputs.packages, 'llama-cpp-python')
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/wheelcache/llama-cpp-python
+          key: mobile-wheels-v1-${{ inputs.platform }}-llama-cpp-python-${{ hashFiles('src/mobile/ci/wheels/wheelhouse.toml', 'src/mobile/ci/wheels/build_wheels.sh', 'src/mobile/ci/wheels/wheels.py', 'src/mobile/ci/wheels/recipes/llama-cpp-python/**') }}
 
       - name: Write provenance
         env:

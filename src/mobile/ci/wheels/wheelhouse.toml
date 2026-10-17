@@ -1,6 +1,8 @@
-# Self-built mobile wheels for the security pins (cryptography==50.0.2, pillow==12.3.0).
+# Self-built mobile wheels: the security pins (cryptography==50.0.2, pillow==12.3.0) and the on-device
+# engine with vision (llama-cpp-python==0.3.32 with libmtmd).
 #
-# pypi.flet.dev and PyPI have no Android/iOS cp313 wheels for these versions, so
+# pypi.flet.dev and PyPI have no Android/iOS cp313 wheels for these versions (pypi.flet.dev's
+# llama-cpp-python 0.3.32 builds lack libmtmd: LLAVA_BUILD=OFF), so
 # .github/workflows/mobile-wheels.yml builds them with flet-dev/mobile-forge and the
 # mobile builds feed them to `flet build` through PIP_FIND_LINKS
 # (.github/actions/mobile-wheelhouse). Nothing here is uploaded to an index or a release.
@@ -101,3 +103,19 @@ recipe = "recipes/pillow"
 sdist_sha256 = "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce"
 targets = ["arm64-v8a", "x86_64"]
 requires_dist = ["flet-libjpeg==3.0.90", "flet-libfreetype==2.13.3", "flet-libwebp==1.6.0"]
+
+# The built-in llama.cpp engine with the multimodal library (libmtmd) for vision models. Same
+# version as pypi.flet.dev's build 2 (the pyproject pin), built from forge's recipe with
+# LLAVA_BUILD=ON (recipes/llama-cpp-python). A device-only pin: uv.lock has no entry, so the sdist
+# URL and hash are here (PyPI JSON, checked 2026-10-17 against the downloaded bytes).
+# Requires-Dist: forge adds the Android host requirement flet-libcpp-shared (libc++_shared.so).
+[[wheel]]
+name = "llama-cpp-python"
+version = "0.3.32"
+recipe = "recipes/llama-cpp-python"
+sdist_sha256 = "b06502361770f82eb08b7f1a192eb084b9ead2b88fe32cda8c397a2782eabde6"
+sdist_url = "https://files.pythonhosted.org/packages/18/c8/3eb9c10c138eaa9d6148471701476169322eafbd825fdc13ec326552b516/llama_cpp_python-0.3.32.tar.gz"
+targets = ["arm64-v8a", "x86_64", "iphoneos.arm64", "iphonesimulator.arm64", "iphonesimulator.x86_64"]
+requires_dist = ["typing-extensions>=4.5.0", "numpy>=1.20.0", "diskcache>=5.6.1", "jinja2>=2.11.3"]
+requires_dist_android = ["typing-extensions>=4.5.0", "numpy>=1.20.0", "diskcache>=5.6.1", "jinja2>=2.11.3",
+                         "flet-libcpp-shared>=27.2.12479018"]

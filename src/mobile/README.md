@@ -117,31 +117,45 @@ client (no window), including an Android simulation with the real
 
 Model manager › On-device runs GGUF models inside the app through **llama-cpp-python 0.3.32**
 (`[tool.flet.android]` / `[tool.flet.ios]` dependencies; device-only, so the host `uv sync` never
-builds its sdist). There is no own build: pypi.flet.dev has cp313 wheels for all five targets,
-built by flet-dev/mobile-forge `recipes/llama-cpp-python` (build tag 2, the one with the mobile
-ctypes loader fixes). They are CPU-only (`GGML_NATIVE=OFF`, no Metal / Vulkan / OpenMP) and pure
-ctypes over four libraries in `llama_cpp/lib`: libggml-base, libggml-cpu, libggml and libllama.
+builds its sdist). pypi.flet.dev has cp313 wheels of that version for all five targets (flet-dev/
+mobile-forge `recipes/llama-cpp-python`, build tag 2), but they are built without llava/mtmd, so no
+model could read an image. CI therefore builds the same version itself from forge's recipe with
+`LLAVA_BUILD=ON` and `MTMD_VIDEO=OFF` (`ci/wheels/recipes/llama-cpp-python`, a `[[wheel]]` in
+`wheelhouse.toml`, build tag 1000 outranks the index; mobile-wheels.yml builds and caches it like
+cryptography). The wheels are CPU-only (`GGML_NATIVE=OFF`, no Metal / Vulkan / OpenMP) and pure
+ctypes over five libraries in `llama_cpp/lib`: libggml-base, libggml-cpu, libggml, libllama and
+libmtmd (the image encoder of vision models).
 
-* Size: about 2 MB of native libraries per ABI, plus jinja2, MarkupSafe and diskcache (about 1 MB
+* Size: about 4 MB of native libraries per ABI, plus jinja2, MarkupSafe and diskcache (about 1 MB
   of Python, resolved by pip). Android also installs `flet-libcpp-shared` (`libc++_shared.so`,
   which must exist exactly once in the APK: Gradle merges jniLibs).
-* After every `flet build` CI runs `ci/wheels/wheels.py verify-site-packages --platform <p>
-  --package llama-cpp-python build/site-packages`: the pinned version and build >= 2, exactly the
-  four libraries, then per arch the ELF machine, 16 KB LOAD alignment, NEEDED (siblings,
+* `wheels.py verify-native` checks the built wheels and, after every `flet build`, `wheels.py
+  verify-site-packages --platform <p> --package llama-cpp-python build/site-packages` checks what
+  pip installed, both against the same profile: the pinned version and build >= 1000, exactly the
+  five libraries, then per arch the ELF machine, 16 KB LOAD alignment, NEEDED (siblings,
   libc++_shared, libc/libm/libdl/liblog) and every strong import resolved by a sibling,
   libc++_shared or the NDK API-24 stubs (Android); the slice's CPU and platform, minos <= 13.0
   (14.0 on the arm64 simulator), only sibling and `/usr/lib` dylibs and no DYNAMIC_LOOKUP binds (iOS).
 * The app's `ENGINE_VERSION` equals the pin (a host test checks it); the smoke suite's
-  `llama_engine` check imports `llama_cpp` and loads the four libraries on the emulator and the
+  `llama_engine` check imports `llama_cpp`, loads the libraries and libmtmd on the emulator and the
   iOS simulator.
 * Models are GGUF files in `GLOSSARION_MODELS_DIR` (`<data>/models`, app-internal; excluded from
   iCloud backup on iOS; on Android a model over Auto Backup's 25 MB quota just stops the app's backup).
 * RAM: a model needs roughly its file size × 1.15 + the KV cache + 400 MB. Android refuses a load
   above the phone's total RAM and asks first above the available RAM; iOS refuses above half the
   RAM (unsigned / AltStore IPAs cannot carry the increased-memory-limit entitlement). Qwen3.5 4B
-  wants about 4 GB free and 9B about 8 GB.
-* If an index wheel ever fails on a device, the fallback is our own build of the forge recipe
-  (`ci/wheels/recipes/llama-cpp-python`, a `[[wheel]]` in `wheelhouse.toml`, mobile-wheels.yml).
+  wants about 4 GB free and 9B about 8 GB. Welcome page 1 ("Run on this phone") and the Model manager
+  show this check as a hint per preset (✓ fits, ⚠ tight on free RAM, ✕ too big).
+* **Vision.** Qwen3.5 is natively multimodal: the default presets carry their repository's
+  `mmproj-F16.gguf` (205-918 MB), and any repository with an `mmproj-*.gguf` gets its projector in
+  the same tap (F16, else BF16, Q8_0, F32), downloaded like the model (resume, sha256) as
+  `<stem>.mmproj.gguf` and recorded on the model in `models.json`. Such models say "Reads images"; the
+  in-app endpoint then takes OpenAI `image_url` parts with `data:` URLs (no remote URLs), decodes
+  them with `safe_image.open_image`, scales the longest side to 896 px, re-encodes JPEG and runs
+  llama-cpp-python's `MTMDChatHandler` (the model's own chat template, thinking off). The projector
+  loads with the first image only and the RAM gate checks again with it added. Text-only models keep
+  the 400 "no vision support". The chat's Vision mode and image jobs reach it through
+  `UnifiedClient.send_image` and the `local/` route like any other vision model.
 
 ## Building
 
@@ -191,7 +205,7 @@ artifact retention and the suite policies.
 |---|---|---|---|---|
 | iOS simulator smoke | `ios-simulator-smoke` | `IOS_SIMULATOR_SMOKE_POLICY` | `required` (U9: passed in Build Mobile run 37728461336 on 96da1ec6) | the app on an iPhone simulator, launched with `SIMCTL_CHILD_GLOSSARION_CI_SELFTEST=smoke` (never `simctl openurl`: its "Open in …?" alert is never tapped); waits for `GLOSSARION_SELFTEST_START` (120 s) and `GLOSSARION_SELFTEST PASS` |
 | Android UI tests | `android-ui-tests` | `ANDROID_UI_TESTS_POLICY` | `optional` until `flet test android` has passed once in CI | `flet test android` on the emulator (`ci/android_ui_tests.sh`, tests in `tests/`) |
-| Built-in engine (llama) | `android-smoke` (its own emulator step) | `ANDROID_LLAMA_SUITE_POLICY` | `optional` until it has passed once in CI | a second emulator run of `ci/android_smoke.sh` with `RUN_E2E=0 RUN_LLAMA=1`: the smoke suite, then `glossarion://app/__selftest__?suite=llama` (downloads the `GLOSSARION_LLAMA_SUITE_PRESET` GGUF, default Garbage = Qwen3.5 0.8B, loads it with `n_ctx` 2048, generates a few tokens through the in-app server, unloads); the `GLOSSARION_LLAMA {json}` line goes to `mobile-smoke-logs/llama/llama_result.txt` |
+| Built-in engine (llama) | `android-smoke` (its own emulator step) | `ANDROID_LLAMA_SUITE_POLICY` | `optional` until it has passed once in CI | a second emulator run of `ci/android_smoke.sh` with `RUN_E2E=0 RUN_LLAMA=1`: the smoke suite, then `glossarion://app/__selftest__?suite=llama` (downloads the `GLOSSARION_LLAMA_SUITE_PRESET` GGUF, default Garbage = Qwen3.5 0.8B, loads it with `n_ctx` 2048, generates a few tokens through the in-app server, unloads; then `llama_vision_describe` adds the preset's vision projector and describes a tiny test picture through `UnifiedClient.send_image`); the `GLOSSARION_LLAMA {json}` line goes to `mobile-smoke-logs/llama/llama_result.txt`, the `GLOSSARION_LLAMA_VISION {json}` line to `llama_vision_result.txt` |
 
 `optional`: the suite runs only when its dispatch input is `on`, and a failure never
 fails the run (`continue-on-error`; for the llama suite on its step). `required`: `auto` runs it whenever its platform is
@@ -391,6 +405,7 @@ os_log (iOS) plus `console.log`. (`sys.__stderr__` is fd 2 = `/dev/null` on Andr
 | `GLOSSARION_SELFTEST PASS {json}` / `FAIL {json}` | self-test finished (deep link or button) |
 | `GLOSSARION_SPIKE …` | U0 spike results (FGS ticks every 60 s, events) |
 | `GLOSSARION_LLAMA {json}` | the `llama` suite's result (model, sha256_ok, load_s, tokens, tok_s, system_info) |
+| `GLOSSARION_LLAMA_VISION {json}` | the `llama` suite's vision check (model, projector, sha256_ok, seconds, text, prompt_tokens, projector_loaded, red) |
 
 ```bash
 adb logcat -s flet.python

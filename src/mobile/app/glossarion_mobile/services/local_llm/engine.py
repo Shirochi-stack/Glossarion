@@ -1,8 +1,13 @@
 """The inference engines behind the on-device endpoint.
 
-``Engine`` protocol: ``load(path, n_ctx, n_threads)``, ``unload()``, ``chat(messages, params,
+``Engine`` protocol: ``load(path, n_ctx, n_threads, mmproj=None)``, ``unload()``, ``chat(messages, params,
 should_stop) -> iterator of text deltas`` (``last_usage`` / ``last_finish`` describe the finished
-generation), ``count_prompt(messages) -> tokens``, ``loaded``.
+generation), ``count_prompt(messages) -> tokens``, ``loaded``, ``vision`` (a projector was given).
+
+Vision: a model loaded with its ``mmproj`` projector answers requests with ``image_url`` parts through
+llama-cpp-python's ``MTMDChatHandler`` (libmtmd; the model's own chat template, so Qwen3.5 works). The
+projector is loaded on the first image only (text-only use costs no extra RAM) and freed with the model.
+The service has already scaled the images down (``vision.prepare_messages``).
 
 * ``LlamaEngine``: llama-cpp-python (``ENGINE_VERSION``; on the device the pypi.flet.dev cp313 wheels).
   ``llama_cpp`` is imported only when a model loads, so the app starts without it and the screen says
@@ -27,8 +32,8 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 
 log = logging.getLogger("glossarion.local_llm")
 
-__all__ = ["ENGINE_VERSION", "EngineUnavailable", "FakeEngine", "LlamaEngine", "default_threads", "engine_status",
-           "system_info"]
+__all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "LlamaEngine", "default_threads",
+           "engine_status", "system_info", "vision_status"]
 
 #: The llama-cpp-python pin of ``src/mobile/pyproject.toml`` (``[tool.flet.android/ios].dependencies``).
 ENGINE_VERSION = "0.3.32"
@@ -36,6 +41,8 @@ ENGINE_VERSION = "0.3.32"
 DEFAULT_SAMPLING = {"top_k": 20, "top_p": 0.8, "min_p": 0.0}
 STOP_CHECK_EVERY = 8  # tokens between two "is the client still there?" checks
 UNAVAILABLE = "The on-device engine is not available in this build (llama-cpp-python is not installed)"
+NO_MTMD = "This build's on-device engine cannot read images (llama-cpp-python without libmtmd)"
+_VISION: list = []  # cached vision_status() result
 
 
 class EngineUnavailable(RuntimeError):
@@ -64,6 +71,24 @@ def system_info() -> Optional[str]:
         return f"unavailable ({exc})"
 
 
+def vision_status() -> tuple:
+    """``(available, reason)``: libmtmd loads (``llama_cpp.mtmd_cpp`` dlopens it at import). Cached."""
+    if not _VISION:
+        try:
+            importlib.import_module("llama_cpp.mtmd_cpp")
+            _VISION.append((True, None))
+        except Exception as exc:
+            log.info("on-device vision unavailable: %s", exc)
+            _VISION.append((False, f"{NO_MTMD}: {exc}"))
+    return _VISION[0]
+
+
+def image_count(messages: Sequence[dict]) -> int:
+    from glossarion_mobile.services.local_llm.vision import image_count as count
+
+    return count(messages)
+
+
 def default_threads() -> int:
     """``max(2, min(4, cpus - 2))``: 4 on 8- and 6-core phones, 2 on 4-core ones."""
     cpus = 0
@@ -88,6 +113,7 @@ def _text_of(content: Any) -> str:
 class _Base:
     def __init__(self) -> None:
         self.path: Optional[str] = None
+        self.mmproj: Optional[str] = None
         self.n_ctx = 0
         self.n_threads = 0
         self.last_usage: dict = {}
@@ -96,6 +122,20 @@ class _Base:
     @property
     def loaded(self) -> bool:
         return self.path is not None
+
+    @property
+    def vision(self) -> bool:
+        """The loaded model has a vision projector (in memory once ``vision_loaded``)."""
+        return self.path is not None and bool(self.mmproj)
+
+    @property
+    def vision_loaded(self) -> bool:
+        return False
+
+    def _image_tokens(self, messages: Sequence[dict]) -> int:
+        from glossarion_mobile.services.local_llm.vision import IMAGE_TOKENS
+
+        return image_count(messages) * IMAGE_TOKENS
 
 
 class FakeEngine(_Base):
@@ -115,26 +155,45 @@ class FakeEngine(_Base):
         self.unloads = 0
         self.generated = 0  # tokens produced since the last chat started
         self.calls: list = []
+        self.projector_loads = 0
+        self._projector = False
 
-    def load(self, path: str, n_ctx: int, n_threads: int) -> None:
+    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None) -> None:
         if self.load_delay:
             time.sleep(self.load_delay)
         self.path, self.n_ctx, self.n_threads = path, int(n_ctx), int(n_threads)
+        self.mmproj = mmproj
+        self._projector = False
         self.loads.append((path, int(n_ctx), int(n_threads)))
 
     def unload(self) -> None:
         if self.path is not None:
             self.unloads += 1
         self.path = None
+        self.mmproj = None
+        self._projector = False
+
+    @property
+    def vision_loaded(self) -> bool:
+        return self._projector
 
     def count_prompt(self, messages: Sequence[dict]) -> int:
-        return sum(len(_text_of(m.get("content")).split()) + 4 for m in messages)
+        return sum(len(_text_of(m.get("content")).split()) + 4 for m in messages) + self._image_tokens(messages)
 
     def chat(self, messages: Sequence[dict], params: dict, should_stop: Callable[[], bool]) -> Iterator[str]:
         self.calls.append({"messages": list(messages), "params": dict(params)})
         self.generated = 0
+        images = image_count(messages)
+        if images:
+            if not self.mmproj:
+                raise EngineUnavailable("This on-device model has no vision support")
+            if not self._projector:
+                self._projector = True
+                self.projector_loads += 1
         last = next((m for m in reversed(list(messages)) if m.get("role") == "user"), {})
         text = self.reply(list(messages)) if self.reply else f"Echo: {_text_of(last.get('content'))}"
+        if images and not self.reply:
+            text += f" [{images} image{'s' if images != 1 else ''}]"
         if self.think:
             text = "<think>\nplanning the answer\n</think>\n\n" + text
         tokens = re.findall(r"\S+\s*|\s+", text)
@@ -164,6 +223,7 @@ class LlamaEngine(_Base):
         super().__init__()
         self.llm: Any = None
         self.formatter: Any = None
+        self.vision_handler: Any = None
         self._lock = threading.RLock()
 
     def _module(self) -> Any:
@@ -172,7 +232,7 @@ class LlamaEngine(_Base):
         except Exception as exc:
             raise EngineUnavailable(f"{UNAVAILABLE}: {exc}") from exc
 
-    def load(self, path: str, n_ctx: int, n_threads: int) -> None:
+    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None) -> None:
         llama_cpp = self._module()
         with self._lock:
             self.unload()
@@ -184,12 +244,35 @@ class LlamaEngine(_Base):
                 llm.chat_handler = self.formatter.to_chat_handler()
             self.llm = llm
             self.path, self.n_ctx, self.n_threads = str(path), int(n_ctx), int(n_threads)
+            self.mmproj = str(mmproj) if mmproj else None
+
+    @property
+    def vision_loaded(self) -> bool:
+        return self.vision_handler is not None and getattr(self.vision_handler, "mtmd_ctx", None) is not None
+
+    def _vision(self) -> Any:
+        """The model's MTMD chat handler (created on the first image; the projector loads in its first call)."""
+        if self.vision_handler is None:
+            if not self.mmproj:
+                raise EngineUnavailable("This on-device model has no vision support")
+            available, reason = vision_status()
+            if not available:
+                raise EngineUnavailable(reason or NO_MTMD)
+            self.vision_handler = _make_vision_handler(self.mmproj)
+        return self.vision_handler
 
     def unload(self) -> None:
         with self._lock:
             llm, self.llm = self.llm, None
+            handler, self.vision_handler = self.vision_handler, None
             self.formatter = None
             self.path = None
+            self.mmproj = None
+            if handler is not None:
+                try:
+                    handler._exit_stack.close()  # mtmd_free: the projector, before its model goes
+                except Exception:
+                    log.debug("freeing the vision projector failed", exc_info=True)
             if llm is not None:
                 try:
                     llm.close()
@@ -206,8 +289,9 @@ class LlamaEngine(_Base):
         llm = self.llm
         if llm is None:
             raise EngineUnavailable("No model is loaded")
-        prompt = self._prompt(messages)
-        return len(llm.tokenize(prompt.encode("utf-8"), add_bos=False, special=True))
+        text_only = [{"role": m.get("role"), "content": _text_of(m.get("content"))} for m in messages]
+        prompt = self._prompt(text_only)
+        return len(llm.tokenize(prompt.encode("utf-8"), add_bos=False, special=True)) + self._image_tokens(messages)
 
     def chat(self, messages: Sequence[dict], params: dict, should_stop: Callable[[], bool]) -> Iterator[str]:
         llm = self.llm
@@ -215,8 +299,15 @@ class LlamaEngine(_Base):
             raise EngineUnavailable("No model is loaded")
         if self.formatter is not None:
             self.formatter.enable_thinking = bool(params.get("enable_thinking", False))
+        images = image_count(messages)
+        handler = self._vision() if images else None
+        if handler is not None:
+            handler.enable_thinking = bool(params.get("enable_thinking", False))
+            chat_messages = [_vision_message(m) for m in messages]
+        else:
+            chat_messages = [{"role": m.get("role"), "content": _text_of(m.get("content"))} for m in messages]
         kwargs: dict = {
-            "messages": [{"role": m.get("role"), "content": _text_of(m.get("content"))} for m in messages],
+            "messages": chat_messages,
             "stream": True,
             "max_tokens": int(params.get("max_tokens") or 0) or None,
             "temperature": float(params.get("temperature", 0.7)),
@@ -233,7 +324,21 @@ class LlamaEngine(_Base):
         completion = 0
         # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every
         # STOP_CHECK_EVERY chunks and closing the generator stops llama.cpp's sampling loop.
-        chunks = llm.create_chat_completion(**kwargs)
+        if handler is not None:
+            # the MTMD handler evaluates the prompt (text and image chunks) in this call and returns the
+            # lazy token stream; the text handler is back in place for the next request right after
+            text_handler = llm.chat_handler
+            llm.chat_handler = handler
+            try:
+                chunks = llm.create_chat_completion(**kwargs)
+            except ValueError as exc:
+                if "n_ctx" in str(exc):
+                    raise ContextOverflow(str(exc)) from exc
+                raise
+            finally:
+                llm.chat_handler = text_handler
+        else:
+            chunks = llm.create_chat_completion(**kwargs)
         try:
             for index, chunk in enumerate(chunks):
                 choice = (chunk.get("choices") or [{}])[0]
@@ -257,6 +362,34 @@ class LlamaEngine(_Base):
             pass
         self.last_usage = {"prompt_tokens": prompt, "completion_tokens": completion,
                            "total_tokens": prompt + completion}
+
+
+class ContextOverflow(ValueError):
+    """The prompt with its images does not fit ``n_ctx`` (libmtmd's own count, after the estimate)."""
+
+
+def _vision_message(message: dict) -> dict:
+    """A message for the MTMD handler: a user turn keeps its text and image_url parts; the others are text."""
+    content = message.get("content")
+    if message.get("role") == "user" and isinstance(content, list):
+        parts = [p for p in content if isinstance(p, dict) and p.get("type") in ("text", "image_url")]
+        return {"role": "user", "content": parts}
+    return {"role": message.get("role"), "content": _text_of(content)}
+
+
+def _make_vision_handler(mmproj: str) -> Any:
+    """``MTMDChatHandler`` (libmtmd; the GGUF's own chat template) rendering with ``enable_thinking``
+    like ``NoThinkFormatter``. CPU only (``use_gpu=False``), quiet."""
+    from llama_cpp import llama_chat_format
+
+    class NoThinkVisionHandler(llama_chat_format.MTMDChatHandler):
+        enable_thinking = False
+
+        def __call__(self, **kwargs: Any) -> Any:
+            kwargs.setdefault("enable_thinking", self.enable_thinking)
+            return super().__call__(**kwargs)
+
+    return NoThinkVisionHandler(clip_model_path=str(mmproj), verbose=False, use_gpu=False)
 
 
 def _make_formatter(llm: Any) -> Any:

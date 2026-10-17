@@ -723,7 +723,8 @@ def test_real_manifest_matches_pins_lock_and_recipes():
     manifest = cmw.load_wheelhouse_manifest(cmw.DEFAULT_WHEELHOUSE_MANIFEST)
     project = cmw.load_project(cmw.DEFAULT_PYPROJECT)
     assert cmw.check_manifest_pins(manifest, project, MOBILE / "uv.lock") == []
-    assert {w.name: w.version for w in manifest.wheels} == {"cryptography": "50.0.2", "pillow": "12.3.0"}
+    assert {w.name: w.version for w in manifest.wheels} == {"cryptography": "50.0.2", "pillow": "12.3.0",
+                                                            "llama-cpp-python": "0.3.32"}
     assert manifest.build_tag > 11, "must outrank pypi.flet.dev's build tags"
     crypto = manifest.wheel("cryptography")
     assert set(crypto.targets) == set(ANDROID + IOS), "serious_python installs all three iOS slices"
@@ -750,6 +751,33 @@ def test_cryptography_requires_dist_matches_the_sdist_metadata():
                       "bcrypt>=3.1.5 ; extra == 'ssh'"]     # PKG-INFO of cryptography-50.0.2.tar.gz
     assert cmw.runtime_requirements(manifest.wheel("cryptography").requires_dist) == \
         cmw.runtime_requirements(sdist_requires)
+
+
+def test_llama_wheel_is_device_only_with_mtmd_and_per_platform_requires():
+    """llama-cpp-python (vision engine): the pyproject pin, no uv.lock entry (device-only) but the PyPI
+    sdist URL + hash in the manifest, every target, Requires-Dist like pypi.flet.dev's build 2 (plus
+    flet-libcpp-shared on Android only), and the recipe builds libmtmd without video (no ffmpeg)."""
+    manifest = cmw.load_wheelhouse_manifest(cmw.DEFAULT_WHEELHOUSE_MANIFEST)
+    project = cmw.load_project(cmw.DEFAULT_PYPROJECT)
+    llama = manifest.wheel("llama-cpp-python")
+    assert llama.sdist_url.endswith("/llama_cpp_python-0.3.32.tar.gz")
+    assert ("llama-cpp-python", "0.3.32") not in cmw.load_uv_lock_sdists(MOBILE / "uv.lock")
+    assert not [r for r in project.common if r.key == "llama-cpp-python"]
+    assert set(llama.targets) == set(ANDROID + IOS)
+    base = {"typing-extensions>=4.5.0", "numpy>=1.20.0", "diskcache>=5.6.1", "jinja2>=2.11.3"}
+    assert set(llama.requires_for("iphoneos.arm64")) == base
+    assert set(llama.requires_for("x86_64")) == base | {"flet-libcpp-shared>=27.2.12479018"}
+    text = (MOBILE / "ci" / "wheels" / "recipes" / "llama-cpp-python" / "meta.yaml").read_text(encoding="utf-8")
+    assert text.count("-DLLAVA_BUILD=ON") == 2 and "LLAVA_BUILD=OFF" not in text
+    assert text.count("-DMTMD_VIDEO=OFF") == 2
+    patch = (MOBILE / "ci" / "wheels" / "recipes" / "llama-cpp-python" / "patches" / "mobile.patch").read_bytes()
+    assert b"\r\n" not in patch and b"+++ b/vendor/llama.cpp/tools/mtmd/CMakeLists.txt" in patch
+    # a pin that is also a host dependency must come from uv.lock (sdist_url is for device-only pins)
+    shared = cmw.Project.__new__(cmw.Project)
+    shared.__dict__.update(project.__dict__)
+    shared.common = list(project.common) + [r for r in project.android if r.key == "llama-cpp-python"]
+    assert any("sdist_url is only for device-only pins" in e
+               for e in cmw.check_manifest_pins(manifest, shared, MOBILE / "uv.lock"))
 
 
 def _render_recipe(path: Path, sdk: str, arch: str = "arm64") -> dict:
@@ -1688,7 +1716,7 @@ def test_env_exports(proj, capsys):
     assert "forge_host=iOS" in out and "iphoneos_deployment_target" not in out and "openssl_static" not in out
     assert "rust_targets=aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios" in out
     assert wh.main(base + ["packages", "--platform", "ios"]) == 0
-    assert capsys.readouterr().out.split() == ["cryptography"]
+    assert capsys.readouterr().out.split() == ["cryptography", "llama-cpp-python"]
     assert wh.main(["--manifest", str(root / "wheelhouse.toml"), "recipe", "--platform", "ios", "pillow"]) == 1
     assert "not built for ios" in capsys.readouterr().err
 
@@ -1711,22 +1739,23 @@ def test_workflow_and_action_wiring():
 
 
 # --------------------------------------------------------------------------- wheels.py verify-site-packages
-LLAMA_LIBS = ("libggml-base", "libggml-cpu", "libggml", "libllama")
+LLAMA_LIBS = ("libggml-base", "libggml-cpu", "libggml", "libllama", "libmtmd")
 LLAMA_NEEDED = {"libggml-base": (), "libggml-cpu": ("libggml-base.so",),
                 "libggml": ("libggml-cpu.so", "libggml-base.so"),
-                "libllama": ("libggml.so", "libggml-cpu.so", "libggml-base.so")}
+                "libllama": ("libggml.so", "libggml-cpu.so", "libggml-base.so"),
+                "libmtmd": ("libllama.so", "libggml.so", "libggml-base.so")}
 
 
-def _llama_dist_info(arch_dir: Path, build="2", version="0.3.32", tag="cp313-cp313-x"):
+def _llama_dist_info(arch_dir: Path, build="1000", version="0.3.32", tag="cp313-cp313-x"):
     di = arch_dir / f"llama_cpp_python-{version}.dist-info"
     di.mkdir(parents=True)
     (di / "WHEEL").write_text(f"Wheel-Version: 1.0\nBuild: {build}\nTag: {tag}\n", encoding="utf-8")
     (di / "METADATA").write_text(f"Name: llama_cpp_python\nVersion: {version}\n", encoding="utf-8")
 
 
-def make_llama_android(sp: Path, target="x86_64", build="2", align=0x4000, extra_needed=(), unresolved=(),
+def make_llama_android(sp: Path, target="x86_64", build="1000", align=0x4000, extra_needed=(), unresolved=(),
                        libs=LLAMA_LIBS, cxx_copies=1) -> Path:
-    """build/site-packages/<target> with llama-cpp-python's four ELF libraries + flet-libcpp-shared."""
+    """build/site-packages/<target> with llama-cpp-python's five ELF libraries + flet-libcpp-shared."""
     arch = sp / target
     _llama_dist_info(arch, build)
     lib = arch / "llama_cpp" / "lib"
@@ -1756,22 +1785,24 @@ def _verify_llama(sp, platform, ndk=None, **kw):
     return wh.verify_site_packages(sp, platform, "llama-cpp-python", "0.3.32", stubs, (13, 0), **kw)
 
 
-def test_verify_site_packages_android_accepts_the_index_build(tmp_path):
+def test_verify_site_packages_android_accepts_our_vision_build(tmp_path):
     sp = tmp_path / "site-packages"
     make_llama_android(sp, "x86_64")
     make_llama_android(sp, "arm64-v8a")
     errors, notes = _verify_llama(sp, "android", make_ndk(tmp_path / "ndk", LLAMA_NDK_EXPORTS))
     assert errors == []
-    assert any("x86_64: llama-cpp-python 0.3.32 build 2" in n for n in notes)
+    assert any("x86_64: llama-cpp-python 0.3.32 build 1000" in n for n in notes)
+    assert any("arm64-v8a: lib/libmtmd.so NEEDED" in n for n in notes)
     assert any("arm64-v8a: lib/libllama.so NEEDED" in n for n in notes)
 
 
 @pytest.mark.parametrize("change, message", [
-    ({"build": "1"}, "has WHEEL Build 1; need build >= 2"),
+    ({"build": "2"}, "has WHEEL Build 2; need build >= 1000"),   # pypi.flet.dev's build: no libmtmd
     ({"align": 0x1000}, "LOAD alignment ['0x1000']"),
     ({"extra_needed": ("libvulkan.so",)}, "NEEDED ['libvulkan.so'] beyond"),
     ({"unresolved": ("ggml_backend_metal_init",)}, "1 undefined symbols ['ggml_backend_metal_init']"),
     ({"libs": LLAMA_LIBS[:3]}, "holds ['libggml', 'libggml-base', 'libggml-cpu'], expected exactly"),
+    ({"libs": LLAMA_LIBS[:4]}, "holds ['libggml', 'libggml-base', 'libggml-cpu', 'libllama'], expected exactly"),
     ({"cxx_copies": 2}, "2 copies of libc++_shared.so"),
     ({"cxx_copies": 0}, "0 copies of libc++_shared.so"),
 ])
@@ -1829,7 +1860,7 @@ def make_llama_ios(sp: Path, target: str, minos=None, extra_dylib=None, lookup=F
     return arch
 
 
-def test_verify_site_packages_ios_accepts_the_index_build(tmp_path):
+def test_verify_site_packages_ios_accepts_our_vision_build(tmp_path):
     for target in IOS_SLICES:
         make_llama_ios(tmp_path, target)
     errors, notes = _verify_llama(tmp_path, "ios")
@@ -1879,3 +1910,45 @@ def test_build_tag_parsing_is_pip_compatible():
     assert cmw.parse_build_tag("1000") == (1000, "")
     assert cmw.parse_build_tag("11b") == (11, "b")
     assert cmw.parse_build_tag("") == () and cmw.parse_build_tag("x1") == ()
+
+
+def _zip_tree(arch: Path, wheel: Path) -> Path:
+    import zipfile
+
+    with zipfile.ZipFile(wheel, "w") as zf:
+        for path in sorted(arch.rglob("*")):
+            if path.is_file() and "opt/lib" not in path.as_posix():   # flet-libcpp-shared is another wheel
+                zf.write(path, path.relative_to(arch).as_posix())
+    return wheel
+
+
+def test_verify_native_checks_the_llama_wheels_like_the_installed_copy(tmp_path):
+    """verify-native on our llama-cpp-python wheels: the five libraries (libmtmd included), checked against
+    the NDK's libc++_shared.so on Android (flet-libcpp-shared ships it on the device) and like
+    verify-site-packages on iOS."""
+    ndk = make_ndk(tmp_path / "ndk", LLAMA_NDK_EXPORTS)
+    for triple in wh.NDK_TRIPLE.values():
+        d = ndk / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "sysroot" / "usr" / "lib" / triple
+        (d / "libc++_shared.so").write_bytes(make_elf(needed=("libc.so",), symbols=[("_ZNSt6__ndk14cout", GLOBAL, DEF)]))
+    stubs = wh.NdkStubs(ndk)
+    arch = make_llama_android(tmp_path / "sp", "x86_64")
+    wheel = _zip_tree(arch, tmp_path / "llama_cpp_python-0.3.32-1000-cp313-cp313-android_24_x86_64.whl")
+    errors, notes = wh.verify_native_wheel(wheel, "llama-cpp-python", "x86_64", "3.5.9", (13, 0), stubs)
+    assert errors == [] and any("lib/libmtmd.so NEEDED" in n for n in notes)
+    # no libmtmd (pypi.flet.dev's build 2) and an import nothing provides are both errors
+    arch = make_llama_android(tmp_path / "sp2", "x86_64", libs=LLAMA_LIBS[:4], unresolved=("ggml_metal_init",))
+    wheel = _zip_tree(arch, tmp_path / "old.whl")
+    errors, _ = wh.verify_native_wheel(wheel, "llama-cpp-python", "x86_64", "3.5.9", (13, 0), stubs)
+    text = "\n".join(errors)
+    assert "expected exactly ['libggml', 'libggml-base', 'libggml-cpu', 'libllama', 'libmtmd']" in text
+    assert "['ggml_metal_init']" in text
+    # without an NDK the Android imports cannot be checked: an error, not a pass
+    errors, _ = wh.verify_native_wheel(_zip_tree(make_llama_android(tmp_path / "sp3", "x86_64"), tmp_path / "x.whl"),
+                                       "llama-cpp-python", "x86_64", "3.5.9", (13, 0), None)
+    assert errors and "no NDK" in "\n".join(errors)
+    # iOS slices
+    for target in IOS_SLICES:
+        arch = make_llama_ios(tmp_path / "ios", target)
+        wheel = _zip_tree(arch, tmp_path / f"{target}.whl")
+        errors, notes = wh.verify_native_wheel(wheel, "llama-cpp-python", target, "3.5.9", (13, 0), None)
+        assert errors == [] and any("lib/libmtmd.dylib" in n for n in notes), (target, errors)

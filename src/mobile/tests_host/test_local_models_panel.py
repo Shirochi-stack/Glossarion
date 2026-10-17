@@ -158,7 +158,10 @@ def test_on_device_tab_one_tap_download_load_and_use(tmp_path, fake_hf):
         assert "local/Tiny-Q4_K_M" in catalog.snapshot.models
         assert _find(panel.preset_column, "local-preset-action-0").content == "In use"
         assert _find(panel.preset_column, "local-preset-status-0").value == "Loaded · in use"
-        assert panel.engine_state.value == "Ready · Tiny-Q4_K_M" and not panel.unload_button.disabled
+        # the repository has a vision projector: it came in the same tap and the model reads images
+        assert engine_service.is_vision("Tiny-Q4_K_M") and engine.mmproj.endswith("Tiny-Q4_K_M.mmproj.gguf")
+        assert _find(panel.preset_column, "local-preset-vision-0") is not None
+        assert panel.engine_state.value == "Ready · Tiny-Q4_K_M · reads images" and not panel.unload_button.disabled
         assert any(n.startswith("Model: local/Tiny-Q4_K_M (Tiny)") for n in notes)
 
         # the file-less preset of the same repo auto-picks Q4_K_M: already there, so it is just used
@@ -318,6 +321,9 @@ def test_layout_fits_small_phones(tmp_path, width):
     actions = row.controls[-1]
     assert isinstance(actions, ft.Row) and actions.wrap
     for text in texts.controls:
+        if isinstance(text, ft.Row):  # the "Reads images" mark: an icon and one ellipsized line
+            assert text.key.startswith("local-preset-vision-")
+            text = text.controls[-1]
         assert text.max_lines and text.overflow == ft.TextOverflow.ELLIPSIS
     stack = [control]
     while stack:
@@ -342,3 +348,36 @@ def test_model_sheet_offers_on_device_models(tmp_path):
     assert env.open_local_models is not None
     source = Path(ms.__file__).read_text(encoding="utf-8")
     assert '"Get on-device models…"' in source and 'key="model-get-local"' in source
+
+
+def test_a_text_only_download_gets_image_support_from_the_menu(tmp_path, fake_hf):
+    """A model downloaded before the projector existed (or whose projector failed) reads text only; the
+    row's ⋮ menu offers "Add image support", which downloads the repository's mmproj and marks the row."""
+    import flet as ft
+
+    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
+
+    async def scenario():
+        prefs = fakes.FakePrefs({presets.PREF_KEY: _tiny_presets()[:1]})
+        service, engine = _engine_service(tmp_path, prefs)
+        registry = service.registry
+        os.makedirs(registry.root, exist_ok=True)
+        with open(registry.file_path("Tiny-Q4_K_M"), "wb") as handle:
+            handle.write(PAYLOAD)
+        registry.add("Tiny-Q4_K_M", {"repo": REPO, "file": FILE, "revision": "r", "size": len(PAYLOAD),
+                                     "sha256": hashlib.sha256(PAYLOAD).hexdigest(), "downloaded_at": 1})
+        notes = []
+        panel = LocalModelsPanel(service=service, prefs=prefs, notify=notes.append, confirm=lambda *a: True)
+        panel.build()
+        menu = _find(panel.preset_column, "local-preset-menu-0")
+        assert "Add image support" in [i.content for i in menu.items]
+        assert _find(panel.preset_column, "local-preset-vision-0") is None
+        assert await panel.add_vision(0)
+        assert service.is_vision("Tiny-Q4_K_M") and notes[-1] == "local/Tiny-Q4_K_M reads images now"
+        assert _find(panel.preset_column, "local-preset-vision-0") is not None
+        menu = _find(panel.preset_column, "local-preset-menu-0")
+        assert "Add image support" not in [i.content for i in menu.items]
+        assert isinstance(_find(panel.preset_column, "local-preset-vision-0"), ft.Row)
+        panel.dispose()
+
+    asyncio.run(scenario())

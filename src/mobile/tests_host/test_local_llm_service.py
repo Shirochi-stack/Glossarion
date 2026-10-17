@@ -152,8 +152,9 @@ def test_download_refreshes_the_catalog_and_delete_unloads(tmp_path, monkeypatch
         service, engine = make_service(tmp_path, stems=(), refresh_catalog=lambda: refreshed.append(1))
 
         async def scenario():
-            commit, files = await service.resolve(hf.HfRef("tester/Tiny-GGUF"))
-            spec = service.spec_for("tester/Tiny-GGUF", commit, hf.pick_file(files))
+            listing = await service.resolve(hf.HfRef("tester/Tiny-GGUF"))
+            assert [p.name for p in listing.projectors] == ["mmproj-F16.gguf"]
+            spec = service.spec_for("tester/Tiny-GGUF", listing.commit, hf.pick_file(listing.files))
             return await service.download(spec)
 
         state = asyncio.run(scenario())

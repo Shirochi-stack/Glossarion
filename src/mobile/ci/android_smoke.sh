@@ -15,7 +15,9 @@
 #     (downloads the GLOSSARION_LLAMA_SUITE_PRESET GGUF from Hugging Face, default "Garbage"
 #     = Qwen3.5 0.8B, loads it, generates a few tokens through the in-app OpenAI-compatible
 #     server, unloads), waits for GLOSSARION_SELFTEST PASS {"suite":"llama" (LLAMA_TIMEOUT,
-#     default 30 min) and saves the GLOSSARION_LLAMA {json} line to llama_result.txt;
+#     default 30 min) and saves the GLOSSARION_LLAMA {json} line to llama_result.txt; its second check
+#     (llama_vision_describe) adds the preset's vision projector and describes a tiny test picture
+#     through the app's vision path: the GLOSSARION_LLAMA_VISION {json} line goes to llama_vision_result.txt;
 #  7. always save logcat (flet.python + full + crash buffer), meminfo, pidof, package dump, the
 #     app's last self-test report (debuggable builds) and a screenshot into the log dir.
 #
@@ -197,6 +199,9 @@ collect_diagnostics() {
   if [ "$RUN_LLAMA" = "1" ] && [ ! -s "$LOG_DIR/llama_result.txt" ]; then
     grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA')" "$TAG_LOG" "$FULL_LOG" 2>/dev/null | tail -n 1 > "$LOG_DIR/llama_result.txt" || true
   fi
+  if [ "$RUN_LLAMA" = "1" ] && [ ! -s "$LOG_DIR/llama_vision_result.txt" ]; then
+    grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA_VISION')" "$TAG_LOG" "$FULL_LOG" 2>/dev/null | tail -n 1 > "$LOG_DIR/llama_vision_result.txt" || true
+  fi
   grep -a -c -F 'Traceback (most recent call last)' "$TAG_LOG" > "$LOG_DIR/python_tracebacks_count.txt" 2>/dev/null || true
   log "result: $RESULT (exit $exit_code)"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -295,7 +300,9 @@ if [ "$RUN_LLAMA" = "1" ]; then
   # its PASS line; keep it even when the suite fails (the EXIT trap still collects the rest).
   run_suite llama "$LLAMA_URL" "$LLAMA_TIMEOUT"
   grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA')" "$TAG_LOG" "$FULL_LOG" | tail -n 1 > "$LOG_DIR/llama_result.txt" || true
+  grep -a -h -E "$(marker_regex 'GLOSSARION_LLAMA_VISION')" "$TAG_LOG" "$FULL_LOG" | tail -n 1 > "$LOG_DIR/llama_vision_result.txt" || true
   log "llama suite: $(cut -c1-500 "$LOG_DIR/llama_result.txt" 2>/dev/null)"
+  log "llama vision: $(cut -c1-500 "$LOG_DIR/llama_vision_result.txt" 2>/dev/null)"
 else
   log "RUN_LLAMA=$RUN_LLAMA: skipping the built-in engine (llama) suite"
 fi
