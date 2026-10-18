@@ -1349,16 +1349,11 @@ def _build_gemini_request_body(
     # ── Safety settings ──
     # AuthGem endpoints always disable safety filters (ignores DISABLE_GEMINI_SAFETY toggle).
     # Threshold is configurable via dropdown: OFF, BLOCK_NONE, BLOCK_ONLY_HIGH, etc.
-    _threshold = os.getenv("GEMINI_SAFETY_THRESHOLD", "BLOCK_NONE").strip().upper()
-    if _threshold not in ("OFF", "BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"):
-        _threshold = "BLOCK_NONE"
+    # Each category may have its own threshold (Other Settings › API Safety Settings).
+    from gemini_policy import gemini_safety_thresholds
     body["safetySettings"] = [
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": _threshold},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": _threshold},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": _threshold},
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": _threshold},
-        {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": _threshold},
-        {"category": "HARM_CATEGORY_JAILBREAK", "threshold": _threshold},
+        {"category": category, "threshold": threshold}
+        for category, threshold in gemini_safety_thresholds("BLOCK_NONE")
     ]
 
     return body

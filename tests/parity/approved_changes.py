@@ -38,6 +38,21 @@ _RESPECT_ENV_PAIR = _after(
     "                ('INDEFINITE_RATE_LIMIT_RETRY', '1' if getattr(self, 'indefinite_rate_limit_retry_var', False) else '0'),",
     "                ('RESPECT_RETRY_AFTER', '1' if getattr(self, 'respect_retry_after_var', True) else '0'),")
 
+# 2026-10-18 per-category Gemini safety thresholds (gemini_safety_category_thresholds /
+# GEMINI_SAFETY_CATEGORY_THRESHOLDS)
+_SAFETY_CATEGORY_ROW = _after(
+    "            ('gemini_safety_threshold', ['gemini_safety_threshold_var'], 'BLOCK_NONE', str),",
+    "            ('gemini_safety_category_thresholds', ['gemini_safety_category_thresholds_var'], {}, dict),")
+_SAFETY_CATEGORY_ROW_GUI = _after(
+    "                ('gemini_safety_threshold', ['gemini_safety_threshold_var'], 'BLOCK_NONE', str),",
+    "                ('gemini_safety_category_thresholds', ['gemini_safety_category_thresholds_var'], {}, dict),")
+_SAFETY_CATEGORY_ENV_DICT = _after(
+    "            'GEMINI_SAFETY_THRESHOLD': str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE')),",
+    "            'GEMINI_SAFETY_CATEGORY_THRESHOLDS': json.dumps(self.config.get('gemini_safety_category_thresholds') or {}),")
+_SAFETY_CATEGORY_ENV_PAIR = _after(
+    "                ('GEMINI_SAFETY_THRESHOLD', str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE'))),",
+    "                ('GEMINI_SAFETY_CATEGORY_THRESHOLDS', json.dumps(self.config.get('gemini_safety_category_thresholds') or {})),")
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -92,6 +107,18 @@ APPROVED = (
             "src/translator_gui.py": [_RESPECT_SETTINGS_ROW_GUI, _RESPECT_BOOL_ROW, _RESPECT_MIGRATION,
                                       _RESPECT_ENV_DICT, _RESPECT_ENV_PAIR],
             "src/run_env.py": [_RESPECT_ENV_DICT, _RESPECT_ENV_PAIR],
+        },
+        # a new key: nothing recorded before it existed changes value
+        "values": {},
+    },
+    {
+        "date": "2026-10-18",
+        "what": "Per-category Gemini safety thresholds (Other Settings › API Safety Settings); a "
+                "category set to 'Same as threshold' follows the main Threshold",
+        "source": {
+            "src/settings_persistence.py": [_SAFETY_CATEGORY_ROW],
+            "src/translator_gui.py": [_SAFETY_CATEGORY_ROW_GUI, _SAFETY_CATEGORY_ENV_DICT, _SAFETY_CATEGORY_ENV_PAIR],
+            "src/run_env.py": [_SAFETY_CATEGORY_ENV_DICT, _SAFETY_CATEGORY_ENV_PAIR],
         },
         # a new key: nothing recorded before it existed changes value
         "values": {},

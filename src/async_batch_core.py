@@ -749,11 +749,10 @@ class AsyncAPIProcessor:
 
             # Add safety settings if disabled
             if os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true":
+                from gemini_policy import gemini_safety_thresholds
                 request["generateContentRequest"]["safetySettings"] = [
-                    {"category": cat, "threshold": "BLOCK_NONE"}
-                    for cat in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
-                               "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
-                               "HARM_CATEGORY_CIVIC_INTEGRITY", "HARM_CATEGORY_JAILBREAK"]
+                    {"category": cat, "threshold": threshold}
+                    for cat, threshold in gemini_safety_thresholds("BLOCK_NONE")
                 ]
                 
             requests.append(request)

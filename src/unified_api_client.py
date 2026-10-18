@@ -173,10 +173,12 @@ import html
 import builtins as _builtins
 try:
     from gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
-                               omit_gemini_legacy_parameters, gemini_ignores_sampling)
+                               omit_gemini_legacy_parameters, gemini_ignores_sampling,
+                               gemini_safety_thresholds, describe_gemini_safety)
 except ImportError:
     from .gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
-                                omit_gemini_legacy_parameters, gemini_ignores_sampling)
+                                omit_gemini_legacy_parameters, gemini_ignores_sampling,
+                                gemini_safety_thresholds, describe_gemini_safety)
 try:
     from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
 except ImportError:
@@ -16128,41 +16130,24 @@ class UnifiedClient:
                 # Configure safety settings using google-genai SDK
                 safety_settings = None
                 if disable_safety:
-                    _threshold_name = os.getenv("GEMINI_SAFETY_THRESHOLD", "OFF").strip().upper()
-                    _threshold_map = {
-                        "OFF": types.HarmBlockThreshold.OFF,
-                        "BLOCK_NONE": types.HarmBlockThreshold.BLOCK_NONE,
-                        "BLOCK_ONLY_HIGH": types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                        "BLOCK_MEDIUM_AND_ABOVE": types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-                        "BLOCK_LOW_AND_ABOVE": types.HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
-                    }
-                    _threshold = _threshold_map.get(_threshold_name, types.HarmBlockThreshold.OFF)
+                    # each category's own threshold (Other Settings), else the main one
+                    _safety_pairs = gemini_safety_thresholds("OFF")
                     safety_settings = [
-                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=_threshold),
-                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=_threshold),
-                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=_threshold),
-                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=_threshold),
-                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold=_threshold),
-                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_JAILBREAK, threshold=_threshold),
+                        types.SafetySetting(category=getattr(types.HarmCategory, _cat),
+                                            threshold=getattr(types.HarmBlockThreshold, _thr))
+                        for _cat, _thr in _safety_pairs if hasattr(types.HarmCategory, _cat)
                     ]
                     generation_config.safety_settings = safety_settings
+                    safety_status, readable_safety = describe_gemini_safety(_safety_pairs)
                     if not self._is_stop_requested():
-                        print(f"🔒 Vertex AI Gemini Safety Status: DISABLED ({_threshold_name})")
+                        print(f"🔒 Vertex AI Gemini Safety Status: {safety_status}")
                 else:
                     if not self._is_stop_requested():
                         print(f"🔒 Vertex AI Gemini Safety Status: ENABLED (default)")
                     
                 # SAVE SAFETY CONFIGURATION FOR VERIFICATION
                 if safety_settings:
-                    safety_status = f"DISABLED - All categories set to {_threshold_name}"
-                    readable_safety = {
-                        "HATE_SPEECH": _threshold_name,
-                        "SEXUALLY_EXPLICIT": _threshold_name,
-                        "HARASSMENT": _threshold_name,
-                        "DANGEROUS_CONTENT": _threshold_name,
-                        "CIVIC_INTEGRITY": _threshold_name,
-                        "JAILBREAK": _threshold_name
-                    }
+                    pass  # safety_status / readable_safety came with the settings above
                 else:
                     safety_status = "ENABLED - Using default Gemini safety settings"
                     # Show actual default thresholds (BLOCK_MEDIUM_AND_ABOVE for most categories)
@@ -22059,22 +22044,12 @@ class UnifiedClient:
         # Configure safety settings
         safety_settings = None
         if disable_safety:
-            _threshold_name = os.getenv("GEMINI_SAFETY_THRESHOLD", "OFF").strip().upper()
-            _threshold_map = {
-                "OFF": types.HarmBlockThreshold.OFF,
-                "BLOCK_NONE": types.HarmBlockThreshold.BLOCK_NONE,
-                "BLOCK_ONLY_HIGH": types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                "BLOCK_MEDIUM_AND_ABOVE": types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-                "BLOCK_LOW_AND_ABOVE": types.HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
-            }
-            _threshold = _threshold_map.get(_threshold_name, types.HarmBlockThreshold.OFF)
+            # each category's own threshold (Other Settings), else the main one
+            _safety_pairs = gemini_safety_thresholds("OFF")
             safety_settings = [
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=_threshold),
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=_threshold),
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=_threshold),
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=_threshold),
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold=_threshold),
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_JAILBREAK, threshold=_threshold),
+                types.SafetySetting(category=getattr(types.HarmCategory, _cat),
+                                    threshold=getattr(types.HarmBlockThreshold, _thr))
+                for _cat, _thr in _safety_pairs if hasattr(types.HarmCategory, _cat)
             ]
             if not self._is_stop_requested():
                 #logger.info(f"Gemini safety settings disabled - using {_threshold_name} for all categories")
@@ -22090,15 +22065,7 @@ class UnifiedClient:
         
         # Prepare configuration data
         if disable_safety:
-            safety_status = f"DISABLED - All categories set to {_threshold_name}"
-            readable_safety = {
-                "HATE_SPEECH": _threshold_name,
-                "SEXUALLY_EXPLICIT": _threshold_name,
-                "HARASSMENT": _threshold_name,
-                "DANGEROUS_CONTENT": _threshold_name,
-                "CIVIC_INTEGRITY": _threshold_name,
-                "JAILBREAK": _threshold_name
-            }
+            safety_status, readable_safety = describe_gemini_safety(_safety_pairs)
         else:
             safety_status = "ENABLED - Using default Gemini safety settings"
             # Show actual default thresholds (BLOCK_MEDIUM_AND_ABOVE for most categories)

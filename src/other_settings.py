@@ -11949,8 +11949,11 @@ def _create_processing_options_section(self, parent):
     
     # Row with checkbox + dropdown
     safety_row = QWidget()
-    safety_row_h = QHBoxLayout(safety_row)
+    # a grid, so the "Show per-category" button sits right under the Threshold dropdown
+    safety_row_h = QGridLayout(safety_row)
     safety_row_h.setContentsMargins(0, 5, 0, 0)
+    safety_row_h.setHorizontalSpacing(10)
+    safety_row_h.setVerticalSpacing(4)
     
     safety_cb = self._create_styled_checkbox("Disable API Safety Filters (Gemini, Groq, Fireworks, etc.)")
     try:
@@ -11963,10 +11966,9 @@ def _create_processing_options_section(self, parent):
         except Exception:
             pass
     safety_cb.toggled.connect(_on_safety_toggle)
-    safety_row_h.addWidget(safety_cb)
+    safety_row_h.addWidget(safety_cb, 0, 0)
     
-    safety_row_h.addSpacing(10)
-    safety_row_h.addWidget(QLabel("Threshold:"))
+    safety_row_h.addWidget(QLabel("Threshold:"), 0, 1)
     
     safety_threshold_combo = QComboBox()
     safety_threshold_combo.addItems(["OFF", "BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"])
@@ -11993,11 +11995,65 @@ def _create_processing_options_section(self, parent):
         except Exception:
             pass
     safety_threshold_combo.currentTextChanged.connect(_on_safety_threshold_changed)
-    safety_row_h.addWidget(safety_threshold_combo)
-    safety_row_h.addStretch()
+    safety_row_h.addWidget(safety_threshold_combo, 0, 2)
+    safety_row_h.setColumnStretch(3, 1)
     section_v.addWidget(safety_row)
+
+    # Per-category thresholds (Gemini), collapsed behind the "Show per-category" button in the row
+    # above; "Same as threshold" follows Threshold.
+    from gemini_policy import GEMINI_SAFETY_CATEGORIES, GEMINI_SAFETY_THRESHOLDS
+    saved_categories = self.config.get('gemini_safety_category_thresholds') or {}
+    self.gemini_safety_category_thresholds_var = {
+        category: str(value).upper()
+        for category, value in (saved_categories.items() if isinstance(saved_categories, dict) else ())
+        if str(value).upper() in GEMINI_SAFETY_THRESHOLDS
+    }
+    same_label = "Same as threshold"
+    short_labels = {"HARM_CATEGORY_HATE_SPEECH": "Hate", "HARM_CATEGORY_DANGEROUS_CONTENT": "Dangerous",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "Sexual", "HARM_CATEGORY_HARASSMENT": "Harassment",
+                    "HARM_CATEGORY_CIVIC_INTEGRITY": "Civic", "HARM_CATEGORY_JAILBREAK": "Jailbreak"}
+    category_box = QWidget()
+    category_grid = QGridLayout(category_box)
+    category_grid.setContentsMargins(20, 0, 0, 2)
+    category_grid.setHorizontalSpacing(6)
+    category_grid.setVerticalSpacing(2)
+    for index, (category, label) in enumerate(GEMINI_SAFETY_CATEGORIES):
+        combo = QComboBox()
+        combo.addItems([same_label, *GEMINI_SAFETY_THRESHOLDS])
+        combo.setFixedWidth(175)
+        combo.setStyleSheet(safety_threshold_combo.styleSheet())
+        self._add_combobox_arrow(combo)
+        self._disable_combobox_mousewheel(combo)
+        current = self.gemini_safety_category_thresholds_var.get(category)
+        combo.setCurrentIndex(max(0, combo.findText(current)) if current else 0)
+        combo.setToolTip(f"Gemini threshold for {label.lower()} ({category}). Same as threshold = the Threshold dropdown.")
+
+        def _on_category_changed(text, category=category):
+            if text == same_label:
+                self.gemini_safety_category_thresholds_var.pop(category, None)
+            else:
+                self.gemini_safety_category_thresholds_var[category] = text
+        combo.currentTextChanged.connect(_on_category_changed)
+        row, column = divmod(index, 2)  # two per row: three rows for the six categories
+        name = QLabel(f"{short_labels.get(category, label)}:")
+        name.setToolTip(label)
+        category_grid.addWidget(name, row, column * 2)
+        category_grid.addWidget(combo, row, column * 2 + 1)
+    category_grid.setColumnStretch(4, 1)
+    category_box.setVisible(bool(self.gemini_safety_category_thresholds_var))
+    category_toggle = QPushButton("Hide per-category ▾" if category_box.isVisible() else "Show per-category ▸")
+    category_toggle.setCursor(Qt.PointingHandCursor)
+    category_toggle.setToolTip("Set a different Gemini threshold for each harm category")
+
+    def _toggle_categories():
+        category_box.setVisible(not category_box.isVisible())
+        category_toggle.setText("Hide per-category ▾" if category_box.isVisible() else "Show per-category ▸")
+    category_toggle.clicked.connect(_toggle_categories)
+    category_toggle.setFixedWidth(safety_threshold_combo.width())
+    safety_row_h.addWidget(category_toggle, 1, 2)  # under the Threshold dropdown
+    section_v.addWidget(category_box)
     
-    safety_warning = QLabel("⚠️ Disables content safety filters for supported providers.\nGemini: Sets all harm categories to selected threshold.\nGroq/Fireworks: Disables moderation parameter.")
+    safety_warning = QLabel("⚠️ Disables content safety filters for supported providers.\nGemini: Sets every harm category to Threshold (Per-category overrides single ones).\nGroq/Fireworks: Disables moderation parameter.")
     safety_warning.setStyleSheet("color: #ff6b6b; font-size: 9pt;")
     safety_warning.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(safety_warning)

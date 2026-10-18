@@ -25,9 +25,11 @@ import threading
 from typing import Optional, List, Dict, Any, Tuple
 
 try:
-    from gemini_policy import is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level, omit_gemini_legacy_parameters
+    from gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
+                               omit_gemini_legacy_parameters, gemini_safety_thresholds)
 except ImportError:
-    from .gemini_policy import is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level, omit_gemini_legacy_parameters
+    from .gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
+                                omit_gemini_legacy_parameters, gemini_safety_thresholds)
 
 logger = logging.getLogger(__name__)
 
@@ -775,40 +777,15 @@ class GrpcGeminiClient:
         if not disabled:
             return None
         
-        # Map threshold name from env var to protobuf enum
-        _threshold_name = os.getenv("GEMINI_SAFETY_THRESHOLD", "OFF").strip().upper()
-        _threshold_map = {
-            "OFF": SafetySetting.HarmBlockThreshold.OFF,
-            "BLOCK_NONE": SafetySetting.HarmBlockThreshold.BLOCK_NONE,
-            "BLOCK_ONLY_HIGH": SafetySetting.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            "BLOCK_MEDIUM_AND_ABOVE": SafetySetting.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            "BLOCK_LOW_AND_ABOVE": SafetySetting.HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
-        }
-        _threshold = _threshold_map.get(_threshold_name, SafetySetting.HarmBlockThreshold.OFF)
-        
-        categories = [
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-            HarmCategory.HARM_CATEGORY_HARASSMENT,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        ]
-        
-        # Add CIVIC_INTEGRITY and JAILBREAK where this proto defines them
-        for name in ("HARM_CATEGORY_CIVIC_INTEGRITY", "HARM_CATEGORY_JAILBREAK"):
-            try:
-                categories.append(getattr(HarmCategory, name))
-            except (AttributeError, ValueError):
-                pass
-        
+        # Each category's own threshold (Other Settings), else GEMINI_SAFETY_THRESHOLD; categories
+        # this proto does not define (CIVIC_INTEGRITY / JAILBREAK on older ones) are skipped.
         settings = []
-        for cat in categories:
-            settings.append(
-                SafetySetting(
-                    category=cat,
-                    threshold=_threshold
-                )
-            )
-        
+        for name, threshold_name in gemini_safety_thresholds("OFF"):
+            category = getattr(HarmCategory, name, None)
+            threshold = getattr(SafetySetting.HarmBlockThreshold, threshold_name, None)
+            if category is None or threshold is None:
+                continue
+            settings.append(SafetySetting(category=category, threshold=threshold))
         return settings
     
     def _parse_response(self, response, supports_thinking: bool = False) -> GrpcGeminiResponse:

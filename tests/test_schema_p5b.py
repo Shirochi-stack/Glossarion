@@ -288,7 +288,7 @@ def test_mutable_defaults_are_fresh_for_every_build():
     owner = _owners(1, 3)[0]
     first, second = ss.desktop_settings_map(owner), ss.desktop_settings_map(owner)
     mutable = [(a, b) for a, b in zip(first, second) if isinstance(a[2], (list, dict))]
-    assert len(mutable) == 6                  # prompt_profiles {} + five [] defaults
+    assert len(mutable) == 7                  # prompt_profiles {}, gemini_safety_category_thresholds {} + five []
     for a, b in mutable:
         assert a[2] is not b[2] and a[1] is not b[1]
         a[2].append("x") if isinstance(a[2], list) else a[2].update(x=1)

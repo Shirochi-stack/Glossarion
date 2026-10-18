@@ -429,6 +429,7 @@ class FrozenDesktopTables:
             ('disable_zero_detection', ['disable_zero_detection_var'], False, bool),
             ('disable_gemini_safety', ['disable_gemini_safety_var'], False, bool),
             ('gemini_safety_threshold', ['gemini_safety_threshold_var'], 'BLOCK_NONE', str),
+            ('gemini_safety_category_thresholds', ['gemini_safety_category_thresholds_var'], {}, dict),
 
             # Anti-duplicate parameters - all vars updated by other_settings.py callbacks
             ('enable_anti_duplicate', ['enable_anti_duplicate_var'], False, bool),

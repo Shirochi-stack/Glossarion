@@ -17,6 +17,50 @@ def is_google_prohibited_use_policy_refusal(content) -> bool:
     )
 
 
+#: Adjustable Gemini harm categories (API names) with their Other Settings labels, in send order.
+GEMINI_SAFETY_CATEGORIES = (
+    ("HARM_CATEGORY_HATE_SPEECH", "Hate speech"),
+    ("HARM_CATEGORY_DANGEROUS_CONTENT", "Dangerous content"),
+    ("HARM_CATEGORY_SEXUALLY_EXPLICIT", "Sexually explicit"),
+    ("HARM_CATEGORY_HARASSMENT", "Harassment"),
+    ("HARM_CATEGORY_CIVIC_INTEGRITY", "Civic integrity"),
+    ("HARM_CATEGORY_JAILBREAK", "Jailbreak"),
+)
+GEMINI_SAFETY_THRESHOLDS = ("OFF", "BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE")
+
+
+def gemini_safety_thresholds(default="OFF"):
+    """``[(category, threshold), ...]`` for every adjustable category: its own threshold from
+    ``GEMINI_SAFETY_CATEGORY_THRESHOLDS`` (JSON ``{category: threshold}``, set in Other Settings),
+    else ``GEMINI_SAFETY_THRESHOLD``, else ``default``. Unknown values fall back the same way."""
+    import json
+    import os
+    base = str(os.getenv("GEMINI_SAFETY_THRESHOLD", default) or default).strip().upper()
+    if base not in GEMINI_SAFETY_THRESHOLDS:
+        base = default
+    try:
+        overrides = json.loads(os.getenv("GEMINI_SAFETY_CATEGORY_THRESHOLDS", "") or "{}")
+    except (TypeError, ValueError):
+        overrides = {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    result = []
+    for category, _label in GEMINI_SAFETY_CATEGORIES:
+        value = str(overrides.get(category) or "").strip().upper()
+        result.append((category, value if value in GEMINI_SAFETY_THRESHOLDS else base))
+    return result
+
+
+def describe_gemini_safety(pairs):
+    """``(status, readable)`` for the safety log and payload record of ``gemini_safety_thresholds()``:
+    "DISABLED - All categories set to X" when they agree, else the per-category values."""
+    readable = {category.replace("HARM_CATEGORY_", ""): threshold for category, threshold in pairs}
+    values = set(readable.values())
+    if len(values) == 1:
+        return f"DISABLED - All categories set to {values.pop()}", readable
+    return "DISABLED - Per category: " + ", ".join(f"{k}={v}" for k, v in readable.items()), readable
+
+
 def _gemini_version(model):
     """``(major, minor)`` of a numbered Gemini model (``gemini-3-flash`` -> (3, 0)), else None."""
     import re
