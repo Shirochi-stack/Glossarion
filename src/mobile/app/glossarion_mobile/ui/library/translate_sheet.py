@@ -133,7 +133,8 @@ def _settings_ctx() -> Any:
 
 
 class TranslateSheet:
-    def __init__(self, ctx: Any, books: Sequence[Mapping[str, Any]], sources: Sequence[str]) -> None:
+    def __init__(self, ctx: Any, books: Sequence[Mapping[str, Any]], sources: Sequence[str],
+                 run_config: Optional[Mapping[str, Any]] = None) -> None:
         self.ctx = ctx
         self.books = [dict(b) for b in books]
         self.sources = list(sources)
@@ -183,7 +184,10 @@ class TranslateSheet:
         if settings_ctx is not None and ready:
             from glossarion_mobile.ui.chat.plan_card import RunOptionsPanel
 
-            self.run_panel = RunOptionsPanel(settings_ctx, on_change=lambda values, only: self._refresh_range(),
+            # ``run_config``: a chat Result card's "Only for this run" values (Resume of a book in the Library)
+            self.run_panel = RunOptionsPanel(settings_ctx, values=dict(run_config or {}),
+                                             only_this_run=bool(run_config),
+                                             on_change=lambda values, only: self._refresh_range(),
                                              key="lib-run-options")
             self.range_chip = ft.Chip(label=ft.Text(self.run_panel.range_chip_label()),
                                       leading=ft.Icon(ft.Icons.FORMAT_LIST_NUMBERED, size=16),
@@ -254,6 +258,8 @@ class TranslateSheet:
 
     def close(self) -> None:
         close_dialog(self._page, self.sheet)
+        if self.run_panel is not None:
+            self.run_panel.release()  # its summary stops following the config
 
     async def start(self) -> Optional[str]:
         if self.start_reason is not None:
@@ -263,6 +269,8 @@ class TranslateSheet:
         service = self.ctx.service
         # The sources were resolved on the io pool when the sheet opened: never re-run the
         # registry reads / directory scans of raw_source() on the UI loop.
+        if self.run_panel is not None:
+            self.run_panel.commit()  # a number typed and not yet submitted when Start is tapped
         overrides = self.run_panel.config_overrides() if self.run_panel is not None else {}
         spec = service.translate_spec(self.ready_books, review_glossary=bool(self.review_switch.value),
                                       sources=self.ready_sources, config_overrides=overrides)
@@ -344,12 +352,14 @@ class TranslateSheet:
         return self.chapters_sheet
 
 
-async def open_translate_sheet(ctx: Any, books: Sequence[Mapping[str, Any]]) -> TranslateSheet:
-    """Resolve the raw sources on the io pool, then show the sheet."""
+async def open_translate_sheet(ctx: Any, books: Sequence[Mapping[str, Any]],
+                               run_config: Optional[Mapping[str, Any]] = None) -> TranslateSheet:
+    """Resolve the raw sources on the io pool, then show the sheet (``run_config``: its Run options'
+    "Only for this run" values, from a chat Result card's Resume)."""
     service = ctx.service
     books = [dict(b) for b in books]
     sources = await ctx.io(lambda: [service.raw_source(b) for b in books])
-    sheet = TranslateSheet(ctx, books, sources)
+    sheet = TranslateSheet(ctx, books, sources, run_config=run_config)
     if ctx.page is not None:
         sheet.show(ctx.page)
     return sheet

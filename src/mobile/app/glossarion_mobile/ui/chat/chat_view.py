@@ -1808,7 +1808,7 @@ class ChatView:
             panel = RunOptionsPanel(self.env, values=values, only_this_run=bool(only),
                                     on_change=on_change, key="batch-run-options" if batch else "plan-run-options")
             for stale in [k for k in self.run_panels if k[0] == cid and k[1] == key[1] and k != key]:
-                self.run_panels.pop(stale, None)
+                self._drop_panel(stale)
             self.run_panels[key] = panel
         return panel
 
@@ -1826,7 +1826,7 @@ class ChatView:
             panel = RunOptionsPanel(self.env, values=run_config_of(params.get("config_overrides")),
                                     key=f"resume-run-options-{item.index}")
             for stale in [k for k in self.run_panels if k[:3] == key[:3] and k != key]:
-                self.run_panels.pop(stale, None)
+                self._drop_panel(stale)
             self.run_panels[key] = panel
         return panel
 
@@ -1837,8 +1837,18 @@ class ChatView:
         if item is None:
             return None, None
         keys = [k for k in self.run_panels if k[:3] == (self.cid, "resume", item.index)]
-        panels = [self.run_panels.pop(k) for k in keys]
+        panels = [self._drop_panel(k, commit=True) for k in keys]
         return (panels[-1].config_overrides(), keys[-1][3]) if panels else (None, None)
+
+    def _drop_panel(self, key: tuple, *, commit: bool = False) -> Optional[RunOptionsPanel]:
+        """Release a Run options panel (it stops observing the config); ``commit``: its run starts now, so a
+        number typed into it and not yet submitted is saved first (Start / Resume tapped straight after typing)."""
+        panel = self.run_panels.pop(key, None)
+        if panel is not None:
+            if commit:
+                panel.commit()
+            panel.release()
+        return panel
 
     def _refresh_range_chips(self) -> None:
         for chip, panel in list(getattr(self, "_range_chips", {}).values()):
@@ -2023,7 +2033,7 @@ class ChatView:
     def _take_run_config(self, cid: str, plan: dict) -> dict:
         """The Plan card's Run options for this start (its panel, else the values saved with the plan);
         the panel is released."""
-        panel = self.run_panels.pop((cid, "plan", plan.get("created")), None)
+        panel = self._drop_panel((cid, "plan", plan.get("created")), commit=True)
         if panel is not None:
             return panel.config_overrides()
         values = plan.get("run_config") if isinstance(plan.get("run_config"), dict) else {}
@@ -2419,6 +2429,7 @@ class ChatView:
             return
         chats = self.env.chats
         chats.set_meta(self.cid, "pending_plan", None)
+        self._drop_panel((self.cid, "plan", plan.get("created")))
         index = int(plan.get("user_index") if plan.get("user_index") is not None else -1)
         if index >= 0 and index == len(chats.messages(self.cid)) - 1:
             chats.truncate_messages(self.cid, index)  # the unsent user_file turn goes with the plan
@@ -2495,7 +2506,9 @@ class ChatView:
         folder, in_attachments = await self.env.run_io(self._job_workspace_state, item)
         hand_off = getattr(self.env, "library_translate", None)
         if folder and not in_attachments and hand_off is not None:
-            return await self._await(hand_off(folder, self._turn_source(item)))
+            # the card's "Only for this run" values go with it (the sheet starts switched on with them)
+            extra = {"run_config": run_config} if run_config else {}
+            return await self._await(hand_off(folder, self._turn_source(item), **extra))
         self._resume_last(run_config, run_key)
         return None
 
@@ -2921,7 +2934,7 @@ class ChatView:
         files = list(batch.get("files") or ())
         if action == "clear":
             self.env.chats.set_meta(cid, "pending_batch", None)
-            self.run_panels.pop((cid, "batch", created), None)
+            self._drop_panel((cid, "batch", created))
             self.batch_card = None
             self.render_transcript()
             return None
@@ -2957,6 +2970,8 @@ class ChatView:
         created = batch.get("created")
         files = [p for p in (batch.get("files") or ()) if p]
         panel = self.run_panels.get((cid, "batch", created))
+        if panel is not None:
+            panel.commit()
         run_config = panel.config_overrides() if panel is not None else (
             dict(batch.get("run_config") or {}) if batch.get("only_this_run", False) else {})
         title = os.path.basename(files[0]) + (f" +{len(files) - 1}" if len(files) > 1 else "") if files else "Batch"
@@ -2969,7 +2984,7 @@ class ChatView:
             self.notify(f"Could not start: {exc}")
             return None
         self.env.chats.set_meta(cid, "pending_batch", None)
-        self.run_panels.pop((cid, "batch", created), None)
+        self._drop_panel((cid, "batch", created))  # committed above
         self.batch_card = None
         names = "\n".join(f"- {os.path.basename(p)}" for p in files[:50]) + (
             f"\n- … +{len(files) - 50} more" if len(files) > 50 else "")

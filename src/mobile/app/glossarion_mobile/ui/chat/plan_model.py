@@ -33,6 +33,7 @@ __all__ = [
     "NO_FILES_TEXT",
     "RUN_OPTION_KEYS",
     "RunOverlayStore",
+    "SUMMARY_KEYS",
     "batch_files",
     "classify_archive",
     "glossary_chip_label",
@@ -63,6 +64,8 @@ RUN_OPTION_KEYS = (
     "scan_phase_enabled",
     "REMOVE_AI_ARTIFACTS",
 )
+#: The config keys ``run_options_summary`` reads (the Context Mode tile writes the three flags behind it).
+SUMMARY_KEYS = (*RUN_OPTION_KEYS, "contextual", "use_rolling_summary", "rolling_summary_mode")
 
 #: Inputs a picked folder contributes to a batch: the desktop ``browse_folder`` supported set
 #: (translator_gui; "include subfolders" = ``deep_scan_var``) without ``.exe`` (RPG Maker games are

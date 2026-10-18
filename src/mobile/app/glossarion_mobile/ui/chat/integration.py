@@ -1478,9 +1478,10 @@ class ChatFeature:
                 return library.bid_for(book)
         return None
 
-    async def library_translate(self, folder: str, source: str = "") -> Any:
+    async def library_translate(self, folder: str, source: str = "", run_config: Optional[dict] = None) -> Any:
         """Resume / Retry failed of a chat book that moved into the Library: the Library translate sheet
-        for it (the Library resumes from the moved workspace's progress file)."""
+        for it (the Library resumes from the moved workspace's progress file); ``run_config``: the Result
+        card's "Only for this run" values, which the sheet's Run options start with."""
         notify = getattr(self.app, "notify", None)
         library = self.library_service()
         feature = getattr(self.app, "library_feature", None)
@@ -1494,6 +1495,8 @@ class ChatFeature:
             book = dict(book, raw_source_path=str(source))
         from glossarion_mobile.ui.library.translate_sheet import open_translate_sheet
 
+        if run_config:
+            return await open_translate_sheet(feature.context(), [book], run_config=run_config)
         return await open_translate_sheet(feature.context(), [book])
 
     def job_workspace(self, snap: Any) -> str:
