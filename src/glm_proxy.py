@@ -1206,6 +1206,25 @@ def ensure_general_api_key(
     return True
 
 
+def logout(account_id: Optional[int] = None, log_fn=None) -> bool:
+    """Stop the account's proxy and delete its saved credential for the selected access mode
+    (ZCode login plan or General API key). Returns whether a credential was removed."""
+    account = _normalize_account_id(account_id)
+    if _external_proxy_url(account):
+        raise RuntimeError("A remote GLM_PROXY_URL keeps its own login; log out on that PC")
+    with _proxy_launch_lock:
+        shutdown_proxy(account)
+        path = _credentials_path(account)
+        removed = False
+        if os.path.isfile(path):
+            os.remove(path)
+            removed = True
+    label = "default account" if account == 0 else f"account #{account}"
+    (log_fn or _log_noop)(f"🔓 GLM proxy: Z.AI credential removed for {label}." if removed
+                          else f"🔓 GLM proxy: no saved Z.AI credential for {label}.")
+    return removed
+
+
 def open_login(log_fn=None, account_id: Optional[int] = None) -> str:
     """Run the upstream Z.AI browser login and start that account's proxy."""
     _login(account_id=account_id, log_fn=log_fn)

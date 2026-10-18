@@ -14271,7 +14271,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         mode_label = "General API key" if general_api else "ZCode login plan"
         if logged_in:
             self.authza_login_btn.setText(f"✅ Z.AI {account_label}")
-            action = f"Log in again to replace the saved {mode_label} credential"
+            action = f"Click to log out of the saved {mode_label} credential"
             color = "#166534"
         else:
             self.authza_login_btn.setText(
@@ -14293,9 +14293,33 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         )
 
     def _authza_login_clicked(self):
-        """Run the selected AuthZA account's browser login off the GUI thread."""
+        """Run the selected AuthZA account's browser login off the GUI thread; when that account is
+        already logged in, offer to log out instead (like the other login buttons)."""
         account_id = self._selected_authza_account_id()
         self._authza_login_account_id = account_id
+        try:
+            from glm_proxy import has_credentials
+
+            logged_in = has_credentials(account_id)
+        except Exception:
+            logged_in = False
+        if logged_in:
+            account_label = "default account" if account_id == 0 else f"account #{account_id}"
+            reply = QMessageBox.question(
+                self, "Z.AI Account",
+                f"Currently logged in to Z.AI ({account_label}).\n\nDo you want to log out?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                try:
+                    from glm_proxy import logout
+
+                    logout(account_id=account_id, log_fn=self.append_log)
+                    self.append_log(f"🔓 Z.AI ({account_label}): Logged out")
+                except Exception as exc:
+                    QMessageBox.warning(self, "Z.AI Logout Failed", f"Z.AI logout failed:\n{exc}")
+                self._update_authza_login_status()
+            return
         self.authza_login_btn.setEnabled(False)
         self.authza_login_btn.setText("⏳ Z.AI Login…")
         account_label = "default account" if account_id == 0 else f"account #{account_id}"
