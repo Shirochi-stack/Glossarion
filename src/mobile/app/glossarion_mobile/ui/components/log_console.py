@@ -7,6 +7,12 @@ coalesced into 40-line selectable ``Text`` blocks in the mono family at the log
 size (``theme.log_text``, §6.2), at most 100 mounted
 (§7.3). Following scrolls with ``scroll_to(offset=-1)``; ``auto_scroll`` stays
 off. Search and Share arrive with the job detail view (U3).
+
+Owner 2026-10-18: the follow toggle is an "auto-scroll" button (pause / resume icons, a tooltip naming
+the state, key ``log-autoscroll``) whose choice lasts for the app session (``SESSION``); with
+``header_follow`` the host shows ``follow_button`` in its card header (next to Share) instead of the
+filter row. The filter chips and Copy are compact so All / Errors / Thinking / API and Copy fit a
+360 dp phone at 100 % text; the row still scrolls sideways at larger text.
 """
 
 from __future__ import annotations
@@ -20,9 +26,20 @@ import flet as ft
 
 from glossarion_mobile.services.dispatcher import LogBuffer, LogLine, UiDispatcher
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.theme import HIT_TARGET, log_text
+from glossarion_mobile.ui.theme import HIT_TARGET, log_text, text_style
 
-__all__ = ["FILTERS", "LogConsole"]
+__all__ = ["CHIP_LABEL", "CHIP_LABEL_PADDING", "CHIP_PADDING", "COMPACT_BUTTON", "FILTERS", "LogConsole",
+           "SESSION"]
+
+#: per-viewer choices kept for the rest of the app session (every LogConsole opens with them)
+SESSION = {"following": True}
+
+#: compact filter chips: LABEL_MEDIUM text, 2 + 4 dp padding a side (the chip's tap target stays 48 dp)
+CHIP_LABEL = "label_medium"
+CHIP_PADDING = ft.Padding.symmetric(horizontal=2)
+CHIP_LABEL_PADDING = ft.Padding.symmetric(horizontal=4)
+#: Copy / follow in the filter row: 40 dp wide, still 48 dp tall
+COMPACT_BUTTON = ft.BoxConstraints(min_width=40, min_height=tokens.SIZES["hit_target"])
 
 # (filter id, chip label, LogLine.kind values shown)
 FILTERS = (
@@ -42,11 +59,12 @@ class LogConsole(ft.Column):
     backlog: int = field(default=500, metadata={"skip": True})
     list_height: Optional[float] = field(default=320, metadata={"skip": True})
     copy_handler: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
+    header_follow: bool = field(default=False, metadata={"skip": True})
 
     def init(self) -> None:
         super().init()
         self.filter_id = "all"
-        self.following = True
+        self.following = bool(SESSION["following"])
         self.lines: deque[LogLine] = deque(maxlen=self.block_lines * self.max_blocks)
         self.gap_total = 0
         self._unsubscribe: Optional[Callable[[], None]] = None
@@ -54,6 +72,10 @@ class LogConsole(ft.Column):
         self.filter_chips = {
             fid: ft.Chip(
                 label=ft.Text(label),
+                label_text_style=text_style(CHIP_LABEL),
+                padding=CHIP_PADDING,
+                label_padding=CHIP_LABEL_PADDING,
+                visual_density=ft.VisualDensity.COMPACT,
                 selected=fid == "all",
                 show_checkmark=False,
                 on_select=lambda e, f=fid: self.set_filter(f),
@@ -62,18 +84,19 @@ class LogConsole(ft.Column):
             for fid, label, _kinds in FILTERS
         }
         self.follow_button = ft.IconButton(
-            icon=ft.Icons.VERTICAL_ALIGN_BOTTOM,
-            selected=True,
-            tooltip="Follow new lines",
+            tooltip="Auto-scroll",  # _paint_follow names the state
             on_click=self._toggle_follow,
-            size_constraints=HIT_TARGET,
+            size_constraints=HIT_TARGET if self.header_follow else COMPACT_BUTTON,
+            key="log-autoscroll",
         )
+        self._paint_follow()
         self.copy_button = ft.IconButton(
             icon=ft.Icons.CONTENT_COPY,
             tooltip="Copy log",
             on_click=self._copy,
-            size_constraints=HIT_TARGET,
+            size_constraints=COMPACT_BUTTON,
             visible=self.copy_handler is not None,
+            key="log-copy",
         )
         self.empty_text = ft.Text("No log lines yet.", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
         self.list_view = ft.ListView(
@@ -84,15 +107,15 @@ class LogConsole(ft.Column):
             expand=self.list_height is None,
             auto_scroll=False,
         )
+        self.filter_row = ft.Row(list(self.filter_chips.values()), scroll=ft.ScrollMode.AUTO, spacing=4, expand=True,
+                                 key="log-filters")
+        self.toolbar = ft.Row(
+            [self.filter_row] + ([] if self.header_follow else [self.follow_button]) + [self.copy_button],
+            spacing=2,
+            key="log-toolbar",
+        )
         self.controls = [
-            ft.Row(
-                [
-                    ft.Row(list(self.filter_chips.values()), scroll=ft.ScrollMode.AUTO, spacing=6, expand=True),
-                    self.follow_button,
-                    self.copy_button,
-                ],
-                spacing=4,
-            ),
+            self.toolbar,
             ft.Container(
                 content=self.list_view,
                 bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
@@ -201,10 +224,26 @@ class LogConsole(ft.Column):
         self._rebuild()
         self._after_change()
 
-    def _toggle_follow(self, e: Any = None) -> None:
-        self.following = not self.following
-        self.follow_button.selected = self.following
+    def _paint_follow(self) -> None:
+        # the icon is the tap's action (pause while following, jump-to-end while paused)
+        button = self.follow_button
+        button.selected = self.following
+        if self.following:
+            button.icon = ft.Icons.PAUSE_CIRCLE_OUTLINE
+            button.tooltip = "Auto-scroll is on: tap to pause"
+        else:
+            button.icon = ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN
+            button.tooltip = "Auto-scroll is paused: tap to follow new lines"
+
+    def set_following(self, following: bool) -> None:
+        """Auto-scroll on (jumps to the end now) or off; remembered for the app session."""
+        self.following = bool(following)
+        SESSION["following"] = self.following
+        self._paint_follow()
         self._after_change()
+
+    def _toggle_follow(self, e: Any = None) -> None:
+        self.set_following(not self.following)
 
     def visible_text(self) -> str:
         return "\n".join(line.text for line in self.lines if self._visible(line))

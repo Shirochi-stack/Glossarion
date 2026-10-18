@@ -252,12 +252,16 @@ class JobDetailScreen(Screen):
             copy_handler=self.copy_handler,
             list_height=360,
             backlog=2000,
+            header_follow=True,
         )
         log_card = SectionCard(
             title="Log",
             icon="TERMINAL",
-            trailing=ft.IconButton(icon=ft.Icons.SHARE, tooltip="Share log", on_click=self._on_share_log,
-                                   size_constraints=HIT_TARGET),
+            # auto-scroll on/off next to Share (owner 2026-10-18), so the filter row keeps its width
+            trailing=ft.Row([self.console.follow_button,
+                             ft.IconButton(icon=ft.Icons.SHARE, tooltip="Share log", on_click=self._on_share_log,
+                                           size_constraints=HIT_TARGET, key="log-share")],
+                            spacing=0, tight=True),
             children=[self.console],
             key="job-log",
         )
