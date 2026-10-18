@@ -6,7 +6,9 @@ Rolling summary"): the Settings pages' own schema tiles (``settings.tiles.make_t
 write into a ``plan_model.RunOverlayStore`` whose values become the JobSpec ``config_overrides``
 (merged over the config snapshot at job start, like every other override); off, they write
 config.json like Settings. The tiles are rebuilt under a per-build key when the switch flips
-(Flet 1.0.3 freezes a replaced subtree that keeps its key).
+(Flet 1.0.3 freezes a replaced subtree that keeps its key). The summary follows the config too (the
+panel observes the store for the keys it shows until ``release``); ``commit`` saves a number typed into
+a field that has not lost focus yet (Start / Resume tapped straight after typing).
 
 ``ChooseChaptersSheet`` - the range field, the Spine order switch and the live preview of the
 files the range translates (``plan_model.range_preview`` on the io pool: the desktop 🔍
@@ -27,7 +29,8 @@ from typing import Any, Callable, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.chat.plan_model import RUN_OPTION_KEYS, RunOverlayStore, range_label, run_options_summary
+from glossarion_mobile.ui.chat.plan_model import (RUN_OPTION_KEYS, SUMMARY_KEYS, RunOverlayStore, range_label,
+                                                  run_options_summary)
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import scroll_sheet
@@ -92,6 +95,12 @@ class RunOptionsPanel:
         )
         self._key = key
         self.render(push=False)
+        # "Only for this run" off, the tiles write the config: the summary follows it (and Settings edits)
+        store = getattr(ctx, "store", None)
+        if store is not None and hasattr(store, "observe_keys"):
+            on_ui = getattr(ctx, "on_ui", None)
+            self._unsub = store.observe_keys(
+                SUMMARY_KEYS, lambda _k, _v: on_ui(self._store_changed) if callable(on_ui) else self._store_changed())
 
     # ---- state -------------------------------------------------------------------------------------
 
@@ -198,6 +207,31 @@ class RunOptionsPanel:
     def config_changed(self) -> None:
         """A config change (switch off, or a key this run does not override)."""
         self.refresh_summary()
+
+    def _store_changed(self) -> None:
+        """A config key the summary reads changed (a tile with the switch off, Settings, another panel)."""
+        self.summary_text.value = self.summary()
+        self._push(self.summary_text)
+
+    def commit(self) -> None:
+        """Save what a number / text field holds when it was typed but not submitted (no blur yet): Start
+        and Resume run with what the panel shows."""
+        for tile in list(self.tiles.values()):
+            if getattr(tile, "field", None) is None or not callable(getattr(tile, "_on_submit", None)):
+                continue
+            try:
+                tile._on_submit()
+            except Exception:
+                log.debug("saving the typed %s failed", getattr(tile, "key", "?"), exc_info=True)
+
+    def release(self) -> None:
+        """The panel is done (its run started, its card or plan went away): stop observing the config."""
+        unsub, self._unsub = self._unsub, None
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                pass
 
     def _notify(self) -> None:
         if self.on_change is not None:

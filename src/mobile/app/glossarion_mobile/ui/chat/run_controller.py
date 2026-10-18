@@ -313,12 +313,17 @@ class ChatRuns:
                 service.resume_params = self._resume_params  # Jobs page / launch banner Resume
 
     def _resume_params(self, spec: Any) -> Optional[dict]:
-        """``JobService.resume_params``: a chat job resumed outside the chat runs with the chat's model now."""
+        """``JobService.resume_params``: a chat job resumed outside the chat runs with the chat's model now and
+        with the Run options its stopped card shows by default ("Only for this run" off: the settings now, never
+        the Send-time values the Jobs page cannot show)."""
         origin = getattr(spec, "origin", None) or {}
         cid = origin.get("cid") if origin.get("type") == "chat" else None
         if cid is None or getattr(spec, "kind", None) not in CHAT_JOB_KINDS or self.store.session(cid) is None:
             return None
-        return self.with_current_model(cid, getattr(spec, "params", None) or {})
+        params = dict(getattr(spec, "params", None) or {})
+        if getattr(spec, "kind", None) == DIRECT_TEXT_JOB_KIND and isinstance(params.get("config_overrides"), Mapping):
+            params["config_overrides"] = with_run_config(params["config_overrides"], {})
+        return self.with_current_model(cid, params)
 
     def detach(self) -> None:
         if self._job_unsub is not None:

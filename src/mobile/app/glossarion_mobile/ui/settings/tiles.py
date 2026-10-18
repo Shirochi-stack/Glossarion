@@ -82,6 +82,7 @@ __all__ = [
     "JsonTile",
     "ListSettingTile",
     "MIRRORS",
+    "MOBILE_MINIMUMS",
     "MOBILE_READONLY_REASONS",
     "listed_setting",
     "MultiplierGridTile",
@@ -144,6 +145,10 @@ def _parse_number(raw: Any, kind: str) -> Any:
 
 
 _POOL_SLUGS: dict = {}
+
+#: Number settings whose schema has no minimum (the desktop control is a free text field) but whose mobile
+#: tiles never go below one (owner: a batch of 0 requests is no batch): the stepper, a typed value, apply.
+MOBILE_MINIMUMS: dict = {"batch_size": 1}
 
 #: Keys the desktop writes together with another one (other_settings ``_on_use_toc_ncx_toggle``:
 #: translate_toc_ncx always mirrors use_toc_ncx; ``_on_skip_title_tag_toggle`` keeps the inverse
@@ -536,7 +541,10 @@ class NumberTile(SettingTile):
             except (TypeError, ValueError):
                 return None
 
-        return num(spec_attr(self.spec, "minimum", None)), num(spec_attr(self.spec, "maximum", None))
+        low = num(spec_attr(self.spec, "minimum", None))
+        if low is None:
+            low = num(MOBILE_MINIMUMS.get(self.key))
+        return low, num(spec_attr(self.spec, "maximum", None))
 
     def build_editor_row(self) -> Optional[ft.Control]:
         low, high = self.bounds()
