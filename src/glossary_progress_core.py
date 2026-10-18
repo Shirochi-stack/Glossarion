@@ -1405,11 +1405,9 @@ def make_glossary_progress_model(
             # outstanding item -- whenever the toggle is on, so the
             # work it represents is visible before it starts rather
             # than appearing from nowhere mid-run.
+            # Removed from progress by the user lands here too: the row goes
+            # back to Not Translated (owner 2026-10-18), it does not vanish.
             if not _gp_minimal_pass_toggle_enabled():
-                return None
-            # Removed from progress by the user: stay hidden until the pass
-            # runs again (that writes a new `minimal_pass` record).
-            if _d.get('minimal_pass_removed'):
                 return None
             info = {'status': 'not_completed'}
         raw_status = str(info.get('status') or 'unknown').strip().lower()
@@ -2527,11 +2525,13 @@ def make_glossary_progress_model(
             remove_minimal_pass = any(kind == 'minimal_pass' for _, (kind, _value) in removable_targets)
             changed = False
             if remove_minimal_pass:
+                # The record goes; the row shows Not Translated while the
+                # toggle is on, and the next run does the pass again.
                 if 'minimal_pass' in _d:
                     del _d['minimal_pass']
                     changed = True
-                if not _d.get('minimal_pass_removed'):
-                    _d['minimal_pass_removed'] = True
+                if 'minimal_pass_removed' in _d:  # the old "hide the row" marker
+                    del _d['minimal_pass_removed']
                     changed = True
             if indices_to_remove:
                 removed_indices = _d.get('manual_removed_indices', [])

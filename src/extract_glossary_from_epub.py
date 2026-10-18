@@ -7586,6 +7586,7 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=
         set_hook = getattr(GlossaryManager, "set_before_send_hook", None)
         if callable(set_hook):
             set_hook(_stamp_minimal_pass_request_model)
+        run_started = time.time()
         try:
             with _minimal_pass_environment():
                 GlossaryManager.save_glossary(pass_dir, minimal_chapters, "")
@@ -7597,12 +7598,28 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=
         _record_minimal_pass_progress("failed", context=context, error=str(e)[:200])
         return []
 
+    # A stop makes the extractor return early: it may have written the entries it
+    # already had, but the pass is not done, so it is recorded as stopped (the next
+    # run does it again), never as completed.
+    stopped = bool(callable(check_stop) and check_stop())
+    if not stopped:
+        try:
+            stopped = bool(GlossaryManager.is_stop_requested())
+        except Exception:
+            stopped = False
+
     # save_glossary writes glossary.csv into the directory it is given.
     entries = []
     produced_a_file = False
     for name in ("glossary.csv", "glossary.json"):
         candidate = os.path.join(pass_dir, name)
         if not os.path.exists(candidate):
+            continue
+        try:
+            # 2 s slack for coarse file-system timestamps
+            if os.path.getmtime(candidate) < run_started - 2:
+                continue  # left over from an earlier run: this run wrote nothing
+        except OSError:
             continue
         produced_a_file = True
         try:
@@ -7612,6 +7629,14 @@ def _run_minimal_glossary_pass(chapters, glossary_dir, check_stop=None, context=
             entries = []
         if entries:
             break
+
+    if stopped:
+        entries = [e for e in entries if isinstance(e, dict)] if produced_a_file else []
+        print(f"⏹️ Minimal glossary pass stopped before it finished; {len(entries)} entries to merge"
+              if entries else "⏹️ Minimal glossary pass stopped before it finished; nothing merged")
+        _record_minimal_pass_progress("skipped", context=context, reason="stopped",
+                                      entry_count=len(entries), completed_at=time.time())
+        return entries
 
     if not produced_a_file:
         # The extractor returned without writing anything. That is a setup

@@ -119,12 +119,11 @@ BLOCKS = [
     (23524, 23574, 8, 0, []),
     (23575, 24546, 8, 0, [("(_d or gp_data).get('chapter_numbers', {})",
                            "(_d or _current_gp_data()).get('chapter_numbers', {})"),
-                          # owner fix 2026-10-16: a removed Minimal pass stays hidden until it runs again
+                          # owner fix 2026-10-18: a removed Minimal pass goes back to Not Translated
                           ("            if not _gp_minimal_pass_toggle_enabled():\n                return None\n",
-                           "            if not _gp_minimal_pass_toggle_enabled():\n                return None\n"
-                           "            # Removed from progress by the user: stay hidden until the pass\n"
-                           "            # runs again (that writes a new `minimal_pass` record).\n"
-                           "            if _d.get('minimal_pass_removed'):\n                return None\n")]),
+                           "            # Removed from progress by the user lands here too: the row goes\n"
+                           "            # back to Not Translated (owner 2026-10-18), it does not vanish.\n"
+                           "            if not _gp_minimal_pass_toggle_enabled():\n                return None\n")]),
     (24872, 24896, 8, 0, []),
     (24932, 25139, 8, 0, [("        if changed:\n            with open(_rp, 'w', encoding='utf-8') as _f:\n"
                            "                json.dump(_d, _f, ensure_ascii=False, indent=2)\n",
@@ -135,10 +134,13 @@ BLOCKS = [
     (26443, 26481, 8, 0, []),
     (26165, 26232, 8, 0, [("            if remove_minimal_pass and 'minimal_pass' in _d:\n"
                            "                del _d['minimal_pass']\n                changed = True\n",
-                           "            if remove_minimal_pass:\n                if 'minimal_pass' in _d:\n"
+                           "            if remove_minimal_pass:\n"
+                           "                # The record goes; the row shows Not Translated while the\n"
+                           "                # toggle is on, and the next run does the pass again.\n"
+                           "                if 'minimal_pass' in _d:\n"
                            "                    del _d['minimal_pass']\n                    changed = True\n"
-                           "                if not _d.get('minimal_pass_removed'):\n"
-                           "                    _d['minimal_pass_removed'] = True\n                    changed = True\n")]),
+                           "                if 'minimal_pass_removed' in _d:  # the old \"hide the row\" marker\n"
+                           "                    del _d['minimal_pass_removed']\n                    changed = True\n")]),
 ]
 
 
