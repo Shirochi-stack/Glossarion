@@ -245,6 +245,7 @@ class ChatSettingsSheet:
         self.glossary_bucket: Optional[str] = None
         self.glossary_choice: Optional[tuple] = None
         self.glossary_error: Optional[str] = None
+        self.glossary_card: Any = None  # GlossaryPromptCard of the last rebuild (None: no glossary prompt)
         self.listing: Any = None  # profiles.ProfileList of the shared listing (None without a service)
         self._given_profiles = list(profiles)
         self.profiles = list(profiles)
@@ -688,7 +689,7 @@ class ChatSettingsSheet:
         """The bucket the effective glossary mode extracts with and its profiles (read at every rebuild:
         the mode rows above change it)."""
         self.glossary_bucket = glossary_prompt_bucket(self.value_of("glossary_override_mode"), self.config.get)
-        self.glossary_choice, self.glossary_error = None, None
+        self.glossary_choice, self.glossary_error, self.glossary_card = None, None, None
         if self.glossary_bucket is None:
             return
         if self.glossary_service is None:
@@ -720,12 +721,35 @@ class ChatSettingsSheet:
                            key="setting-glossary-profile-note")
         from glossarion_mobile.services.glossary import PROFILE_BUCKETS
 
+        from glossarion_mobile.ui.glossary.settings_tabs import GlossaryPromptCard
+
         names, _selected = self.glossary_choice
-        row = self._dropdown(GLOSSARY_PROFILE_OVERRIDE_KEYS[bucket], "Glossary prompt profile",
+        field_name = GLOSSARY_PROFILE_OVERRIDE_KEYS[bucket]
+        row = self._dropdown(field_name, "Glossary prompt profile",
                              [(name, name) for name in names], missing="{value} (missing)")
+        # the selected profile's prompt, like Model & prompt's card: This chat's New profile… becomes the
+        # chat's override, All chats' the active profile (set_value)
+        self.glossary_card = GlossaryPromptCard(
+            self.glossary_service, bucket, str(self.value_of(field_name) or ""), ctx=self._settings_ctx(),
+            page=self._page, default_text=self._glossary_default_text(bucket),
+            on_changed=self._glossary_profiles_changed, on_created=lambda name, f=field_name: self.set_value(f, name),
+            on_manage=lambda b=bucket: self.manage_glossary_profiles(b),
+            model=lambda: str(self.value_of("model") or ""), key="setting-glossary-prompt")
         return ft.Column([row, ft.Text(f"{PROFILE_BUCKETS[bucket]} · {DESCRIPTIONS['glossary_prompt_profile']}",
-                                       theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)],
+                                       theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+                          self.glossary_card.build()],
                          spacing=2, tight=True, key="setting-glossary-profile")
+
+    def _glossary_profiles_changed(self) -> None:
+        self.rebuild()
+        self._changed()
+
+    def manage_glossary_profiles(self, bucket: str) -> None:
+        """Manage…: Settings › Glossary on the bucket's tab (its profile row: New / Save / Delete)."""
+        self.close()
+        open_setting = getattr(self._settings_ctx(), "open_setting", None)
+        if callable(open_setting):
+            open_setting(f"glossary.{bucket}")
 
     def rebuild(self) -> None:
         for section_id, tile in self.sections.items():  # the user's expand / collapse taps

@@ -282,3 +282,218 @@ def test_plan_glossary_sheet_profile_dropdown_writes_globally():
         assert off.profile_dropdown is None and "not used" in off.profile_row.value
 
     asyncio.run(scenario())
+
+
+# ==========================================================================
+# the glossary prompt card (owner: "the in built minimal and balanced/full glossary prompts to be configured")
+# ==========================================================================
+
+_CP_SPEC = importlib.util.spec_from_file_location("_glossarion_cp_helpers_gprof", Path(__file__).with_name("test_chat_prompts.py"))
+CP = importlib.util.module_from_spec(_CP_SPEC)
+_CP_SPEC.loader.exec_module(CP)
+
+#: the prompt keys' schema defaults (what Settings › Glossary shows when config.json has none)
+BUILTIN = {"manual_glossary_prompt3": "BUILTIN BAL\nsecond line", "unified_auto_glosary_prompt3": "BUILTIN MIN"}
+
+
+class _GCtx(CP.Ctx):
+    """The SettingsContext surface: the prompt editor, the schema defaults and Manage… (open_setting)."""
+
+    def __init__(self, store=None):
+        super().__init__(store)
+        self.schema = types.SimpleNamespace(effective_default=lambda key: BUILTIN.get(key))
+        self.opened: list = []
+
+    def open_setting(self, section_id, key=None):
+        self.opened.append(section_id)
+        return section_id
+
+
+def _carded_sheet(config, chats=None, scope="chat"):
+    from glossarion_mobile.ui.sheets.chat_settings import ChatSettingsSheet
+
+    ctx = _GCtx(config)
+    return ChatSettingsSheet(cid="2", config=config, chats=chats or _Chats(), scope=scope, ctx=ctx), ctx
+
+
+def _glossary_card_text(sheet, suffix):
+    control = CP._by_key(sheet.sections["glossary"], f"setting-glossary-prompt-{suffix}")
+    return None if control is None else getattr(control, "value", control)
+
+
+@needs_flet
+@needs_profiles
+def test_glossary_card_shows_the_selected_profile_of_the_modes_bucket():
+    from glossarion_mobile.ui.screens.profiles import prompt_preview
+
+    config = _config("balanced")
+    sheet, _ctx = _carded_sheet(config)
+    card = CP._by_key(sheet.sections["glossary"], "setting-glossary-prompt")
+    texts = CP._texts(card)
+    assert "Extraction prompt" in texts and "Built-in" in texts  # Default is the bucket's built-in prompt
+    assert any(t.startswith("Profiles are shared") for t in texts)
+    assert any(t.startswith("11 chars") for t in texts)  # "BAL default": N chars · ≈ N tokens
+    assert _glossary_card_text(sheet, "preview") == "BAL default"
+    for suffix in ("edit", "new", "manage"):
+        assert not CP._by_key(card, f"setting-glossary-prompt-{suffix}").disabled, suffix
+    sheet._on_select("glossary_prompt_profile_balanced_full", "Strict")
+    assert _glossary_card_text(sheet, "preview") == "BAL strict"
+    sheet._on_select("glossary_prompt_profile_balanced_full", "On-device")
+    assert _glossary_card_text(sheet, "preview") == prompt_preview(gd.ON_DEVICE_GLOSSARY_PROMPTS["balanced_full"])
+
+    # Minimal mode: the Minimal bucket's prompts
+    config["auto_glossary_mode"] = "minimal"
+    sheet.rebuild()
+    assert _glossary_card_text(sheet, "preview") == "MIN default"
+    sheet._on_select("glossary_prompt_profile_minimal", "Tiny")
+    assert _glossary_card_text(sheet, "preview") == "MIN tiny"
+    # a mode without an extraction prompt: the note, no card
+    config["auto_glossary_mode"] = "off"
+    sheet.rebuild()
+    assert sheet.glossary_card is None and _glossary_note(sheet) is not None
+    assert CP._by_key(sheet.sections["glossary"], "setting-glossary-prompt") is None
+
+
+@needs_flet
+@needs_profiles
+def test_glossary_card_default_shows_the_builtin_prompt():
+    config = _Config({"auto_glossary_mode": "full", "direct_text_glossary_override_mode": "none"})
+    sheet, _ctx = _carded_sheet(config, scope="global")
+    assert _glossary_card_text(sheet, "preview") == "BUILTIN BAL\nsecond line"
+    editor = sheet.glossary_card.edit_prompt()
+    assert editor.title == "Default" and editor.field.value == "BUILTIN BAL\nsecond line"
+    assert editor.default == "BUILTIN BAL\nsecond line"  # Reset to default: the built-in text
+    config["auto_glossary_mode"] = "minimal"
+    sheet.rebuild()
+    assert _glossary_card_text(sheet, "preview") == "BUILTIN MIN"
+
+
+@needs_flet
+@needs_profiles
+def test_glossary_edit_prompt_saves_the_profile_without_switching_it():
+    from glossarion_mobile.services.glossary import PROMPT_PLACEHOLDERS
+    from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
+
+    config = _config("balanced")
+    chats = _Chats()
+    sheet, ctx = _carded_sheet(config, chats)
+    sheet._on_select("glossary_prompt_profile_balanced_full", "Loose")
+    editor = sheet.glossary_card.edit_prompt()
+    assert isinstance(editor, PromptEditorSheet) and editor.title == "Loose" and editor.field.value == "BAL loose"
+    assert editor.placeholders == PROMPT_PLACEHOLDERS["balanced_full"] and "{entries}" in editor.placeholders
+    assert ctx.page.dialogs[-1] is editor.sheet
+    editor.field.value = "BAL loose v2 {language}"
+    assert editor.save() is True
+    assert config["glossary_prompt_profiles"]["balanced_full"]["Loose"] == "BAL loose v2 {language}"
+    # This chat: the profile itself changed; the global selection and the run prompt did not
+    assert config["active_glossary_prompt_profiles"] == {} and config["manual_glossary_prompt3"] == "BAL default"
+    assert chats.values["2"] == {"glossary_prompt_profile_balanced_full": "Loose"}
+    assert _glossary_card_text(sheet, "preview") == "BAL loose v2 {language}"  # rebuilt after the save
+    written = dict(config)
+    assert sheet.glossary_card.edit_prompt().save() is True and dict(config) == written  # unchanged: nothing
+
+    # All chats: Default is the bucket's Default prompt; as the selected one it is the run prompt too
+    sheet._on_scope(types.SimpleNamespace(control=types.SimpleNamespace(selected=["global"])))
+    assert sheet.glossary_card.name == "Default"
+    editor = sheet.glossary_card.edit_prompt()
+    editor.field.value = "BAL default v2"
+    editor.save()
+    assert config["glossary_prompt_profile_defaults"]["balanced_full"] == "BAL default v2"
+    assert config["manual_glossary_prompt3"] == "BAL default v2" and config["manual_glossary_prompt"] == "BAL default v2"
+    assert config["active_glossary_prompt_profiles"] == {}
+    assert config["unified_auto_glosary_prompt3"] == "MIN default"  # the Minimal bucket is untouched
+
+    # Manage…: Settings › Glossary on the bucket's tab
+    CP._by_key(sheet.sections["glossary"], "setting-glossary-prompt-manage").on_click(None)
+    assert ctx.opened == ["glossary.balanced_full"]
+
+
+@needs_flet
+@needs_profiles
+def test_glossary_new_profile_copies_and_selects_it():
+    config = _config("balanced")
+    chats = _Chats()
+    sheet, ctx = _carded_sheet(config, chats)
+    sheet._on_select("glossary_prompt_profile_balanced_full", "Strict")
+    card = sheet.glossary_card
+    dialog = card.new_profile()
+    _dialog, field = card.name_dialog
+    assert ctx.page.dialogs[-1] is dialog and field.value == "Strict (copy)"
+    assert "Starts as a copy of 'Strict'." in CP._texts(dialog)
+    field.value = "Strict v2"
+    CP._confirm(dialog)
+    assert config["glossary_prompt_profiles"]["balanced_full"]["Strict v2"] == "BAL strict"
+    # This chat: the chat's own profile; the global selection is untouched
+    assert chats.values["2"] == {"glossary_prompt_profile_balanced_full": "Strict v2"}
+    assert config["active_glossary_prompt_profiles"] == {} and config["manual_glossary_prompt3"] == "BAL default"
+    assert _glossary_dropdown(sheet).value == "Strict v2" and "Strict v2" in [o.key for o in _glossary_dropdown(sheet).options]
+    assert card.editor.title == "Strict v2" and dialog.open is False  # then it opens in the editor
+
+    # a taken name keeps the dialog open
+    dialog = sheet.glossary_card.new_profile()
+    field = sheet.glossary_card.name_dialog[1]
+    field.value = "Default"
+    CP._confirm(dialog)
+    assert field.error and dialog.open
+
+    # All chats: the new profile becomes the active one (the bucket's run prompt)
+    sheet._on_scope(types.SimpleNamespace(control=types.SimpleNamespace(selected=["global"])))
+    dialog = sheet.glossary_card.new_profile()
+    sheet.glossary_card.name_dialog[1].value = "Mine"
+    CP._confirm(dialog)
+    assert config["active_glossary_prompt_profiles"] == {"balanced_full": "Mine"}
+    assert config["glossary_prompt_profiles"]["balanced_full"]["Mine"] == "BAL default"  # a copy of Default
+    assert config["manual_glossary_prompt3"] == "BAL default"
+
+
+@needs_flet
+@needs_profiles
+def test_plan_glossary_sheet_prompt_card_writes_globally():
+    from glossarion_mobile.services.glossary import GlossaryService
+    from glossarion_mobile.ui.glossary.common import GlossaryContext
+    from glossarion_mobile.ui.glossary.sheets import PlanGlossarySheet
+
+    config = _config("minimal")
+    changed = []
+
+    async def scenario():
+        _conn, session = MK._fake_session("android")
+        session.apply_page_patch({"width": 412, "height": 915})
+        settings = _GCtx(config)
+        ctx = GlossaryContext(service=GlossaryService(config=config), page=session.page, platform="android",
+                              notify=lambda *a, **k: None, navigate=lambda *a, **k: None, settings=settings)
+        noop = lambda: None
+        sheet = PlanGlossarySheet(ctx, on_load_file=noop, on_clear=noop, on_review=noop, on_mode=noop,
+                                  effective="Glossary: Minimal (auto)", on_settings=noop, prompt_bucket="minimal",
+                                  on_profile_changed=lambda: changed.append(True))
+        assert sheet.prompt_card in sheet.tiles and sheet.tiles.index(sheet.prompt_card) == 2  # under the dropdown
+
+        def preview():
+            return CP._by_key(sheet.prompt_card, "pg-prompt-preview").value
+
+        assert preview() == "MIN default"
+        assert any(t.startswith("Profiles are shared") for t in CP._texts(sheet.prompt_card))
+        assert sheet.select_profile("Tiny") == "MIN tiny" and preview() == "MIN tiny" and changed == [True]
+        # Edit prompt: the active profile's text, the run prompt follows
+        editor = sheet.glossary_card.edit_prompt()
+        assert settings.page.dialogs[-1] is editor.sheet and "{max_names}" in editor.placeholders
+        editor.field.value = "MIN tiny v2"
+        editor.save()
+        assert config["glossary_prompt_profiles"]["minimal"]["Tiny"] == "MIN tiny v2"
+        assert config["unified_auto_glosary_prompt3"] == "MIN tiny v2" and preview() == "MIN tiny v2"
+        # New profile…: the active one, like the dropdown
+        dialog = sheet.glossary_card.new_profile()
+        assert sheet.glossary_card.name_dialog[1].value == "Tiny (copy)"
+        sheet.glossary_card.name_dialog[1].value = "Tinier"
+        CP._confirm(dialog)
+        assert config["active_glossary_prompt_profiles"] == {"minimal": "Tinier"}
+        assert sheet.profile_dropdown.value == "Tinier" and preview() == "MIN tiny v2"
+        # Manage…: Settings › Glossary on the Minimal tab
+        sheet.glossary_card.manage()
+        assert settings.opened == ["glossary.minimal"]
+        # no extraction prompt: no card
+        off = PlanGlossarySheet(ctx, on_load_file=noop, on_clear=noop, on_review=noop, on_mode=noop,
+                                prompt_bucket=None)
+        assert off.glossary_card is None and off.prompt_card not in off.tiles
+
+    asyncio.run(scenario())

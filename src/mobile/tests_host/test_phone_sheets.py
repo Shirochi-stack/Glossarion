@@ -388,23 +388,34 @@ def test_plan_glossary_sheet_is_only_as_tall_as_its_rows():
         ctx = GlossaryContext(service=GlossaryService(config=config), page=page, platform="android",
                               notify=lambda *a, **k: None, navigate=lambda *a, **k: None)
         noop = lambda: None
+        kwargs.setdefault("prompt_bucket", "balanced_full")
         return PlanGlossarySheet(ctx, on_load_file=noop, on_clear=noop, on_review=noop, on_mode=noop,
-                                 effective="Glossary: Balanced (auto)", on_settings=noop,
-                                 prompt_bucket="balanced_full", **kwargs)
+                                 effective="Glossary: Balanced (auto)", on_settings=noop, **kwargs)
+
+    def done_of(sheet):
+        return _find(sheet.dialog.content, lambda c: getattr(c, "content", None) == "Done")
 
     async def scenario():
+        # a mode without an extraction prompt (no prompt card) fits a common phone
         _conn, _session, page = _phone(412, 915)
-        sheet = plan_sheet(page).show(page)
+        sheet = plan_sheet(page, prompt_bucket=None).show(page)
         assert sheet.dialog in _open_dialogs(page)
-        done = _find(sheet.dialog.content, lambda c: getattr(c, "content", None) == "Done")
+        done = done_of(sheet)
         assert done is not None and _column_of(sheet.dialog.content, done).scroll is None
         assert sheet.dialog.scrollable  # no 9/16 cap: a compact body is never squeezed
+        # the prompt card counts: compact on a tall screen, scrolling to Done where it may not fit
+        _tall_conn, _tall_session, tall_page = _phone(412, 1200)  # own names: the 412x915 session stays alive
+        carded = plan_sheet(tall_page).show(tall_page)
+        assert carded.prompt_card in carded.tiles
+        assert _column_of(carded.dialog.content, done_of(carded)).scroll is None
+        carded = plan_sheet(page).show(page)
+        assert carded.estimated_height() > sheet.estimated_height() + 150
+        assert_phone_sheet(carded.dialog, carded.prompt_card, done_of(carded))
         # a small phone, or the batch rows (Map glossaries…): the body scrolls to Done
-        _conn, _session, small = _phone(360, 640)
+        _small_conn, _small_session, small = _phone(360, 640)
         tall = plan_sheet(small).show(small)
-        assert_phone_sheet(tall.dialog, tall.tiles[-1],
-                           _find(tall.dialog.content, lambda c: getattr(c, "content", None) == "Done"))
-        batch = plan_sheet(page, on_map=lambda: None)
+        assert_phone_sheet(tall.dialog, tall.tiles[-1], done_of(tall))
+        batch = plan_sheet(page, prompt_bucket=None, on_map=lambda: None)
         batch.show(page)
         assert _column_of(batch.dialog.content, batch.mode_tile).scroll is not None
 

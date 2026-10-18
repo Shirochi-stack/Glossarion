@@ -385,6 +385,18 @@ PROFILE_BUCKETS = {
 #: the Minimal tab drives "minimal", the Balanced/Full tab "balanced" and "full"); the other modes send none.
 PROMPT_BUCKET_FOR_MODE = {"minimal": "minimal", "balanced": "balanced_full", "full": "balanced_full"}
 
+#: The placeholders the desktop Glossary Manager lists above each bucket's prompt ("Available placeholders").
+PROMPT_PLACEHOLDERS = {
+    "balanced_full": ("{fields}", "{fields1}", "{language}", "{entries}", "{description_mandatory}",
+                      "{description_detailed}", "{description_in_language}", "{description_excluded_note}",
+                      "{description_example}", "{example}", "{description_name_split_example}",
+                      "{name_split_example}", "{gender_instruction}", "{subject_tracking_instruction}"),
+    "minimal": ("{fields}", "{fields1}", "{language}", "{entries}", "{min_frequency}", "{max_names}",
+                "{max_titles}", "{marker}", "{description_example}", "{example}",
+                "{description_name_split_example}", "{name_split_example}", "{gender_instruction}",
+                "{subject_tracking_instruction}"),
+}
+
 #: config.json dicts the Balanced/Full and Minimal rows share (each row writes only its own entry).
 _GLOSSARY_PROFILE_DICT_KEYS = ("glossary_prompt_profiles", "active_glossary_prompt_profiles",
                                "glossary_prompt_profile_defaults")
@@ -1886,6 +1898,57 @@ class GlossaryService:
             return None
         self.persist_prompt_profiles(profiles)
         return text
+
+    def prompt_profile_texts(self, bucket_id: str, *, default_text: str = "") -> dict:
+        """``{name: prompt}`` of a Balanced/Full or Minimal row in its listed order ("Default": the bucket's
+        Default text, the prompt runs send while Default is selected); nothing is written."""
+        profiles = self.prompt_profiles(bucket_id, default_text=default_text)
+        state = profiles.state
+        default = str(self.gd().GLOSSARY_PROMPT_DEFAULT_PROFILE)
+        return {name: str((state.default_prompt if name == default else state.profiles.get(name, "")) or "")
+                for name in profiles.names}
+
+    def builtin_prompt_texts(self, bucket_id: str, *, default_text: str = "") -> dict:
+        """``{name: built-in text}`` of a row's built-in profiles: Default (``default_text``, the prompt's
+        schema default, when given) and the shipped On-device profile."""
+        gd = self.gd()
+        out = {str(gd.GLOSSARY_PROMPT_DEFAULT_PROFILE): str(default_text)} if default_text else {}
+        on_device = getattr(gd, "ON_DEVICE_GLOSSARY_PROMPTS", {}).get(bucket_id)
+        name = getattr(gd, "GLOSSARY_PROMPT_ON_DEVICE_PROFILE", None)
+        if name and on_device is not None:
+            out[str(name)] = str(on_device)
+        return out
+
+    def save_prompt_profile_text(self, bucket_id: str, name: str, text: Any, *, default_text: str = "") -> Optional[str]:
+        """Edit prompt: ``name`` ("Default" included) gets ``text`` (``GlossaryPromptProfiles.save``, as the
+        settings tab's Save Profile); the bucket's selected profile stays as it is. Returns an error message,
+        or None."""
+        profiles = self.prompt_profiles(bucket_id, default_text=default_text)
+        before = profiles.selected_name()
+        if profiles.select(name) is None:
+            return f"The glossary prompt profile '{name}' no longer exists"
+        box = profiles.save(name, str(text or ""))
+        profiles.select(before)
+        if not self.persist_prompt_profiles(profiles):
+            return "Could not save the glossary prompt profile. Please try again."
+        return str(box[1] or box[0]) if box else None
+
+    def create_prompt_profile(self, bucket_id: str, name: str, text: Any, *, default_text: str = "") -> Optional[str]:
+        """New profile…: a new profile ``name`` holding ``text`` (Save Profile under a new name); the bucket's
+        selected profile stays as it is. Returns an error message, or None."""
+        name = str(name or "").strip()
+        profiles = self.prompt_profiles(bucket_id, default_text=default_text)
+        if name in profiles.names or name.casefold() == str(self.gd().GLOSSARY_PROMPT_DEFAULT_PROFILE).casefold():
+            return "A profile with this name already exists. Choose another name."
+        before = profiles.selected_name()
+        profiles.select(str(self.gd().GLOSSARY_PROMPT_DEFAULT_PROFILE))  # Save then adds instead of renaming
+        box = profiles.save(name, str(text or ""))
+        if box:
+            return str(box[1] or box[0])
+        profiles.select(before)
+        if not self.persist_prompt_profiles(profiles):
+            return "Could not save the glossary prompt profile. Please try again."
+        return None
 
     def prompt_profile_config(self, names: Mapping[str, Any]) -> dict:
         """The current prompt keys of each ``bucket -> profile name`` (a chat's own glossary prompt
