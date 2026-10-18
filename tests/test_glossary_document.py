@@ -555,7 +555,8 @@ MOVED_BLOCKS = {
         ("            profiles[key] = {}\n",
          "            profiles[key] = {}\n"
          "        # setdefault: an edited On-device text survives\n"
-         "        profiles[key].setdefault(GLOSSARY_PROMPT_ON_DEVICE_PROFILE, ON_DEVICE_GLOSSARY_PROMPTS[key])\n"),
+         "        profiles[key].setdefault(GLOSSARY_PROMPT_ON_DEVICE_PROFILE, ON_DEVICE_GLOSSARY_PROMPTS[key])\n"
+         "        _replace_previous_on_device_prompt(owner, key, profiles[key])\n"),
         SELF_TO_OWNER,
     ]),
     "glossary_prompt_profiles_for": (509, 511, 4, 0, [
@@ -785,6 +786,8 @@ LEGACY_GM_APPROVED = [
      "                profiles[key] = {}\n"
      "            import glossary_document as _gd\n"
      "            profiles[key].setdefault(_gd.GLOSSARY_PROMPT_ON_DEVICE_PROFILE, _gd.ON_DEVICE_GLOSSARY_PROMPTS[key])\n"
+     # 2026-10-19 simpler On-device prompts: an unedited earlier built-in text is updated
+     "            _gd._replace_previous_on_device_prompt(self, key, profiles[key])\n"
      "        self.config['glossary_prompt_profiles'] = profiles\n"),
     ("            QMessageBox.warning(self, \"Default Profile\", \"The Default glossary prompt profile cannot be deleted.\")\n"
      "            return\n",
@@ -3532,3 +3535,48 @@ def test_goldens_are_the_frozen_desktop_output(tmp_path, monkeypatch, legacy_gm)
         if got != GOLDEN_SHA256.get(case[0]):
             mismatched.append(case[0])
     assert not mismatched, mismatched
+
+
+# ---- On-device prompts: unedited earlier built-in texts are brought up to date
+
+
+@pytest.mark.parametrize("bucket", ["balanced_full", "minimal"])
+def test_previous_on_device_prompt_is_replaced(bucket):
+    meta = gd.glossary_prompt_profile_meta(bucket)
+    old = gd.PREVIOUS_ON_DEVICE_GLOSSARY_PROMPTS[bucket][0]
+    config = {"glossary_prompt_profiles": {bucket: {"On-device": old, "Mine": old}},
+              meta["config_key"]: old}
+    if meta["legacy_config_key"]:
+        config[meta["legacy_config_key"]] = old
+    owner = types.SimpleNamespace(config=config, **{meta["attr"]: old})
+
+    profiles, _active = gd.ensure_glossary_prompt_profiles(owner)
+
+    new = gd.ON_DEVICE_GLOSSARY_PROMPTS[bucket]
+    assert new != old
+    assert profiles[bucket] == {"On-device": new, "Mine": old}  # a user profile is never touched
+    assert config[meta["config_key"]] == new and getattr(owner, meta["attr"]) == new
+    if meta["legacy_config_key"]:
+        assert config[meta["legacy_config_key"]] == new
+
+
+@pytest.mark.parametrize("bucket", ["balanced_full", "minimal"])
+def test_edited_on_device_prompt_is_kept(bucket):
+    meta = gd.glossary_prompt_profile_meta(bucket)
+    edited = gd.PREVIOUS_ON_DEVICE_GLOSSARY_PROMPTS[bucket][0] + "\nKeep it short."
+    config = {"glossary_prompt_profiles": {bucket: {"On-device": edited}}, meta["config_key"]: edited}
+    owner = types.SimpleNamespace(config=config, **{meta["attr"]: edited})
+
+    profiles, _active = gd.ensure_glossary_prompt_profiles(owner)
+
+    assert profiles[bucket]["On-device"] == edited
+    assert config[meta["config_key"]] == edited and getattr(owner, meta["attr"]) == edited
+    other = "minimal" if bucket == "balanced_full" else "balanced_full"
+    assert profiles[other]["On-device"] == gd.ON_DEVICE_GLOSSARY_PROMPTS[other]
+
+
+def test_on_device_prompts_ask_only_for_names():
+    for bucket, prompt in gd.ON_DEVICE_GLOSSARY_PROMPTS.items():
+        assert "raw_name,translated_name,gender" in prompt and "田中太郎,Tanaka Taro,male" in prompt
+        assert set(re.findall(r"\{(\w+)\}", prompt)) == {"language"}, bucket
+        assert "description" not in prompt and "type" not in prompt

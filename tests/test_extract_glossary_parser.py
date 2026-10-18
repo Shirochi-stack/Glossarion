@@ -1792,3 +1792,136 @@ def test_parallel_epub_default_profile_reset_requires_confirmation(monkeypatch):
     assert dialog.system_prompt_edit.toPlainText() == default_parallel_epub_system_prompt()
     dialog.deleteLater()
     app.processEvents()
+
+
+# ---- On-device prompts: raw_name,translated_name[,gender] rows are characters
+
+ON_DEVICE_ROWS = "\n".join([
+    "田中太郎,Tanaka Taro,male",
+    "佐藤花子,Sato Hanako,Female",
+    "鈴木,Suzuki,unknown",
+    "山田,Yamada",
+])
+
+
+def test_name_only_rows_are_characters(monkeypatch):
+    _set_glossary_env(monkeypatch)
+
+    entries = parse_api_response(ON_DEVICE_ROWS)
+
+    assert [(e["type"], e["raw_name"], e["translated_name"], e["gender"]) for e in entries] == [
+        ("character", "田中太郎", "Tanaka Taro", "male"),
+        ("character", "佐藤花子", "Sato Hanako", "Female"),
+        ("character", "鈴木", "Suzuki", "unknown"),
+        ("character", "山田", "Yamada", "Unknown"),
+    ]
+
+
+def test_name_only_header_maps_rows_to_characters(monkeypatch):
+    _set_glossary_env(monkeypatch)
+    response = "raw_name,translated_name,gender\n田中太郎,Tanaka Taro,male\n山田,Yamada,"
+
+    entries = parse_api_response(response)
+
+    assert [(e["type"], e["raw_name"], e["translated_name"], e["gender"]) for e in entries] == [
+        ("character", "田中太郎", "Tanaka Taro", "male"),
+        ("character", "山田", "Yamada", "Unknown"),
+    ]
+
+
+def test_name_only_rows_without_header_skip_prose(monkeypatch):
+    _set_glossary_env(monkeypatch)
+    monkeypatch.setenv("GLOSSARY_ENTRY_TYPE_FILTER_MODE", "none")
+    response = "\n".join([
+        "Here are the names you asked for, listed one per line as requested.",
+        "Names:,list",
+        "raw_name,translated_name",
+        "田中太郎,Tanaka Taro,male",
+    ])
+
+    entries = parse_api_response(response)
+
+    assert [(e["type"], e["raw_name"], e["translated_name"]) for e in entries] == [
+        ("character", "田中太郎", "Tanaka Taro")]
+
+
+@pytest.mark.parametrize("response, expected", [
+    ("character,田中太郎,Tanaka Taro,male", ("character", "田中太郎", "Tanaka Taro", "male")),
+    ("characters,田中太郎,Tanaka Taro", ("character", "田中太郎", "Tanaka Taro", "Unknown")),
+    ("item,魔石,Mana Stone", ("item", "魔石", "Mana Stone", None)),
+    ("title,剣聖,Sword Saint,male", ("title", "剣聖", "Sword Saint", "male")),
+])
+def test_typed_rows_are_unchanged(monkeypatch, response, expected):
+    _set_glossary_env(monkeypatch)
+    monkeypatch.setenv("GLOSSARY_ENTRY_TYPE_FILTER_MODE", "loose")
+
+    entries = parse_api_response(response)
+
+    assert [(e["type"], e["raw_name"], e["translated_name"], e.get("gender")) for e in entries] == [expected]
+
+
+def test_typed_two_column_rows_are_still_dropped(monkeypatch):
+    _set_glossary_env(monkeypatch)
+
+    assert parse_api_response("character,田中太郎") == []
+
+
+def _minimal_lines(response, monkeypatch, gender=True):
+    import GlossaryManager as GM
+    monkeypatch.setenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "1" if gender else "0")
+    monkeypatch.setenv("GLOSSARY_INCLUDE_DESCRIPTION", "0")
+    monkeypatch.delenv("GLOSSARY_SKIP_ALL_VALIDATION", raising=False)
+    lines = GM._process_ai_response(response, "", 1, False, 90, "japanese", "all")
+    return [line.split(GM.GLOSSARY_SEP) for line in lines]
+
+
+def test_minimal_name_only_rows_are_characters(monkeypatch):
+    _set_glossary_env(monkeypatch)
+
+    rows = _minimal_lines("raw_name,translated_name,gender\n" + ON_DEVICE_ROWS, monkeypatch)
+
+    assert rows == [
+        ["type", "raw_name", "translated_name", "gender"],
+        ["character", "田中太郎", "Tanaka Taro", "male"],
+        ["character", "佐藤花子", "Sato Hanako", "Female"],
+        ["character", "鈴木", "Suzuki", "unknown"],
+        ["character", "山田", "Yamada", ""],
+    ]
+
+
+@pytest.mark.parametrize("fast", [False, True])
+def test_minimal_typed_rows_are_unchanged_and_name_only_rows_typed(monkeypatch, fast):
+    _set_glossary_env(monkeypatch)
+    response = "character,田中太郎,Tanaka Taro,male\nterm,東京駅,Tokyo Station,\n田中,Tanaka,female"
+    if fast:
+        monkeypatch.setenv("GLOSSARY_SKIP_ALL_VALIDATION", "1")
+        import GlossaryManager as GM
+        monkeypatch.setenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "1")
+        monkeypatch.setenv("GLOSSARY_INCLUDE_DESCRIPTION", "0")
+        rows = [line.split(GM.GLOSSARY_SEP) for line in
+                GM._process_ai_response(response, "", 1, False, 90, "japanese", "all")]
+    else:
+        rows = _minimal_lines(response, monkeypatch)
+
+    assert rows[1:] == [
+        ["character", "田中太郎", "Tanaka Taro", "male"],
+        ["term", "東京駅", "Tokyo Station", ""],
+        ["character", "田中", "Tanaka", "female"],
+    ]
+
+
+@pytest.mark.parametrize("bucket", ["balanced_full", "minimal"])
+def test_on_device_prompts_format_like_the_extractors(monkeypatch, bucket):
+    import glossary_document as gd
+    prompt = gd.ON_DEVICE_GLOSSARY_PROMPTS[bucket]
+    monkeypatch.setenv("GLOSSARY_TARGET_LANGUAGE", "English")
+    monkeypatch.setenv("GLOSSARY_SYSTEM_PROMPT", prompt)
+
+    system_prompt, user_prompt = glossary_extractor.build_prompt("本文")
+
+    assert user_prompt == "本文"
+    assert "{" not in system_prompt and "English" in system_prompt
+    assert "raw_name,translated_name,gender" in system_prompt and "田中太郎,Tanaka Taro,male" in system_prompt
+    assert "type" not in system_prompt and "description" not in system_prompt
+    # the Minimal pass replaces its placeholders with str.replace, never str.format
+    assert prompt.replace("{language}", "English") == system_prompt

@@ -8,6 +8,7 @@ import argparse
 from glossary_matching import section_name_for_type, type_for_section
 from gender_tracking import display_gender as _display_gender, normalize_entries_gender as _normalize_entries_gender
 from gender_tracking import looks_like_gender_value as _shared_looks_like_gender_value
+from gender_tracking import is_name_only_header as _is_name_only_header, name_only_row as _name_only_row
 import zipfile
 import time
 import sys
@@ -4458,6 +4459,9 @@ def parse_api_response(response_text: str) -> List[Dict]:
     # CSV-like format parsing
     lines = response_text.strip().split('\n')
     header_fields = None
+    # A raw_name,translated_name[,gender] header (On-device prompts): its rows are characters.
+    header_without_type = False
+    _name_only_type = _normalize_entry_type('character', enabled_types)
     def _is_basic_latin(s: str) -> bool:
         try:
             for ch in (s or ""):
@@ -4501,6 +4505,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                         header_fields = [c.strip() for c in next(csv.reader([line])) if c.strip()]
                     except Exception:
                         header_fields = [c.strip() for c in line.split(',') if c.strip()]
+                header_without_type = False
                 continue
 
             if _GSEP in line:
@@ -4510,6 +4515,16 @@ def parse_api_response(response_text: str) -> List[Dict]:
                     row = next(csv.reader([line]))
                 except Exception:
                     row = [p.strip() for p in line.split(',')]
+
+            if _is_name_only_header(row):
+                header_fields = [c.strip() for c in row if c.strip()]
+                header_without_type = True
+                continue
+            if not header_fields:
+                # raw_name,translated_name[,gender] without the type column: a character
+                _name_only = _name_only_row(row, custom_types)
+                if _name_only:
+                    row = [_name_only_type] + _name_only
 
             # --- NEW CLEANUP LOGIC ---
             if len(row) >= 3:
@@ -4539,7 +4554,8 @@ def parse_api_response(response_text: str) -> List[Dict]:
                     else:
                         row = row[:len(header_fields)]
                 entry_map = {header_fields[i]: row[i] for i in range(len(header_fields))}
-                entry_type = (entry_map.get('type') or '').lower() or 'term'
+                entry_type = (entry_map.get('type') or '').lower() or (
+                    _name_only_type if header_without_type else 'term')
                 if not _is_entry_type_accepted(entry_type, enabled_types):
                     continue
                 entry_map['type'] = _normalize_entry_type(entry_type, enabled_types)

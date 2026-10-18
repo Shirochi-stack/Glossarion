@@ -79,6 +79,47 @@ def repair_gender_description(gender: Any, description: Any) -> Tuple[str, str]:
     return gender, description
 
 
+# Header names a name-only row can echo; such a row is never an entry.
+_NAME_ONLY_HEADER_WORDS = frozenset({"type", "raw_name", "translated_name", "gender", "description"})
+
+
+def is_name_only_header(cells: Sequence[Any]) -> bool:
+    """A ``raw_name,translated_name[,gender]`` header: the names without a type column."""
+    names = [str(cell or "").strip().lower() for cell in cells or ()]
+    return "raw_name" in names and "translated_name" in names and "type" not in names
+
+
+def name_only_row(cells: Sequence[Any], known_types: Any = ()) -> Optional[List[str]]:
+    """``[raw_name, translated_name, gender]`` of a row written without its type column, else None.
+
+    The On-device prompts ask small models for ``raw_name,translated_name,gender`` lines,
+    and some drop the gender. Such a row is a character: two or three fields, the first
+    is not an entry type (``known_types`` plus character/term, plurals included) and a
+    third field, when present, is empty or reads as a gender. An echoed header or prose
+    (a sentence, a label ending in ``:``) is not a row.
+    """
+    fields = [str(cell or "").strip() for cell in cells or ()]
+    if len(fields) not in (2, 3):
+        return None
+    raw_name, translated_name = fields[0], fields[1]
+    gender = fields[2] if len(fields) == 3 else ""
+    if not raw_name or not translated_name:
+        return None
+    if gender and not looks_like_gender_value(gender):
+        return None
+    known = {str(name or "").strip().lower() for name in known_types or ()} | {"character", "term"}
+    first = raw_name.lower()
+    forms = {first, first + "s", first[:-1] if first.endswith("s") else first,
+             first[:-3] + "y" if first.endswith("ies") else first}
+    if forms & known:
+        return None
+    for name in (raw_name, translated_name):
+        if (name.lower() in _NAME_ONLY_HEADER_WORDS or len(name) > 60 or len(name.split()) >= 6
+                or name.endswith((":", "：", ".", "。"))):
+            return None
+    return [raw_name, translated_name, gender]
+
+
 def display_gender(value: Any) -> str:
     """The form a gender is stored and shown in: first letter capital.
 

@@ -3223,24 +3223,39 @@ def editor_entry_line_number(file_path, row):
 GLOSSARY_PROMPT_DEFAULT_PROFILE = "Default"
 
 #: Built-in profile for small on-device models (mobile llama.cpp, 0.8B-9B): seeded into both
-#: buckets and protected from deletion like Default. The output is still the CSV the
-#: extractors parse (comma separated type,raw_name,translated_name,gender[,...]; header optional).
+#: buckets and protected from deletion like Default. It asks only for names: one
+#: raw_name,translated_name,gender line each, which both extractors read as a character.
 GLOSSARY_PROMPT_ON_DEVICE_PROFILE = "On-device"
+_ON_DEVICE_GLOSSARY_PROMPT = (
+    "Find the names of people in the text.\n"
+    "Write one line per name: raw_name,translated_name,gender\n"
+    "raw_name: copy it exactly from the text.\n"
+    "translated_name: the name in {language}.\n"
+    "gender: male, female or unknown.\n"
+    "No header. No other text. Example:\n"
+    "田中太郎,Tanaka Taro,male"
+)
 ON_DEVICE_GLOSSARY_PROMPTS = {
+    'balanced_full': _ON_DEVICE_GLOSSARY_PROMPT,
+    'minimal': _ON_DEVICE_GLOSSARY_PROMPT,
+}
+#: Earlier built-in On-device texts: a stored copy still equal to one is replaced by the
+#: current text, an edited one is kept.
+PREVIOUS_ON_DEVICE_GLOSSARY_PROMPTS = {
     'balanced_full': (
         "List the names in the text as CSV.\n"
         "{fields}\n"
         "Copy raw_name exactly from the text. Write translated_name in {language}.\n"
         "Extract all {entries}.\n"
         "Output only CSV lines, one entry per line, no other text. Example:\n"
-        "character,田中太郎,Tanaka Taro,male"
+        "character,田中太郎,Tanaka Taro,male",
     ),
     'minimal': (
         "List the names in the text as CSV.\n"
         "Columns: type,raw_name,translated_name,gender,description\n"
         "Copy raw_name exactly from the text. Write translated_name and description in {language}.\n"
         "Output only CSV lines, one entry per line, no other text. Example:\n"
-        "character,田中太郎,Tanaka Taro,male,a young swordsman"
+        "character,田中太郎,Tanaka Taro,male,a young swordsman",
     ),
 }
 
@@ -3275,6 +3290,21 @@ def is_builtin_glossary_prompt_profile(profile_name):
     return str(profile_name or '').strip() == GLOSSARY_PROMPT_ON_DEVICE_PROFILE
 
 
+def _replace_previous_on_device_prompt(owner, key, bucket_profiles):
+    """Bring an unedited earlier built-in On-device text up to date: the stored profile,
+    and the bucket's current prompt (config key, legacy key, owner attribute) when it holds one."""
+    previous = PREVIOUS_ON_DEVICE_GLOSSARY_PROMPTS.get(key, ())
+    current = ON_DEVICE_GLOSSARY_PROMPTS[key]
+    if bucket_profiles.get(GLOSSARY_PROMPT_ON_DEVICE_PROFILE) in previous:
+        bucket_profiles[GLOSSARY_PROMPT_ON_DEVICE_PROFILE] = current
+    meta = glossary_prompt_profile_meta(key)
+    for config_key in (meta['config_key'], meta['legacy_config_key']):
+        if config_key and owner.config.get(config_key) in previous:
+            owner.config[config_key] = current
+    if getattr(owner, meta['attr'], None) in previous:
+        setattr(owner, meta['attr'], current)
+
+
 def ensure_glossary_prompt_profiles(owner):
     """Ensure glossary prompt profile containers exist and hold the built-in On-device profile."""
     profiles = owner.config.get('glossary_prompt_profiles', {})
@@ -3285,6 +3315,7 @@ def ensure_glossary_prompt_profiles(owner):
             profiles[key] = {}
         # setdefault: an edited On-device text survives
         profiles[key].setdefault(GLOSSARY_PROMPT_ON_DEVICE_PROFILE, ON_DEVICE_GLOSSARY_PROMPTS[key])
+        _replace_previous_on_device_prompt(owner, key, profiles[key])
     owner.config['glossary_prompt_profiles'] = profiles
 
     active = owner.config.get('active_glossary_prompt_profiles', {})

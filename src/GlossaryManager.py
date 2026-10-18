@@ -5,7 +5,8 @@ import os
 import re
 import os
 from glossary_matching import is_entry_type_token, section_name_for_type
-from gender_tracking import display_gender, looks_like_gender_value, repair_gender_description
+from gender_tracking import (display_gender, is_name_only_header, looks_like_gender_value, name_only_row,
+                             repair_gender_description)
 import sys
 import threading
 import tempfile
@@ -5574,6 +5575,27 @@ def _filter_csv_by_mode(csv_lines, filter_mode):
     print(f"📑 Filter '{filter_mode}': {len(filtered)-1} entries kept from {len(csv_lines)-1}")
     return filtered
 
+def _type_name_only_lines(lines):
+    """Give ``raw_name,translated_name[,gender]`` lines (the On-device prompts) their type.
+
+    Each such line becomes ``character,raw_name,translated_name,gender`` so the rest of
+    the parser reads it like any other row; a ``raw_name,translated_name,gender`` header
+    is dropped. Lines with a known entry type first are left as they are.
+    """
+    try:
+        known_types = list(_custom_entry_types_for_refinement())
+    except Exception:
+        known_types = []
+    typed = []
+    for line in lines:
+        sep = _gsep(line)
+        cells = [c.strip() for c in line.split(sep)]
+        if is_name_only_header(cells):
+            continue
+        name_only = name_only_row(cells, known_types)
+        typed.append(sep.join(['character'] + name_only) if name_only else line)
+    return typed
+
 def _process_ai_response(response_text, all_text, min_frequency, 
                        strip_honorifics, fuzzy_threshold, language, filter_mode):
     """Process AI response and return CSV lines"""
@@ -5653,6 +5675,8 @@ def _process_ai_response(response_text, all_text, min_frequency,
                     normalized_lines.append(ln)
                 lines = normalized_lines
                 print(f"📑 Detected space-separated AI output — normalized to \\x1F separator")
+
+    lines = _type_name_only_lines(lines)
 
     # --- Dynamic header capture: accept every column the AI returns ---
     dynamic_header = None
