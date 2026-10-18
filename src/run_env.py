@@ -1288,8 +1288,8 @@ class RunEnvMixin:
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
             'SKIP_PDF_TITLE_TRANSLATION': "1" if getattr(self, 'skip_pdf_title_translation_var', True) else "0",
             'SKIP_IMAGE_TITLE_TRANSLATION': "1" if getattr(self, 'skip_image_title_translation_var', True) else "0",
-            'SKIP_TITLE_TAG_TRANSLATION': "1" if getattr(self, 'skip_title_tag_translation_var', False) else "0",
-            'USE_TITLE': "0" if getattr(self, 'skip_title_tag_translation_var', False) else "1",
+            'SKIP_TITLE_TAG_TRANSLATION': "1" if getattr(self, 'skip_title_tag_translation_var', True) else "0",
+            'USE_TITLE': "0" if getattr(self, 'skip_title_tag_translation_var', True) else "1",
             'IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT': str(getattr(
                 self,
                 'image_only_title_tag_system_prompt',
@@ -2590,7 +2590,7 @@ class RunEnvMixin:
                 ('SKIP_TXT_TITLE_TRANSLATION', '1' if getattr(self, 'skip_txt_title_translation_var', True) else '0'),
                 ('SKIP_PDF_TITLE_TRANSLATION', '1' if getattr(self, 'skip_pdf_title_translation_var', True) else '0'),
                 ('SKIP_IMAGE_TITLE_TRANSLATION', '1' if getattr(self, 'skip_image_title_translation_var', True) else '0'),
-                ('SKIP_TITLE_TAG_TRANSLATION', '1' if getattr(self, 'skip_title_tag_translation_var', False) else '0'),
+                ('SKIP_TITLE_TAG_TRANSLATION', '1' if getattr(self, 'skip_title_tag_translation_var', True) else '0'),
                 ('IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT', str(getattr(
                     self,
                     'image_only_title_tag_system_prompt',
@@ -2811,7 +2811,7 @@ class RunEnvMixin:
                 ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),
                 ('IGNORE_HEADER', '1' if getattr(self, 'ignore_header_var', False) else '0'),
                 ('ALLOW_AI_MARKDOWN_HEADERS', '1' if getattr(self, 'allow_ai_markdown_headers_var', False) else '0'),
-                ('USE_TITLE', '0' if getattr(self, 'skip_title_tag_translation_var', False) else '1'),
+                ('USE_TITLE', '0' if getattr(self, 'skip_title_tag_translation_var', True) else '1'),
 
                 # Extraction mode
                 ('TEXT_EXTRACTION_METHOD', env_text_extraction_method),
@@ -3278,7 +3278,7 @@ class RunEnvMixin:
         os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var else "0"
         os.environ['SKIP_TXT_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0"
         os.environ['SKIP_PDF_TITLE_TRANSLATION'] = "1" if getattr(self, 'skip_pdf_title_translation_var', True) else "0"
-        skip_title_tag = bool(getattr(self, 'skip_title_tag_translation_var', False))
+        skip_title_tag = bool(getattr(self, 'skip_title_tag_translation_var', True))
         os.environ['SKIP_TITLE_TAG_TRANSLATION'] = "1" if skip_title_tag else "0"
         os.environ['USE_TITLE'] = "0" if skip_title_tag else "1"
         # Replace {target_lang} variable in book title prompts with output language

@@ -533,7 +533,7 @@ def _live_config_from_owner(owner):
     )
     cfg["skip_title_tag_translation"] = _checked_value(
         getattr(owner, "skip_title_tag_translation_var", None),
-        cfg.get("skip_title_tag_translation", False),
+        cfg.get("skip_title_tag_translation", True),
     )
     cfg.setdefault("qa_scan_keys", cfg.get("qa_scan_keys", []))
     cfg["use_ai_truncation_detection_keys"] = _checked_value(
@@ -572,7 +572,7 @@ def _live_config_from_worker(config):
         "rotation_frequency": _env_int("ROTATION_FREQUENCY", 1),
         "skip_title_tag_translation": _env_bool(
             "SKIP_TITLE_TAG_TRANSLATION",
-            False,
+            True,
         ),
         "use_custom_openai_endpoint": os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1",
         "openai_base_url": os.getenv("OPENAI_CUSTOM_BASE_URL", ""),
@@ -614,7 +614,7 @@ def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=N
     settings["skip_title_tag_translation"] = bool(
         live_config.get(
             "skip_title_tag_translation",
-            _env_bool("SKIP_TITLE_TAG_TRANSLATION", False),
+            _env_bool("SKIP_TITLE_TAG_TRANSLATION", True),
         )
     )
 

@@ -102,6 +102,17 @@ _BATCH_SAFETY = (
     '                ]\n',
 )
 
+# 2026-10-19 "Skip title tag translation" is on by default (skip_title_tag_translation /
+# SKIP_TITLE_TAG_TRANSLATION; the inverse legacy use_title / USE_TITLE follows)
+_TITLE_TAG_CONFIG_GET = ("self.config.get('skip_title_tag_translation', False)",
+                         "self.config.get('skip_title_tag_translation', True)")
+_TITLE_TAG_GETATTR = ("getattr(self, 'skip_title_tag_translation_var', False)",
+                      "getattr(self, 'skip_title_tag_translation_var', True)")
+_TITLE_TAG_SETTINGS_ROW = ("('skip_title_tag_translation', ['skip_title_tag_translation_var'], False, bool)",
+                           "('skip_title_tag_translation', ['skip_title_tag_translation_var'], True, bool)")
+_USE_TITLE_SETTINGS_ROW = ("('use_title', ['use_title_var'], True, bool)",
+                           "('use_title', ['use_title_var'], False, bool)")
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -209,6 +220,52 @@ APPROVED = (
         },
         # prompt text only (the logged preview / length follow from the source change)
         "values": {},
+    },
+    {
+        "date": "2026-10-19",
+        "what": "Skip title tag translation is on by default (HTML/XHTML <title> tags are kept untranslated "
+                "unless the user turns it off); a saved value still wins",
+        "source": {
+            "src/owner_state.py": [_TITLE_TAG_CONFIG_GET],
+            "src/translator_gui.py": [_TITLE_TAG_CONFIG_GET, _TITLE_TAG_GETATTR, _TITLE_TAG_SETTINGS_ROW,
+                                      _USE_TITLE_SETTINGS_ROW],
+            "src/settings_persistence.py": [_TITLE_TAG_SETTINGS_ROW, _USE_TITLE_SETTINGS_ROW],
+            "src/other_settings.py": [
+                _TITLE_TAG_CONFIG_GET,
+                ("self.config['skip_title_tag_translation'] = False",
+                 "self.config['skip_title_tag_translation'] = True"),
+            ],
+            "src/run_env.py": [_TITLE_TAG_GETATTR],
+            "src/translation_pipeline.py": [_TITLE_TAG_CONFIG_GET],
+            "src/app.py": [("config('skip_title_tag_translation', False)", "config('skip_title_tag_translation', True)")],
+            "src/qa_scan_runtime.py": [
+                ('cfg.get("skip_title_tag_translation", False)', 'cfg.get("skip_title_tag_translation", True)'),
+                ('            "SKIP_TITLE_TAG_TRANSLATION",\n            False,\n',
+                 '            "SKIP_TITLE_TAG_TRANSLATION",\n            True,\n'),
+                ('_env_bool("SKIP_TITLE_TAG_TRANSLATION", False)', '_env_bool("SKIP_TITLE_TAG_TRANSLATION", True)'),
+            ],
+            "src/Chapter_Extractor.py": [
+                ("'skip_title_tag_translation': _env_flag('SKIP_TITLE_TAG_TRANSLATION'),",
+                 "'skip_title_tag_translation': _env_flag('SKIP_TITLE_TAG_TRANSLATION', '1'),"),
+            ],
+            "src/title_tag_translation.py": [
+                ("    ``SKIP_TITLE_TAG_TRANSLATION`` is authoritative and defaults to false,\n"
+                 "    which means title tags are translated.  ``USE_TITLE`` remains a fallback\n",
+                 "    ``SKIP_TITLE_TAG_TRANSLATION`` is authoritative and defaults to true,\n"
+                 "    which means title tags are kept untranslated.  ``USE_TITLE`` remains a fallback\n"),
+                ('        return _env_true("USE_TITLE")\n    return True\n',
+                 '        return _env_true("USE_TITLE")\n    return False\n'),
+            ],
+        },
+        # recorded values (config key, owner attribute, exported env var): old -> new
+        "values": {
+            "skip_title_tag_translation": (False, True),
+            "skip_title_tag_translation_var": (False, True),
+            "SKIP_TITLE_TAG_TRANSLATION": ("0", "1"),
+            "use_title": (True, False),
+            "use_title_var": (True, False),
+            "USE_TITLE": ("1", "0"),
+        },
     },
 )
 

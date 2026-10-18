@@ -73,11 +73,11 @@ from title_tag_translation import (
 )
 
 
-def test_title_tag_translation_is_enabled_by_default(monkeypatch):
+def test_title_tag_translation_is_skipped_by_default(monkeypatch):
     monkeypatch.delenv("SKIP_TITLE_TAG_TRANSLATION", raising=False)
     monkeypatch.delenv("USE_TITLE", raising=False)
 
-    assert should_translate_title_tags() is True
+    assert should_translate_title_tags() is False
 
     monkeypatch.setenv("SKIP_TITLE_TAG_TRANSLATION", "1")
     assert should_translate_title_tags() is False

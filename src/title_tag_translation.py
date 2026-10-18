@@ -29,15 +29,15 @@ def _env_true(name: str) -> bool:
 def should_translate_title_tags() -> bool:
     """Return whether document title tags should be sent for translation.
 
-    ``SKIP_TITLE_TAG_TRANSLATION`` is authoritative and defaults to false,
-    which means title tags are translated.  ``USE_TITLE`` remains a fallback
+    ``SKIP_TITLE_TAG_TRANSLATION`` is authoritative and defaults to true,
+    which means title tags are kept untranslated.  ``USE_TITLE`` remains a fallback
     for old launchers/configurations that have not learned the new setting.
     """
     if "SKIP_TITLE_TAG_TRANSLATION" in os.environ:
         return not _env_true("SKIP_TITLE_TAG_TRANSLATION")
     if "USE_TITLE" in os.environ:
         return _env_true("USE_TITLE")
-    return True
+    return False
 
 
 def title_tag_translation_payload(markup: str) -> str:

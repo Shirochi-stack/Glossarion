@@ -170,7 +170,8 @@ def git_text(relpath: str, sha: str = U6_BASE_SHA) -> str:
             if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
                 raise
             pytest.skip(f"legacy source {relpath}@{sha[:8]} unavailable: {exc}")
-        _GIT_CACHE[key] = data.decode("utf-8-sig").replace("\r\n", "\n")
+        from parity.approved_changes import apply_to_source  # owner-approved default changes since the pin
+        _GIT_CACHE[key] = apply_to_source(relpath, data.decode("utf-8-sig").replace("\r\n", "\n"))
     return _GIT_CACHE[key]
 
 
