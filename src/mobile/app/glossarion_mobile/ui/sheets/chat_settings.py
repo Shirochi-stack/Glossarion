@@ -33,6 +33,13 @@ Profiles & prompts: rename, delete / reset, import / export). Edits from This ch
 global active profile (``keep_active``). A chat whose profile no longer exists shows "<name> (missing)".
 No API key settings live here (owner #17): keys have their own Keys button next to Settings.
 
+Glossary prompt profile (Glossary section): the profiles of the Glossary Manager bucket the effective
+glossary mode extracts with (Minimal -> Minimal, Balanced / Full -> Balanced/Full; ``GlossaryService.
+prompt_profile_choice``), hidden with a note for modes that send no AI extraction prompt. All chats selects
+the profile for every run (``GlossaryService.select_prompt_profile``, the Settings › Glossary dropdown);
+This chat / This series store an override per bucket (``GLOSSARY_PROFILE_OVERRIDE_KEYS``) that the chat's
+runs apply as config overrides of that bucket's prompt keys (``ChatView.run_overrides``).
+
 U9 Series (§2.14 item 5, §2.15): the chat's series defaults sit between All chats and the chat
 (``ChatStoreAdapter.overrides`` layers them; "custom" and ↺ use the chat's ``own_overrides``), so a
 row the series sets reads "Inherited from: Series <name>"; the SeriesFeature fills ``SERIES_HOOKS``
@@ -48,6 +55,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.state.chat_store_adapter import GLOSSARY_PROFILE_OVERRIDE_KEYS
 from glossarion_mobile.ui.chat.direct_text_rules import (
     ATTACHMENT_PROMPT_ROLES,
     AUTO_ACCEPT_GLOSSARY_PREF,
@@ -58,6 +66,7 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
     SIDECAR_META_FIELDS,
     DirectTextSettings,
     glossary_override_updates,
+    glossary_prompt_bucket,
     merge_meta_overrides,
     normalize_rendered_card_limit,
 )
@@ -127,6 +136,7 @@ DESCRIPTIONS = {
         "text automatically."
     ),
     "skip_plan": "Start attachment runs immediately instead of showing a Plan card first (mobile).",
+    "glossary_prompt_profile": "The Glossary Manager prompt the automatic glossary is extracted with.",
     "auto_accept_glossary": (
         "Skip the Edit / Yes / No card; translation starts with the generated glossary. Desktop always asks."
     ),
@@ -213,6 +223,8 @@ class ChatSettingsSheet:
         profile_service: Any = None,
         ctx: Any = None,
         on_manage_profiles: Optional[Callable[[], Any]] = None,
+        # the glossary prompt profiles (default: a GlossaryService over ``config`` when it is the settings store)
+        glossary_service: Any = None,
     ) -> None:
         self.cid = str(cid)
         self.config = config
@@ -223,6 +235,16 @@ class ChatSettingsSheet:
         if profile_service is None and callable(getattr(config, "snapshot", None)):
             profile_service = ProfileService(config)
         self.profile_service = profile_service
+        if glossary_service is None and (callable(getattr(config, "snapshot", None)) or isinstance(config, dict)):
+            from glossarion_mobile.services.glossary import GlossaryService
+
+            glossary_service = GlossaryService(config=config)
+        self.glossary_service = glossary_service
+        #: the glossary prompt profile row of the last rebuild: bucket (None: the mode sends no extraction
+        #: prompt), (names, globally selected name) or the reason the profiles are unavailable
+        self.glossary_bucket: Optional[str] = None
+        self.glossary_choice: Optional[tuple] = None
+        self.glossary_error: Optional[str] = None
         self.listing: Any = None  # profiles.ProfileList of the shared listing (None without a service)
         self._given_profiles = list(profiles)
         self.profiles = list(profiles)
@@ -285,6 +307,11 @@ class ChatSettingsSheet:
         return self.global_settings().with_overrides(self.overrides())
 
     def value_of(self, field_name: str) -> Any:
+        if field_name in GLOSSARY_PROFILE_OVERRIDE_KEYS.values():
+            override = self.overrides().get(field_name)
+            if self.scope == "chat" and override:
+                return override
+            return self.glossary_choice[1] if self.glossary_choice else ""
         if field_name in ("model", "profile", "target_language"):
             override = self.overrides().get(field_name)
             if self.scope == "chat" and override:
@@ -323,6 +350,9 @@ class ChatSettingsSheet:
             elif field_name == "auto_accept_glossary":
                 if self.prefs is not None:  # Prefs (mobile_state.json), never config.json
                     self.prefs.set(AUTO_ACCEPT_GLOSSARY_PREF, bool(value))
+            elif field_name in GLOSSARY_PROFILE_OVERRIDE_KEYS.values():
+                bucket = next(b for b, key in GLOSSARY_PROFILE_OVERRIDE_KEYS.items() if key == field_name)
+                self.select_glossary_profile(bucket, value)
             else:
                 updates = global_updates_for(field_name, value)
                 if updates:
@@ -629,10 +659,65 @@ class ChatSettingsSheet:
         self.rebuild()
         self._changed()
 
+    # ---- glossary prompt profile ----------------------------------------------------------------
+
+    def _glossary_default_text(self, bucket: str) -> str:
+        """The bucket prompt's schema default (what Settings › Glossary shows when config.json has none)."""
+        schema = getattr(self.ctx, "schema", None)
+        try:
+            key = self.glossary_service.gd().glossary_prompt_profile_meta(bucket)["config_key"]
+            return str(schema.effective_default(key) or "") if schema is not None else ""
+        except Exception:
+            return ""
+
+    def refresh_glossary_profiles(self) -> None:
+        """The bucket the effective glossary mode extracts with and its profiles (read at every rebuild:
+        the mode rows above change it)."""
+        self.glossary_bucket = glossary_prompt_bucket(self.value_of("glossary_override_mode"), self.config.get)
+        self.glossary_choice, self.glossary_error = None, None
+        if self.glossary_bucket is None:
+            return
+        if self.glossary_service is None:
+            self.glossary_error = "Needs the settings store"
+            return
+        try:
+            self.glossary_choice = self.glossary_service.prompt_profile_choice(
+                self.glossary_bucket, default_text=self._glossary_default_text(self.glossary_bucket))
+        except Exception as exc:
+            log.warning("glossary prompt profiles unavailable", exc_info=True)
+            self.glossary_error = f"Glossary prompt profiles need {getattr(exc, 'name', None) or 'the glossary core'}"
+
+    def select_glossary_profile(self, bucket: str, name: Any) -> None:
+        """All chats: ``name`` becomes the bucket's active profile for every run (Settings › Glossary)."""
+        if self.glossary_service is None or not name:
+            return
+        try:
+            self.glossary_service.select_prompt_profile(bucket, str(name),
+                                                        default_text=self._glossary_default_text(bucket))
+        except Exception:
+            log.warning("selecting the glossary prompt profile failed", exc_info=True)
+
+    def _glossary_profile_row(self) -> ft.Control:
+        bucket = self.glossary_bucket
+        if bucket is None or self.glossary_choice is None:
+            note = self.glossary_error or ("Glossary prompt profile: not used - this glossary mode sends no AI "
+                                           "extraction prompt.")
+            return ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                           key="setting-glossary-profile-note")
+        from glossarion_mobile.services.glossary import PROFILE_BUCKETS
+
+        names, _selected = self.glossary_choice
+        row = self._dropdown(GLOSSARY_PROFILE_OVERRIDE_KEYS[bucket], "Glossary prompt profile",
+                             [(name, name) for name in names], missing="{value} (missing)")
+        return ft.Column([row, ft.Text(f"{PROFILE_BUCKETS[bucket]} · {DESCRIPTIONS['glossary_prompt_profile']}",
+                                       theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)],
+                         spacing=2, tight=True, key="setting-glossary-profile")
+
     def rebuild(self) -> None:
         for section_id, tile in self.sections.items():  # the user's expand / collapse taps
             self.expanded[section_id] = bool(getattr(tile, "expanded", False))
         glossary_mode = str(self.value_of("glossary_override_mode"))
+        self.refresh_glossary_profiles()
         glossary_group = ft.RadioGroup(
             value=glossary_mode,
             on_change=lambda e: self.set_value("glossary_override_mode", e.control.value),
@@ -700,6 +785,7 @@ class ChatSettingsSheet:
                 controls=[
                     ft.Row([ft.Container(expand=True), *self._badge("glossary_override_mode")]),
                     glossary_group,
+                    self._glossary_profile_row(),
                     *([self._switch("auto_accept_glossary", "Always accept generated glossaries")]
                       if self.shows_auto_accept else []),
                 ],

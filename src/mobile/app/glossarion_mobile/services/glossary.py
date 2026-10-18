@@ -66,6 +66,7 @@ __all__ = [
     "LIST_FORMATS",
     "OpReport",
     "PROFILE_BUCKETS",
+    "PROMPT_BUCKET_FOR_MODE",
     "ProfileOwner",
     "RowSpec",
     "ViewState",
@@ -379,6 +380,10 @@ PROFILE_BUCKETS = {
     "minimal": "Minimal Profile",
     "refinement": "Refinement Profile",
 }
+
+#: Auto glossary mode -> the profile bucket whose prompt its AI extraction sends (desktop Glossary Manager:
+#: the Minimal tab drives "minimal", the Balanced/Full tab "balanced" and "full"); the other modes send none.
+PROMPT_BUCKET_FOR_MODE = {"minimal": "minimal", "balanced": "balanced_full", "full": "balanced_full"}
 
 #: config.json dicts the Balanced/Full and Minimal rows share (each row writes only its own entry).
 _GLOSSARY_PROFILE_DICT_KEYS = ("glossary_prompt_profiles", "active_glossary_prompt_profiles",
@@ -1862,6 +1867,48 @@ class GlossaryService:
             log.exception("saving the prompt profiles failed")
             return False
         return True
+
+    # ---- prompt profile pickers (Chat settings, the Plan glossary sheet) ---------------------------
+
+    def prompt_profile_choice(self, bucket_id: str, *, default_text: str = "") -> tuple:
+        """(profile names, selected name) of a Balanced/Full or Minimal row, as the settings tab lists them
+        ("Default" first, then whatever the bucket holds); nothing is written."""
+        profiles = self.prompt_profiles(bucket_id, default_text=default_text)
+        return list(profiles.names), str(profiles.selected_name())
+
+    def select_prompt_profile(self, bucket_id: str, name: str, *, default_text: str = "") -> Optional[str]:
+        """Make ``name`` the bucket's active profile for every run (the settings tab's dropdown:
+        ``GlossaryPromptProfiles.select`` + :meth:`persist_prompt_profiles`). Returns its prompt, or None
+        for an unknown name (nothing written)."""
+        profiles = self.prompt_profiles(bucket_id, default_text=default_text)
+        text = profiles.select(name)
+        if text is None:
+            return None
+        self.persist_prompt_profiles(profiles)
+        return text
+
+    def prompt_profile_config(self, names: Mapping[str, Any]) -> dict:
+        """The current prompt keys of each ``bucket -> profile name`` (a chat's own glossary prompt
+        profiles), as config overrides for one run: ``GlossaryPromptProfiles.select`` on a copy of
+        config.json, never persisted. Unknown buckets / profiles and empty prompts are left out (the run
+        keeps the global prompt)."""
+        out: dict = {}
+        for bucket_id, name in dict(names or {}).items():
+            if bucket_id not in PROMPT_BUCKET_FOR_MODE.values() or not str(name or "").strip():
+                continue
+            try:
+                profiles = self.prompt_profiles(bucket_id)
+                text = profiles.select(str(name))
+            except Exception:
+                log.warning("glossary prompt profile %r of %s unavailable", name, bucket_id, exc_info=True)
+                continue
+            if text is None or not str(text).strip():
+                continue
+            meta = self.gd().glossary_prompt_profile_meta(bucket_id)
+            for key in (meta.get("config_key"), meta.get("legacy_config_key")):
+                if key:
+                    out[key] = profiles.owner.config.get(key, text)
+        return out
 
 class _Holder:
     """Attribute bag for shared methods called with an explicit ``self`` (the special-file test)."""

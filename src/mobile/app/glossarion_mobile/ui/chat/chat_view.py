@@ -1612,9 +1612,10 @@ class ChatView:
         """The chat's overrides for a run (``ChatStoreAdapter.overrides``), its prompt profile checked at
         Send: the re-check that follows a renamed profile / clears a deleted one is posted (and waits for
         the Library at start-up), so a chat may still name a profile that is gone - it runs with what it
-        inherits (series / All chats), never with the backend's silent first profile."""
+        inherits (series / All chats), never with the backend's silent first profile. The chat's own glossary
+        prompt profiles are resolved to their prompts here (``run_request.GLOSSARY_PROMPTS``)."""
         chats = self.env.chats
-        overrides = dict(chats.overrides(cid))
+        overrides = self._with_glossary_prompts(dict(chats.overrides(cid)))
         name = overrides.get("profile")
         if not name:
             return overrides
@@ -1627,9 +1628,30 @@ class ChatView:
                 reconcile()  # the posted re-check, now: renames followed, gone ones cleared (with its notice)
             except Exception:
                 log.exception("re-checking the chats' prompt profiles failed")
-            overrides = dict(chats.overrides(cid))
+            overrides = self._with_glossary_prompts(dict(chats.overrides(cid)))
         if overrides.get("profile") and overrides["profile"] not in names:
             overrides.pop("profile", None)
+        return overrides
+
+    def _with_glossary_prompts(self, overrides: dict) -> dict:
+        """``overrides`` plus the prompts of the chat's glossary prompt profiles (Chat settings › Glossary,
+        This chat): the run uses them instead of the global current prompt keys of those buckets. A profile
+        that no longer exists is left out (the run keeps the global prompt)."""
+        from glossarion_mobile.state.chat_store_adapter import GLOSSARY_PROFILE_OVERRIDE_KEYS
+        from glossarion_mobile.ui.chat.run_request import GLOSSARY_PROMPTS
+
+        names = {bucket: overrides[key] for bucket, key in GLOSSARY_PROFILE_OVERRIDE_KEYS.items() if overrides.get(key)}
+        if not names or self.env is None or self.env.store is None:
+            return overrides
+        try:
+            from glossarion_mobile.services.glossary import GlossaryService
+
+            prompts = GlossaryService(config=self.env.store).prompt_profile_config(names)
+        except Exception:
+            log.warning("the chat's glossary prompt profiles are unavailable", exc_info=True)
+            prompts = {}
+        if prompts:
+            overrides[GLOSSARY_PROMPTS] = prompts
         return overrides
 
     def resume_profile(self, cid: str, name: str) -> Optional[str]:
@@ -1882,7 +1904,9 @@ class ChatView:
         if opener is None:
             return self.open_chat_settings()
         return opener(effective=self._plan_glossary_label(), inputs=[p for p in inputs if p],
-                      on_changed=self.apply_settings_changed)
+                      on_changed=self.apply_settings_changed,
+                      glossary_override_mode=self.settings().glossary_override_mode,
+                      chat_overrides=self.env.chats.overrides(self.cid) if self.bound else None)
 
     def open_choose_chapters(self, plan: dict, *, batch: bool = False) -> Optional[ChooseChaptersSheet]:
         """Choose chapters: range + Spine order + the live preview (desktop 🔍 preview)."""

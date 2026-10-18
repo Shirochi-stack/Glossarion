@@ -56,12 +56,14 @@ __all__ = [
     "attachment_icon",
     "attachment_kind_label",
     "attachment_text_chars",
+    "auto_glossary_mode_key",
     "auto_title",
     "count_tokens",
     "display_markdown",
     "force_no_glossary_for_mode",
     "format_attachment_size",
     "glossary_override_updates",
+    "glossary_prompt_bucket",
     "history_window_bounds",
     "is_supported_attachment",
     "manual_glossary_source",
@@ -229,16 +231,7 @@ def effective_glossary_label(mode: Any, config_get: Callable[..., Any], has_atta
         return "Glossary: Off"
     if normalize_glossary_override_mode(mode) == "manual":
         return "Glossary: Manual"
-    config = {"auto_glossary_mode": config_get("auto_glossary_mode", None),
-              "enable_auto_glossary": config_get("enable_auto_glossary", False)}
-    try:
-        from types import SimpleNamespace
-
-        from run_env import RunEnvMixin  # shared (U2): the desktop's mode resolution
-
-        key = RunEnvMixin._current_auto_glossary_mode(SimpleNamespace(config=config))
-    except Exception:
-        key = str(config["auto_glossary_mode"] or "off").strip().lower().replace(" ", "_")
+    key = auto_glossary_mode_key(config_get)
     try:
         from glossarion_mobile.ui.screens.welcome_flow import GLOSSARY_MODE_CARDS
 
@@ -246,6 +239,33 @@ def effective_glossary_label(mode: Any, config_get: Callable[..., Any], has_atta
     except Exception:
         title = ""
     return f"Glossary: {title or str(key).replace('_', ' ').title()} (auto)"
+
+
+def auto_glossary_mode_key(config_get: Callable[..., Any]) -> str:
+    """The main settings' auto glossary mode key ("balanced", "minimal", "off", ...) by the desktop rule
+    (``RunEnvMixin._current_auto_glossary_mode``: display names, the legacy ``enable_auto_glossary``
+    fallback)."""
+    config = {"auto_glossary_mode": config_get("auto_glossary_mode", None),
+              "enable_auto_glossary": config_get("enable_auto_glossary", False)}
+    try:
+        from types import SimpleNamespace
+
+        from run_env import RunEnvMixin  # shared (U2): the desktop's mode resolution
+
+        return str(RunEnvMixin._current_auto_glossary_mode(SimpleNamespace(config=config)))
+    except Exception:
+        return str(config["auto_glossary_mode"] or "off").strip().lower().replace(" ", "_")
+
+
+def glossary_prompt_bucket(mode: Any, config_get: Callable[..., Any], has_attachment: bool = True) -> Optional[str]:
+    """The glossary prompt profile bucket ("balanced_full" / "minimal") an attachment run of a chat with
+    glossary policy ``mode`` extracts with, or None when it sends no AI extraction prompt (the chat forces
+    No / Manual glossary, or the main mode is Off, Manual Glossary Only, No Glossary, Single Pass)."""
+    if force_no_glossary_for_mode(mode, has_attachment) or normalize_glossary_override_mode(mode) == "manual":
+        return None
+    from glossarion_mobile.services.glossary import PROMPT_BUCKET_FOR_MODE
+
+    return PROMPT_BUCKET_FOR_MODE.get(auto_glossary_mode_key(config_get))
 
 
 def glossary_override_updates(mode: Any) -> dict:
