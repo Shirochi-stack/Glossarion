@@ -34,6 +34,7 @@ from unified_api_client import (
     _api_watchdog_set_backlog,
     _api_watchdog_set_scheduler_queue,
     _lazy_batch_window_backlog,
+    model_context_window,
 )
 from glossary_paths import (
     get_book_glossary_dir,
@@ -1263,6 +1264,40 @@ def _compute_safe_input_tokens(max_output_tokens: int, compression_factor: float
         cf = 1.0
     budget = int((effective - safety_margin) / cf)
     return max(budget, minimum)
+
+
+#: Smallest input budget a known context window shrinks a glossary chunk to.
+CONTEXT_INPUT_MINIMUM = 512
+
+
+def _compute_context_input_tokens(context_window, max_output_tokens, prompt_tokens: int = 0):
+    """Input tokens one glossary request may carry inside a ``context_window``-token model (None when the
+    window is unknown): the window minus the output limit and the prompt (system prompt + glossary
+    instructions), less 10% for tokenizer differences, never below ``CONTEXT_INPUT_MINIMUM``."""
+    try:
+        window = int(context_window or 0)
+    except (TypeError, ValueError):
+        window = 0
+    if window <= 0:
+        return None
+    try:
+        output = max(0, int(max_output_tokens or 0))
+    except (TypeError, ValueError):
+        output = 0
+    room = window - output - max(0, int(prompt_tokens or 0))
+    return max(int(room * 0.9), CONTEXT_INPUT_MINIMUM)
+
+
+def _compute_glossary_input_budget(max_output_tokens, compression_factor, model, prompt_tokens: int = 0) -> tuple:
+    """``(budget, context_window, context_budget)`` for a glossary chunk: the output-limit budget
+    (``_compute_safe_input_tokens``) capped by the model's context window when it is known
+    (``unified_api_client.model_context_window``; ``context_*`` are None otherwise)."""
+    budget = _compute_safe_input_tokens(max_output_tokens, compression_factor)
+    context_window = model_context_window(model)
+    context_budget = _compute_context_input_tokens(context_window, max_output_tokens, prompt_tokens)
+    if context_budget is None:
+        return budget, None, None
+    return min(budget, context_budget), context_window, context_budget
 
 # Global stop flag for GUI integration
 _stop_requested = False
@@ -8124,9 +8159,20 @@ def main(log_callback=None, stop_callback=None):
     # Resolve effective output token limit, including active per-key pool overrides.
     effective_output_tokens = _effective_glossary_output_limit(config, model)
 
-    # Budget for chunking, matching TransateKRtoEN safe limit logic
-    available_tokens = _compute_safe_input_tokens(effective_output_tokens, compression_factor)
+    # Budget for chunking, matching TransateKRtoEN safe limit logic, capped by the model's
+    # context window when it is known (on-device local/ models)
+    try:
+        _prompt_overhead = sum(count_tokens(part) for part in build_prompt(""))
+    except Exception:
+        _prompt_overhead = 0
+    available_tokens, _context_window, _context_budget = _compute_glossary_input_budget(
+        effective_output_tokens, compression_factor, model, _prompt_overhead
+    )
     print(f"📊 Chunk budget: {available_tokens:,} tokens (output limit {effective_output_tokens:,}, margin 500, compression {compression_factor})")
+    if _context_window:
+        # a chapter larger than the context window cannot run whole: split it whatever the toggle says
+        print(f"📐 Context window {_context_window:,} tokens: chapter splitting is on (≤{available_tokens:,} tokens a chunk)")
+        chapter_split_enabled = True
 
     # Initialize chapter splitter with compression factor
     chapter_splitter = ChapterSplitter(model_name=model, compression_factor=compression_factor)

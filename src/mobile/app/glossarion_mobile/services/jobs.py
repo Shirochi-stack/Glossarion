@@ -169,7 +169,29 @@ def no_sign_in_scope(kind: Any) -> Iterator[None]:
     if sign_in_allowed(kind):
         yield
         return
-    name, value = NO_SIGN_IN_ENV
+    with _env_scope(*NO_SIGN_IN_ENV):
+        yield
+
+
+@contextlib.contextmanager
+def local_context_scope() -> Iterator[None]:
+    """``CONTEXT_ENV`` (every on-device model's context window, ``setting_writes.local_context_env``)
+    set while a job runs: the shared glossary code sizes its chunks to fit a ``local/`` model's context
+    (``unified_api_client.model_context_window``). Nothing is set without the app's engine service."""
+    from glossarion_mobile.state.setting_writes import local_context_env
+
+    value = local_context_env()
+    if not value:
+        yield
+        return
+    from glossarion_mobile.services.local_llm.service import CONTEXT_ENV
+
+    with _env_scope(CONTEXT_ENV, value):
+        yield
+
+
+@contextlib.contextmanager
+def _env_scope(name: str, value: str) -> Iterator[None]:
     previous = os.environ.get(name)
     os.environ[name] = value
     try:
@@ -2124,7 +2146,7 @@ class JobService:
             config_taken = True
             lock = self.backend.job_lock
             with self.backend.scoped_process_state(capture_stdout=host.log, lock=lock), \
-                    no_sign_in_scope(job.spec.kind):
+                    no_sign_in_scope(job.spec.kind), local_context_scope():
                 # Held from the run reset to the owner latch: a stop protocol still running on
                 # gl-job-stop (the previous job's, or this job's own) never interleaves with them.
                 with self._stop_lock:

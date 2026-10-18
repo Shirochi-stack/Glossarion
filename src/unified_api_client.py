@@ -1736,6 +1736,114 @@ class UnifiedClientError(Exception):
         self.details = details
 
 # ---------------------------------------------------------------------------
+# Context-length errors: the request is larger than the model's context window, so sending it
+# again can never succeed. The client raises them at once as error_type="context_length" (details:
+# ``max_context`` / ``input_tokens`` when the message names them) and the glossary callers split
+# the chunk instead. A window learnt this way is remembered per model for the next chunk budget.
+# ---------------------------------------------------------------------------
+#: Context windows of on-device models, set by Glossarion Mobile while a job runs:
+#: ``local/<stem>=<tokens>`` pairs separated by ``;``.
+LOCAL_CONTEXT_ENV = "GLOSSARION_LOCAL_LLM_CONTEXT"
+_CONTEXT_ERROR_MARKERS = (
+    "maximum context length", "max context length", "context_length_exceeded",
+    "context length exceeded", "prompt is too long", "input tokens exceed",
+    "exceeds the context window", "exceeds the maximum number of tokens allowed",
+)
+_CONTEXT_MAX_RES = (
+    re.compile(r"max(?:imum)?[_ ]context(?:[_ ]length)?(?:\s+is)?\s*[=:]?\s*([\d,]+)", re.IGNORECASE),
+    re.compile(r"maximum number of tokens allowed\s*\(([\d,]+)\)", re.IGNORECASE),
+    re.compile(r">\s*([\d,]+)\s+maximum", re.IGNORECASE),
+)
+_CONTEXT_INPUT_RES = (
+    re.compile(r"\binput\s*(?:≈|~|=|:)\s*([\d,]+)", re.IGNORECASE),
+    re.compile(r"\(([\d,]+)\s+(?:of\s+(?:text\s+)?input|in\s+the\s+messages|in\s+the\s+prompt)", re.IGNORECASE),
+    re.compile(r"resulted\s+in\s+([\d,]+)\s+tokens", re.IGNORECASE),
+    re.compile(r"prompt is too long:\s*([\d,]+)", re.IGNORECASE),
+    re.compile(r"input token count\s*\(([\d,]+)\)", re.IGNORECASE),
+    re.compile(r"request\s+has\s+([\d,]+)\s+input\s+tokens?", re.IGNORECASE),
+)
+_KNOWN_CONTEXT_WINDOWS: Dict[str, int] = {}
+_KNOWN_CONTEXT_WINDOWS_LOCK = threading.Lock()
+
+
+def _positive_token_count(value) -> Optional[int]:
+    try:
+        number = int(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def context_length_error_info(err) -> Optional[dict]:
+    """``{"max_context", "input_tokens"}`` (each None when unknown) when ``err`` says the request does
+    not fit the model's context window, else None."""
+    if err is None:
+        return None
+    text = str(err)
+    if getattr(err, "error_type", None) != "context_length":
+        lowered = text.lower()
+        if not any(marker in lowered for marker in _CONTEXT_ERROR_MARKERS):
+            return None
+    details = getattr(err, "details", None)
+    details = details if isinstance(details, dict) else {}
+    info = {
+        "max_context": _positive_token_count(details.get("max_context")),
+        "input_tokens": _positive_token_count(details.get("input_tokens")),
+    }
+    for key, patterns in (("max_context", _CONTEXT_MAX_RES), ("input_tokens", _CONTEXT_INPUT_RES)):
+        for pattern in patterns:
+            if info[key] is not None:
+                break
+            match = pattern.search(text)
+            if match:
+                info[key] = _positive_token_count(match.group(1))
+    return info
+
+
+def remember_context_window(model, max_context) -> None:
+    """Keep the smallest context window a provider reported for ``model``."""
+    key = str(model or "").strip().lower()
+    tokens = _positive_token_count(max_context)
+    if not key or tokens is None:
+        return
+    with _KNOWN_CONTEXT_WINDOWS_LOCK:
+        previous = _KNOWN_CONTEXT_WINDOWS.get(key)
+        if previous is None or tokens < previous:
+            _KNOWN_CONTEXT_WINDOWS[key] = tokens
+
+
+def model_context_window(model) -> Optional[int]:
+    """The context window of ``model`` when known: an on-device ``local/<stem>`` model's from
+    ``LOCAL_CONTEXT_ENV``, else one a context-length error reported earlier in this process."""
+    key = str(model or "").strip().lower()
+    if not key:
+        return None
+    if key.startswith("local/"):
+        for pair in str(os.environ.get(LOCAL_CONTEXT_ENV, "") or "").split(";"):
+            name, sep, value = pair.rpartition("=")
+            if sep and name.strip().lower() == key:
+                tokens = _positive_token_count(value)
+                if tokens is not None:
+                    return tokens
+    with _KNOWN_CONTEXT_WINDOWS_LOCK:
+        return _KNOWN_CONTEXT_WINDOWS.get(key)
+
+
+def context_length_error(err, model=None) -> Optional["UnifiedClientError"]:
+    """``err`` as a non-retryable ``context_length`` UnifiedClientError when it is a context-length
+    error (the reported window is remembered for ``model``), else None."""
+    info = context_length_error_info(err)
+    if info is None:
+        return None
+    if model and info["max_context"]:
+        remember_context_window(model, info["max_context"])
+    if isinstance(err, UnifiedClientError) and err.error_type == "context_length":
+        err.details = {**(err.details if isinstance(err.details, dict) else {}), **info}
+        return err
+    status = getattr(err, "http_status", None) or getattr(err, "status_code", None)
+    return UnifiedClientError(str(err), error_type="context_length", http_status=status, details=info)
+
+# ---------------------------------------------------------------------------
 # Server Retry-After hints (Other Settings "Respect provider wait time (Retry-After)")
 # One place reads how long a rate-limited server asked us to wait: the Retry-After header
 # (seconds or HTTP-date), retry-after-ms, a ``retry_after_seconds`` the route already put in
@@ -11502,6 +11610,11 @@ class UnifiedClient:
                     print("The local model cannot run this request - not retrying")
                     raise
 
+                ctx_error = context_length_error(e, self.model)
+                if ctx_error is not None:
+                    print("The request exceeds the model's context window - not retrying")
+                    raise ctx_error
+
                 if self.client_type == "autharena" and e.error_type == "autharena_verification_error":
                     print("🔐 Arena rejected browser verification; this does not mean the saved login was lost.")
                     raise
@@ -11817,6 +11930,10 @@ class UnifiedClient:
                 # COMPREHENSIVE ERROR HANDLING FOR NoneType and other issues
                 error_str = str(e).lower()
                 print(f"Unexpected error: {e}")
+                ctx_error = context_length_error(e, self.model)
+                if ctx_error is not None:
+                    print("The request exceeds the model's context window - not retrying")
+                    raise ctx_error from e
 
                 # Make Invalid header value errors actionable (usually bad/empty key or newline in key)
                 if "invalid header value" in error_str and "bearer" in error_str:
@@ -18388,6 +18505,10 @@ class UnifiedClient:
                 if is_cancel:
                     # Normalize and stop retry/printing
                     raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                ctx_error = context_length_error(e, getattr(self, 'model', None))
+                if ctx_error is not None:
+                    # the identical request would overflow the context window again
+                    raise ctx_error
                 if attempt < max_retries - 1:
                     self._debug_log(f"{provider_name} SDK error (attempt {attempt + 1}): {e}")
 
@@ -26740,6 +26861,10 @@ class UnifiedClient:
                     if provider in self._LOCAL_OPENAI_PROVIDERS and self._extract_http_status_from_exception(e) == 499:
                         # the on-device engine dropped this queued request on Stop: never send it again
                         raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                    ctx_error = context_length_error(e, getattr(self, 'model', None))
+                    if ctx_error is not None:
+                        # the identical request would overflow the context window again: never resend it
+                        raise ctx_error
                     if not self._multi_key_mode and attempt < max_retries - 1:
                         # Suppress cancellation errors when stop is requested
                         error_str = str(e).lower()

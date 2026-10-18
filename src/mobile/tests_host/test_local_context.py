@@ -117,6 +117,30 @@ def test_local_jobs_use_batch_size_1_and_half_the_context_as_output(tmp_path):
     assert sw.local_output_limit(f"local/{LIGHT}") is None  # no engine service: the saved budget stays
 
 
+def test_a_job_exports_each_on_device_models_context_for_the_glossary_chunk_budget(tmp_path, monkeypatch):
+    """owner 2026-10-18: the Minimal glossary sent ~20,000 tokens to an 8,192-token model; a job now exports
+    every local/ model's context (CONTEXT_ENV) which the shared code reads to size its chunks."""
+    import os
+
+    from glossarion_mobile.services import jobs
+    from unified_api_client import model_context_window
+
+    monkeypatch.delenv(svc.CONTEXT_ENV, raising=False)
+    service, _engine = _service(tmp_path)
+    with jobs.local_context_scope():  # no engine service: nothing is exported
+        assert svc.CONTEXT_ENV not in os.environ
+    svc.set_default_service(service)
+    try:
+        assert sw.local_context_env() == f"local/{LIGHT}=8192;local/{HEAVY}=4096"
+        service.save_context(12288)
+        with jobs.local_context_scope():
+            assert os.environ[svc.CONTEXT_ENV] == f"local/{LIGHT}=12288;local/{HEAVY}=12288"
+            assert model_context_window(f"local/{LIGHT}") == 12288
+        assert svc.CONTEXT_ENV not in os.environ  # restored when the job ends
+    finally:
+        svc.set_default_service(None)
+
+
 def _welcome(service, model):
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.screens.welcome import WelcomeScreen

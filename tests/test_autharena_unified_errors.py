@@ -50,11 +50,12 @@ def handlers(tmp_path, monkeypatch):
                      _get_current_run_id=lambda: None,
                      _api_watchdog_record_retry=lambda *args, **kwargs: None,
                      _api_watchdog_update_model=lambda *args, **kwargs: None,
-                     # the key-context decorator and the module-level Retry-After helpers the handlers use
+                     # the key-context decorator and the module-level Retry-After / context-length helpers
+                     # the handlers use
                      route_key_context=lambda func: func,
                      **{name: getattr(_unified_module(), name) for name in (
                          "RETRY_AFTER_MAX_SECONDS", "respect_retry_after_enabled", "server_retry_after_seconds",
-                         "parse_retry_after_value")})
+                         "parse_retry_after_value", "context_length_error")})
     exec(_unified_handlers_code(), namespace)
     client = namespace["UnifiedClient"]()
     tls = SimpleNamespace()

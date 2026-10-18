@@ -51,6 +51,9 @@ __all__ = ["EngineSnapshot", "LocalEngineService", "default_service", "model_blo
            "set_default_service"]
 
 URL_ENV = "GLOSSARION_LOCAL_LLM_URL"
+#: each on-device model's context window while a job runs (``local/<stem>=<tokens>;...``), read by the
+#: shared ``unified_api_client.model_context_window`` to size glossary chunks (jobs.local_context_scope)
+CONTEXT_ENV = "GLOSSARION_LOCAL_LLM_CONTEXT"
 SETTINGS_KEY = "local_llm_settings"
 #: Prefs key of the on-device sampling settings (Model manager > On-device > engine card). They replace
 #: the request's top_p / top_k / min_p / penalties for every on-device request, so the global
