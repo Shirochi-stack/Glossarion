@@ -2014,11 +2014,15 @@ class TranslationConfig:
         
         # Handle split marker instruction placeholder
         # Always strip the placeholder from base prompt - we'll add the instruction dynamically
-        # based on whether we're actually merging multiple chapters in a given request
+        # based on whether we're actually merging multiple chapters in a given request.
+        # The template keeps the placeholder so get_system_prompt() can put the instruction
+        # where the user wrote it.
+        self.SYSTEM_PROMPT_TEMPLATE = self.SYSTEM_PROMPT
         if self.SYSTEM_PROMPT:
-            import re
-            # Strip placeholder - the actual instruction will be added via get_system_prompt()
-            self.SYSTEM_PROMPT = re.sub(r'\s*\{split_marker_instruction\}\s*', '', self.SYSTEM_PROMPT)
+            from prompt_defaults import apply_split_marker_instruction
+            # Strip placeholder (its line, not the line breaks around it) - the actual
+            # instruction will be added via get_system_prompt()
+            self.SYSTEM_PROMPT = apply_split_marker_instruction(self.SYSTEM_PROMPT, "")
             
         _raw_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "off")
         # Backward compat: "0" → "off", "1" → "medium"
@@ -2317,9 +2321,14 @@ class TranslationConfig:
         
         # Only add split marker instruction if actually merging multiple chapters
         if actual_merge_count > 1 and self.REQUEST_MERGING_ENABLED:
-            split_instr = ("- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' "
-                          "(Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), "
-                          "you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.")
+            from prompt_defaults import (SPLIT_MARKER_INSTRUCTION, SPLIT_MARKER_PLACEHOLDER,
+                                         apply_split_marker_instruction)
+            split_instr = SPLIT_MARKER_INSTRUCTION
+            # At the placeholder when the prompt has one (and SYSTEM_PROMPT was not replaced since)
+            template = getattr(self, "SYSTEM_PROMPT_TEMPLATE", "") or ""
+            if (SPLIT_MARKER_PLACEHOLDER in template
+                    and apply_split_marker_instruction(template, "") == self.SYSTEM_PROMPT):
+                return apply_split_marker_instruction(template, split_instr)
             # Append to end of system prompt
             return self.SYSTEM_PROMPT + "\n\n" + split_instr
         

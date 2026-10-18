@@ -14,6 +14,8 @@ tag prompt stays in title_tag_translation (DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_P
 GUI-free; must stay importable on Python 3.10 without Qt.
 """
 
+import re
+
 # ---- TranslatorGUI.__init__ ("# Default prompts") ----
 DEFAULT_TRANSLATION_CHUNK_PROMPT = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned."
 DEFAULT_IMAGE_CHUNK_PROMPT = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
@@ -71,6 +73,43 @@ Format the summary clearly with sections. Be concise but comprehensive.
 Recent translations to summarize:
 {translations}
         """
+
+
+# ---- {split_marker_instruction} (request merging) ----
+SPLIT_MARKER_PLACEHOLDER = "{split_marker_instruction}"
+SPLIT_MARKER_INSTRUCTION = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
+
+
+def apply_split_marker_instruction(prompt, instruction=""):
+    """Fill ``{split_marker_instruction}`` where the user put it.
+
+    A non-empty *instruction* replaces each placeholder in place. An empty one
+    removes the placeholder: a line holding only the placeholder is dropped
+    together with its line break, so the lines around it stay separate lines;
+    an inline placeholder is removed and the words around it keep one space.
+    """
+    if not prompt or SPLIT_MARKER_PLACEHOLDER not in prompt:
+        return prompt
+    if instruction:
+        return prompt.replace(SPLIT_MARKER_PLACEHOLDER, instruction)
+    lines = prompt.splitlines(keepends=True)
+    kept = []
+    for line in lines:
+        if line.strip() == SPLIT_MARKER_PLACEHOLDER:
+            continue
+        kept.append(re.sub(r'[ \t]*\{split_marker_instruction\}[ \t]*', _inline_gap, line))
+    text = "".join(kept)
+    if lines and lines[-1].strip() == SPLIT_MARKER_PLACEHOLDER and not prompt.endswith(("\n", "\r")):
+        # the placeholder was the last line: drop the break that led to it
+        text = text.rstrip("\r\n")
+    return text
+
+
+def _inline_gap(match):
+    line = match.string
+    before = line[:match.start()]
+    after = line[match.end():]
+    return " " if before.strip() and after.strip() else ""
 
 
 def sanitize_prompt_profiles(config):

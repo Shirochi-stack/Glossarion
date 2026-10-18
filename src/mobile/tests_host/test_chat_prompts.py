@@ -423,6 +423,25 @@ def test_edit_prompt_changes_the_shared_profile_only(tmp_path):
     store._saver.close()
 
 
+def test_edit_prompt_chips_insert_at_the_caret(tmp_path):
+    """Edit prompt's placeholder chips go where the caret is (on_selection_change), not at the end."""
+    import flet as ft
+
+    store = _store(tmp_path, {"prompt_profiles": {"Universal": "u", "Mine": "Line one\nLine two"},
+                              "active_profile": "Universal"})
+    sheet, chats, ctx = _sheet(store, {"profile": "Mine"})
+    editor = sheet.edit_prompt()
+    assert editor.field.on_selection_change is not None
+    editor.field.on_selection_change(types.SimpleNamespace(selection=ft.TextSelection(base_offset=9, extent_offset=9)))
+    assert editor.insert("{split_marker_instruction}\n") == "Line one\n{split_marker_instruction}\nLine two"
+    assert (editor.field.selection.base_offset, editor.field.selection.extent_offset) == (36, 36)
+    assert editor.counter.value.startswith(f"{len(editor.field.value):,} chars")
+    # a selected range is replaced
+    editor.field.on_selection_change(types.SimpleNamespace(selection=ft.TextSelection(base_offset=3, extent_offset=5)))
+    assert editor.insert("{target_lang}") == "Lin{target_lang}one\n{split_marker_instruction}\nLine two"
+    store._saver.close()
+
+
 def _confirm(dialog):
     dialog.actions[1].on_click(None)
 

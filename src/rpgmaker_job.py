@@ -536,8 +536,8 @@ class RpgMakerJobMixin:
             # Set up environment for translation
             system_prompt = self.prompt_text.toPlainText().strip()
             system_prompt = system_prompt.replace('{target_lang}', output_lang)
-            import re
-            system_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', '', system_prompt)
+            from prompt_defaults import apply_split_marker_instruction
+            system_prompt = apply_split_marker_instruction(system_prompt, "")
 
             os.environ['API_KEY'] = api_key
             os.environ['SYSTEM_PROMPT'] = system_prompt

@@ -1068,11 +1068,11 @@ class GlossarionWeb:
                 translation_prompt = translation_prompt.replace('{target_lang}', target_lang)
                 
                 # Replace {split_marker_instruction} placeholder
-                import re
+                from prompt_defaults import apply_split_marker_instruction
                 split_instr = ""
                 if self.get_config_value('request_merging_enabled', False):
                     split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
-                translation_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', lambda m: '\n' + split_instr if split_instr else '', translation_prompt)
+                translation_prompt = apply_split_marker_instruction(translation_prompt, split_instr)
                 
                 # Set OUTPUT_LANGUAGE env var for downstream use
                 os.environ['OUTPUT_LANGUAGE'] = target_lang

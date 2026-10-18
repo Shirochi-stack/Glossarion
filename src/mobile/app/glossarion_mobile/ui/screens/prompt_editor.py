@@ -29,11 +29,13 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.settings.editors import PromptEditor, count_label
 
 __all__ = [
+    "CursorCache",
     "PLACEHOLDERS",
     "PromptEditorPane",
     "PromptEditorSheet",
     "TokenCounter",
     "insert_placeholder",
+    "selection_range",
     "token_label",
 ]
 
@@ -68,6 +70,56 @@ def insert_placeholder(text: str, placeholder: str, start: Optional[int] = None,
         end = start
     new = text[:start] + placeholder + text[end:]
     return new, start + len(placeholder)
+
+
+def selection_range(selection: Any) -> tuple[Optional[int], Optional[int]]:
+    """``(start, end)`` of a ``ft.TextSelection`` in either direction; ``(None, None)`` when unknown."""
+    start = getattr(selection, "base_offset", None) if selection is not None else None
+    end = getattr(selection, "extent_offset", None) if selection is not None else None
+    if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end < 0:
+        return None, None  # Flutter reports -1 / -1 for a field that never had a caret
+    return min(start, end), max(start, end)
+
+
+class CursorCache:
+    """The caret / selection of a ``TextField``, so a placeholder chip inserts where the user is.
+
+    Flet sends the caret to Python only through ``on_selection_change``; without the handler
+    ``field.selection`` stays unset and every chip appended to the end. The last reported range
+    is kept here (the field's own ``selection`` is the fallback), and :meth:`insert` replaces it.
+    """
+
+    def __init__(self, field: Any) -> None:
+        self.field = field
+        self.start: Optional[int] = None
+        self.end: Optional[int] = None
+        field.on_selection_change = self.on_selection_change
+
+    def on_selection_change(self, e: Any = None) -> None:
+        start, end = selection_range(getattr(e, "selection", None))
+        if start is not None:
+            self.start, self.end = start, end
+
+    def forget(self) -> None:
+        """The text was replaced (load / reset): the old caret means nothing in it."""
+        self.start = self.end = None
+
+    def range(self) -> tuple[Optional[int], Optional[int]]:
+        if self.start is not None:
+            return self.start, self.end
+        return selection_range(getattr(self.field, "selection", None))
+
+    def insert(self, placeholder: str) -> str:
+        """Insert at the caret (replacing a selected range), or append when no caret is known."""
+        start, end = self.range()
+        text, cursor = insert_placeholder(self.field.value or "", placeholder, start, end)
+        self.field.value = text
+        self.start = self.end = cursor
+        try:  # the caret goes after the placeholder (shown when the field has focus)
+            self.field.selection = ft.TextSelection(base_offset=cursor, extent_offset=cursor)
+        except Exception:
+            pass
+        return text
 
 
 class TokenCounter:
@@ -169,6 +221,7 @@ class PromptEditorPane(ft.Column):
             border_radius=tokens.RADII["field"],
             on_change=self._on_change,
         )
+        self.cursor = CursorCache(self.field)
         self.counter_text = ft.Text(count_label(self.initial), theme_style=ft.TextThemeStyle.LABEL_SMALL,
                                     color=ft.Colors.ON_SURFACE_VARIANT)
         self.tokens = TokenCounter(run_io=run_io, model=model, on_count=self._on_count, counter=counter)
@@ -192,6 +245,7 @@ class PromptEditorPane(ft.Column):
 
     def set_value(self, text: str, *, initial: bool = True) -> None:
         self.field.value = str(text or "")
+        self.cursor.forget()
         if initial:
             self.initial = self.field.value
         self.counter_text.value = count_label(self.field.value)
@@ -236,17 +290,7 @@ class PromptEditorPane(ft.Column):
         self._push(self.counter_text)
 
     def insert(self, placeholder: str) -> str:
-        selection = getattr(self.field, "selection", None)
-        start = getattr(selection, "base_offset", None) if selection is not None else None
-        end = getattr(selection, "extent_offset", None) if selection is not None else None
-        if start is not None and end is not None and end < start:
-            start, end = end, start
-        text, cursor = insert_placeholder(self.value, placeholder, start, end)
-        self.field.value = text
-        try:
-            self.field.selection = ft.TextSelection(base_offset=cursor, extent_offset=cursor)
-        except Exception:
-            pass
+        text = self.cursor.insert(placeholder)
         self._on_change()
         self._push(self.field)
         return text
@@ -266,7 +310,8 @@ class PromptEditorSheet(PromptEditor):
 
     def build_body(self) -> ft.Control:
         body = super().build_body()
-        self.tokens = TokenCounter(run_io=getattr(self.ctx, "run_io", None), model=self._model,
+        self.cursor = CursorCache(self.field)
+        self.tokens =TokenCounter(run_io=getattr(self.ctx, "run_io", None), model=self._model,
                                    on_count=self._on_count, counter=self._counter_fn)
         chips = [ft.Chip(label=ft.Text(p, size=12), on_click=lambda e, p=p: self.insert(p)) for p in self.placeholders]
         if not chips:
@@ -281,9 +326,12 @@ class PromptEditorSheet(PromptEditor):
         self.counter.value = label
         self.ctx.push(self.counter)
 
+    def _on_reset(self, e: Any = None) -> None:
+        self.cursor.forget()
+        super()._on_reset(e)
+
     def insert(self, placeholder: str) -> str:
-        text, _cursor = insert_placeholder(self.field.value or "", placeholder)
-        self.field.value = text
+        text = self.cursor.insert(placeholder)
         self._on_change()
         self.ctx.push(self.field)
         return text
