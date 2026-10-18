@@ -748,7 +748,7 @@ class GrpcGeminiClient:
         
         level_model = uses_gemini_thinking_level(model) or thinking_level is not None
         if level_model:
-            omit_gemini_legacy_parameters(config_kwargs)
+            omit_gemini_legacy_parameters(config_kwargs, model)
             thinking_budget = None
         # Apply thinking configuration
         if _ThinkingConfig is not None and (thinking_budget is not None or thinking_level is not None):
@@ -793,11 +793,12 @@ class GrpcGeminiClient:
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
         ]
         
-        # Try to add CIVIC_INTEGRITY if available
-        try:
-            categories.append(HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY)
-        except (AttributeError, ValueError):
-            pass
+        # Add CIVIC_INTEGRITY and JAILBREAK where this proto defines them
+        for name in ("HARM_CATEGORY_CIVIC_INTEGRITY", "HARM_CATEGORY_JAILBREAK"):
+            try:
+                categories.append(getattr(HarmCategory, name))
+            except (AttributeError, ValueError):
+                pass
         
         settings = []
         for cat in categories:

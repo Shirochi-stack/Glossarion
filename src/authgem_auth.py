@@ -1295,7 +1295,7 @@ def _build_gemini_request_body(
     is_gemini_3 = uses_gemini_thinking_level(model_lower)
 
     if is_gemini_3:
-        omit_gemini_legacy_parameters(gen_config)
+        omit_gemini_legacy_parameters(gen_config, model_lower)
 
     if thinking_level not in ("minimal", "low", "medium", "high"):
         thinking_level = "high"
@@ -1358,6 +1358,7 @@ def _build_gemini_request_body(
         {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": _threshold},
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": _threshold},
         {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": _threshold},
+        {"category": "HARM_CATEGORY_JAILBREAK", "threshold": _threshold},
     ]
 
     return body

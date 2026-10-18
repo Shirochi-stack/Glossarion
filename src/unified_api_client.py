@@ -172,9 +172,11 @@ import hashlib
 import html
 import builtins as _builtins
 try:
-    from gemini_policy import is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level, omit_gemini_legacy_parameters
+    from gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
+                               omit_gemini_legacy_parameters, gemini_ignores_sampling)
 except ImportError:
-    from .gemini_policy import is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level, omit_gemini_legacy_parameters
+    from .gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
+                                omit_gemini_legacy_parameters, gemini_ignores_sampling)
 try:
     from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
 except ImportError:
@@ -7906,7 +7908,7 @@ class UnifiedClient:
     def _effective_temperature(self, temperature: Optional[float]) -> Optional[float]:
         return None if (self._temperature_parameter_disabled()
                         or model_rejects_temperature(self._get_active_request_model())
-                        or uses_gemini_thinking_level(self._get_active_request_model())) else temperature
+                        or gemini_ignores_sampling(self._get_active_request_model())) else temperature
 
     @route_key_context
     def _send_core(self,
@@ -16120,7 +16122,7 @@ class UnifiedClient:
                             print(f"⚠️ Could not build Vertex ThinkingConfig: {_tc_err2}")
 
                 if uses_gemini_thinking_level(model_name):
-                    omit_gemini_legacy_parameters(config_params)
+                    omit_gemini_legacy_parameters(config_params, model_name)
                 generation_config = types.GenerateContentConfig(**config_params)
                 
                 # Configure safety settings using google-genai SDK
@@ -16141,6 +16143,7 @@ class UnifiedClient:
                         types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=_threshold),
                         types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=_threshold),
                         types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold=_threshold),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_JAILBREAK, threshold=_threshold),
                     ]
                     generation_config.safety_settings = safety_settings
                     if not self._is_stop_requested():
@@ -16157,7 +16160,8 @@ class UnifiedClient:
                         "SEXUALLY_EXPLICIT": _threshold_name,
                         "HARASSMENT": _threshold_name,
                         "DANGEROUS_CONTENT": _threshold_name,
-                        "CIVIC_INTEGRITY": _threshold_name
+                        "CIVIC_INTEGRITY": _threshold_name,
+                        "JAILBREAK": _threshold_name
                     }
                 else:
                     safety_status = "ENABLED - Using default Gemini safety settings"
@@ -16167,7 +16171,8 @@ class UnifiedClient:
                         "SEXUALLY_EXPLICIT": "BLOCK_MEDIUM_AND_ABOVE (default)",
                         "HARASSMENT": "BLOCK_MEDIUM_AND_ABOVE (default)",
                         "DANGEROUS_CONTENT": "BLOCK_MEDIUM_AND_ABOVE (default)",
-                        "CIVIC_INTEGRITY": "BLOCK_MEDIUM_AND_ABOVE (default)"
+                        "CIVIC_INTEGRITY": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                        "JAILBREAK": "BLOCK_MEDIUM_AND_ABOVE (default)"
                     }
                 
                 # Save configuration to file
@@ -17809,7 +17814,7 @@ class UnifiedClient:
         for attempt in range(max_retries):
             omit_claude_sampling_parameters(json, payload_model)
             if uses_gemini_thinking_level(payload_model):
-                omit_gemini_legacy_parameters(json)
+                omit_gemini_legacy_parameters(json, payload_model)
             # Always log attempt number so backoff is visible
             try:
                 print(f"{provider} HTTP attempt {attempt + 1}/{max_retries}")
@@ -20245,7 +20250,7 @@ class UnifiedClient:
         
         omit_claude_sampling_parameters(params, self._get_active_request_model())
         if uses_gemini_thinking_level(self._get_active_request_model()):
-            omit_gemini_legacy_parameters(params)
+            omit_gemini_legacy_parameters(params, self._get_active_request_model())
         # Log applied parameters with exact values (once per request if log_key provided)
         if log:
             self._log_anti_duplicate_applied(params, log_key)
@@ -22069,6 +22074,7 @@ class UnifiedClient:
                 types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=_threshold),
                 types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=_threshold),
                 types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold=_threshold),
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_JAILBREAK, threshold=_threshold),
             ]
             if not self._is_stop_requested():
                 #logger.info(f"Gemini safety settings disabled - using {_threshold_name} for all categories")
@@ -22090,7 +22096,8 @@ class UnifiedClient:
                 "SEXUALLY_EXPLICIT": _threshold_name,
                 "HARASSMENT": _threshold_name,
                 "DANGEROUS_CONTENT": _threshold_name,
-                "CIVIC_INTEGRITY": _threshold_name
+                "CIVIC_INTEGRITY": _threshold_name,
+                "JAILBREAK": _threshold_name
             }
         else:
             safety_status = "ENABLED - Using default Gemini safety settings"
@@ -22100,7 +22107,8 @@ class UnifiedClient:
                 "SEXUALLY_EXPLICIT": "BLOCK_MEDIUM_AND_ABOVE (default)",
                 "HARASSMENT": "BLOCK_MEDIUM_AND_ABOVE (default)",
                 "DANGEROUS_CONTENT": "BLOCK_MEDIUM_AND_ABOVE (default)",
-                "CIVIC_INTEGRITY": "BLOCK_MEDIUM_AND_ABOVE (default)"
+                "CIVIC_INTEGRITY": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                "JAILBREAK": "BLOCK_MEDIUM_AND_ABOVE (default)"
             }
         
         # Log to console with thinking status - only if not stopping
@@ -25238,7 +25246,7 @@ class UnifiedClient:
                     self._add_request_parameters_to_sdk_kwargs(call_kwargs, key_request_parameters)
                     omit_claude_sampling_parameters(call_kwargs, effective_model)
                     if uses_gemini_thinking_level(effective_model):
-                        omit_gemini_legacy_parameters(call_kwargs)
+                        omit_gemini_legacy_parameters(call_kwargs, effective_model)
                     if self._temperature_parameter_disabled() or model_rejects_temperature(effective_model):
                         strip_temperature(call_kwargs)
                     if provider == 'nanogpt':
