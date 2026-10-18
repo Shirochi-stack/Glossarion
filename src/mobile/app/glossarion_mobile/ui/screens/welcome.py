@@ -492,6 +492,14 @@ class WelcomeScreen(Screen):
             return None
         return self.ondevice_flow()
 
+    def shown_max_output_tokens(self) -> int:
+        """The output-token limit Request size shows: half the context for an on-device model, else the
+        value set here, else the saved one, else 16,384."""
+        ondevice = self.local_context()
+        if ondevice is not None:
+            return max(256, ondevice.current_context() // 2)
+        return int(self.flow.max_output_tokens or self.default_max_tokens or 16384)
+
     def _run_budget(self) -> ft.Control:
         """U13: the output-token budget (slider + field; mobile default 16,384) and the chunk size (blank: auto).
 
@@ -499,9 +507,7 @@ class WelcomeScreen(Screen):
         the budget, which is then half the context and read-only (jobs on ``local/`` use that; the saved
         budget stays for cloud models)."""
         ondevice = self.local_context()
-        current = int(self.flow.max_output_tokens or self.default_max_tokens or 16384)
-        if ondevice is not None:
-            current = max(256, ondevice.current_context() // 2)
+        current = self.shown_max_output_tokens()
         low, high = TOKEN_SLIDER
         field = ft.TextField(label="Output token limit" + (" (half the context)" if ondevice is not None else ""),
                              value=str(current), dense=True, width=170, disabled=ondevice is not None,
@@ -871,6 +877,12 @@ class WelcomeScreen(Screen):
                 pass
 
     def finish(self) -> dict:
+        # Save what Request size showed even when it was left untouched (owner 2026-10-18: an on-device
+        # model shows batch size 1 and half the context, yet Run options kept 5 and 128,000).
+        if self.flow.batch_size is None:
+            self.flow.batch_size = self.default_batch_size()
+        if self.flow.max_output_tokens is None or self.local_context() is not None:
+            self.flow.max_output_tokens = self.shown_max_output_tokens()
         updates = self.flow.finish_updates()
         if self.on_finish is not None:
             self.on_finish(updates)

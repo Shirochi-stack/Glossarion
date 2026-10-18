@@ -158,3 +158,20 @@ def test_welcome_request_size_shows_the_context_for_an_on_device_model(tmp_path)
     cloud = _by_key(_welcome(service, "gpt-6")._run_budget())
     assert "welcome-ctx" not in cloud and not cloud["welcome-max-tokens"].disabled
     assert cloud["welcome-max-tokens"].value == "16384"
+
+def test_welcome_finish_saves_the_request_size_it_showed(tmp_path):
+    """owner 2026-10-18: Welcome showed batch size 1 and half the context for an on-device model, but saved
+    nothing untouched, so Run options kept 5 and 128,000."""
+    service, _engine = _service(tmp_path)
+    s = _welcome(service, f"local/{HEAVY}")
+    updates = s.finish()
+    assert updates["batch_size"] == 1 and updates["max_output_tokens"] == 2048  # Heavy: 4,096 context
+
+    s = _welcome(service, "gpt-6")
+    updates = s.finish()
+    assert updates["batch_size"] == 5 and updates["max_output_tokens"] == 16384
+    # values the user set still win
+    s = _welcome(service, "gpt-6")
+    s.flow.batch_size, s.flow.max_output_tokens = 3, 8192
+    updates = s.finish()
+    assert updates["batch_size"] == 3 and updates["max_output_tokens"] == 8192
