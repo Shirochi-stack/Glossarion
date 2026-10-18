@@ -20,7 +20,7 @@ import flet as ft
 from glossarion_mobile.state.series import MAX_NAME_CHARS, SERIES_COLORS, clean_name, color_hex
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
-from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
+from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog, dialog_column
 from glossarion_mobile.ui.components.sheet import sheet_frame
 
 __all__ = ["DELETE_BODY", "SeriesEditorDialog", "SeriesPickerSheet", "color_dot"]
@@ -101,11 +101,11 @@ class SeriesPickerSheet:
         self.body = ft.Column(
             [ft.Container(padding=ft.Padding.only(left=16, right=16, bottom=8),
                           content=ft.Column(header, tight=True, spacing=2)), *rows],
-            tight=True, spacing=0, scroll=ft.ScrollMode.AUTO,
+            tight=True, spacing=0, scroll=None if tablet else ft.ScrollMode.AUTO,
         )
-        if tablet:
+        if tablet:  # the dialog scrolls (dialogs.dialog_column): a scrolling body would make it screen-high
             self.dialog: Any = ft.AlertDialog(content=ft.Container(width=tokens.SIZES["dialog_max"], content=self.body),
-                                              content_padding=ft.Padding.symmetric(vertical=12))
+                                              content_padding=ft.Padding.symmetric(vertical=12), scrollable=True)
         else:
             self.dialog = ft.BottomSheet(content=sheet_frame(self.body, padding=ft.Padding.only(bottom=8)),
                                          show_drag_handle=True, scrollable=True,
@@ -187,9 +187,9 @@ class SeriesEditorDialog:
         actions += [ft.TextButton(content="Cancel", on_click=lambda e: self.close(), key="series-cancel"),
                     ft.FilledButton(content=save_label, on_click=lambda e: self._save(), key="series-save")]
         self.dialog = ft.AlertDialog(
+            scrollable=True,
             title=ft.Text(title),
-            content=ft.Container(width=tokens.SIZES["dialog_max"],
-                                 content=ft.Column(content, tight=True, spacing=8, scroll=ft.ScrollMode.AUTO)),
+            content=ft.Container(width=tokens.SIZES["dialog_max"], content=dialog_column(content)),
             actions=actions,
             actions_alignment=ft.MainAxisAlignment.END,
         )

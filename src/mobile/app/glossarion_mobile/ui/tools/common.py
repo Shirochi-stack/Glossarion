@@ -22,7 +22,7 @@ from typing import Any, Callable, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.components.dialogs import close_dialog, fit_dialog_column
+from glossarion_mobile.ui.components.dialogs import close_dialog, dialog_column
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.library.common import LibraryContext
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
@@ -398,9 +398,10 @@ class ChoiceDialog:
                                        key=f"{key}-{value}")
             self.buttons[value] = button
             actions.append(button)
-        self.column = ft.Column([ft.Text(body, selectable=True)], tight=True, scroll=ft.ScrollMode.AUTO)
+        self.column = dialog_column([ft.Text(body, selectable=True)], spacing=10)
         self.dialog = ft.AlertDialog(
             modal=True,
+            scrollable=True,
             title=ft.Text(title),
             content=ft.Container(width=tokens.SIZES["dialog_max"], content=self.column),
             actions=actions,
@@ -416,7 +417,6 @@ class ChoiceDialog:
         except RuntimeError:
             self._future = None
         if page is not None:
-            fit_dialog_column(page, self.column, self.title, self.body)
             page.show_dialog(self.dialog)
         return self
 

@@ -17,10 +17,9 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components._handlers import await_handler, call_handler
-from glossarion_mobile.ui.components.sheet import fits_compact, page_width, text_height
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["ConfirmDialog", "close_dialog", "dialog_height", "fit_dialog_column", "show_snackbar"]
+__all__ = ["ConfirmDialog", "close_dialog", "dialog_column", "show_snackbar"]
 
 
 def close_dialog(page: Any, dialog: Any) -> bool:
@@ -63,22 +62,15 @@ def close_dialog(page: Any, dialog: Any) -> bool:
     return True
 
 
-def dialog_height(width: float, title: str, body: str, items: Sequence[str] = ()) -> float:
-    """Upper estimate (dp, 200 % text) of an AlertDialog on a ``width`` dp page: title, body text,
-    bullet items and the button row."""
-    width = max(120.0, min(float(tokens.SIZES["dialog_max"]), width - 80))  # dialog insets + padding
-    return (text_height(title, width, 22) + text_height(body, width) + 8 * len(items)
-            + sum(text_height(f"• {item}", width, 12) for item in items) + 140)
+def dialog_column(controls: Sequence[ft.Control], spacing: float = 8) -> ft.Column:
+    """A dialog body that is only as tall as its content (owner #21).
 
-
-def fit_dialog_column(page: Any, column: ft.Column, title: str, body: str, items: Sequence[str] = ()) -> None:
-    """Scroll a dialog's body Column only when it may not fit (owner #21).
-
-    Flet 1.0.3 lays a scrolling Column out as tall as the space it may take, so a short confirmation
-    ("Delete selected", "Retranslate selected") opened screen-high with empty space under its text. As the
-    compact sheets do (``fits_compact``), it keeps its natural height unless it may not fit."""
-    fits = fits_compact(page, dialog_height(page_width(page), title, body, items))
-    column.scroll = None if fits else ft.ScrollMode.AUTO
+    Flet 1.0.3 lays a scrolling Column out at least as tall as its bounded parent
+    (``scrollable_control.dart`` ``_InnerConstraintsEnforcer``), so a dialog whose body scrolled opened
+    screen-high with empty space under a few lines of text. The body is a plain Column and the dialog
+    scrolls instead (``AlertDialog(scrollable=True)``, Flutter's own scroll view): it keeps its natural
+    height and scrolls only when the content does not fit. No control in it may ``expand``."""
+    return ft.Column(list(controls), tight=True, spacing=spacing)
 
 
 class ConfirmDialog:
@@ -114,9 +106,10 @@ class ConfirmDialog:
             ft.ButtonStyle(bgcolor=ft.Colors.ERROR, color=ft.Colors.ON_ERROR) if destructive else None
         )
         self.confirm_button = ft.FilledButton(content=confirm_label, on_click=self._on_confirm, style=confirm_style)
-        self.column = ft.Column(content, tight=True, spacing=8, scroll=ft.ScrollMode.AUTO)
+        self.column = dialog_column(content)
         self.dialog = ft.AlertDialog(
             modal=True,
+            scrollable=True,
             title=ft.Text(title),
             content=ft.Container(width=tokens.SIZES["dialog_max"], content=self.column),
             actions=[self.cancel_button, self.confirm_button],
@@ -125,7 +118,6 @@ class ConfirmDialog:
 
     def show(self, page: Any) -> None:
         self._page = page
-        fit_dialog_column(page, self.column, self.title, self.body, self.items)
         if self.state == "closed":  # shown again
             self.state = "idle"
             self._set_running(False)

@@ -23,7 +23,7 @@ import flet as ft
 
 from glossarion_mobile.services.library import CoreMissing
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.components.dialogs import close_dialog
+from glossarion_mobile.ui.components.dialogs import close_dialog, dialog_column
 
 __all__ = [
     "ChoiceDialog",
@@ -50,10 +50,10 @@ class ChoiceDialog:
                                          key=f"choice-{choice_id}"))
         self.dialog = ft.AlertDialog(
             modal=True,
+            scrollable=True,
             title=ft.Text(title),
             content=ft.Container(width=tokens.SIZES["dialog_max"],
-                                 content=ft.Column([ft.Text(body, selectable=True)], tight=True,
-                                                   scroll=ft.ScrollMode.AUTO)),
+                                 content=dialog_column([ft.Text(body, selectable=True)], spacing=10)),
             actions=buttons,
             actions_alignment=ft.MainAxisAlignment.END,
         )
