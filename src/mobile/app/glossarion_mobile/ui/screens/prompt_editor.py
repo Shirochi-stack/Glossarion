@@ -311,7 +311,7 @@ class PromptEditorSheet(PromptEditor):
     def build_body(self) -> ft.Control:
         body = super().build_body()
         self.cursor = CursorCache(self.field)
-        self.tokens =TokenCounter(run_io=getattr(self.ctx, "run_io", None), model=self._model,
+        self.tokens = TokenCounter(run_io=getattr(self.ctx, "run_io", None), model=self._model,
                                    on_count=self._on_count, counter=self._counter_fn)
         chips = [ft.Chip(label=ft.Text(p, size=12), on_click=lambda e, p=p: self.insert(p)) for p in self.placeholders]
         if not chips:
