@@ -65,6 +65,7 @@ __all__ = [
     "streaming_states",
     "streaming_summary",
     "local_output_limit",
+    "local_context_env",
     "with_mobile_streaming_defaults",
     "write_setting",
     "write_settings",
@@ -292,6 +293,23 @@ def local_output_limit(model: Any) -> Optional[int]:
         return int(service.output_limit_for(value[len("local/"):])) if service is not None else None
     except Exception:
         log.debug("local_output_limit failed", exc_info=True)
+        return None
+
+
+def local_context_env() -> Optional[str]:
+    """The ``CONTEXT_ENV`` value a job runs with: ``local/<stem>=<tokens>`` for every on-device model
+    (``LocalEngineService.context_for``, the window its requests must fit), joined by ``;``; None without
+    the app's engine service or a downloaded model."""
+    try:
+        from glossarion_mobile.services.local_llm.service import default_service
+
+        service = default_service()
+        if service is None:
+            return None
+        pairs = [f"local/{stem}={int(service.context_for(stem))}" for stem in sorted(service.registry.load())]
+        return ";".join(pairs) or None
+    except Exception:
+        log.debug("local_context_env failed", exc_info=True)
         return None
 
 

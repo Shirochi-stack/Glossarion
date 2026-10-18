@@ -1002,10 +1002,19 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     # Use the expected output/input token ratio to determine a safe input limit.
     # Use glossary-specific compression factor with fallback to global
     compression_factor = float(os.getenv("GLOSSARY_COMPRESSION_FACTOR", os.getenv("COMPRESSION_FACTOR", "1.0")))
-    # Safe input limit is max_output divided by the expected output/input factor.
-    # (e.g., if output is expected to be 1.5x input, keep input near max_output / 1.5)
-    safe_input_limit = int(max_output_tokens / max(compression_factor, 0.1)) if compression_factor > 0 else int(max_output_tokens * 0.8)
-    
+    # Safe input limit is (max_output - 500) divided by the expected output/input factor
+    # (e.g., if output is expected to be 1.5x input, keep input near max_output / 1.5),
+    # capped by the model's context window when it is known (on-device local/ models).
+    safe_input_limit, context_window, context_input_limit = _minimal_chunk_budget(
+        max_output_tokens, compression_factor, custom_prompt
+    )
+    # A request larger than the context window cannot run at all: split by tokens whatever the
+    # chapter-split toggle and character threshold say.
+    context_forces_split = context_input_limit is not None and estimated_tokens > context_input_limit
+    if context_forces_split:
+        print(f"📐 Context window {context_window:,} tokens: splitting the text into chunks of ≤{safe_input_limit:,} tokens")
+        chapter_split_threshold = 0
+
     if estimated_tokens > safe_input_limit:
         # Only show detailed token logs if using token-based chunking (threshold == 0)
         if chapter_split_threshold == 0:
@@ -1018,11 +1027,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             pass
     
     # Check if we need to split into chunks based on EFFECTIVE size after filtering
-    needs_chunking = chapter_split_enabled and (
+    needs_chunking = context_forces_split or (chapter_split_enabled and (
         (chapter_split_threshold == 0 and estimated_tokens > safe_input_limit) or
         (chapter_split_threshold > 0 and effective_text_size > chapter_split_threshold)
-    )
-    if not chapter_split_enabled:
+    ))
+    if not chapter_split_enabled and not context_forces_split:
         print("📑 Chapter splitting disabled (GLOSSARY_ENABLE_CHAPTER_SPLIT=0) - processing without pre-splitting")
     
     _minimal_scheduled_requests_complete = True
@@ -1067,7 +1076,14 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             
             # Use ChapterSplitter to intelligently split based on tokens
             split_results = splitter.split_chapter(text_to_split, max_tokens=safe_input_limit)
-            chunks_to_process = [(i, chunk) for i, (chunk, _, _) in enumerate(split_results, 1)]
+            # Plain text splits only at line breaks: a longer line is sentence-packed to the budget
+            split_texts = []
+            for chunk, _, _ in split_results:
+                if splitter.count_tokens(chunk) > safe_input_limit:
+                    split_texts.extend(splitter._split_text_into_chunks(chunk, safe_input_limit))
+                else:
+                    split_texts.append(chunk)
+            chunks_to_process = [(i, chunk) for i, chunk in enumerate(split_texts, 1)]
             
             print(f"📑 ChapterSplitter created {len(chunks_to_process)} token-balanced chunks")
             all_glossary_entries = []
@@ -5004,7 +5020,98 @@ def _normalize_filtered_text(text: str) -> str:
 
     return normalized_text
 
-def _extract_with_custom_prompt(custom_prompt, all_text, language, 
+#: Shortest chunk (characters) a context-length error still splits; a smaller one fails as it is.
+CONTEXT_SPLIT_MIN_CHARS = 200
+#: Most pieces one context-length error splits a chunk into.
+CONTEXT_SPLIT_MAX_PARTS = 64
+
+
+def _glossary_prompt_tokens(prompt):
+    """Tokens of the glossary system prompt (cl100k_base, else about 4 characters a token)."""
+    text = str(prompt or "")
+    try:
+        import tiktoken
+        return len(tiktoken.get_encoding("cl100k_base").encode(text))
+    except Exception:
+        return len(text) // 4
+
+
+def _minimal_chunk_budget(max_output_tokens, compression_factor, custom_prompt):
+    """``(budget, context_window, context_budget)`` of a Minimal glossary chunk: the output-limit budget
+    capped by the model's context window less the output limit and the glossary prompt
+    (``extract_glossary_from_epub._compute_glossary_input_budget``)."""
+    from extract_glossary_from_epub import _compute_glossary_input_budget
+    model = os.getenv("MODEL", "gemini-2.0-flash")
+    return _compute_glossary_input_budget(
+        max_output_tokens, compression_factor, model, _glossary_prompt_tokens(custom_prompt)
+    )
+
+
+def _split_text_evenly(text, parts):
+    """``text`` cut into ``parts`` pieces of about equal length, at line breaks (else spaces) when
+    one is near the cut."""
+    text = str(text or "")
+    parts = max(1, min(int(parts), len(text) or 1))
+    pieces, start = [], 0
+    for index in range(1, parts):
+        target = start + (len(text) - start) // (parts - index + 1)
+        window = max(1, (target - start) // 4)
+        cut = -1
+        for sep in ("\n", " "):
+            cut = text.rfind(sep, target - window, target + window)
+            if cut > start:
+                break
+        cut = cut + 1 if cut > start else target
+        if cut <= start:
+            continue
+        pieces.append(text[start:cut])
+        start = cut
+    pieces.append(text[start:])
+    return [piece for piece in pieces if piece.strip()]
+
+
+def _context_split_parts(info, max_output_tokens):
+    """How many pieces a chunk the model rejected as too long is cut into: enough for each to fit
+    ``max_context`` less the output limit when the error names both sizes, else halves."""
+    max_context = (info or {}).get("max_context")
+    input_tokens = (info or {}).get("input_tokens")
+    if not max_context or not input_tokens:
+        return 2
+    try:
+        reserved = min(int(max_output_tokens or 0), max_context // 2)
+    except (TypeError, ValueError):
+        reserved = max_context // 2
+    room = max(256, max_context - reserved)
+    return max(2, min(CONTEXT_SPLIT_MAX_PARTS, -(-int(input_tokens) // room)))
+
+
+def _send_splitting_on_context_error(send_text, text, max_output_tokens, *, _depth=0):
+    """Responses for ``text``: ``send_text(text)``, and when the model rejects it as longer than its
+    context window, the same for the pieces of ``text`` (recursively, down to
+    ``CONTEXT_SPLIT_MIN_CHARS``), in order. None when a send returns None (a user stop)."""
+    from unified_api_client import context_length_error_info
+    try:
+        response = send_text(text)
+        return None if response is None else [response]
+    except Exception as exc:
+        info = context_length_error_info(exc)
+        if info is None or len(text) < CONTEXT_SPLIT_MIN_CHARS * 2 or _depth >= 8:
+            raise
+        pieces = _split_text_evenly(text, _context_split_parts(info, max_output_tokens))
+        if len(pieces) < 2:
+            raise
+        limit = f" ({info['max_context']:,})" if info.get("max_context") else ""
+        print(f"📐 Context limit hit{limit}: splitting chunk into {len(pieces)} parts")
+    responses = []
+    for piece in pieces:
+        piece_responses = _send_splitting_on_context_error(send_text, piece, max_output_tokens, _depth=_depth + 1)
+        if piece_responses is None:
+            return None
+        responses.extend(piece_responses)
+    return responses
+
+
+def _extract_with_custom_prompt(custom_prompt, all_text, language,
                               min_frequency, max_names, max_titles, 
                               existing_glossary, output_dir, 
                               strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all', max_sentences=200, log_callback=None,
@@ -5223,94 +5330,107 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     max_timeout_retries = int(os.getenv("TIMEOUT_RETRY_ATTEMPTS", "2"))
                 except Exception:
                     max_timeout_retries = 2
-                timeout_retry_count = 0
-                while True:
-                    try:
-                        response, finish_reason, raw_obj = send_with_interrupt(
-                            messages=messages,
-                            client=client,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            stop_check_fn=is_stop_requested,
-                            chunk_timeout=chunk_timeout,
-                            context=progress_context
-                        )
-                        break
-                    except UnifiedClientError as e:
-                        error_msg = str(e)
-                        lower_msg = error_msg.lower()
 
-                        # Only treat an explicit user stop as an interrupt; timeouts/cancellations should retry
-                        user_stopped = ("stopped by user" in lower_msg) or (
-                            is_stop_requested() and not any(k in lower_msg for k in ("timeout", "timed out", "cancelled"))
-                        )
-                        if user_stopped:
-                            print(f"📑 ❌ AI extraction interrupted by user")
-                            return {}
+                def _send_glossary_text(part_text):
+                    """The response text for ``part_text``, None when the user stopped."""
+                    request_messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"{part_text}"}
+                    ]
+                    timeout_retry_count = 0
+                    while True:
+                        try:
+                            response, finish_reason, raw_obj = send_with_interrupt(
+                                messages=request_messages,
+                                client=client,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                stop_check_fn=is_stop_requested,
+                                chunk_timeout=chunk_timeout,
+                                context=progress_context
+                            )
+                            break
+                        except UnifiedClientError as e:
+                            error_msg = str(e)
+                            lower_msg = error_msg.lower()
 
-                        # Treat cancelled / client init errors as timeout retries
-                        is_timeout = ("timed out" in lower_msg) or ("timeout" in lower_msg) or ("cancelled" in lower_msg) or ("client not initialized" in lower_msg)
-                        if is_timeout and timeout_retry_count < max_timeout_retries:
-                            timeout_retry_count += 1
-                            if chunk_timeout:
-                                print(f"⚠️ AI extraction timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                            # Only treat an explicit user stop as an interrupt; timeouts/cancellations should retry
+                            user_stopped = ("stopped by user" in lower_msg) or (
+                                is_stop_requested() and not any(k in lower_msg for k in ("timeout", "timed out", "cancelled"))
+                            )
+                            if user_stopped:
+                                return None
+
+                            # Treat cancelled / client init errors as timeout retries
+                            is_timeout = ("timed out" in lower_msg) or ("timeout" in lower_msg) or ("cancelled" in lower_msg) or ("client not initialized" in lower_msg)
+                            if is_timeout and timeout_retry_count < max_timeout_retries:
+                                timeout_retry_count += 1
+                                if chunk_timeout:
+                                    print(f"⚠️ AI extraction timed out after {chunk_timeout} seconds, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                                else:
+                                    print(f"⚠️ AI extraction timed out, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+
+                                # Clear cancellation flags that timeouts may have set
+                                try:
+                                    client.reset_cleanup_state()
+                                except Exception:
+                                    pass
+                                try:
+                                    # Also clear class-level global cancellation for all clients
+                                    client.__class__.set_global_cancellation(False)
+                                except Exception:
+                                    pass
+
+                                # Reinitialize client if needed
+                                # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
+                                if not getattr(client, '_multi_key_mode', False):
+                                    client_type = getattr(client, 'client_type', 'unknown')
+                                    needs_reinit = False
+                                    if client_type == 'gemini':
+                                        needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
+                                    elif client_type == 'openai':
+                                        needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
+                                    if needs_reinit:
+                                        try:
+                                            print(f"   🔄 Reinitializing {client_type} client...")
+                                            client._setup_client()
+                                        except Exception as reinit_err:
+                                            print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
+                                # Stagger retries to avoid simultaneous API calls
+                                try:
+                                    import random
+                                    base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                                    retry_delay = random.uniform(base_delay / 2, base_delay)
+                                    print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
+                                    time.sleep(retry_delay)
+                                except Exception:
+                                    time.sleep(1.0)
+                                continue
                             else:
-                                print(f"⚠️ AI extraction timed out, retrying ({timeout_retry_count}/{max_timeout_retries})...")
+                                raise
+                    if hasattr(response, 'content'):
+                        return response.content
+                    return str(response)
 
-                            # Clear cancellation flags that timeouts may have set
-                            try:
-                                client.reset_cleanup_state()
-                            except Exception:
-                                pass
-                            try:
-                                # Also clear class-level global cancellation for all clients
-                                client.__class__.set_global_cancellation(False)
-                            except Exception:
-                                pass
-
-                            # Reinitialize client if needed
-                            # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
-                            if not getattr(client, '_multi_key_mode', False):
-                                client_type = getattr(client, 'client_type', 'unknown')
-                                needs_reinit = False
-                                if client_type == 'gemini':
-                                    needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
-                                elif client_type == 'openai':
-                                    needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
-                                if needs_reinit:
-                                    try:
-                                        print(f"   🔄 Reinitializing {client_type} client...")
-                                        client._setup_client()
-                                    except Exception as reinit_err:
-                                        print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
-                            # Stagger retries to avoid simultaneous API calls
-                            try:
-                                import random
-                                base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-                                retry_delay = random.uniform(base_delay / 2, base_delay)
-                                print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
-                                time.sleep(retry_delay)
-                            except Exception:
-                                time.sleep(1.0)
-                            continue
-                        else:
-                            raise
+                # A chunk longer than the model's context window is split and sent in pieces
+                response_texts = _send_splitting_on_context_error(_send_glossary_text, text_sample, max_tokens)
+                if response_texts is None:
+                    print(f"📑 ❌ AI extraction interrupted by user")
+                    return {}
                 api_time = time.time() - api_start
                 print(f"📑 API call completed in {api_time:.1f}s")
 
-                # Get the actual text from the response
-                if hasattr(response, 'content'):
-                    response_text = response.content
-                else:
-                    response_text = str(response)
-
-                # Before processing response
+                # Process each response and build CSV (one header, the pieces' entries in order)
                 process_start = time.time()
-                # print(f"📑 Processing AI response...")              
-                # Process response and build CSV
-                csv_lines = _process_ai_response(response_text, all_text, min_frequency, 
-                                                     strip_honorifics, fuzzy_threshold, 
-                                                     language, filter_mode)
+                csv_lines = None
+                for response_text in response_texts:
+                    part_lines = _process_ai_response(response_text, all_text, min_frequency, 
+                                                      strip_honorifics, fuzzy_threshold, 
+                                                      language, filter_mode)
+                    if csv_lines is None:
+                        csv_lines = list(part_lines)
+                    else:
+                        csv_lines.extend(line for line in part_lines if not _is_glossary_header(line))
                 
                 print(f"📑 AI extracted {len(csv_lines) - 1} valid terms (header excluded)")
 
