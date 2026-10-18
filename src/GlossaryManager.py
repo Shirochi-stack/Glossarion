@@ -4343,6 +4343,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     _FIRST_COMPLETED = None
 
                 pending = set(futures)
+                # the 0.1 s wait would print the same "Scoring... Ns elapsed" ~10x a second: once every 3 s
+                last_heartbeat = 0.0
                 while pending:
                     _check_filter_stop()
                     done = set()
@@ -4361,7 +4363,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         # No batch completed within timeout
                         elapsed = time.time() - scoring_start_time
                         _check_filter_stop()
-                        print(f"📑 Scoring... {elapsed:.0f}s elapsed")
+                        if elapsed - last_heartbeat >= 3.0:
+                            last_heartbeat = elapsed
+                            print(f"📑 Scoring... {elapsed:.0f}s elapsed")
                         continue
 
                     for future in done:
