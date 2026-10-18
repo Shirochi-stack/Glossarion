@@ -146,18 +146,16 @@ def test_builtin_on_device_glossary_profiles_are_seeded(config):
         assert profiles["balanced_full"]["Alpha"] == "alpha balanced" and profiles["minimal"]["Mini"] == "mini prompt"
 
 
-def test_on_device_glossary_prompts_keep_the_parsed_csv_format():
-    """Short prompts, but the extractors' CSV and placeholders: {fields} (Balanced/Full: expanded as CSV
-    columns because the prompt says CSV), {language}; the example row parses."""
+def test_on_device_glossary_prompts_ask_only_for_names():
+    """Very short prompts a 0.8B model follows: raw_name,translated_name,gender lines, {language} the only
+    placeholder; the example row is what both extractors read as a character."""
     import glossary_document as gd
 
-    balanced, minimal = gd.ON_DEVICE_GLOSSARY_PROMPTS["balanced_full"], gd.ON_DEVICE_GLOSSARY_PROMPTS["minimal"]
-    assert "{fields}" in balanced and "CSV" in balanced and "{language}" in balanced and "{entries}" in balanced
-    assert "type,raw_name,translated_name,gender,description" in minimal and "{language}" in minimal
-    for text, columns in ((balanced, 4), (minimal, 5)):
-        assert len(text) < 400
+    for text in gd.ON_DEVICE_GLOSSARY_PROMPTS.values():
+        assert len(text) < 300 and "raw_name,translated_name,gender" in text and "{language}" in text
+        assert "{fields}" not in text and "{entries}" not in text and "description" not in text
         example = text.strip().splitlines()[-1]
-        assert example.startswith("character,") and len(example.split(",")) == columns
+        assert example == "田中太郎,Tanaka Taro,male"
 
 
 @pytest.mark.parametrize("bucket", ["balanced_full", "minimal"])
