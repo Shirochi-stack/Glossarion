@@ -12,7 +12,7 @@ right after ``_install_chat()`` (it uses the chat feature's OAuthBridge and Chat
    chat feature's Welcome flow plus the step-2 sign-ins, the Endpoints link and the
    permission requests); every other route falls through;
 2. marks those pages implemented on the Settings home (no "Arrives in" chip) and
-   points its "Import / Export profiles" chip at Profiles;
+   points its "Move Profiles" chip at Profiles;
 3. gives the OAuthBridge the config reader (account slots named by the model and the
    key pools) and applies the saved Appearance prefs to the page;
 4. once the backend is ready (and after every sign-in / sign-out on the Accounts page)

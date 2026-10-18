@@ -59,8 +59,11 @@ log = logging.getLogger(__name__)
 
 #: Step 1 sign-ins, all equal (U11 item 1): (provider, button label).
 SIGN_INS = (("authgpt", "Sign in with ChatGPT"), ("authcd", "Sign in with Claude"),
-            ("authgem", "Sign in with Gemini"), ("authgrok", "Sign in with Grok"),
+            ("authgem", "Sign in with Vertex (Pay as you go)"), ("authgrok", "Sign in with Grok"),
             ("authnan", "Sign in with NanoGPT"), ("authds", "Sign in with DeepSeek"))
+#: sign-ins whose long label uses smaller type to fit its half row. authgem/ bills Google Cloud
+#: Vertex AI per request; it is not a Gemini subscription, so it is not labelled "Gemini".
+SMALL_LABELS = frozenset({"authgem"})
 OTHER_SIGN_INS = SIGN_INS[1:]
 #: Step 1 keyless routes (U13): (provider, button label). Their models are polled before the user picks one.
 #: ocz/ (OpenCode Zen) runs through the desktop OpenCode CLI and cannot run on a phone.
@@ -427,12 +430,16 @@ class WelcomeScreen(Screen):
             return ft.Row([ft.Text(short, theme_style=ft.TextThemeStyle.BODY_SMALL),
                            ReasonChip(reason="Sign-in unavailable in this build")], wrap=True)
         return self._cell_button(short, label, lambda e, p=provider: self.open_sign_in(p),
-                                 f"welcome-signin-{provider}")
+                                 f"welcome-signin-{provider}", small=provider in SMALL_LABELS)
 
     @staticmethod
-    def _cell_button(text: str, tooltip: str, on_click: Callable[[Any], Any], key: str) -> ft.Control:
-        """A half-row button: the provider's name only (the section title says what it does)."""
-        return ft.Row([ft.OutlinedButton(content=ft.Text(text, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+    def _cell_button(text: str, tooltip: str, on_click: Callable[[Any], Any], key: str,
+                     small: bool = False) -> ft.Control:
+        """A half-row button: the provider's name only (the section title says what it does).
+        ``small`` uses smaller type for a long name."""
+        style = ft.TextThemeStyle.LABEL_SMALL if small else None
+        return ft.Row([ft.OutlinedButton(content=ft.Text(text, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                                                         theme_style=style),
                                          tooltip=tooltip, on_click=on_click, key=key, expand=True,
                                          style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8)))])
 

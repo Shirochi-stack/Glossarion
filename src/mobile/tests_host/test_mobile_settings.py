@@ -1117,13 +1117,13 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
         assert home.banner.visible
         store.set_job_running(False)
         assert not home.banner.visible
-        # quick chips: Save now, Backup, Import / Export profiles
+        # quick chips: Save now, Backup, Move profiles
         store.set("batch_size", 30)
         assert await home._on_save_now() is True and notes[-1] == "Settings saved"
         assert await home._on_save_now() is False and notes[-1] == "No unsaved changes"
         backup = await home._on_backup()
         assert backup and Path(backup).exists() and notes[-1].startswith("Backup created: config_")
-        assert home._on_profiles().title == "Import / Export profiles"
+        assert home._on_profiles().title == "Move Profiles"
         # the search field swaps the list for results
         home.search.set_query("temperature")
         assert "temperature" in home.search.result_rows and home.content.controls is home.search.results.controls

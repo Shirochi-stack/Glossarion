@@ -2,7 +2,7 @@
 
 Top to bottom: search field ("Search settings") with the filter chips
 Modified · Locked · Unavailable on mobile; quick-action chips Save now ·
-Backup · Import / Export profiles; notices (job running → "Changes apply to
+Backup · Move Profiles; notices (job running → "Changes apply to
 the next run", API keys that could not be decrypted, config.json problems,
 missing schema); then the grouped section list. Groups follow the spec order
 (General, Translation, Models & keys, Glossary, QA, Manga, Reader & Library,
@@ -159,7 +159,7 @@ class SettingsHome(HubScreen):
         )
         self.save_chip = chip("Save now", "SAVE_OUTLINED", self._on_save_now, "settings-quick-save")
         self.backup_chip = chip("Backup", "SETTINGS_BACKUP_RESTORE", self._on_backup, "settings-quick-backup")
-        self.profiles_chip = chip("Import / Export profiles", "SWAP_VERT", self._on_profiles, "settings-quick-profiles")
+        self.profiles_chip = chip("Move Profiles", "SWAP_VERT", self._on_profiles, "settings-quick-profiles")
         self.quick_row = ft.Row([self.save_chip, self.backup_chip, self.profiles_chip], spacing=6, scroll=ft.ScrollMode.AUTO)
         self.notices = ft.Column(self._notice_controls(), spacing=6, tight=True)
         self.content = ft.ListView(expand=True, spacing=tokens.SPACING["md"],
@@ -424,7 +424,7 @@ class SettingsHome(HubScreen):
     def _on_profiles(self, e: Any = None) -> Any:
         if "settings.profiles" in self.implemented:
             return self.ctx.go("settings.profiles")
-        sheet = InfoSheet(title="Import / Export profiles", body=_PROFILES_DETAIL)
+        sheet = InfoSheet(title="Move Profiles", body=_PROFILES_DETAIL)
         if self.ctx.page is not None:
             sheet.show(self.ctx.page)
         return sheet
