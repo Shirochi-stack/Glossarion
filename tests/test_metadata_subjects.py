@@ -374,6 +374,44 @@ def test_incomplete_subject_array_response_is_rejected():
     assert parsed == {}
 
 
+# owner 2026-10-18: a 0.8B on-device model answered with the fence inline and raw line breaks
+# inside strings; the old parser dropped the whole first line and failed at char 0.
+SMALL_MODEL_RESPONSE = (
+    '```json{ "description": "A female android who was adopted by a soldier and became a girl. '
+    "The world was turned into a battlefield by the Emperor's ambition\n"
+    ', and I am the hero who fought it.", "subject": [ "SF", "하렘", "현대판타지", "TS", "게임", '
+    '"인터넷방송", "착각", "집착", "먼치킨", "백\n'
+    '합" ], "title": "[TS]나 혼자 메카닉 천재 소녀"}```'
+)
+
+
+def test_small_model_inline_fence_and_raw_line_breaks_parse():
+    translator = MetadataTranslator(object(), {"output_language": "English"})
+    parsed = translator._parse_metadata_response(
+        SMALL_MODEL_RESPONSE, {"description": "x", "subject": SUBJECTS, "title": "y"}
+    )
+    assert sorted(parsed) == ["description", "subject", "title"]
+    assert parsed["description"].startswith("A female android")
+    assert parsed["subject"][-1] == "백합"  # a tag broken across lines is joined
+    assert parsed["title"] == "[TS]나 혼자 메카닉 천재 소녀"
+
+
+@pytest.mark.parametrize("response", [
+    '```json\n{"title": "A"}\n```',
+    '```\n{"title": "A"}',                      # the fence never closed
+    'Here it is:\n{"title": "A",}\nHope this helps',  # chatter and a trailing comma
+    '{"title": "A"}',
+])
+def test_loosely_wrapped_metadata_objects_parse(response):
+    translator = MetadataTranslator(object(), {"output_language": "English"})
+    assert translator._parse_metadata_response(response, {"title": "x"}) == {"title": "A"}
+
+
+def test_loosely_wrapped_metadata_arrays_parse():
+    translator = MetadataTranslator(object(), {"output_language": "English"})
+    assert translator._parse_list_translation_response('```json["a", "b",]```', ["x", "y"]) == ["a", "b"]
+
+
 def test_metadata_send_normalizes_user_cancellation_without_exception_chain(monkeypatch):
     import TransateKRtoEN
 

@@ -3823,24 +3823,39 @@ class MetadataTranslator:
             return None
     
     @staticmethod
-    def _strip_json_code_fence(response: str) -> str:
-        response = str(response).strip()
-        if not response.startswith("```"):
-            return response
+    def _strip_json_code_fence(response: str, opener: str = "{") -> str:
+        """The JSON object (``opener`` "{") or array ("[") inside a model response.
 
-        lines = response.splitlines()
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        return "\n".join(lines).strip()
+        Small models wrap it loosely (owner 2026-10-18, a 0.8B model answered ```json{ ... }``` on one
+        line), so the fence is found anywhere, inline or on its own lines, closed or not, and the text is
+        cut from the first ``opener`` to the last matching bracket, dropping any chatter around it."""
+        text = str(response or "").strip()
+        fence = re.search(r"```[ \t]*(?:json|JSON)?\s*(.*?)\s*```", text, re.DOTALL)
+        if fence:
+            text = fence.group(1).strip()
+        elif text.startswith("```"):  # an opening fence that never closed
+            text = re.sub(r"^```[ \t]*(?:json|JSON)?", "", text).strip()
+        closer = "}" if opener == "{" else "]"
+        start, end = text.find(opener), text.rfind(closer)
+        if start != -1 and end > start:
+            text = text[start:end + 1]
+        return text
+
+    @staticmethod
+    def _loads_lenient_json(text: str) -> Any:
+        """``json.loads`` that accepts raw line breaks inside strings (``strict=False``) and, failing that,
+        trailing commas before a closing bracket - both common in small-model output."""
+        try:
+            return json.loads(text, strict=False)
+        except ValueError:
+            return json.loads(re.sub(r",\s*([}\]])", r"\1", text), strict=False)
 
     def _parse_list_translation_response(
         self, response: str, original_values: List[Any]
     ) -> Optional[List[str]]:
         """Parse a translated JSON array without allowing subject loss."""
         try:
-            parsed = json.loads(self._strip_json_code_fence(response))
+            parsed = self._loads_lenient_json(self._strip_json_code_fence(response, "["))
         except (TypeError, ValueError, json.JSONDecodeError) as e:
             self._print(f"Error parsing metadata array response: {e}")
             return None
@@ -3859,7 +3874,9 @@ class MetadataTranslator:
     def _parse_metadata_response(self, response: str, original_fields: Dict[str, Any]) -> Dict[str, Any]:
         """Parse metadata response"""
         try:
-            parsed = json.loads(self._strip_json_code_fence(response))
+            parsed = self._loads_lenient_json(self._strip_json_code_fence(response, "{"))
+            if not isinstance(parsed, dict):
+                raise ValueError("expected a JSON object")
             
             result = {}
             for field, value in parsed.items():
@@ -3872,7 +3889,8 @@ class MetadataTranslator:
                                 f"with {len(original_value)} items"
                             )
                             continue
-                        translated_values = [str(item).strip() for item in value]
+                        # a small model may break a short tag across lines ("백\n합")
+                        translated_values = [re.sub(r"\s*\n\s*", "", str(item)).strip() for item in value]
                         if all(translated_values):
                             result[field] = translated_values
                     else:
