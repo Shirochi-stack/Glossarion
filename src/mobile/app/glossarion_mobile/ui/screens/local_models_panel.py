@@ -734,8 +734,8 @@ class LocalModelsPanel(OnDeviceFlow):
                                       theme_style=ft.TextThemeStyle.BODY_SMALL)
         return [
             ft.Text("Sampling (on-device models only)", weight=ft.FontWeight.W_600, key="local-sampling-title"),
-            _small("Qwen's recommended values reduce repetition loops. These replace the main Temperature and "
-                   "anti-duplicate settings for on-device models; cloud models keep using those."),
+            _small("Qwen's recommended values reduce repetition loops. These replace the anti-duplicate "
+                   "settings for on-device models; cloud models keep using those."),
             ft.Row(list(self.sampling_fields.values()), wrap=True, spacing=8, run_spacing=8, key="local-sampling"),
             ft.Row([ft.TextButton(content="Save", key="local-sampling-save", on_click=lambda e: self.save_sampling()),
                     ft.TextButton(content="Qwen defaults", key="local-sampling-reset",

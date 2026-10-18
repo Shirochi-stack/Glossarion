@@ -53,19 +53,20 @@ __all__ = ["EngineSnapshot", "LocalEngineService", "default_service", "model_blo
 URL_ENV = "GLOSSARION_LOCAL_LLM_URL"
 SETTINGS_KEY = "local_llm_settings"
 #: Prefs key of the on-device sampling settings (Model manager > On-device > engine card). They replace
-#: the request's temperature / top_p / top_k / min_p / penalties for every on-device request, so the
-#: global Temperature and anti-duplicate settings keep applying to cloud models only.
+#: the request's top_p / top_k / min_p / penalties for every on-device request, so the global
+#: anti-duplicate settings keep applying to cloud models only; the temperature stays the request's.
 SAMPLING_KEY = "local_llm_sampling"
-#: Qwen's recommended non-thinking sampling for its small models (owner 2026-10-18: 0.3 and no penalty
-#: let a 0.8B model loop on "<p><br/>"); presence_penalty 1.5 counters endless repetition.
-DEFAULT_ONDEVICE_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
-                             "presence_penalty": 1.5, "repeat_penalty": 1.0}
+#: Qwen's recommended non-thinking sampling for its small models (owner 2026-10-18: no penalty let a 0.8B
+#: model loop on "<p><br/>"); presence_penalty 1.5 counters endless repetition. The temperature is the
+#: global one (Welcome defaults it to Qwen's 0.7).
+DEFAULT_ONDEVICE_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5,
+                             "repeat_penalty": 1.0}
 #: (low, high, type) of each sampling setting
-SAMPLING_LIMITS = {"temperature": (0.0, 2.0, float), "top_p": (0.0, 1.0, float), "top_k": (0, 200, int),
+SAMPLING_LIMITS = {"top_p": (0.0, 1.0, float), "top_k": (0, 200, int),
                    "min_p": (0.0, 1.0, float), "presence_penalty": (-2.0, 2.0, float),
                    "repeat_penalty": (0.5, 2.0, float)}
 #: field labels (Model manager) and error messages
-SAMPLING_LABELS = {"temperature": "Temperature", "top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
+SAMPLING_LABELS = {"top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
                    "presence_penalty": "Presence penalty", "repeat_penalty": "Repeat penalty"}
 MAX_WAITERS = 8
 IDLE_UNLOAD = 600.0
@@ -822,10 +823,11 @@ class LocalEngineService:
         except (TypeError, ValueError):
             wanted = 0
         params: dict = {"max_tokens": max(1, min(wanted, room) if wanted > 0 else room)}
-        if body.get("seed") is not None:
-            params["seed"] = body["seed"]
-        # the on-device sampling settings, never the request's (the global temperature / anti-duplicate
-        # values are for cloud models)
+        for key in ("temperature", "seed"):
+            if body.get(key) is not None:
+                params[key] = body[key]
+        # the on-device sampling settings, never the request's (the global anti-duplicate values are for
+        # cloud models)
         params.update(self.sampling())
         stop = body.get("stop")
         if isinstance(stop, str):

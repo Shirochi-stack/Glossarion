@@ -77,6 +77,9 @@ BATCH_SLIDER = (1, 50)
 #: desktop defaults when nothing is saved (``delay`` 5.0 s, ``translation_temperature`` 0.3)
 DEFAULT_DELAY = 5.0
 DEFAULT_TEMPERATURE = 0.3
+#: the temperature for an on-device model (Qwen's recommendation for its small models; owner 2026-10-18:
+#: only on-device models get it, cloud models keep the saved / desktop default)
+ONDEVICE_TEMPERATURE = 0.7
 RATE_LIMIT_WARNING = ("Higher batch sizes send more requests at once and lower delays send them faster: respect your "
                       "provider's rate limits. authds/ (DeepSeek) and authchatgpt/ (ChatGPT) run on the sites' "
                       "own web chat; keep them at batch size 1 with a delay, or the site may limit or block you.")
@@ -602,6 +605,19 @@ class WelcomeScreen(Screen):
         model = str(self.current_model() if self.current_model is not None else "") or DEFAULT_MODEL
         return default_batch_size(model)
 
+    def shown_temperature(self) -> float:
+        """The temperature Request size shows: the one set here, else 0.7 for an on-device model, else the
+        saved one, else the desktop default 0.3."""
+        if self.flow.temperature is not None:
+            return float(self.flow.temperature)
+        model = str(self.current_model() if self.current_model is not None else "") or ""
+        if model.lower().startswith("local/"):
+            return ONDEVICE_TEMPERATURE
+        try:
+            return float(self._saved("translation_temperature", DEFAULT_TEMPERATURE))
+        except (TypeError, ValueError):
+            return DEFAULT_TEMPERATURE
+
     def _request_pacing(self) -> ft.Control:
         """The API call delay, the temperature and Disable temperature (one row, above the batch size)."""
         def number(value: Any, default: float) -> float:
@@ -612,8 +628,7 @@ class WelcomeScreen(Screen):
 
         delay = self.flow.delay if self.flow.delay is not None else number(self._saved("delay", DEFAULT_DELAY),
                                                                            DEFAULT_DELAY)
-        temperature = (self.flow.temperature if self.flow.temperature is not None
-                       else number(self._saved("translation_temperature", DEFAULT_TEMPERATURE), DEFAULT_TEMPERATURE))
+        temperature = self.shown_temperature()
         disabled = (self.flow.disable_temperature if self.flow.disable_temperature is not None
                     else bool(self._saved("disable_temperature", False)))
         delay_field = ft.TextField(label="API call delay (s)", value=f"{delay:g}", dense=True, width=150,
@@ -886,6 +901,8 @@ class WelcomeScreen(Screen):
             self.flow.batch_size = self.default_batch_size()
         if self.flow.max_output_tokens is None or self.local_context() is not None:
             self.flow.max_output_tokens = self.shown_max_output_tokens()
+        if self.flow.temperature is None:
+            self.flow.temperature = self.shown_temperature()
         updates = self.flow.finish_updates()
         if self.on_finish is not None:
             self.on_finish(updates)

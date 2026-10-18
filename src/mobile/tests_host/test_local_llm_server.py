@@ -100,8 +100,7 @@ def test_openai_sdk_plain_and_streaming(running):
                                             temperature=0.1, max_tokens=50)
     assert answer.choices[0].message.content == "Echo: hi there" and answer.model == "local/fake-echo"
     assert answer.usage.completion_tokens == 3 and answer.usage.prompt_tokens > 0
-    # on-device sampling replaces the request's temperature (owner 2026-10-18: Qwen's 0.7, not the request's 0.1)
-    assert engine.calls[-1]["params"]["temperature"] == 0.7 and engine.calls[-1]["params"]["max_tokens"] == 50
+    assert engine.calls[-1]["params"]["temperature"] == 0.1 and engine.calls[-1]["params"]["max_tokens"] == 50
     chunks = list(client.chat.completions.create(model="FAKE-ECHO", stream=True,
                                                  messages=[{"role": "user", "content": "a b c"}]))
     text = "".join(c.choices[0].delta.content or "" for c in chunks if c.choices)

@@ -177,26 +177,25 @@ def test_welcome_finish_saves_the_request_size_it_showed(tmp_path):
     assert updates["batch_size"] == 3 and updates["max_output_tokens"] == 8192
 
 def test_on_device_sampling_follows_qwen_and_replaces_the_request(tmp_path):
-    """owner 2026-10-18: on-device requests use their own sampling (Qwen's recommendation: temperature 0.7,
-    presence penalty 1.5 ...) instead of the global temperature / anti-duplicate values."""
+    """owner 2026-10-18: on-device requests use their own sampling (Qwen's recommendation: presence penalty
+    1.5 ...) instead of the global anti-duplicate values; the temperature stays the request's."""
     service, _engine = _service(tmp_path)
-    assert service.sampling() == svc.DEFAULT_ONDEVICE_SAMPLING
-    assert svc.DEFAULT_ONDEVICE_SAMPLING["temperature"] == 0.7 and svc.DEFAULT_ONDEVICE_SAMPLING["presence_penalty"] == 1.5
-    params = service._params({"temperature": 0.3, "presence_penalty": 0.0, "frequency_penalty": 0.4, "seed": 7,
+    assert service.sampling() == svc.DEFAULT_ONDEVICE_SAMPLING and "temperature" not in service.sampling()
+    assert svc.DEFAULT_ONDEVICE_SAMPLING["presence_penalty"] == 1.5
+    params = service._params({"temperature": 0.7, "presence_penalty": 0.0, "frequency_penalty": 0.4, "seed": 7,
                               "max_tokens": 100}, 4096)
     assert params["temperature"] == 0.7 and params["presence_penalty"] == 1.5 and params["repeat_penalty"] == 1.0
     assert params["top_p"] == 0.8 and params["top_k"] == 20 and params["min_p"] == 0.0
     assert "frequency_penalty" not in params and params["seed"] == 7 and params["max_tokens"] == 100
 
-    saved, error = service.save_sampling({"temperature": "0.9", "top_k": "40", "presence_penalty": "",
-                                          "repeat_penalty": "1.1"})
-    assert error is None and saved["temperature"] == 0.9 and saved["top_k"] == 40
+    saved, error = service.save_sampling({"top_k": "40", "presence_penalty": "", "repeat_penalty": "1.1"})
+    assert error is None and saved["top_k"] == 40
     assert saved["presence_penalty"] == 1.5 and saved["repeat_penalty"] == 1.1  # blank -> Qwen's value
-    assert service._params({}, 512)["temperature"] == 0.9
-    assert service.save_sampling({"temperature": "3"})[1] == "Temperature must be between 0 and 2"
+    assert service._params({}, 512)["top_k"] == 40
+    assert service.save_sampling({"min_p": "3"})[1] == "Min P must be between 0 and 1"
     assert service.save_sampling({"top_k": "2.5"})[1] == "Top K must be a whole number"
     assert service.save_sampling({"top_p": "abc"})[1] == "Top P must be a number"
-    assert service.sampling()["temperature"] == 0.9  # a rejected save changes nothing
+    assert service.sampling()["top_k"] == 40  # a rejected save changes nothing
 
 
 def test_on_device_engine_card_saves_and_resets_sampling(tmp_path):
@@ -205,11 +204,33 @@ def test_on_device_engine_card_saves_and_resets_sampling(tmp_path):
     service, _engine = _service(tmp_path)
     panel = LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: f"local/{LIGHT}")
     panel.build()
-    assert panel.sampling_fields["temperature"].value == "0.7" and panel.sampling_fields["presence_penalty"].value == "1.5"
-    panel.sampling_fields["temperature"].value = "0.5"
-    assert panel.save_sampling() is None and service.sampling()["temperature"] == 0.5
+    assert "temperature" not in panel.sampling_fields and panel.sampling_fields["presence_penalty"].value == "1.5"
+    panel.sampling_fields["presence_penalty"].value = "1.2"
+    assert panel.save_sampling() is None and service.sampling()["presence_penalty"] == 1.2
     panel.sampling_fields["min_p"].value = "9"
     assert panel.save_sampling() and panel.sampling_error.visible
     assert panel.reset_sampling() is None and service.sampling() == svc.DEFAULT_ONDEVICE_SAMPLING
-    assert panel.sampling_fields["temperature"].value == "0.7"
+    assert panel.sampling_fields["presence_penalty"].value == "1.5"
     panel.dispose()
+
+def test_welcome_temperature_is_0_7_only_for_an_on_device_model(tmp_path):
+    """owner 2026-10-18: an on-device model gets temperature 0.7; cloud models keep the saved one / 0.3."""
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.screens.welcome import WelcomeScreen
+
+    def welcome(saved, model):
+        s = WelcomeScreen(parse_route("/welcome"), oauth=object(), navigate=lambda r: None,
+                          current_model=lambda: model, config_get=lambda key, default=None: saved.get(key, default))
+        s.get_body()
+        return s
+
+    for saved in ({}, {"translation_temperature": 0.3}, {"translation_temperature": 1.1}):
+        s = welcome(saved, f"local/{LIGHT}")
+        assert s.shown_temperature() == 0.7 and s.finish()["translation_temperature"] == 0.7
+    s = welcome({}, "gpt-6")
+    assert s.shown_temperature() == 0.3 and s.finish()["translation_temperature"] == 0.3
+    s = welcome({"translation_temperature": 1.1}, "gpt-6")
+    assert s.shown_temperature() == 1.1 and s.finish()["translation_temperature"] == 1.1
+    s = welcome({}, f"local/{LIGHT}")
+    s.flow.temperature = 0.2  # a value set in Welcome wins
+    assert s.finish()["translation_temperature"] == 0.2
