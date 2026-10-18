@@ -641,8 +641,20 @@ def test_series_feature_end_to_end(tmp_path):
     picker._pick(None)
     assert S.chat_series_id(chats, "2", feature.store) is None and chats.overrides("2") == {}
     # ＋ New chat in series: a new chat, in the series, opened
+    # (the last-used model / profile seed gives way to the series' own model)
+    plain_new_chat = chats.new_chat
+
+    def seeded_new_chat():  # ChatStoreAdapter.new_chat seeds the last-used values as the chat's own
+        new_cid = plain_new_chat()
+        chats.set_override(new_cid, "model", "last-model")
+        chats.set_override(new_cid, "profile", "last-profile")
+        return new_cid
+
+    chats.new_chat = seeded_new_chat
     cid = feature.new_chat_in_series(saga.id)
+    chats.new_chat = plain_new_chat
     assert S.chat_series_id(chats, cid, feature.store) == saga.id and app.opened[-1] == cid
+    assert chats.overrides(cid) == {"model": "series-model", "profile": "last-profile"}
     # Library: Add to Series links books; the filter reads them back
     sheet = feature.add_books_sheet(["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
     sheet._pick(saga.id)

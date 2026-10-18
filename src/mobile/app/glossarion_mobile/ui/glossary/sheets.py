@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui.components._handlers import call_handler
+from glossarion_mobile.ui.components.sheet import fits_compact
 from glossarion_mobile.ui.glossary.common import SheetHost, sheet
 from glossarion_mobile.ui.theme import number_keyboard
 
@@ -281,15 +282,27 @@ class ModeSheet:
 
 
 class PlanGlossarySheet:
-    """What a translation will use (the desktop main-window glossary row) for the chat Plan / Library."""
+    """What a translation will use (the desktop main-window glossary row) for the chat Plan / Library.
+
+    "Glossary prompt profile": the profiles of the bucket the run extracts with (``prompt_bucket``:
+    "balanced_full" / "minimal"; None = the mode sends no AI extraction prompt, a note instead). Like the
+    mode row it writes the global setting (``GlossaryService.select_prompt_profile``); ``chat_profile``
+    is the chat's own profile of that bucket (Chat settings, This chat), which its runs use instead.
+
+    The sheet is only as tall as its rows: the body scrolls only when its estimated height does not fit the
+    page (``components.sheet.fits_compact``)."""
 
     def __init__(self, ctx: Any, *, book: Optional[Mapping[str, Any]] = None, on_load_file: Callable[[], Any],
                  on_use_book: Optional[Callable[[], Any]] = None, on_clear: Callable[[], Any],
                  on_review: Optional[Callable[[], Any]] = None, on_mode: Callable[[], Any],
                  effective: str = "", on_map: Optional[Callable[[], Any]] = None,
-                 on_settings: Optional[Callable[[], Any]] = None) -> None:
+                 on_settings: Optional[Callable[[], Any]] = None, prompt_bucket: Optional[str] = None,
+                 chat_profile: Optional[str] = None,
+                 on_profile_changed: Optional[Callable[[], Any]] = None) -> None:
         self.ctx = ctx
         self.host = SheetHost(ctx)
+        self.prompt_bucket = prompt_bucket
+        self.on_profile_changed = on_profile_changed
         service = ctx.service
         loaded = str(service.cfg("manual_glossary_path", "") or "")
         self.mode_tile = ft.ListTile(leading=ft.Icon(ft.Icons.RULE), title=ft.Text(f"Glossary mode: {service.mode_label()}"),
@@ -298,8 +311,10 @@ class PlanGlossarySheet:
                                      on_click=lambda e: self._run(on_mode))
         self.loaded_text = ft.Text(f"Loaded: {os.path.basename(loaded)}" if loaded else "No glossary loaded (auto-mapping "
                                    "picks the book glossary)", theme_style=ft.TextThemeStyle.BODY_SMALL, key="pg-loaded")
+        self.profile_row = self._profile_row(prompt_bucket, chat_profile)
         tiles = [
             self.mode_tile,
+            self.profile_row,
             self.loaded_text,
             ft.ListTile(leading=ft.Icon(ft.Icons.FILE_OPEN), title=ft.Text("Load file…"), key="pg-load",
                         on_click=lambda e: self._run(on_load_file)),
@@ -317,14 +332,80 @@ class PlanGlossarySheet:
         if on_settings is not None:
             tiles.append(ft.TextButton(content="Change glossary mode settings", icon=ft.Icons.SETTINGS,
                                        on_click=lambda e: self._run(on_settings), key="pg-settings"))
-        title = "Glossary" + (f" · {book.get('name')}" if book else "")
-        self.dialog = sheet(title, tiles, actions=[ft.TextButton(content="Done", on_click=lambda e: self.host.close())],
+        self.title = "Glossary" + (f" · {book.get('name')}" if book else "")
+        self.tiles = tiles
+        self.dialog = sheet(self.title, tiles, actions=[ft.TextButton(content="Done", on_click=lambda e: self.host.close())],
                             key="pg-sheet")
+        self.body = self.dialog.content.content.content  # SafeArea > Container > the sheet's Column
+
+    # ---- glossary prompt profile -------------------------------------------------------------------
+
+    def _default_text(self, bucket: str) -> str:
+        schema = getattr(getattr(self.ctx, "settings", None), "schema", None)
+        try:
+            key = self.ctx.service.gd().glossary_prompt_profile_meta(bucket)["config_key"]
+            return str(schema.effective_default(key) or "") if schema is not None else ""
+        except Exception:
+            return ""
+
+    def _profile_row(self, bucket: Optional[str], chat_profile: Optional[str]) -> ft.Control:
+        note = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
+                       key="pg-profile-note")
+        self.profile_dropdown: Optional[ft.Dropdown] = None
+        choice = None
+        if bucket is None:
+            note.value = "Glossary prompt profile: not used - this glossary mode sends no AI extraction prompt."
+        else:
+            try:
+                choice = self.ctx.service.prompt_profile_choice(bucket, default_text=self._default_text(bucket))
+            except Exception as exc:
+                note.value = f"Glossary prompt profiles need {getattr(exc, 'name', None) or 'the glossary core'}"
+        if choice is None:
+            return note
+        from glossarion_mobile.services.glossary import PROFILE_BUCKETS
+
+        names, selected = choice
+        self.profile_dropdown = ft.Dropdown(
+            label="Glossary prompt profile", value=selected, dense=True, expand=True, key="pg-profile",
+            options=[ft.DropdownOption(key=name, text=name) for name in names],
+            on_select=lambda e: self.select_profile(e.control.value))
+        note.value = PROFILE_BUCKETS.get(bucket, bucket) + (
+            f" · this chat uses “{chat_profile}” (Chat settings)" if chat_profile else " · all chats")
+        return ft.Column([ft.Row([self.profile_dropdown]), note], spacing=2, tight=True, key="pg-profile-row")
+
+    def select_profile(self, name: Any) -> Optional[str]:
+        """The dropdown: ``name`` becomes the bucket's profile for every run (Settings › Glossary)."""
+        if not self.prompt_bucket or not name:
+            return None
+        text = self.ctx.service.select_prompt_profile(self.prompt_bucket, str(name),
+                                                      default_text=self._default_text(self.prompt_bucket))
+        if text is not None:
+            call_handler(self.on_profile_changed)
+        return text
+
+    # ---- presentation ------------------------------------------------------------------------------
 
     def _run(self, handler: Optional[Callable[[], Any]]) -> Any:
         self.host.close()
         return call_handler(handler)
 
+    def estimated_height(self) -> float:
+        """Estimate (dp) with room for somewhat larger text, like ``ModeOptionsSheet.estimated_height``: title,
+        64 dp per row (+28 for a subtitle), the profile dropdown with its note, Done, spacing and padding."""
+        total = 56.0 + 48.0 + 36.0  # title, Done, bottom padding
+        for tile in self.tiles:
+            if isinstance(tile, ft.ListTile):
+                total += 64.0 + (28.0 if tile.subtitle is not None else 0.0)
+            elif tile is self.profile_row and self.profile_dropdown is not None:
+                total += 96.0
+            else:  # a note line, the settings button
+                total += 44.0
+        return total + 10.0 * (len(self.tiles) + 1)  # the column spacing
+
     def show(self, page: Any = None) -> "PlanGlossarySheet":
+        page = page if page is not None else getattr(self.ctx, "page", None)
+        # Owner: a scrolling body takes the whole screen height (empty space under Done); the rows fit
+        # most phones, so the body scrolls only when they would not (a small phone, the batch rows).
+        self.body.scroll = None if fits_compact(page, self.estimated_height()) else ft.ScrollMode.AUTO
         self.host.open(self.dialog)
         return self

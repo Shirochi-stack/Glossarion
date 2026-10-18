@@ -49,6 +49,7 @@ from glossarion_mobile.state.chat_store_adapter import (  # noqa: E402
     SIDECAR_NAME,
     ChatStoreAdapter,
     ChatStoreBinding,
+    MobileChatSidecar,
     message_fingerprints,
     message_id,
 )
@@ -2152,6 +2153,59 @@ def test_approval_card_always_accept_sets_pref_and_answers_yes(desktop_store_cls
             _finish_all(runs)
         finally:
             _close(chat)
+
+    asyncio.run(scenario())
+
+
+def test_new_chat_starts_on_the_last_used_model_and_profile(desktop_store_cls, tmp_path):
+    """Owner: a new chat starts on the model and prompt profile picked last (a chat's own or All chats), not
+    the All-chats values; the chats that exist keep theirs (U13), a later All-chats change wins for the next
+    new chat, and a deleted profile falls back to the inherited one."""
+    names = ["Universal", "My KR style"]
+
+    async def scenario():
+        chat = _chat_view(desktop_store_cls, tmp_path, cid="2", profiles=lambda: list(names))
+        view, adapter, store = chat.view, chat.adapter, chat.store
+        try:
+            await _settle(chat.calls)
+            store.set_many({"model": "gpt-6", "active_profile": "Universal"})
+            view.open_model_sheet("model").select("model", "gpt-own")  # the chat header: this chat only
+            view.open_chat_settings().set_value("profile", "My KR style")  # Chat settings › This chat
+            assert store.get("model") == "gpt-6" and store.get("active_profile") == "Universal"
+            view._on_new_chat()
+            first = adapter.current_cid()
+            assert first != "2"
+            assert adapter.own_overrides(first) == {"model": "gpt-own", "profile": "My KR style"}
+            context = view.chat_context_for(first)
+            assert (context.model, context.profile) == ("gpt-own", "My KR style")
+            assert adapter.own_overrides("2") == {"model": "gpt-own", "profile": "My KR style"}
+            # a global pick afterwards is the latest choice: the next new chat inherits it
+            view.open_model_sheet("model", global_scope=True).select("model", "gpt-7")
+            assert adapter.own_overrides(first)["model"] == "gpt-own"  # existing chats keep their model
+            adapter.set_draft(first, "something")
+            view._on_new_chat()
+            second = adapter.current_cid()
+            assert second not in ("2", first) and adapter.own_overrides(second) == {"profile": "My KR style"}
+            assert view.chat_context_for(second).model == "gpt-7"
+            # the remembered profile was deleted: the new chat inherits the All-chats profile
+            names.remove("My KR style")
+            view.open_model_sheet("model").select("model", "gpt-mine")
+            adapter.set_draft(second, "something")
+            view._on_new_chat()
+            third = adapter.current_cid()
+            assert adapter.own_overrides(third) == {"model": "gpt-mine"}
+            assert view.chat_context_for(third).profile == "Universal"
+            # an All-chats change from any other writer (Welcome, Jobs…) also beats the earlier pick
+            store.set_many({"model": "gpt-8"})
+            adapter.set_draft(third, "something")
+            view._on_new_chat()
+            assert adapter.own_overrides(adapter.current_cid()) == {}
+            # the remembered values survive a restart (sidecar)
+            reloaded = MobileChatSidecar(adapter.sidecar_path)
+        finally:
+            _close(chat)
+        reloaded.load()
+        assert reloaded.data["last_used"]["model"] == {"value": "gpt-mine", "global": "gpt-7"}
 
     asyncio.run(scenario())
 
