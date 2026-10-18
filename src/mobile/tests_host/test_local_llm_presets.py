@@ -16,12 +16,12 @@ from glossarion_mobile.services.local_llm import presets
 def test_defaults_are_the_four_verified_qwen35_ggufs():
     rows = presets.load_presets(FakePrefs())
     assert [(r["name"], r["repo"], r["file"], r["size"], r["sha256"]) for r in rows] == [
-        ("Garbage", "unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-Q4_K_M.gguf", 532517120,
-         "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"),
-        ("Light", "unsloth/Qwen3.5-2B-GGUF", "Qwen3.5-2B-Q4_K_M.gguf", 1280835840,
-         "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-        ("Medium", "unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-Q4_K_M.gguf", 2740937888,
-         "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+        ("Garbage", "unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-UD-Q4_K_XL.gguf", 558772480,
+         "3177ebd67afe4438374da19e690bc1b98756f7e0fea9240e1be404336156a7b5"),
+        ("Light", "unsloth/Qwen3.5-2B-GGUF", "Qwen3.5-2B-UD-Q4_K_XL.gguf", 1339752704,
+         "0af96165ea615bea39a04118d63f0b6d35908aea850ee4a51aa6151d851b8b35"),
+        ("Medium", "unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-UD-Q4_K_XL.gguf", 2912109728,
+         "b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7"),
         ("Heavy", "unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q4_K_M.gguf", 5680522464,
          "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
     ]
@@ -57,7 +57,7 @@ def test_legacy_ollama_presets_migrate_once_keeping_user_names():
     prefs = FakePrefs({presets.LEGACY_PREF_KEY: legacy})
     rows = presets.load_presets(prefs)
     assert [r["name"] for r in rows] == ["Trash", "Mine", "Gemma"]
-    assert rows[0]["file"] == "Qwen3.5-0.8B-Q4_K_M.gguf" and rows[0]["note"].startswith("Qwen3.5 0.8B · fastest")
+    assert rows[0]["file"] == "Qwen3.5-0.8B-UD-Q4_K_XL.gguf" and rows[0]["note"].startswith("Qwen3.5 0.8B · fastest")
     assert rows[0]["note"].endswith("~1 GB RAM")  # the old default note became the new one
     assert rows[1]["repo"] == "unsloth/Qwen3.5-4B-GGUF" and rows[1]["note"] == "my own note"
     assert rows[1]["sha256"] == presets.DEFAULT_PRESETS[2]["sha256"]

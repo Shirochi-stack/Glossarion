@@ -37,7 +37,7 @@ from glossarion_mobile.state.app_state import AppState  # noqa: E402
 from glossarion_mobile.ui import tokens  # noqa: E402
 from glossarion_mobile.ui.responsive import drawer_width  # noqa: E402
 from glossarion_mobile.ui.router import parse_route  # noqa: E402
-from glossarion_mobile.ui.screens.welcome import KEYLESS, ONDEVICE_LABELS, SIGN_INS, WelcomeScreen  # noqa: E402
+from glossarion_mobile.ui.screens.welcome import KEYLESS, ONDEVICE_LABELS, SIGN_INS, SMALL_LABELS, WelcomeScreen  # noqa: E402
 from glossarion_mobile.ui.screens.welcome_flow import STEPS, WelcomeFlow  # noqa: E402
 from glossarion_mobile.ui.shell import drawer as drawer_mod  # noqa: E402
 from glossarion_mobile.ui.shell.drawer import DESTINATIONS, ChatDrawer  # noqa: E402
@@ -176,9 +176,10 @@ def test_page_one_fits_the_phone_without_scrolling(width, with_engine, tmp_path)
     assert height <= budget, (width, height, budget)
     # the cells are half the row: the longest short label fits its button (8 dp padding each side)
     cell = (content_w - 8) / 2
-    for _provider, label in SIGN_INS + KEYLESS:
+    for provider, label in SIGN_INS + KEYLESS:
         short = label.replace("Sign in with ", "")
-        assert text_width(short, tokens.TYPE_SCALE["label_large"].size) + 16 + 2 <= cell, (short, cell)
+        size = tokens.TYPE_SCALE["label_small" if provider in SMALL_LABELS else "label_large"].size
+        assert text_width(short, size) + 16 + 2 <= cell, (short, cell)
     # the on-device cells are a quarter of the row: name and size line fit (6 dp padding each side)
     quarter = (content_w - 3 * 6) / 4 - 12
     if with_engine:
@@ -275,9 +276,9 @@ def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path)
                                   "welcome-ondevice-heavy")}
     lines = {k: [t.value for t in c.content.controls if isinstance(t, ft.Text)] for k, c in cells.items()}
     # model + its image support; the engine's RAM gate on a 6 GB phone with 3 GB free
-    assert lines["welcome-ondevice-garbage"] == ["Garbage", "738 MB ✓"]
-    assert lines["welcome-ondevice-light"] == ["Light ⭐", "1.9 GB ✓"]
-    assert lines["welcome-ondevice-medium"] == ["Medium", "3.4 GB ⚠"]
+    assert lines["welcome-ondevice-garbage"] == ["Garbage", "764 MB ✓"]
+    assert lines["welcome-ondevice-light"] == ["Light ⭐", "2.0 GB ✓"]
+    assert lines["welcome-ondevice-medium"] == ["Medium", "3.6 GB ⚠"]
     assert lines["welcome-ondevice-heavy"] == ["Heavy", "6.6 GB ✕"]
     assert "Android may close Glossarion" in cells["welcome-ondevice-medium"].tooltip
     assert "Pick a smaller model" in cells["welcome-ondevice-heavy"].tooltip
