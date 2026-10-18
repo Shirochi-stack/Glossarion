@@ -1389,7 +1389,8 @@ jobs:
       - name: Download the built files
         uses: actions/download-artifact@v8
         with:
-          pattern: Z_Glossarion-*
+          # X_ (APK, IPA) and Z_ (AAB, simulator) artifacts; the next step keeps the .apk / .ipa files
+          pattern: "?_Glossarion-*"
           path: release-files
       - name: Attach them to the existing release
         env:
