@@ -163,6 +163,10 @@ def test_stopped_card_shows_run_options_and_resume_uses_them(desktop_store_cls, 
             assert len(panels) == 1 and isinstance(panels[0], RunOptionsPanel)
             panel = panels[0]
             assert card.options_box.controls == [panel.control]
+            # owner 2026-10-18: "Only for this run" starts off; switched on, the panel holds the job's values
+            assert panel.only is False
+            panel.switch.value = True
+            panel._on_switch()
             # the values the job ran with (its Run options, not the chat's model)
             assert panel.values == {"batch_size": 7, "translation_temperature": 0.4}
             assert panel.tiles["batch_size"].field.value == "7"

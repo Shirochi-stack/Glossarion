@@ -1743,7 +1743,8 @@ class ChatView:
                 save(values, only_run)
                 self._refresh_range_chips()
 
-            panel = RunOptionsPanel(self.env, values=values, only_this_run=True if only is None else bool(only),
+            # owner 2026-10-18: "Only for this run" is off by default (edits change the settings)
+            panel = RunOptionsPanel(self.env, values=values, only_this_run=bool(only),
                                     on_change=on_change, key="batch-run-options" if batch else "plan-run-options")
             for stale in [k for k in self.run_panels if k[0] == cid and k[1] == key[1] and k != key]:
                 self.run_panels.pop(stale, None)
@@ -1963,7 +1964,7 @@ class ChatView:
         if panel is not None:
             return panel.config_overrides()
         values = plan.get("run_config") if isinstance(plan.get("run_config"), dict) else {}
-        return dict(values) if plan.get("only_this_run", True) else {}
+        return dict(values) if plan.get("only_this_run", False) else {}
 
     async def _start_library_plan(self, plan: dict) -> Any:
         """Start with "Save to: Library": the desktop Load-for-translation output-root check first
@@ -2894,7 +2895,7 @@ class ChatView:
         files = [p for p in (batch.get("files") or ()) if p]
         panel = self.run_panels.get((cid, "batch", created))
         run_config = panel.config_overrides() if panel is not None else (
-            dict(batch.get("run_config") or {}) if batch.get("only_this_run", True) else {})
+            dict(batch.get("run_config") or {}) if batch.get("only_this_run", False) else {})
         title = os.path.basename(files[0]) + (f" +{len(files) - 1}" if len(files) > 1 else "") if files else "Batch"
         chat_title = str((self.env.chats.session(cid) or {}).get("title") or "Chat")
         params: dict = {"config_overrides": dict(run_config)} if run_config else {}

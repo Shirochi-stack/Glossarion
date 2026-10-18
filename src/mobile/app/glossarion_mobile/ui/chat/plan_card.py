@@ -2,7 +2,7 @@
 
 ``RunOptionsPanel`` - the collapsed "Run options" ``ExpansionTile`` (summary "Batch 10 · Temp 0.3 ·
 Rolling summary"): the Settings pages' own schema tiles (``settings.tiles.make_tile``) for
-``plan_model.RUN_OPTION_KEYS`` and the switch **Only for this run** (default on). On, the tiles
+``plan_model.RUN_OPTION_KEYS`` and the switch **Only for this run** (default off, owner 2026-10-18). On, the tiles
 write into a ``plan_model.RunOverlayStore`` whose values become the JobSpec ``config_overrides``
 (merged over the config snapshot at job start, like every other override); off, they write
 config.json like Settings. The tiles are rebuilt under a per-build key when the switch flips
@@ -67,7 +67,7 @@ class RunOptionsPanel:
     ``ctx``: the SettingsContext (``ChatEnv``) whose ``store`` is the config; ``values``: this run's
     saved overrides; ``on_change(values, only_this_run)`` persists them with the plan."""
 
-    def __init__(self, ctx: Any, *, values: Optional[dict] = None, only_this_run: bool = True,
+    def __init__(self, ctx: Any, *, values: Optional[dict] = None, only_this_run: bool = False,
                  on_change: Optional[Callable[[dict, bool], Any]] = None, keys: Sequence[str] = RUN_OPTION_KEYS,
                  key: str = "run-options") -> None:
         self.ctx = ctx
