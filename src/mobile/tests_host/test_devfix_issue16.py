@@ -637,7 +637,7 @@ def test_owner_issue16_desktop_profiles_custom_ones_and_no_silent_universal(isol
             assert dropdown.value == "Korean_html2text"  # the newly imported All chats profile
             options = _option_rows(dropdown)
             expected_v2 = list(prompt_profiles.profile_state_from_config(_stored(app)).prompt_profiles)
-            assert len(expected_v2) == 19 and WUXIA in expected_v2 and RENAMED not in expected_v2, expected_v2
+            assert len(expected_v2) == 20 and WUXIA in expected_v2 and RENAMED not in expected_v2, expected_v2
             _assert_grouped(options, expected_v2)
             sheet.close()
             snap, payloads = await _send_text(app, driver, server, captured, "네 번째 메시지입니다.")
