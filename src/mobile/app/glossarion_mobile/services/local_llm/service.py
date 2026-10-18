@@ -60,9 +60,9 @@ SETTINGS_KEY = "local_llm_settings"
 #: anti-duplicate settings keep applying to cloud models only; the temperature stays the request's.
 SAMPLING_KEY = "local_llm_sampling"
 #: Qwen's recommended non-thinking sampling for its small models (owner 2026-10-18: no penalty let a 0.8B
-#: model loop on "<p><br/>"); presence_penalty 1.5 counters endless repetition. The temperature is the
-#: global one (Welcome defaults it to Qwen's 0.7).
-DEFAULT_ONDEVICE_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5,
+#: model loop on "<p><br/>"); presence_penalty 1.0 counters endless repetition (owner 2026-10-19: 1.5 stopped
+#: a 0.8B model translating at all). The temperature is the global one (Welcome defaults it to 0.7).
+DEFAULT_ONDEVICE_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.0,
                              "repeat_penalty": 1.0}
 #: (low, high, type) of each sampling setting
 SAMPLING_LIMITS = {"top_p": (0.0, 1.0, float), "top_k": (0, 200, int),
