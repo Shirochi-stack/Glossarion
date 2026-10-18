@@ -63,6 +63,7 @@ from glossarion_mobile.ui.chat.cards import (
     JobCard,
     RequestSheet,
     glossary_preview,
+    offers_resume,
 )
 from glossarion_mobile.ui.chat.chat_ops import (
     COPY_FORMATS,
@@ -1079,6 +1080,9 @@ class ChatView:
                 else (runs.persisted_job(self.cid, item.index) if runs is not None else None)
             failed = progress_counts(snapshot).get("failed", 0) if snapshot is not None else 0
 
+        # the Plan chips a Result that offers Resume / Retry failed shows (their labels rebuild the card)
+        chip_state = self._chip_state() if offers_resume(phase, status) else None
+
         def build() -> JobCard:
             card = JobCard(attachment=record, phase=phase, on_action=lambda a, it=item: self._on_job_action(a, it),
                            on_open_request=self._open_request,
@@ -1091,8 +1095,8 @@ class ChatView:
                 card.set_report(report)
             return card
 
-        slot = self._card(slot_key, ("job", self.cid, item, record, phase, status, segments, report, failed, row_page),
-                          build)
+        slot = self._card(slot_key, ("job", self.cid, item, record, phase, status, segments, report, failed, row_page,
+                                     chip_state), build)
         card = slot.card
         # owner #5: a Result that offers Resume / Retry failed keeps the Plan card's Run options (the values the
         # job ran with), so they can be changed before resuming; the same panel object across renders
@@ -1101,6 +1105,12 @@ class ChatView:
         shown = card.options_box.controls
         if (shown[0] if shown else None) is not control:
             card.set_run_options(control)
+        # above them, the Plan card's chips: what Resume / Retry failed runs with (model, profile, language,
+        # glossary, range), so they can be changed first
+        chips_key = (chip_state, panel) if card.offers_resume else None
+        if card.chip_state != chips_key:
+            card.chip_state = chips_key
+            card.set_resume_chips(self._result_chips(item, record, panel) if chips_key is not None else [])
         # UI_SPEC §2.12.4 Result: the turn's output files as chips (its own workspace, on the io pool)
         key = ("outputs", self.cid, self._mid(item.index) or item.index, tuple(item.requests), item.report,
                item.actions, phase.name)
@@ -1870,6 +1880,7 @@ class ChatView:
         panel = self.run_panels.get(key)
         if panel is None:
             panel = RunOptionsPanel(self.env, values=run_config_of(params.get("config_overrides")),
+                                    on_change=lambda _values, _only: self._refresh_range_chips(),
                                     key=f"resume-run-options-{item.index}")
             for stale in [k for k in self.run_panels if k[:3] == key[:3] and k != key]:
                 self._drop_panel(stale)
@@ -1904,33 +1915,63 @@ class ChatView:
             except Exception:
                 pass
 
-    def _plan_controls(self, plan: dict, card: Any = None) -> list:
-        from glossarion_mobile.ui.chat.output_modes import output_mode as _output_mode
+    def _chip_state(self) -> tuple:
+        """What the shared Plan chips (``_setting_chips``) show: the chat's model · profile · language, the
+        glossary chip text and the chat's glossary policy."""
+        return (self.state.chat_context.value, self._glossary_chip_text(), self.settings().glossary_override_mode)
 
+    def _setting_chips(self, path: str, key: str) -> list:
+        """The Plan card's model, profile, language and glossary chips (and the chat glossary Policy chip),
+        also shown on a Result that offers Resume / Retry failed; ``path``: the turn's attachment, ``key``: the
+        chips' key prefix ("plan-model", ...)."""
         context = self.state.chat_context.value
         settings = self.settings()
-        record = plan.get("attachment") if isinstance(plan.get("attachment"), dict) else {}
-        path = str(record.get("path") or "")
-        panel = self._run_panel(plan)
-        mode = str(plan.get("output_mode") or "text")
-        destination = str(plan.get("destination") or "chat")
-        range_chip = ft.Chip(label=ft.Text(panel.range_chip_label()), leading=ft.Icon(ft.Icons.FORMAT_LIST_NUMBERED, size=16),
-                             on_click=lambda e: self.open_choose_chapters(plan), key="plan-range")
-        self._range_chips = {"plan": (range_chip, panel)}
         chips = [
-            ft.Chip(label=ft.Text(context.model), on_click=lambda e: self.open_model_sheet("model"), key="plan-model"),
+            ft.Chip(label=ft.Text(context.model), on_click=lambda e: self.open_model_sheet("model"), key=f"{key}-model"),
             ft.Chip(label=ft.Text(context.profile), on_click=lambda e: self.open_model_sheet("profile"),
-                    key="plan-profile"),
+                    key=f"{key}-profile"),
             ft.Chip(label=ft.Text(f"→ {context.target_language}"), on_click=lambda e: self.open_model_sheet("language"),
-                    key="plan-language"),
+                    key=f"{key}-language"),
             ft.Chip(label=ft.Text(self._glossary_chip_text()), leading=ft.Icon(ft.Icons.MENU_BOOK, size=16),
-                    on_click=lambda e: self.open_plan_glossary([path]), key="plan-glossary"),
+                    on_click=lambda e: self.open_plan_glossary([path]), key=f"{key}-glossary"),
         ]
         if settings.glossary_override_mode in ("manual", "no_glossary"):
             # this chat's own glossary policy (Chat settings) overrides the main glossary
             chips.append(ft.Chip(label=ft.Text("Policy: " + ("Manual" if settings.glossary_override_mode == "manual"
                                                               else "Off")),
-                                 on_click=lambda e: self.open_chat_settings(), key="plan-policy"))
+                                 on_click=lambda e: self.open_chat_settings(), key=f"{key}-policy"))
+        return chips
+
+    def _range_chip(self, panel: RunOptionsPanel, slot: Any, key: str, on_click: Callable[[Any], Any]) -> ft.Chip:
+        """The "All chapters" chip of ``panel`` (Choose chapters); ``_refresh_range_chips`` follows its range."""
+        chip = ft.Chip(label=ft.Text(panel.range_chip_label()), leading=ft.Icon(ft.Icons.FORMAT_LIST_NUMBERED, size=16),
+                       on_click=on_click, key=key)
+        if not isinstance(getattr(self, "_range_chips", None), dict):
+            self._range_chips = {}
+        self._range_chips[slot] = (chip, panel)
+        return chip
+
+    def _result_chips(self, item: Any, record: Optional[dict], panel: Optional[RunOptionsPanel]) -> list:
+        """A Result's Plan chips (no output mode / Save to: they cannot change on Resume); the range chip writes
+        the card's resume Run options."""
+        attachment = dict(record or {})
+        chips = self._setting_chips(str(attachment.get("path") or ""), "result")
+        if panel is not None:
+            chips.append(self._range_chip(panel, ("resume", item.index), "result-range",
+                                          lambda e, p=panel: self.open_choose_chapters({"attachment": attachment},
+                                                                                       panel=p)))
+        return chips
+
+    def _plan_controls(self, plan: dict, card: Any = None) -> list:
+        from glossarion_mobile.ui.chat.output_modes import output_mode as _output_mode
+
+        record = plan.get("attachment") if isinstance(plan.get("attachment"), dict) else {}
+        path = str(record.get("path") or "")
+        panel = self._run_panel(plan)
+        mode = str(plan.get("output_mode") or "text")
+        destination = str(plan.get("destination") or "chat")
+        range_chip = self._range_chip(panel, "plan", "plan-range", lambda e: self.open_choose_chapters(plan))
+        chips = self._setting_chips(path, "plan")
         chips += [
             ft.Chip(label=ft.Text(f"{_output_mode(mode).emoji} {_output_mode(mode).label}"),
                     on_click=lambda e: self.open_mode_options(mode), key="plan-output"),
@@ -2004,11 +2045,14 @@ class ChatView:
                       glossary_override_mode=self.settings().glossary_override_mode,
                       chat_overrides=self.env.chats.overrides(self.cid) if self.bound else None)
 
-    def open_choose_chapters(self, plan: dict, *, batch: bool = False) -> Optional[ChooseChaptersSheet]:
-        """Choose chapters: range + Spine order + the live preview (desktop 🔍 preview)."""
+    def open_choose_chapters(self, plan: dict, *, batch: bool = False,
+                             panel: Optional[RunOptionsPanel] = None) -> Optional[ChooseChaptersSheet]:
+        """Choose chapters: range + Spine order + the live preview (desktop 🔍 preview); ``panel``: the
+        Run options it writes (a Result's resume panel), else the plan's."""
         if not self.bound:
             return None
-        panel = self._run_panel(plan, batch=batch)
+        if panel is None:
+            panel = self._run_panel(plan, batch=batch)
         if batch:
             files = list(plan.get("files") or [])
             path = next((p for p in files if str(p).lower().endswith((".epub", ".pdf"))), files[0] if files else "")
@@ -2731,7 +2775,10 @@ class ChatView:
         async def go() -> None:
             try:
                 kwargs = {"run_config": run_config, "run_config_for": run_key} if run_config is not None else {}
+                # what the card's chips show: the chat's profile / language / glossary now (the model follows
+                # the chat in ``resubmit`` itself)
                 run = await self.env.runs.resubmit(cid, profile_check=lambda name: self.resume_profile(cid, name),
+                                                   overrides=self.run_overrides(cid), settings=self.settings(cid),
                                                    **kwargs)
             except Exception as exc:
                 self.notify(f"Could not resume: {exc}")

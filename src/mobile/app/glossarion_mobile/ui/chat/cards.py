@@ -644,6 +644,15 @@ def _request_row(segment: dict, on_open: Optional[Callable[[dict], Any]]) -> ft.
     )
 
 
+def offers_resume(phase: Any, status: str = "") -> bool:
+    """A Result in ``phase`` / ``status`` offers Resume or Retry failed (a run that can be resubmitted with
+    other Run options): stopped / failed / interrupted, or done with failed chapters."""
+    name = phase.name
+    if phase.live or name in ("plan", "queued"):
+        return False
+    return name != "done" or "failed" in (status or "")
+
+
 def material_surface(content: ft.Control, *, bgcolor: Any, radius: float, padding: Any) -> ft.Card:
     """A card's coloured, rounded surface painted by a Material (a flat Flutter ``Card``), not by a decorated
     ``Container``. A ``ListTile`` (every ``ExpansionTile`` header: Requests, Run options, the report) paints
@@ -747,7 +756,10 @@ class JobCard(ft.Container):
         self.u10_handler: Optional[Callable[[str], Any]] = None
         self.u10_state: dict = {}
         self.u10_builds = 0
-        # owner #5: a stopped / failed / interrupted Result's Run options (the Plan card's panel, for Resume)
+        # a stopped / failed / interrupted Result's Plan chips (model, profile, language, glossary, range: what
+        # Resume runs with) and its Run options (owner #5: the Plan card's panel, for Resume)
+        self.resume_chips = ft.Row([], wrap=True, spacing=6, run_spacing=6, visible=False, key="job-resume-chips")
+        self.chip_state: Any = None
         self.options_box = ft.Column([], spacing=0, tight=True, visible=False, key="job-run-options")
         self.buttons = ft.Row([], wrap=True, spacing=8, run_spacing=4)
         self.action_buttons: dict = {}
@@ -776,6 +788,7 @@ class JobCard(ft.Container):
                 self.report_tile,
                 self.outputs_row,
                 self.u10_box,
+                self.resume_chips,
                 self.options_box,
                 self.buttons,
             ],
@@ -935,14 +948,18 @@ class JobCard(ft.Container):
         self.buttons.controls = buttons
         if hasattr(self, "options_box"):
             self.options_box.visible = bool(self.options_box.controls) and self.offers_resume
+            self.resume_chips.visible = bool(self.resume_chips.controls) and self.offers_resume
 
     @property
     def offers_resume(self) -> bool:
         """The Result offers Resume or Retry failed (a run that can be resubmitted with other Run options)."""
-        name = self.phase.name
-        if self.phase.live or name in ("plan", "queued"):
-            return False
-        return name != "done" or "failed" in (self.status or "")
+        return offers_resume(self.phase, self.status)
+
+    def set_resume_chips(self, chips: Sequence[ft.Control]) -> None:
+        """The Plan card's chips (model, profile, language, glossary, range) above the Run options of a Result
+        that offers Resume / Retry failed; [] removes them."""
+        self.resume_chips.controls = list(chips)
+        self.resume_chips.visible = bool(self.resume_chips.controls) and self.offers_resume
 
     def set_run_options(self, control: Optional[ft.Control]) -> None:
         """Owner #5: the Run options panel (``plan_card.RunOptionsPanel.control``) shown above the buttons of a

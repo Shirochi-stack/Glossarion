@@ -150,7 +150,7 @@ def test_stopped_card_shows_run_options_and_resume_uses_them(desktop_store_cls, 
             view._run_turn = lambda r: 2
             resubmitted: list = []
 
-            async def resubmit(cid, profile_check=None, run_config=None, run_config_for=None):
+            async def resubmit(cid, profile_check=None, run_config=None, run_config_for=None, **_chips):
                 resubmitted.append((run_config, run_config_for))
                 return None
 
