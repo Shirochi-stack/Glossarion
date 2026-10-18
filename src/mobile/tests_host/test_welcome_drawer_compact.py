@@ -390,3 +390,18 @@ def test_page_one_on_device_second_tap_cancels_a_download(tmp_path, monkeypatch)
         s.dispose()
     finally:
         server.close()
+
+def test_choosing_a_glossary_mode_keeps_the_page_and_its_scroll():
+    """owner 2026-10-18: tapping a mode card on page 2 rebuilt the page and scrolled it back to the top."""
+    s = screen()
+    s.go("language_glossary")
+    page = s.page_area.content
+    first, second = list(s.mode_cards)[:2]
+    s.select_mode(second)
+    assert s.page_area.content is page  # the same page: its scroll position stays
+    assert s.flow.glossary_mode == second
+    assert s.mode_cards[second].border is not None and s.mode_cards[first].border is None
+    assert s.mode_cards[second].bgcolor == ft.Colors.SECONDARY_CONTAINER
+    s.select_mode(first)
+    assert s.page_area.content is page and s.mode_cards[first].border is not None
+    assert s.mode_cards[second].border is None

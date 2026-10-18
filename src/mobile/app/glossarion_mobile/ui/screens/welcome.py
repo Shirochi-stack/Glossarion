@@ -690,14 +690,18 @@ class WelcomeScreen(Screen):
             content=ft.Column(lines, spacing=2, tight=True),
             padding=10,
             border_radius=12,
-            bgcolor=ft.Colors.SECONDARY_CONTAINER if selected else ft.Colors.SURFACE_CONTAINER_HIGHEST,
-            border=ft.Border.all(2, ft.Colors.PRIMARY) if selected else None,
             on_click=lambda e, v=value: self.select_mode(v),
             key=f"glossary-mode-{value}",
             col={"xs": 12, "sm": 6},
         )
+        self._style_mode_card(control, selected)
         self.mode_cards[value] = control
         return control
+
+    @staticmethod
+    def _style_mode_card(control: ft.Container, selected: bool) -> None:
+        control.bgcolor = ft.Colors.SECONDARY_CONTAINER if selected else ft.Colors.SURFACE_CONTAINER_HIGHEST
+        control.border = ft.Border.all(2, ft.Colors.PRIMARY) if selected else None
 
     def _page_language_glossary(self) -> ft.Control:
         self.mode_cards = {}
@@ -853,8 +857,18 @@ class WelcomeScreen(Screen):
         self.render()
 
     def select_mode(self, mode: str) -> None:
+        """Highlight the chosen card in place: rebuilding the page (``render``) scrolled it back to the top
+        on every tap (owner 2026-10-18)."""
         self.flow.select_mode(mode)
-        self.render()
+        if self.flow.step_id != "language_glossary" or not self.mode_cards:
+            self.render()
+            return
+        for value, card in self.mode_cards.items():
+            self._style_mode_card(card, value == self.flow.glossary_mode)
+            try:
+                card.update()
+            except Exception:  # not on a page (tests)
+                pass
 
     def finish(self) -> dict:
         updates = self.flow.finish_updates()
