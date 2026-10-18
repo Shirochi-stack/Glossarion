@@ -622,6 +622,7 @@ class LocalModelsPanel(OnDeviceFlow):
                     ft.TextButton(content="Save", key="local-settings-save", on_click=lambda e: self.save_settings())],
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.settings_error,
+            *self._sampling_section(),
         ])
         self.preset_column = ft.Column([], spacing=6, tight=True, key="local-presets")
         presets_card = SectionCard(title="Models", key="local-presets-card",
@@ -717,6 +718,47 @@ class LocalModelsPanel(OnDeviceFlow):
         self.settings_error.visible = bool(error)
         _push(self.settings_error)
         return error
+
+    def _sampling_section(self) -> list:
+        """On-device sampling (Qwen's recommendation by default): replaces the global Temperature and
+        anti-duplicate values for on-device models only."""
+        from glossarion_mobile.services.local_llm.service import SAMPLING_LABELS
+
+        values = self.service.sampling()
+        self.sampling_fields = {
+            key: ft.TextField(value=f"{values[key]:g}", label=label, dense=True, width=118,
+                              keyboard_type=ft.KeyboardType.NUMBER, key=f"local-sampling-{key}")
+            for key, label in SAMPLING_LABELS.items()
+        }
+        self.sampling_error = ft.Text("", color=ft.Colors.ERROR, visible=False,
+                                      theme_style=ft.TextThemeStyle.BODY_SMALL)
+        return [
+            ft.Text("Sampling (on-device models only)", weight=ft.FontWeight.W_600, key="local-sampling-title"),
+            _small("Qwen's recommended values reduce repetition loops. These replace the main Temperature and "
+                   "anti-duplicate settings for on-device models; cloud models keep using those."),
+            ft.Row(list(self.sampling_fields.values()), wrap=True, spacing=8, run_spacing=8, key="local-sampling"),
+            ft.Row([ft.TextButton(content="Save", key="local-sampling-save", on_click=lambda e: self.save_sampling()),
+                    ft.TextButton(content="Qwen defaults", key="local-sampling-reset",
+                                  on_click=lambda e: self.reset_sampling())], spacing=4),
+            self.sampling_error,
+        ]
+
+    def save_sampling(self) -> Optional[str]:
+        values, error = self.service.save_sampling({k: f.value for k, f in self.sampling_fields.items()})
+        self.sampling_error.value = error or ""
+        self.sampling_error.visible = bool(error)
+        _push(self.sampling_error)
+        if not error:
+            for key, field in self.sampling_fields.items():
+                field.value = f"{values[key]:g}"
+            _push(*self.sampling_fields.values())
+            self.say("Saved. On-device requests use these from now on.")
+        return error
+
+    def reset_sampling(self) -> Optional[str]:
+        for field in self.sampling_fields.values():
+            field.value = ""
+        return self.save_sampling()
 
     def save_settings(self) -> Optional[str]:
         values, error = self.service.save_settings(self.ctx_field.value, self.threads_field.value)

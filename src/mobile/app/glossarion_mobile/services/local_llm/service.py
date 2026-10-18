@@ -52,6 +52,21 @@ __all__ = ["EngineSnapshot", "LocalEngineService", "default_service", "model_blo
 
 URL_ENV = "GLOSSARION_LOCAL_LLM_URL"
 SETTINGS_KEY = "local_llm_settings"
+#: Prefs key of the on-device sampling settings (Model manager > On-device > engine card). They replace
+#: the request's temperature / top_p / top_k / min_p / penalties for every on-device request, so the
+#: global Temperature and anti-duplicate settings keep applying to cloud models only.
+SAMPLING_KEY = "local_llm_sampling"
+#: Qwen's recommended non-thinking sampling for its small models (owner 2026-10-18: 0.3 and no penalty
+#: let a 0.8B model loop on "<p><br/>"); presence_penalty 1.5 counters endless repetition.
+DEFAULT_ONDEVICE_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+                             "presence_penalty": 1.5, "repeat_penalty": 1.0}
+#: (low, high, type) of each sampling setting
+SAMPLING_LIMITS = {"temperature": (0.0, 2.0, float), "top_p": (0.0, 1.0, float), "top_k": (0, 200, int),
+                   "min_p": (0.0, 1.0, float), "presence_penalty": (-2.0, 2.0, float),
+                   "repeat_penalty": (0.5, 2.0, float)}
+#: field labels (Model manager) and error messages
+SAMPLING_LABELS = {"temperature": "Temperature", "top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
+                   "presence_penalty": "Presence penalty", "repeat_penalty": "Repeat penalty"}
 MAX_WAITERS = 8
 IDLE_UNLOAD = 600.0
 BACKGROUND_UNLOAD = 60.0
@@ -464,6 +479,44 @@ class LocalEngineService:
         """Save only the Context default (0 or blank: each model's own, ``context_for``); Threads stay."""
         return self.save_settings(n_ctx, self.settings()["n_threads"])
 
+    def sampling(self) -> dict:
+        """The on-device sampling settings: the saved ones, Qwen's recommended value for the rest."""
+        try:
+            raw = self.prefs.get(SAMPLING_KEY, None) if self.prefs is not None else None
+        except Exception:
+            raw = None
+        raw = raw if isinstance(raw, dict) else {}
+        out = dict(DEFAULT_ONDEVICE_SAMPLING)
+        for key, (low, high, kind) in SAMPLING_LIMITS.items():
+            try:
+                value = kind(raw[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if low <= value <= high:
+                out[key] = value
+        return out
+
+    def save_sampling(self, values: dict) -> tuple:
+        """(sampling, None) or (None, message); a blank value goes back to Qwen's recommendation."""
+        out = {}
+        for key, (low, high, kind) in SAMPLING_LIMITS.items():
+            text = str((values or {}).get(key, "") if (values or {}).get(key) is not None else "").strip()
+            if not text:
+                out[key] = DEFAULT_ONDEVICE_SAMPLING[key]
+                continue
+            try:
+                number = kind(float(text)) if kind is int else kind(text)
+            except ValueError:
+                return None, f"{SAMPLING_LABELS[key]} must be a number"
+            if kind is int and float(text) != number:
+                return None, f"{SAMPLING_LABELS[key]} must be a whole number"
+            if not low <= number <= high:
+                return None, f"{SAMPLING_LABELS[key]} must be between {low:g} and {high:g}"
+            out[key] = number
+        if self.prefs is not None:
+            self.prefs.set(SAMPLING_KEY, dict(out))
+        return out, None
+
     def preset_for(self, stem: str) -> Optional[dict]:
         """The preset that brought ``stem`` (same repo and file; else a file-less preset of that repo)."""
         entry = self.registry.load().get(stem) or {}
@@ -762,17 +815,18 @@ class LocalEngineService:
         return ChatRun(stem, deltas, usage=lambda: getattr(engine, "last_usage", {}),
                        finish=lambda: getattr(engine, "last_finish", "stop"), release=release)
 
-    @staticmethod
-    def _params(body: dict, room: int) -> dict:
+    def _params(self, body: dict, room: int) -> dict:
         wanted = body.get("max_completion_tokens") or body.get("max_tokens")
         try:
             wanted = int(wanted) if wanted else 0
         except (TypeError, ValueError):
             wanted = 0
         params: dict = {"max_tokens": max(1, min(wanted, room) if wanted > 0 else room)}
-        for key in ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed"):
-            if body.get(key) is not None:
-                params[key] = body[key]
+        if body.get("seed") is not None:
+            params["seed"] = body["seed"]
+        # the on-device sampling settings, never the request's (the global temperature / anti-duplicate
+        # values are for cloud models)
+        params.update(self.sampling())
         stop = body.get("stop")
         if isinstance(stop, str):
             stop = [stop]

@@ -316,6 +316,7 @@ class LlamaEngine(_Base):
             "min_p": float(params.get("min_p", DEFAULT_SAMPLING["min_p"])),
             "presence_penalty": float(params.get("presence_penalty") or 0.0),
             "frequency_penalty": float(params.get("frequency_penalty") or 0.0),
+            "repeat_penalty": float(params.get("repeat_penalty") or 1.0),
             "stop": params.get("stop") or None,
         }
         if params.get("seed") is not None:
