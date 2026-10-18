@@ -84,6 +84,24 @@ _SPLIT_MARKER_RPGMAKER = (                               # _process_rpgmaker_gam
     "            from prompt_defaults import apply_split_marker_instruction\n"
     "            system_prompt = apply_split_marker_instruction(system_prompt, \"\")\n")
 
+# 2026-10-18 Gemini safety: each harm category's own threshold (gemini_policy.gemini_safety_thresholds)
+# plus HARM_CATEGORY_JAILBREAK, also in the async batch request builder (it sent BLOCK_NONE for five).
+_BATCH_SAFETY = (
+    '            if os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true":\n'
+    '                request["generateContentRequest"]["safetySettings"] = [\n'
+    '                    {"category": cat, "threshold": "BLOCK_NONE"}\n'
+    '                    for cat in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",\n'
+    '                               "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",\n'
+    '                               "HARM_CATEGORY_CIVIC_INTEGRITY"]\n'
+    '                ]\n',
+    '            if os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true":\n'
+    '                from gemini_policy import gemini_safety_thresholds\n'
+    '                request["generateContentRequest"]["safetySettings"] = [\n'
+    '                    {"category": cat, "threshold": threshold}\n'
+    '                    for cat, threshold in gemini_safety_thresholds("BLOCK_NONE")\n'
+    '                ]\n',
+)
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -140,6 +158,15 @@ APPROVED = (
             "src/run_env.py": [_RESPECT_ENV_DICT, _RESPECT_ENV_PAIR],
         },
         # a new key: nothing recorded before it existed changes value
+        "values": {},
+    },
+    {
+        "date": "2026-10-18",
+        "what": "Async batch: Gemini safety settings use each category's threshold (and HARM_CATEGORY_JAILBREAK) "
+                "instead of BLOCK_NONE for five categories",
+        "source": {
+            "src/async_api_processor.py": [_BATCH_SAFETY],
+        },
         "values": {},
     },
     {

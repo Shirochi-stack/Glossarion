@@ -149,7 +149,10 @@ def legacy_text():
     text, error = _git_show("src/async_api_processor.py")
     if text is None:
         pytest.skip(f"async_api_processor.py@{U7_BASE_SHA[:8]} unavailable: {error}")
-    return text
+    # owner-approved changes made after the freeze (tests/parity/approved_changes.py)
+    from parity.approved_changes import apply_to_source
+
+    return apply_to_source("src/async_api_processor.py", text)
 
 
 def live_text(name):
@@ -616,9 +619,10 @@ GEMINI_REQUEST = lambda cid, prompt, temp, limit, extra=None: {  # noqa: E731
     "custom_id": cid, "generateContentRequest": dict({
         "model": "models/gemini-2.5-flash", "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": dict({"temperature": temp, "maxOutputTokens": limit}, **(extra or {}))})}
+#: each category's own threshold (gemini_policy.gemini_safety_thresholds; BLOCK_NONE when none is set)
 SAFETY = [{"category": c, "threshold": "BLOCK_NONE"} for c in (
-    "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-    "HARM_CATEGORY_DANGEROUS_CONTENT", "HARM_CATEGORY_CIVIC_INTEGRITY")]
+    "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_DANGEROUS_CONTENT", "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_CIVIC_INTEGRITY", "HARM_CATEGORY_JAILBREAK")]
 
 #: (model, env) -> expected prepare_batch_request result (pinned desktop behaviour, bugs included:
 #: gpt-4o-mini is sent as gpt-4o - DISCREPANCIES "U7 async batch").
