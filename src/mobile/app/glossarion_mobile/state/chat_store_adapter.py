@@ -404,6 +404,11 @@ OVERRIDE_KEYS = (
     *GLOSSARY_PROFILE_OVERRIDE_KEYS.values(),
 )
 
+#: Sidecar key of the model / prompt profile the user picked last, whatever the scope (owner: a new chat
+#: starts on them): ``{key: {"value": picked, "global": the All-chats value when it was picked}}``.
+LAST_USED_KEY = "last_used"
+LAST_USED_FIELDS = ("model", "profile")
+
 
 class MobileChatSidecar:
     """Mobile-only per-chat data; never read by desktop."""
@@ -427,6 +432,9 @@ class MobileChatSidecar:
                 "chats": {str(k): dict(v) for k, v in payload["chats"].items() if isinstance(v, dict)},
                 "scratch": list(payload.get("scratch") or []),
             }
+            last_used = payload.get(LAST_USED_KEY)
+            if isinstance(last_used, dict):
+                self.data[LAST_USED_KEY] = {str(k): dict(v) for k, v in last_used.items() if isinstance(v, dict)}
 
     def save(self) -> None:
         atomic_write_json(self.path, self.data)
@@ -598,6 +606,9 @@ class ChatStoreAdapter:
         #: (the chat's series defaults). ``overrides`` puts them beneath the chat's own overrides;
         #: ``own_overrides`` is the sidecar value alone (Chat settings' "custom" badge and ↺).
         self.override_layers: list[Callable[[Any], Optional[dict]]] = []
+        #: ``last_used -> {override key: value}``: what a new chat starts on (the chat feature resolves the
+        #: remembered model / profile against the All-chats values and the profiles that still exist).
+        self.new_chat_seed: Optional[Callable[[dict], Optional[dict]]] = None
 
     # ---- lifecycle --------------------------------------------------------------------------
 
@@ -978,8 +989,44 @@ class ChatStoreAdapter:
                 self.sessions.append(session)
                 self.current_id = session["id"]
             cid = str(self.current_id)
+        self._seed_new_chat(cid)
         self._changed(cid)
         return cid
+
+    def _seed_new_chat(self, cid: str) -> None:
+        """A new (or the reused empty) chat starts on the model / prompt profile used last: they become its
+        own overrides when they differ from the All-chats values (a value the empty chat already has stays)."""
+        seed = self.new_chat_seed
+        if seed is None or self.sidecar is None:
+            return
+        try:
+            values = seed(self.last_used()) or {}
+        except Exception:
+            log.exception("seeding the new chat failed")
+            return
+        own = self.own_overrides(cid)
+        for key in LAST_USED_FIELDS:
+            if values.get(key) and own.get(key) is None:
+                self.set_override(cid, key, values[key])
+
+    def last_used(self) -> dict:
+        """``{"model" / "profile": {"value", "global"}}`` (see ``LAST_USED_KEY``)."""
+        with self._lock:
+            data = (self.sidecar.data.get(LAST_USED_KEY) if self.sidecar is not None else None) or {}
+            return copy.deepcopy(data)
+
+    def remember_last_used(self, key: str, value: Any, global_value: Any = None) -> None:
+        """The user picked ``value`` for ``key`` (a chat's own or the All-chats one); ``global_value`` is the
+        All-chats value at that moment (a later All-chats change wins over this pick for new chats)."""
+        if key not in LAST_USED_FIELDS or not value or self.sidecar is None:
+            return
+        entry = {"value": str(value), "global": str(global_value or "")}
+        with self._lock:
+            last_used = self.sidecar.data.setdefault(LAST_USED_KEY, {})
+            if last_used.get(key) == entry:
+                return
+            last_used[key] = entry
+        self._save_sidecar()
 
     def rename(self, cid: Any, title: str) -> bool:
         from glossarion_mobile.ui.chat.direct_text_rules import rename_title
@@ -1673,6 +1720,7 @@ class ChatStoreAdapter:
         """Drawer / header "New scratch chat": an unsaved chat (never in ``direct_text_chats.json``)."""
         entry = self._make_scratch()
         self._register_scratch(entry)
+        self._seed_new_chat(entry.cid)
         return entry.cid
 
     def duplicate_as_scratch(self, cid: Any) -> Optional[str]:

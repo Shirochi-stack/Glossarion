@@ -330,6 +330,15 @@ def known_profile_names(env: Any) -> Optional[list]:
     return list(listing.names)
 
 
+def remember_pick(env: Any, field_name: str, value: Any, global_scope: bool) -> None:
+    """Record a model / prompt profile pick for the next new chat (``ChatView.new_chat_seed``): ``global_scope``
+    is an All-chats pick, else the chat's own (with the All-chats value it was picked over)."""
+    remember = getattr(getattr(env, "chats", None), "remember_last_used", None)
+    config_key = {"model": "model", "profile": "active_profile"}.get(field_name)
+    if callable(remember) and config_key:
+        remember(field_name, value, value if global_scope else env.config_get(config_key, ""))
+
+
 class ChatView:
     def __init__(
         self,
@@ -513,6 +522,8 @@ class ChatView:
         self.env = env
         if env.chats is not None:
             self._env_unsubs.append(env.chats.subscribe(self._on_store_changed))
+            if hasattr(env.chats, "new_chat_seed"):
+                env.chats.new_chat_seed = self.new_chat_seed  # every new_chat() caller (drawer, share, series…)
         if env.runs is not None:
             self._env_unsubs.append(env.runs.subscribe(lambda cid: env.on_ui(self._on_run_changed, cid)))
         if env.jobs is not None and getattr(env.jobs, "available", False):
@@ -605,13 +616,7 @@ class ChatView:
 
         env = self.env
         overrides = env.chats.overrides(cid) if self.bound else {}
-        listing = None
-        service = getattr(env, "profile_service", None)
-        if service is not None:
-            try:
-                listing = service.listing()
-            except Exception:
-                log.debug("prompt profile listing failed", exc_info=True)
+        listing = self._profile_listing()
 
         def inherited(field_name: str) -> str:
             return inherited_value(env.config_get, field_name, listing,
@@ -622,6 +627,40 @@ class ChatView:
         target = overrides.get("target_language") or inherited("target_language")
         custom = any(overrides.get(k) is not None for k in overrides)
         return ChatContext(model=str(model), profile=str(profile), target_language=str(target), custom=custom)
+
+    def _profile_listing(self) -> Any:
+        """The shared prompt profile listing (``ProfileService.listing``), None without the service."""
+        service = getattr(self.env, "profile_service", None) if self.env is not None else None
+        if service is None:
+            return None
+        try:
+            return service.listing()
+        except Exception:
+            log.debug("prompt profile listing failed", exc_info=True)
+            return None
+
+    def new_chat_seed(self, last_used: dict) -> dict:
+        """What a new chat starts on (owner: the model and prompt profile used last, not the All-chats ones):
+        the remembered pick (``ChatStoreAdapter.last_used``) unless it is the All-chats value anyway, the
+        All-chats value changed after it (that later choice wins) or the profile no longer exists."""
+        from glossarion_mobile.ui.sheets.chat_settings import inherited_value
+
+        env = self.env
+        if env is None:
+            return {}
+        listing = self._profile_listing()
+        names = known_profile_names(env) or self._profiles()
+        seed: dict = {}
+        for key, config_key in (("model", "model"), ("profile", "active_profile")):
+            entry = (last_used or {}).get(key) or {}
+            value = str(entry.get("value") or "")
+            if not value or str(env.config_get(config_key, "") or "") != str(entry.get("global") or ""):
+                continue
+            if key == "profile" and names and value not in names:
+                continue  # deleted: the new chat inherits the All-chats profile
+            if value != inherited_value(env.config_get, key, listing, names):
+                seed[key] = value
+        return seed
 
     def load_chat(self, cid: Any) -> None:
         """Show chat ``cid``: draft, attachment, mode, header, transcript tail (``_load_chat_session``)."""
@@ -3899,6 +3938,7 @@ class ChatView:
         if field_name == "model" and self.bound and not global_scope:
             this_chat_only = True  # owner (U13): every chat keeps its own model; Settings sets the default
             self.env.chats.set_override(self.cid, override_key, value)
+            remember_pick(self.env, field_name, value, global_scope=False)
         else:
             # the desktop combos' side effects: the profile's extraction method
             # (prompt_profiles.select_profile), the target-language fan-out
@@ -3906,6 +3946,7 @@ class ChatView:
             from glossarion_mobile.state.setting_writes import write_setting
 
             write_setting(self.env.store, key, value)
+            remember_pick(self.env, field_name, value, global_scope=True)
             if (field_name == "model" and follow_open_chat and self.bound
                     and (self.env.chats.overrides(self.cid) or {}).get("model")):
                 self.env.chats.set_override(self.cid, override_key, value)  # the drawer: the open chat too

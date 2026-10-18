@@ -274,6 +274,9 @@ class SeriesFeature:
             return None
         cid = str(chats.new_chat())
         move_chat(chats, cid, sid, self.store)
+        for key, value in self.store.defaults(sid).items():
+            if key in ("model", "profile") and value is not None:
+                chats.set_override(cid, key, None)  # the series' model / profile beats the last-used seed
         self.open_chat(cid)
         return cid
 
