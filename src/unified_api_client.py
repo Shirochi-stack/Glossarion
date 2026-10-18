@@ -22205,7 +22205,9 @@ class UnifiedClient:
                             _tier = f", Tier: {gemini_tier} (not sent: OpenAI-compatible endpoint)"
                         else:
                             _tier = f", Tier: {gemini_tier}"
-                    print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens}{_tier}")
+                    _temp_label = temperature if temperature is not None else (
+                        "Disabled" if self._temperature_parameter_disabled() else "Not Supported")
+                    print(f"   📊 Temperature: {_temp_label}, Max tokens: {max_tokens}{_tier}")
 
                 # ========== MAKE THE API CALL - DIFFERENT FOR EACH ENDPOINT ==========
                 if use_openai_endpoint and gemini_endpoint:
