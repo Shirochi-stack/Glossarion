@@ -3998,6 +3998,28 @@ class SdlxliffReviewCoreMixin:
     def _has_linguistic_letters(text):
         return any(ch.isalpha() for ch in str(text or ""))
 
+    # Unicode-name prefixes of the letters each output language is written in.
+    _REVIEW_TARGET_SCRIPT_PREFIXES = {
+        "ru": ("CYRILLIC",),
+        "ar": ("ARABIC",),
+        "hi": ("DEVANAGARI",),
+        "zh-CN": ("CJK",),
+        "zh-TW": ("CJK",),
+        "ja": ("HIRAGANA", "KATAKANA", "CJK"),
+        "ko": ("HANGUL",),
+    }
+
+    def _is_in_review_target_script(self, text):
+        """True when every letter of ``text`` is already written in the output language's
+        script (e.g. English words kept in a Korean source), so an unchanged copy is fine."""
+        try:
+            code = self._review_target_language_code()
+        except Exception:
+            code = "en"
+        prefixes = self._REVIEW_TARGET_SCRIPT_PREFIXES.get(code, ("LATIN",))
+        letters = [ch for ch in str(text or "") if ch.isalpha()]
+        return bool(letters) and all(unicodedata.name(ch, "").startswith(prefixes) for ch in letters)
+
     def _row_status(self, source_text, target_text, source_missing=False, target_missing=False):
         source_text = self._normalize_review_text(source_text)
         target_text = self._normalize_review_text(target_text)
@@ -4005,7 +4027,12 @@ class SdlxliffReviewCoreMixin:
             return "red", "dropped/added"
         if not target_text:
             return "red", "empty"
-        if source_text and source_text == target_text and self._has_linguistic_letters(source_text):
+        if (
+            source_text
+            and source_text == target_text
+            and self._has_linguistic_letters(source_text)
+            and not self._is_in_review_target_script(source_text)
+        ):
             return "red", "untranslated"
         if source_text:
             source_len = len(source_text)

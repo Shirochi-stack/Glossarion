@@ -262,6 +262,20 @@ def _expected_moved(frozen, name):
         src = src[:start] + (
             "        self._refresh_notepad_page_after_save(piece_index, rebuilt, saved_html, html_text)\n"
         ) + src[end:]
+    if name == "_row_status":
+        # owner fix 2026-10-18: text already in the output language's script (English
+        # words kept in a CJK source) is not "untranslated" when copied unchanged.
+        old = ("        if source_text and source_text == target_text"
+               " and self._has_linguistic_letters(source_text):\n")
+        assert src.count(old) == 1
+        src = src.replace(old, (
+            "        if (\n"
+            "            source_text\n"
+            "            and source_text == target_text\n"
+            "            and self._has_linguistic_letters(source_text)\n"
+            "            and not self._is_in_review_target_script(source_text)\n"
+            "        ):\n"
+        ))
     for method, var in (("_inject_machine_translation_to_target", "translated"),
                         ("_undo_all_target_edits", "original")):
         if name == method:
