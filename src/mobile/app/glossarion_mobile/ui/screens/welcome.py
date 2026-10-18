@@ -323,7 +323,10 @@ class WelcomeScreen(Screen):
             content=ft.Column(lines, spacing=0, tight=True),
             padding=ft.Padding.symmetric(horizontal=6, vertical=5),
             border_radius=10,
-            border=ft.Border.all(2 if suggested else 1, ft.Colors.PRIMARY if suggested else ft.Colors.OUTLINE_VARIANT),
+            # only the model in use is highlighted; the suggestion is just the ⭐ (owner 2026-10-18: a
+            # highlighted Light cell read as an auto-selected model; the user picks one)
+            border=ft.Border.all(2 if state == "in_use" else 1,
+                                 ft.Colors.PRIMARY if state == "in_use" else ft.Colors.OUTLINE_VARIANT),
             bgcolor=ft.Colors.SECONDARY_CONTAINER if state == "in_use" else None,
             tooltip=tooltip or None,
             on_click=lambda e, i=index: call_handler(self.use_ondevice, i),
