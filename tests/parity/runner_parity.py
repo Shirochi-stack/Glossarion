@@ -84,7 +84,8 @@ def git_show(sha: str, relpath: str) -> str:
 
 def legacy_translator_gui() -> str:
     if "tg" not in _LEGACY_CACHE:
-        _LEGACY_CACHE["tg"] = git_show(LEGACY_SHA, "src/translator_gui.py")
+        from parity.approved_changes import apply_to_source  # owner-approved changes since the pin
+        _LEGACY_CACHE["tg"] = apply_to_source("src/translator_gui.py", git_show(LEGACY_SHA, "src/translator_gui.py"))
     return _LEGACY_CACHE["tg"]
 
 

@@ -738,9 +738,9 @@ class ImageJobMixin:
             if getattr(self, 'request_merging_enabled_var', False):
                 split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
             
-            # Use a regex to replace the placeholder regardless of surrounding whitespace or newlines
-            import re
-            system_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', lambda m: '\n' + split_instr if split_instr else '', system_prompt)
+            # Fill the placeholder where the user put it; without an instruction its line goes away
+            from prompt_defaults import apply_split_marker_instruction
+            system_prompt = apply_split_marker_instruction(system_prompt, split_instr)
 
             # Check if we should append glossary to the prompt
             append_glossary = self.config.get('append_glossary', True)  # Default to True

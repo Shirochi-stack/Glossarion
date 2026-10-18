@@ -1553,6 +1553,31 @@ def test_prompt_editor_placeholders_and_token_count():
     assert labels == ["9 chars · 42 tokens"] and counter.last == 42
 
 
+@needs_flet
+def test_prompt_editor_pane_inserts_at_the_caret_flet_reports():
+    """Flet sends the caret only through on_selection_change: the chip inserts there, not at the end."""
+    import flet as ft
+
+    from glossarion_mobile.ui.screens.prompt_editor import PromptEditorPane
+
+    pane = PromptEditorPane(value="Translate to now.", counter=lambda text, model: 0)
+    assert pane.field.on_selection_change is not None and pane.field.selection is None
+    event = types.SimpleNamespace(selection=ft.TextSelection(base_offset=13, extent_offset=13))
+    pane.field.on_selection_change(event)
+    assert pane.insert("{target_lang}") == "Translate to {target_lang}now."
+    assert (pane.field.selection.base_offset, pane.field.selection.extent_offset) == (26, 26)  # after it
+    pane.insert("{split_marker_instruction}")  # the caret moved past the first one
+    assert pane.value == "Translate to {target_lang}{split_marker_instruction}now."
+    # a selection made backwards is replaced
+    pane.set_value("A\nOLD\nB")
+    pane.field.on_selection_change(types.SimpleNamespace(selection=ft.TextSelection(base_offset=5, extent_offset=2)))
+    assert pane.insert("{split_marker_instruction}") == "A\n{split_marker_instruction}\nB"
+    # a reload forgets the caret; an invalid one (-1) is no caret: append on its own line
+    pane.set_value("Fresh")
+    pane.field.on_selection_change(types.SimpleNamespace(selection=ft.TextSelection(base_offset=-1, extent_offset=-1)))
+    assert pane.insert("{target_lang}") == "Fresh\n{target_lang}"
+
+
 # ==========================================================================
 # Appearance / Storage / Backup / Import / About / Danger zone
 # ==========================================================================

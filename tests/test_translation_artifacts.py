@@ -4476,3 +4476,70 @@ def test_emergency_compliance_minimum_raw_length(monkeypatch, minimum, expected)
     )
 
     assert result == expected
+
+
+_SPLIT_PROMPT = (
+    "Translate to English.\n"
+    "- Keep honorifics etc.\n"
+    "{split_marker_instruction}\n"
+    "- Preserve any Markdown formatting."
+)
+
+
+def _split_config(monkeypatch, prompt, merging=True):
+    for key in ("DIRECT_TEXT_SKIP_PROMPT_PROFILE", "DIRECT_TEXT_PROFILE_USER_PROMPT"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("SYSTEM_PROMPT", prompt)
+    monkeypatch.setenv("REQUEST_MERGING_ENABLED", "1" if merging else "0")
+    return TranslationConfig()
+
+
+def test_split_marker_instruction_is_filled_at_the_placeholder(monkeypatch):
+    from prompt_defaults import SPLIT_MARKER_INSTRUCTION
+
+    config = _split_config(monkeypatch, _SPLIT_PROMPT)
+
+    assert config.get_system_prompt(actual_merge_count=3) == (
+        "Translate to English.\n"
+        "- Keep honorifics etc.\n"
+        + SPLIT_MARKER_INSTRUCTION + "\n"
+        "- Preserve any Markdown formatting."
+    )
+
+
+def test_split_marker_placeholder_line_goes_away_without_joining_lines(monkeypatch):
+    expected = "Translate to English.\n- Keep honorifics etc.\n- Preserve any Markdown formatting."
+
+    assert _split_config(monkeypatch, _SPLIT_PROMPT).get_system_prompt(actual_merge_count=1) == expected
+    assert _split_config(monkeypatch, _SPLIT_PROMPT, merging=False).get_system_prompt(3) == expected
+    assert _split_config(monkeypatch, _SPLIT_PROMPT).SYSTEM_PROMPT == expected
+
+
+def test_split_marker_instruction_without_placeholder_is_appended(monkeypatch):
+    from prompt_defaults import SPLIT_MARKER_INSTRUCTION
+
+    config = _split_config(monkeypatch, "Translate to English.\n- Keep honorifics.")
+
+    assert config.get_system_prompt(actual_merge_count=2) == (
+        "Translate to English.\n- Keep honorifics.\n\n" + SPLIT_MARKER_INSTRUCTION
+    )
+
+
+@pytest.mark.parametrize(
+    ("prompt", "instruction", "expected"),
+    [
+        ("a\n{split_marker_instruction}\nb", "", "a\nb"),
+        ("a\r\n{split_marker_instruction}\r\nb", "", "a\r\nb"),
+        ("a\n  {split_marker_instruction}  \nb", "", "a\nb"),
+        ("a\n{split_marker_instruction}", "", "a"),
+        ("{split_marker_instruction}\na", "", "a"),
+        ("Keep {split_marker_instruction} tags", "", "Keep tags"),
+        ("a\n{split_marker_instruction}\nb", "X", "a\nX\nb"),
+        ("Keep {split_marker_instruction} tags", "X", "Keep X tags"),
+        ("no placeholder", "X", "no placeholder"),
+    ],
+)
+def test_apply_split_marker_instruction_keeps_its_position(prompt, instruction, expected):
+    from prompt_defaults import apply_split_marker_instruction
+
+    assert apply_split_marker_instruction(prompt, instruction) == expected

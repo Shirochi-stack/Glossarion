@@ -61,6 +61,29 @@ _ON_DEVICE_DEFAULT_PROMPT_ROW = _after(
     '            "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,',
     f'            "On-device": "{_ON_DEVICE_PROMPT}",')
 
+# 2026-10-18 {split_marker_instruction} stays where the user put it: filled in place, or its own
+# line removed without joining the lines around it (prompt_defaults.apply_split_marker_instruction)
+_SPLIT_MARKER_OLD_SUB = ("re.sub(r'\\s*\\{split_marker_instruction\\}\\s*', "
+                         "lambda m: '\\n' + split_instr if split_instr else '', system_prompt)")
+
+
+def _split_marker_fill(indent):
+    return (indent + "# Use a regex to replace the placeholder regardless of surrounding whitespace or newlines\n"
+            + indent + "import re\n"
+            + indent + "system_prompt = " + _SPLIT_MARKER_OLD_SUB + "\n",
+            indent + "# Fill the placeholder where the user put it; without an instruction its line goes away\n"
+            + indent + "from prompt_defaults import apply_split_marker_instruction\n"
+            + indent + "system_prompt = apply_split_marker_instruction(system_prompt, split_instr)\n")
+
+
+_SPLIT_MARKER_TEXT_FILE = _split_marker_fill(" " * 16)   # _process_text_file (text_jobs)
+_SPLIT_MARKER_IMAGE_FILE = _split_marker_fill(" " * 12)  # _process_image_file (image_job)
+_SPLIT_MARKER_RPGMAKER = (                               # _process_rpgmaker_game (rpgmaker_job)
+    "            import re\n"
+    "            system_prompt = re.sub(r'\\s*\\{split_marker_instruction\\}\\s*', '', system_prompt)\n",
+    "            from prompt_defaults import apply_split_marker_instruction\n"
+    "            system_prompt = apply_split_marker_instruction(system_prompt, \"\")\n")
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -145,6 +168,20 @@ APPROVED = (
             {"parents": ("default_prompts", "prompt_profiles"), "after": "Subtitle Translation",
              "key": "On-device", "value": _ON_DEVICE_PROMPT},
         ],
+    },
+    {
+        "date": "2026-10-18",
+        "what": "Prompt placeholders stay where the user put them: {split_marker_instruction} is filled "
+                "in place, and without an instruction its line is removed without joining its neighbours",
+        "source": {
+            # the runners lived in translator_gui before U3 / U7
+            "src/translator_gui.py": [_SPLIT_MARKER_TEXT_FILE, _SPLIT_MARKER_IMAGE_FILE, _SPLIT_MARKER_RPGMAKER],
+            "src/text_jobs.py": [_SPLIT_MARKER_TEXT_FILE],
+            "src/image_job.py": [_SPLIT_MARKER_IMAGE_FILE],
+            "src/rpgmaker_job.py": [_SPLIT_MARKER_RPGMAKER],
+        },
+        # prompt text only (the logged preview / length follow from the source change)
+        "values": {},
     },
 )
 
