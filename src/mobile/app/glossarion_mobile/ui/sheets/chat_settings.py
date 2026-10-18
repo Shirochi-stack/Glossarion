@@ -309,6 +309,11 @@ class ChatSettingsSheet:
         return "All chats"
 
     def set_value(self, field_name: str, value: Any) -> None:
+        remember = getattr(getattr(self, "chats", None), "remember_last_used", None)
+        if field_name in ("model", "profile") and getattr(self, "subject", "chat") == "chat" and callable(remember):
+            # what the next new chat starts on (ChatView.new_chat_seed), whatever the scope
+            config_key = {"model": "model", "profile": "active_profile"}[field_name]
+            remember(field_name, value, self.config.get(config_key, "") if self.scope == "chat" else value)
         if self.scope == "chat":
             if field_name in SIDECAR_META_FIELDS:  # mobile-only chat settings live in the sidecar meta
                 self.chats.set_meta(self.cid, field_name, bool(value))
