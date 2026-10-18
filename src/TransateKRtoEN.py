@@ -26323,6 +26323,27 @@ def main(log_callback=None, stop_callback=None):
             progress_manager.save()
         print("⏹️ Translation stopped during metadata phase")
 
+    def _save_metadata_json():
+        # Skip metadata.json for plain text files — it serves no purpose there
+        if is_text_file:
+            return
+        try:
+            with open(metadata_path, 'w', encoding='utf-8') as mf:
+                json.dump(metadata, mf, ensure_ascii=False, indent=2)
+            print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
+            if metadata_progress_enabled and progress_manager.refresh_metadata_content_hash(metadata_path):
+                progress_manager.save()
+        except Exception as metadata_save_error:
+            _set_metadata_progress("failed", error=metadata_save_error)
+            raise
+
+    def _stop_metadata_phase_keeping_results():
+        # A stop after a field was translated keeps it: its *_translated flag and value are written to
+        # metadata.json before stopping, so Resume skips it (owner 2026-10-19: the progress said
+        # completed but metadata.json was never written, so every Resume translated it again).
+        _save_metadata_json()
+        _stop_metadata_phase()
+
     if metadata_regeneration_requested:
         # A Progress Manager reset can leave metadata.json on disk when deletion
         # fails. Restore saved originals and clear completion flags so the phase
@@ -26397,7 +26418,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"📚 Skipping title translation for {os.path.splitext(input_path)[1]} file")
 
         if _metadata_phase_stop_requested():
-            _stop_metadata_phase()
+            _stop_metadata_phase_keeping_results()
             return
 
         if not _skip_metadata_translation and any(translate_metadata_fields.values()):
@@ -26476,12 +26497,11 @@ def main(log_callback=None, stop_callback=None):
                         metadata, fields_to_translate, mode=translator_mode
                     )
                 except MetadataTranslationCancelled:
-                    _stop_metadata_phase()
+                    _stop_metadata_phase_keeping_results()
                     return
 
-                if _metadata_phase_stop_requested():
-                    _stop_metadata_phase()
-                    return
+                # A stop raised meanwhile is handled after the completed fields are recorded (the
+                # check before the save below), so a finished response is never thrown away.
 
                 # Mark every successfully handled field complete, including
                 # valid responses whose output is identical to the input.
@@ -26555,20 +26575,10 @@ def main(log_callback=None, stop_callback=None):
         traceback.print_exc()
 
     if _metadata_phase_stop_requested():
-        _stop_metadata_phase()
+        _stop_metadata_phase_keeping_results()
         return
 
-    # Skip metadata.json for plain text files — it serves no purpose there
-    if not is_text_file:
-        try:
-            with open(metadata_path, 'w', encoding='utf-8') as mf:
-                json.dump(metadata, mf, ensure_ascii=False, indent=2)
-            print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
-            if metadata_progress_enabled and progress_manager.refresh_metadata_content_hash(metadata_path):
-                progress_manager.save()
-        except Exception as metadata_save_error:
-            _set_metadata_progress("failed", error=metadata_save_error)
-            raise
+    _save_metadata_json()
 
     if metadata_only:
         if metadata_translation_failed:

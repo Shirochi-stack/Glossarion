@@ -3336,6 +3336,18 @@ class MetadataTranslator:
         if self._is_any_stop_requested():
             raise MetadataTranslationCancelled("Metadata translation stopped by user")
 
+    def _response_must_be_discarded(self) -> bool:
+        """After a response arrived: only a forced stop discards it (TRANSLATION_CANCELLED is set by a
+        graceful stop too, so it does not count while GRACEFUL_STOP is on)."""
+        try:
+            if hasattr(self.client, 'is_globally_cancelled') and self.client.is_globally_cancelled():
+                return True
+        except Exception:
+            pass
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        return self._is_any_stop_requested()
+
     def _cancel_active_metadata_calls(self) -> None:
         if not self._is_force_stop_requested():
             return
@@ -3390,7 +3402,11 @@ class MetadataTranslator:
                 ) from None
             raise
 
-        self._raise_if_stop_requested()
+        # A graceful stop lets the in-flight request finish and keeps its answer (owner 2026-10-19: a
+        # Stop while the metadata request ran threw the finished translation away, so Resume sent it
+        # again); only a forced stop discards it. The next request is still refused before it is sent.
+        if self._response_must_be_discarded():
+            raise MetadataTranslationCancelled("Metadata translation stopped by user")
         
         # Extract content from response - handle both object and tuple formats
         response_content = None
