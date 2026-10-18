@@ -4094,7 +4094,7 @@ byte-identical.
 
 - The chat's profile pickers (Chat settings, ModelSheet › Profile) list `ProfileService.listing()`, the same
   listing as Settings › Profiles & prompts (`prompt_profiles.profile_state_from_config`): a fresh config shows
-  all 18 built-ins. Before, `integration.profile_names` built the defaults on a bare SimpleNamespace, the
+  all 19 built-ins (18 + On-device since 2026-10-18). Before, `integration.profile_names` built the defaults on a bare SimpleNamespace, the
   AttributeError was swallowed and only 'Universal' was left. Chat order: translation profiles first
   (Universal, the *_BeautifulSoup and *_html2text built-ins, custom profiles), then the task-specific built-ins
   under a "Specialised" heading (`ui/screens/profiles.SPECIALISED_PROFILES`: Refinement, Manga_JP / KR / CN,

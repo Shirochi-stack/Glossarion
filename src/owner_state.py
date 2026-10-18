@@ -143,6 +143,7 @@ class ConfigStateMixin:
             "NanoBanana_Image",
             "SDLXLIFF Editing v2",
             "Subtitle Translation",
+            "On-device",
         }
         return protected
 
@@ -1246,6 +1247,7 @@ Text to analyze:
                 "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
             ),
             "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,
+            "On-device": "You must only output an {target_lang} translation of the following text.",
         }
 
     def _init_watchdog_dir(self):
@@ -1586,6 +1588,7 @@ Text to analyze:
             "NanoBanana_Image",
             "SDLXLIFF Editing v2",
             "Subtitle Translation",
+            "On-device",
         ]
         
         # Add missing required profiles while preserving existing profile positions

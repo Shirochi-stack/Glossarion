@@ -53,6 +53,14 @@ _SAFETY_CATEGORY_ENV_PAIR = _after(
     "                ('GEMINI_SAFETY_THRESHOLD', str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE'))),",
     "                ('GEMINI_SAFETY_CATEGORY_THRESHOLDS', json.dumps(self.config.get('gemini_safety_category_thresholds') or {})),")
 
+# 2026-10-18 built-in "On-device" translation prompt profile (small on-device models)
+_ON_DEVICE_PROMPT = "You must only output an {target_lang} translation of the following text."
+# one row patches both identical lists (always_include_profiles and the protected set)
+_ON_DEVICE_PROFILE_LIST_ROW = _after('            "Subtitle Translation",', '            "On-device",')
+_ON_DEVICE_DEFAULT_PROMPT_ROW = _after(
+    '            "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,',
+    f'            "On-device": "{_ON_DEVICE_PROMPT}",')
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -123,6 +131,21 @@ APPROVED = (
         # a new key: nothing recorded before it existed changes value
         "values": {},
     },
+    {
+        "date": "2026-10-18",
+        "what": "Built-in 'On-device' prompt profile (always included, cannot be deleted) for small "
+                "on-device models; the mobile app selects it when a local/ model is chosen",
+        "source": {
+            "src/owner_state.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW],
+            "src/translator_gui.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW],
+        },
+        "values": {},
+        # recorded profile dicts (under these keys) gain the new profile after the anchor key
+        "inserts": [
+            {"parents": ("default_prompts", "prompt_profiles"), "after": "Subtitle Translation",
+             "key": "On-device", "value": _ON_DEVICE_PROMPT},
+        ],
+    },
 )
 
 
@@ -144,14 +167,29 @@ def _changed(value, old, new):
 
 
 def apply_to_golden(data):
-    """A loaded golden (nested dicts / lists) with the approved recorded values changed."""
+    """A loaded golden (nested dicts / lists) with the approved recorded values changed and the
+    approved new keys inserted."""
     values = {}
+    inserts = []
     for change in APPROVED:
         values.update(change["values"])
+        inserts.extend(change.get("inserts", ()))
 
-    def walk(node):
+    def _inserted(parent, node):
+        for rule in inserts:
+            if parent in rule["parents"] and rule["after"] in node and rule["key"] not in node:
+                out = {}
+                for key, value in node.items():
+                    out[key] = value
+                    if key == rule["after"]:
+                        out[rule["key"]] = rule["value"]
+                node = out
+        return node
+
+    def walk(node, parent=None):
         if isinstance(node, dict):
-            return {key: (_changed(walk(value), *values[key]) if key in values else walk(value))
+            node = _inserted(parent, node)
+            return {key: (_changed(walk(value, key), *values[key]) if key in values else walk(value, key))
                     for key, value in node.items()}
         if isinstance(node, list):
             return [walk(item) for item in node]

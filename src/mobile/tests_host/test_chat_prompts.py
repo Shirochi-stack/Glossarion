@@ -6,7 +6,7 @@ What the owner reported on the U8 APK (2026-10-08):
   the chat's profile pickers (Chat settings, the ModelSheet Profile tab, ``/profile``, Series defaults)
   came from ``integration.profile_names``, which built the built-ins on a bare SimpleNamespace, hit an
   AttributeError and fell back to ``["Universal"]`` on every fresh config. They now read the Settings ›
-  Profiles & prompts listing (the shared ``prompt_profiles`` desktop start-up): all 18 built-ins,
+  Profiles & prompts listing (the shared ``prompt_profiles`` desktop start-up): all 19 built-ins,
   translation profiles first and the task-specific ones under "Specialised" (owner decision).
 * #15 "we should be able to modify prompts in the chat settings and add prompts": Chat settings ›
   Model & prompt has the profile's prompt card: Edit prompt (``PromptEditorSheet``; edits the shared
@@ -64,9 +64,9 @@ pytestmark = [needs_flet, needs_backend]
 BUILTINS = ["Universal", "Refinement", "Korean_BeautifulSoup", "Japanese_BeautifulSoup", "Chinese_BeautifulSoup",
             "Korean_html2text", "Japanese_html2text", "Chinese_html2text", "Manga_JP", "Manga_KR", "Manga_CN",
             "Glossary_Editor", "RPGMaker_GTool", "RPGMaker_GTool_Image", "NanoBanana_Image", "Original",
-            "SDLXLIFF Editing v2", "Subtitle Translation"]
+            "SDLXLIFF Editing v2", "Subtitle Translation", "On-device"]
 TRANSLATION = ["Universal", "Korean_BeautifulSoup", "Japanese_BeautifulSoup", "Chinese_BeautifulSoup",
-               "Korean_html2text", "Japanese_html2text", "Chinese_html2text"]
+               "Korean_html2text", "Japanese_html2text", "Chinese_html2text", "On-device"]
 SPECIALISED = [n for n in BUILTINS if n not in TRANSLATION]
 
 
@@ -236,7 +236,7 @@ def test_owner_report_16_a_fresh_config_lists_every_builtin_not_only_universal(t
 
     store = _store(tmp_path)
     names = profile_names(store)
-    assert names != ["Universal"] and len(names) == 18
+    assert names != ["Universal"] and len(names) == 19
     assert sorted(names) == sorted(_desktop_defaults()) == sorted(BUILTINS)
     # translation profiles first, then the task-specific built-ins (each group in desktop order)
     assert names == TRANSLATION + SPECIALISED
@@ -248,7 +248,7 @@ def test_owner_report_16_a_fresh_config_lists_every_builtin_not_only_universal(t
     env = feature.build_env()
     assert env.profiles() == names and env.profile_service is not None
 
-    # Chat settings › Prompt profile: 18 profiles + the disabled "Specialised" heading after the translation ones
+    # Chat settings › Prompt profile: 19 profiles + the disabled "Specialised" heading after the translation ones
     sheet = ChatSettingsSheet(cid="2", config=store, chats=Chats(), profiles=env.profiles())
     options = _profile_dropdown(sheet).options
     keys = [o.key for o in options]
@@ -261,14 +261,14 @@ def test_owner_report_16_a_fresh_config_lists_every_builtin_not_only_universal(t
 
 CONFIGS = {
     # a current desktop config (every built-in) + a custom profile
-    "desktop": lambda d: ({**d, "My style": "mine"}, 19),
+    "desktop": lambda d: ({**d, "My style": "mine"}, 20),
     # an older desktop config without the newest built-ins: desktop start-up adds them back
     "old_desktop": lambda d: ({k: v for k, v in d.items()
                                if k not in ("NanoBanana_Image", "SDLXLIFF Editing v2", "Subtitle Translation")}
-                              | {"My style": "mine"}, 19),
+                              | {"My style": "mine"}, 20),
     # only Universal stored: the always-include built-ins come back (the deletable ones do not)
-    "only_universal": lambda d: ({"Universal": "x"}, 13),
-    "empty": lambda d: ({}, 13),
+    "only_universal": lambda d: ({"Universal": "x"}, 14),
+    "empty": lambda d: ({}, 14),
 }
 
 
@@ -359,7 +359,7 @@ def test_keep_active_with_a_dangling_or_absent_active_profile(tmp_path):
     fresh = _store(tmp_path, {}, name="fresh.json")
     ProfileService(fresh).save("Universal", "Universal", "my universal", keep_active=True)
     assert "active_profile" not in fresh.keys() and "text_extraction_method" not in fresh.keys()
-    assert fresh.get("prompt_profiles")["Universal"] == "my universal" and len(fresh.get("prompt_profiles")) == 18
+    assert fresh.get("prompt_profiles")["Universal"] == "my universal" and len(fresh.get("prompt_profiles")) == 19
     fresh._saver.close()
 
 
@@ -619,7 +619,7 @@ def test_chat_view_pickers_on_a_fresh_config(tmp_path, desktop_store_cls):
         try:
             sheet = view.open_chat_settings()
             assert isinstance(sheet, ChatSettingsSheet)
-            assert len([o for o in _profile_dropdown(sheet).options if not o.disabled]) == 18
+            assert len([o for o in _profile_dropdown(sheet).options if not o.disabled]) == 19
             assert _card(sheet) is not None and not _by_key(_card(sheet), "setting-profile-prompt-new").disabled
             # Integrate: the chat's sheet edits on the chat env and its profile service; Manage… leaves the chat
             assert sheet.ctx is env and sheet.profile_service is env.profile_service
@@ -639,7 +639,7 @@ def test_chat_view_pickers_on_a_fresh_config(tmp_path, desktop_store_cls):
             keys = [str(getattr(row, "key", "") or "") for row in rows]
             assert keys.count("profile-group-specialised") == 1
             assert model_sheet._profile_preview("Manga_JP") and model_sheet._profile_preview("Universal")
-            assert len(model_sheet._profile_texts()) == 18
+            assert len(model_sheet._profile_texts()) == 19
             view.run_slash("/profile manga_jp")
             assert notes[-1] == "Prompt profile: Manga_JP"
         finally:
