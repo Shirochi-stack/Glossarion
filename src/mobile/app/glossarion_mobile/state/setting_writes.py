@@ -64,6 +64,7 @@ __all__ = [
     "streaming_mode",
     "streaming_states",
     "streaming_summary",
+    "local_output_limit",
     "with_mobile_streaming_defaults",
     "write_setting",
     "write_settings",
@@ -261,7 +262,10 @@ def streaming_enabled(source: Any) -> bool:
 
 
 def default_batch_size(model: Any) -> int:
-    """``settings_rules.default_batch_size``: 1 for the web-chat routes (authds/, authchatgpt/), else 5."""
+    """``settings_rules.default_batch_size``: 1 for the web-chat routes (authds/, authchatgpt/), else 5;
+    1 for an on-device ``local/`` model too (mobile only: its engine answers one request at a time)."""
+    if str(model or "").strip().lower().startswith("local/"):
+        return 1
     rules = _rules()
     if rules is not None and hasattr(rules, "default_batch_size"):
         try:
@@ -273,6 +277,22 @@ def default_batch_size(model: Any) -> int:
 
 #: Job config of a ``local/`` (on-device) model, whatever the saved settings say.
 LOCAL_ENGINE_JOB_CONFIG = {"batch_translation": False, "enable_parallel_extraction": False, "extraction_workers": 1}
+
+
+def local_output_limit(model: Any) -> Optional[int]:
+    """The output-token limit of a job on an on-device ``local/<stem>`` model: half its configured context
+    (``LocalEngineService.output_limit_for``), or None without the app's engine service."""
+    value = str(model or "").strip()
+    if not value.lower().startswith("local/"):
+        return None
+    try:
+        from glossarion_mobile.services.local_llm.service import default_service
+
+        service = default_service()
+        return int(service.output_limit_for(value[len("local/"):])) if service is not None else None
+    except Exception:
+        log.debug("local_output_limit failed", exc_info=True)
+        return None
 
 
 def with_mobile_streaming_defaults(config: Any) -> Any:
@@ -294,6 +314,10 @@ def with_mobile_streaming_defaults(config: Any) -> Any:
         # the on-device engine (services.local_llm) answers one request at a time: parallel requests would
         # only queue at its endpoint and spend the client's timeout waiting
         config.update(LOCAL_ENGINE_JOB_CONFIG)
+        # owner 2026-10-18: half the configured context is the output budget; the prompt keeps the rest
+        limit = local_output_limit(config.get("model"))
+        if limit:
+            config["max_output_tokens"] = limit
     if bool(config.get("stream_thinking_logs")) and not bool(config.get("enable_thoughts", THOUGHTS_DEFAULT)):
         rules = _rules()
         try:

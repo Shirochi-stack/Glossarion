@@ -2,8 +2,10 @@
 
 The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.local_llm``:
 
-* **Engine**: Not loaded / Loading… / Ready · <model> / Generating, Unload, the Context and Threads
-  defaults (Prefs ``local_llm_settings``) and the engine's system info after the first load. Without
+* **Engine**: Not loaded / Loading… / Ready · <model> / Generating, Unload, the Context slider and field
+  (``ContextControl``, also on the Welcome page) and the Threads default (Prefs ``local_llm_settings``) and
+  the engine's system info after the first load. Choosing a model resets Context to that model's own
+  (8,192 tokens, 4,096 for files of 4 GB and more); a job on it asks for half the context as output. Without
   llama-cpp-python (a desktop dev run) the card says the engine is unavailable; nothing crashes.
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
@@ -39,7 +41,8 @@ from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.theme import HIT_TARGET, semantic
 
-__all__ = ["FileChooser", "LocalModelsPanel", "LocalPresetEditor", "OnDeviceFlow", "RAM_HINTS"]
+__all__ = ["CONTEXT_SLIDER", "ContextControl", "FileChooser", "LocalModelsPanel", "LocalPresetEditor", "OnDeviceFlow",
+           "RAM_HINTS"]
 
 log = logging.getLogger("glossarion.models")
 
@@ -49,6 +52,8 @@ VISION_TEXT = "Reads images"
 #: ``service.preset_ram_check`` verdict -> (mark, words) of the RAM hint
 RAM_HINTS = {"ok": ("✓", "fits this phone"), "confirm": ("⚠", "tight on free RAM"), "refuse": ("✕", "too big for this phone"),
              "unknown": ("", "")}
+#: Context slider range and step (tokens); the field takes 512 up to ``presets.MAX_CTX``
+CONTEXT_SLIDER = (2048, 16384, 1024)
 
 
 def _push(*controls: Any) -> None:
@@ -64,6 +69,53 @@ def _push(*controls: Any) -> None:
 def _small(text: str, **kwargs: Any) -> ft.Text:
     kwargs.setdefault("color", ft.Colors.ON_SURFACE_VARIANT)
     return ft.Text(text, theme_style=ft.TextThemeStyle.BODY_SMALL, **kwargs)
+
+
+class ContextControl:
+    """The on-device Context: a 2,048-16,384 slider and a field for exact values and larger contexts.
+
+    ``on_change(tokens)`` runs for every valid value (slider steps of 1,024; the field 512 up to
+    ``presets.MAX_CTX``); ``set_value`` shows another one (a newly chosen model's own context)."""
+
+    def __init__(self, value: int, on_change: Callable[[int], Any], *, key: str = "local-ctx",
+                 label: str = "Context (tokens)") -> None:
+        low, high, step = CONTEXT_SLIDER
+        self.on_change = on_change
+        self.value = int(value)
+        self.field = ft.TextField(label=label, value=str(self.value), dense=True, width=150,
+                                  keyboard_type=ft.KeyboardType.NUMBER, key=key, on_change=self._from_field)
+        self.slider = ft.Slider(min=low, max=high, divisions=(high - low) // step, value=self._clamp(self.value),
+                                label="{value}", expand=True, key=f"{key}-slider", on_change=self._from_slider)
+        self.control = ft.Row([self.slider, self.field], spacing=8, key=f"{key}-row",
+                              vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+    @staticmethod
+    def _clamp(value: int) -> int:
+        low, high, _step = CONTEXT_SLIDER
+        return max(low, min(high, int(value)))
+
+    def _from_slider(self, e: Any) -> None:
+        low, _high, step = CONTEXT_SLIDER
+        value = max(low, int(round(float(e.control.value) / step)) * step)
+        self.value = value
+        self.field.value = str(value)
+        _push(self.field)
+        self.on_change(value)
+
+    def _from_field(self, e: Any) -> None:
+        text = str(e.control.value or "").strip()
+        if not text.isdigit() or not 512 <= int(text) <= presets.MAX_CTX:
+            return
+        self.value = int(text)  # may go beyond the slider's 16,384
+        self.slider.value = self._clamp(self.value)
+        _push(self.slider)
+        self.on_change(self.value)
+
+    def set_value(self, value: int) -> None:
+        self.value = int(value)
+        self.field.value = str(self.value)
+        self.slider.value = self._clamp(self.value)
+        _push(self.field, self.slider)
 
 
 def _preset_ref(preset: dict) -> str:
@@ -370,7 +422,10 @@ class OnDeviceFlow:
         return stem
 
     async def activate(self, stem: str, label: str = "") -> bool:
-        """Load ``stem`` (asking when RAM is tight) and make ``local/<stem>`` the model."""
+        """Load ``stem`` (asking when RAM is tight) and make ``local/<stem>`` the model. Context goes back
+        to the model's own (``context_for``: 4,096 for Heavy), which the Context slider then shows."""
+        self.service.save_context(0)
+        self.context_changed(stem)
         verdict, message = self.service.ram_check(stem)
         if verdict == "refuse":
             raise _Failed(message)
@@ -427,6 +482,17 @@ class OnDeviceFlow:
         finally:
             self.busy.discard(key)
             self.render()
+
+    def context_changed(self, stem: Optional[str]) -> None:
+        """The Context default changed (a model was chosen); a screen showing a ``ContextControl`` updates it."""
+
+    def current_context(self) -> int:
+        """The Context the slider shows: the current ``local/`` model's (its preset's, the saved default or
+        its own), else the saved default, else 8,192."""
+        model = str(self.current_model() if self.current_model is not None else "") or ""
+        if model.lower().startswith("local/"):
+            return self.service.context_for(model[len("local/"):])
+        return self.service.settings()["n_ctx"] or 8192
 
     async def get_preset(self, index: int) -> Optional[str]:
         """The one-tap action: download if needed, load, use. Returns the model id or None."""
@@ -536,8 +602,8 @@ class LocalModelsPanel(OnDeviceFlow):
         self.unload_button = ft.TextButton(content="Unload", icon=ft.Icons.EJECT, key="local-unload",
                                            on_click=lambda e: self.spawn(self.unload()))
         settings = self.service.settings()
-        self.ctx_field = ft.TextField(value=str(settings["n_ctx"] or ""), label="Context", hint_text="auto",
-                                      dense=True, expand=True, keyboard_type=ft.KeyboardType.NUMBER, key="local-ctx")
+        self.context = ContextControl(self.current_context(), self.save_context)
+        self.ctx_field = self.context.field
         self.threads_field = ft.TextField(value=str(settings["n_threads"] or ""), label="Threads", hint_text="auto",
                                           dense=True, expand=True, keyboard_type=ft.KeyboardType.NUMBER,
                                           key="local-threads")
@@ -549,7 +615,10 @@ class LocalModelsPanel(OnDeviceFlow):
             ft.Row([ft.Container(content=self.engine_state, expand=True), self.unload_button],
                    vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             self.engine_detail,
-            ft.Row([self.ctx_field, self.threads_field,
+            self.context.control,
+            _small("Choosing a model sets its own context (4,096 for Heavy). Jobs on an on-device model ask for "
+                   "half the context as output and send one request at a time.", key="local-ctx-note"),
+            ft.Row([self.threads_field,
                     ft.TextButton(content="Save", key="local-settings-save", on_click=lambda e: self.save_settings())],
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.settings_error,
@@ -636,6 +705,18 @@ class LocalModelsPanel(OnDeviceFlow):
         self.unavailable_text.value = snap.unavailable_reason or ""
         if push:
             _push(self.engine_state, self.engine_detail, self.unload_button, self.unavailable_text)
+
+    def context_changed(self, stem: Optional[str]) -> None:
+        if getattr(self, "context", None) is not None:
+            self.context.set_value(self.service.context_for(stem) if stem else self.current_context())
+
+    def save_context(self, tokens: int) -> Optional[str]:
+        """The Context slider or field: saved at once; a loaded model reloads with it on its next request."""
+        _values, error = self.service.save_context(tokens)
+        self.settings_error.value = error or ""
+        self.settings_error.visible = bool(error)
+        _push(self.settings_error)
+        return error
 
     def save_settings(self) -> Optional[str]:
         values, error = self.service.save_settings(self.ctx_field.value, self.threads_field.value)

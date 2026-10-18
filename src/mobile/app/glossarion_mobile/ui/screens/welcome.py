@@ -178,6 +178,7 @@ class WelcomeScreen(Screen):
         self.local_engine = local_engine
         self.prefs = prefs
         self.ondevice: Any = None  # OnDeviceFlow (local_models_panel), made on first render
+        self.context_control: Any = None  # ContextControl of the Request size step (on-device models)
         self.ondevice_box = ft.Container(key="welcome-ondevice-box")
         self._ondevice_unsub: Optional[Callable[[], None]] = None
         self.page_area = ft.Container(expand=True)
@@ -484,14 +485,50 @@ class WelcomeScreen(Screen):
         self.render()
         self.use_provider(provider)
 
+    def local_context(self) -> Optional[Any]:
+        """The on-device flow when the chosen model is an on-device ``local/`` one (its Context applies)."""
+        model = str(self.current_model() if self.current_model is not None else "") or ""
+        if not model.lower().startswith("local/"):
+            return None
+        return self.ondevice_flow()
+
     def _run_budget(self) -> ft.Control:
-        """U13: the output-token budget (slider + field; mobile default 16,384) and the chunk size (blank: auto)."""
+        """U13: the output-token budget (slider + field; mobile default 16,384) and the chunk size (blank: auto).
+
+        With an on-device model: its Context (``ContextControl``, saved at once like Model manager's) above
+        the budget, which is then half the context and read-only (jobs on ``local/`` use that; the saved
+        budget stays for cloud models)."""
+        ondevice = self.local_context()
         current = int(self.flow.max_output_tokens or self.default_max_tokens or 16384)
+        if ondevice is not None:
+            current = max(256, ondevice.current_context() // 2)
         low, high = TOKEN_SLIDER
-        field = ft.TextField(label="Output token limit", value=str(current), dense=True, width=170,
+        field = ft.TextField(label="Output token limit" + (" (half the context)" if ondevice is not None else ""),
+                             value=str(current), dense=True, width=170, disabled=ondevice is not None,
                              keyboard_type=number_keyboard(), key="welcome-max-tokens")
         slider = ft.Slider(min=low, max=high, value=max(low, min(high, current)), expand=True,
-                           key="welcome-max-tokens-slider")
+                           disabled=ondevice is not None, key="welcome-max-tokens-slider")
+        context_rows: list[ft.Control] = []
+        if ondevice is not None:
+            from glossarion_mobile.ui.screens.local_models_panel import ContextControl
+
+            def on_context(tokens: int) -> None:
+                ondevice.service.save_context(tokens)
+                half = max(256, tokens // 2)
+                field.value = str(half)
+                slider.value = max(low, min(high, half))
+                for control in (field, slider):
+                    try:
+                        control.update()
+                    except Exception:
+                        pass
+
+            self.context_control = ContextControl(ondevice.current_context(), on_context, key="welcome-ctx",
+                                                  label="Context (tokens)")
+            context_rows = [self.context_control.control,
+                            ft.Text("On-device model: the context holds the prompt and the answer; half of it is the "
+                                    "output limit, and requests go one at a time.",
+                                    theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)]
 
         def from_slider(e: Any) -> None:
             value = int(round(float(e.control.value) / 1024.0)) * 1024 or low
@@ -521,6 +558,7 @@ class WelcomeScreen(Screen):
                                                          str(e.control.value or "").strip()))
         return ft.Column([
             ft.Text("Request size", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+            *context_rows,
             ft.Row([slider, field], spacing=8),
             chunk,
             ft.Text("Lower limits suit phones and free tiers; leave the chunk size blank to let Glossarion choose.",
@@ -542,7 +580,7 @@ class WelcomeScreen(Screen):
 
     def default_batch_size(self) -> int:
         """The batch size shown when the user has not set one: the saved one, else the current model's
-        default (1 for authds/ and authchatgpt/, else 5; ``settings_rules.default_batch_size``)."""
+        default (1 for authds/, authchatgpt/ and on-device local/, else 5; ``setting_writes.default_batch_size``)."""
         from glossarion_mobile.state.setting_writes import default_batch_size
         from glossarion_mobile.ui.chat.send_state import DEFAULT_MODEL
 

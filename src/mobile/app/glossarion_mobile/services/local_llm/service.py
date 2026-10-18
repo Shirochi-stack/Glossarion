@@ -460,6 +460,10 @@ class LocalEngineService:
             self.prefs.set(SETTINGS_KEY, values)
         return values, None
 
+    def save_context(self, n_ctx: Any) -> tuple:
+        """Save only the Context default (0 or blank: each model's own, ``context_for``); Threads stay."""
+        return self.save_settings(n_ctx, self.settings()["n_threads"])
+
     def preset_for(self, stem: str) -> Optional[dict]:
         """The preset that brought ``stem`` (same repo and file; else a file-less preset of that repo)."""
         entry = self.registry.load().get(stem) or {}
@@ -485,6 +489,11 @@ class LocalEngineService:
             return self.settings()["n_ctx"]
         size = int((self.registry.load().get(stem) or {}).get("size") or 0)
         return 8192 if size < 4 * GIB else 4096
+
+    def output_limit_for(self, stem: str) -> int:
+        """The output-token limit of a job on ``local/<stem>``: half its context, so the prompt keeps the
+        other half."""
+        return max(256, self.context_for(stem) // 2)
 
     # ---- RAM gate --------------------------------------------------------------------------------
 
@@ -535,7 +544,9 @@ class LocalEngineService:
     def _ensure_loaded(self, stem: str, *, force: bool = False, interactive: bool = False,
                        vision: bool = False) -> None:
         engine = self._engine()
-        if self._stem == stem and engine.loaded:
+        n_ctx = self.context_for(stem)
+        # a changed Context (Model manager or Welcome slider) reloads the model with it on the next request
+        if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx):
             if vision and not engine.vision_loaded:  # the projector loads with the first image
                 self._gate_ram(stem, engine.n_ctx or self.context_for(stem), force, interactive, vision=True)
             return
@@ -545,7 +556,6 @@ class LocalEngineService:
         path = self.registry.file_path(stem)
         if not os.path.isfile(path):
             raise LocalLLMError(404, "model_not_found", f"local/{stem} is not downloaded. {NOT_DOWNLOADED}.")
-        n_ctx = self.context_for(stem)
         self._gate_ram(stem, n_ctx, force, interactive, vision=vision)
         if engine.loaded:
             self._unload_locked()
