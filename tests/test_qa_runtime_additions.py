@@ -497,6 +497,29 @@ def _drop_local_hashlib_import(tree):
     return removed
 
 
+def _drop_shared_script_ranges(legacy_tree, new_tree):
+    """Owner change (2026-10-18): detect_non_english_content's script ranges and per-language
+    script lists moved to script_ranges (shared with the SDLXLIFF editor). Check the moved values
+    are the legacy ones, then point the legacy tree at the shared names and drop the new import."""
+    import script_ranges
+
+    shared = {"all_script_ranges": ("SCRIPT_RANGES", script_ranges.SCRIPT_RANGES),
+              "language_script_mapping": ("LANGUAGE_SCRIPTS", script_ranges.LANGUAGE_SCRIPTS)}
+    fn = next(n for n in legacy_tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "detect_non_english_content")
+    replaced = 0
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") in shared:
+            name, value = shared[node.targets[0].id]
+            assert ast.literal_eval(node.value) == value, name
+            node.value = ast.Name(id=name, ctx=ast.Load())
+            replaced += 1
+    assert replaced == 2
+    imports = [n for n in new_tree.body if isinstance(n, ast.ImportFrom) and n.module == "script_ranges"]
+    assert [[a.name for a in n.names] for n in imports] == [["LANGUAGE_SCRIPTS", "SCRIPT_RANGES"]]
+    new_tree.body.remove(imports[0])
+
+
 def test_scanner_refusal_defaults_are_key_pool_service_list():
     legacy_tree = ast.parse(git_text("src/scan_html_folder.py"))
     new_tree = ast.parse(src_text("scan_html_folder.py"))
@@ -509,6 +532,7 @@ def test_scanner_refusal_defaults_are_key_pool_service_list():
     assert [[a.name for a in n.names] for n in imports] == [["DEFAULT_REFUSAL_PATTERNS"]]
     assert not [n for n in new_tree.body if isinstance(n, ast.Assign)
                 and getattr(n.targets[0], "id", "") == "DEFAULT_REFUSAL_PATTERNS"]
+    _drop_shared_script_ranges(legacy_tree, new_tree)
     # the import stands where the list was; nothing else in the scanner changed (bar the hashlib fix)
     old_body = [ast.dump(n) for n in legacy_tree.body]
     new_body = [ast.dump(n) for n in new_tree.body]

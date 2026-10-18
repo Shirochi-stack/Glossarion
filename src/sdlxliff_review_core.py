@@ -54,6 +54,7 @@ from progress_core import (
     _normalize_progress_match_name,
     _write_progress_snapshot_atomic,
 )
+from script_ranges import text_is_in_language_script
 from sdlxliff_sidecar_writer import (
     _SIDECAR_FRESHNESS_MANIFEST_LOCK,
     _SIDECAR_FRESHNESS_MANIFEST_TYPE,
@@ -3998,27 +3999,13 @@ class SdlxliffReviewCoreMixin:
     def _has_linguistic_letters(text):
         return any(ch.isalpha() for ch in str(text or ""))
 
-    # Unicode-name prefixes of the letters each output language is written in.
-    _REVIEW_TARGET_SCRIPT_PREFIXES = {
-        "ru": ("CYRILLIC",),
-        "ar": ("ARABIC",),
-        "hi": ("DEVANAGARI",),
-        "zh-CN": ("CJK",),
-        "zh-TW": ("CJK",),
-        "ja": ("HIRAGANA", "KATAKANA", "CJK"),
-        "ko": ("HANGUL",),
-    }
-
     def _is_in_review_target_script(self, text):
         """True when every letter of ``text`` is already written in the output language's
         script (e.g. English words kept in a Korean source), so an unchanged copy is fine."""
         try:
-            code = self._review_target_language_code()
+            return text_is_in_language_script(text, self._review_target_language())
         except Exception:
-            code = "en"
-        prefixes = self._REVIEW_TARGET_SCRIPT_PREFIXES.get(code, ("LATIN",))
-        letters = [ch for ch in str(text or "") if ch.isalpha()]
-        return bool(letters) and all(unicodedata.name(ch, "").startswith(prefixes) for ch in letters)
+            return False
 
     def _row_status(self, source_text, target_text, source_missing=False, target_missing=False):
         source_text = self._normalize_review_text(source_text)

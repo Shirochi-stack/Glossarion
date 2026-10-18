@@ -36,6 +36,7 @@ from tqdm import tqdm
 import threading
 import re
 import unicodedata
+from script_ranges import LANGUAGE_SCRIPTS, SCRIPT_RANGES
 import time
 import html as html_lib
 import xml.etree.ElementTree as ET
@@ -1371,38 +1372,10 @@ def detect_non_english_content(text, qa_settings=None):
                 pass  # Silently continue to script-based detection
             pass
     
-    # Define all script ranges
-    all_script_ranges = [
-        (0xAC00, 0xD7AF, 'Korean'), (0x1100, 0x11FF, 'Korean'),
-        (0x3130, 0x318F, 'Korean'), (0xA960, 0xA97F, 'Korean'),
-        (0xD7B0, 0xD7FF, 'Korean'), (0x3040, 0x309F, 'Japanese'),
-        (0x30A0, 0x30FF, 'Japanese'), (0x31F0, 0x31FF, 'Japanese'),
-        (0xFF65, 0xFF9F, 'Japanese'), (0x4E00, 0x9FFF, 'Chinese'),
-        (0x3400, 0x4DBF, 'Chinese'), (0x20000, 0x2A6DF, 'Chinese'),
-        (0x2A700, 0x2B73F, 'Chinese'), (0x0590, 0x05FF, 'Hebrew'),
-        (0x0600, 0x06FF, 'Arabic'), (0x0700, 0x074F, 'Syriac'),
-        (0x0750, 0x077F, 'Arabic'), (0x0E00, 0x0E7F, 'Thai'),
-        (0x0400, 0x04FF, 'Cyrillic'), (0x0500, 0x052F, 'Cyrillic'),
-    ]
-    
-    # Define which scripts are allowed for each target language
-    # Latin-based languages allow basic Latin + extensions
-    language_script_mapping = {
-        'english': [],  # Only Latin (default - everything else is foreign)
-        'spanish': [],  # Latin with Spanish diacritics
-        'french': [],   # Latin with French diacritics  
-        'german': [],   # Latin with German diacritics
-        'portuguese': [],  # Latin with Portuguese diacritics
-        'italian': [],  # Latin with Italian diacritics
-        'russian': ['Cyrillic'],  # Cyrillic only
-        'japanese': ['Japanese', 'Chinese'],  # Japanese uses kanji too
-        'korean': ['Korean'],
-        'chinese': ['Chinese'],
-        'arabic': ['Arabic', 'Syriac'],
-        'hebrew': ['Hebrew'],
-        'thai': ['Thai'],
-    }
-    
+    # Script ranges and per-language allowed scripts are shared with the SDLXLIFF editor
+    all_script_ranges = SCRIPT_RANGES
+    language_script_mapping = LANGUAGE_SCRIPTS
+
     # Get allowed scripts for target language (empty means Latin-based)
     allowed_scripts = language_script_mapping.get(target_language, [])
     

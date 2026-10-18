@@ -203,6 +203,7 @@ app_files = [
     ('sdlxliff_extraction_manager.py', '.'),
     ('sdlxliff_extractor.py', '.'),
     ('sdlxliff_converter.py', '.'),
+    ('script_ranges.py', '.'),
     ('sdlxliff_sidecar_writer.py', '.'),
     ('md_txt_sidecar_writer.py', '.'),  # MD/TXT sidecar writer (html2text)
     ('_compress_worker.py', '.'),  # Lightweight image compression worker
@@ -588,6 +589,7 @@ app_modules = [
     'sdlxliff_extraction_manager',
     'sdlxliff_extractor',
     'sdlxliff_converter',
+    'script_ranges',
     'sdlxliff_sidecar_writer',
     'md_txt_sidecar_writer',  # MD/TXT sidecar writer (html2text)
     '_compress_worker',  # Lightweight image compression worker

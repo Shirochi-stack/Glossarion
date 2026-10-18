@@ -377,6 +377,28 @@ def test_core_imports_without_qt_and_parses_as_310():
     assert out.returncode == 0 and out.stdout.strip().endswith("ok"), out.stderr[-2000:]
 
 
+@pytest.mark.parametrize("language, text, status", [
+    ("English", "YOU DIED...", "green"),
+    ("English", "ＹＯＵ ＤＩＥＤ…", "green"),        # fullwidth Latin from a CJK source
+    ("English", "Café déjà", "green"),
+    ("English", "죽었다", "red"),
+    ("English", "YOU 死んだ", "red"),
+    ("Korean", "죽었다", "green"),
+    ("Korean", "大韓民國 만세", "green"),           # Hanja next to Hangul
+    ("Korean", "大韓民國", "red"),                  # Hanja alone may be untranslated Chinese
+    ("Korean", "YOU DIED", "red"),
+    ("Japanese", "ｶﾀｶﾅ", "green"),                 # halfwidth katakana
+    ("Japanese", "死亡", "red"),
+    ("Chinese (Traditional)", "我死了", "green"),
+    ("Klingon", "YOU DIED", "red"),
+])
+def test_unchanged_text_already_in_output_language_is_not_untranslated(language, text, status):
+    class Review(core.SdlxliffReviewCoreMixin):
+        _config = {"output_language": language}
+
+    assert Review()._row_status(text, text)[0] == status
+
+
 # ===========================================================================
 # Fixture workspace
 # ===========================================================================
