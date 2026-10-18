@@ -5,6 +5,7 @@ Returned list should mirror the main GUI model dropdown.
 Updated: 2026-03-10
 """
 import concurrent.futures
+import hashlib
 import importlib.util
 import json
 import os
@@ -64,6 +65,7 @@ def _get_static_model_options() -> List[str]:
         # - gemini-3-pro-preview shut down March 9 2026, removed
         # - gemini-pro / gemini-pro-vision are legacy 1.0 models, removed
         # - gemini-2.0-flash/lite scheduled shutdown June 1 2026, still available
+        "gemini-4-argon",
         "gemini-3.8-flash","gemini-3.7-flash","gemini-3.6-flash","gemini-3.5-flash","gemini-3-flash-preview",
         "gemini-3.1-pro-preview","gemini-3.5-flash-lite","gemini-3.1-flash-lite",
         "gemini-3.1-flash-image-preview",
@@ -933,6 +935,9 @@ def _catalog_provider_for_model(model: str) -> Optional[str]:
     for provider, prefixes in _BARE_PROVIDER_PREFIXES:
         if value.startswith(prefixes):
             return provider
+        # the bare stem typed to look a provider up ("gemini", "claude") polls it too
+        if value in {prefix[:-1] for prefix in prefixes if prefix.endswith("-")}:
+            return provider
     return None
 
 
@@ -1001,6 +1006,8 @@ def _load_model_catalog_cache(*, force_disk: bool = False) -> dict:
                 loaded["attempts"] = {}
             if not isinstance(loaded.get("attempt_variants"), dict):
                 loaded["attempt_variants"] = {}
+            if not isinstance(loaded.get("rejected_keys"), dict):
+                loaded["rejected_keys"] = {}
         except (OSError, ValueError, TypeError):
             loaded = _empty_model_catalog_cache()
         _MODEL_CATALOG_MEMORY_CACHE = loaded
@@ -1594,12 +1601,14 @@ def _provider_key(
     explicit = str(provider_keys.get(spec.name, "") or "").strip()
     if explicit:
         return explicit
+    # The key the user entered for the selected model wins over an environment
+    # variable, which may be a stale or unrelated key (a run exports GEMINI_API_KEY).
+    if active_provider == spec.name and str(active_api_key or "").strip():
+        return str(active_api_key).strip()
     for env_name in spec.api_key_envs:
         value = str(os.getenv(env_name, "") or "").strip()
         if value:
             return value
-    if active_provider == spec.name:
-        return str(active_api_key or "").strip()
     return ""
 
 
@@ -1651,6 +1660,31 @@ def provider_model_catalog_supports_anonymous_poll(
     specs.extend(_custom_catalog_specs(custom_routes, model))
     spec = next((item for item in specs if item.name == provider), None)
     return bool(spec is not None and spec.public)
+
+
+def _catalog_key_fingerprint(key: str) -> str:
+    """A short one-way fingerprint of a catalog key (the cache never holds the key)."""
+    return hashlib.sha256(str(key or "").strip().encode("utf-8")).hexdigest()[:16]
+
+
+def _catalog_key_changed_since_rejection(
+    provider: str,
+    active_model: str,
+    active_api_key: str,
+    custom_routes: object = None,
+) -> bool:
+    """Whether the provider's last poll was refused for its key and another key is entered now:
+    a corrected key polls at once instead of waiting out the 24-hour TTL."""
+    rejected = (_load_model_catalog_cache().get("rejected_keys") or {}).get(provider)
+    if not rejected:
+        return False
+    specs = list(PROVIDER_CATALOG_SPECS)
+    specs.extend(_custom_catalog_specs(custom_routes, active_model))
+    spec = next((item for item in specs if item.name == provider), None)
+    if spec is None:
+        return False
+    key = _provider_key(spec, provider, active_api_key, {})
+    return bool(key) and _catalog_key_fingerprint(key) != rejected
 
 
 def provider_model_catalog_refresh_due(
@@ -1763,7 +1797,11 @@ def due_provider_catalog_for_model(
             return None
     if provider == "antigravity":
         return None
-    if not provider or not provider_model_catalog_refresh_due(provider, max_age=max_age):
+    if not provider:
+        return None
+    if (not provider_model_catalog_refresh_due(provider, max_age=max_age)
+            and not _catalog_key_changed_since_rejection(provider, active_model, active_api_key,
+                                                         custom_routes)):
         return None
 
     if provider == "ollamapull":
@@ -1860,6 +1898,10 @@ def refresh_provider_model_catalogs(
     successful: Dict[str, List[str]] = {}
     failed = set()
     attempted = {spec.name for spec, _key in eligible}
+    # Providers that rejected the key (HTTP 400/401/403), with the key they rejected:
+    # the 24-hour wait then holds only while that same key is entered.
+    keys_by_name = {spec.name: key for spec, key in eligible}
+    rejected_key: Dict[str, str] = {}
 
     authgrok_target = _authgrok_catalog_target(active_model)
     if (
@@ -1944,6 +1986,9 @@ def refresh_provider_model_catalogs(
                 except Exception as error:
                     failed.add(spec.name)
                     statuses[spec.name] = _catalog_error_status(error)
+                    if (isinstance(error, urllib.error.HTTPError) and error.code in (400, 401, 403)
+                            and keys_by_name.get(spec.name)):
+                        rejected_key[spec.name] = keys_by_name[spec.name]
 
     try:
         cache = _load_model_catalog_cache(force_disk=True)
@@ -1976,6 +2021,12 @@ def refresh_provider_model_catalogs(
                     record["variant"] = variant
                 providers[name] = record
                 last_successful[name] = record
+        rejected_keys = cache.setdefault("rejected_keys", {})
+        for name in attempted:
+            if name in rejected_key:
+                rejected_keys[name] = _catalog_key_fingerprint(rejected_key[name])
+            else:
+                rejected_keys.pop(name, None)
         for name in attempted:
             attempts[name] = now
             variant = _provider_catalog_variant(name)

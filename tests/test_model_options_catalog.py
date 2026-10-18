@@ -4,6 +4,7 @@ import inspect
 import sys
 import types
 import urllib.error
+import urllib.parse
 from types import SimpleNamespace
 
 import model_options
@@ -1318,6 +1319,59 @@ def test_http_catalog_failure_reports_status_and_safe_response_detail(tmp_path, 
     assert model_options.due_provider_catalog_for_model(
         "grok-3-mini", "xai-secret-that-must-not-appear"
     ) is None
+
+
+def test_a_corrected_key_polls_at_once_after_a_rejected_one(tmp_path, monkeypatch):
+    """owner 2026-10-18: choosing a Gemini model while the field still held another key failed the
+    poll and blocked it for 24 hours, so the right key pasted next never polled."""
+    _isolated_cache(tmp_path, monkeypatch)
+    sent = []
+
+    def fake_get(url, headers, timeout):
+        key = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("key", [""])[0]
+        sent.append(key)
+        if key != "good-gemini-key":
+            raise urllib.error.HTTPError(url, 400, "Bad Request", {},
+                                         io.BytesIO(b'{"error":{"message":"API key not valid."}}'))
+        return {"models": [{"name": "models/gemini-4-argon", "supportedGenerationMethods": ["generateContent"]}]}
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="gemini-3.8-flash", active_api_key="sk-ant-wrong", only_provider="gemini", timeout=0.1)
+    assert result.statuses["gemini"].startswith("static fallback (HTTP 400")
+    cache_text = (tmp_path / "model_catalog_cache.json").read_text(encoding="utf-8")
+    assert "sk-ant-wrong" not in cache_text  # only a fingerprint is kept
+    # the same rejected key waits out the TTL; another key polls at once
+    assert model_options.due_provider_catalog_for_model("gemini-3.8-flash", "sk-ant-wrong") is None
+    assert model_options.due_provider_catalog_for_model("gemini-3.8-flash", "good-gemini-key") == "gemini"
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="gemini-3.8-flash", active_api_key="good-gemini-key", only_provider="gemini", timeout=0.1)
+    assert result.provider_models["gemini"] == ["gemini-4-argon"] and sent == ["sk-ant-wrong", "good-gemini-key"]
+    # after a success the TTL holds for every key again
+    assert model_options.due_provider_catalog_for_model("gemini-3.8-flash", "other-key") is None
+
+
+def test_a_bare_provider_stem_owns_its_catalog():
+    assert model_options.catalog_provider_for_model("gemini") == "gemini"
+    assert model_options.catalog_provider_for_model("Gemini ") == "gemini"
+    assert model_options.catalog_provider_for_model("claude") == "anthropic"
+    assert model_options.catalog_provider_for_model("gemini-4-argon") == "gemini"
+    assert model_options.catalog_provider_for_model("geminis") is None
+
+
+def test_the_entered_key_wins_over_an_environment_key(monkeypatch):
+    """A run exports GEMINI_API_KEY with whatever key it used; the catalog poll must send the key
+    entered for the selected Gemini model, not that leftover."""
+    monkeypatch.setenv("GEMINI_API_KEY", "stale-key-from-an-earlier-run")
+    spec = next(s for s in model_options.PROVIDER_CATALOG_SPECS if s.name == "gemini")
+    assert model_options._provider_key(spec, "gemini", "entered-key", {}) == "entered-key"
+    # with no key entered (or another provider selected) the environment key still serves
+    assert model_options._provider_key(spec, "gemini", "", {}) == "stale-key-from-an-earlier-run"
+    assert model_options._provider_key(spec, "openai", "sk-x", {}) == "stale-key-from-an-earlier-run"
+
+
+def test_gemini_4_is_in_the_static_list():
+    assert "gemini-4-argon" in model_options._get_static_model_options()
 
 
 def test_scoped_auto_poll_contacts_only_selected_provider_once_per_day(tmp_path, monkeypatch):
