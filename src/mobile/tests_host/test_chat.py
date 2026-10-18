@@ -1315,6 +1315,8 @@ def test_chat_feature_on_the_app_shell(app_env, desktop_store_cls, tmp_path):
             assert view.composer.attachment["name"] == "book2.epub" and adapter.attachment("2")["name"] == "book2.epub"
             assert view.send_inputs().block is None, view.send_inputs()
             assert view.composer.send_button.tap() is SendAction.SEND
+            # Send first waits for the EPUB's Library lookup (is it a Library book? ``_match_library_book``)
+            await tf._wait(lambda: adapter.meta("2").get("pending_plan"), timeout=10)
             plan = adapter.meta("2").get("pending_plan")
             assert plan and adapter.messages("2")[plan["user_index"]][0] == "user_file"
             assert type(view.transcript.cards[-1]).__name__ == "JobCard" and view.transcript.cards[-1].phase.name == "plan"

@@ -29,7 +29,9 @@ auto-migrate calls ``on_workspace_migrated``), so the Result card offers "Open i
 Migrate; a QA scan runs from the Result card, the ＋ sheet and ``/qa`` (Quick Scan, the job's card is a
 "QA scan" message, progress in the JobStrip); "Always accept" on the glossary card; a Library book is
 attached from inside the chat (＋ › From Library, the empty-chat chip, ``/library [title]``: the
-searchable picker) and Send then defaults to "Save to: Library" (the book's own workspace).
+searchable picker) and Send then defaults to "Save to: Library" (the book's own workspace). A file attached
+any other way that is a Library book (the same bytes as its raw: ``library_book_for_file``) is attached as
+that book too, so the same attachment continues its Library progress instead of starting over.
 
 U9: Chat settings › Text size (85–150 %, per chat, sidecar ``text_scale``) scales the
 transcript and composer text: the column sits in a Container whose nested theme carries the
@@ -231,6 +233,40 @@ def library_matches(service: Any, query: str) -> list:
     return exact if len(exact) == 1 else found
 
 
+def is_book_file(path: Any) -> bool:
+    """``path`` is a file type the Library keeps as a book's raw (``library_core.RAW_IMPORT_EXTENSIONS``)."""
+    try:
+        import library_core  # shared (U5)
+    except Exception:
+        return False
+    books = tuple(getattr(library_core, "RAW_IMPORT_EXTENSIONS", ()) or ())
+    return os.path.splitext(str(path or ""))[1].lower() in books
+
+
+def library_book_for_file(service: Any, path: str) -> Any:
+    """Blocking: the attachable Library book (ToolTarget) whose raw file is ``path`` or holds the same
+    bytes (``library_core._same_file_content``: the size, then the content - the identity the Library's
+    same-book rule uses), else None. A different file that only shares the name is not the book. A row
+    with a workspace (its progress) wins over a raw-only row."""
+    from glossarion_mobile.ui.tools import targets as tg
+
+    path = str(path or "")
+    if not path or not os.path.isfile(path) or not is_book_file(path):
+        return None
+    import library_core  # shared (U5)
+
+    same_content = getattr(library_core, "_same_file_content", None)
+    found = []
+    for target in tg.library_targets(service):
+        if library_attach_reason(target) is not None:
+            continue
+        source = str(getattr(target, "source", "") or "")
+        if _same_path(source, path) or (same_content is not None and same_content(source, path)):
+            found.append(target)
+    found.sort(key=lambda target: not getattr(target, "folder", ""))
+    return found[0] if found else None
+
+
 def _library_plan_fields(view: Any, cid: str, record: Optional[dict]) -> dict:
     """Plan fields of a send whose attachment is the chat's Library book (``library_attachment`` meta):
     ``{"destination": "library", "library_bid": bid}`` (the book's own workspace), else {}."""
@@ -410,6 +446,9 @@ class ChatView:
         self.library_picker: Any = None
         self._tool_states: dict = {}  # chat QA job id -> last state seen (its card re-renders on a change)
         self._library_starting: set = set()  # Plan "created" stamps whose Library start is under way
+        # (path, task) of the Library lookup of the file just attached (``_match_library_book``): Send waits for it
+        self._library_lookup: Optional[tuple] = None
+        self._send_waiting = False
 
         chat = state.chats.get(state.current_chat.value)
         self.header = ChatHeader(
@@ -1552,8 +1591,15 @@ class ChatView:
 
         ``once``: chat override keys (model / profile / target_language) for this send only, from
         long-press Send -> "Translate once with another model…" (UI_SPEC §2.2 one-shot)."""
+        if self._send_waiting:
+            return  # a second tap while the attachment's Library lookup finishes
         text = self.composer.send_text()
         record = self.composer.attachment
+        lookup = self._pending_library_lookup(record)
+        if lookup is not None:
+            self._send_waiting = True
+            self._spawn(self._send_after_lookup(lookup, once))
+            return
         if record and not os.path.isfile(str(record.get("path") or "")):
             self.notify("Attachment missing", action_label="Remove", on_action=self.composer._remove_attachment)
             return
@@ -2726,7 +2772,10 @@ class ChatView:
             self.env.chats.set_meta(self.cid, LIBRARY_ATTACHMENT_META, None)
 
     def attach_file(self, path: str) -> bool:
-        """``_set_attachment``: one supported file per turn; images/CBZ switch to Vision · auto."""
+        """``_set_attachment``: one supported file per turn; images/CBZ switch to Vision · auto.
+
+        A file that is a Library book (picked again from Files, shared in, re-attached) continues that
+        book: ``_match_library_book`` attaches it as the Library book."""
         record = attachment_record(path)
         if record is None or not is_supported_attachment(path):
             self.notify("Unsupported attachment")
@@ -2744,7 +2793,66 @@ class ChatView:
         name = record["name"]
         self.caption.show(f"Attached {name} · Vision enabled" if is_vision_attachment(path) else f"Attached {name}")
         self.refresh_send()
+        self._match_library_book(str(record.get("path") or path))
         return True
+
+    def _match_library_book(self, path: str) -> None:
+        """Look the attached file up in the Library on the io pool (``library_book_for_file``): the same
+        file as a Library book's raw is attached as that book (``attach_library_book``), so Send continues
+        it in its own workspace - its finished chapters, translated metadata and glossary - as that book's
+        run ("Save to: Library") instead of starting over in a new chat run root."""
+        self._library_lookup = None
+        if not self.bound or not is_book_file(path):
+            return
+        attached = self.env.chats.meta(self.cid).get(LIBRARY_ATTACHMENT_META)
+        if isinstance(attached, Mapping) and _same_path(attached.get("path"), path):
+            return
+        service = self._library_service()
+        snapshot = getattr(service, "snapshot", None) if service is not None else None
+        try:
+            empty = snapshot is None or (bool(getattr(snapshot, "scanned_at", None)) and not snapshot.all_books())
+        except Exception:
+            empty = True
+        if empty:
+            return  # no Library (yet), or no book in it to continue
+        task = self._spawn(self._adopt_library_book(service, self.cid, path))
+        if task is not None:
+            self._library_lookup = (path, task)
+
+    async def _adopt_library_book(self, service: Any, cid: str, path: str) -> Any:
+        """``_match_library_book``'s lookup; the matched book is attached while the composer of chat ``cid``
+        still holds ``path``. Returns the Library target (None: not a Library book)."""
+        try:
+            snapshot = getattr(service, "snapshot", None)
+            if snapshot is not None and not getattr(snapshot, "scanned_at", None) and hasattr(service, "refresh"):
+                await service.refresh(quiet=True, reason="chat attachment")  # first use: scan quietly
+            target = await self.env.run_io(library_book_for_file, service, path)
+        except Exception:
+            log.exception("looking the attachment up in the Library failed")
+            return None
+        record = self.composer.attachment
+        if target is None or self.cid != cid or not record or not _same_path(record.get("path"), path):
+            return None
+        self.attach_library_book(target, note="Continues the Library book")
+        return target
+
+    def _pending_library_lookup(self, record: Optional[dict]) -> Any:
+        """The unfinished Library lookup of the composer's attachment, else None."""
+        lookup = self._library_lookup
+        if not record or lookup is None or not _same_path(lookup[0], record.get("path")):
+            return None
+        return lookup[1] if asyncio.isfuture(lookup[1]) and not lookup[1].done() else None
+
+    async def _send_after_lookup(self, lookup: Any, once: Optional[dict]) -> None:
+        """Send once the attachment's Library lookup ended (a Library book goes to its own workspace)."""
+        try:
+            await lookup
+        except Exception:
+            log.debug("the attachment's Library lookup failed", exc_info=True)
+        finally:
+            self._send_waiting = False
+            self._library_lookup = None
+        self.begin_send(once)
 
     async def pick_and_attach(self, images: bool = False, extensions: Optional[list] = None) -> Optional[str]:
         if self.env is None or self.env.pick_files is None:
@@ -3515,18 +3623,28 @@ class ChatView:
         picker.show(self.page)
         return picker
 
-    def attach_library_book(self, target: Any) -> bool:
+    def attach_library_book(self, target: Any, note: str = "") -> bool:
         """Attach a Library book's raw file to this chat and remember it as the chat's Library book
         (sidecar meta ``library_attachment`` ``{bid, path}``: the next Send defaults to "Save to:
-        Library"); a snackbar with Remove."""
+        Library"); a snackbar with Remove (``note``: its text before the book's title, for an attached
+        file that turned out to be a Library book)."""
         source = str(getattr(target, "source", "") or "")
-        if not source or not self.attach_file(source):
+        if not source:
             return False
         bid = str(getattr(target, "bid", "") or "")
-        if self.bound:
+        previous = self.env.chats.meta(self.cid).get(LIBRARY_ATTACHMENT_META) if self.bound else None
+        if self.bound:  # first: attach_file keeps it (same path) and looks nothing up
             self.env.chats.set_meta(self.cid, LIBRARY_ATTACHMENT_META, {"bid": bid, "path": source})
-        self.notify(f"Attached {os.path.basename(source)} from the Library", action_label="Remove",
-                    on_action=self.composer._remove_attachment)
+        if not self.attach_file(source):
+            if self.bound:
+                self.env.chats.set_meta(self.cid, LIBRARY_ATTACHMENT_META, previous)
+            return False
+        if note:
+            title = str(getattr(target, "title", "") or os.path.basename(source))
+            self.notify(f"{note}: {title}", action_label="Remove", on_action=self.composer._remove_attachment)
+        else:
+            self.notify(f"Attached {os.path.basename(source)} from the Library", action_label="Remove",
+                        on_action=self.composer._remove_attachment)
         return True
 
     async def attach_library_query(self, query: str) -> Optional[str]:
