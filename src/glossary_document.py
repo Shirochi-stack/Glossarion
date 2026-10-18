@@ -3222,6 +3222,28 @@ def editor_entry_line_number(file_path, row):
 #: The unnamed profile every glossary prompt bucket has (GlossaryManagerMixin attribute).
 GLOSSARY_PROMPT_DEFAULT_PROFILE = "Default"
 
+#: Built-in profile for small on-device models (mobile llama.cpp, 0.8B-9B): seeded into both
+#: buckets and protected from deletion like Default. The output is still the CSV the
+#: extractors parse (comma separated type,raw_name,translated_name,gender[,...]; header optional).
+GLOSSARY_PROMPT_ON_DEVICE_PROFILE = "On-device"
+ON_DEVICE_GLOSSARY_PROMPTS = {
+    'balanced_full': (
+        "List the names in the text as CSV.\n"
+        "{fields}\n"
+        "Copy raw_name exactly from the text. Write translated_name in {language}.\n"
+        "Extract all {entries}.\n"
+        "Output only CSV lines, one entry per line, no other text. Example:\n"
+        "character,田中太郎,Tanaka Taro,male"
+    ),
+    'minimal': (
+        "List the names in the text as CSV.\n"
+        "Columns: type,raw_name,translated_name,gender,description\n"
+        "Copy raw_name exactly from the text. Write translated_name and description in {language}.\n"
+        "Output only CSV lines, one entry per line, no other text. Example:\n"
+        "character,田中太郎,Tanaka Taro,male,a young swordsman"
+    ),
+}
+
 
 def glossary_prompt_profile_meta(profile_key):
     """Metadata for user-defined glossary prompt profile buckets."""
@@ -3248,14 +3270,21 @@ def is_default_glossary_prompt_profile(profile_name):
     return str(profile_name or '').strip().casefold() == GLOSSARY_PROMPT_DEFAULT_PROFILE.casefold()
 
 
+def is_builtin_glossary_prompt_profile(profile_name):
+    """A built-in named profile (cannot be deleted); Default is checked on its own."""
+    return str(profile_name or '').strip() == GLOSSARY_PROMPT_ON_DEVICE_PROFILE
+
+
 def ensure_glossary_prompt_profiles(owner):
-    """Ensure glossary prompt profile containers exist without seeding defaults."""
+    """Ensure glossary prompt profile containers exist and hold the built-in On-device profile."""
     profiles = owner.config.get('glossary_prompt_profiles', {})
     if not isinstance(profiles, dict):
         profiles = {}
     for key in ('balanced_full', 'minimal'):
         if not isinstance(profiles.get(key), dict):
             profiles[key] = {}
+        # setdefault: an edited On-device text survives
+        profiles[key].setdefault(GLOSSARY_PROMPT_ON_DEVICE_PROFILE, ON_DEVICE_GLOSSARY_PROMPTS[key])
     owner.config['glossary_prompt_profiles'] = profiles
 
     active = owner.config.get('active_glossary_prompt_profiles', {})
@@ -3477,6 +3506,8 @@ class GlossaryPromptProfiles:
         name = str(name or '').strip()
         if is_default_glossary_prompt_profile(name):
             return "Default Profile", "The Default glossary prompt profile cannot be deleted."
+        if is_builtin_glossary_prompt_profile(name):
+            return "Built-in Profile", f"The built-in '{name}' glossary prompt profile cannot be deleted."
         outcome = self._pp.prefill_delete(self.state, name, confirm=confirm)
         if not outcome.ok:
             return (outcome.title, outcome.error) if outcome.error else None

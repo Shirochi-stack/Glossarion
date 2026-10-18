@@ -87,6 +87,8 @@ def _core(name: str, *attrs: str):
 needs_flet = pytest.mark.skipif(not (_has("flet") and _has("msgpack")), reason="flet / msgpack not installed")
 gd = _core("glossary_document", "GlossaryDocument", "write_token_csv", "editor_row_specs", "EditorRow")
 needs_gd = pytest.mark.skipif(gd is None, reason="glossary_document (U6 chain 1) not importable")
+#: The built-in glossary prompt profile seeded into both buckets (small on-device models).
+ON_DEVICE = "On-device"
 rules = _core("settings_rules", "apply_glossary_mode_locks", "glossary_mode_toggle_states", "apply_change",
               "auto_glossary_modes", "glossary_mode_label", "evaluate_locks")
 needs_rules = pytest.mark.skipif(rules is None, reason="settings_rules (glossary mode locks) not importable")
@@ -797,7 +799,7 @@ def test_prompt_profile_rows_are_the_shared_glossary_document_classes():
     config = {"glossary_prompt_profile_defaults": {"balanced_full": "OLD default"}, "manual_glossary_prompt3": "NEW"}
     service = GlossaryService(config=config)
     row = service.prompt_profiles("balanced_full", default_text="Default prompt")
-    assert isinstance(row, gd.GlossaryPromptProfiles) and row.names == ["Default"]
+    assert isinstance(row, gd.GlossaryPromptProfiles) and row.names == ["Default", ON_DEVICE]
     assert row.select("Default") == "NEW" and service.persist_prompt_profiles(row)
     assert config["manual_glossary_prompt3"] == "NEW" and config["glossary_prompt_profile_defaults"] == {
         "balanced_full": "NEW"}
@@ -843,8 +845,10 @@ def test_prompt_profile_rows_are_the_shared_glossary_document_classes():
     minimal.new()
     balanced.new()
     assert service.persist_prompt_profiles(minimal) and service.persist_prompt_profiles(balanced)
-    assert config["glossary_prompt_profiles"] == {"minimal": {"New Profile #1": ""},
-                                                  "balanced_full": {"New Profile #1": ""}}
+    # (the built-in On-device profile is seeded into both buckets)
+    assert config["glossary_prompt_profiles"] == {
+        "minimal": {ON_DEVICE: gd.ON_DEVICE_GLOSSARY_PROMPTS["minimal"], "New Profile #1": ""},
+        "balanced_full": {ON_DEVICE: gd.ON_DEVICE_GLOSSARY_PROMPTS["balanced_full"], "New Profile #1": ""}}
     assert config["active_glossary_prompt_profiles"] == {"minimal": "New Profile #1", "balanced_full": "New Profile #1"}
 
     # Refinement: the system + user pair row
@@ -861,7 +865,7 @@ def test_prompt_profile_rows_are_the_shared_glossary_document_classes():
     service = GlossaryService(config=broken)
     row = service.prompt_profiles("balanced_full")
     assert row.save("Mine", "text") == ("Save Failed", "Could not save the glossary prompt profile. Please try again.")
-    assert row.names == ["Default"]
+    assert row.names == ["Default", ON_DEVICE]
 
 
 @needs_flet
@@ -872,23 +876,25 @@ def test_profile_bar_drives_the_shared_row(iso):
     config = {"manual_glossary_prompt3": "Base prompt"}
     service = GlossaryService(config=config)
 
+    on_device = gd.ON_DEVICE_GLOSSARY_PROMPTS["balanced_full"]
+
     async def scenario():
         conn, session = _TB._fake_session("android")
         page = session.page
         ctx = _ctx(page, service, settings=None)
         bar = ProfileBar(ctx, "balanced_full", prompt_keys=("manual_glossary_prompt3",))
         _mount(page, bar.control)
-        assert bar.names == ["Default"] and bar.dropdown.value == "Default" and not bar.dropdown.disabled
+        assert bar.names == ["Default", ON_DEVICE] and bar.dropdown.value == "Default" and not bar.dropdown.disabled
         name = bar.new()
         assert name == "New Profile #1" and config["active_glossary_prompt_profiles"] == {"balanced_full": name}
-        assert config["glossary_prompt_profiles"]["balanced_full"] == {name: ""}
-        assert [o.key for o in bar.dropdown.options] == ["Default", name] and bar.dropdown.value == name
+        assert config["glossary_prompt_profiles"]["balanced_full"] == {ON_DEVICE: on_device, name: ""}
+        assert [o.key for o in bar.dropdown.options] == ["Default", ON_DEVICE, name] and bar.dropdown.value == name
         # a prompt tile edit stages into the selected profile (_auto_save_glossary_prompt_profile)
         config["manual_glossary_prompt3"] = "Edited prompt"
         bar.on_prompt_changed()
         assert config["glossary_prompt_profiles"]["balanced_full"][name] == "Edited prompt"
         assert await bar.save("Mine") is None and ctx.notes[-1] == "Saved profile “Mine”"
-        assert config["glossary_prompt_profiles"]["balanced_full"] == {"Mine": "Edited prompt"}
+        assert config["glossary_prompt_profiles"]["balanced_full"] == {ON_DEVICE: on_device, "Mine": "Edited prompt"}
         bar.select("Default")
         assert config["manual_glossary_prompt3"] == "Base prompt" and config["active_glossary_prompt_profiles"] == {}
         ctx.extras["answers"] = []
@@ -902,12 +908,13 @@ def test_profile_bar_drives_the_shared_row(iso):
         assert "Mine" in config["glossary_prompt_profiles"]["balanced_full"]
         ctx.extras["answers"] = [True]
         await bar.delete()
-        assert config["glossary_prompt_profiles"]["balanced_full"] == {} and bar.names == ["Default"]
+        assert config["glossary_prompt_profiles"]["balanced_full"] == {ON_DEVICE: on_device} and bar.names == [
+            "Default", ON_DEVICE]
         # hidden, then shown again: the row is opened again on the current config
         bar.detach()
         config["glossary_prompt_profiles"]["balanced_full"] = {"Elsewhere": "x"}
         bar.attach()
-        assert bar.names == ["Default", "Elsewhere"]
+        assert bar.names == ["Default", "Elsewhere", ON_DEVICE]
         bar.detach()
 
     asyncio.run(scenario())

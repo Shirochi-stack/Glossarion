@@ -504,8 +504,11 @@ class SeriesFeature:
             self.say("The model picker is not available")
             return None
         if scope != "chat":  # "All chats": the global model, like the chat's sheet
+            from glossarion_mobile.state.setting_writes import write_setting
+
             current = str(config.get("model", "") or "")
-            on_select = lambda _f, value, _c: config.set_many({"model": value})  # noqa: E731
+            # write_setting: a local/ model also selects the On-device prompt profiles
+            on_select = lambda _f, value, _c: write_setting(config, "model", value)  # noqa: E731
         else:
             current = str(self.store.defaults(sid).get("model") or config.get("model", "") or "")
             on_select = lambda _f, value, _c: self.store.set_default(sid, "model", value)  # noqa: E731

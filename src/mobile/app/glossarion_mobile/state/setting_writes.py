@@ -24,6 +24,10 @@ value changes are stored. An absent toggle counts as ON on mobile (``MOBILE_STRE
 desktop default stays off): every job's config snapshot gets it (``with_mobile_streaming_defaults``), and
 chat / Reader runs force streaming only while it is on (``streaming_enabled``).
 
+Choosing an on-device ``local/`` model (mobile only) also selects the built-in "On-device" translation
+and glossary prompt profiles; choosing a model that is not ``local/`` again restores the profiles that
+were active before, where On-device is still selected (``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``).
+
 Every global writer on mobile (Settings tiles, ModelSheet / Plan chips, Chat settings › All chats,
 the Welcome flow) goes through ``write_setting`` / ``write_settings``, which run the shared rules
 (``settings_rules.apply_change``, the Profiles service over ``prompt_profiles``) on a copy of the
@@ -48,6 +52,8 @@ __all__ = [
     "MOBILE_DEFAULT_MODEL",
     "default_batch_size",
     "MOBILE_STREAMING_DEFAULT",
+    "ON_DEVICE_BEFORE_KEY",
+    "ON_DEVICE_PROFILE",
     "PROFILE_KEY",
     "RULE_KEYS",
     "STREAMING_KEY",
@@ -107,6 +113,15 @@ MOBILE_MAX_OUTPUT_TOKENS = 16384
 #: The model when none is saved on Glossarion Mobile (owner 2026-10-12): ChatGPT's web chat, which needs
 #: no API key and no sign-in. The desktop default stays authgpt/gpt-6-luna; the default is never written.
 MOBILE_DEFAULT_MODEL = "authchatgpt/auto"
+#: The built-in prompt profile for small on-device models (the translation profile and the Balanced/Full and
+#: Minimal glossary profiles share the name): choosing a ``local/`` model selects them, and choosing a model
+#: that is not ``local/`` again brings back what was active before (``ON_DEVICE_BEFORE_KEY``) wherever the
+#: On-device profile is still the active one.
+ON_DEVICE_PROFILE = "On-device"
+ON_DEVICE_BEFORE_KEY = "profiles_before_on_device"
+_GLOSSARY_PROFILE_BUCKETS = ("balanced_full", "minimal")
+_GLOSSARY_PROFILE_KEYS = ("glossary_prompt_profiles", "active_glossary_prompt_profiles",
+                          "glossary_prompt_profile_defaults")
 #: ``settings_rules.DEFAULT_BATCH_SIZE`` / ``SERIAL_BATCH_ROUTES`` (literals: loads before the backend).
 _BATCH_SIZE = 5
 _SERIAL_BATCH_ROUTES = ("authds/", "authchatgpt/")
@@ -414,6 +429,115 @@ def _set_many(store: Any, values: Mapping[Any, Any]) -> list:
     return [k for k, v in values.items() if store.set(k, v)]
 
 
+def _unset(store: Any, key: str) -> list:
+    present, _value = _stored_value(store, key)
+    if not present:
+        return []
+    unset = getattr(store, "unset", None)
+    if callable(unset):
+        unset(key)
+        return [key]
+    return _set_many(store, {key: None})
+
+
+def _is_local_model(model: Any) -> bool:
+    return str(model or "").strip().lower().startswith("local/")
+
+
+def _select_glossary_profiles(store: Any, names: Mapping[str, str]) -> list:
+    """The Glossary Manager's Balanced/Full and Minimal profile rows picking ``names[bucket]``
+    (``glossary_document.GlossaryPromptProfiles.select``: the active profile plus the current prompt keys
+    runs read); a name the bucket does not have picks Default. Only the keys that changed are written."""
+    snapshot = getattr(store, "snapshot", None)
+    if not callable(snapshot) or not names:
+        return []
+    try:
+        import copy
+        import types
+
+        gd = importlib.import_module("glossary_document")
+        config = dict(snapshot() or {})
+        owner = types.SimpleNamespace(config=copy.deepcopy(config))
+        keys = list(_GLOSSARY_PROFILE_KEYS)
+        for bucket, name in names.items():
+            meta = gd.glossary_prompt_profile_meta(bucket)
+            keys += [k for k in (meta["config_key"], meta.get("legacy_config_key")) if k]
+            current = owner.config.get(meta["config_key"])
+            if not current:
+                # no current prompt stored: open the row on the active profile's own text, so opening it
+                # stages nothing new into that profile
+                profiles = gd.glossary_prompt_profiles_for(owner, bucket)
+                active = gd.active_glossary_prompt_profile_for(owner, bucket)
+                current = profiles[active] if active in profiles else gd.default_glossary_prompt_profile_text(
+                    owner, bucket)
+            setattr(owner, meta["attr"], str(current or ""))
+            row = gd.GlossaryPromptProfiles(owner, bucket, str(current or ""))
+            if row.select(name) is None:
+                row.select(gd.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+    except Exception:
+        log.debug("glossary prompt profile select failed", exc_info=True)
+        return []
+    updates = {k: owner.config[k] for k in dict.fromkeys(keys) if k in owner.config and owner.config[k] != config.get(k)}
+    return _set_many(store, updates) if updates else []
+
+
+def _active_glossary_profiles(store: Any) -> dict:
+    _present, active = _stored_value(store, "active_glossary_prompt_profiles")
+    active = active if isinstance(active, Mapping) else {}
+    return {bucket: str(active.get(bucket) or "") for bucket in _GLOSSARY_PROFILE_BUCKETS}
+
+
+def _use_on_device_profiles(store: Any) -> list:
+    """A ``local/`` model was chosen: select the On-device translation and glossary profiles and remember
+    what was active (``ON_DEVICE_BEFORE_KEY``). A part already on On-device keeps the remembered value."""
+    _present, record = _stored_value(store, ON_DEVICE_BEFORE_KEY)
+    record = record if isinstance(record, Mapping) else {}
+    remembered = record.get("glossary") if isinstance(record.get("glossary"), Mapping) else {}
+    _present, profile = _stored_value(store, PROFILE_KEY)
+    glossary = _active_glossary_profiles(store)
+    before = {
+        PROFILE_KEY: str(record.get(PROFILE_KEY) or "") if profile == ON_DEVICE_PROFILE else str(profile or ""),
+        "glossary": {bucket: str(remembered.get(bucket) or "") if name == ON_DEVICE_PROFILE else name
+                     for bucket, name in glossary.items()},
+    }
+    changed = _select_profile(store, ON_DEVICE_PROFILE)
+    changed += _select_glossary_profiles(store, {bucket: ON_DEVICE_PROFILE for bucket in _GLOSSARY_PROFILE_BUCKETS})
+    changed += _set_many(store, {ON_DEVICE_BEFORE_KEY: before})
+    return changed
+
+
+def _restore_profiles_before_on_device(store: Any) -> list:
+    """A model that is not ``local/`` replaced a ``local/`` one: bring back the remembered profiles where
+    On-device is still the active one (a profile the user picked meanwhile stays)."""
+    present, record = _stored_value(store, ON_DEVICE_BEFORE_KEY)
+    if not present:
+        return []
+    record = record if isinstance(record, Mapping) else {}
+    changed: list = []
+    _present, profile = _stored_value(store, PROFILE_KEY)
+    if profile == ON_DEVICE_PROFILE:
+        previous = str(record.get(PROFILE_KEY) or "")
+        # nothing was stored before: the first profile again, as before
+        changed += _select_profile(store, previous) if previous else _unset(store, PROFILE_KEY)
+    remembered = record.get("glossary") if isinstance(record.get("glossary"), Mapping) else {}
+    names = {bucket: str(remembered.get(bucket) or "") or "Default"
+             for bucket, name in _active_glossary_profiles(store).items() if name == ON_DEVICE_PROFILE}
+    changed += _select_glossary_profiles(store, names)
+    changed += _unset(store, ON_DEVICE_BEFORE_KEY)
+    return changed
+
+
+def _write_model(store: Any, value: Any) -> list:
+    """The global model, plus the On-device prompt profiles when it moves to or from a ``local/`` model."""
+    _present, old = _stored_value(store, "model")
+    changed = _set_many(store, {"model": value})
+    if _is_local_model(value) and not _is_local_model(old):
+        changed += _use_on_device_profiles(store)
+    elif value and _is_local_model(old) and not _is_local_model(value):
+        changed += _restore_profiles_before_on_device(store)
+    return changed
+
+
 def write_setting(store: Any, key: Any, value: Any) -> list:
     """Store one global setting the way its desktop control does; returns the changed keys."""
     if store is None:
@@ -428,6 +552,8 @@ def write_setting(store: Any, key: Any, value: Any) -> list:
         return _write_context_mode(store, value)
     if key == STREAMING_KEY:
         return _write_streaming(store, value)
+    if key == "model":
+        return _write_model(store, value)
     snapshot = getattr(store, "snapshot", None)
     if key not in RULE_KEYS or not callable(snapshot):
         return _set_many(store, {key: value})

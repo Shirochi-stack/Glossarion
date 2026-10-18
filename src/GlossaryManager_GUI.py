@@ -412,7 +412,7 @@ class GlossaryManagerMixin:
         return glossary_document.is_default_glossary_prompt_profile(profile_name)
 
     def _ensure_glossary_prompt_profiles(self):
-        """Ensure glossary prompt profile containers exist without seeding defaults."""
+        """Ensure glossary prompt profile containers exist and hold the built-in On-device profile."""
         return glossary_document.ensure_glossary_prompt_profiles(self)
 
     def _glossary_prompt_profiles_for(self, profile_key):
@@ -623,6 +623,9 @@ class GlossaryManagerMixin:
         profiles = self._glossary_prompt_profiles_for(profile_key)
         if self._is_default_glossary_prompt_profile(name):
             QMessageBox.warning(self, "Default Profile", "The Default glossary prompt profile cannot be deleted.")
+            return
+        if glossary_document.is_builtin_glossary_prompt_profile(name):
+            QMessageBox.warning(self, "Built-in Profile", f"The built-in '{name}' glossary prompt profile cannot be deleted.")
             return
         if not name or name not in profiles:
             QMessageBox.warning(self, "Profile Not Found", "Select an existing profile to delete.")

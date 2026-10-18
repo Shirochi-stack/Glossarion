@@ -550,6 +550,12 @@ MOVED_BLOCKS = {
     "ensure_glossary_prompt_profiles": (480, 507, 4, 0, [
         ("def _ensure_glossary_prompt_profiles(self):", "def ensure_glossary_prompt_profiles(owner):"),
         ("self._glossary_prompt_profile_meta(key)", "glossary_prompt_profile_meta(key)"),
+        # the built-in On-device profile is seeded into both buckets (LEGACY_GM_APPROVED)
+        ("exist without seeding defaults.", "exist and hold the built-in On-device profile."),
+        ("            profiles[key] = {}\n",
+         "            profiles[key] = {}\n"
+         "        # setdefault: an edited On-device text survives\n"
+         "        profiles[key].setdefault(GLOSSARY_PROMPT_ON_DEVICE_PROFILE, ON_DEVICE_GLOSSARY_PROMPTS[key])\n"),
         SELF_TO_OWNER,
     ]),
     "glossary_prompt_profiles_for": (509, 511, 4, 0, [
@@ -608,6 +614,8 @@ MOVED_BLOCKS = {
 REWIRE_SPANS = (
     (47, 47, 10), (91, 178, 4), (276, 277, 27), (457, 475, 3), (477, 478, 2), (480, 507, 3),
     (509, 511, 2), (513, 515, 2), (517, 523, 2), (525, 528, 2), (530, 534, 2), (563, 568, 1),
+    # the built-in On-device glossary prompt profile cannot be deleted (LEGACY_GM_APPROVED)
+    (735, 735, 4),
     (991, 996, 1), (1031, 1045, 2), (1047, 1089, 8), (1121, 1185, 13), (1187, 1367, 7), (1369, 1555, 5),
     (1800, 1810, 3),
     # U9 gap closures: Entry Type Configuration / Custom Fields call the glossary_document rules
@@ -769,10 +777,29 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
+#: Owner-approved behaviour changes since U6_BASE_SHA, applied to the frozen Glossary Manager the
+#: Tier D/P replays run so it keeps matching the working tree and the mobile classes.
+LEGACY_GM_APPROVED = [
+    # 2026-10-18 built-in "On-device" glossary prompt profile (seeded, cannot be deleted)
+    ("                profiles[key] = {}\n        self.config['glossary_prompt_profiles'] = profiles\n",
+     "                profiles[key] = {}\n"
+     "            import glossary_document as _gd\n"
+     "            profiles[key].setdefault(_gd.GLOSSARY_PROMPT_ON_DEVICE_PROFILE, _gd.ON_DEVICE_GLOSSARY_PROMPTS[key])\n"
+     "        self.config['glossary_prompt_profiles'] = profiles\n"),
+    ("            QMessageBox.warning(self, \"Default Profile\", \"The Default glossary prompt profile cannot be deleted.\")\n"
+     "            return\n",
+     "            QMessageBox.warning(self, \"Default Profile\", \"The Default glossary prompt profile cannot be deleted.\")\n"
+     "            return\n"
+     "        if name == \"On-device\":\n"
+     "            QMessageBox.warning(self, \"Built-in Profile\", f\"The built-in '{name}' glossary prompt profile cannot be deleted.\")\n"
+     "            return\n"),
+]
+
+
 @pytest.fixture(scope="module")
 def legacy_gm(qapp):
-    return _load_gm_module(_git_text("src/GlossaryManager_GUI.py"), "_glossary_manager_u6_frozen",
-                           SRC / "GlossaryManager_GUI.py")
+    text = _apply_edits(_git_text("src/GlossaryManager_GUI.py"), LEGACY_GM_APPROVED, "frozen GlossaryManager_GUI.py")
+    return _load_gm_module(text, "_glossary_manager_u6_frozen", SRC / "GlossaryManager_GUI.py")
 
 
 @pytest.fixture(scope="module")
