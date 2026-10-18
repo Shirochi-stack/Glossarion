@@ -209,6 +209,7 @@ def test_save_to_library_runs_with_the_plan_cards_mode_and_chat_overrides():
     fake = types.SimpleNamespace(env=types.SimpleNamespace(jobs=Jobs(), chats=chats), render_transcript=lambda **k: None,
                                  notify=lambda *a, **k: None, navigate=lambda *a: None)
     fake.run_overrides = lambda cid: ChatView.run_overrides(fake, cid)  # the chat's overrides as a run gets them
+    fake._with_glossary_prompts = lambda overrides: ChatView._with_glossary_prompts(fake, overrides)
     plan = {"output_mode": "image"}
     asyncio.run(ChatView._submit_library(fake, "c1", plan, {"path": "/x/Book.epub", "name": "Book.epub"},
                                          {"translation_temperature": 0.5}))

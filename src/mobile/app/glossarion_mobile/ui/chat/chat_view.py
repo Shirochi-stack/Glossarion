@@ -1680,7 +1680,7 @@ class ChatView:
         from glossarion_mobile.ui.chat.run_request import GLOSSARY_PROMPTS
 
         names = {bucket: overrides[key] for bucket, key in GLOSSARY_PROFILE_OVERRIDE_KEYS.items() if overrides.get(key)}
-        if not names or self.env is None or self.env.store is None:
+        if not names or getattr(self.env, "store", None) is None:
             return overrides
         try:
             from glossarion_mobile.services.glossary import GlossaryService

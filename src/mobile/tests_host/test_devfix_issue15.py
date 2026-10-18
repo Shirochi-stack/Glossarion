@@ -629,6 +629,9 @@ def test_owner_issue15_edit_and_add_prompts_from_chat_settings(tmp_path, app_env
             assert all(CHAT_MARK in text and SHARED_MARK in text for text in sent), \
                 f"chat A did not run with '{CHAT_PROFILE}': {[t[:200] for t in sent]}"
 
+            # a new chat would start on the profile picked last (chat A's, test_chat covers that);
+            # forget that pick so chat B inherits All chats
+            chats.sidecar.data.pop("last_used", None)
             cid_b = await _new_chat(app, driver)
             assert cid_b != cid_a and chats.own_overrides(cid_b).get("profile") is None
             mark = prompts.mark()
@@ -712,6 +715,9 @@ def test_owner_issue15_rename_and_delete_under_manage(tmp_path, app_env, monkeyp
                 f"chat A did not run with '{CHAT_PROFILE}': {[t[:200] for t in sent]}"
 
             # chat B inherits All chats (Universal); its Chat settings › Manage… › chat A's profile › rename
+            # a new chat would start on the profile picked last (chat A's, test_chat covers that);
+            # forget that pick so chat B inherits All chats
+            chats.sidecar.data.pop("last_used", None)
             cid_b = await _new_chat(app, driver)
             assert cid_b != cid_a and chats.own_overrides(cid_b).get("profile") is None
             sheet_b = await _open_chat_settings(app, driver)

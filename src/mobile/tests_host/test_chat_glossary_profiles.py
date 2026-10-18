@@ -169,13 +169,13 @@ def test_chat_settings_dropdown_lists_the_bucket_of_the_effective_mode():
     config = _config("balanced")
     sheet = _sheet(config)
     dropdown = _glossary_dropdown(sheet)
-    assert dropdown is not None and [o.key for o in dropdown.options] == ["Default", "Strict", "Loose"]
+    assert dropdown is not None and [o.key for o in dropdown.options] == ["Default", "Strict", "Loose", "On-device"]  # + the built-in profile
     assert dropdown.value == "Default"
     assert _find(sheet.sections["glossary"], lambda c: getattr(c, "value", None) == "Inherited from: All chats")
 
     config["auto_glossary_mode"] = "minimal"
     sheet.rebuild()
-    assert [o.key for o in _glossary_dropdown(sheet).options] == ["Default", "Tiny"]
+    assert [o.key for o in _glossary_dropdown(sheet).options] == ["Default", "Tiny", "On-device"]
 
     config["auto_glossary_mode"] = "off"
     sheet.rebuild()
@@ -272,7 +272,7 @@ def test_plan_glossary_sheet_profile_dropdown_writes_globally():
         session.apply_page_patch({"width": 412, "height": 915})
         sheet = _plan_sheet(session.page, config, prompt_bucket="balanced_full", chat_profile="Loose",
                             on_profile_changed=lambda: changed.append(True))
-        assert [o.key for o in sheet.profile_dropdown.options] == ["Default", "Strict", "Loose"]
+        assert [o.key for o in sheet.profile_dropdown.options] == ["Default", "Strict", "Loose", "On-device"]  # + the built-in profile
         assert "this chat uses “Loose”" in sheet.profile_row.controls[-1].value
         assert sheet.select_profile("Strict") == "BAL strict" and changed == [True]
         assert config["manual_glossary_prompt3"] == "BAL strict"
