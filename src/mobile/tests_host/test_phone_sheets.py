@@ -306,7 +306,12 @@ def test_chat_settings_auto_accept_switch_writes_prefs_and_chat_meta():
     row = _auto_accept_row(sheet)
     assert row is not None and sheet.value_of("auto_accept_glossary") is False  # default off (desktop: always asks)
     switch = _find(row, lambda c: type(c).__name__ == "Switch")
-    assert switch.label == "Always accept generated glossaries" and switch.value is False
+    # owner 2026-10-19: the label is its own wrapping Text beside the switch (a Switch label ran under
+    # the "Inherited from" badge), and tapping it toggles the switch
+    label = _find(row, lambda c: getattr(c, "value", None) == "Always accept generated glossaries")
+    assert switch.label is None and switch.value is False and label is not None
+    tap_target = _find(row, lambda c: getattr(c, "content", None) is label)
+    assert tap_target is not None and tap_target.expand and tap_target.on_click is not None
     assert _find(row, lambda c: getattr(c, "value", None) == DESCRIPTIONS["auto_accept_glossary"]) is not None
     assert "Desktop always asks" in DESCRIPTIONS["auto_accept_glossary"]
 
