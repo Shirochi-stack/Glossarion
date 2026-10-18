@@ -74,6 +74,7 @@ __all__ = [
     "ProfilesUnavailable",
     "ask_profile_name",
     "chat_profile_order",
+    "copy_profile_name",
     "extraction_note",
     "follow_profile",
     "grouped_profile_names",
@@ -177,6 +178,15 @@ class ProfilesUnavailable(RuntimeError):
 def profile_id(name: str) -> str:
     """Opaque route id of a profile name (route pattern ``slug``)."""
     return hashlib.sha1(str(name).encode("utf-8")).hexdigest()[:12]
+
+
+def copy_profile_name(name: str, taken: Any) -> str:
+    """The first "<name> (copy)" / "<name> (copy N)" not in ``taken`` (Duplicate's naming)."""
+    candidate, n = f"{name} (copy)", 2
+    while candidate in taken:
+        candidate = f"{name} (copy {n})"
+        n += 1
+    return candidate
 
 
 def extraction_note(name: str) -> Optional[str]:
@@ -561,12 +571,7 @@ class ProfileService:
 
     def copy_name(self, name: str, listing: Optional[ProfileList] = None) -> str:
         """The first free "<name> (copy)" / "<name> (copy N)" (Duplicate's naming)."""
-        texts = (listing or self.listing()).texts
-        candidate, n = f"{name} (copy)", 2
-        while candidate in texts:
-            candidate = f"{name} (copy {n})"
-            n += 1
-        return candidate
+        return copy_profile_name(name, (listing or self.listing()).texts)
 
     def duplicate(self, name: str, *, keep_active: bool = False) -> str:
         listing = self.listing()
@@ -694,18 +699,21 @@ def profile_prompt_card(
     missing: Optional[bool] = None,
     mono: str = "monospace",
     key: str = "profile-prompt-card",
+    heading: Optional[str] = None,
+    preview_lines: int = 3,
 ) -> ft.Control:
     """One profile's prompt as a card (Chat settings › Model & prompt): the desktop role label
     ("System prompt" / "User prompt", ``system_prompt_to_user``), Built-in / modified marks, the first lines,
     the size, the extraction and skip notes, and Edit prompt · New profile… · Manage…. A profile that no
-    longer exists (``missing``; default: not in the listing) can only be replaced (Edit is off)."""
+    longer exists (``missing``; default: not in the listing) can only be replaced (Edit is off). ``heading``
+    replaces the role label (a glossary extraction prompt); ``preview_lines`` caps the preview (a compact sheet)."""
     from glossarion_mobile.ui.settings.editors import count_label
 
     missing = (name not in listing.texts) if missing is None else bool(missing)
     text = str(listing.texts.get(name, "") or "")
     builtin = listing.is_builtin(name) or name in listing.defaults
     heading = ft.Row(
-        [ft.Text("User prompt" if role_user else "System prompt", theme_style=ft.TextThemeStyle.LABEL_MEDIUM,
+        [ft.Text(heading or ("User prompt" if role_user else "System prompt"), theme_style=ft.TextThemeStyle.LABEL_MEDIUM,
                  expand=True),
          *([ft.Text("Built-in", theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)]
            if builtin and not missing else []),
@@ -718,7 +726,7 @@ def profile_prompt_card(
                             "row to inherit.", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ERROR,
                             key=f"{key}-missing"))
     else:
-        rows.append(ft.Text(prompt_preview(text), font_family=mono, size=12, max_lines=3,
+        rows.append(ft.Text(prompt_preview(text, preview_lines), font_family=mono, size=12, max_lines=preview_lines,
                             overflow=ft.TextOverflow.ELLIPSIS, color=ft.Colors.ON_SURFACE_VARIANT,
                             key=f"{key}-preview"))
         rows.append(ft.Text(count_label(text), theme_style=ft.TextThemeStyle.LABEL_SMALL,

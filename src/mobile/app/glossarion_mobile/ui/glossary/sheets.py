@@ -287,7 +287,9 @@ class PlanGlossarySheet:
     "Glossary prompt profile": the profiles of the bucket the run extracts with (``prompt_bucket``:
     "balanced_full" / "minimal"; None = the mode sends no AI extraction prompt, a note instead). Like the
     mode row it writes the global setting (``GlossaryService.select_prompt_profile``); ``chat_profile``
-    is the chat's own profile of that bucket (Chat settings, This chat), which its runs use instead.
+    is the chat's own profile of that bucket (Chat settings, This chat), which its runs use instead. Under
+    it the selected profile's prompt card (``GlossaryPromptCard``: Edit prompt · New profile… · Manage…;
+    a new profile becomes the active one, like the dropdown).
 
     The sheet is only as tall as its rows: the body scrolls only when its estimated height does not fit the
     page (``components.sheet.fits_compact``)."""
@@ -302,7 +304,9 @@ class PlanGlossarySheet:
         self.ctx = ctx
         self.host = SheetHost(ctx)
         self.prompt_bucket = prompt_bucket
+        self.chat_profile = chat_profile
         self.on_profile_changed = on_profile_changed
+        self.glossary_card: Any = None  # GlossaryPromptCard (None: no profile dropdown)
         service = ctx.service
         loaded = str(service.cfg("manual_glossary_path", "") or "")
         self.mode_tile = ft.ListTile(leading=ft.Icon(ft.Icons.RULE), title=ft.Text(f"Glossary mode: {service.mode_label()}"),
@@ -312,9 +316,11 @@ class PlanGlossarySheet:
         self.loaded_text = ft.Text(f"Loaded: {os.path.basename(loaded)}" if loaded else "No glossary loaded (auto-mapping "
                                    "picks the book glossary)", theme_style=ft.TextThemeStyle.BODY_SMALL, key="pg-loaded")
         self.profile_row = self._profile_row(prompt_bucket, chat_profile)
+        self.prompt_card = ft.Container(content=self._prompt_card(), key="pg-prompt-box")
         tiles = [
             self.mode_tile,
             self.profile_row,
+            *([self.prompt_card] if self.glossary_card is not None else []),
             self.loaded_text,
             ft.ListTile(leading=ft.Icon(ft.Icons.FILE_OPEN), title=ft.Text("Load file…"), key="pg-load",
                         on_click=lambda e: self._run(on_load_file)),
@@ -380,8 +386,49 @@ class PlanGlossarySheet:
         text = self.ctx.service.select_prompt_profile(self.prompt_bucket, str(name),
                                                       default_text=self._default_text(self.prompt_bucket))
         if text is not None:
+            self.refresh_profile()
             call_handler(self.on_profile_changed)
         return text
+
+    def _settings_ctx(self) -> Any:
+        """The SettingsContext the prompt editor opens with (the app's; else one around this page)."""
+        settings = getattr(self.ctx, "settings", None)
+        if settings is not None:
+            return settings
+        from glossarion_mobile.ui.settings.context import SettingsContext
+
+        return SettingsContext(page=getattr(self.ctx, "page", None),
+                               store=getattr(self.ctx.service, "config", None), schema=None)
+
+    def _prompt_card(self) -> Optional[ft.Control]:
+        """The selected profile's prompt card (None without a profile dropdown)."""
+        if self.profile_dropdown is None or not self.prompt_bucket:
+            self.glossary_card = None
+            return None
+        from glossarion_mobile.ui.glossary.settings_tabs import GlossaryPromptCard
+
+        service = self.ctx.service
+        self.glossary_card = GlossaryPromptCard(
+            service, self.prompt_bucket, str(self.profile_dropdown.value or ""), ctx=self._settings_ctx(),
+            page=getattr(self.ctx, "page", None), default_text=self._default_text(self.prompt_bucket),
+            on_changed=self.refresh_profile, on_created=self.select_profile, on_manage=self.manage_profiles,
+            model=lambda: str(service.cfg("model", "") or ""), key="pg-prompt", preview_lines=2)
+        return self.glossary_card.build()
+
+    def refresh_profile(self) -> None:
+        """Re-read the dropdown and the prompt card (after a selection, an edit or a new profile)."""
+        row = self._profile_row(self.prompt_bucket, self.chat_profile)
+        if isinstance(row, ft.Column) and isinstance(self.profile_row, ft.Column):
+            self.profile_row.controls = row.controls
+        self.prompt_card.content = self._prompt_card()
+        self.ctx.push(self.profile_row, self.prompt_card)
+
+    def manage_profiles(self) -> None:
+        """Manage…: Settings › Glossary on the bucket's tab."""
+        self.host.close()
+        open_setting = getattr(getattr(self.ctx, "settings", None), "open_setting", None)
+        if callable(open_setting) and self.prompt_bucket:
+            open_setting(f"glossary.{self.prompt_bucket}")
 
     # ---- presentation ------------------------------------------------------------------------------
 
@@ -391,13 +438,17 @@ class PlanGlossarySheet:
 
     def estimated_height(self) -> float:
         """Estimate (dp) with room for somewhat larger text, like ``ModeOptionsSheet.estimated_height``: title,
-        64 dp per row (+28 for a subtitle), the profile dropdown with its note, Done, spacing and padding."""
+        64 dp per row (+28 for a subtitle), the profile dropdown with its note, its prompt card, Done, spacing
+        and padding."""
         total = 56.0 + 48.0 + 36.0  # title, Done, bottom padding
         for tile in self.tiles:
             if isinstance(tile, ft.ListTile):
                 total += 64.0 + (28.0 if tile.subtitle is not None else 0.0)
             elif tile is self.profile_row and self.profile_dropdown is not None:
                 total += 96.0
+            elif tile is self.prompt_card:
+                # heading, a 2-line preview, the size, the 2-line shared note, the button row, padding
+                total += 24.0 + 36.0 + 18.0 + 36.0 + 48.0 + 12.0 + 4.0 * 5
             else:  # a note line, the settings button
                 total += 44.0
         return total + 10.0 * (len(self.tiles) + 1)  # the column spacing

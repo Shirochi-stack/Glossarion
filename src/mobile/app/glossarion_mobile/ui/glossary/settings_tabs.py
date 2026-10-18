@@ -25,18 +25,18 @@ changes since opening comes from SectionPage.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import flet as ft
 
-from glossarion_mobile.services.glossary import PROFILE_BUCKETS, CoreMissing
+from glossarion_mobile.services.glossary import PROFILE_BUCKETS, PROMPT_PLACEHOLDERS, CoreMissing
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.glossary.common import ask, attach_mode_locks, prompt_text
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["GlossarySettingsScreen", "GlossarySettingsTab", "ProfileBar", "SECTION_TABS", "TAB_SECTIONS", "MODE_KEYS"]
+__all__ = ["GlossaryPromptCard", "GlossarySettingsScreen", "GlossarySettingsTab", "ProfileBar", "SECTION_TABS", "TAB_SECTIONS", "MODE_KEYS"]
 
 log = logging.getLogger("glossarion.glossary.ui")
 
@@ -267,6 +267,158 @@ class ProfileBar:
                 pass
             self._unsub = None
         self._stale = True
+
+
+class GlossaryPromptCard:
+    """One Balanced/Full or Minimal glossary prompt profile as the shared prompt card of Chat settings ›
+    Model & prompt (``profiles.profile_prompt_card``): its text, size, the "Profiles are shared" note and
+    Edit prompt · New profile… · Manage…, for Chat settings › Glossary and the Plan glossary sheet.
+
+    Edit prompt edits the profile itself (``GlossaryService.save_prompt_profile_text``: Save Profile of the
+    bucket's row; Default is the bucket's Default prompt) without changing which profile is selected. New
+    profile… copies it into a new profile of the bucket and hands the name to ``on_created`` (the caller
+    selects it: this chat's override or the active profile). Manage… opens the bucket's Settings › Glossary
+    tab. ``on_changed`` runs after a save (the caller re-reads its row)."""
+
+    def __init__(self, service: Any, bucket_id: str, name: str, *, ctx: Any, page: Any = None,
+                 default_text: str = "", on_changed: Optional[Callable[[], Any]] = None,
+                 on_created: Optional[Callable[[str], Any]] = None, on_manage: Optional[Callable[[], Any]] = None,
+                 model: Callable[[], str] = lambda: "", key: str = "glossary-prompt", preview_lines: int = 3) -> None:
+        self.service = service
+        self.bucket_id = bucket_id
+        self.name = str(name or "")
+        self.ctx = ctx  # the SettingsContext the prompt editor opens with
+        self.page = page if page is not None else getattr(ctx, "page", None)
+        self.default_text = default_text
+        self.on_changed = on_changed
+        self.on_created = on_created
+        self.on_manage = on_manage
+        self.model = model
+        self.key = key
+        self.preview_lines = preview_lines
+        self.editor: Any = None
+        self.name_dialog: Any = None
+        self.texts: dict = {}
+        self.builtins: dict = {}
+        self.error: Optional[str] = None
+        self.load()
+
+    def load(self) -> None:
+        """Read the bucket's profile texts (``{name: prompt}``) and its built-in texts."""
+        try:
+            self.texts = self.service.prompt_profile_texts(self.bucket_id, default_text=self.default_text)
+            self.builtins = self.service.builtin_prompt_texts(self.bucket_id, default_text=self.default_text)
+            self.error = None
+        except Exception as exc:
+            log.warning("glossary prompt profile texts unavailable", exc_info=True)
+            self.texts, self.builtins = {}, {}
+            self.error = f"Glossary prompt profiles need {getattr(exc, 'name', None) or 'the glossary core'}"
+
+    def listing(self) -> Any:
+        from glossarion_mobile.ui.screens.profiles import ProfileList
+
+        names = list(self.texts)
+        return ProfileList(names=names, texts=dict(self.texts), defaults=dict(self.builtins),
+                           protected=frozenset(self.builtins) | frozenset(names[:1]))  # names[0]: Default
+
+    def build(self) -> ft.Control:
+        from glossarion_mobile.ui.screens.profiles import profile_prompt_card
+        from glossarion_mobile.ui.theme import mono_family
+
+        return profile_prompt_card(
+            self.listing(), self.name, heading="Extraction prompt",
+            missing=self.error is None and self.name not in self.texts,
+            on_edit=self.edit_prompt, on_new=self.new_profile, on_manage=self.manage,
+            disabled_reason=self.error, mono=mono_family(self.page), key=self.key,
+            preview_lines=self.preview_lines,
+        )
+
+    def _say(self, message: str) -> None:
+        say = getattr(self.ctx, "say", None)
+        if callable(say):
+            say(message)
+
+    def edit_prompt(self, name: Optional[str] = None) -> Any:
+        """Edit prompt: the profile's text in ``PromptEditorSheet`` (the bucket's placeholder chips, token
+        count; Reset to default for Default and On-device). Saving changes the profile itself."""
+        from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
+
+        name = str(name or self.name)
+        if self.error or name not in self.texts:
+            self._say(self.error or f"The glossary prompt profile '{name}' no longer exists")
+            return None
+        editor = PromptEditorSheet(
+            self.ctx, title=name,
+            subtitle=f"{PROFILE_BUCKETS[self.bucket_id]} · glossary prompt · shared with every chat and the desktop",
+            value=str(self.texts.get(name, "") or ""), default=self.builtins.get(name),
+            placeholders=PROMPT_PLACEHOLDERS.get(self.bucket_id, ()), model=self.model,
+            on_save=lambda text, n=name: self.save_prompt(n, text),
+        )
+        editor.on_saved = lambda _value: self._saved()  # once the editor has closed
+        self.editor = editor
+        editor.show()
+        return editor
+
+    def save_prompt(self, name: str, text: Any) -> Optional[str]:
+        """Store an edited prompt (None, or the error the editor shows); unchanged text writes nothing."""
+        if str(text or "").strip() == str(self.texts.get(name, "") or "").strip():
+            return None
+        try:
+            error = self.service.save_prompt_profile_text(self.bucket_id, name, text, default_text=self.default_text)
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        if error is None:
+            self.load()
+        return error
+
+    def _saved(self) -> None:
+        if self.on_changed is not None:
+            self.on_changed()
+
+    def new_profile(self) -> Any:
+        """New profile…: a name dialog; the profile starts as a copy of this one, is selected by
+        ``on_created`` and opens in the editor."""
+        from glossarion_mobile.ui.screens.profiles import ask_profile_name, copy_profile_name
+
+        if self.error:
+            self._say(self.error)
+            return None
+        source = self.name
+        known = source in self.texts
+        text = str(self.texts.get(source, "") or "")
+        dialog, field_ = ask_profile_name(
+            self.page, title="New glossary profile",
+            note=f"Starts as a copy of '{source}'." if known else "Starts empty.",
+            initial=copy_profile_name(source, self.texts) if known else "",
+            confirm_label="Create",
+            on_submit=lambda name: self.create_profile(name, text),
+            on_done=lambda name: self.edit_prompt(name),
+        )
+        self.name_dialog = (dialog, field_)
+        return dialog
+
+    def create_profile(self, name: str, text: str) -> Optional[str]:
+        """Create ``name`` holding ``text`` in the bucket, then let the caller select it (None, or the
+        error the name dialog shows)."""
+        try:
+            error = self.service.create_prompt_profile(self.bucket_id, name, text, default_text=self.default_text)
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        if error:
+            return error
+        self.load()
+        if self.on_created is not None:
+            self.on_created(str(name).strip())
+        return None
+
+    def manage(self) -> None:
+        """Manage…: the bucket's Settings › Glossary tab (its profile row, the prompt and its options)."""
+        if self.on_manage is not None:
+            self.on_manage()
+            return
+        open_setting = getattr(self.ctx, "open_setting", None)
+        if callable(open_setting):
+            open_setting(f"glossary.{self.bucket_id}")
 
 
 class GlossarySettingsTab:
