@@ -370,6 +370,43 @@ def test_long_action_sheet_scrolls_and_a_short_one_stays_compact(size):
 
 
 @needs_flet
+def test_plan_glossary_sheet_is_only_as_tall_as_its_rows():
+    """The chat file card's "Glossary: …" chip opened a full-height sheet with empty space under Done: the
+    body stays compact when the rows fit and scrolls (every row reachable) only when they would not."""
+    from glossarion_mobile.services.glossary import GlossaryService
+    from glossarion_mobile.ui.glossary.common import GlossaryContext
+    from glossarion_mobile.ui.glossary.sheets import PlanGlossarySheet
+
+    config = {"auto_glossary_mode": "balanced", "manual_glossary_prompt3": "BAL"}
+
+    def plan_sheet(page, **kwargs):
+        ctx = GlossaryContext(service=GlossaryService(config=config), page=page, platform="android",
+                              notify=lambda *a, **k: None, navigate=lambda *a, **k: None)
+        noop = lambda: None
+        return PlanGlossarySheet(ctx, on_load_file=noop, on_clear=noop, on_review=noop, on_mode=noop,
+                                 effective="Glossary: Balanced (auto)", on_settings=noop,
+                                 prompt_bucket="balanced_full", **kwargs)
+
+    async def scenario():
+        _conn, _session, page = _phone(412, 915)
+        sheet = plan_sheet(page).show(page)
+        assert sheet.dialog in _open_dialogs(page)
+        done = _find(sheet.dialog.content, lambda c: getattr(c, "content", None) == "Done")
+        assert done is not None and _column_of(sheet.dialog.content, done).scroll is None
+        assert sheet.dialog.scrollable  # no 9/16 cap: a compact body is never squeezed
+        # a small phone, or the batch rows (Map glossaries…): the body scrolls to Done
+        _conn, _session, small = _phone(360, 640)
+        tall = plan_sheet(small).show(small)
+        assert_phone_sheet(tall.dialog, tall.tiles[-1],
+                           _find(tall.dialog.content, lambda c: getattr(c, "content", None) == "Done"))
+        batch = plan_sheet(page, on_map=lambda: None)
+        batch.show(page)
+        assert _column_of(batch.dialog.content, batch.mode_tile).scroll is not None
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 @pytest.mark.parametrize("size", PHONES)
 def test_show_full_translation_info_sheet_scrolls(size):
     from glossarion_mobile.ui.chat.direct_text_rules import LONG_OUTPUT_CHARS

@@ -73,6 +73,7 @@ from glossarion_mobile.state.prefs import atomic_write_json
 __all__ = [
     "ChatStoreAdapter",
     "ChatStoreBinding",
+    "GLOSSARY_PROFILE_OVERRIDE_KEYS",
     "MobileChatSidecar",
     "SCRATCH_DIR_NAME",
     "SIDECAR_NAME",
@@ -388,11 +389,19 @@ class ChatStoreBinding:
 # Sidecar: direct_text_chats.mobile.json
 # ---------------------------------------------------------------------------
 
+#: Glossary prompt profile bucket (``glossary_document.glossary_prompt_profile_meta``) -> the per-chat
+#: override key naming that bucket's profile (Chat settings › Glossary "Glossary prompt profile").
+GLOSSARY_PROFILE_OVERRIDE_KEYS = {
+    "balanced_full": "glossary_prompt_profile_balanced_full",
+    "minimal": "glossary_prompt_profile_minimal",
+}
+
 #: Per-chat override keys (Appendix B ``overrides``); None / missing = inherited.
 OVERRIDE_KEYS = (
     "model", "profile", "target_language", "output_mode", "attachment_prompt_role",
     "glossary_override_mode", "manual_glossary_path", "force_multipass_off", "disable_thinking",
     "skip_prompt_profile", "disable_auto_scroll", "rendered_card_limit",
+    *GLOSSARY_PROFILE_OVERRIDE_KEYS.values(),
 )
 
 

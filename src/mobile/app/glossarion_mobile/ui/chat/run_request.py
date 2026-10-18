@@ -59,6 +59,8 @@ __all__ = [
     "DIRECT_TEXT_JOB_KIND",
     "GENERATE_MEDIA_JOB_KIND",
     "GENERATIVE_SENTINEL",
+    "GLOSSARY_PROMPTS",
+    "GLOSSARY_PROMPT_CONFIG_KEYS",
     "DirectTextRun",
     "attachment_record",
     "build_run_options",
@@ -218,6 +220,12 @@ def build_run_options(run: DirectTextRun, settings: DirectTextSettings) -> Any:
 
 #: Per-chat overrides -> the config.json key the owner reads.
 OVERRIDE_CONFIG_KEYS = {"model": "model", "profile": "active_profile", "target_language": "output_language"}
+#: Run overrides entry holding the chat's own glossary prompts, already resolved from its glossary prompt
+#: profiles (``ChatView.run_overrides`` -> ``GlossaryService.prompt_profile_config``): config key -> prompt.
+GLOSSARY_PROMPTS = "glossary_prompts"
+#: The current prompt keys of the glossary prompt profile buckets (``glossary_document.
+#: glossary_prompt_profile_meta``: Balanced/Full + its legacy key, Minimal) - what ``GLOSSARY_PROMPTS`` may set.
+GLOSSARY_PROMPT_CONFIG_KEYS = ("manual_glossary_prompt3", "manual_glossary_prompt", "unified_auto_glosary_prompt3")
 
 
 def config_overrides(overrides: Optional[Mapping[str, Any]]) -> dict:
@@ -226,6 +234,9 @@ def config_overrides(overrides: Optional[Mapping[str, Any]]) -> dict:
         value = (overrides or {}).get(name)
         if isinstance(value, str) and value.strip():
             out[key] = value.strip()
+    prompts = (overrides or {}).get(GLOSSARY_PROMPTS)
+    if isinstance(prompts, Mapping):  # the chat's glossary prompt profiles (Chat settings › Glossary)
+        out.update({k: str(v) for k, v in prompts.items() if k in GLOSSARY_PROMPT_CONFIG_KEYS and str(v or "").strip()})
     if out.get("active_profile"):
         # a per-chat profile switches the extraction method like the desktop profile combo
         # (prompt_profiles.extraction_method_for_profile: *_BeautifulSoup / *_html2text)
@@ -253,9 +264,10 @@ def replace_profile(overrides: Optional[Mapping[str, Any]], profile: Optional[st
     return out
 
 
-#: ``config_overrides`` keys the chat itself writes (``config_overrides``: model, profile, target and the
-#: extraction method the profile switches); every other key of a chat job's overrides is its Run options.
-CHAT_OVERRIDE_KEYS = frozenset((*OVERRIDE_CONFIG_KEYS.values(), "text_extraction_method"))
+#: ``config_overrides`` keys the chat itself writes (``config_overrides``: model, profile, target, the
+#: extraction method the profile switches and the glossary prompts); every other key of a chat job's
+#: overrides is its Run options.
+CHAT_OVERRIDE_KEYS = frozenset((*OVERRIDE_CONFIG_KEYS.values(), "text_extraction_method", *GLOSSARY_PROMPT_CONFIG_KEYS))
 
 
 def run_config_of(overrides: Optional[Mapping[str, Any]]) -> dict:

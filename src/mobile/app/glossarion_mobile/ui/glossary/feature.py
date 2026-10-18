@@ -374,13 +374,24 @@ class GlossaryFeature:
 
     def open_plan_glossary_sheet(self, *, book: Optional[Mapping[str, Any]] = None, effective: str = "",
                                  on_changed: Optional[Callable[[], Any]] = None,
-                                 inputs: Optional[Sequence[str]] = None) -> Any:
+                                 inputs: Optional[Sequence[str]] = None, glossary_override_mode: str = "none",
+                                 chat_overrides: Optional[Mapping[str, Any]] = None) -> Any:
         """PlanGlossarySheet for the chat Plan card / BatchPlanCard / the Library TranslateSheet glossary
         chip. ``inputs``: the run's input files; with more than one EPUB the sheet offers "Map
-        glossaries…" (desktop ``load_glossary`` opens the mapping dialog for several EPUBs)."""
+        glossaries…" (desktop ``load_glossary`` opens the mapping dialog for several EPUBs).
+        ``glossary_override_mode`` / ``chat_overrides``: the chat's glossary policy and overrides (its own
+        glossary prompt profiles); the Library runs on the main settings."""
+        from glossarion_mobile.state.chat_store_adapter import GLOSSARY_PROFILE_OVERRIDE_KEYS
+        from glossarion_mobile.ui.chat.direct_text_rules import glossary_prompt_bucket
         from glossarion_mobile.ui.glossary.sheets import PlanGlossarySheet
 
         ctx = self.context()
+        try:
+            bucket = glossary_prompt_bucket(glossary_override_mode, self.service.cfg)
+        except Exception:
+            log.warning("glossary prompt bucket unavailable", exc_info=True)
+            bucket = None
+        chat_profile = (chat_overrides or {}).get(GLOSSARY_PROFILE_OVERRIDE_KEYS[bucket]) if bucket else None
 
         def done(_value: Any = None) -> None:
             if on_changed is not None:
@@ -428,7 +439,8 @@ class GlossaryFeature:
                                   on_use_book=(lambda: self.spawn(use_book())) if book else None,
                                   on_clear=lambda: self.spawn(clear()), on_review=review,
                                   on_mode=lambda: self.open_mode_sheet(on_changed=done), on_map=on_map,
-                                  on_settings=on_settings)
+                                  on_settings=on_settings, prompt_bucket=bucket, chat_profile=chat_profile,
+                                  on_profile_changed=done)
         self.sheets.append(sheet)
         return sheet.show()
 
