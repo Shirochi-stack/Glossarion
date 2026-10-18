@@ -640,7 +640,7 @@ class GlossarionWeb:
         os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(
             config('failed_translation_retry_attempts', 3)
         )
-        skip_title_tag = bool(config('skip_title_tag_translation', False))
+        skip_title_tag = bool(config('skip_title_tag_translation', True))
         os.environ['SKIP_TITLE_TAG_TRANSLATION'] = '1' if skip_title_tag else '0'
         os.environ['USE_TITLE'] = '0' if skip_title_tag else '1'
         image_only_title_prompt = str(config(

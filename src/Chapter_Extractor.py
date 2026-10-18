@@ -2592,7 +2592,7 @@ def _chapter_extraction_cache_signature(extraction_mode, parser):
         'special_file_exact': os.getenv('SPECIAL_FILE_EXACT', '').strip(),
         'batch_translate_headers': _env_flag('BATCH_TRANSLATE_HEADERS'),
         'use_title': _env_flag('USE_TITLE'),
-        'skip_title_tag_translation': _env_flag('SKIP_TITLE_TAG_TRANSLATION'),
+        'skip_title_tag_translation': _env_flag('SKIP_TITLE_TAG_TRANSLATION', '1'),
         'ignore_header': _env_flag('IGNORE_HEADER'),
         'remove_duplicate_h1_p': _env_flag('REMOVE_DUPLICATE_H1_P'),
     }

@@ -7550,14 +7550,14 @@ def _create_prompt_management_section(self, parent):
     skip_img_title_cb.toggled.connect(_on_skip_image_title_toggle)
     section_v.addWidget(skip_img_title_cb)
 
-    # XHTML/HTML document title tags are translated by default. This setting
+    # XHTML/HTML document title tags are skipped (kept untranslated) by default. This setting
     # is intentionally independent from book metadata and image filenames.
     if not hasattr(self, 'skip_title_tag_translation_var'):
         self.skip_title_tag_translation_var = bool(
-            self.config.get('skip_title_tag_translation', False)
+            self.config.get('skip_title_tag_translation', True)
         )
     if 'skip_title_tag_translation' not in self.config:
-        self.config['skip_title_tag_translation'] = False
+        self.config['skip_title_tag_translation'] = True
     self.use_title_var = not bool(self.skip_title_tag_translation_var)
 
     skip_title_tag_cb = self._create_styled_checkbox(

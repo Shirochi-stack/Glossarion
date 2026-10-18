@@ -3819,7 +3819,7 @@ class TranslationPipelineMixin(GlossaryPipelineMixin, ImageJobMixin, RpgMakerJob
             os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', True) else '0'
             os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
             os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = '1' if self.config.get('allow_ai_markdown_headers', False) else '0'
-            skip_title_tag = bool(self.config.get('skip_title_tag_translation', False))
+            skip_title_tag = bool(self.config.get('skip_title_tag_translation', True))
             os.environ['SKIP_TITLE_TAG_TRANSLATION'] = '1' if skip_title_tag else '0'
             os.environ['USE_TITLE'] = '0' if skip_title_tag else '1'
             try:

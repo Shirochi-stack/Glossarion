@@ -752,7 +752,7 @@ Text to analyze:
         self.ignore_header_var = self.config.get('ignore_header', False)
         self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', False)
         self.skip_title_tag_translation_var = bool(
-            self.config.get('skip_title_tag_translation', False)
+            self.config.get('skip_title_tag_translation', True)
         )
         # Retain the inverse legacy value for compatibility with old readers.
         self.use_title_var = not self.skip_title_tag_translation_var
@@ -1519,7 +1519,7 @@ Text to analyze:
         self.translate_special_files_var = self.config.get('translate_special_files', False)
         self.skip_image_title_translation_var = bool(self.config.get('skip_image_title_translation', True))
         self.skip_title_tag_translation_var = bool(
-            self.config.get('skip_title_tag_translation', False)
+            self.config.get('skip_title_tag_translation', True)
         )
         self.use_title_var = not self.skip_title_tag_translation_var
         # Custom special file keywords (comma-separated)

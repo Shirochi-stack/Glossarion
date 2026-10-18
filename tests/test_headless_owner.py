@@ -433,6 +433,20 @@ def test_null_text_settings_read_back_empty_like_qt(tmp_path, monkeypatch):
     assert collected["chapter_range"] == "" and collected["vertex_ai_location"] == ""
 
 
+def test_skip_title_tag_translation_defaults_on_and_a_saved_value_wins(tmp_path, monkeypatch):
+    # owner-approved 2026-10-19: a fresh config skips <title> tags; the inverse use_title follows
+    owner, _startup, env = _owner(tmp_path, monkeypatch, {})
+    assert owner.skip_title_tag_translation_var is True and owner.use_title_var is False
+    assert env["SKIP_TITLE_TAG_TRANSLATION"] == "1" and env["USE_TITLE"] == "0"
+    collected = owner._collect_live_settings()
+    assert collected["skip_title_tag_translation"] is True and collected["use_title"] is False
+
+    owner, _startup, env = _owner(tmp_path, monkeypatch, {"skip_title_tag_translation": False})
+    assert owner.skip_title_tag_translation_var is False and owner.use_title_var is True
+    assert env["SKIP_TITLE_TAG_TRANSLATION"] == "0" and env["USE_TITLE"] == "1"
+    assert owner._collect_live_settings()["skip_title_tag_translation"] is False
+
+
 def _legacy_statements(method, predicate):
     tree = ast.parse(_git_show("src/translator_gui.py"))
     fn = _method_nodes(tree, "TranslatorGUI")[method]
