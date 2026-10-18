@@ -70,6 +70,8 @@ __all__ = [
     "run_config_of",
     "run_options_dict",
     "user_turn",
+    "with_chat_overrides",
+    "with_current_glossary",
     "with_run_config",
 ]
 
@@ -281,6 +283,26 @@ def with_run_config(overrides: Optional[Mapping[str, Any]], run_config: Optional
     Run options before Resume); the chat's keys stay and win, as at Send (``ChatRuns.send``)."""
     chat = {k: v for k, v in dict(overrides or {}).items() if k in CHAT_OVERRIDE_KEYS}
     return {**dict(run_config or {}), **chat}
+
+
+def with_chat_overrides(overrides: Optional[Mapping[str, Any]], chat: Optional[Mapping[str, Any]]) -> dict:
+    """A job's ``config_overrides`` with the chat's keys (model, profile, target language, glossary prompts)
+    taken from the chat's run overrides now (``chat``: ``ChatView.run_overrides``; a key it does not set is
+    inherited, as at Send); its Run options are kept."""
+    return {**run_config_of(overrides), **config_overrides(chat)}
+
+
+def with_current_glossary(options: Optional[Mapping[str, Any]], run: DirectTextRun,
+                          settings: DirectTextSettings) -> dict:
+    """A resubmitted job's run options with the glossary the chat would send with now (``run_options_dict``):
+    the run's own manual glossary only while the chat's policy is still Manual, ``force_no_glossary`` from
+    the chat's policy now. Everything else stays as the job ran with."""
+    out = dict(options or {})
+    manual = run.manual_glossary_path if settings.glossary_override_mode == "manual" else ""
+    out["manual_glossary_path"] = manual
+    out["force_no_glossary"] = bool(force_no_glossary_for_mode(settings.glossary_override_mode, run.is_attachment)
+                                    and not manual)
+    return out
 
 
 def job_params(

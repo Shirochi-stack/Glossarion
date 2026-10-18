@@ -79,6 +79,8 @@ from glossarion_mobile.ui.chat.run_request import (
     prepare_direct_text_run,
     replace_profile,
     user_turn,
+    with_chat_overrides,
+    with_current_glossary,
     with_run_config,
 )
 from glossarion_mobile.ui.chat.stream_bridge import RunStream
@@ -846,7 +848,9 @@ class ChatRuns:
     async def resubmit(self, cid: Any, *,
                        profile_check: Optional[Callable[[str], Optional[str]]] = None,
                        run_config: Optional[Mapping[str, Any]] = None,
-                       run_config_for: Optional[str] = None) -> Optional[ChatRun]:
+                       run_config_for: Optional[str] = None,
+                       overrides: Optional[Mapping[str, Any]] = None,
+                       settings: Optional[DirectTextSettings] = None) -> Optional[ChatRun]:
         """Resume / Retry failed: the same JobSpec params (same run root), so the pipeline continues
         from its ``translation_progress.json`` and only redoes missing or failed chapters.
 
@@ -865,7 +869,12 @@ class ChatRuns:
         Run options are replaced by these (``run_request.with_run_config``; {} runs with the config's
         values), None keeps the ones it was sent with. ``run_config_for``: the ``turn_key`` of the run those
         Run options were taken from; when it is not the run resubmitted here (an older turn's card), they
-        are ignored and the run keeps its own."""
+        are ignored and the run keeps its own.
+
+        ``overrides`` / ``settings`` (the Result card's chips: ``ChatView.run_overrides`` / ``settings`` now):
+        the run's profile, target language and glossary prompts follow the chat's overrides now
+        (``run_request.with_chat_overrides``) and its glossary the chat's policy now
+        (``run_request.with_current_glossary``), like the model; None keeps the Send-time values."""
         cid = str(cid)
         if self.live_run(cid) is not None:
             return None
@@ -880,6 +889,10 @@ class ChatRuns:
         params["user_index"] = user_index  # a new submission records the turn where it is now
         if run_config is not None and (run_config_for is None or run_config_for == turn_key(params)):
             params["config_overrides"] = with_run_config(params.get("config_overrides"), run_config)
+        if overrides is not None:
+            params["config_overrides"] = with_chat_overrides(params.get("config_overrides"), overrides)
+        if settings is not None and kind != GENERATE_MEDIA_JOB_KIND and isinstance(params.get("options"), Mapping):
+            params["options"] = with_current_glossary(params["options"], DirectTextRun.from_dict(run_dict), settings)
         counter = getattr(self.store, "request_count", None)
         if "request_number" in params and callable(counter):
             params["request_number"] = counter(cid) + 1
