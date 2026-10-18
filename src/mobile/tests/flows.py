@@ -182,7 +182,12 @@ async def library_book_chapters(d: Any, title: str = EPUB_TITLE) -> None:
     await d.tap(key="dest-library")
     await d.wait(key="shelf", timeout=60)
     await d.tap(contains="Completed (", timeout=60)  # the shelf (a finished book)
-    names = ({"contains": title}, {"contains": Path(EPUB_NAME).stem})
+    # the metadata translation renames the book (the fake server romanizes the title: 257af833 parses its
+    # JSON now), so the translated title counts too
+    from glossarion_mobile.diagnostics.fake_llm_server import romanize_hangul
+
+    translated = romanize_hangul(title.split()[0]) if title.split() else title
+    names = ({"contains": title}, {"contains": translated}, {"contains": Path(EPUB_NAME).stem})
     index = await d.wait_any(*names, timeout=120)
     await d.tap(**names[index])
     await d.tap(text="Chapters", timeout=60)

@@ -58,6 +58,7 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import zipfile
 import sys
 import time
 from pathlib import Path
@@ -534,6 +535,9 @@ def test_owner_report_6_notifications_on_a_phone(app_env, tmp_path, monkeypatch)
     files = {}
     for name in names:
         shutil.copyfile(SELFTEST_EPUB, picks / name)
+        # distinct bytes per run: an identical file now attaches as the Library book it already is
+        with zipfile.ZipFile(picks / name, "a") as book:
+            book.writestr("META-INF/run-id.txt", name)
         files[name] = picks / name
 
     async def scenario(server):
