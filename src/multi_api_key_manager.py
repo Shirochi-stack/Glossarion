@@ -29,7 +29,7 @@ try:
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
         QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox,
         QStyledItemDelegate, QStyleOptionViewItem, QStyle, QToolButton, QTimeEdit,
-        QSplitter, QTabWidget,
+        QSplitter, QTabWidget, QListView,
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect, QEvent, QTime
     from PySide6.QtGui import (
@@ -77,6 +77,7 @@ except ImportError:
     QTimeEdit = object
     QSplitter = object
     QTabWidget = object
+    QListView = object
     QTime = object
     QIcon = object
     QFont = object
@@ -3573,6 +3574,10 @@ class MultiAPIKeyDialog(QDialog):
                     self._dedicated_load_keys(current_pool)
         finally:
             self._syncing_external_key_pool_state = False
+            if getattr(self, 'schedule_editor', None) is not None:
+                # ⏰ Schedules picker markers and switch, also for pools whose section is not built
+                self._refresh_schedule_pool_items()
+                self._refresh_schedule_pool_state()
 
     def _broadcast_key_pool_config_changed(self, pool_name=None, refresh_keys=False):
         """Refresh sibling key-manager dialogs after this dialog writes shared config."""
@@ -4074,6 +4079,10 @@ class MultiAPIKeyDialog(QDialog):
 
         if not getattr(self, '_pending_key_pool_section_builders', None):
             self._finish_key_pool_render()
+        # Construction is over: from here on toggles and edits are user actions (saved and
+        # broadcast live), also while sections are still waiting for the deferred render, which
+        # builds each one as initialization (_build_deferred_key_pool_section).
+        self._initializing = False
 
     def _create_preview_dialog(self):
         """Create a one-pool manager view using the normal dedicated-pool UI."""
@@ -4133,29 +4142,42 @@ class MultiAPIKeyDialog(QDialog):
         ]
 
     def _deferred_key_pool_section_builders(self):
+        """``(pool, builder)`` of the sections built after the dialog shows, in page order."""
         return (
-            self._create_fallback_section,
-            self._create_truncation_retry_section,
-            self._create_glossary_section,
-            self._create_glossary_refinement_section,
-            self._create_metadata_section,
-            self._create_ai_truncation_detection_section,
-            self._create_rolling_summary_section,
-            self._create_qa_scan_section,
-            self._create_inpainter_section,
-            self._create_tts_section,
+            ('fallback', self._create_fallback_section),
+            ('truncation_retry', self._create_truncation_retry_section),
+            ('glossary', self._create_glossary_section),
+            ('glossary_refinement', self._create_glossary_refinement_section),
+            ('metadata', self._create_metadata_section),
+            ('ai_truncation_detection', self._create_ai_truncation_detection_section),
+            ('rolling_summary', self._create_rolling_summary_section),
+            ('qa_scan', self._create_qa_scan_section),
+            ('inpainter', self._create_inpainter_section),
+            ('tts', self._create_tts_section),
         )
 
     def _prepare_deferred_key_pool_sections(self, parent_layout):
-        self._pending_key_pool_section_builders = list(self._deferred_key_pool_section_builders())
+        """Reserve one hidden slot per deferred section, in page order: a section is built into
+        its slot by the background render or, out of order, when the ⏰ Schedules tab needs that
+        pool (``_ensure_key_pool_section``)."""
+        self._pending_key_pool_section_builders = []
         self._deferred_key_pool_render_started = False
-        if not self._pending_key_pool_section_builders:
+        builders = self._deferred_key_pool_section_builders()
+        if not builders:
             return
 
         self._deferred_key_pool_host = QWidget()
         self._deferred_key_pool_host_layout = QVBoxLayout(self._deferred_key_pool_host)
         self._deferred_key_pool_host_layout.setContentsMargins(0, 0, 0, 0)
         self._deferred_key_pool_host_layout.setSpacing(10)
+        for pool_name, build_section in builders:
+            slot = QWidget()
+            slot_layout = QVBoxLayout(slot)
+            slot_layout.setContentsMargins(0, 0, 0, 0)
+            slot_layout.setSpacing(0)
+            slot.hide()  # an empty slot takes no space (and no spacing) until its section is built
+            self._deferred_key_pool_host_layout.addWidget(slot)
+            self._pending_key_pool_section_builders.append((pool_name, build_section, slot))
         parent_layout.addWidget(self._deferred_key_pool_host)
         self._refresh_deferred_key_pool_geometry()
 
@@ -4167,30 +4189,67 @@ class MultiAPIKeyDialog(QDialog):
         if not getattr(self, '_pending_key_pool_section_builders', None):
             return
         self._deferred_key_pool_render_started = True
-        QTimer.singleShot(25, self._render_next_deferred_key_pool_section)
+        self._queue_deferred_key_pool_render(25)
+
+    def _queue_deferred_key_pool_render(self, delay_ms):
+        if getattr(self, '_deferred_key_pool_render_queued', False):
+            return  # one tick at a time (a pause and a resume never run two chains)
+        self._deferred_key_pool_render_queued = True
+        QTimer.singleShot(delay_ms, self._render_next_deferred_key_pool_section)
 
     def _render_next_deferred_key_pool_section(self):
+        self._deferred_key_pool_render_queued = False
         pending_builders = getattr(self, '_pending_key_pool_section_builders', None)
         if not pending_builders:
             self._finish_key_pool_render()
             return
+        if self._schedules_tab_is_current():
+            # paused while ⏰ Schedules shows: it builds the sections it needs itself, and the
+            # rest resumes when 🔑 Key Pools is shown again
+            self._deferred_key_pool_render_started = False
+            return
 
-        build_section = pending_builders.pop(0)
-        parent_layout = getattr(self, '_deferred_key_pool_host_layout', None)
-        if parent_layout is None:
-            parent_layout = getattr(self, 'scrollable_layout', None)
-
-        if parent_layout is not None:
-            try:
-                build_section(parent_layout)
-                self._refresh_deferred_key_pool_geometry()
-            except Exception as exc:
-                print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
+        self._build_deferred_key_pool_section(pending_builders.pop(0))
 
         if pending_builders:
-            QTimer.singleShot(75, self._render_next_deferred_key_pool_section)
+            self._queue_deferred_key_pool_render(75)
         else:
             self._finish_key_pool_render()
+
+    def _build_deferred_key_pool_section(self, pending):
+        """Build one deferred section into its slot. Its builder's own toggle / load calls are
+        part of building, not user actions (no live broadcasts, saves or log lines)."""
+        _pool_name, build_section, slot = pending
+        previous = getattr(self, '_initializing', False)
+        self._initializing = True
+        try:
+            build_section(slot.layout())
+            slot.show()
+            self._refresh_deferred_key_pool_geometry()
+        except Exception as exc:
+            print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
+        finally:
+            self._initializing = previous
+        if getattr(self, 'schedule_editor', None) is not None:
+            self._watch_key_pool_trees()
+
+    def _ensure_key_pool_section(self, pool_name):
+        """Build *pool_name*'s 🔑 Key Pools section now if the background render has not reached
+        it (the ⏰ Schedules tab works through its key list, add form and enable switch); only
+        that section is built, under a busy cursor. Returns True if it was built now."""
+        pending_builders = getattr(self, '_pending_key_pool_section_builders', None) or []
+        pending = next((entry for entry in pending_builders if entry[0] == pool_name), None)
+        if pending is None:
+            return False
+        pending_builders.remove(pending)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self._build_deferred_key_pool_section(pending)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not pending_builders:
+            self._finish_key_pool_render()
+        return True
 
     def _refresh_deferred_key_pool_geometry(self):
         try:
@@ -4284,8 +4343,12 @@ class MultiAPIKeyDialog(QDialog):
             return
         self._key_pool_render_finished = True
         if not getattr(self, 'preview_pool', None):
-            self._toggle_multi_key_mode()
-        self._initializing = False
+            previous = getattr(self, '_initializing', False)
+            self._initializing = True   # a layout pass over the built sections, not a user toggle
+            try:
+                self._toggle_multi_key_mode()
+            finally:
+                self._initializing = previous
 
     def _create_fallback_section(self, parent_layout):
         """Create the fallback keys section at the bottom"""
@@ -5201,6 +5264,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.use_fallback_keys_var.set(enabled)
             except Exception:
                 self.translator_gui.use_fallback_keys_var = enabled
+        self._on_pool_enabled_changed('fallback')
         live_updates = self._can_emit_live_key_pool_updates()
         if live_updates:
             self._broadcast_key_pool_config_changed('fallback', refresh_keys=False)
@@ -7726,6 +7790,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['use_glossary_keys'] = enabled
         if hasattr(self.translator_gui, 'use_glossary_keys_var'):
             self.translator_gui.use_glossary_keys_var = enabled
+        self._on_pool_enabled_changed('glossary')
 
         live_updates = self._can_emit_live_key_pool_updates()
         if live_updates:
@@ -9112,6 +9177,7 @@ class MultiAPIKeyDialog(QDialog):
         enabled = self.enabled_checkbox.isChecked()
         self.translator_gui.config['use_multi_api_keys'] = enabled
         self.enabled_var = enabled
+        self._on_pool_enabled_changed('main')
 
         # Save the config immediately for direct user toggles. Live-sync refreshes
         # are already reading the saved value from the shared config.
@@ -10018,11 +10084,11 @@ class MultiAPIKeyDialog(QDialog):
 
     def _key_context_tree(self, pool_name):
         if pool_name == 'main':
-            return self.tree
+            return getattr(self, 'tree', None)
         if pool_name == 'fallback':
-            return self.fallback_tree
+            return getattr(self, 'fallback_tree', None)   # None until its section is built
         if pool_name == 'glossary':
-            return self.glossary_tree
+            return getattr(self, 'glossary_tree', None)
         return self._dedicated_widget(pool_name, 'tree')
 
     # The Key Pools tab's own handlers of a pool's key list. The ⏰ Schedules tab mirrors its
@@ -10251,14 +10317,20 @@ class MultiAPIKeyDialog(QDialog):
         return tabs is not None and tabs.currentWidget() is getattr(self, 'schedules_tab', None)
 
     def _on_manager_tab_changed(self, index):
+        """⏰ Schedules: built on first open (only the chosen pool's Key Pools section is built
+        for it, never every pending one); 🔑 Key Pools: the borrowed add form goes home and the
+        deferred section render, paused while Schedules showed, resumes."""
         if getattr(self, 'manager_tabs', None) is None:
             return
         if self.manager_tabs.widget(index) is getattr(self, 'schedules_tab', None):
-            self._ensure_schedules_tab()
-            self._refresh_schedule_tab()
-            self._borrow_pool_add_form()
+            if getattr(self, 'schedule_editor', None) is None:
+                self._ensure_schedules_tab()      # fills the list and syncs the chosen pool
+            else:
+                self._refresh_schedule_tab()
+                self._sync_schedule_pool_section()
         else:
             self._return_pool_add_form()
+            self._start_deferred_key_pool_render()
 
     def _schedule_pool_ids(self):
         """Every key pool the manager has (Translation, Fallback, Glossary, the dedicated pools)."""
@@ -10274,21 +10346,14 @@ class MultiAPIKeyDialog(QDialog):
         api_key = str(api_key or '')
         return api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
 
-    def _build_pending_key_pool_sections(self):
-        """Build the Key Pools sections still waiting for the deferred render now: the
-        ⏰ Schedules tab works through their key lists and add forms."""
-        self._deferred_key_pool_render_started = True
-        while getattr(self, '_pending_key_pool_section_builders', None):
-            self._render_next_deferred_key_pool_section()
-
     def _ensure_schedules_tab(self):
-        """Build the ⏰ Schedules tab once: pool picker, the pool's add-key form (borrowed from
-        the 🔑 Key Pools tab), the pool's keys with their schedule (reorder column, drag and drop,
-        the Key Pools context menu, double-click the model) and the shared :class:`ScheduleEditor`
-        (mode 'key') with Save / Clear for the selection."""
+        """Build the ⏰ Schedules tab once: pool picker (✅ / ⛔ enabled marker and key count) with
+        the pool's own enable switch, the pool's add-key form (borrowed from the 🔑 Key Pools tab),
+        the pool's keys with their schedule (reorder column, drag and drop, the Key Pools context
+        menu, double-click the model) and the shared :class:`ScheduleEditor` (mode 'key') with
+        Save / Clear for the selection. Only the chosen pool's Key Pools section is built for it."""
         if getattr(self, 'schedule_editor', None) is not None:
             return self.schedules_tab
-        self._build_pending_key_pool_sections()
         tab_layout = QVBoxLayout(self.schedules_tab)
         tab_layout.setContentsMargins(20, 12, 20, 12)
         tab_layout.setSpacing(10)
@@ -10310,6 +10375,15 @@ class MultiAPIKeyDialog(QDialog):
         self._disable_combobox_mousewheel(self.schedule_pool_combo)
         self.schedule_pool_combo.currentIndexChanged.connect(lambda *_: self._on_schedule_pool_changed())
         pool_row.addWidget(self.schedule_pool_combo, 1)
+        # the pool's enable switch: drives the pool's own 🔑 Key Pools checkbox (same handler,
+        # same config key) and follows it back
+        self.schedule_pool_enable_check = self._create_styled_checkbox("Enable pool")
+        self.schedule_pool_enable_check.setToolTip(
+            "Switch this pool on or off (the same switch as in 🔑 Key Pools). "
+            "Schedules can be edited either way.")
+        self.schedule_pool_enable_check.toggled.connect(self._on_schedule_pool_enable_toggled)
+        pool_row.addSpacing(12)
+        pool_row.addWidget(self.schedule_pool_enable_check)
         tab_layout.addLayout(pool_row)
 
         # the pool's own add-key form from the 🔑 Key Pools tab sits here while this tab is open
@@ -10317,7 +10391,9 @@ class MultiAPIKeyDialog(QDialog):
         self.schedule_add_layout = QVBoxLayout(self.schedule_add_host)
         self.schedule_add_layout.setContentsMargins(0, 0, 0, 0)
         tab_layout.addWidget(self.schedule_add_host)
-        self.schedule_add_hint = QLabel("This pool is switched off: turn it on in 🔑 Key Pools to add keys.")
+        self.schedule_add_hint = QLabel("⛔ This pool is switched off: its keys are not used. Switch it on above "
+                                        "to use them and to add keys; schedules can still be edited.")
+        self.schedule_add_hint.setWordWrap(True)
         self.schedule_add_hint.setStyleSheet("color: gray;")
         self.schedule_add_hint.hide()
         tab_layout.addWidget(self.schedule_add_hint)
@@ -10387,6 +10463,7 @@ class MultiAPIKeyDialog(QDialog):
         tab_layout.addWidget(splitter, 1)
 
         self._watch_key_pool_trees()
+        self._refresh_schedule_pool_items()
         self._on_schedule_pool_changed()
         return self.schedules_tab
 
@@ -10424,6 +10501,95 @@ class MultiAPIKeyDialog(QDialog):
             return
         self._refresh_schedule_tab()
 
+    # ---- the chosen pool: its Key Pools section (built on demand), add form and enable switch
+    SCHEDULE_POOL_SYNC_DELAY_MS = 10
+
+    def _queue_schedule_pool_sync(self):
+        """Run ``_sync_schedule_pool_section`` once the pool switch has painted (a timer, not a
+        zero-delay call, so the new list shows first); quick switches coalesce into one sync."""
+        if getattr(self, '_schedule_pool_sync_queued', False):
+            return
+        self._schedule_pool_sync_queued = True
+        QTimer.singleShot(self.SCHEDULE_POOL_SYNC_DELAY_MS, self, self._sync_schedule_pool_section)
+
+    def _sync_schedule_pool_section(self):
+        """Build the chosen pool's 🔑 Key Pools section if the deferred render has not yet (only
+        that one), then show its add form here. Moving a form between the tabs restyles the whole
+        form, so it happens at most once per pool switch, after the list has updated."""
+        self._schedule_pool_sync_queued = False
+        if getattr(self, 'schedule_editor', None) is None or not self._schedules_tab_is_current():
+            return
+        if self._ensure_key_pool_section(self._schedule_pool()):
+            self._refresh_schedule_tab()   # the Status column comes from the new section's list
+        self._borrow_pool_add_form()
+        self._refresh_schedule_pool_state()
+
+    def _pool_enable_checkbox(self, pool_name):
+        """The pool's enable switch on 🔑 Key Pools (None until its section is built)."""
+        attr = {'main': 'enabled_checkbox', 'fallback': 'use_fallback_checkbox',
+                'glossary': 'use_glossary_keys_checkbox'}.get(pool_name)
+        return getattr(self, attr, None) if attr else self._dedicated_widget(pool_name, 'keys_checkbox')
+
+    def _pool_enabled(self, pool_name):
+        checkbox = self._pool_enable_checkbox(pool_name)
+        if checkbox is not None:
+            return checkbox.isChecked()
+        toggle_key = self._pool_toggle_key(pool_name)
+        return bool(toggle_key and self.translator_gui.config.get(toggle_key, False))
+
+    def _schedule_pool_item_text(self, pool_name):
+        mark = '✅' if self._pool_enabled(pool_name) else '⛔'
+        count = len(self._pool_key_list(pool_name) or [])
+        return f"{mark} {key_pool_service.POOL_SPECS[pool_name]['title']} ({count})"
+
+    def _refresh_schedule_pool_items(self, pools=None):
+        """The pool picker's entries: ✅ on / ⛔ off, title and key count."""
+        combo = self.schedule_pool_combo
+        for index in range(combo.count()):
+            pool = combo.itemData(index)
+            if pools is not None and pool not in pools:
+                continue
+            text = self._schedule_pool_item_text(pool)
+            if combo.itemText(index) != text:
+                combo.setItemText(index, text)
+            combo.setItemData(index, "Enabled: its keys are used" if self._pool_enabled(pool) else
+                              "Switched off: its keys are not used (schedules can still be edited)",
+                              Qt.ToolTipRole)
+
+    def _refresh_schedule_pool_state(self):
+        """The enable switch beside the picker and the "switched off" note follow the chosen pool."""
+        pool_name = self._schedule_pool()
+        enabled = self._pool_enabled(pool_name)
+        check = self.schedule_pool_enable_check
+        text = f"Enable {key_pool_service.POOL_SPECS[pool_name]['title']}"
+        if check.text() != text:
+            check.setText(text)
+        if check.isChecked() != enabled:
+            self._set_checkbox_from_config(check, enabled)   # silent, with its ✓ overlay redrawn
+        self.schedule_add_hint.setVisible(not enabled)
+
+    def _on_schedule_pool_enable_toggled(self, checked):
+        """The Schedules enable switch: the pool's own 🔑 Key Pools checkbox is set, so its handler
+        (config, save, broadcast, section visibility) runs exactly as for a click there."""
+        pool_name = self._schedule_pool()
+        self._ensure_key_pool_section(pool_name)
+        checkbox = self._pool_enable_checkbox(pool_name)
+        if checkbox is None:
+            self._refresh_schedule_pool_state()
+            return
+        if checkbox.isChecked() != bool(checked):
+            checkbox.setChecked(bool(checked))
+        self._on_pool_enabled_changed(pool_name)
+
+    def _on_pool_enabled_changed(self, pool_name):
+        """Called by every pool toggle handler (user click on either tab, config sync): the picker
+        marker and, for the chosen pool, the Schedules switch follow."""
+        if getattr(self, 'schedule_editor', None) is None:
+            return
+        self._refresh_schedule_pool_items([pool_name])
+        if pool_name == self._schedule_pool():
+            self._refresh_schedule_pool_state()
+
     # ---- the pool's add-key form: the Key Pools widget itself, moved here while this tab shows
     def _pool_add_form(self, pool_name):
         attr = {'main': 'add_key_frame', 'fallback': 'add_fallback_frame',
@@ -10435,20 +10601,46 @@ class MultiAPIKeyDialog(QDialog):
         in this tab; it goes back to its section when the tab or the pool changes."""
         if getattr(self, 'schedule_editor', None) is None or not self._schedules_tab_is_current():
             return None
-        self._return_pool_add_form()
         form = self._pool_add_form(self._schedule_pool())
+        borrowed = getattr(self, '_borrowed_add_form', None)
+        if borrowed and form is borrowed[0]:
+            return form   # already here: moving it again would restyle it for nothing
+        self._return_pool_add_form()
         home = form.parentWidget().layout() if form is not None and form.parentWidget() else None
         if home is None:
-            self.schedule_add_hint.hide()
             return None
+        self._prepare_add_form_for_moving(form)
         hidden = form.isHidden()
         index = home.indexOf(form)
         home.removeWidget(form)
         self.schedule_add_layout.addWidget(form)
         form.setVisible(not hidden)
         self._borrowed_add_form = (form, home, index)
-        self.schedule_add_hint.setVisible(hidden)
         return form
+
+    @staticmethod
+    def _prepare_add_form_for_moving(form):
+        """Moving a widget to another parent repolishes it, and a repolished combo box re-measures
+        every item: the model pickers hold the whole model catalog (well over a thousand names) in
+        their drop-down and completer lists, which made each move of an add form cost tens of ms.
+        Once, before the first move: the lists lay out rows of one height (they are one-line
+        rows), and each combo keeps the width it has now as its minimum instead of re-measuring
+        its items (``AdjustToContentsOnFirstShow`` measured them once; the layout is unchanged)."""
+        if form.property('scheduleTabMovable'):
+            return
+        form.setProperty('scheduleTabMovable', True)
+        for combo in form.findChildren(QComboBox):
+            views = [combo.view()]
+            completer = combo.completer()
+            if completer is not None:
+                views.append(completer.popup())
+            for view in views:
+                if isinstance(view, QListView):
+                    view.setUniformItemSizes(True)
+            if combo.sizeAdjustPolicy() == QComboBox.AdjustToContentsOnFirstShow:
+                combo.ensurePolished()   # measured with its style sheet, as when shown
+                combo.setMinimumWidth(max(combo.minimumWidth(), combo.minimumSizeHint().width()))
+                combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
 
     def _return_pool_add_form(self):
         borrowed = getattr(self, '_borrowed_add_form', None)
@@ -10460,34 +10652,39 @@ class MultiAPIKeyDialog(QDialog):
         self.schedule_add_layout.removeWidget(form)
         home.insertWidget(index, form)
         form.setVisible(not hidden)
-        self.schedule_add_hint.hide()
 
     def _schedule_pool(self):
         combo = getattr(self, 'schedule_pool_combo', None)
         return combo.currentData() if combo is not None else 'main'
 
     def select_schedule_pool(self, pool_name):
-        """Show *pool_name* in the ⏰ Schedules tab (built if needed)."""
+        """Show *pool_name* in the ⏰ Schedules tab (built if needed), its section and add form
+        included (no deferred step)."""
         self._ensure_schedules_tab()
         index = self.schedule_pool_combo.findData(pool_name)
         if index >= 0:
             self.schedule_pool_combo.setCurrentIndex(index)
+            self._sync_schedule_pool_section()
         return index >= 0
 
     def _on_schedule_pool_changed(self):
-        self._return_pool_add_form()
-        self.schedule_editor.set_kinds(request_schedule.pool_schedule_kinds(self._schedule_pool()))
+        """A pool switch shows the pool's keys at once (from the stored keys); building its
+        section if needed and moving its add form here follow right after the repaint."""
+        pool_name = self._schedule_pool()
+        self.schedule_editor.set_kinds(request_schedule.pool_schedule_kinds(pool_name))
+        self._refresh_schedule_pool_state()
         self._refresh_schedule_key_list(selected=[])
-        self._borrow_pool_add_form()
+        if (self._pool_add_form(pool_name) is not None and self._key_context_tree(pool_name) is not None
+                and getattr(self, '_borrowed_add_form', None) is None):
+            self._sync_schedule_pool_section()   # nothing to move out (first open): no wait
+        else:
+            self._queue_schedule_pool_sync()
 
     def _refresh_schedule_tab(self, selected_entries=None):
         if getattr(self, 'schedule_editor', None) is None:
             return
-        combo = self.schedule_pool_combo
-        for index in range(combo.count()):
-            pool = combo.itemData(index)
-            count = len(self._pool_key_list(pool) or [])
-            combo.setItemText(index, f"{key_pool_service.POOL_SPECS[pool]['title']} ({count})")
+        self._refresh_schedule_pool_items()
+        self._refresh_schedule_pool_state()
         self._refresh_schedule_key_list(selected_entries=selected_entries)
 
     def _schedule_selected_indices(self):
@@ -10595,6 +10792,7 @@ class MultiAPIKeyDialog(QDialog):
         """Select the ⏰ Schedules list's selected keys (or *rows*) in the pool's Key Pools list,
         so that list's own handlers act on them; returns ``{row: Key Pools item}``."""
         pool_name = self._schedule_pool()
+        self._ensure_key_pool_section(pool_name)
         tree = self._key_context_tree(pool_name)
         if tree is None:
             return {}
@@ -10655,9 +10853,10 @@ class MultiAPIKeyDialog(QDialog):
         """A drop on the ⏰ Schedules list: give the pool's Key Pools list the same order and run
         that list's drop sync (one reorder path for both tabs); the dropped keys stay selected."""
         pool_name = self._schedule_pool()
+        self._ensure_key_pool_section(pool_name)
         tree = self.schedule_key_tree
         entries = list(getattr(self, '_schedule_row_entries', []))
-        order = [tree.topLevelItem(row).data(0, Qt.UserRole) for row in range(tree.topLevelItemCount())]
+        order =[tree.topLevelItem(row).data(0, Qt.UserRole) for row in range(tree.topLevelItemCount())]
         pool_tree = self._key_context_tree(pool_name)
         items = self._pool_tree_items_by_index(pool_name)
         if pool_tree is None or sorted(order) != sorted(items) or len(entries) != len(order):
@@ -11710,6 +11909,7 @@ class MultiAPIKeyDialog(QDialog):
             tree.clearSelection()
         self.translator_gui.config[spec['toggle_key']] = enabled
         setattr(self.translator_gui, f"use_{pool_name}_keys_var", enabled)
+        self._on_pool_enabled_changed(pool_name)
         live_updates = self._can_emit_live_key_pool_updates()
         if live_updates:
             self._broadcast_key_pool_config_changed(pool_name, refresh_keys=False)

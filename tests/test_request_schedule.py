@@ -729,7 +729,7 @@ def test_schedules_tab_edits_one_schedule_per_key(monkeypatch):
         assert pools[:3] == ["main", "fallback", "glossary"] and set(pools) == set(mkm.POOL_CONTEXTS)
         for combo in (dialog.schedule_pool_combo, editor.kind_combo, editor.zone_combo, editor.preview_zone_combo):
             assert "down-arrow" in combo.styleSheet() and "Halgakos" in combo.styleSheet()
-        assert dialog.schedule_pool_combo.itemText(0) == "Translation Keys (2)"
+        assert dialog.schedule_pool_combo.itemText(0) == "✅ Translation Keys (2)"
         # the list: masked key, model, schedule state
         assert tree.topLevelItemCount() == 2
         assert tree.topLevelItem(0).text(1) == "sk-first...-key" and tree.topLevelItem(0).text(2) == "deepseek-chat"
@@ -893,7 +893,7 @@ def test_schedules_tab_adds_keys_with_the_key_pools_form(monkeypatch):
         assert [k["api_key"] for k in config["multi_api_keys"]][-1] == "sk-added-from-schedules"
         assert dialog.tree.topLevelItemCount() == 4 and tree.topLevelItemCount() == 4
         assert tree.topLevelItem(3).text(1) == "sk-added...ules" and tree.topLevelItem(3).text(2) == "deepseek-chat"
-        assert dialog.schedule_pool_combo.itemText(0) == "Translation Keys (4)"
+        assert dialog.schedule_pool_combo.itemText(0) == "✅ Translation Keys (4)"
         # another pool: its form comes in, the Translation form goes home
         assert dialog.select_schedule_pool("fallback")
         assert host.isAncestorOf(dialog.add_fallback_frame) and not host.isAncestorOf(dialog.add_key_frame)
@@ -1128,3 +1128,168 @@ def test_one_reorder_column_and_drop_sync_for_every_key_list():
     manager = (SRC / "multi_api_key_manager.py").read_text(encoding="utf-8")
     assert manager.count("QPushButton(\"↑ ↑\")") == 0 and manager.count("_create_key_reorder_column(") == 6
     assert "rowsMoved.connect" not in manager and manager.count("_install_key_tree_drop_sync(") == 6
+
+
+# ------------------------------------------------- ⏰ Schedules tab: lazy building, speed, pool switch
+def _many_keys(prefix, count):
+    return [{"api_key": f"{prefix}-key-{i:02d}-local-test", "model": "deepseek-chat" if i % 2 else "gemini-3-pro",
+             "enabled": True} for i in range(count)]
+
+
+def _pump(app, seconds, until=lambda: False):
+    end = time.perf_counter() + seconds
+    while time.perf_counter() < end and not until():
+        app.processEvents()
+        time.sleep(0.002)
+
+
+def _pending_pools(dialog):
+    return [entry[0] for entry in dialog._pending_key_pool_section_builders]
+
+
+def test_schedules_tab_and_extra_sections_are_built_lazily(monkeypatch):
+    app, mkm = _qt(monkeypatch)
+    config = _sync_config()
+    dialog, saved = _manager(mkm, config)
+    try:
+        deferred = [pool for pool, _builder in dialog._deferred_key_pool_section_builders()]
+        # construction: no Schedules tab yet, only the Translation section; user actions are live
+        assert getattr(dialog, "schedule_editor", None) is None and dialog.schedules_tab.layout() is None
+        assert _pending_pools(dialog) == deferred and not hasattr(dialog, "fallback_tree")
+        assert dialog._can_emit_live_key_pool_updates()
+        # opening ⏰ Schedules builds the tab, not the pending sections; the background render pauses
+        dialog.manager_tabs.setCurrentIndex(1)
+        app.processEvents()
+        assert dialog.schedule_editor is not None and _pending_pools(dialog) == deferred
+        assert dialog.schedule_add_host.isAncestorOf(dialog.add_key_frame)
+        dialog._deferred_key_pool_render_started = True
+        dialog._render_next_deferred_key_pool_section()
+        assert _pending_pools(dialog) == deferred and not dialog._deferred_key_pool_render_started
+        # unbuilt pools still list their keys (from the stored keys)
+        index = dialog.schedule_pool_combo.findData("metadata")
+        dialog.schedule_pool_combo.setCurrentIndex(index)
+        assert dialog.schedule_key_tree.topLevelItemCount() == 2 and "metadata" in _pending_pools(dialog)
+        # ... and only the chosen pool's section is built, right after the switch, in its own place
+        _pump(app, 2.0, until=lambda: getattr(dialog, "metadata_add_frame", None) is not None
+              and dialog.schedule_add_host.isAncestorOf(dialog.metadata_add_frame))
+        assert dialog.schedule_add_host.isAncestorOf(dialog.metadata_add_frame)
+        assert _pending_pools(dialog) == [pool for pool in deferred if pool != "metadata"]
+        slot = dialog.metadata_container.parentWidget()
+        assert dialog._deferred_key_pool_host_layout.indexOf(slot) == deferred.index("metadata")
+        assert dialog.metadata_tree.topLevelItemCount() == 2
+        assert dialog.translation_key_pool_frame.isAncestorOf(dialog.add_key_frame)
+        # the key actions build a pool's section on demand too
+        assert dialog.select_schedule_pool("glossary") and "glossary" not in _pending_pools(dialog)
+        assert dialog.schedule_add_host.isAncestorOf(dialog.add_glossary_frame)
+        # back on 🔑 Key Pools the forms are home and the render resumes until every section exists
+        dialog.manager_tabs.setCurrentIndex(0)
+        assert dialog.glossary_container.isAncestorOf(dialog.add_glossary_frame)
+        _pump(app, 10.0, until=lambda: not dialog._pending_key_pool_section_builders)
+        assert not _pending_pools(dialog) and dialog._key_pool_render_finished
+        assert dialog._can_emit_live_key_pool_updates()
+        host = dialog._deferred_key_pool_host_layout
+        built = [host.itemAt(i).widget() for i in range(host.count())]
+        assert built.index(dialog.fallback_container.parentWidget()) == deferred.index("fallback")
+        assert built.index(slot) == deferred.index("metadata") and all(not w.isHidden() for w in built)
+    finally:
+        _close(app, dialog)
+
+
+def test_schedules_pool_switch_is_fast(monkeypatch):
+    app, mkm = _qt(monkeypatch)
+    config = {
+        "use_multi_api_keys": True, "multi_api_keys": _many_keys("sk", 10),
+        "use_fallback_keys": True, "fallback_keys": _many_keys("fb", 10),
+        "use_glossary_keys": True, "glossary_keys": _many_keys("gl", 10),
+        "use_metadata_keys": True, "metadata_keys": _many_keys("md", 10),
+    }
+    dialog, saved = _manager(mkm, config)
+    try:
+        dialog.show()
+        app.processEvents()
+        start = time.perf_counter()
+        dialog.manager_tabs.setCurrentIndex(1)
+        app.processEvents()
+        first_open = time.perf_counter() - start
+        pools = ["main", "fallback", "glossary", "metadata"]
+        for pool in pools:                      # first visits build the sections
+            dialog.select_schedule_pool(pool)
+        timings = {}
+        combo, tree = dialog.schedule_pool_combo, dialog.schedule_key_tree
+        for pool in pools[1:] + pools[:1] + pools[1:]:
+            start = time.perf_counter()
+            combo.setCurrentIndex(combo.findData(pool))
+            app.processEvents()
+            shown = time.perf_counter() - start
+            assert tree.topLevelItemCount() == 10 and dialog._schedule_pool() == pool
+            _pump(app, 2.0, until=lambda: not dialog._schedule_pool_sync_queued)
+            timings[pool] = max(timings.get(pool, 0), shown, time.perf_counter() - start)
+            assert dialog.schedule_add_host.isAncestorOf(dialog._pool_add_form(pool))
+            assert tree.topLevelItem(9).text(4)                  # Status column from the Key Pools list
+        assert max(timings.values()) < 0.3, timings
+        assert first_open < 1.5, first_open
+        # the moved forms keep their layout width (the model pickers no longer re-measure the catalog)
+        combo_widths = {pool: dialog._pool_add_form(pool).findChildren(mkm.QComboBox)[0].minimumWidth() for pool in pools}
+        assert all(width > 0 for width in combo_widths.values()), combo_widths
+    finally:
+        _close(app, dialog)
+
+
+def test_schedules_pool_enable_switch_follows_the_key_pools_toggle(monkeypatch):
+    import key_pool_service
+    env = dict(os.environ)
+    app, mkm, dialog, config, saved = _schedules_dialog(monkeypatch)
+    title = lambda pool: key_pool_service.POOL_SPECS[pool]["title"]  # noqa: E731
+    combo, check, hint = dialog.schedule_pool_combo, dialog.schedule_pool_enable_check, dialog.schedule_add_hint
+
+    def item(pool):
+        return combo.itemText(combo.findData(pool))
+
+    try:
+        # the picker marks every pool on / off with its key count, built or not
+        assert item("main") == f"✅ {title('main')} (3)" and item("fallback") == f"✅ {title('fallback')} (2)"
+        assert item("metadata") == f"⛔ {title('metadata')} (2)" and "metadata" in _pending_pools(dialog)
+        assert check.isChecked() and check.text() == f"Enable {title('main')}" and not hint.isVisibleTo(dialog)
+        # Schedules switch → the Key Pools checkbox and its handler (config, section, saved)
+        assert dialog.select_schedule_pool("fallback")
+        check.setChecked(False)
+        assert not dialog.use_fallback_checkbox.isChecked() and config["use_fallback_keys"] is False
+        assert item("fallback").startswith("⛔") and hint.isVisibleTo(dialog)
+        assert dialog.add_fallback_frame.isHidden()
+        # schedules stay editable while the pool is off
+        _select(dialog.schedule_key_tree, 0)
+        assert dialog.schedule_editor.isEnabled()
+        dialog.schedule_editor.enable_check.setChecked(True)
+        dialog._apply_schedule_to_selected()
+        assert rs.is_enabled_config(config["fallback_keys"][0]["disable_schedule"])
+        # Key Pools checkbox → the Schedules switch, marker and note
+        dialog.use_fallback_checkbox.setChecked(True)
+        assert check.isChecked() and item("fallback").startswith("✅") and not hint.isVisibleTo(dialog)
+        assert not dialog.add_fallback_frame.isHidden() and config["use_fallback_keys"] is True
+        # an unbuilt pool: switching it on builds its section and uses its own checkbox
+        assert dialog.select_schedule_pool("metadata")
+        assert not check.isChecked() and hint.isVisibleTo(dialog)
+        check.setChecked(True)
+        assert dialog.use_metadata_keys_checkbox.isChecked() and config["use_metadata_keys"] is True
+        assert item("metadata").startswith("✅") and saved
+        dialog.use_metadata_keys_checkbox.setChecked(False)
+        assert not check.isChecked() and item("metadata").startswith("⛔")
+        tick = next(label for label in check.findChildren(mkm.QLabel) if label.text() == "✓")
+        assert tick.isHidden()                              # the switch's ✓ overlay follows too
+        # another pool toggled on 🔑 Key Pools: only its marker changes
+        dialog.use_fallback_checkbox.setChecked(False)
+        assert item("fallback").startswith("⛔") and not check.isChecked()
+        dialog.use_metadata_keys_checkbox.setChecked(True)
+        assert check.isChecked() and item("fallback").startswith("⛔")
+        assert not tick.isHidden()
+        # a config change synced from elsewhere (unbuilt pool) shows too
+        assert "qa_scan" in _pending_pools(dialog) and item("qa_scan").startswith("⛔")
+        config[key_pool_service.POOL_SPECS["qa_scan"]["toggle_key"]] = True
+        dialog._refresh_pool_from_config("qa_scan")
+        assert item("qa_scan").startswith("✅")
+        # the picker keeps its Halgakos arrow
+        assert "down-arrow" in combo.styleSheet() and "Halgakos" in combo.styleSheet()
+    finally:
+        _close(app, dialog)
+        os.environ.clear()
+        os.environ.update(env)
