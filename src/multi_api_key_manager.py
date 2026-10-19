@@ -1976,21 +1976,7 @@ class RequestScheduleDialog(QDialog):
     ``result_config`` is the saved config dict ({} = schedule removed) after ``exec()``.
     """
 
-    MODES = {
-        'disable': ("🗓️ Disable schedule",
-                    "During these windows the key counts as disabled: requests skip it exactly like a "
-                    "manually disabled key. Outside them it is enabled again (the Enabled setting is not "
-                    "changed)."),
-        'queue': ("⏳ Request Queue",
-                  "During these windows the key is not skipped, but requests that would use it wait until "
-                  "the window ends. Other usable keys outside their windows are preferred; requests only "
-                  "wait when every usable key is queued or disabled (until the earliest window end)."),
-        'main_queue': ("⏳ Request Queue",
-                       "During these windows requests that use the main API key wait before sending until "
-                       "the window ends (logged every 3 minutes; Stop ends the wait). Translation, glossary "
-                       "extraction and the other runs follow it. With Translation Keys (multi-key mode) on, "
-                       "each pool key's own Request Queue applies instead."),
-    }
+    MODES = request_schedule.EDITOR_MODES
 
     def __init__(self, parent=None, schedule=None, *, mode='queue', subject=''):
         super().__init__(parent)
@@ -2035,8 +2021,7 @@ class RequestScheduleDialog(QDialog):
 
         presets = QHBoxLayout()
         deepseek = QPushButton("🐋 Use DeepSeek peak hours")
-        deepseek.setToolTip("DeepSeek peak pricing: 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday "
-                            "(off-peak costs half). Kept in UTC so it stays right when your clocks change.")
+        deepseek.setToolTip(request_schedule.DEEPSEEK_PRESET_HELP)
         deepseek.clicked.connect(lambda: self._load(request_schedule.DEEPSEEK_PEAK_SCHEDULE))
         presets.addWidget(deepseek)
         clear = QPushButton("🧹 Clear schedule")
@@ -2077,12 +2062,8 @@ class RequestScheduleDialog(QDialog):
         combo = QComboBox()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
-        if include_local:
-            combo.addItem(f"Local ({request_schedule.zone_label('local')})", 'local')
-        combo.addItem("UTC", 'UTC')
-        for name in request_schedule.common_timezones():
-            if request_schedule.zone_is_known(name):
-                combo.addItem(name, name)
+        for label, zone in request_schedule.zone_choices(include_local):
+            combo.addItem(label, zone)
         combo.setToolTip("Pick a zone or type an IANA name (e.g. Asia/Shanghai)")
         return combo
 
@@ -2179,25 +2160,8 @@ class RequestScheduleDialog(QDialog):
     def _update_preview(self, *_args):
         if not hasattr(self, 'preview_label'):
             return
-        schedule = self._schedule()
-        if not schedule.windows or not schedule.weekdays:
-            self.preview_label.setText("No windows or no days: saving removes the schedule.")
-            return
-        extra = self._combo_zone(self.preview_zone_combo)
-        zones = ['local', 'UTC'] + ([extra] if extra not in ('local', 'UTC') and request_schedule.zone_is_known(extra) else [])
-        lines = []
-        if self._suggested:
-            lines.append("Suggested: DeepSeek peak hours (no schedule saved yet).")
-        for zone in zones:
-            lines.append(f"• {request_schedule.zone_label(zone)}: {request_schedule.describe(schedule, zone)}")
-        end = request_schedule.next_window_end(schedule)
-        if end is not None:
-            lines.append(f"Now: inside a window until {request_schedule.format_clock(end, 'local')} local.")
-        else:
-            start = request_schedule.next_window_start(schedule)
-            if start is not None:
-                lines.append(f"Now: outside the windows; the next one starts "
-                             f"{request_schedule.format_clock(start, 'local')} local.")
+        lines = request_schedule.preview_lines(self._schedule(), self._combo_zone(self.preview_zone_combo),
+                                               suggested=self._suggested)
         self.preview_label.setText("\n".join(lines))
 
     def _clear_and_accept(self):

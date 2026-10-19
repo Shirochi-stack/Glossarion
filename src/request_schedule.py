@@ -40,7 +40,11 @@ Display
     ``"10:00–13:00, 15:00–19:00 (local), Mon–Fri"``; ``convert(schedule, tz, now)`` (same
     instants written in another zone; ``ScheduleError`` when the windows would need different
     weekday shifts); ``zone_label(tz, now)``; ``format_clock(dt, tz)``; ``format_wait(seconds)``;
-    ``resolve_tz(name)``; ``common_timezones()``.
+    ``resolve_tz(name)``; ``common_timezones()``; ``zone_is_known(name)``.
+Editors (desktop RequestScheduleDialog, mobile ScheduleSheet)
+    ``EDITOR_MODES`` (mode -> title, explanation), ``DEEPSEEK_PRESET_HELP``,
+    ``zone_choices(include_local=True)`` -> [(label, zone)], ``preview_lines(schedule,
+    extra_zone, suggested=False)`` -> the preview text lines.
 Keys (dicts or ``APIKeyEntry`` objects)
     ``DISABLE_FIELD`` / ``QUEUE_FIELD``; ``key_schedule(key, field)``;
     ``key_disabled_by_schedule(key, now)``; ``key_queued_now(key, now)``;
@@ -71,13 +75,14 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Callable, Iterable, NamedTuple, Optional
 
 __all__ = [
-    "ALL_WEEKDAYS", "DEEPSEEK_PEAK_SCHEDULE", "DISABLE_FIELD", "LOG_INTERVAL_SECONDS",
+    "ALL_WEEKDAYS", "DEEPSEEK_PEAK_SCHEDULE", "DEEPSEEK_PRESET_HELP", "DISABLE_FIELD", "EDITOR_MODES",
+    "LOG_INTERVAL_SECONDS",
     "MAIN_QUEUE_CONFIG_KEY", "MAIN_QUEUE_ENV", "QUEUE_FIELD", "QueueWaiter", "Schedule",
     "ScheduleError", "WAITER", "WEEKDAYS", "WEEKDAY_NAMES", "Window", "common_timezones", "convert",
     "current_window", "describe", "format_clock", "format_hhmm", "format_wait", "from_config",
     "is_in_window", "is_thread_waiting", "key_disabled_by_schedule", "key_queued_now",
     "key_schedule", "key_schedule_summary", "main_queue_schedule_from_env", "next_window_end",
-    "next_window_start", "normalize_config", "parse_hhmm", "pool_queue_wait_until",
+    "next_window_start", "normalize_config", "parse_hhmm", "pool_queue_wait_until", "preview_lines",
     "queue_deferred", "resolve_tz", "thread_wait_seconds", "to_config", "validate", "zone_label",
 ]
 
@@ -583,6 +588,61 @@ def describe(schedule, tz="local", now=None) -> str:
         else:
             groups.append((days, [window.label()]))
     return "; ".join(f"{', '.join(labels)} ({label}), {_day_runs(days)}" for days, labels in groups)
+
+
+# ------------------------------------------------------------------------------------------ editors
+#: The schedule editors' modes (desktop RequestScheduleDialog, mobile ScheduleSheet):
+#: mode -> (title, explanation).
+EDITOR_MODES = {
+    "disable": ("🗓️ Disable schedule",
+                "During these windows the key counts as disabled: requests skip it exactly like a "
+                "manually disabled key. Outside them it is enabled again (the Enabled setting is not "
+                "changed)."),
+    "queue": ("⏳ Request Queue",
+              "During these windows the key is not skipped, but requests that would use it wait until "
+              "the window ends. Other usable keys outside their windows are preferred; requests only "
+              "wait when every usable key is queued or disabled (until the earliest window end)."),
+    "main_queue": ("⏳ Request Queue",
+                   "During these windows requests that use the main API key wait before sending until "
+                   "the window ends (logged every 3 minutes; Stop ends the wait). Translation, glossary "
+                   "extraction and the other runs follow it. With Translation Keys (multi-key mode) on, "
+                   "each pool key's own Request Queue applies instead."),
+}
+DEEPSEEK_PRESET_HELP = ("DeepSeek peak pricing: 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday "
+                        "(off-peak costs half). Kept in UTC so it stays right when your clocks change.")
+
+
+def zone_choices(include_local=True, now=None):
+    """``[(label, zone), ...]`` the editors' zone pickers offer: Local (with its offset), UTC and
+    the :func:`common_timezones` this machine can load."""
+    out = [(f"Local ({zone_label('local', now)})", "local")] if include_local else []
+    out.append(("UTC", "UTC"))
+    out.extend((name, name) for name in common_timezones() if zone_is_known(name))
+    return out
+
+
+def preview_lines(schedule, extra_zone=None, *, suggested=False, now=None):
+    """The editors' preview: the windows in local time, UTC and *extra_zone*, then whether *now*
+    is inside a window (until when) or when the next one starts. *suggested* adds the "no
+    schedule saved yet" note of a prefilled DeepSeek preset."""
+    schedule = _coerce(schedule) if not isinstance(schedule, Schedule) else schedule
+    if not schedule or not schedule.windows or not schedule.weekdays:
+        return ["No windows or no days: saving removes the schedule."]
+    moment = _utc(now)
+    zones = ["local", "UTC"]
+    if extra_zone and extra_zone not in zones and zone_is_known(extra_zone):
+        zones.append(extra_zone)
+    lines = ["Suggested: DeepSeek peak hours (no schedule saved yet)."] if suggested else []
+    for zone in zones:
+        lines.append(f"• {zone_label(zone, moment)}: {describe(schedule, zone, moment)}")
+    end = next_window_end(schedule, moment)
+    if end is not None:
+        lines.append(f"Now: inside a window until {format_clock(end, 'local', moment)} local.")
+    else:
+        start = next_window_start(schedule, moment)
+        if start is not None:
+            lines.append(f"Now: outside the windows; the next one starts {format_clock(start, 'local', moment)} local.")
+    return lines
 
 
 # -------------------------------------------------------------------------------------------- keys

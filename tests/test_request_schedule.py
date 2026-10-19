@@ -228,6 +228,26 @@ def _window_around_now(offset_hours=0.0, length_hours=1.0):
             "weekdays": list(range(7)), "timezone": "UTC"}
 
 
+def test_editor_helpers_shared_by_desktop_and_mobile():
+    """EDITOR_MODES / zone_choices / preview_lines: the desktop dialog and the mobile ScheduleSheet show these."""
+    assert set(rs.EDITOR_MODES) == {"disable", "queue", "main_queue"}
+    assert rs.EDITOR_MODES["disable"][0] == "🗓️ Disable schedule" and rs.EDITOR_MODES["queue"][0] == "⏳ Request Queue"
+    choices = rs.zone_choices()
+    assert choices[0][1] == "local" and choices[0][0].startswith("Local (local") and choices[1] == ("UTC", "UTC")
+    assert all(rs.zone_is_known(zone) for _label, zone in choices)
+    assert rs.zone_choices(include_local=False)[0] == ("UTC", "UTC")
+    lines = rs.preview_lines(DEEPSEEK_PEAK_SCHEDULE, "UTC", suggested=True, now=at(2026, 10, MON, 2))
+    assert lines[0].startswith("Suggested") and "• UTC: 01:00–04:00, 06:00–10:00 (UTC), Mon–Fri" in lines
+    assert lines[-1].startswith("Now: inside a window until ") and len(lines) == 4   # local, UTC (no third zone)
+    lines = rs.preview_lines(rs.to_config(DEEPSEEK_PEAK_SCHEDULE), now=at(2026, 10, SAT, 12))
+    assert lines[-1].startswith("Now: outside the windows; the next one starts ")
+    if rs.zone_is_known("Asia/Tokyo"):
+        assert any(line.startswith("• Asia/Tokyo, UTC+9: 10:00–13:00, 15:00–19:00")
+                   for line in rs.preview_lines(DEEPSEEK_PEAK_SCHEDULE, "Asia/Tokyo"))
+    empty = ["No windows or no days: saving removes the schedule."]
+    assert rs.preview_lines(None) == empty and rs.preview_lines(Schedule((), rs.WEEKDAYS, "UTC")) == empty
+
+
 ACTIVE = _window_around_now(-0.5, 2.0)      # contains the real now (re-checked by the tests)
 INACTIVE = _window_around_now(5.0, 1.0)     # starts in five hours
 
