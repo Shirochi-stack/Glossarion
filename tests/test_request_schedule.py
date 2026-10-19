@@ -1420,6 +1420,107 @@ def test_schedules_pool_switch_is_fast(monkeypatch):
         _close(app, dialog)
 
 
+def _timed_slices(monkeypatch, mkm):
+    """Record the duration of every slice of a section build (``_step_key_pool_section``)."""
+    durations = []
+    original = mkm.MultiAPIKeyDialog._step_key_pool_section
+
+    def timed(self, pending):
+        start = time.perf_counter()
+        try:
+            return original(self, pending)
+        finally:
+            durations.append((pending[0], time.perf_counter() - start))
+
+    monkeypatch.setattr(mkm.MultiAPIKeyDialog, "_step_key_pool_section", timed)
+    return durations
+
+
+def test_schedules_pool_switch_streams_the_section_in_slices(monkeypatch):
+    app, mkm = _qt(monkeypatch)
+    assert Path(mkm.__file__).resolve().parent == SRC.resolve()
+    durations = _timed_slices(monkeypatch, mkm)
+    config = _sync_config()
+    config["qa_scan_keys"] = _many_keys("qa", 3)
+    app, mkm, dialog, config, saved = _schedules_dialog(monkeypatch, config)
+    combo, tree, loading = dialog.schedule_pool_combo, dialog.schedule_key_tree, dialog.schedule_add_loading
+
+    def borrowed(pool):
+        form = dialog._pool_add_form(pool)
+        return form is not None and dialog.schedule_add_host.isAncestorOf(form)
+
+    try:
+        dialog.show()
+        app.processEvents()
+        assert borrowed("main") and "metadata" in _pending_pools(dialog)
+        # a click on an unbuilt pool switches at once: its keys show, nothing is built yet
+        combo.setCurrentIndex(combo.findData("metadata"))
+        assert dialog._schedule_pool() == "metadata" and tree.topLevelItemCount() == 2
+        assert "metadata" in _pending_pools(dialog) and getattr(dialog, "metadata_add_frame", None) is None
+        assert not durations and dialog._schedule_pool_sync_queued
+        # the first slice: "Loading …" where the add form goes (the previous form went home)
+        _pump(app, 2.0, until=lambda: bool(durations))
+        assert durations == [("metadata", durations[0][1])] and "metadata" in _pending_pools(dialog)
+        assert loading.isVisibleTo(dialog) and "Loading Metadata Keys" in loading.text()
+        assert dialog.translation_key_pool_frame.isAncestorOf(dialog.add_key_frame)
+        prebuilt = dialog._prebuilt_model_combos["metadata"]
+        # another pool chosen before it finished: that one loads, the first waits (its work kept)
+        combo.setCurrentIndex(combo.findData("qa_scan"))
+        assert dialog._schedule_pool() == "qa_scan" and tree.topLevelItemCount() == 3
+        _pump(app, 3.0, until=lambda: borrowed("qa_scan"))
+        assert borrowed("qa_scan") and not loading.isVisibleTo(dialog)
+        assert "metadata" in _pending_pools(dialog) and "qa_scan" not in _pending_pools(dialog)
+        assert dialog._prebuilt_model_combos.get("metadata") is prebuilt
+        assert {pool for pool, _ in durations} == {"metadata", "qa_scan"}
+        # back to it: the rest streams in, with the model picker made in its first slice
+        combo.setCurrentIndex(combo.findData("metadata"))
+        _pump(app, 3.0, until=lambda: borrowed("metadata"))
+        assert borrowed("metadata") and dialog.metadata_model_combo is prebuilt
+        assert "metadata" not in dialog._prebuilt_model_combos and dialog.metadata_tree.topLevelItemCount() == 2
+        assert tree.topLevelItem(1).text(dialog.SCHEDULE_STATUS_COLUMN)   # Status from the new section
+        # each section took two slices, none of them long (a whole section used to be one step)
+        assert [pool for pool, _ in durations].count("metadata") == 2
+        assert max(seconds for _, seconds in durations) < 0.25, durations
+        # nothing is built while a popup (the picker's own list) is open
+        monkeypatch.setattr(mkm.MultiAPIKeyDialog, "_key_pool_popup_open", staticmethod(lambda: True))
+        count = len(durations)
+        combo.setCurrentIndex(combo.findData("tts"))
+        _pump(app, 0.4)
+        assert len(durations) == count and "tts" in _pending_pools(dialog) and dialog._schedule_pool_sync_queued
+        monkeypatch.setattr(mkm.MultiAPIKeyDialog, "_key_pool_popup_open", staticmethod(lambda: False))
+        _pump(app, 3.0, until=lambda: borrowed("tts"))
+        assert borrowed("tts") and "tts" not in _pending_pools(dialog)
+        # select_schedule_pool (other code, the key actions) still builds everything at once
+        assert dialog.select_schedule_pool("inpainter") and borrowed("inpainter")
+    finally:
+        _close(app, dialog)
+
+
+def test_background_section_render_runs_in_slices_and_waits_for_popups(monkeypatch):
+    app, mkm = _qt(monkeypatch)
+    durations = _timed_slices(monkeypatch, mkm)
+    dialog, saved = _manager(mkm, _sync_config())
+    try:
+        deferred = [pool for pool, _builder in dialog._deferred_key_pool_section_builders()]
+        render = dialog._render_next_deferred_key_pool_section
+        render()                                   # the first slice: the model picker only
+        assert _pending_pools(dialog) == deferred and set(dialog._prebuilt_model_combos) == {deferred[0]}
+        render()                                   # the second: the section, with that picker
+        assert _pending_pools(dialog) == deferred[1:] and not dialog._prebuilt_model_combos
+        assert dialog.fallback_model_combo.minimumWidth() > 0
+        monkeypatch.setattr(mkm.MultiAPIKeyDialog, "_key_pool_popup_open", staticmethod(lambda: True))
+        render()
+        assert _pending_pools(dialog) == deferred[1:] and not dialog._prebuilt_model_combos
+        assert dialog._deferred_key_pool_render_queued      # it tries again later
+        monkeypatch.setattr(mkm.MultiAPIKeyDialog, "_key_pool_popup_open", staticmethod(lambda: False))
+        _pump(app, 15.0, until=lambda: not dialog._pending_key_pool_section_builders)
+        assert not _pending_pools(dialog) and dialog._key_pool_render_finished
+        assert len(durations) == 2 * len(deferred)
+        assert max(seconds for _, seconds in durations) < 0.25, durations
+    finally:
+        _close(app, dialog)
+
+
 def test_schedules_pool_enable_switch_follows_the_key_pools_toggle(monkeypatch):
     import key_pool_service
     env = dict(os.environ)

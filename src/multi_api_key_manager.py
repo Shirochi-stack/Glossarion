@@ -3216,6 +3216,49 @@ class MultiAPIKeyDialog(QDialog):
             removed_models,
         )
 
+    def _create_model_combo(self):
+        """An add-key form's model picker: editable, the whole model catalog
+        (``_get_model_options_for_dropdown``) with completion, the Halgakos arrow and no mouse
+        wheel. Its width is measured once from the catalog's longest name instead of by Qt from
+        every item: a combo sized to its contents re-measured all ~1,500 names each time it was
+        restyled, made editable, laid out or shown, which was most of a 🔑 Key Pools section's
+        build time (and kept the ⏰ Schedules pool picker waiting). A section built in slices
+        gets the one made for it in an earlier slice."""
+        building = getattr(self, '_building_key_pool', None)
+        prebuilt = getattr(self, '_prebuilt_model_combos', {}).pop(building, None) if building else None
+        if prebuilt is not None:
+            return prebuilt
+        models = self._get_model_options_for_dropdown()
+        combo = QComboBox()
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        if isinstance(combo.view(), QListView):
+            combo.view().setUniformItemSizes(True)   # one-line rows: no per-row size measuring
+        self._apply_combobox_icon(combo)   # styled while empty: restyling restyles every row
+        combo.addItems(models)
+        combo.setEditable(True)
+        self._attach_model_autofill(combo, self._on_model_requirement_input_changed)
+        self._disable_combobox_mousewheel(combo)
+        popup = combo.completer().popup() if combo.completer() is not None else None
+        if isinstance(popup, QListView):
+            popup.setUniformItemSizes(True)
+        combo.ensurePolished()
+        combo.setMinimumWidth(combo.minimumSizeHint().width() + self._model_names_width(combo.fontMetrics(), models))
+        return combo
+
+    _MODEL_NAMES_WIDTH_CACHE = {}
+
+    @classmethod
+    def _model_names_width(cls, metrics, models):
+        """The pixel width of the longest of *models* in *metrics* (cached per font and list)."""
+        key = (metrics.height(), metrics.averageCharWidth(), hash(tuple(models)))
+        width = cls._MODEL_NAMES_WIDTH_CACHE.get(key)
+        if width is None:
+            width = max((metrics.horizontalAdvance(str(model)) for model in models), default=0)
+            if len(cls._MODEL_NAMES_WIDTH_CACHE) > 16:
+                cls._MODEL_NAMES_WIDTH_CACHE.clear()
+            cls._MODEL_NAMES_WIDTH_CACHE[key] = width
+        return width
+
     def _model_needs_google_creds(self, model: str) -> bool:
         model = (model or '').strip().lower()
         return (
@@ -4172,6 +4215,7 @@ class MultiAPIKeyDialog(QDialog):
         its slot by the background render or, out of order, when the ⏰ Schedules tab needs that
         pool (``_ensure_key_pool_section``)."""
         self._pending_key_pool_section_builders = []
+        self._prebuilt_model_combos = {}   # pool -> its model picker, made a slice ahead
         self._deferred_key_pool_render_started = False
         builders = self._deferred_key_pool_section_builders()
         if not builders:
@@ -4208,7 +4252,14 @@ class MultiAPIKeyDialog(QDialog):
         self._deferred_key_pool_render_queued = True
         QTimer.singleShot(delay_ms, self._render_next_deferred_key_pool_section)
 
+    #: pause between two slices of the deferred render (input and paints run in between) and
+    #: the wait while a popup (a combo's list, a menu) is open
+    KEY_POOL_RENDER_SLICE_DELAY_MS = 15
+    KEY_POOL_RENDER_POPUP_DELAY_MS = 100
+
     def _render_next_deferred_key_pool_section(self):
+        """One slice of the background render (see ``_step_key_pool_section``), then the next
+        one after a pause; paused while ⏰ Schedules shows and waiting while a popup is open."""
         self._deferred_key_pool_render_queued = False
         pending_builders = getattr(self, '_pending_key_pool_section_builders', None)
         if not pending_builders:
@@ -4219,20 +4270,53 @@ class MultiAPIKeyDialog(QDialog):
             # rest resumes when 🔑 Key Pools is shown again
             self._deferred_key_pool_render_started = False
             return
+        if self._key_pool_popup_open():
+            self._queue_deferred_key_pool_render(self.KEY_POOL_RENDER_POPUP_DELAY_MS)
+            return
 
-        self._build_deferred_key_pool_section(pending_builders.pop(0))
+        built = self._step_key_pool_section(pending_builders[0])
 
         if pending_builders:
-            self._queue_deferred_key_pool_render(75)
+            self._queue_deferred_key_pool_render(75 if built else self.KEY_POOL_RENDER_SLICE_DELAY_MS)
         else:
             self._finish_key_pool_render()
 
+    @staticmethod
+    def _key_pool_popup_open():
+        """A drop-down list, completer or menu is open: building now would freeze it."""
+        try:
+            return QApplication.activePopupWidget() is not None
+        except Exception:
+            return False
+
+    def _pending_key_pool_section(self, pool_name):
+        pending_builders = getattr(self, '_pending_key_pool_section_builders', None) or []
+        return next((entry for entry in pending_builders if entry[0] == pool_name), None)
+
+    def _step_key_pool_section(self, pending):
+        """One slice of building a deferred section, so no single step holds the event loop
+        for long: first its add form's model picker (the model catalog, completion), kept aside
+        for the section (``_create_model_combo`` takes it), then the section itself. Returns True
+        when the section was built (and removed from the pending list)."""
+        pool_name = pending[0]
+        prebuilt = self._prebuilt_model_combos
+        if pool_name not in prebuilt:
+            prebuilt[pool_name] = self._create_model_combo()
+            return False
+        pending_builders = getattr(self, '_pending_key_pool_section_builders', None) or []
+        if pending in pending_builders:
+            pending_builders.remove(pending)
+        self._build_deferred_key_pool_section(pending)
+        return True
+
     def _build_deferred_key_pool_section(self, pending):
         """Build one deferred section into its slot. Its builder's own toggle / load calls are
-        part of building, not user actions (no live broadcasts, saves or log lines)."""
-        _pool_name, build_section, slot = pending
+        part of building, not user actions (no live broadcasts, saves or log lines). A model
+        picker made for it beforehand (``_step_key_pool_section``) is used."""
+        pool_name, build_section, slot = pending
         previous = getattr(self, '_initializing', False)
         self._initializing = True
+        self._building_key_pool = pool_name
         try:
             build_section(slot.layout())
             slot.show()
@@ -4241,15 +4325,22 @@ class MultiAPIKeyDialog(QDialog):
             print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
         finally:
             self._initializing = previous
+            self._building_key_pool = None
+            unused = getattr(self, '_prebuilt_model_combos', {}).pop(pool_name, None)
+            if unused is not None:   # the builder failed before taking it
+                self._model_search_combos = [
+                    combo for combo in getattr(self, '_model_search_combos', []) or [] if combo is not unused]
+                unused.deleteLater()
         if getattr(self, 'schedule_editor', None) is not None:
             self._watch_key_pool_trees()
 
     def _ensure_key_pool_section(self, pool_name):
         """Build *pool_name*'s 🔑 Key Pools section now if the background render has not reached
         it (the ⏰ Schedules tab works through its key list, add form and enable switch); only
-        that section is built, under a busy cursor. Returns True if it was built now."""
+        that section is built, at once, under a busy cursor (the ⏰ Schedules pool picker builds
+        in slices instead: ``_sync_schedule_pool_section``). Returns True if it was built now."""
         pending_builders = getattr(self, '_pending_key_pool_section_builders', None) or []
-        pending = next((entry for entry in pending_builders if entry[0] == pool_name), None)
+        pending = self._pending_key_pool_section(pool_name)
         if pending is None:
             return False
         pending_builders.remove(pending)
@@ -4462,13 +4553,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Fallback Model
         add_fallback_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        fallback_models = self._get_model_options_for_dropdown()
-        self.fallback_model_combo = QComboBox()
-        self.fallback_model_combo.addItems(fallback_models)
-        self.fallback_model_combo.setEditable(True)
-        self._attach_model_autofill(self.fallback_model_combo, self._on_model_requirement_input_changed)
-        self._apply_combobox_icon(self.fallback_model_combo)
-        self._disable_combobox_mousewheel(self.fallback_model_combo)  # Disable mousewheel
+        self.fallback_model_combo = self._create_model_combo()
         add_fallback_grid.addWidget(self._wrap_model_with_ollama_settings(self.fallback_model_combo), 0, 4)
 
         # Add fallback button
@@ -5837,13 +5922,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Model
         add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        add_models = self._get_model_options_for_dropdown()
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(add_models)
-        self.model_combo.setEditable(True)
-        self._attach_model_autofill(self.model_combo, self._on_model_requirement_input_changed)
-        self._apply_combobox_icon(self.model_combo)
-        self._disable_combobox_mousewheel(self.model_combo)  # Disable mousewheel
+        self.model_combo = self._create_model_combo()
         add_grid.addWidget(self._wrap_model_with_ollama_settings(self.model_combo), 0, 4)
 
         # Row 1: Cooldown and buttons
@@ -7055,13 +7134,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Model
         add_glossary_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        glossary_models = self._get_model_options_for_dropdown()
-        self.glossary_model_combo = QComboBox()
-        self.glossary_model_combo.addItems(glossary_models)
-        self.glossary_model_combo.setEditable(True)
-        self._attach_model_autofill(self.glossary_model_combo, self._on_model_requirement_input_changed)
-        self._apply_combobox_icon(self.glossary_model_combo)
-        self._disable_combobox_mousewheel(self.glossary_model_combo)
+        self.glossary_model_combo = self._create_model_combo()
         add_glossary_grid.addWidget(self._wrap_model_with_ollama_settings(self.glossary_model_combo), 0, 4)
 
         # Add button
@@ -10363,6 +10436,11 @@ class MultiAPIKeyDialog(QDialog):
         self.schedule_add_host = QWidget()
         self.schedule_add_layout = QVBoxLayout(self.schedule_add_host)
         self.schedule_add_layout.setContentsMargins(0, 0, 0, 0)
+        # while a pool's section is still being built (in slices) its add form is not there yet
+        self.schedule_add_loading = QLabel('')
+        self.schedule_add_loading.setStyleSheet("color: gray; font-style: italic;")
+        self.schedule_add_loading.hide()
+        self.schedule_add_layout.addWidget(self.schedule_add_loading)
         tab_layout.addWidget(self.schedule_add_host)
         self.schedule_add_hint = QLabel("⛔ This pool is switched off: its keys are not used. Switch it on above "
                                         "to use them and to add keys; schedules can still be edited.")
@@ -10500,25 +10578,62 @@ class MultiAPIKeyDialog(QDialog):
     # ---- the chosen pool: its Key Pools section (built on demand), add form and enable switch
     SCHEDULE_POOL_SYNC_DELAY_MS = 10
 
-    def _queue_schedule_pool_sync(self):
-        """Run ``_sync_schedule_pool_section`` once the pool switch has painted (a timer, not a
-        zero-delay call, so the new list shows first); quick switches coalesce into one sync."""
+    def _queue_schedule_pool_sync(self, delay_ms=None):
+        """Run the next step of ``_sync_schedule_pool_section`` once the pool switch has painted
+        (a timer, not a zero-delay call, so the new list shows and clicks are handled first);
+        quick switches coalesce into one sync, which follows the pool chosen last."""
         if getattr(self, '_schedule_pool_sync_queued', False):
             return
         self._schedule_pool_sync_queued = True
-        QTimer.singleShot(self.SCHEDULE_POOL_SYNC_DELAY_MS, self, self._sync_schedule_pool_section)
+        QTimer.singleShot(self.SCHEDULE_POOL_SYNC_DELAY_MS if delay_ms is None else delay_ms, self,
+                          lambda: self._sync_schedule_pool_section(sliced=True))
 
-    def _sync_schedule_pool_section(self):
+    def _sync_schedule_pool_section(self, sliced=False):
         """Build the chosen pool's 🔑 Key Pools section if the deferred render has not yet (only
         that one), then show its add form here. Moving a form between the tabs restyles the whole
-        form, so it happens at most once per pool switch, after the list has updated."""
+        form, so it happens at most once per pool switch, after the list has updated.
+
+        *sliced* (a pool picked in the picker): one slice per call and the next one queued, with
+        "Loading …" where the add form goes, so the picker and the list stay responsive; a pool
+        chosen meanwhile takes over (the earlier pool's partial work is kept for later). Never
+        while a popup (the picker's own list) is open. Otherwise everything at once."""
         self._schedule_pool_sync_queued = False
         if getattr(self, 'schedule_editor', None) is None or not self._schedules_tab_is_current():
             return
-        if self._ensure_key_pool_section(self._schedule_pool()):
+        pool_name = self._schedule_pool()
+        if sliced:
+            if self._key_pool_popup_open():
+                self._queue_schedule_pool_sync(self.KEY_POOL_RENDER_POPUP_DELAY_MS)
+                return
+            pending = self._pending_key_pool_section(pool_name)
+            if pending is not None:
+                self._show_schedule_add_loading(pool_name)
+                if self._step_key_pool_section(pending):
+                    self._refresh_schedule_tab()   # the Status column comes from the new section's list
+                    if not self._pending_key_pool_section_builders:
+                        self._finish_key_pool_render()
+                self._queue_schedule_pool_sync(self.KEY_POOL_RENDER_SLICE_DELAY_MS)   # then the form
+                return
+        elif self._ensure_key_pool_section(pool_name):
             self._refresh_schedule_tab()   # the Status column comes from the new section's list
+        self._show_schedule_add_loading(None)
         self._borrow_pool_add_form()
         self._refresh_schedule_pool_state()
+
+    def _show_schedule_add_loading(self, pool_name):
+        """"⏳ Loading <pool>…" in place of the add form while *pool_name*'s section is built
+        (the previous pool's form goes home first); None hides it."""
+        label = getattr(self, 'schedule_add_loading', None)
+        if label is None:
+            return
+        if pool_name is None:
+            label.hide()
+            return
+        self._return_pool_add_form()
+        text = f"⏳ Loading {key_pool_service.POOL_SPECS[pool_name]['title']}…"
+        if label.text() != text:
+            label.setText(text)
+        label.show()
 
     def _pool_enable_checkbox(self, pool_name):
         """The pool's enable switch on 🔑 Key Pools (None until its section is built)."""
@@ -11526,12 +11641,7 @@ class MultiAPIKeyDialog(QDialog):
         add_grid.addWidget(show_btn, 0, 2)
 
         add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        model_combo = QComboBox()
-        model_combo.addItems(self._get_model_options_for_dropdown())
-        model_combo.setEditable(True)
-        self._attach_model_autofill(model_combo, self._on_model_requirement_input_changed)
-        self._apply_combobox_icon(model_combo)
-        self._disable_combobox_mousewheel(model_combo)
+        model_combo = self._create_model_combo()
         setattr(self, self._dedicated_attr(pool_name, 'model_combo'), model_combo)
         add_grid.addWidget(self._wrap_model_with_ollama_settings(model_combo), 0, 4)
 
