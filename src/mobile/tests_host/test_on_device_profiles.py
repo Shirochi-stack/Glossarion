@@ -50,7 +50,7 @@ pytestmark = pytest.mark.skipif(bool(_BACKEND_ERROR), reason=_BACKEND_ERROR or "
 LOCAL = "local/qwen3-0.6b-q4"
 CLOUD = "authchatgpt/auto"
 ON_DEVICE = "On-device"
-TRANSLATION_TEXT = "You must only output {target_lang} translations."
+TRANSLATION_TEXT = "You must only output {target_lang} translations with html tags."
 
 
 @pytest.fixture(autouse=True)

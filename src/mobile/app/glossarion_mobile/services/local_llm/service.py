@@ -158,6 +158,18 @@ def process_stop_state() -> Optional[str]:
     return None
 
 
+#: Context of a model without its own / a saved one (tokens): smaller models get more. Owner 2026-10-19:
+#: halved from 8192 / 4096 — shorter requests (the output limit is half the context) keep small
+#: on-device models on task.
+DEFAULT_CONTEXT_SMALL = 4096
+DEFAULT_CONTEXT_LARGE = 2048  # models of 4 GiB or more
+
+
+def default_context(size: int) -> int:
+    """The default context for a model file of ``size`` bytes."""
+    return DEFAULT_CONTEXT_SMALL if int(size or 0) < 4 * GIB else DEFAULT_CONTEXT_LARGE
+
+
 def ram_need(size: int, n_ctx: int) -> int:
     return int(int(size) * 1.15 + int(n_ctx) * 64 * 1024 + 400 * MIB)
 
@@ -567,7 +579,7 @@ class LocalEngineService:
         if self.settings()["n_ctx"]:
             return self.settings()["n_ctx"]
         size = int((self.registry.load().get(stem) or {}).get("size") or 0)
-        return 8192 if size < 4 * GIB else 4096
+        return default_context(size)
 
     def output_limit_for(self, stem: str) -> int:
         """The output-token limit of a job on ``local/<stem>``: half its context, so the prompt keeps the
@@ -598,7 +610,7 @@ class LocalEngineService:
         size = int(preset.get("size") or 0)
         if not size or not self.memory()[0]:
             return "unknown", ""
-        n_ctx = int(preset.get("n_ctx") or 0) or self.settings()["n_ctx"] or (8192 if size < 4 * GIB else 4096)
+        n_ctx = int(preset.get("n_ctx") or 0) or self.settings()["n_ctx"] or default_context(size)
         return self.ram_verdict(ram_need(size, n_ctx), str(preset.get("name") or "This model"))
 
     def ram_verdict(self, need: int, name: str) -> tuple:

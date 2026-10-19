@@ -1247,7 +1247,7 @@ Text to analyze:
                 "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
             ),
             "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,
-            "On-device": "You must only output {target_lang} translations.",
+            "On-device": "You must only output {target_lang} translations with html tags.",
         }
 
     def _init_watchdog_dir(self):

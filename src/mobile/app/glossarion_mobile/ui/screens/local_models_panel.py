@@ -37,6 +37,7 @@ import flet as ft
 
 from glossarion_mobile.services.local_llm import downloads as dl
 from glossarion_mobile.services.local_llm import hf, presets
+from glossarion_mobile.services.local_llm.service import DEFAULT_CONTEXT_SMALL
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.section_card import SectionCard
@@ -144,7 +145,7 @@ class LocalPresetEditor:
         self.note = ft.TextField(value=str(preset.get("note", "")), label="Note (optional)", dense=True,
                                  key="local-preset-note")
         self.n_ctx = ft.TextField(value=str(preset.get("n_ctx") or ""), label="Context (tokens, optional)",
-                                  hint_text="8192", dense=True, keyboard_type=ft.KeyboardType.NUMBER,
+                                  hint_text=str(DEFAULT_CONTEXT_SMALL), dense=True, keyboard_type=ft.KeyboardType.NUMBER,
                                   key="local-preset-ctx")
         self.error = ft.Text("", color=ft.Colors.ERROR, visible=False, selectable=True)
         self.dialog = ft.BottomSheet(
@@ -489,11 +490,11 @@ class OnDeviceFlow:
 
     def current_context(self) -> int:
         """The Context the slider shows: the current ``local/`` model's (its preset's, the saved default or
-        its own), else the saved default, else 8,192."""
+        its own), else the saved default, else the small-model default (``DEFAULT_CONTEXT_SMALL``)."""
         model = str(self.current_model() if self.current_model is not None else "") or ""
         if model.lower().startswith("local/"):
             return self.service.context_for(model[len("local/"):])
-        return self.service.settings()["n_ctx"] or 8192
+        return self.service.settings()["n_ctx"] or DEFAULT_CONTEXT_SMALL
 
     async def get_preset(self, index: int) -> Optional[str]:
         """The one-tap action: download if needed, load, use. Returns the model id or None."""

@@ -64,7 +64,7 @@ def test_context_control_slider_steps_and_the_field_goes_past_16384():
     assert control.slider.value == 4096 and control.field.value == "4096" and control.value == 4096
 
 
-def test_choosing_heavy_resets_the_context_and_the_slider_shows_4096(tmp_path):
+def test_choosing_heavy_resets_the_context_and_the_slider_shows_2048(tmp_path):
     from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
 
     service, engine = _service(tmp_path)
@@ -72,17 +72,17 @@ def test_choosing_heavy_resets_the_context_and_the_slider_shows_4096(tmp_path):
     panel = LocalModelsPanel(service=service, prefs=service.prefs, use_model=lambda m: model.update(id=m),
                              current_model=lambda: model["id"])
     panel.build()
-    assert panel.context.value == 8192  # Light's own context (a file under 4 GB)
+    assert panel.context.value == 4096  # Light's own context (a file under 4 GB)
     assert panel.save_context(16384) is None and service.settings()["n_ctx"] == 16384
     assert service.context_for(LIGHT) == 16384
 
     assert asyncio.run(panel.activate(HEAVY, "Heavy"))
     assert model["id"] == f"local/{HEAVY}" and service.settings()["n_ctx"] == 0  # back to the model's own
-    assert panel.context.value == 4096 and panel.context.slider.value == 4096 and panel.ctx_field.value == "4096"
-    assert engine.loads[-1][1] == 4096
+    assert panel.context.value == 2048 and panel.context.slider.value == 2048 and panel.ctx_field.value == "2048"
+    assert engine.loads[-1][1] == 2048
 
     assert asyncio.run(panel.activate(LIGHT, "Light"))
-    assert panel.context.value == 8192 and engine.loads[-1][1] == 8192
+    assert panel.context.value == 4096 and engine.loads[-1][1] == 4096
     panel.dispose()
 
 
@@ -90,10 +90,10 @@ def test_a_changed_context_reloads_the_loaded_model(tmp_path):
     service, engine = _service(tmp_path)
     service.load_blocking(LIGHT)
     service.load_blocking(LIGHT)
-    assert [load[1] for load in engine.loads] == [8192]  # same context: no reload
+    assert [load[1] for load in engine.loads] == [4096]  # same context: no reload
     service.save_context(12288)
     service.load_blocking(LIGHT)
-    assert [load[1] for load in engine.loads] == [8192, 12288]
+    assert [load[1] for load in engine.loads] == [4096, 12288]
 
 
 def test_local_jobs_use_batch_size_1_and_half_the_context_as_output(tmp_path):
@@ -103,13 +103,13 @@ def test_local_jobs_use_batch_size_1_and_half_the_context_as_output(tmp_path):
     svc.set_default_service(service)
     try:
         config = sw.with_mobile_streaming_defaults({"model": f"local/{LIGHT}"})
-        assert config["batch_size"] == 1 and config["max_output_tokens"] == 4096
+        assert config["batch_size"] == 1 and config["max_output_tokens"] == 2048
         service.save_context(20000)
         config = sw.with_mobile_streaming_defaults({"model": f"local/{LIGHT}", "max_output_tokens": 16384,
                                                     "batch_size": 3})
         assert config["max_output_tokens"] == 10000 and config["batch_size"] == 3  # a saved batch size wins
         service.save_context(0)
-        assert sw.with_mobile_streaming_defaults({"model": f"local/{HEAVY}"})["max_output_tokens"] == 2048
+        assert sw.with_mobile_streaming_defaults({"model": f"local/{HEAVY}"})["max_output_tokens"] == 1024
         # a cloud model keeps the saved budget
         assert sw.with_mobile_streaming_defaults({"model": "gpt-6", "max_output_tokens": 16384})["max_output_tokens"] == 16384
     finally:
@@ -131,7 +131,7 @@ def test_a_job_exports_each_on_device_models_context_for_the_glossary_chunk_budg
         assert svc.CONTEXT_ENV not in os.environ
     svc.set_default_service(service)
     try:
-        assert sw.local_context_env() == f"local/{LIGHT}=8192;local/{HEAVY}=4096"
+        assert sw.local_context_env() == f"local/{LIGHT}=4096;local/{HEAVY}=2048"
         service.save_context(12288)
         with jobs.local_context_scope():
             assert os.environ[svc.CONTEXT_ENV] == f"local/{LIGHT}=12288;local/{HEAVY}=12288"
@@ -171,8 +171,8 @@ def test_welcome_request_size_shows_the_context_for_an_on_device_model(tmp_path)
     service, _engine = _service(tmp_path)
     s = _welcome(service, f"local/{HEAVY}")
     rows = _by_key(s._run_budget())
-    assert rows["welcome-ctx"].value == "4096" and rows["welcome-ctx-slider"].value == 4096
-    assert rows["welcome-max-tokens"].value == "2048" and rows["welcome-max-tokens"].disabled
+    assert rows["welcome-ctx"].value == "2048" and rows["welcome-ctx-slider"].value == 2048
+    assert rows["welcome-max-tokens"].value == "1024" and rows["welcome-max-tokens"].disabled
     assert rows["welcome-max-tokens-slider"].disabled
     assert s.default_batch_size() == 1
     s.context_control._from_slider(_event(10240.0))
@@ -189,7 +189,7 @@ def test_welcome_finish_saves_the_request_size_it_showed(tmp_path):
     service, _engine = _service(tmp_path)
     s = _welcome(service, f"local/{HEAVY}")
     updates = s.finish()
-    assert updates["batch_size"] == 1 and updates["max_output_tokens"] == 2048  # Heavy: 4,096 context
+    assert updates["batch_size"] == 1 and updates["max_output_tokens"] == 1024  # Heavy: 2,048 context
 
     s = _welcome(service, "gpt-6")
     updates = s.finish()
