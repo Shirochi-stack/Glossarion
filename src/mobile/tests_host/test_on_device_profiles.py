@@ -243,3 +243,36 @@ def test_restored_profile_that_was_deleted_meanwhile_stays_on_device(tmp_path):
     # "My style" is gone: the switch-back refuses an unknown name instead of storing it
     assert store.get("active_profile") == ON_DEVICE and not store.has(ON_DEVICE_BEFORE_KEY)
     store._saver.close()
+
+
+@pytest.mark.parametrize("config", [{}, {"custom_glossary_fields": ["description", "age"]}],
+                         ids=["fresh", "existing"])
+def test_local_model_drops_the_glossary_description_column(tmp_path, config):
+    """On-device: no extra glossary columns (a 0.8B model writes name, translated name, gender only);
+    the "removed" flag keeps owner_state from adding "description" back. A cloud model restores them."""
+    from glossarion_mobile.state.setting_writes import (CUSTOM_FIELDS_KEY, DESCRIPTION_REMOVED_KEY,
+                                                        write_setting)
+
+    store = _store(tmp_path, config)
+    changed = write_setting(store, "model", LOCAL)
+    assert CUSTOM_FIELDS_KEY in changed
+    assert store.get(CUSTOM_FIELDS_KEY) == [] and store.get(DESCRIPTION_REMOVED_KEY) is True
+    write_setting(store, "model", "local/other")  # still On-device: the remembered columns stay
+    write_setting(store, "model", CLOUD)
+    if config:
+        assert store.get(CUSTOM_FIELDS_KEY) == ["description", "age"]
+        assert not store.get(DESCRIPTION_REMOVED_KEY)
+    else:  # nothing was stored: the desktop default (owner_state adds "description") again
+        assert not store.has(CUSTOM_FIELDS_KEY) and not store.has(DESCRIPTION_REMOVED_KEY)
+    store._saver.close()
+
+
+def test_columns_added_while_on_device_stay(tmp_path):
+    from glossarion_mobile.state.setting_writes import CUSTOM_FIELDS_KEY, write_setting
+
+    store = _store(tmp_path, {})
+    write_setting(store, "model", LOCAL)
+    store.set_many({CUSTOM_FIELDS_KEY: ["age"]})
+    write_setting(store, "model", CLOUD)
+    assert store.get(CUSTOM_FIELDS_KEY) == ["age"]
+    store._saver.close()

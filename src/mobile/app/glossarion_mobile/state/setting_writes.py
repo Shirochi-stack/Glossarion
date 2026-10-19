@@ -25,8 +25,10 @@ desktop default stays off): every job's config snapshot gets it (``with_mobile_s
 chat / Reader runs force streaming only while it is on (``streaming_enabled``).
 
 Choosing an on-device ``local/`` model (mobile only) also selects the built-in "On-device" translation
-and glossary prompt profiles; choosing a model that is not ``local/`` again restores the profiles that
-were active before, where On-device is still selected (``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``).
+and glossary prompt profiles and drops the glossary's extra columns (the "description" field; owner
+2026-10-19: a small model only writes name, translated name and gender); choosing a model that is not
+``local/`` again restores the profiles and columns that were active before, where they are still the
+On-device ones (``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``).
 
 Every global writer on mobile (Settings tiles, ModelSheet / Plan chips, Chat settings › All chats,
 the Welcome flow) goes through ``write_setting`` / ``write_settings``, which run the shared rules
@@ -119,6 +121,10 @@ MOBILE_DEFAULT_MODEL = "authchatgpt/auto"
 #: that is not ``local/`` again brings back what was active before (``ON_DEVICE_BEFORE_KEY``) wherever the
 #: On-device profile is still the active one.
 ON_DEVICE_PROFILE = "On-device"
+#: the glossary's extra columns (desktop Glossary Manager › Custom Fields) and its "description was
+#: removed on purpose" flag (owner_state adds "description" back to an empty list without it)
+CUSTOM_FIELDS_KEY = "custom_glossary_fields"
+DESCRIPTION_REMOVED_KEY = "custom_field_description_removed"
 ON_DEVICE_BEFORE_KEY = "profiles_before_on_device"
 _GLOSSARY_PROFILE_BUCKETS = ("balanced_full", "minimal")
 _GLOSSARY_PROFILE_KEYS = ("glossary_prompt_profiles", "active_glossary_prompt_profiles",
@@ -518,9 +524,19 @@ def _use_on_device_profiles(store: Any) -> list:
         "glossary": {bucket: str(remembered.get(bucket) or "") if name == ON_DEVICE_PROFILE else name
                      for bucket, name in glossary.items()},
     }
+    fields_present, fields = _stored_value(store, CUSTOM_FIELDS_KEY)
+    removed_present, removed = _stored_value(store, DESCRIPTION_REMOVED_KEY)
+    if "fields" in record:  # already On-device: keep what was remembered then
+        before["fields"] = record.get("fields")
+    elif fields_present or removed_present:
+        before["fields"] = {CUSTOM_FIELDS_KEY: list(fields) if isinstance(fields, (list, tuple)) else fields,
+                            DESCRIPTION_REMOVED_KEY: removed}
+    else:
+        before["fields"] = None  # nothing stored: the desktop default ("description") again
     changed = _select_profile(store, ON_DEVICE_PROFILE)
     changed += _select_glossary_profiles(store, {bucket: ON_DEVICE_PROFILE for bucket in _GLOSSARY_PROFILE_BUCKETS})
-    changed += _set_many(store, {ON_DEVICE_BEFORE_KEY: before})
+    # no extra glossary columns: the "removed" flag keeps the desktop from adding "description" back
+    changed += _set_many(store, {CUSTOM_FIELDS_KEY: [], DESCRIPTION_REMOVED_KEY: True, ON_DEVICE_BEFORE_KEY: before})
     return changed
 
 
@@ -541,6 +557,14 @@ def _restore_profiles_before_on_device(store: Any) -> list:
     names = {bucket: str(remembered.get(bucket) or "") or "Default"
              for bucket, name in _active_glossary_profiles(store).items() if name == ON_DEVICE_PROFILE}
     changed += _select_glossary_profiles(store, names)
+    _present, fields = _stored_value(store, CUSTOM_FIELDS_KEY)
+    if "fields" in record and not fields:  # columns the user added meanwhile stay
+        previous = record.get("fields")
+        if isinstance(previous, Mapping):
+            changed += _set_many(store, {CUSTOM_FIELDS_KEY: previous.get(CUSTOM_FIELDS_KEY) or [],
+                                         DESCRIPTION_REMOVED_KEY: bool(previous.get(DESCRIPTION_REMOVED_KEY))})
+        else:
+            changed += _unset(store, CUSTOM_FIELDS_KEY) + _unset(store, DESCRIPTION_REMOVED_KEY)
     changed += _unset(store, ON_DEVICE_BEFORE_KEY)
     return changed
 
