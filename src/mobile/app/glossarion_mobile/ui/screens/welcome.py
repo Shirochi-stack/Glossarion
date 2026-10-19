@@ -728,11 +728,19 @@ class WelcomeScreen(Screen):
 
     def _page_language_glossary(self) -> ft.Control:
         self.mode_cards = {}
+        # editable: pick a listed language or type any other one (owner 2026-10-19); typing filters the list
+        options = list(dict.fromkeys([*self.languages, self.flow.target_language] if self.flow.target_language
+                                     else self.languages))
         language = ft.Dropdown(
             label="Target language",
             value=self.flow.target_language,
-            options=[ft.DropdownOption(key=lang, text=lang) for lang in self.languages],
-            on_select=lambda e: setattr(self.flow, "target_language", e.control.value or self.flow.target_language),
+            options=[ft.DropdownOption(key=lang, text=lang) for lang in options],
+            editable=True,
+            enable_filter=True,
+            expand=True,
+            key="welcome-language",
+            on_select=lambda e: self.set_target_language(e.control.value),
+            on_text_change=lambda e: self.set_target_language(e.control.text),
         )
         return ft.Column(
             [
@@ -746,6 +754,13 @@ class WelcomeScreen(Screen):
             spacing=10,
             scroll=ft.ScrollMode.AUTO,
         )
+
+    def set_target_language(self, value: Any) -> str:
+        """The Target language (picked or typed): blank keeps the previous one."""
+        text = str(value or "").strip()
+        if text:
+            self.flow.target_language = text
+        return self.flow.target_language
 
     def _page_permissions(self) -> ft.Control:
         rows: list[ft.Control] = [

@@ -26,7 +26,7 @@ __all__ = [
 STEPS = ("sign_in", "language_glossary", "permissions", "done")  # "providers" merged into "sign_in" (2026-10-16)
 STEP_TITLES = {
     "sign_in": "Welcome to Glossarion",
-    "language_glossary": "Choose Your Glossary Mode",
+    "language_glossary": "Choose Your Language and Glossary Mode",
     "permissions": "Permissions",
     "done": "You're ready",
 }

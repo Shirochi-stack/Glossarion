@@ -112,3 +112,20 @@ def test_changes_are_written_on_finish_and_the_field_goes_beyond_the_slider():
     updates = screen.flow.finish_updates()
     assert (updates["batch_size"], updates["delay"], updates["translation_temperature"],
             updates["disable_temperature"]) == (12, 0.5, 1.1, True)
+
+
+def test_target_language_is_editable_and_a_typed_language_is_saved():
+    """Step 2 "Choose Your Language and Glossary Mode": pick a listed language or type any other one."""
+    from glossarion_mobile.ui.screens.welcome_flow import STEP_TITLES
+
+    assert STEP_TITLES["language_glossary"] == "Choose Your Language and Glossary Mode"
+    screen = welcome("authchatgpt/auto")
+    language = by_key(screen)["welcome-language"]
+    assert language.editable and language.enable_filter and language.value == "English"
+    language.on_text_change(types.SimpleNamespace(control=types.SimpleNamespace(text="  Tagalog ")))
+    assert screen.flow.target_language == "Tagalog"
+    language.on_text_change(types.SimpleNamespace(control=types.SimpleNamespace(text="")))  # cleared: kept
+    assert screen.flow.target_language == "Tagalog"
+    language.on_select(event("Korean"))
+    assert screen.finish()["output_language"] == "Korean"
+
