@@ -1,11 +1,13 @@
 """Built-in "On-device" prompt profiles for small on-device models (mobile llama.cpp, ``local/<stem>``).
 
-* the translation profile "On-device" is a desktop built-in (always included, protected), so a fresh
-  and an existing config both list it;
+* the translation profiles "On-device_BeautifulSoup" (html tags) and "On-device_html2text" (markdown) are
+  desktop built-ins (always included, protected), so a fresh and an existing config both list them; a
+  stored "On-device" (their name before the split, owner 2026-10-19) becomes "On-device_BeautifulSoup";
 * the Balanced/Full and Minimal glossary buckets get an "On-device" profile (``glossary_document``),
   seeded without overwriting an edited text and protected from deletion like Default;
 * choosing a ``local/`` model (``setting_writes.write_setting(store, "model", ...)``, the path every
-  global model writer takes) selects the On-device translation, glossary and review generator profiles
+  global model writer takes) selects the On-device translation profile of the text extraction method
+  (switching the method while one is active switches to the other) and the glossary and review generator profiles
   and the current prompt keys runs read; choosing a model that is not ``local/`` again restores the
   remembered profiles where On-device is still the active one;
 * the review generator's "On-device" profile holds both of its prompts (the review prompt and the Full
@@ -50,7 +52,10 @@ pytestmark = pytest.mark.skipif(bool(_BACKEND_ERROR), reason=_BACKEND_ERROR or "
 LOCAL = "local/qwen3-0.6b-q4"
 CLOUD = "authchatgpt/auto"
 ON_DEVICE = "On-device"
+ON_DEVICE_BS = "On-device_BeautifulSoup"
+ON_DEVICE_H2T = "On-device_html2text"
 TRANSLATION_TEXT = "You must only output {target_lang} translations with html tags."
+HTML2TEXT_TEXT = "You must only output {target_lang} translations with markdown."
 
 
 @pytest.fixture(autouse=True)
@@ -88,7 +93,7 @@ def _existing_config() -> dict:
     import prompt_profiles
 
     defaults = dict(prompt_profiles.profile_state_from_config({}).default_prompts)
-    profiles = {name: text for name, text in defaults.items() if name != ON_DEVICE}
+    profiles = {name: text for name, text in defaults.items() if not name.startswith(ON_DEVICE)}
     profiles["My style"] = "Translate to {target_lang}, my way."
     return {
         "prompt_profiles": profiles,
@@ -105,8 +110,8 @@ def _existing_config() -> dict:
     }
 
 
-def _assert_on_device(store) -> None:
-    assert store.get("active_profile") == ON_DEVICE
+def _assert_on_device(store, translation: str = ON_DEVICE_BS) -> None:
+    assert store.get("active_profile") == translation
     assert store.get("active_glossary_prompt_profiles") == {"balanced_full": ON_DEVICE, "minimal": ON_DEVICE}
     balanced = _on_device_glossary("balanced_full").strip()
     assert store.get("manual_glossary_prompt3") == balanced and store.get("manual_glossary_prompt") == balanced
@@ -123,11 +128,115 @@ def test_builtin_on_device_translation_profile_is_listed_and_protected(tmp_path,
 
     config = _existing_config() if config == "existing" else config
     state = prompt_profiles.profile_state_from_config(config)
-    assert state.prompt_profiles[ON_DEVICE] == TRANSLATION_TEXT
-    assert ON_DEVICE in prompt_profiles.protected_profiles(state)
+    assert state.prompt_profiles[ON_DEVICE_BS] == TRANSLATION_TEXT
+    assert state.prompt_profiles[ON_DEVICE_H2T] == HTML2TEXT_TEXT
+    assert ON_DEVICE not in state.prompt_profiles
+    assert {ON_DEVICE_BS, ON_DEVICE_H2T} <= prompt_profiles.protected_profiles(state)
+    assert prompt_profiles.extraction_method_for_profile(ON_DEVICE_BS) == "standard"
+    assert prompt_profiles.extraction_method_for_profile(ON_DEVICE_H2T) == "enhanced"
     store = _store(tmp_path, config)
-    assert ON_DEVICE in ProfileService(store).listing().names
+    assert {ON_DEVICE_BS, ON_DEVICE_H2T} <= set(ProfileService(store).listing().names)
     store._saver.close()
+
+
+def test_mobile_on_device_names_match_the_shared_core():
+    import prompt_profiles
+    from glossarion_mobile.state import setting_writes as sw
+
+    assert sw.ON_DEVICE_TRANSLATION_PROFILES == prompt_profiles.ON_DEVICE_TRANSLATION_PROFILES
+    assert prompt_profiles.RENAMED_BUILTIN_PROFILES == {ON_DEVICE: ON_DEVICE_BS}
+
+
+@pytest.mark.parametrize("name,text", [(ON_DEVICE_BS, TRANSLATION_TEXT), (ON_DEVICE_H2T, HTML2TEXT_TEXT)])
+def test_on_device_translation_profiles_cannot_be_deleted_and_reset_restores_them(tmp_path, name, text):
+    import prompt_profiles
+
+    state = prompt_profiles.profile_state_from_config({})
+    state.prompt_profiles[name] = "edited"
+    outcome = prompt_profiles.delete_or_reset_profile(state, name, confirm=lambda *a, **k: True)
+    assert outcome.kind == "reset" and state.prompt_profiles[name] == text
+
+
+# ---- migration of the translation profile "On-device" ------------------------------------------------------
+
+
+def _legacy_config(text: str = TRANSLATION_TEXT, active: str = ON_DEVICE) -> dict:
+    """A config saved by a build with the single "On-device" translation profile."""
+    import prompt_profiles
+
+    defaults = dict(prompt_profiles.profile_state_from_config({}).default_prompts)
+    profiles = {}
+    for name, value in defaults.items():
+        if name == ON_DEVICE_BS:
+            profiles[ON_DEVICE] = text
+        elif name != ON_DEVICE_H2T:
+            profiles[name] = value
+    profiles["My style"] = "Translate to {target_lang}, my way."
+    return {"prompt_profiles": profiles, "active_profile": active}
+
+
+@pytest.mark.parametrize("text", ["You must only output {target_lang} translations.", TRANSLATION_TEXT],
+                         ids=["older-builtin", "builtin"])
+def test_migration_unedited_on_device_takes_the_new_builtin(text):
+    import prompt_profiles
+
+    config = _legacy_config(text)
+    assert prompt_profiles.migrate_renamed_builtin_profiles(config) == ["prompt_profiles", "active_profile"]
+    assert ON_DEVICE not in config["prompt_profiles"] and config["active_profile"] == ON_DEVICE_BS
+    state = prompt_profiles.profile_state_from_config(config)
+    assert state.prompt_profiles[ON_DEVICE_BS] == TRANSLATION_TEXT
+    assert state.prompt_profiles[ON_DEVICE_H2T] == HTML2TEXT_TEXT
+    assert state.profile_var == ON_DEVICE_BS
+    assert prompt_profiles.migrate_renamed_builtin_profiles(config) == []  # idempotent
+
+
+def test_migration_edited_on_device_keeps_its_text_in_place():
+    import prompt_profiles
+
+    config = _legacy_config("My tiny prompt for {target_lang}", active="My style")
+    order = list(config["prompt_profiles"])
+    assert prompt_profiles.migrate_renamed_builtin_profiles(config) == ["prompt_profiles"]
+    assert config["prompt_profiles"][ON_DEVICE_BS] == "My tiny prompt for {target_lang}"
+    assert list(config["prompt_profiles"]) == [ON_DEVICE_BS if n == ON_DEVICE else n for n in order]
+    assert config["active_profile"] == "My style"
+    state = prompt_profiles.profile_state_from_config(config)
+    assert state.prompt_profiles[ON_DEVICE_BS] == "My tiny prompt for {target_lang}"
+    assert state.prompt_profiles[ON_DEVICE_H2T] == HTML2TEXT_TEXT
+
+
+def test_migration_runs_at_desktop_start_up():
+    """ConfigStateMixin._init_variables (desktop start-up, HeadlessOwner): the active "On-device" follows."""
+    import prompt_profiles
+
+    state = prompt_profiles.profile_state_from_config(_legacy_config())
+    assert state.profile_var == ON_DEVICE_BS and ON_DEVICE not in state.prompt_profiles
+
+
+def test_mobile_start_up_migration_store_and_remembered_record(tmp_path):
+    from glossarion_mobile.state.setting_writes import ON_DEVICE_BEFORE_KEY, migrate_on_device_profiles
+
+    config = _legacy_config("edited {target_lang}")
+    config[ON_DEVICE_BEFORE_KEY] = {"active_profile": ON_DEVICE, "glossary": {}}
+    store = _store(tmp_path, config)
+    changed = migrate_on_device_profiles(store)
+    assert set(changed) == {"prompt_profiles", "active_profile", ON_DEVICE_BEFORE_KEY}
+    assert store.get("active_profile") == ON_DEVICE_BS
+    assert store.get("prompt_profiles")[ON_DEVICE_BS] == "edited {target_lang}"
+    assert store.get(ON_DEVICE_BEFORE_KEY)["active_profile"] == ON_DEVICE_BS
+    assert migrate_on_device_profiles(store) == []  # idempotent
+    store._saver.close()
+
+
+def test_chat_and_series_overrides_naming_on_device_follow_the_rename():
+    """Chats / series store a profile name: the start-up re-check (``reconcile_profile_overrides`` ->
+    ``follow_profile``) moves "On-device" to "On-device_BeautifulSoup"; a run re-checks before it starts."""
+    import prompt_profiles
+    from glossarion_mobile.ui.screens.profiles import follow_profile
+
+    names = list(prompt_profiles.profile_state_from_config({}).prompt_profiles)
+    assert follow_profile(ON_DEVICE, names) == ON_DEVICE_BS
+    assert follow_profile(ON_DEVICE_H2T, names) == ON_DEVICE_H2T
+    assert follow_profile("Gone", names) is None
 
 
 @pytest.mark.parametrize("config", [{}, "existing", "edited"])
@@ -184,15 +293,16 @@ def test_local_model_selects_on_device_and_cloud_model_restores(tmp_path, config
     store = _store(tmp_path, config)
     before = store.snapshot()
 
+    translation = ON_DEVICE_H2T if config else ON_DEVICE_BS  # existing: enhanced (Korean_html2text)
     changed = write_setting(store, "model", LOCAL)
     assert "model" in changed and store.get("model") == LOCAL
-    _assert_on_device(store)
+    _assert_on_device(store, translation)
     assert store.has(ON_DEVICE_BEFORE_KEY)
     # another local model keeps the remembered profiles
     remembered = store.get(ON_DEVICE_BEFORE_KEY)
     write_setting(store, "model", "local/other")
     assert store.get(ON_DEVICE_BEFORE_KEY) == remembered
-    _assert_on_device(store)
+    _assert_on_device(store, translation)
 
     write_setting(store, "model", CLOUD)
     after = store.snapshot()
@@ -215,7 +325,7 @@ def test_switch_back_keeps_a_profile_the_user_picked(tmp_path):
 
     store = _store(tmp_path, _existing_config())
     write_setting(store, "model", LOCAL)
-    _assert_on_device(store)
+    _assert_on_device(store, ON_DEVICE_H2T)
     # meanwhile: the translation profile and the Minimal glossary profile picked by hand
     write_setting(store, PROFILE_KEY, "My style")
     owner = types.SimpleNamespace(config=store.snapshot())
@@ -243,7 +353,7 @@ def test_restored_profile_that_was_deleted_meanwhile_stays_on_device(tmp_path):
     store.set_many({"prompt_profiles": profiles})
     write_setting(store, "model", CLOUD)
     # "My style" is gone: the switch-back refuses an unknown name instead of storing it
-    assert store.get("active_profile") == ON_DEVICE and not store.has(ON_DEVICE_BEFORE_KEY)
+    assert store.get("active_profile") == ON_DEVICE_H2T and not store.has(ON_DEVICE_BEFORE_KEY)
     store._saver.close()
 
 
@@ -411,3 +521,124 @@ def test_review_job_sends_the_active_profiles_prompts(active):
     before = json.loads(json.dumps(config))
     assert review_prompts(rg, config) == expected
     assert config == before  # the job's config snapshot is not changed
+
+
+# ---- the text extraction method and the On-device translation profiles ----------------------------------
+
+
+@pytest.mark.parametrize("method,expected", [(None, ON_DEVICE_BS), ("standard", ON_DEVICE_BS),
+                                             ("enhanced", ON_DEVICE_H2T)])
+def test_local_model_selects_the_on_device_profile_of_the_extraction_method(tmp_path, method, expected):
+    from glossarion_mobile.state.setting_writes import write_setting
+
+    store = _store(tmp_path, {"text_extraction_method": method} if method else {})
+    write_setting(store, "model", LOCAL)
+    assert store.get("active_profile") == expected
+    assert store.get("text_extraction_method", "standard") == (method or "standard")
+    write_setting(store, "model", CLOUD)
+    assert not store.has("active_profile")  # nothing was stored before: the first profile again
+    assert store.get("text_extraction_method", "standard") == (method or "standard")
+    store._saver.close()
+
+
+def test_switching_the_extraction_method_switches_the_active_on_device_profile(tmp_path):
+    from glossarion_mobile.state.setting_writes import EXTRACTION_KEY, ON_DEVICE_BEFORE_KEY, write_setting
+
+    store = _store(tmp_path, {"active_profile": "My style", "prompt_profiles": _existing_config()["prompt_profiles"]})
+    write_setting(store, "model", LOCAL)
+    assert store.get("active_profile") == ON_DEVICE_BS
+    write_setting(store, EXTRACTION_KEY, "enhanced")
+    assert store.get("active_profile") == ON_DEVICE_H2T and store.get(EXTRACTION_KEY) == "enhanced"
+    write_setting(store, EXTRACTION_KEY, "standard")
+    assert store.get("active_profile") == ON_DEVICE_BS and store.get(EXTRACTION_KEY) == "standard"
+    write_setting(store, EXTRACTION_KEY, "enhanced")
+    # the remembered profile still comes back for a cloud model (On-device_html2text is On-device too)
+    assert store.get(ON_DEVICE_BEFORE_KEY)["active_profile"] == "My style"
+    write_setting(store, "model", CLOUD)
+    assert store.get("active_profile") == "My style" and store.get(EXTRACTION_KEY) == "enhanced"
+    store._saver.close()
+
+
+def test_extraction_method_leaves_other_profiles_alone_and_a_suffixless_profile_keeps_it(tmp_path):
+    """Universal (no _BeautifulSoup / _html2text suffix): the method is the user's choice alone - selecting it
+    never resets the stored method, and changing the method never changes the profile."""
+    from glossarion_mobile.state.setting_writes import EXTRACTION_KEY, PROFILE_KEY, write_setting
+
+    store = _store(tmp_path, {"model": CLOUD})
+    write_setting(store, EXTRACTION_KEY, "enhanced")
+    assert store.get(EXTRACTION_KEY) == "enhanced" and not store.has(PROFILE_KEY)
+    write_setting(store, PROFILE_KEY, "Korean_BeautifulSoup")
+    assert store.get(EXTRACTION_KEY) == "standard"  # a suffixed profile still switches it (desktop)
+    write_setting(store, EXTRACTION_KEY, "enhanced")
+    assert store.get(PROFILE_KEY) == "Korean_BeautifulSoup"  # not an On-device profile: stays
+    write_setting(store, PROFILE_KEY, "Universal")
+    assert store.get(PROFILE_KEY) == "Universal" and store.get(EXTRACTION_KEY) == "enhanced"
+    store._saver.close()
+
+
+def test_standard_replaces_a_stale_legacy_enhanced_extraction_mode(tmp_path):
+    """``extraction_mode`` 'enhanced' wins over ``text_extraction_method`` at run time: choosing
+    BeautifulSoup writes the filtering level there, as the desktop save does."""
+    from glossarion_mobile.state.setting_writes import EXTRACTION_KEY, write_setting
+
+    store = _store(tmp_path, {"extraction_mode": "enhanced", "text_extraction_method": "enhanced",
+                              "file_filtering_level": "comprehensive"})
+    write_setting(store, EXTRACTION_KEY, "standard")
+    assert store.get("extraction_mode") == "comprehensive" and store.get(EXTRACTION_KEY) == "standard"
+    store._saver.close()
+
+
+def _env_value(config: dict, tmp_path, name: str) -> str:
+    from glossarion_mobile.ui.screens import env_preview as ep
+
+    result = ep.build_env_preview(config, input_path=ep.preview_input_path("epub", str(tmp_path)),
+                                  lock=__import__("threading").Lock())
+    assert result.ok, result.error
+    return {row.key: row.value for row in result.rows}[name]
+
+
+@pytest.mark.parametrize("method,html2text", [("enhanced", "1"), ("standard", "0")])
+def test_cloud_model_universal_runs_with_the_chosen_extraction(tmp_path, method, html2text):
+    """Welcome › Text extraction with a cloud model and the default Universal profile: the job's config
+    (config.json + the chat's overrides, as ``JobService`` builds it) runs with that method."""
+    from glossarion_mobile.state.setting_writes import EXTRACTION_KEY, write_setting
+    from glossarion_mobile.ui.chat.run_request import config_overrides
+
+    store = _store(tmp_path, {"model": CLOUD})
+    write_setting(store, EXTRACTION_KEY, method)
+    config = store.snapshot()
+    config.update(config_overrides({"profile": "Universal", "model": CLOUD}))
+    assert "text_extraction_method" not in config_overrides({"profile": "Universal"})
+    assert config["text_extraction_method"] == method
+    assert _env_value(config, tmp_path, "TEXT_EXTRACTION_METHOD") == method
+    assert _env_value(config, tmp_path, "USE_HTML2TEXT") == html2text
+    store._saver.close()
+
+
+@pytest.mark.parametrize("model,method,profile", [(LOCAL, "enhanced", ON_DEVICE_H2T), (LOCAL, "standard", ON_DEVICE_BS),
+                                                   (CLOUD, "enhanced", None)])
+def test_welcome_text_extraction_is_saved_and_selects_the_on_device_profile(tmp_path, model, method, profile):
+    """Welcome › Text extraction: Finish saves ``text_extraction_method`` for every model (written like the
+    app's Finish: ``write_setting``), and an on-device model's translation profile follows it."""
+    pytest.importorskip("flet")
+    from glossarion_mobile.state.setting_writes import EXTRACTION_KEY, write_setting
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.screens.welcome import WelcomeScreen
+
+    store = _store(tmp_path, {})
+    write_setting(store, "model", model)  # step 1 picks the model
+    screen = WelcomeScreen(parse_route("/welcome"), current_model=lambda: store.get("model", ""),
+                           config_get=lambda key, default=None: store.get(key, default))
+    screen.get_body()
+    screen.go("language_glossary")
+    assert screen.shown_extraction_method() == "standard"  # BeautifulSoup (recommended) by default
+    screen.flow.select_extraction(method)
+    updates = screen.finish()
+    assert updates[EXTRACTION_KEY] == method
+    write_setting(store, EXTRACTION_KEY, updates[EXTRACTION_KEY])
+    assert store.get(EXTRACTION_KEY) == method
+    if profile:
+        assert store.get("active_profile") == profile
+    else:
+        assert not store.has("active_profile")
+    store._saver.close()

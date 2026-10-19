@@ -64,6 +64,8 @@ __all__ = [
     "delete_or_reset_profile", "new_profile", "profiles_config_updates", "apply_profiles_to_config",
     "write_profiles_to_config_file", "read_profiles_file", "merge_imported_profiles",
     "export_profiles_json", "json_export_path", "write_profiles_json", "extraction_method_for_profile",
+    "ON_DEVICE_TRANSLATION_PROFILES", "RENAMED_BUILTIN_PROFILES", "PREVIOUS_BUILTIN_PROFILE_TEXTS",
+    "on_device_translation_profile", "is_on_device_translation_profile", "migrate_renamed_builtin_profiles",
     # assistant prefill profiles
     "PrefillState", "PrefillOutcome", "PREFILL_DEFAULT_NAME", "PREFILL_CONFIG_KEYS",
     "prefill_state_from_config", "prefill_load", "prefill_stage", "prefill_select", "prefill_new", "prefill_save",
@@ -211,6 +213,78 @@ def extraction_method_for_profile(name):
     if 'html2text' in profile_lower:
         return 'enhanced'
     return None
+
+
+# ---- built-in profiles renamed by a later release ----------------------------------------------
+
+#: The built-in translation profiles for small on-device models, by text extraction method
+#: (owner 2026-10-19: "On-device" split in two; the names follow the *_BeautifulSoup /
+#: *_html2text convention, so selecting one switches the extraction method like the others).
+ON_DEVICE_TRANSLATION_PROFILES = {
+    'standard': 'On-device_BeautifulSoup',
+    'enhanced': 'On-device_html2text',
+}
+#: Built-in profile names a later release renamed: old name -> new name.
+RENAMED_BUILTIN_PROFILES = {
+    'On-device': 'On-device_BeautifulSoup',
+}
+#: Every text a renamed built-in shipped with: a stored copy still equal to one was never edited and
+#: gives way to the new built-in (ConfigStateMixin._init_variables adds it back with its current text).
+PREVIOUS_BUILTIN_PROFILE_TEXTS = {
+    'On-device': (
+        "You must only output an {target_lang} translation of the following text.",
+        "You must only output a {target_lang} translation.",
+        "You must translate this into {target_lang}.",
+        "You must only output {target_lang} translations.",
+        "You must only output {target_lang} translations with html tags.",
+    ),
+}
+
+
+def on_device_translation_profile(method=None):
+    """The On-device translation profile for a text extraction method ('standard' when unknown)."""
+    return ON_DEVICE_TRANSLATION_PROFILES.get(str(method or ''), ON_DEVICE_TRANSLATION_PROFILES['standard'])
+
+
+def is_on_device_translation_profile(name):
+    """One of the On-device translation profiles (or the name they had before the split)."""
+    name = str(name or '')
+    return name in ON_DEVICE_TRANSLATION_PROFILES.values() or name in RENAMED_BUILTIN_PROFILES
+
+
+def migrate_renamed_builtin_profiles(config):
+    """Move *config* (in place) off built-in profile names a later release renamed.
+
+    A stored profile under the old name becomes the new one in the same position, keeping the
+    user's edited text; an unedited copy (one of ``PREVIOUS_BUILTIN_PROFILE_TEXTS``) is dropped so
+    the start-up reconciliation adds the new built-in with its current text. When the new name is
+    already taken, an edited old profile stays as a custom profile. ``active_profile`` follows the
+    rename unless the old name still exists. Idempotent; returns the config keys it changed.
+    """
+    if not isinstance(config, dict):
+        return []
+    changed = []
+    profiles = config.get('prompt_profiles')
+    for old, new in RENAMED_BUILTIN_PROFILES.items():
+        if isinstance(profiles, dict) and old in profiles:
+            text = profiles[old]
+            unedited = text in PREVIOUS_BUILTIN_PROFILE_TEXTS.get(old, ())
+            if unedited or new not in profiles:
+                renamed = {}
+                for key, value in profiles.items():
+                    if key != old:
+                        renamed[key] = value
+                    elif not unedited:
+                        renamed[new] = value
+                profiles = renamed
+                config['prompt_profiles'] = profiles
+                if 'prompt_profiles' not in changed:
+                    changed.append('prompt_profiles')
+        if config.get('active_profile') == old and not (isinstance(profiles, dict) and old in profiles):
+            config['active_profile'] = new
+            if 'active_profile' not in changed:
+                changed.append('active_profile')
+    return changed
 
 
 # =============================================================================================

@@ -32,6 +32,7 @@ from glossarion_mobile.state.config_store import MISSING, MobileConfigStore
 from glossarion_mobile.state.setting_writes import (
     CONTEXT_MODE_KEY,
     CONTEXT_MODE_WRITES,
+    EXTRACTION_KEY,
     MOBILE_STREAMING_DEFAULT,
     PROFILE_KEY,
     RULE_KEYS,
@@ -422,9 +423,10 @@ class SettingTile:
             extra = self.implied_writes(value)
             if extra:  # keys the desktop control writes together with this one, in one store write
                 self.store.set_many({self.path: value, **extra})
-            elif len(self.path) == 1 and (self.key in RULE_KEYS or self.key == PROFILE_KEY):
+            elif len(self.path) == 1 and (self.key in RULE_KEYS or self.key in (PROFILE_KEY, EXTRACTION_KEY)):
                 # the desktop control's side effects (output-mode flags, glossary-mode toggles,
-                # thoughts lock, target-language fan-out, profile extraction method)
+                # thoughts lock, target-language fan-out, profile extraction method, the On-device
+                # translation profile of the extraction method)
                 write_setting(self.store, self.key, value)
             else:
                 self.store.set(self.path, value)

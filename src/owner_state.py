@@ -143,7 +143,8 @@ class ConfigStateMixin:
             "NanoBanana_Image",
             "SDLXLIFF Editing v2",
             "Subtitle Translation",
-            "On-device",
+            "On-device_BeautifulSoup",
+            "On-device_html2text",
         }
         return protected
 
@@ -1247,7 +1248,8 @@ Text to analyze:
                 "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
             ),
             "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,
-            "On-device": "You must only output {target_lang} translations with html tags.",
+            "On-device_BeautifulSoup": "You must only output {target_lang} translations with html tags.",
+            "On-device_html2text": "You must only output {target_lang} translations with markdown.",
         }
 
     def _init_watchdog_dir(self):
@@ -1568,6 +1570,9 @@ Text to analyze:
             self.config['book_title_system_prompt'] = "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
         
         # Profiles
+        # built-in profiles renamed since (2026-10-19: "On-device" -> "On-device_BeautifulSoup")
+        from prompt_profiles import migrate_renamed_builtin_profiles
+        migrate_renamed_builtin_profiles(self.config)
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
         self.config['prompt_profiles'] = self.prompt_profiles
         
@@ -1588,7 +1593,8 @@ Text to analyze:
             "NanoBanana_Image",
             "SDLXLIFF Editing v2",
             "Subtitle Translation",
-            "On-device",
+            "On-device_BeautifulSoup",
+            "On-device_html2text",
         ]
         
         # Add missing required profiles while preserving existing profile positions

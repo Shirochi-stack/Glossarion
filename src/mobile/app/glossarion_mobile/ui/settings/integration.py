@@ -149,6 +149,15 @@ class SettingsFeature:
                     migrate_quick_sample_size(self.store.get, self.store.set, self.prefs)
             except Exception:
                 log.exception("the QA sample size migration failed")
+            # owner 2026-10-19: the translation profile "On-device" is now "On-device_BeautifulSoup" (once;
+            # chats and series follow through profiles.follow_profile)
+            try:
+                from glossarion_mobile.state.setting_writes import migrate_on_device_profiles
+
+                if self.store.loaded and not self.store.read_only:
+                    migrate_on_device_profiles(self.store)
+            except Exception:
+                log.exception("the On-device profile migration failed")
 
         dispatcher = self.dispatcher
         if dispatcher is not None and getattr(dispatcher, "bound", False):

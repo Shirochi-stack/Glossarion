@@ -24,8 +24,10 @@ value changes are stored. An absent toggle counts as ON on mobile (``MOBILE_STRE
 desktop default stays off): every job's config snapshot gets it (``with_mobile_streaming_defaults``), and
 chat / Reader runs force streaming only while it is on (``streaming_enabled``).
 
-Choosing an on-device ``local/`` model (mobile only) also selects the built-in "On-device" translation,
-glossary and review generator prompt profiles (the review profile holds very short review and final
+Choosing an on-device ``local/`` model (mobile only) also selects the built-in On-device translation
+profile of the text extraction method (``ON_DEVICE_TRANSLATION_PROFILES``: "On-device_BeautifulSoup" for
+'standard', "On-device_html2text" for 'enhanced'; switching the method while one is active switches to the
+other) and the "On-device" glossary and review generator prompt profiles (the review profile holds very short review and final
 prompts: ``review_generator.ON_DEVICE_REVIEW_PROMPT`` / ``ON_DEVICE_FINAL_REVIEW_PROMPT``), drops the
 glossary's extra columns (the "description" field; owner 2026-10-19: a small model only writes name,
 translated name and gender) and sets its Request size (``ON_DEVICE_SETTINGS``: temperature 0.7, batch
@@ -58,8 +60,12 @@ __all__ = [
     "MOBILE_DEFAULT_MODEL",
     "default_batch_size",
     "MOBILE_STREAMING_DEFAULT",
+    "EXTRACTION_KEY",
     "ON_DEVICE_BEFORE_KEY",
     "ON_DEVICE_PROFILE",
+    "ON_DEVICE_TRANSLATION_PROFILES",
+    "migrate_on_device_profiles",
+    "on_device_translation_profile",
     "PROFILE_KEY",
     "RULE_KEYS",
     "STREAMING_KEY",
@@ -120,11 +126,16 @@ MOBILE_MAX_OUTPUT_TOKENS = 16384
 #: The model when none is saved on Glossarion Mobile (owner 2026-10-12): ChatGPT's web chat, which needs
 #: no API key and no sign-in. The desktop default stays authgpt/gpt-6-luna; the default is never written.
 MOBILE_DEFAULT_MODEL = "authchatgpt/auto"
-#: The built-in prompt profile for small on-device models (the translation profile and the Balanced/Full and
-#: Minimal glossary profiles share the name): choosing a ``local/`` model selects them, and choosing a model
-#: that is not ``local/`` again brings back what was active before (``ON_DEVICE_BEFORE_KEY``) wherever the
-#: On-device profile is still the active one.
+#: The built-in prompt profile for small on-device models (the Balanced/Full and Minimal glossary profiles and
+#: the review profile share the name; the translation profile had it before it was split by extraction
+#: method): choosing a ``local/`` model selects them, and choosing a model that is not ``local/`` again brings
+#: back what was active before (``ON_DEVICE_BEFORE_KEY``) wherever the On-device profile is still the active one.
 ON_DEVICE_PROFILE = "On-device"
+#: The built-in translation profiles for on-device models by ``text_extraction_method`` (owner 2026-10-19;
+#: ``prompt_profiles.ON_DEVICE_TRANSLATION_PROFILES`` - a literal: this module loads before the backend).
+ON_DEVICE_TRANSLATION_PROFILES = {"standard": "On-device_BeautifulSoup", "enhanced": "On-device_html2text"}
+#: The text extraction method (Welcome, Settings › Text Extraction Method; desktop default 'standard').
+EXTRACTION_KEY = "text_extraction_method"
 #: the glossary's extra columns (desktop Glossary Manager › Custom Fields) and its "description was
 #: removed on purpose" flag (owner_state adds "description" back to an empty list without it)
 CUSTOM_FIELDS_KEY = "custom_glossary_fields"
@@ -456,6 +467,65 @@ def extraction_method_for_profile(name: Any) -> Optional[str]:
         return None
 
 
+def on_device_translation_profile(method: Any = None) -> str:
+    """The On-device translation profile for a text extraction method ('standard' when unknown)."""
+    return ON_DEVICE_TRANSLATION_PROFILES.get(str(method or ""), ON_DEVICE_TRANSLATION_PROFILES["standard"])
+
+
+def _is_on_device_translation(name: Any) -> bool:
+    """One of the On-device translation profiles, or "On-device" (their name before the split)."""
+    return name in ON_DEVICE_TRANSLATION_PROFILES.values() or name == ON_DEVICE_PROFILE
+
+
+def migrate_on_device_profiles(store: Any) -> list:
+    """App start: move the stored config off the translation profile "On-device" (now
+    "On-device_BeautifulSoup"; ``prompt_profiles.migrate_renamed_builtin_profiles``: an edited text is kept,
+    an unedited one gives way to the new built-in, ``active_profile`` follows) and the profile remembered in
+    ``ON_DEVICE_BEFORE_KEY``. Chats and series naming it follow through ``profiles.follow_profile``.
+    Idempotent; returns the changed keys."""
+    snapshot = getattr(store, "snapshot", None)
+    if not callable(snapshot):
+        return []
+    try:
+        module = importlib.import_module("prompt_profiles")
+        config = snapshot()
+        changed = list(module.migrate_renamed_builtin_profiles(config))
+        renamed = dict(module.RENAMED_BUILTIN_PROFILES)
+    except Exception:
+        log.warning("the On-device profile migration is unavailable", exc_info=True)
+        return []
+    record = config.get(ON_DEVICE_BEFORE_KEY)
+    if isinstance(record, Mapping) and record.get(PROFILE_KEY) in renamed:
+        config[ON_DEVICE_BEFORE_KEY] = {**record, PROFILE_KEY: renamed[record[PROFILE_KEY]]}
+        changed.append(ON_DEVICE_BEFORE_KEY)
+    if not changed:
+        return []
+    log.info("built-in prompt profiles renamed: %s", changed)
+    return _set_many(store, {key: config[key] for key in changed})
+
+
+def _write_extraction_method(store: Any, method: Any) -> list:
+    """The text extraction method (any model, any profile: a profile without a _BeautifulSoup / _html2text
+    suffix such as Universal never changes it, so this is what decides); with an On-device translation
+    profile active, the On-device profile of that method.
+
+    A stale legacy ``extraction_mode`` 'enhanced' would win over 'standard' at run time
+    (``owner_state.initialize_extraction_variables``): it becomes the filtering level, as the desktop
+    save writes it (``settings_persistence``: 'enhanced' or the file filtering level)."""
+    values = {EXTRACTION_KEY: method}
+    _present, legacy_mode = _stored_value(store, "extraction_mode")
+    if method != "enhanced" and legacy_mode == "enhanced":
+        _present, level = _stored_value(store, "file_filtering_level")
+        values["extraction_mode"] = level or "smart"
+    changed = _set_many(store, values)
+    _present, profile = _stored_value(store, PROFILE_KEY)
+    if _is_on_device_translation(profile) and method in ON_DEVICE_TRANSLATION_PROFILES:
+        wanted = on_device_translation_profile(method)
+        if profile != wanted:
+            changed += _select_profile(store, wanted)
+    return changed
+
+
 def _select_profile(store: Any, name: Any) -> list:
     """Settings › Profiles' "Use this profile" (``ProfileService.select`` -> ``select_profile``).
 
@@ -608,7 +678,8 @@ def _active_review_profile(store: Any) -> Optional[str]:
 
 
 def _use_on_device_profiles(store: Any, model: Any = None) -> list:
-    """A ``local/`` model was chosen: select the On-device translation and glossary profiles and remember
+    """A ``local/`` model was chosen: select the On-device translation profile of the text extraction method
+    and the On-device glossary profiles and remember
     what was active (``ON_DEVICE_BEFORE_KEY``). A part already on On-device keeps the remembered value."""
     _present, record = _stored_value(store, ON_DEVICE_BEFORE_KEY)
     record = record if isinstance(record, Mapping) else {}
@@ -616,7 +687,8 @@ def _use_on_device_profiles(store: Any, model: Any = None) -> list:
     _present, profile = _stored_value(store, PROFILE_KEY)
     glossary = _active_glossary_profiles(store)
     before = {
-        PROFILE_KEY: str(record.get(PROFILE_KEY) or "") if profile == ON_DEVICE_PROFILE else str(profile or ""),
+        PROFILE_KEY: (str(record.get(PROFILE_KEY) or "") if _is_on_device_translation(profile)
+                      else str(profile or "")),
         "glossary": {bucket: str(remembered.get(bucket) or "") if name == ON_DEVICE_PROFILE else name
                      for bucket, name in glossary.items()},
     }
@@ -647,7 +719,8 @@ def _use_on_device_profiles(store: Any, model: Any = None) -> list:
             present, value = _stored_value(store, key)
             before["settings"][key] = [bool(present), value]
     before["applied"] = applied
-    changed = _select_profile(store, ON_DEVICE_PROFILE)
+    _present, method = _stored_value(store, EXTRACTION_KEY)
+    changed = _select_profile(store, on_device_translation_profile(method))
     changed += _select_glossary_profiles(store, {bucket: ON_DEVICE_PROFILE for bucket in _GLOSSARY_PROFILE_BUCKETS})
     if review is not None:
         changed += _select_review_profile(store, ON_DEVICE_PROFILE)
@@ -666,7 +739,7 @@ def _restore_profiles_before_on_device(store: Any) -> list:
     record = record if isinstance(record, Mapping) else {}
     changed: list = []
     _present, profile = _stored_value(store, PROFILE_KEY)
-    if profile == ON_DEVICE_PROFILE:
+    if _is_on_device_translation(profile):
         previous = str(record.get(PROFILE_KEY) or "")
         # nothing was stored before: the first profile again, as before
         changed += _select_profile(store, previous) if previous else _unset(store, PROFILE_KEY)
@@ -737,6 +810,8 @@ def write_setting(store: Any, key: Any, value: Any) -> list:
         return _write_streaming(store, value)
     if key == "model":
         return _write_model(store, value)
+    if key == EXTRACTION_KEY:
+        return _write_extraction_method(store, value)
     snapshot = getattr(store, "snapshot", None)
     if key not in RULE_KEYS or not callable(snapshot):
         return _set_many(store, {key: value})

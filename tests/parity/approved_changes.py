@@ -53,13 +53,23 @@ _SAFETY_CATEGORY_ENV_PAIR = _after(
     "                ('GEMINI_SAFETY_THRESHOLD', str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE'))),",
     "                ('GEMINI_SAFETY_CATEGORY_THRESHOLDS', json.dumps(self.config.get('gemini_safety_category_thresholds') or {})),")
 
-# 2026-10-18 built-in "On-device" translation prompt profile (small on-device models)
+# 2026-10-18 built-in On-device translation prompt profiles (small on-device models); 2026-10-19 split by
+# text extraction method: On-device_BeautifulSoup (html tags, the default) and On-device_html2text (markdown)
 _ON_DEVICE_PROMPT = "You must only output {target_lang} translations with html tags."
+_ON_DEVICE_HTML2TEXT_PROMPT = "You must only output {target_lang} translations with markdown."
 # one row patches both identical lists (always_include_profiles and the protected set)
-_ON_DEVICE_PROFILE_LIST_ROW = _after('            "Subtitle Translation",', '            "On-device",')
+_ON_DEVICE_PROFILE_LIST_ROW = _after('            "Subtitle Translation",', '            "On-device_BeautifulSoup",',
+                                     '            "On-device_html2text",')
 _ON_DEVICE_DEFAULT_PROMPT_ROW = _after(
     '            "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,',
-    f'            "On-device": "{_ON_DEVICE_PROMPT}",')
+    f'            "On-device_BeautifulSoup": "{_ON_DEVICE_PROMPT}",',
+    f'            "On-device_html2text": "{_ON_DEVICE_HTML2TEXT_PROMPT}",')
+# start-up migration of a stored "On-device" (prompt_profiles.migrate_renamed_builtin_profiles)
+_ON_DEVICE_MIGRATION_ROW = _after(
+    "        # Profiles",
+    '        # built-in profiles renamed since (2026-10-19: "On-device" -> "On-device_BeautifulSoup")',
+    "        from prompt_profiles import migrate_renamed_builtin_profiles",
+    "        migrate_renamed_builtin_profiles(self.config)")
 
 # 2026-10-18 {split_marker_instruction} stays where the user put it: filled in place, or its own
 # line removed without joining the lines around it (prompt_defaults.apply_split_marker_instruction)
@@ -252,17 +262,21 @@ APPROVED = (
     },
     {
         "date": "2026-10-18",
-        "what": "Built-in 'On-device' prompt profile (always included, cannot be deleted) for small "
-                "on-device models; the mobile app selects it when a local/ model is chosen",
+        "what": "Built-in 'On-device_BeautifulSoup' / 'On-device_html2text' prompt profiles (always included, "
+                "cannot be deleted) for small on-device models; the mobile app selects the one matching the text "
+                "extraction method when a local/ model is chosen",
         "source": {
-            "src/owner_state.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW],
-            "src/translator_gui.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW],
+            "src/owner_state.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW, _ON_DEVICE_MIGRATION_ROW],
+            "src/translator_gui.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW,
+                                      _ON_DEVICE_MIGRATION_ROW],
         },
         "values": {},
         # recorded profile dicts (under these keys) gain the new profile after the anchor key
         "inserts": [
             {"parents": ("default_prompts", "prompt_profiles"), "after": "Subtitle Translation",
-             "key": "On-device", "value": _ON_DEVICE_PROMPT},
+             "key": "On-device_BeautifulSoup", "value": _ON_DEVICE_PROMPT},
+            {"parents": ("default_prompts", "prompt_profiles"), "after": "On-device_BeautifulSoup",
+             "key": "On-device_html2text", "value": _ON_DEVICE_HTML2TEXT_PROMPT},
         ],
     },
     {

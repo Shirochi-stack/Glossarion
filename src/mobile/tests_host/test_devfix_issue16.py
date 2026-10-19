@@ -101,13 +101,15 @@ app_env = _TB.app_env
 BUILTINS = ["Universal", "Refinement", "Korean_BeautifulSoup", "Japanese_BeautifulSoup", "Chinese_BeautifulSoup",
             "Korean_html2text", "Japanese_html2text", "Chinese_html2text", "Manga_JP", "Manga_KR", "Manga_CN",
             "Glossary_Editor", "RPGMaker_GTool", "RPGMaker_GTool_Image", "NanoBanana_Image", "Original",
-            "SDLXLIFF Editing v2", "Subtitle Translation", "On-device"]
+            "SDLXLIFF Editing v2", "Subtitle Translation", "On-device_BeautifulSoup",
+            "On-device_html2text"]
 #: Owner decision: the chat picker's "Specialised" group (task-specific built-ins), after the translation ones.
 SPECIALISED = ["Refinement", "Manga_JP", "Manga_KR", "Manga_CN", "Glossary_Editor", "RPGMaker_GTool",
                "RPGMaker_GTool_Image", "NanoBanana_Image", "Original", "SDLXLIFF Editing v2", "Subtitle Translation"]
 TRANSLATION = [name for name in BUILTINS if name not in SPECIALISED]
 #: Built-ins an older desktop config does not have yet (the desktop start-up adds them).
-NEWER_BUILTINS = ("NanoBanana_Image", "SDLXLIFF Editing v2", "Subtitle Translation", "On-device")
+NEWER_BUILTINS = ("NanoBanana_Image", "SDLXLIFF Editing v2", "Subtitle Translation", "On-device_BeautifulSoup",
+                  "On-device_html2text")
 
 WUXIA, CASUAL, RENAME_ME, RENAMED = "Wuxia House Style", "Casual KR", "Rename Me", "Renamed KR"
 #: Unique lines in the custom profiles' prompts: a run's request shows which profile it really used.
@@ -429,7 +431,8 @@ def test_owner_issue16_fresh_install_lists_every_builtin_profile(isolated):
             assert model_sheet is not None, "/profile did not open the ModelSheet"
             _assert_sheet_grouped(model_sheet.profile_rows(), BUILTINS)
             assert TRANSLATION == ["Universal", "Korean_BeautifulSoup", "Japanese_BeautifulSoup", "Chinese_BeautifulSoup",
-                                   "Korean_html2text", "Japanese_html2text", "Chinese_html2text", "On-device"]
+                                   "Korean_html2text", "Japanese_html2text", "Chinese_html2text", "On-device_BeautifulSoup",
+                                   "On-device_html2text"]
             for name in ("Manga_JP", "Subtitle Translation", "Korean_BeautifulSoup"):
                 assert model_sheet._profile_preview(name), f"no preview for the built-in {name} on a fresh config"
                 await driver.wait(key=f"profile-{name}", timeout=5)
