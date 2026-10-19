@@ -21,12 +21,11 @@ OpenAI server (``diagnostics.fake_llm_server``, the E2E fixture) on 127.0.0.1.
    root): chat B's book is queued behind chat A's and parks on the model while A finishes. A's move
    waits (nothing appears in B's run root), and both books land in the real output root once the
    queue is idle.
-3. ``test_name_clash_same_book_merges_other_book_asks``: the same book sent again from another chat
-   merges into its Library folder silently; a different book with the same file name stays in the
-   chat, the snackbar's "Merge…" opens the desktop "Attachment folder already exists" dialog and
-   "Merge and replace" moves it. ``test_a_different_book_at_the_same_inbox_path_is_not_merged_silently``:
-   a different book that lands at the same Inbox path (the first copy was deleted) is a different
-   book too: it must ask, not replace the Library book's translation.
+3. ``test_name_clash_reuses_the_library_book``: the same book sent again from another chat merges
+   into its Library folder silently, and so does a different book with the same file name (owner
+   2026-10-19: no "A Library book named … already exists" snackbar; the previous book is reused).
+   ``test_a_different_book_at_the_same_inbox_path_reuses_the_library_book``: likewise for a book
+   that lands at the same Inbox path after the first copy was deleted.
 4. ``test_scratch_chat_and_stopped_run_stay_put``: a scratch chat's book never leaves its scratch
    folder; a run stopped with the composer's Stop stays in Attachments (Resume, "Open in Library"
    off with its reason, idle sweeps leave it, the Attachments manager lists it without Migrate)
@@ -548,9 +547,8 @@ def test_the_next_queued_job_never_receives_the_move(iso, migrate_calls):
 # ==========================================================================
 
 
-def test_name_clash_same_book_merges_other_book_asks(iso, migrate_calls):
+def test_name_clash_reuses_the_library_book(iso, migrate_calls):
     from glossarion_mobile.diagnostics import fixtures
-    from glossarion_mobile.ui.chat.attachments import MERGE_TITLE
 
     source = iso.picks / "Clash.epub"
     shutil.copyfile(SELFTEST_EPUB, source)
@@ -589,29 +587,14 @@ def test_name_clash_same_book_merges_other_book_asks(iso, migrate_calls):
             folders = {m[4] for m in chats.messages(cid2) if m[0] == "assistant" and len(m) > 4 and m[4]}
             assert any(_same(f, target) for f in folders), folders
 
-            # a different book with the same file name: it stays in the chat until the user decides
+            # a different book with the same file name: the Library book is reused quietly
             cid3 = chats.new_chat()
             assert cid3 not in (cid1, cid2)
-            before = (target / "translation_progress.json").read_bytes()
-            calls_before = len(migrate_calls)
             run3 = await _send(app, driver, cid3, str(stranger))
             await _finish(app, run3)
             assert run3.state == "done", run3.state
-            folders3 = chats.attachment_folders(cid3)
-            assert len(folders3) == 1 and Path(folders3[0]).name == "Clash", folders3
-            assert (target / "translation_progress.json").read_bytes() == before
-            assert len(migrate_calls) == calls_before, migrate_calls[calls_before:]
-            clash = [n for n in notes if n[0] == "A Library book named Clash already exists"]
-            assert clash and clash[-1][1] == "Merge…", [n[:2] for n in notes]
-            # a later sweep (queue idle) leaves it and does not nag again
-            await feature.sweep("test")
-            assert chats.attachment_folders(cid3) == folders3
-            assert len([n for n in notes if n[0].startswith("A Library book named")]) == 1
-            # the snackbar action -> the desktop dialog -> Merge and replace
-            await tester._dispatch(clash[-1][3], "action")
-            await driver.wait(text=MERGE_TITLE, timeout=10)
-            await driver.tap(text="Merge and replace")
             assert await _until(lambda: chats.attachment_folders(cid3) == [], 30), chats.attachment_folders(cid3)
+            assert not [n for n in notes if n[0].startswith("A Library book named")], [n[:2] for n in notes]
             assert await _until(lambda: len([n for n in notes if n[0] == "Added to the Library"]) >= 3, 10), \
                 [n[:2] for n in notes]
             assert (target / "source_epub.txt").is_file()
@@ -625,12 +608,10 @@ def test_name_clash_same_book_merges_other_book_asks(iso, migrate_calls):
     _run_scenario(scenario)
 
 
-def test_a_different_book_at_the_same_inbox_path_is_not_merged_silently(iso, migrate_calls):
-    """The same-book rule must look at the book, not only at the path ``source_epub.txt`` names: the
-    Inbox copy of a translated book is deleted (Files › Inbox) and later a DIFFERENT book with the
-    same file name is picked, so FileBridge puts it at the very same Inbox path. Its finished chat
-    workspace must stay in the chat and ask (the name-clash snackbar), never replace the Library
-    book's translation without a word."""
+def test_a_different_book_at_the_same_inbox_path_reuses_the_library_book(iso, migrate_calls):
+    """The Inbox copy of a translated book is deleted (Files › Inbox) and later a different book with
+    the same file name is picked, so FileBridge puts it at the very same Inbox path. Its finished chat
+    workspace merges into the same-named Library book without a snackbar (owner 2026-10-19)."""
     from glossarion_mobile.diagnostics import fixtures
 
     source = iso.picks / "Clash.epub"
@@ -660,13 +641,11 @@ def test_a_different_book_at_the_same_inbox_path_is_not_merged_silently(iso, mig
             run2 = await _send(app, driver, cid2, raw2)
             await _finish(app, run2)
             assert run2.state == "done", run2.state
-            folders = chats.attachment_folders(cid2)
-            assert len(folders) == 1 and Path(folders[0]).name == "Clash", \
-                (f"the other book was merged into the Library book silently: attachments {folders}, "
-                 f"Library progress now {_progress(target)}, snackbars {[n[:2] for n in notes]}")
-            assert (target / "translation_progress.json").read_bytes() == before
-            assert not [c for c in migrate_calls if c["chat"] == str(cid2)], migrate_calls
-            assert [n for n in notes if n[0] == "A Library book named Clash already exists"], [n[:2] for n in notes]
+            assert await _until(lambda: chats.attachment_folders(cid2) == [], 30), chats.attachment_folders(cid2)
+            assert before
+            merged = [c for c in migrate_calls if c["chat"] == str(cid2)]
+            assert len(merged) == 1 and merged[0]["merge_callback"] and merged[0]["result"].get("ok"), migrate_calls
+            assert not [n for n in notes if n[0].startswith("A Library book named")], [n[:2] for n in notes]
         finally:
             await _stop_app(tf, app)
 

@@ -1717,11 +1717,10 @@ def test_auto_migrate_waits_while_a_job_holds_the_lock(desktop_store_cls, tmp_pa
     adapter.close()
 
 
-def test_auto_migrate_merges_the_same_book_and_asks_for_another(desktop_store_cls, tmp_path, iso_env):
-    """A same-named Library folder of the SAME book (its source_epub.txt points at the same raw) is
-    merged into silently (the newest compiled document kept); a different book's folder is left
-    alone: the workspace stays in Attachments and the snackbar's action opens the desktop
-    "Attachment folder already exists" dialog, whose Merge and replace moves it."""
+def test_auto_migrate_reuses_a_same_named_library_book_quietly(desktop_store_cls, tmp_path, iso_env):
+    """A same-named Library folder is merged into silently (the newest compiled document kept), also
+    when its source_epub.txt points at another raw (owner 2026-10-19: no "A Library book named …
+    already exists" snackbar; the previous book is reused quietly)."""
     _TC._desktop_history(tmp_path)
     adapter = _adapter(desktop_store_cls, tmp_path, save_delay=0.01)
     jobs = _IdleJobs()
@@ -1744,17 +1743,11 @@ def test_auto_migrate_merges_the_same_book_and_asks_for_another(desktop_store_cl
     foreign = _write_workspace(iso_env.out / "other", stranger)
     before = (foreign / "translation_progress.json").read_bytes()
     outcome = feature.auto_migrate_blocking("2", str(second))
-    assert outcome["status"] == "collision" and second.is_dir()
-    assert (foreign / "translation_progress.json").read_bytes() == before
+    assert outcome["status"] == "moved" and outcome["reason"] == "merged" and not second.exists()
+    assert (foreign / "source_epub.txt").read_text(encoding="utf-8") == str(other_raw)
+    assert before is not None
     feature._announce(outcome)
-    feature._announce(outcome)  # once per workspace and session
-    collisions = [n for n in notes if n and str(n[0]).startswith("A Library book named")]
-    assert collisions == [notes[-1]] and notes[-1][:2] == ("A Library book named other already exists", "Merge…")
-    dialog = notes[-1][2]()
-    assert dialog.title == "Attachment folder already exists"
-    asyncio.run(dialog._on_confirm())
-    assert dialog.result is True and not second.exists() and (foreign / "source_epub.txt").read_text(
-        encoding="utf-8") == str(other_raw)
+    assert not [n for n in notes if n and str(n[0]).startswith("A Library book named")], notes
     assert notes[-1] == ("Added to the Library",)
     adapter.close()
 

@@ -1295,9 +1295,9 @@ class ChatFeature:
                 if any(_inside(target, root) for root in run_roots):
                     # OUTPUT_DIRECTORY still names a run root: not the real output folder
                     return done(MIGRATE_DEFERRED, "the output folder points at a run root", jobs_running=True)
+                # an existing Library folder of the same name is reused quietly: the workspace merges into
+                # it (owner 2026-10-19: no "A Library book named … already exists" snackbar)
                 merge = os.path.exists(target)
-                if merge and _norm(folder) not in self._merge_approved and not self._same_book(target, folder, source):
-                    return done(MIGRATE_COLLISION, "a different Library book has this name")
                 result = self.chats.migrate_attachment(cid, folder, (lambda _target: True) if merge else None)
             finally:
                 if lock is not None:
