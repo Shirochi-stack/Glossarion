@@ -1663,6 +1663,37 @@ class ChatStoreAdapter:
         self._changed(cid)
         return result
 
+    def rename_attachment_workspace(self, cid: Any, folder: str, name: str) -> str:
+        """Blocking: rename one managed ``Attachments/<stem>`` workspace to ``Attachments/<name>`` (the stored
+        paths follow, the shared ``_relocate_session_attachment_paths``), so Migrate merges it into the
+        Library folder of that name. Returns the renamed folder ('' when it is not a managed workspace of
+        this chat, the name is taken or the rename failed)."""
+        session = self.session(cid)
+        name = os.path.basename(str(name or ""))
+        if session is None or not name:
+            return ""
+        binding = self.binding_for(cid)
+        if not binding.is_managed_attachment_workspace(session, folder):
+            return ""
+        source = os.path.realpath(os.path.abspath(str(folder)))
+        target = os.path.join(os.path.dirname(source), name)
+        if os.path.normcase(target) == os.path.normcase(source):
+            return source
+        with self._store_lock(cid):
+            if os.path.exists(target):
+                return ""
+            try:
+                os.rename(source, target)
+            except OSError:
+                log.warning("renaming the attachment workspace %s failed", source, exc_info=True)
+                return ""
+            binding.relocate(session, source, target)
+        with self._lock:
+            self._bodies = OrderedDict((k, v) for k, v in self._bodies.items() if k[0] != session.get("id"))
+        self.attachment_folders(cid)
+        self._changed(cid)
+        return target
+
     def migration_target(self, cid: Any, folder: str) -> str:
         """The folder Migrate would create (exists -> the desktop "Attachment folder already exists" choice)."""
         session = self.session(cid)
