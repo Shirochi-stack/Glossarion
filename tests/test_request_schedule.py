@@ -595,6 +595,17 @@ def test_schedule_dialog_edits_presets_and_zones(monkeypatch):
     dialog = mkm.RequestScheduleDialog(None, None, mode="queue", subject="deepseek-chat")
     assert dialog._schedule() == DEEPSEEK_PEAK_SCHEDULE
     assert "Suggested" in dialog.preview_label.text() and "UTC" in dialog.preview_label.text()
+    # off by default: the body is greyed out and Save keeps the windows switched off
+    assert not dialog.enable_check.isChecked() and not dialog.body.isEnabled()
+    assert dialog.preview_label.text().startswith(rs.OFF_PREVIEW_LINE)
+    dialog._save()
+    assert dialog.result_config == rs.to_config(DEEPSEEK_PEAK_SCHEDULE, enabled=False)
+    assert rs.from_config(dialog.result_config) is None
+    reopened = mkm.RequestScheduleDialog(None, dialog.result_config, mode="queue")
+    assert not reopened.enable_check.isChecked() and reopened._schedule() == DEEPSEEK_PEAK_SCHEDULE
+    assert not reopened._suggested
+    dialog.enable_check.setChecked(True)
+    assert dialog.body.isEnabled()
     dialog._save()
     assert dialog.result_config == rs.to_config(DEEPSEEK_PEAK_SCHEDULE)
     # switching "Times are in" rewrites the same instants in that zone

@@ -104,7 +104,11 @@ def test_schedule_sheet_suggests_deepseek_and_saves_edits():
         # nothing saved: the DeepSeek peak hours are suggested, kept in UTC
         assert sheet.schedule() == (rs.DEEPSEEK_PEAK_SCHEDULE, None) and sheet.zone_dropdown.value == "UTC"
         preview = sheet.preview_text.value
-        assert preview.startswith("Suggested: DeepSeek peak hours")
+        # off by default: the windows are dimmed until the switch is turned on
+        assert not sheet.enabled and sheet.body.disabled and preview.startswith(rs.OFF_PREVIEW_LINE)
+        assert "Suggested: DeepSeek peak hours" in preview
+        assert sheet.set_enabled(True) and not sheet.body.disabled
+        assert sheet.preview_text.value.startswith("Suggested: DeepSeek peak hours")
         assert "• UTC: 01:00–04:00, 06:00–10:00 (UTC), Mon–Fri" in preview and "inside a window until" in preview
         # edit a time (a phone keyboard may drop the colon), add / remove a window, tick Saturday
         sheet.rows[0][1].value = "0030"
@@ -227,6 +231,7 @@ def test_keys_screen_schedule_entries_status_and_clear(tmp_path):
         # ⏳ Request Queue for both keys: the DeepSeek preset is suggested, Save writes it to each
         sheet = screen.open_schedule_sheet("queue")
         assert isinstance(sheet, ScheduleSheet) and sheet.title == "⏳ Request Queue · 2 keys" and sheet.suggested
+        assert not sheet.enabled and sheet.set_enabled(True)
         assert sheet.save() is None
         assert [k.get("queue_schedule") for k in keys.keys("main")] == [DEEPSEEK, DEEPSEEK]
         assert notes[-1] == "Request Queue saved for 2 key(s)"
@@ -238,7 +243,8 @@ def test_keys_screen_schedule_entries_status_and_clear(tmp_path):
         screen.clear_selection()
         screen.toggle_select(0)
         sheet = screen.open_schedule_sheet("disable")
-        assert sheet.title == "🗓️ Disable schedule · deepseek-chat" and sheet.save() is None
+        assert sheet.title == "🗓️ Disable schedule · deepseek-chat" and sheet.set_enabled(True)
+        assert sheet.save() is None
         assert keys.keys("main")[0]["disable_schedule"] == DEEPSEEK and "disable_schedule" not in keys.keys("main")[1]
         disabled = rs.key_schedule_summary({"disable_schedule": DEEPSEEK}, now=now)[0]
         assert disabled.startswith("🗓️ Disabled until ") and _find_text(screen.cards[0], lambda v: v == disabled)
@@ -313,6 +319,7 @@ def test_model_sheet_request_queue_entry_saves_the_main_key_schedule(tmp_path):
         queue = sheet.open_request_queue()
         assert isinstance(queue, ScheduleSheet) and queue.mode == "main_queue" and queue.suggested
         assert queue.title == "⏳ Request Queue · deepseek-chat"
+        assert not queue.enabled and queue.set_enabled(True)
         assert queue.save() is None
         assert store.get("request_queue_schedule") == DEEPSEEK
         assert MK._on_disk(store)["request_queue_schedule"] == DEEPSEEK
@@ -349,6 +356,7 @@ def test_settings_tile_opens_the_schedule_sheet(tmp_path):
         assert tile.summary() == "Off: requests are sent at once"
         editor = tile.activate()
         assert isinstance(editor, ScheduleSheet) and editor.mode == "main_queue" and editor.sheet.open
+        assert not editor.enabled and editor.set_enabled(True)
         assert editor.save() is None and store.get("request_queue_schedule") == DEEPSEEK
         assert tile.summary() == queue_summary(DEEPSEEK) and tile.summary().startswith("⏳ Request Queue · ")
         store._saver.close()

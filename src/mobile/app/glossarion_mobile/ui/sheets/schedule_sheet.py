@@ -107,8 +107,16 @@ class ScheduleSheet:
         self.result: Optional[dict] = None
         self.rows: list = []  # [(row control, start field, end field)]
         self.zone = "local"
-        current = rs.from_config(schedule)
+        current, enabled = rs.editable_config(schedule)
         self.suggested = current is None  # nothing saved: the DeepSeek preset is a suggestion
+        # Off by default: everything below is disabled (greyed out) until the schedule is enabled
+        self.enable_switch = ft.Switch(value=bool(enabled), key="schedule-enabled",
+                                       on_change=lambda e: self.set_enabled(bool(e.control.value)))
+        self.enable_row = ft.Row([self.enable_switch, ft.Container(
+            content=ft.Text(rs.ENABLE_LABELS.get(self.mode, rs.ENABLE_LABELS["queue"]),
+                            theme_style=ft.TextThemeStyle.BODY_LARGE),
+            expand=True, on_click=lambda e: self.set_enabled(not self.enable_switch.value))],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER)
         title, explanation = rs.EDITOR_MODES[self.mode]
         self.title = f"{title} · {subject}" if subject else title
         self.zone_dropdown = ft.Dropdown(label="Times are in", dense=True, expand=True, key="schedule-zone",
@@ -136,9 +144,7 @@ class ScheduleSheet:
         def heading(text: str) -> ft.Text:
             return ft.Text(text, theme_style=ft.TextThemeStyle.LABEL_LARGE, weight=ft.FontWeight.W_600)
 
-        self.sheet = bottom_sheet(sheet_frame(scroll_column([
-            ft.Text(self.title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600),
-            ft.Text(explanation, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+        self.body = ft.Column([
             ft.Row([self.zone_dropdown]),
             heading("Windows (start → end; an end before the start runs past midnight)"),
             self.rows_column,
@@ -150,6 +156,13 @@ class ScheduleSheet:
             ft.Row([self.preview_zone_dropdown]),
             self.preview_text,
             self.error,
+        ], tight=True, spacing=10, disabled=not enabled, opacity=1.0 if enabled else 0.5, key="schedule-body")
+
+        self.sheet = bottom_sheet(sheet_frame(scroll_column([
+            ft.Text(self.title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600),
+            ft.Text(explanation, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
+            self.enable_row,
+            self.body,
         ], footer=[ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.close(), key="schedule-cancel"),
                            self.save_button], alignment=ft.MainAxisAlignment.END)])))
         self.load(current or rs.DEEPSEEK_PEAK_SCHEDULE, push=False)
@@ -209,6 +222,19 @@ class ScheduleSheet:
             _push(self.rows_column, self.zone_dropdown, *self.day_chips)
         self.update_preview(push=push)
 
+    @property
+    def enabled(self) -> bool:
+        return bool(self.enable_switch.value)
+
+    def set_enabled(self, on: bool) -> bool:
+        """The off-by-default switch: the rest of the sheet is disabled and dimmed while off."""
+        self.enable_switch.value = bool(on)
+        self.body.disabled = not on
+        self.body.opacity = 1.0 if on else 0.5
+        _push(self.enable_switch, self.body)
+        self.update_preview()
+        return bool(on)
+
     def use_deepseek(self) -> None:
         """🐋 Use DeepSeek peak hours (kept in UTC)."""
         self.load(self.rs.DEEPSEEK_PEAK_SCHEDULE)
@@ -253,8 +279,9 @@ class ScheduleSheet:
         schedule, error = self.schedule()
         if error:
             return [error]
-        return self.rs.preview_lines(schedule, self.preview_zone_dropdown.value, suggested=self.suggested,
-                                     now=self._clock())
+        lines = self.rs.preview_lines(schedule, self.preview_zone_dropdown.value, suggested=self.suggested,
+                                      now=self._clock())
+        return lines if self.enabled else [self.rs.OFF_PREVIEW_LINE] + lines
 
     def update_preview(self, *, push: bool = True) -> str:
         text = "\n".join(self.preview_lines())
@@ -327,11 +354,11 @@ class ScheduleSheet:
         if error:
             self._show_error(error)
             return error
-        if schedule.windows and not schedule.weekdays:
+        if self.enabled and schedule.windows and not schedule.weekdays:
             message = "Tick at least one day, or use 🧹 Clear schedule."
             self._show_error(message)
             return message
-        return self._finish(self.rs.to_config(schedule))
+        return self._finish(self.rs.to_config(schedule, enabled=self.enabled))
 
     def clear(self) -> Optional[str]:
         """🧹 Clear schedule: removes it and closes."""

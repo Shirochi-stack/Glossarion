@@ -17275,10 +17275,15 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         refresh_action = menu.addAction("🌐 Refresh Online Models")
         manage_action = menu.addAction("⚙️ Manage Models...")
         menu.addSeparator()
-        # ⏳ Request Queue of the main key (checked while a schedule is saved)
+        # ⏳ Request Queue of the main key (checked while a schedule is enabled)
         queue_action = menu.addAction("⏳ Request Queue…")
         queue_action.setCheckable(True)
-        queue_action.setChecked(bool(self.config.get('request_queue_schedule')))
+        try:
+            import request_schedule as _request_schedule
+            queue_on = _request_schedule.from_config(self.config.get('request_queue_schedule')) is not None
+        except Exception:
+            queue_on = False
+        queue_action.setChecked(queue_on)
         queue_action.setToolTip("Requests wait before sending during the schedule's windows")
 
         action = menu.exec(self.model_combo.mapToGlobal(position))
@@ -17331,8 +17336,10 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self.config[request_schedule.MAIN_QUEUE_CONFIG_KEY] = dict(result)
         os.environ[request_schedule.MAIN_QUEUE_ENV] = _json.dumps(result)
         self.save_config(show_message=False)
-        if result:
+        if request_schedule.from_config(result) is not None:
             self.append_log(f"⏳ Request Queue set for the main key: {request_schedule.describe(result)}")
+        elif result:
+            self.append_log("⏳ Request Queue saved but turned off for the main key")
         else:
             self.append_log("⏳ Request Queue removed for the main key")
 

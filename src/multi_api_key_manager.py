@@ -1966,6 +1966,49 @@ class RefusalPatternsDialog(QDialog):
                 pass
 
 
+def _halgakos_icon_path(base_dir=''):
+    """Return the best available Halgakos icon path for Qt stylesheets."""
+    candidates = []
+    if base_dir:
+        candidates.append(os.path.join(base_dir, 'Halgakos.ico'))
+    candidates.extend([
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico'),
+        os.path.join(os.getcwd(), 'Halgakos.ico'),
+    ])
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return candidates[0] if candidates else 'Halgakos.ico'
+
+
+def _apply_halgakos_combobox_icon(combobox, icon_path=None):
+    """Use Halgakos.ico as the dropdown arrow for a combo box."""
+    icon_path = (icon_path or _halgakos_icon_path()).replace('\\', '/')
+    arrow_style = f"""
+        QComboBox {{
+            padding-right: 0px;
+        }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 32px;
+            border-left: 1px solid #4a5568;
+        }}
+        QComboBox::down-arrow {{
+            image: url("{icon_path}");
+            width: 16px;
+            height: 16px;
+        }}
+        QComboBox::down-arrow:on {{
+            top: 1px;
+            left: 1px;
+        }}
+    """
+    existing = combobox.styleSheet()
+    combobox.setStyleSheet(f"{existing}\n{arrow_style}" if existing else arrow_style)
+    return combobox
+
+
 class RequestScheduleDialog(QDialog):
     """One schedule editor for every time-based key setting (request_schedule).
 
@@ -1985,13 +2028,25 @@ class RequestScheduleDialog(QDialog):
         self.result_config = None
         self._rows = []
         self._zone = 'local'
-        current = request_schedule.from_config(schedule)
+        current, enabled = request_schedule.editable_config(schedule)
         self._suggested = current is None
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
         text = QLabel(explanation)
         text.setWordWrap(True)
-        layout.addWidget(text)
+        outer.addWidget(text)
+
+        # Off by default: everything below is greyed out until the schedule is enabled
+        self.enable_check = MultiAPIKeyDialog._create_styled_checkbox(
+            self, request_schedule.ENABLE_LABELS.get(mode, request_schedule.ENABLE_LABELS['queue']))
+        self.enable_check.setChecked(bool(enabled))
+        outer.addWidget(self.enable_check)
+        self.body = QWidget()
+        layout = QVBoxLayout(self.body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.body)
+        self.body.setEnabled(bool(enabled))
+        self.enable_check.toggled.connect(self._on_enabled_toggled)
 
         zone_row = QHBoxLayout()
         zone_row.addWidget(QLabel("Times are in:"))
@@ -2052,7 +2107,7 @@ class RequestScheduleDialog(QDialog):
             button.setMinimumWidth(120)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        outer.addWidget(buttons)
 
         self._load(current or request_schedule.DEEPSEEK_PEAK_SCHEDULE)
         self.resize(640, 640)
@@ -2065,6 +2120,7 @@ class RequestScheduleDialog(QDialog):
         for label, zone in request_schedule.zone_choices(include_local):
             combo.addItem(label, zone)
         combo.setToolTip("Pick a zone or type an IANA name (e.g. Asia/Shanghai)")
+        _apply_halgakos_combobox_icon(combo, _halgakos_icon_path(getattr(self.parent(), 'base_dir', '')))
         return combo
 
     @staticmethod
@@ -2157,11 +2213,17 @@ class RequestScheduleDialog(QDialog):
             self._zone = zone
             self._update_preview()
 
+    def _on_enabled_toggled(self, checked):
+        self.body.setEnabled(bool(checked))
+        self._update_preview()
+
     def _update_preview(self, *_args):
         if not hasattr(self, 'preview_label'):
             return
         lines = request_schedule.preview_lines(self._schedule(), self._combo_zone(self.preview_zone_combo),
                                                suggested=self._suggested)
+        if not self.enable_check.isChecked():
+            lines = [request_schedule.OFF_PREVIEW_LINE] + lines
         self.preview_label.setText("\n".join(lines))
 
     def _clear_and_accept(self):
@@ -2170,10 +2232,11 @@ class RequestScheduleDialog(QDialog):
 
     def _save(self):
         schedule = self._schedule()
-        if schedule.windows and not schedule.weekdays:
+        enabled = self.enable_check.isChecked()
+        if enabled and schedule.windows and not schedule.weekdays:
             QMessageBox.warning(self, "No days", "Tick at least one day, or use 🧹 Clear schedule.")
             return
-        self.result_config = request_schedule.to_config(schedule)
+        self.result_config = request_schedule.to_config(schedule, enabled=enabled)
         self.accept()
 
 
@@ -2818,46 +2881,15 @@ class MultiAPIKeyDialog(QDialog):
 
     def _halgakos_icon_path(self):
         """Return the best available Halgakos icon path for Qt stylesheets."""
-        candidates = []
         try:
-            candidates.append(os.path.join(getattr(self.translator_gui, 'base_dir', ''), 'Halgakos.ico'))
+            base_dir = getattr(self.translator_gui, 'base_dir', '')
         except Exception:
-            pass
-        candidates.extend([
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico'),
-            os.path.join(os.getcwd(), 'Halgakos.ico'),
-        ])
-        for path in candidates:
-            if path and os.path.exists(path):
-                return path
-        return candidates[0] if candidates else 'Halgakos.ico'
+            base_dir = ''
+        return _halgakos_icon_path(base_dir)
 
     def _apply_combobox_icon(self, combobox):
         """Use Halgakos.ico as the dropdown arrow for a combo box."""
-        icon_path = self._halgakos_icon_path().replace('\\', '/')
-        arrow_style = f"""
-            QComboBox {{
-                padding-right: 0px;
-            }}
-            QComboBox::drop-down {{
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 32px;
-                border-left: 1px solid #4a5568;
-            }}
-            QComboBox::down-arrow {{
-                image: url("{icon_path}");
-                width: 16px;
-                height: 16px;
-            }}
-            QComboBox::down-arrow:on {{
-                top: 1px;
-                left: 1px;
-            }}
-        """
-        existing = combobox.styleSheet()
-        combobox.setStyleSheet(f"{existing}\n{arrow_style}" if existing else arrow_style)
-        return combobox
+        return _apply_halgakos_combobox_icon(combobox, self._halgakos_icon_path())
 
     def _create_styled_checkbox(self, text):
         """Create a checkbox with proper checkmark using text overlay"""

@@ -42,7 +42,10 @@ Display
     weekday shifts); ``zone_label(tz, now)``; ``format_clock(dt, tz)``; ``format_wait(seconds)``;
     ``resolve_tz(name)``; ``common_timezones()``; ``zone_is_known(name)``.
 Editors (desktop RequestScheduleDialog, mobile ScheduleSheet)
-    ``EDITOR_MODES`` (mode -> title, explanation), ``DEEPSEEK_PRESET_HELP``,
+    ``EDITOR_MODES`` (mode -> title, explanation), ``ENABLE_LABELS`` (mode -> the off-by-default
+    on/off switch), ``OFF_PREVIEW_LINE``, ``DEEPSEEK_PRESET_HELP``,
+    ``editable_config(value)`` -> (schedule or None, enabled): the saved windows even while
+    switched off; ``to_config(schedule, enabled=False)`` saves them switched off,
     ``zone_choices(include_local=True)`` -> [(label, zone)], ``preview_lines(schedule,
     extra_zone, suggested=False)`` -> the preview text lines.
 Keys (dicts or ``APIKeyEntry`` objects)
@@ -76,6 +79,7 @@ from typing import Callable, Iterable, NamedTuple, Optional
 
 __all__ = [
     "ALL_WEEKDAYS", "DEEPSEEK_PEAK_SCHEDULE", "DEEPSEEK_PRESET_HELP", "DISABLE_FIELD", "EDITOR_MODES",
+    "ENABLE_LABELS", "OFF_PREVIEW_LINE", "editable_config", "is_enabled_config",
     "LOG_INTERVAL_SECONDS",
     "MAIN_QUEUE_CONFIG_KEY", "MAIN_QUEUE_ENV", "QUEUE_FIELD", "QueueWaiter", "Schedule",
     "ScheduleError", "WAITER", "WEEKDAYS", "WEEKDAY_NAMES", "Window", "common_timezones", "convert",
@@ -317,7 +321,7 @@ def _parse_weekdays(value) -> frozenset:
     return frozenset(out)
 
 
-def _parse(value) -> Optional[Schedule]:
+def _parse(value, honor_enabled=True) -> Optional[Schedule]:
     if value is None or value == "" or value == {} or value == []:
         return None
     if isinstance(value, Schedule):
@@ -327,10 +331,10 @@ def _parse(value) -> Optional[Schedule]:
             value = json.loads(value)
         except Exception as exc:
             raise ScheduleError(f"invalid schedule JSON: {exc}")
-        return _parse(value)
+        return _parse(value, honor_enabled)
     if not isinstance(value, dict):
         raise ScheduleError("a schedule is a JSON object")
-    if value.get("enabled", True) is False:
+    if honor_enabled and not is_enabled_config(value):
         return None
     raw_windows = value.get("windows") or []
     if not isinstance(raw_windows, (list, tuple)):
@@ -355,6 +359,27 @@ def _parse(value) -> Optional[Schedule]:
     return Schedule(tuple(windows), weekdays, tz_name)
 
 
+def is_enabled_config(value) -> bool:
+    """False when the config value is switched off ("enabled": false). Schedules are off unless
+    the user turned them on in the editor; a value without the flag (older configs) counts as on."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return True
+    return not (isinstance(value, dict) and value.get("enabled", True) is False)
+
+
+def editable_config(value):
+    """(schedule, enabled) for an editor: the saved windows even while the schedule is switched
+    off (None when nothing valid is saved) and whether it is switched on."""
+    try:
+        schedule = _parse(value, honor_enabled=False)
+    except ScheduleError:
+        schedule = None
+    return schedule, bool(schedule) and is_enabled_config(value)
+
+
 def from_config(value, strict=False) -> Optional[Schedule]:
     """The Schedule a config value holds, or None (empty / disabled / no windows / no weekdays).
     Invalid values raise :class:`ScheduleError` when *strict*, else give None."""
@@ -375,21 +400,27 @@ def validate(value) -> list:
     return []
 
 
-def to_config(schedule) -> dict:
-    """The JSON-safe config dict of *schedule* ({} for None)."""
+def to_config(schedule, enabled=True) -> dict:
+    """The JSON-safe config dict of *schedule* ({} for None). ``enabled=False`` keeps the windows
+    but switches the schedule off ("enabled": false)."""
     schedule = from_config(schedule) if not isinstance(schedule, Schedule) else schedule
     if not schedule or not schedule.windows or not schedule.weekdays:
         return {}
-    return {
+    config = {
         "windows": [{"start": format_hhmm(w.start), "end": format_hhmm(w.end)} for w in schedule.windows],
         "weekdays": sorted(schedule.weekdays),
         "timezone": schedule.timezone or "local",
     }
+    if not enabled:
+        config["enabled"] = False
+    return config
 
 
 def normalize_config(value) -> dict:
-    """The canonical config dict of *value* ({} when empty or invalid)."""
-    return to_config(from_config(value))
+    """The canonical config dict of *value* ({} when empty or invalid); a switched-off schedule
+    keeps its windows and "enabled": false."""
+    schedule, enabled = editable_config(value)
+    return to_config(schedule, enabled=enabled)
 
 
 _COERCE_CACHE: dict = {}
@@ -608,6 +639,13 @@ EDITOR_MODES = {
                    "extraction and the other runs follow it. With Translation Keys (multi-key mode) on, "
                    "each pool key's own Request Queue applies instead."),
 }
+#: The editors' on/off switch (off by default: nothing is scheduled until the user turns it on).
+ENABLE_LABELS = {
+    "disable": "🗓️ Enable Disable schedule",
+    "queue": "⏳ Enable Request Queue",
+    "main_queue": "⏳ Enable Request Queue",
+}
+OFF_PREVIEW_LINE = "Off: saving keeps these windows but nothing is scheduled until this is enabled."
 DEEPSEEK_PRESET_HELP = ("DeepSeek peak pricing: 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday "
                         "(off-peak costs half). Kept in UTC so it stays right when your clocks change.")
 
