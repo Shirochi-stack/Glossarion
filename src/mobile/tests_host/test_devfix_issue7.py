@@ -175,7 +175,7 @@ class Phone:
         self.alpha_chat_ws = finished_workspace(chat2 / "Attachments" / "alpha", self.alpha_raw)
         self.beta_ws = finished_workspace(chat5 / "Attachments" / "beta", self.beta_raw)
         self.alpha_ws = self.out / "alpha"  # where auto-migrate moves the first book
-        # A different Library book already called "beta": the second chat book stays in Direct Text
+        # A different Library book already called "beta"; the second chat book stays in Direct Text (_keep_chat_book_in_direct_text)
         self.other_raw = make_epub(data / "Elsewhere" / "beta.epub", "Another Beta", chapters=2)
         self.library_beta = finished_workspace(self.out / "beta", self.other_raw, chapters=2)
         history = {"version": 2, "current_chat_id": 2, "sessions": [
@@ -251,7 +251,24 @@ def phone_env(app_env, storage, tmp_path, monkeypatch):
         folder.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv(name, str(folder))
     monkeypatch.setenv("GLOSSARION_HTTP_LOG", "0")
+    _keep_chat_book_in_direct_text(monkeypatch, "5")
     return storage["data"], ScanRecorder(monkeypatch)
+
+
+def _keep_chat_book_in_direct_text(monkeypatch, cid: str) -> None:
+    """Chat ``cid``'s book stays in its Attachments folder (the Direct Text QA path under test). A
+    same-named Library book no longer keeps it there: it is reused quietly (owner 2026-10-19)."""
+    from glossarion_mobile.ui.chat import integration
+
+    original = integration.ChatFeature.auto_migrate_blocking
+
+    def auto_migrate_blocking(self, chat_id, folder):
+        if str(chat_id) == cid:
+            return {"cid": cid, "folder": str(folder or ""), "status": integration.MIGRATE_SKIPPED,
+                    "reason": "kept in Direct Text by the test", "target": "", "source": ""}
+        return original(self, chat_id, folder)
+
+    monkeypatch.setattr(integration.ChatFeature, "auto_migrate_blocking", auto_migrate_blocking)
 
 
 # ==========================================================================
@@ -511,7 +528,7 @@ def test_owner_phone_chat_qa_quick_scan_sample_size_zero(phone_env):
             # --- the one-time mobile migration ran at app start (before any QA screen was opened)
             assert app.config_store.get(QUICK_KEY) == 0
             assert app.prefs.get(qa_model.QUICK_SAMPLE_MIGRATION_PREF) is True
-            # --- the startup auto-migrate: alpha joins the Library, beta stays (name taken by another book)
+            # --- the startup auto-migrate: alpha joins the Library, beta stays (held by the test)
             sweep = getattr(app.chat_feature, "startup_task", None)
             if sweep is not None:
                 await asyncio.wait_for(asyncio.shield(sweep), 30)
