@@ -1921,7 +1921,7 @@ def test_on_device_prompts_format_like_the_extractors(monkeypatch, bucket):
 
     assert user_prompt == "本文"
     assert "{" not in system_prompt and "English" in system_prompt
-    assert "raw_name,translated_name,gender" in system_prompt and "田中太郎,Tanaka Taro,male" in system_prompt
+    assert "name,English name,gender" in system_prompt and "미라,Mira,female\nレン,Ren,male" in system_prompt
     assert "type" not in system_prompt and "description" not in system_prompt
     # the Minimal pass replaces its placeholders with str.replace, never str.format
     assert prompt.replace("{language}", "English") == system_prompt

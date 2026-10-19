@@ -3226,7 +3226,18 @@ GLOSSARY_PROMPT_DEFAULT_PROFILE = "Default"
 #: buckets and protected from deletion like Default. It asks only for names: one
 #: raw_name,translated_name,gender line each, which both extractors read as a character.
 GLOSSARY_PROMPT_ON_DEVICE_PROFILE = "On-device"
+# Measured on Qwen3.5 0.8B (owner 2026-10-19, 12 Korean chapters x 2 runs): about twice the
+# characters of the previous text, less junk, no echoed source. Field names such as "raw_name"
+# leaked into its replies and the "Tanaka" example was copied into real names.
 _ON_DEVICE_GLOSSARY_PROMPT = (
+    "Find the names of people in the text.\n"
+    "Write one line per name: name,{language} name,gender\n"
+    "Copy the name exactly from the text. Gender is male, female or unknown.\n"
+    "Each name once. No sentences. No other text. Example:\n"
+    "미라,Mira,female\n"
+    "レン,Ren,male"
+)
+_PREVIOUS_NAME_ONLY_PROMPT = (
     "Find the names of people in the text.\n"
     "Write one line per name: raw_name,translated_name,gender\n"
     "raw_name: copy it exactly from the text.\n"
@@ -3249,6 +3260,7 @@ PREVIOUS_ON_DEVICE_GLOSSARY_PROMPTS = {
         "Extract all {entries}.\n"
         "Output only CSV lines, one entry per line, no other text. Example:\n"
         "character,田中太郎,Tanaka Taro,male",
+        _PREVIOUS_NAME_ONLY_PROMPT,
     ),
     'minimal': (
         "List the names in the text as CSV.\n"
@@ -3256,6 +3268,7 @@ PREVIOUS_ON_DEVICE_GLOSSARY_PROMPTS = {
         "Copy raw_name exactly from the text. Write translated_name and description in {language}.\n"
         "Output only CSV lines, one entry per line, no other text. Example:\n"
         "character,田中太郎,Tanaka Taro,male,a young swordsman",
+        _PREVIOUS_NAME_ONLY_PROMPT,
     ),
 }
 

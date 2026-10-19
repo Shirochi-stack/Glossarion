@@ -3577,6 +3577,6 @@ def test_edited_on_device_prompt_is_kept(bucket):
 
 def test_on_device_prompts_ask_only_for_names():
     for bucket, prompt in gd.ON_DEVICE_GLOSSARY_PROMPTS.items():
-        assert "raw_name,translated_name,gender" in prompt and "田中太郎,Tanaka Taro,male" in prompt
+        assert "name,{language} name,gender" in prompt and prompt.endswith("미라,Mira,female\nレン,Ren,male")
         assert set(re.findall(r"\{(\w+)\}", prompt)) == {"language"}, bucket
         assert "description" not in prompt and "type" not in prompt

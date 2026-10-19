@@ -147,15 +147,14 @@ def test_builtin_on_device_glossary_profiles_are_seeded(config):
 
 
 def test_on_device_glossary_prompts_ask_only_for_names():
-    """Very short prompts a 0.8B model follows: raw_name,translated_name,gender lines, {language} the only
-    placeholder; the example row is what both extractors read as a character."""
+    """Very short prompts a 0.8B model follows: name,{language} name,gender lines, {language} the only
+    placeholder; the example rows are what both extractors read as characters."""
     import glossary_document as gd
 
     for text in gd.ON_DEVICE_GLOSSARY_PROMPTS.values():
-        assert len(text) < 300 and "raw_name,translated_name,gender" in text and "{language}" in text
+        assert len(text) < 300 and "name,{language} name,gender" in text and "{language}" in text
         assert "{fields}" not in text and "{entries}" not in text and "description" not in text
-        example = text.strip().splitlines()[-1]
-        assert example == "田中太郎,Tanaka Taro,male"
+        assert text.strip().splitlines()[-2:] == ["미라,Mira,female", "レン,Ren,male"]
 
 
 @pytest.mark.parametrize("bucket", ["balanced_full", "minimal"])
