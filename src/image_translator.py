@@ -19,6 +19,7 @@ import re
 from bs4 import BeautifulSoup
 import logging
 import time
+import request_schedule
 import queue
 import threading
 import uuid
@@ -169,9 +170,11 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
                 except Exception:
                     before_send_callback()
             start_time = time.time()
+            queue_wait_start = request_schedule.thread_wait_seconds()
             result = client.send_image(messages, image_data, temperature=temperature, 
                                      max_tokens=max_tokens, context=context)
-            elapsed = time.time() - start_time
+            # ⏳ Request Queue waits inside the client do not count as API time
+            elapsed = time.time() - start_time - (request_schedule.thread_wait_seconds() - queue_wait_start)
             result_queue.put((result, elapsed))
         except Exception as e:
             result_queue.put(e)
@@ -215,7 +218,8 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
         except queue.Empty:
             if _should_interrupt_wait():
                 raise UnifiedClientError("Image translation stopped by user", error_type="cancelled")
-            elapsed += check_interval
+            if not request_schedule.is_thread_waiting(api_thread):  # never count a Request Queue wait
+                elapsed += check_interval
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 raise UnifiedClientError(f"Image API call timed out after {chunk_timeout} seconds")
 
@@ -294,13 +298,15 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
                 except Exception:
                     before_send_callback()
             start_time = time.time()
+            queue_wait_start = request_schedule.thread_wait_seconds()
             result = client.send(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 context=context,
             )
-            elapsed = time.time() - start_time
+            # ⏳ Request Queue waits inside the client do not count as API time
+            elapsed = time.time() - start_time - (request_schedule.thread_wait_seconds() - queue_wait_start)
             result_queue.put((result, elapsed))
         except Exception as e:
             result_queue.put(e)
@@ -335,7 +341,8 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
         except queue.Empty:
             if _should_interrupt_wait():
                 raise UnifiedClientError("Text translation stopped by user", error_type="cancelled")
-            elapsed += check_interval
+            if not request_schedule.is_thread_waiting(api_thread):  # never count a Request Queue wait
+                elapsed += check_interval
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 raise UnifiedClientError(f"Text API call timed out after {chunk_timeout} seconds")
 

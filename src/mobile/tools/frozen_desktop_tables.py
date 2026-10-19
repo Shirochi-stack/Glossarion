@@ -404,6 +404,7 @@ class FrozenDesktopTables:
             ('max_retries', ['max_retries_var'], 7, lambda v: safe_int(v, 7)),
             ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
             ('respect_retry_after', ['respect_retry_after_var'], True, bool),
+            ('request_queue_schedule', ['request_queue_schedule_var'], {}, dict),
 
             # Retry settings
             ('retry_truncated', ['retry_truncated_var'], False, bool),

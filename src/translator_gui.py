@@ -17274,10 +17274,18 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         menu.addSeparator()
         refresh_action = menu.addAction("🌐 Refresh Online Models")
         manage_action = menu.addAction("⚙️ Manage Models...")
+        menu.addSeparator()
+        # ⏳ Request Queue of the main key (checked while a schedule is saved)
+        queue_action = menu.addAction("⏳ Request Queue…")
+        queue_action.setCheckable(True)
+        queue_action.setChecked(bool(self.config.get('request_queue_schedule')))
+        queue_action.setToolTip("Requests wait before sending during the schedule's windows")
 
         action = menu.exec(self.model_combo.mapToGlobal(position))
 
-        if action == refresh_action:
+        if action == queue_action:
+            self._edit_main_request_queue()
+        elif action == refresh_action:
             try:
                 active_model = self.model_combo.currentText().strip().lower()
             except Exception:
@@ -17299,6 +17307,34 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
                 clipboard.setText(self.model_combo.currentText())
         elif action == paste_action and line_edit is not None:
             line_edit.paste()
+
+    def _edit_main_request_queue(self):
+        """Model name right-click "⏳ Request Queue…": the main key's schedule (request_schedule).
+
+        Saved as config ``request_queue_schedule`` ({} = off) and exported by run_env as
+        ``REQUEST_QUEUE_SCHEDULE``; set live too, so a running job follows it from its next request.
+        """
+        import json as _json
+        import request_schedule
+        from multi_api_key_manager import edit_request_schedule
+
+        try:
+            subject = self.model_combo.currentText().strip()
+        except Exception:
+            subject = str(self.config.get('model', '') or '')
+        result = edit_request_schedule(
+            self, self.config.get(request_schedule.MAIN_QUEUE_CONFIG_KEY) or {}, mode='main_queue', subject=subject,
+        )
+        if result is None:
+            return
+        self.request_queue_schedule_var = dict(result)
+        self.config[request_schedule.MAIN_QUEUE_CONFIG_KEY] = dict(result)
+        os.environ[request_schedule.MAIN_QUEUE_ENV] = _json.dumps(result)
+        self.save_config(show_message=False)
+        if result:
+            self.append_log(f"⏳ Request Queue set for the main key: {request_schedule.describe(result)}")
+        else:
+            self.append_log("⏳ Request Queue removed for the main key")
 
     def _open_model_manager(self, *args, show=True):
         """Open a dialog for managing the model dropdown list."""

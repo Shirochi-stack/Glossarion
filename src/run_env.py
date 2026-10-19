@@ -1632,6 +1632,7 @@ class RunEnvMixin:
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
             'GEMINI_SAFETY_THRESHOLD': str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE')),
             'GEMINI_SAFETY_CATEGORY_THRESHOLDS': json.dumps(self.config.get('gemini_safety_category_thresholds') or {}),
+            'REQUEST_QUEUE_SCHEDULE': json.dumps(self.config.get('request_queue_schedule') or {}),
             'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
             'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
             'MANUAL_GLOSSARY': resolved_glossary,
@@ -2717,6 +2718,7 @@ class RunEnvMixin:
                 ('DISABLE_GEMINI_SAFETY', str(self.config.get('disable_gemini_safety', False)).lower()),
                 ('GEMINI_SAFETY_THRESHOLD', str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE'))),
                 ('GEMINI_SAFETY_CATEGORY_THRESHOLDS', json.dumps(self.config.get('gemini_safety_category_thresholds') or {})),
+                ('REQUEST_QUEUE_SCHEDULE', json.dumps(self.config.get('request_queue_schedule') or {})),
 
                 # OpenRouter (duplicates are okay; ensures presence)
                 ('OPENROUTER_USE_HTTP_ONLY', '1' if getattr(self, 'openrouter_http_only_var', False) else '0'),
@@ -3021,6 +3023,7 @@ class RunEnvMixin:
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
             'GEMINI_SAFETY_THRESHOLD': str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE')),
             'GEMINI_SAFETY_CATEGORY_THRESHOLDS': json.dumps(self.config.get('gemini_safety_category_thresholds') or {}),
+            'REQUEST_QUEUE_SCHEDULE': json.dumps(self.config.get('request_queue_schedule') or {}),
             'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
             'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),

@@ -261,6 +261,7 @@ from difflib import SequenceMatcher
 import unicodedata
 import re
 import time
+import request_schedule
 from glossary_matching import is_entry_type_token
 from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
@@ -22825,6 +22826,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         previous_local_cancel_reason = None
         try:
             start_time = time.time()
+            # ⏳ Request Queue waits inside client.send() do not count as API time
+            queue_wait_start = request_schedule.thread_wait_seconds()
             extend_deferred_batch_logs(deferred_batch_logs)
 
             # Apply chapter/chunk context in THIS thread so UnifiedClient's
@@ -22930,7 +22933,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     raw_obj = resp_obj.raw_content_object
                     # print("🧠 Captured thought signature for history in send_with_interrupt")
             
-            elapsed = time.time() - start_time
+            elapsed = time.time() - start_time - (request_schedule.thread_wait_seconds() - queue_wait_start)
             actual_model, actual_key = _capture_actual_request_metadata()
             # Include raw_obj plus concrete model/key metadata in the result tuple.
             result_queue.put((result, elapsed, raw_obj, actual_model, actual_key))
@@ -23159,7 +23162,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 except Exception:
                     pass
                 raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
-            elapsed += check_interval
+            # The chunk timeout starts after a ⏳ Request Queue wait (it never counts the wait)
+            if not request_schedule.is_thread_waiting(api_thread):
+                elapsed += check_interval
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True

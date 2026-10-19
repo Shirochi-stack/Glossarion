@@ -10,6 +10,7 @@ from request_parameters import normalize_request_parameters
 from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, context_presets, key_enabled_for_context,
                           normalize_disabled_contexts)
 import key_pool_service
+import request_schedule
 
 # GUI imports - optional for Discord bot
 _HEADLESS_IMPORT = (
@@ -27,9 +28,9 @@ try:
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
         QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox,
-        QStyledItemDelegate, QStyleOptionViewItem, QStyle, QToolButton
+        QStyledItemDelegate, QStyleOptionViewItem, QStyle, QToolButton, QTimeEdit
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect, QEvent
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect, QEvent, QTime
     from PySide6.QtGui import (
         QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform,
         QColor, QPainter, QPen, QBrush, QConicalGradient, QCursor,
@@ -72,6 +73,8 @@ except ImportError:
     QStyleOptionViewItem = object
     QStyle = object
     QToolButton = object
+    QTimeEdit = object
+    QTime = object
     QIcon = object
     QFont = object
     QPixmap = object
@@ -549,12 +552,18 @@ class APIKeyEntry:
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
                  azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None,
                  individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0,
-                 request_parameters: Optional[dict] = None, disabled_contexts=None):
+                 request_parameters: Optional[dict] = None, disabled_contexts=None,
+                 disable_schedule=None, queue_schedule=None):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
         self.enabled = enabled
         self.disabled_contexts = normalize_disabled_contexts(disabled_contexts)
+        # Time-based scheduling (request_schedule): 🗓️ Disable schedule / ⏳ Request Queue windows
+        self.disable_schedule = request_schedule.normalize_config(disable_schedule)
+        self.queue_schedule = request_schedule.normalize_config(queue_schedule)
+        # The pool's key list (APIKeyPool sets it): a queued key yields to peers outside a window
+        self._queue_peers = None
         self.google_credentials = google_credentials  # Path to Google service account JSON
         self.azure_endpoint = azure_endpoint  # Azure endpoint URL (only used if use_individual_endpoint is True)
         self.google_region = google_region  # Google Cloud region (e.g., us-east5, us-central1)
@@ -602,7 +611,18 @@ class APIKeyEntry:
         self.last_test_time = None
         self.last_test_message = None
 
+    def queue_deferred(self, context=None) -> bool:
+        """In its ⏳ Request Queue window while a usable pool peer is outside every window: key
+        selection skips it (the peers are preferred). With every usable key queued it stays
+        selectable and the request waits before sending (UnifiedClient._wait_for_request_queue)."""
+        if not getattr(self, 'queue_schedule', None):
+            return False
+        return request_schedule.queue_deferred(
+            self, getattr(self, '_queue_peers', None) or (), enabled=lambda k: key_enabled_for_context(k, context))
+
     def is_available(self, context=None) -> bool:
+        if self.queue_deferred(context):
+            return False
         with self._lock:
             if not key_enabled_for_context(self, context):
                 return False
@@ -661,7 +681,10 @@ class APIKeyEntry:
             'times_used': getattr(self, 'times_used', 0),
             'last_test_result': getattr(self, 'last_test_result', None),
             'last_test_time': getattr(self, 'last_test_time', None),
-            'last_test_message': getattr(self, 'last_test_message', None)
+            'last_test_message': getattr(self, 'last_test_message', None),
+            # Schedules are written only when set (configs without them stay unchanged)
+            **({'disable_schedule': dict(self.disable_schedule)} if getattr(self, 'disable_schedule', None) else {}),
+            **({'queue_schedule': dict(self.queue_schedule)} if getattr(self, 'queue_schedule', None) else {}),
         }
 
     @classmethod
@@ -689,6 +712,8 @@ class APIKeyEntry:
             individual_output_token_limit=data.get('individual_output_token_limit'),
             individual_key_temperature=data.get('individual_key_temperature'),
             api_call_delay=data.get('api_call_delay', 0.0),
+            disable_schedule=data.get('disable_schedule'),
+            queue_schedule=data.get('queue_schedule'),
         )
         # Restore persisted usage counter and last-test results
         entry.times_used = data.get('times_used', 0) or 0
@@ -779,8 +804,11 @@ class APIKeyPool:
                     request_parameters=key_data.get('request_parameters'),
                     individual_output_token_limit=key_data.get('individual_output_token_limit'),
                     individual_key_temperature=key_data.get('individual_key_temperature'),
-                    api_call_delay=key_data.get('api_call_delay', 0.0)
+                    api_call_delay=key_data.get('api_call_delay', 0.0),
+                    disable_schedule=key_data.get('disable_schedule'),
+                    queue_schedule=key_data.get('queue_schedule'),
                 )
+                entry._queue_peers = self.keys
                 # Load saved test results and usage counter
                 entry.times_used = key_data.get('times_used', 0)
                 entry.last_test_result = key_data.get('last_test_result', None)
@@ -958,7 +986,8 @@ class APIKeyPool:
             min_cooldown = float('inf')
 
             for i, key in enumerate(self.keys):
-                if key_enabled_for_context(key, context):  # At least check if enabled
+                # At least check if enabled; a queued key yields to usable peers outside a window
+                if key_enabled_for_context(key, context) and not key.queue_deferred(context):
                     key_id = f"Key#{i+1} ({key.model})"
                     remaining = self._rate_limit_cache.get_remaining_cooldown(key_id)
 
@@ -1123,6 +1152,7 @@ class APIKeyPool:
         """Add a new key to the pool"""
         with self.lock:
             self.keys.append(key_entry)
+            key_entry._queue_peers = self.keys
             logger.info(f"Added key for model {key_entry.model} to pool")
 
     def remove_key(self, index: int):
@@ -1934,6 +1964,261 @@ class RefusalPatternsDialog(QDialog):
                 winsound.MessageBeep(winsound.MB_OK)
             except Exception:
                 pass
+
+
+class RequestScheduleDialog(QDialog):
+    """One schedule editor for every time-based key setting (request_schedule).
+
+    Used by the Multi API Key Manager's "🗓️ Disable schedule…" / "⏳ Request Queue…" key menu
+    entries and by the main window's model-name "⏳ Request Queue…" entry. Windows are edited
+    in the zone chosen under "Times are in" (Local by default; the DeepSeek preset keeps UTC so
+    it stays right across DST); the preview shows them in local time, UTC and one more zone.
+    ``result_config`` is the saved config dict ({} = schedule removed) after ``exec()``.
+    """
+
+    MODES = {
+        'disable': ("🗓️ Disable schedule",
+                    "During these windows the key counts as disabled: requests skip it exactly like a "
+                    "manually disabled key. Outside them it is enabled again (the Enabled setting is not "
+                    "changed)."),
+        'queue': ("⏳ Request Queue",
+                  "During these windows the key is not skipped, but requests that would use it wait until "
+                  "the window ends. Other usable keys outside their windows are preferred; requests only "
+                  "wait when every usable key is queued or disabled (until the earliest window end)."),
+        'main_queue': ("⏳ Request Queue",
+                       "During these windows requests that use the main API key wait before sending until "
+                       "the window ends (logged every 3 minutes; Stop ends the wait). Translation, glossary "
+                       "extraction and the other runs follow it. With Translation Keys (multi-key mode) on, "
+                       "each pool key's own Request Queue applies instead."),
+    }
+
+    def __init__(self, parent=None, schedule=None, *, mode='queue', subject=''):
+        super().__init__(parent)
+        title, explanation = self.MODES.get(mode, self.MODES['queue'])
+        self.setWindowTitle(f"{title} — {subject}" if subject else title)
+        self.result_config = None
+        self._rows = []
+        self._zone = 'local'
+        current = request_schedule.from_config(schedule)
+        self._suggested = current is None
+
+        layout = QVBoxLayout(self)
+        text = QLabel(explanation)
+        text.setWordWrap(True)
+        layout.addWidget(text)
+
+        zone_row = QHBoxLayout()
+        zone_row.addWidget(QLabel("Times are in:"))
+        self.zone_combo = self._zone_combo()
+        self.zone_combo.activated.connect(self._on_zone_changed)
+        zone_row.addWidget(self.zone_combo, 1)
+        layout.addLayout(zone_row)
+
+        windows_box = QGroupBox("Windows (start → end; an end before the start runs past midnight)")
+        windows_outer = QVBoxLayout(windows_box)
+        self.rows_layout = QVBoxLayout()
+        windows_outer.addLayout(self.rows_layout)
+        add_button = QPushButton("➕ Add window")
+        add_button.clicked.connect(lambda: self._add_row(9 * 60, 17 * 60))
+        windows_outer.addWidget(add_button, 0, Qt.AlignLeft)
+        layout.addWidget(windows_box)
+
+        days_box = QGroupBox("Days (the day a window starts)")
+        days_layout = QHBoxLayout(days_box)
+        self.day_checks = []
+        for name in request_schedule.WEEKDAY_NAMES:
+            checkbox = MultiAPIKeyDialog._create_styled_checkbox(self, name)
+            checkbox.toggled.connect(self._update_preview)
+            days_layout.addWidget(checkbox)
+            self.day_checks.append(checkbox)
+        layout.addWidget(days_box)
+
+        presets = QHBoxLayout()
+        deepseek = QPushButton("🐋 Use DeepSeek peak hours")
+        deepseek.setToolTip("DeepSeek peak pricing: 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday "
+                            "(off-peak costs half). Kept in UTC so it stays right when your clocks change.")
+        deepseek.clicked.connect(lambda: self._load(request_schedule.DEEPSEEK_PEAK_SCHEDULE))
+        presets.addWidget(deepseek)
+        clear = QPushButton("🧹 Clear schedule")
+        clear.setToolTip("Remove this schedule and close")
+        clear.clicked.connect(self._clear_and_accept)
+        presets.addWidget(clear)
+        presets.addStretch(1)
+        layout.addLayout(presets)
+
+        preview_box = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_box)
+        also_row = QHBoxLayout()
+        also_row.addWidget(QLabel("Also show in:"))
+        self.preview_zone_combo = self._zone_combo(include_local=False)
+        self.preview_zone_combo.activated.connect(self._update_preview)
+        also_row.addWidget(self.preview_zone_combo, 1)
+        preview_layout.addLayout(also_row)
+        self.preview_label = QLabel()
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        preview_layout.addWidget(self.preview_label)
+        layout.addWidget(preview_box)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.setCenterButtons(True)
+        buttons.layout().setSpacing(16)
+        for button in buttons.buttons():
+            button.setMinimumWidth(120)
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._load(current or request_schedule.DEEPSEEK_PEAK_SCHEDULE)
+        self.resize(640, 640)
+
+    # ------------------------------------------------------------------ widgets
+    def _zone_combo(self, include_local=True):
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        if include_local:
+            combo.addItem(f"Local ({request_schedule.zone_label('local')})", 'local')
+        combo.addItem("UTC", 'UTC')
+        for name in request_schedule.common_timezones():
+            if request_schedule.zone_is_known(name):
+                combo.addItem(name, name)
+        combo.setToolTip("Pick a zone or type an IANA name (e.g. Asia/Shanghai)")
+        return combo
+
+    @staticmethod
+    def _combo_zone(combo):
+        index = combo.currentIndex()
+        text = combo.currentText().strip()
+        if index >= 0 and combo.itemText(index) == combo.currentText():
+            return combo.itemData(index) or text
+        return text or 'local'
+
+    def _set_combo_zone(self, combo, zone):
+        index = combo.findData(zone)
+        if index < 0:
+            combo.addItem(zone, zone)
+            index = combo.findData(zone)
+        combo.setCurrentIndex(index)
+
+    def _time_edit(self, minutes):
+        edit = QTimeEdit(QTime(minutes // 60, minutes % 60))
+        edit.setDisplayFormat("HH:mm")
+        edit.timeChanged.connect(self._update_preview)
+        return edit
+
+    def _add_row(self, start, end):
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        start_edit, end_edit = self._time_edit(start), self._time_edit(end)
+        remove = QPushButton("🗑️")
+        remove.setToolTip("Remove this window")
+        remove.setFixedWidth(40)
+        row_layout.addWidget(start_edit)
+        row_layout.addWidget(QLabel("→"))
+        row_layout.addWidget(end_edit)
+        row_layout.addWidget(remove)
+        row_layout.addStretch(1)
+        entry = (row, start_edit, end_edit)
+        remove.clicked.connect(lambda: self._remove_row(entry))
+        self._rows.append(entry)
+        self.rows_layout.addWidget(row)
+        self._update_preview()
+
+    def _remove_row(self, entry):
+        if entry in self._rows:
+            self._rows.remove(entry)
+            entry[0].setParent(None)
+            entry[0].deleteLater()
+        self._update_preview()
+
+    # ------------------------------------------------------------------ state
+    def _load(self, schedule):
+        for entry in list(self._rows):
+            self._remove_row(entry)
+        self._zone = schedule.timezone or 'local'
+        self._set_combo_zone(self.zone_combo, self._zone)
+        for window in schedule.windows:
+            self._add_row(window.start, window.end)
+        for day, checkbox in enumerate(self.day_checks):
+            checkbox.setChecked(day in schedule.weekdays)
+        self._update_preview()
+
+    def _schedule(self):
+        windows = []
+        for _row, start_edit, end_edit in self._rows:
+            start, end = start_edit.time(), end_edit.time()
+            window = request_schedule.Window(start.hour() * 60 + start.minute(), end.hour() * 60 + end.minute())
+            if window not in windows:
+                windows.append(window)
+        days = frozenset(i for i, checkbox in enumerate(self.day_checks) if checkbox.isChecked())
+        return request_schedule.Schedule(tuple(windows), days, self._zone)
+
+    def _on_zone_changed(self, *_args):
+        zone = self._combo_zone(self.zone_combo)
+        if zone == self._zone:
+            return
+        if not request_schedule.zone_is_known(zone):
+            QMessageBox.warning(self, "Unknown timezone", f"'{zone}' is not a timezone this computer knows.")
+            self._set_combo_zone(self.zone_combo, self._zone)
+            return
+        schedule = self._schedule()
+        if schedule.windows and schedule.weekdays:
+            try:
+                converted = request_schedule.convert(schedule, zone)
+            except request_schedule.ScheduleError as exc:
+                QMessageBox.warning(self, "Timezone", f"Cannot rewrite these windows in {zone}: {exc}.")
+                self._set_combo_zone(self.zone_combo, self._zone)
+                return
+            self._load(converted._replace(timezone=zone))
+        else:
+            self._zone = zone
+            self._update_preview()
+
+    def _update_preview(self, *_args):
+        if not hasattr(self, 'preview_label'):
+            return
+        schedule = self._schedule()
+        if not schedule.windows or not schedule.weekdays:
+            self.preview_label.setText("No windows or no days: saving removes the schedule.")
+            return
+        extra = self._combo_zone(self.preview_zone_combo)
+        zones = ['local', 'UTC'] + ([extra] if extra not in ('local', 'UTC') and request_schedule.zone_is_known(extra) else [])
+        lines = []
+        if self._suggested:
+            lines.append("Suggested: DeepSeek peak hours (no schedule saved yet).")
+        for zone in zones:
+            lines.append(f"• {request_schedule.zone_label(zone)}: {request_schedule.describe(schedule, zone)}")
+        end = request_schedule.next_window_end(schedule)
+        if end is not None:
+            lines.append(f"Now: inside a window until {request_schedule.format_clock(end, 'local')} local.")
+        else:
+            start = request_schedule.next_window_start(schedule)
+            if start is not None:
+                lines.append(f"Now: outside the windows; the next one starts "
+                             f"{request_schedule.format_clock(start, 'local')} local.")
+        self.preview_label.setText("\n".join(lines))
+
+    def _clear_and_accept(self):
+        self.result_config = {}
+        self.accept()
+
+    def _save(self):
+        schedule = self._schedule()
+        if schedule.windows and not schedule.weekdays:
+            QMessageBox.warning(self, "No days", "Tick at least one day, or use 🧹 Clear schedule.")
+            return
+        self.result_config = request_schedule.to_config(schedule)
+        self.accept()
+
+
+def edit_request_schedule(parent, schedule=None, *, mode='queue', subject=''):
+    """Open :class:`RequestScheduleDialog`; the new config dict ({} = removed) or None if cancelled."""
+    dialog = RequestScheduleDialog(parent, schedule, mode=mode, subject=subject)
+    if dialog.exec() != QDialog.Accepted:
+        return None
+    return dialog.result_config
 
 
 class MultiAPIKeyDialog(QDialog):
@@ -4227,6 +4512,7 @@ class MultiAPIKeyDialog(QDialog):
             set_delay_callback=self._set_fallback_api_call_delay_for_selected,
             clear_delay_callback=self._clear_fallback_api_call_delay_for_selected,
             configure_contexts_callback=lambda: self._edit_selected_key_contexts('fallback'),
+            disable_schedule_callback=lambda: self._edit_selected_key_schedule('fallback', 'disable'),
             test_callback=self._test_selected_fallback,
             enable_callback=self._enable_selected_fallback,
             disable_callback=self._disable_selected_fallback,
@@ -6197,7 +6483,8 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_callback, clear_temp_callback, set_delay_callback,
         clear_delay_callback, test_callback, enable_callback, disable_callback,
         remove_callback, clear_all_callback=None, index_resolver=None,
-        configure_contexts_callback=None
+        configure_contexts_callback=None, disable_schedule_callback=None,
+        queue_schedule_callback=None
     ):
         """Shared context menu for every API key tree."""
         item = tree.itemAt(position)
@@ -6258,6 +6545,10 @@ class MultiAPIKeyDialog(QDialog):
         menu.addAction("🧪 Test Selected").triggered.connect(test_callback)
         if configure_contexts_callback:
             menu.addAction(selected_label("🎛️ Configure Request Contexts…")).triggered.connect(configure_contexts_callback)
+        if disable_schedule_callback:
+            menu.addAction(selected_label("🗓️ Disable schedule…")).triggered.connect(disable_schedule_callback)
+        if queue_schedule_callback:
+            menu.addAction(selected_label("⏳ Request Queue…")).triggered.connect(queue_schedule_callback)
         menu.addAction("✅ Enable Selected").triggered.connect(enable_callback)
         menu.addAction("🚫 Disable Selected").triggered.connect(disable_callback)
         menu.addAction("🗑️ Remove Selected").triggered.connect(remove_callback)
@@ -6309,6 +6600,8 @@ class MultiAPIKeyDialog(QDialog):
             set_delay_callback=self._set_api_call_delay_for_selected,
             clear_delay_callback=self._clear_api_call_delay_for_selected,
             configure_contexts_callback=lambda: self._edit_selected_key_contexts('main'),
+            disable_schedule_callback=lambda: self._edit_selected_key_schedule('main', 'disable'),
+            queue_schedule_callback=lambda: self._edit_selected_key_schedule('main', 'queue'),
             test_callback=self._test_selected,
             enable_callback=self._enable_selected,
             disable_callback=self._disable_selected,
@@ -7528,6 +7821,8 @@ class MultiAPIKeyDialog(QDialog):
             set_delay_callback=self._set_glossary_api_call_delay_for_selected,
             clear_delay_callback=self._clear_glossary_api_call_delay_for_selected,
             configure_contexts_callback=lambda: self._edit_selected_key_contexts('glossary'),
+            disable_schedule_callback=lambda: self._edit_selected_key_schedule('glossary', 'disable'),
+            queue_schedule_callback=lambda: self._edit_selected_key_schedule('glossary', 'queue'),
             test_callback=self._test_selected_glossary,
             enable_callback=self._enable_selected_glossary,
             disable_callback=self._disable_selected_glossary,
@@ -9690,16 +9985,33 @@ class MultiAPIKeyDialog(QDialog):
     def _decorate_key_context_status(self, item, key, pool_name):
         column = 6 if pool_name == 'main' else 5
         routes = POOL_CONTEXTS[pool_name]
-        allowed = [c for c in routes if key_enabled_for_context(key, c)]
+        allowed = [c for c in routes if key_enabled_for_context(key, c, include_schedule=False)]
         if allowed and len(allowed) < len(routes):
             item.setText(column, f"◐ {len(allowed)}/{len(routes)} contexts")
         elif not allowed:
             item.setText(column, 'Disabled')
         tooltip = ['Click to choose which request contexts may use this key.']
         tooltip.extend(f"{'✅' if c in allowed else '🚫'} {CONTEXT_LABELS[c]}" for c in routes)
+        # 🗓️ Disable schedule / ⏳ Request Queue: the current state in the column, the windows
+        # (local time) in the tooltip
+        schedule_status, schedule_lines = request_schedule.key_schedule_summary(key)
+        if allowed and schedule_status:
+            item.setText(column, schedule_status)
+            if schedule_status.startswith('🗓️'):
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.gray)
+        elif allowed and schedule_lines:
+            marks = ('🗓️' if request_schedule.key_schedule(key, request_schedule.DISABLE_FIELD) else '') + (
+                '⏳' if request_schedule.key_schedule(key, request_schedule.QUEUE_FIELD) else '')
+            item.setText(column, f"{item.text(column)} {marks}")
+        if schedule_lines:
+            tooltip.append('')
+            tooltip.extend(schedule_lines)
         item.setToolTip(column, '\n'.join(tooltip))
 
-    def _edit_selected_key_contexts(self, pool_name, items=None):
+    def _selected_pool_key_entries(self, pool_name, items=None):
+        """``(pool keys, selected entries)`` of a key tree (Translation keys are APIKeyEntry
+        objects, the other pools config dicts)."""
         tree = self._key_context_tree(pool_name)
         selected = tree.selectedItems() if items is None else items
         if pool_name == 'main':
@@ -9710,7 +10022,63 @@ class MultiAPIKeyDialog(QDialog):
             keys = self._dedicated_keys(pool_name)
         indices = [self._fallback_config_index_for_item(item) if pool_name == 'fallback'
                    else tree.indexOfTopLevelItem(item) for item in selected]
-        entries = [keys[i] for i in indices if 0 <= i < len(keys)]
+        return keys, [keys[i] for i in indices if 0 <= i < len(keys)]
+
+    def _save_pool_key_entries(self, pool_name, keys):
+        """Persist edited key entries of *pool_name*, refresh its tree and the running pools."""
+        if pool_name == 'main':
+            self._save_keys_to_config()
+            if self._can_emit_live_key_pool_updates():
+                self._apply_rotation_settings_to_runtime_pools()
+            self._refresh_key_list()
+        elif pool_name == 'fallback':
+            self.translator_gui.save_config(show_message=False)
+            if self._can_emit_live_key_pool_updates():
+                os.environ['FALLBACK_KEYS'] = json.dumps(keys)
+            self._load_fallback_keys()
+            self._broadcast_key_pool_config_changed('fallback', refresh_keys=True)
+        elif pool_name == 'glossary':
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._refresh_glossary_pool()
+            self._broadcast_key_pool_config_changed('glossary', refresh_keys=True)
+        else:
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+        self._notify_authgpt_visibility()
+
+    def _edit_selected_key_schedule(self, pool_name, kind):
+        """"🗓️ Disable schedule…" (*kind* 'disable') / "⏳ Request Queue…" ('queue') for the
+        selected keys: one RequestScheduleDialog, the result written to every selected key."""
+        keys, entries = self._selected_pool_key_entries(pool_name)
+        if not entries:
+            return
+        field = request_schedule.DISABLE_FIELD if kind == 'disable' else request_schedule.QUEUE_FIELD
+        first = entries[0]
+        current = first.get(field) if isinstance(first, dict) else getattr(first, field, None)
+        subject = f"{len(entries)} keys" if len(entries) > 1 else (
+            first.get('model', '') if isinstance(first, dict) else getattr(first, 'model', ''))
+        result = edit_request_schedule(self, current, mode=kind, subject=subject)
+        if result is None:
+            return
+        for key in entries:
+            if isinstance(key, dict):
+                if result:
+                    key[field] = dict(result)
+                else:
+                    key.pop(field, None)
+            else:
+                setattr(key, field, dict(result))
+        self._save_pool_key_entries(pool_name, keys)
+        label = "Disable schedule" if kind == 'disable' else "Request Queue"
+        if hasattr(self, '_show_status'):
+            try:
+                self._show_status(f"{label} {'saved' if result else 'removed'} for {len(entries)} key(s)")
+            except Exception:
+                pass
+
+    def _edit_selected_key_contexts(self, pool_name, items=None):
+        keys, entries = self._selected_pool_key_entries(pool_name, items)
         if not entries:
             return
         routes = POOL_CONTEXTS[pool_name]
@@ -9734,7 +10102,7 @@ class MultiAPIKeyDialog(QDialog):
         for i, context in enumerate(routes):
             checkbox = self._create_styled_checkbox(CONTEXT_LABELS[context])
             checkbox.setToolTip(context)
-            states = [key_enabled_for_context(key, context) for key in entries]
+            states = [key_enabled_for_context(key, context, include_schedule=False) for key in entries]
             if any(states) and not all(states):
                 checkbox.setTristate(True)
                 checkbox.setCheckState(Qt.PartiallyChecked)
@@ -9788,26 +10156,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 key.enabled = enabled
                 key.disabled_contexts = sorted(blocked)
-        if pool_name == 'main':
-            self._save_keys_to_config()
-            if self._can_emit_live_key_pool_updates():
-                self._apply_rotation_settings_to_runtime_pools()
-            self._refresh_key_list()
-        elif pool_name == 'fallback':
-            self.translator_gui.save_config(show_message=False)
-            if self._can_emit_live_key_pool_updates():
-                os.environ['FALLBACK_KEYS'] = json.dumps(keys)
-            self._load_fallback_keys()
-            self._broadcast_key_pool_config_changed('fallback', refresh_keys=True)
-        elif pool_name == 'glossary':
-            self.translator_gui.save_config(show_message=False)
-            self._load_glossary_keys()
-            self._refresh_glossary_pool()
-            self._broadcast_key_pool_config_changed('glossary', refresh_keys=True)
-        else:
-            self._dedicated_set_keys(pool_name, keys)
-            self._dedicated_load_keys(pool_name)
-        self._notify_authgpt_visibility()
+        self._save_pool_key_entries(pool_name, keys)
 
     def _disable_selected(self):
         selected = self.tree.selectedItems()
@@ -10806,6 +11155,8 @@ class MultiAPIKeyDialog(QDialog):
             set_delay_callback=lambda: self._dedicated_set_api_call_delay_for_selected(pool_name),
             clear_delay_callback=lambda: self._dedicated_clear_api_call_delay_for_selected(pool_name),
             configure_contexts_callback=lambda: self._edit_selected_key_contexts(pool_name),
+            disable_schedule_callback=lambda: self._edit_selected_key_schedule(pool_name, 'disable'),
+            queue_schedule_callback=lambda: self._edit_selected_key_schedule(pool_name, 'queue'),
             test_callback=lambda: self._dedicated_test_selected(pool_name),
             enable_callback=lambda: self._dedicated_enable_selected(pool_name),
             disable_callback=lambda: self._dedicated_disable_selected(pool_name),
