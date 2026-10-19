@@ -732,7 +732,7 @@ def test_schedules_tab_edits_one_schedule_per_key(monkeypatch):
         assert dialog.schedule_pool_combo.itemText(0) == "✅ Translation Keys (2)"
         # the list: masked key, model, schedule state
         assert tree.topLevelItemCount() == 2
-        assert tree.topLevelItem(0).text(1) == "sk-first...-key" and tree.topLevelItem(0).text(2) == "deepseek-chat"
+        assert tree.topLevelItem(0).text(1) == "…-key" and tree.topLevelItem(0).toolTip(1) == "sk-first...-key" and tree.topLevelItem(0).text(2) == "deepseek-chat"
         assert tree.topLevelItem(0).text(dialog.SCHEDULE_SCHEDULE_COLUMN).startswith("⏳") and tree.topLevelItem(1).text(dialog.SCHEDULE_SCHEDULE_COLUMN) == "Off"
         assert not editor.isEnabled()          # nothing selected
         # loading a key shows its field and enabled state
@@ -893,7 +893,7 @@ def test_schedules_tab_adds_keys_with_the_key_pools_form(monkeypatch):
         app.processEvents()
         assert [k["api_key"] for k in config["multi_api_keys"]][-1] == "sk-added-from-schedules"
         assert dialog.tree.topLevelItemCount() == 4 and tree.topLevelItemCount() == 4
-        assert tree.topLevelItem(3).text(1) == "sk-added...ules" and tree.topLevelItem(3).text(2) == "deepseek-chat"
+        assert tree.topLevelItem(3).text(1) == "…ules" and tree.topLevelItem(3).toolTip(1) == "sk-added...ules" and tree.topLevelItem(3).text(2) == "deepseek-chat"
         assert dialog.schedule_pool_combo.itemText(0) == "✅ Translation Keys (4)"
         # another pool: its form comes in, the Translation form goes home
         assert dialog.select_schedule_pool("fallback")
@@ -918,7 +918,7 @@ def test_schedules_tab_adds_keys_with_the_key_pools_form(monkeypatch):
         dialog.fallback_model_combo.setCurrentText("gemini-3-pro")
         dialog._add_fallback_key()
         app.processEvents()
-        assert tree.topLevelItemCount() == 4 and tree.topLevelItem(3).text(1) == "fb-added...ools"
+        assert tree.topLevelItemCount() == 4 and tree.topLevelItem(3).toolTip(1) == "fb-added...ools"
     finally:
         _close(app, dialog)
 
@@ -1075,7 +1075,8 @@ def _key_pools_parameters(dialog, pool, row):
     columns = dialog._pool_key_tree_columns(pool)
     item = dialog._pool_tree_items_by_index(pool)[row]
     limit, temperature, delay = (item.text(columns[field]) for field in ("output_limit", "temperature", "api_call_delay"))
-    parts = [limit, temperature, delay if delay == "global" else f"{delay}s"]
+    values = [limit, temperature, delay if delay == "global" else f"{delay}s"]
+    parts = [f"{icon}{value}" for icon, value in zip(("📤", "🌡️", "⏱️"), values)]
     if "cooldown" in columns:
         parts.append(f"⌛{item.text(columns['cooldown'])}")
     return " · ".join(parts)
@@ -1092,14 +1093,14 @@ def test_schedules_parameters_column_shows_the_key_pools_values(monkeypatch):
             for row in range(tree.topLevelItemCount()):
                 assert tree.topLevelItem(row).text(column) == _key_pools_parameters(dialog, pool, row), (pool, row)
         dialog.select_schedule_pool("main")
-        assert tree.topLevelItem(0).text(column) == "16384 · 0.7 · 2.0s · ⌛120s"
-        assert tree.topLevelItem(1).text(column) == "global · global · global · ⌛60s"
+        assert tree.topLevelItem(0).text(column) == "📤16384 · 🌡️0.7 · ⏱️2.0s · ⌛120s"
+        assert tree.topLevelItem(1).text(column) == "📤global · 🌡️global · ⏱️global · ⌛60s"
         tip = tree.topLevelItem(0).toolTip(column)
         assert "Individual Output Token Limit: 16384" in tip and "cooldown: 120s" in tip
         dialog.select_schedule_pool("fallback")
-        assert tree.topLevelItem(1).text(column) == "global · 1.0 · 0.5s"         # no ⌛ column there
+        assert tree.topLevelItem(1).text(column) == "📤global · 🌡️1.0 · ⏱️0.5s"   # no ⌛ column there
         dialog.select_schedule_pool("glossary")
-        assert tree.topLevelItem(0).text(column) == "8192 · global · global"
+        assert tree.topLevelItem(0).text(column) == "📤8192 · 🌡️global · ⏱️global"
         assert "Using global temperature" in tree.topLevelItem(0).toolTip(column)
         # compact: no wider than all-global values with a cooldown
         metrics = tree.fontMetrics()
@@ -1108,9 +1109,10 @@ def test_schedules_parameters_column_shows_the_key_pools_values(monkeypatch):
         _close(app, dialog)
 
 
-PARAMETER_EDITS = [("Output limit…", "output_limit", 4096, "4096"),
-                   ("Temperature…", "temperature", 0.3, "0.3"),
-                   ("API call delay…", "api_call_delay", 1.5, "1.5s")]
+PARAMETER_EDITS = [("📤 Output limit…", "output_limit", 4096, "4096"),
+                   ("🌡️ Temperature…", "temperature", 0.3, "0.3"),
+                   ("⏱️ API call delay…", "api_call_delay", 1.5, "1.5s")]
+PARAMETER_ICONS = {"output_limit": "📤", "temperature": "🌡️", "api_call_delay": "⏱️"}
 
 
 @pytest.mark.parametrize("label,field,value,text", PARAMETER_EDITS)
@@ -1145,11 +1147,12 @@ def test_schedules_parameters_double_click_uses_the_key_pools_editors(monkeypatc
             tree.itemDoubleClicked.emit(tree.topLevelItem(1), column)
             app.processEvents()
             assert calls[-1] == (pool, columns[field]), pool
-            expected = ["Output limit…", "Temperature…", "API call delay…"] + (["Cooldown…"] if pool == "main" else [])
+            expected = ["📤 Output limit…", "🌡️ Temperature…", "⏱️ API call delay…"] + (
+                ["⌛ Cooldown…"] if pool == "main" else [])
             assert menus[-1] == expected
             keys = dialog._pool_key_list(pool)
             assert dialog._key_parameter_texts(keys[1])[position] == text.rstrip("s"), pool
-            assert tree.topLevelItem(1).text(column).split(" · ")[position] == text, pool
+            assert tree.topLevelItem(1).text(column).split(" · ")[position] == PARAMETER_ICONS[field] + text, pool
             assert tree.topLevelItem(1).text(column) == _key_pools_parameters(dialog, pool, 1)
             if pool != "main":
                 assert saved and dialog._key_parameter_texts(saved[-1][f"{pool}_keys"][1])[position] == text.rstrip("s")
@@ -1184,7 +1187,7 @@ def test_schedules_parameters_sync_both_ways(monkeypatch):
     dialog._show_output_token_limit_dialog = lambda *_a, **_k: (2048, True)
     dialog._show_cooldown_edit_dialog = lambda *_a, **_k: (300, True)
     dialog._exec_key_context_menu = lambda menu, _pos: next(
-        action for action in menu.actions() if action.text() == "Output limit…").trigger()
+        action for action in menu.actions() if action.text() == "📤 Output limit…").trigger()
     tree, column = dialog.schedule_key_tree, dialog.SCHEDULE_PARAMETERS_COLUMN
     try:
         for pool in ("main", "fallback", "glossary", "metadata"):
@@ -1195,7 +1198,7 @@ def test_schedules_parameters_sync_both_ways(monkeypatch):
             _select(pool_tree, 0)
             pool_tree.itemDoubleClicked.emit(pool_tree.topLevelItem(0), columns["temperature"])
             app.processEvents()
-            assert tree.topLevelItem(0).text(column).split(" · ")[1] == "0.9", pool
+            assert tree.topLevelItem(0).text(column).split(" · ")[1] == "🌡️0.9", pool
             if pool == "main":       # the ⌛ cooldown too
                 pool_tree.itemDoubleClicked.emit(pool_tree.topLevelItem(0), columns["cooldown"])
                 app.processEvents()
@@ -1228,7 +1231,8 @@ def test_schedules_tab_reorders_keys_like_the_key_pools_tab(monkeypatch):
         _select(tree, 2)
         dialog._schedule_move_selected("up")
         assert keys() == [one, three, two]
-        assert _models(dialog.tree, 0)[1] == _models(tree, 1)[1] == "sk-main-...test"
+        assert _models(dialog.tree, 0)[1] == tree.topLevelItem(1).toolTip(1) == "sk-main-...test"
+        assert tree.topLevelItem(1).text(1) == "…test"   # the compact column: the last 4 characters
         assert [i for i in range(3) if tree.topLevelItem(i).isSelected()] == [1]
         dialog._schedule_move_selected("top")
         assert keys() == [three, one, two] and tree.topLevelItem(0).isSelected()
@@ -1240,7 +1244,7 @@ def test_schedules_tab_reorders_keys_like_the_key_pools_tab(monkeypatch):
         tree.dropEvent(None)
         assert keys() == [one, two, three]
         assert [k["api_key"] for k in config["multi_api_keys"]] == [one, two, three]
-        assert [dialog.tree.topLevelItem(i).text(0) for i in range(3)] == [tree.topLevelItem(i).text(1) for i in range(3)]
+        assert [dialog.tree.topLevelItem(i).text(0) for i in range(3)] == [tree.topLevelItem(i).toolTip(1) for i in range(3)]
         assert [i for i in range(3) if tree.topLevelItem(i).isSelected()] == [2]
         # a drop on the Key Pools list shows here (and is stored: QTreeWidget never emits rowsMoved)
         dialog.tree.dropEvent = _fake_internal_move(dialog.tree, 0)
@@ -1249,7 +1253,7 @@ def test_schedules_tab_reorders_keys_like_the_key_pools_tab(monkeypatch):
         dialog.tree.dropEvent(None)
         app.processEvents()
         assert keys() == [two, one, three] and dialog.tree.topLevelItem(0).isSelected()
-        assert tree.topLevelItem(0).text(1) == "sk-main-...test" and dialog.key_pool.keys[0].api_key == two
+        assert tree.topLevelItem(0).toolTip(1) == "sk-main-...test" and dialog.key_pool.keys[0].api_key == two
         assert [i for i in range(3) if tree.topLevelItem(i).isSelected()] == [2]   # selection follows its key
         # Fallback: buttons and drops write the config list
         dialog.select_schedule_pool("fallback")

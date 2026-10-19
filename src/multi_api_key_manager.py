@@ -2100,7 +2100,8 @@ class ScheduleEditor(QWidget):
         # Pool keys: what happens during the windows (one schedule per key)
         self.kind_combo = None
         if self.mode == 'key':
-            kind_row = QHBoxLayout()
+            kind_row = QVBoxLayout()  # label above the combo: keeps the editor narrow
+            kind_row.setSpacing(2)
             kind_row.addWidget(QLabel(request_schedule.KIND_LABEL))
             self.kind_combo = QComboBox()
             for name in request_schedule.SCHEDULE_KINDS:
@@ -2112,16 +2113,17 @@ class ScheduleEditor(QWidget):
             self.kind_combo.setMinimumContentsLength(22)
             self.kind_combo.view().setMinimumWidth(self.kind_combo.view().sizeHintForColumn(0) + 24)
             self.kind_combo.currentIndexChanged.connect(self._update_preview)
-            kind_row.addWidget(self.kind_combo, 1)
+            kind_row.addWidget(self.kind_combo)
             layout.addLayout(kind_row)
             self.set_kinds(kinds or request_schedule.SCHEDULE_KINDS)
             self.set_kind(kind)
 
-        zone_row = QHBoxLayout()
+        zone_row = QVBoxLayout()  # label above the combo, like "During the windows:"
+        zone_row.setSpacing(2)
         zone_row.addWidget(QLabel("Times are in:"))
         self.zone_combo = self._zone_combo()
         self.zone_combo.activated.connect(self._on_zone_changed)
-        zone_row.addWidget(self.zone_combo, 1)
+        zone_row.addWidget(self.zone_combo)
         layout.addLayout(zone_row)
 
         windows_box = QGroupBox("Windows (start → end)")
@@ -2137,21 +2139,21 @@ class ScheduleEditor(QWidget):
         layout.addWidget(windows_box)
 
         days_box = QGroupBox("Days (the day a window starts)")
-        days_layout = QHBoxLayout(days_box)
+        days_layout = QGridLayout(days_box)  # two rows (Mon–Thu, Fri–Sun): keeps the editor narrow
         self.day_checks = []
-        for name in request_schedule.WEEKDAY_NAMES:
+        for day, name in enumerate(request_schedule.WEEKDAY_NAMES):
             checkbox = MultiAPIKeyDialog._create_styled_checkbox(self, name)
             checkbox.toggled.connect(self._update_preview)
-            days_layout.addWidget(checkbox)
+            days_layout.addWidget(checkbox, day // 4, day % 4)
             self.day_checks.append(checkbox)
         layout.addWidget(days_box)
 
         presets = QHBoxLayout()
-        self.deepseek_button = QPushButton("🐋 Use DeepSeek peak hours")
+        self.deepseek_button = QPushButton("🐋 DeepSeek peak hours")  # short: keeps the editor narrow
         self.deepseek_button.setToolTip(request_schedule.DEEPSEEK_PRESET_HELP)
         self.deepseek_button.clicked.connect(lambda: self._load(request_schedule.DEEPSEEK_PEAK_SCHEDULE))
         presets.addWidget(self.deepseek_button)
-        self.clear_button = QPushButton("🧹 Clear schedule")
+        self.clear_button = QPushButton("🧹 Clear")
         self.clear_button.setToolTip(clear_tooltip)
         self.clear_button.clicked.connect(self._clear)
         presets.addWidget(self.clear_button)
@@ -2160,11 +2162,12 @@ class ScheduleEditor(QWidget):
 
         preview_box = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_box)
-        also_row = QHBoxLayout()
+        also_row = QVBoxLayout()  # label above the combo, like "Times are in:"
+        also_row.setSpacing(2)
         also_row.addWidget(QLabel("Also show in:"))
         self.preview_zone_combo = self._zone_combo(include_local=False)
         self.preview_zone_combo.activated.connect(self._update_preview)
-        also_row.addWidget(self.preview_zone_combo, 1)
+        also_row.addWidget(self.preview_zone_combo)
         preview_layout.addLayout(also_row)
         # the on / off status line differs in length: reserve the taller variant (no jumps)
         self.preview_label = _ReservedHeightLabel('')
@@ -10246,14 +10249,15 @@ class MultiAPIKeyDialog(QDialog):
     SCHEDULE_PARAMETERS_COLUMN = 3
     SCHEDULE_SCHEDULE_COLUMN = 4
     SCHEDULE_STATUS_COLUMN = 5
-    SCHEDULE_PARAMETERS_HELP = ("Output limit · temperature · API call delay (and ⌛ cooldown for "
+    SCHEDULE_PARAMETERS_HELP = ("📤 Output limit · 🌡️ temperature · ⏱️ API call delay (and ⌛ cooldown for "
                                 "Translation keys), as in the 🔑 Key Pools columns; \"global\" uses "
                                 "the global setting. Double-click to edit.")
     # the Parameters double-click menu: (label, Key Pools column field), in the text's order
-    SCHEDULE_PARAMETER_EDITS = (("Output limit…", 'output_limit'), ("Temperature…", 'temperature'),
-                                ("API call delay…", 'api_call_delay'), ("Cooldown…", 'cooldown'))
+    SCHEDULE_PARAMETER_EDITS = (("📤 Output limit…", 'output_limit'), ("🌡️ Temperature…", 'temperature'),
+                                ("⏱️ API call delay…", 'api_call_delay'), ("⌛ Cooldown…", 'cooldown'))
+    SCHEDULE_PARAMETER_ICONS = ("📤", "🌡️", "⏱️")
     # the editor panel's width cap: its widest rows (Days, the windows box title) without clipping
-    SCHEDULE_EDITOR_MIN_WIDTH = 520
+    SCHEDULE_EDITOR_MIN_WIDTH = 400
 
     def _create_manager_tabs(self, parent_layout, key_pools_widget):
         """The manager's tabs: "🔑 Key Pools" (every pool section) and "⏰ Schedules" (one
@@ -10304,6 +10308,13 @@ class MultiAPIKeyDialog(QDialog):
         api_key = str(api_key or '')
         return api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
 
+    @staticmethod
+    def _short_api_key(api_key):
+        """The ⏰ Schedules list's compact key: its last 4 characters ("…49a6"; the tooltip has the
+        longer masked form)."""
+        api_key = str(api_key or '')
+        return "…" + api_key[-4:] if len(api_key) > 4 else api_key
+
     def _ensure_schedules_tab(self):
         """Build the ⏰ Schedules tab once: pool picker (✅ / ⛔ enabled marker and key count) with
         the pool's own enable switch, the pool's add-key form (borrowed from the 🔑 Key Pools tab),
@@ -10332,6 +10343,10 @@ class MultiAPIKeyDialog(QDialog):
         self._apply_combobox_icon(self.schedule_pool_combo)
         self._disable_combobox_mousewheel(self.schedule_pool_combo)
         self.schedule_pool_combo.currentIndexChanged.connect(lambda *_: self._on_schedule_pool_changed())
+        # one tooltip on the picker, none per entry: on Windows an entry's tooltip over the open list
+        # took the first click (owner 2026-10-19: switching back needed a double click)
+        self.schedule_pool_combo.setToolTip("✅ switched on: its keys are used · ⛔ switched off: its keys are not "
+                                            "used (schedules can still be edited)")
         pool_row.addWidget(self.schedule_pool_combo, 1)
         # the pool's enable switch: drives the pool's own 🔑 Key Pools checkbox (same handler,
         # same config key) and follows it back
@@ -10378,7 +10393,10 @@ class MultiAPIKeyDialog(QDialog):
         header = self.schedule_key_tree.header()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.schedule_key_tree.setColumnWidth(1, 120)
+        # API Key: the last 4 characters ("…49a6"): just the header's width
+        self.schedule_key_tree.setColumnWidth(1, max(
+            header.fontMetrics().horizontalAdvance(self.SCHEDULE_TREE_COLUMNS[1]),
+            self.schedule_key_tree.fontMetrics().horizontalAdvance("…WWWW")) + 24)
         self.schedule_key_tree.setColumnWidth(2, 140)
         self.schedule_key_tree.headerItem().setToolTip(self.SCHEDULE_PARAMETERS_COLUMN, self.SCHEDULE_PARAMETERS_HELP)
         # just wide enough for the "Schedule" header; longer states are elided (the cell tooltip lists them)
@@ -10530,9 +10548,6 @@ class MultiAPIKeyDialog(QDialog):
             text = self._schedule_pool_item_text(pool)
             if combo.itemText(index) != text:
                 combo.setItemText(index, text)
-            combo.setItemData(index, "Enabled: its keys are used" if self._pool_enabled(pool) else
-                              "Switched off: its keys are not used (schedules can still be edited)",
-                              Qt.ToolTipRole)
 
     def _refresh_schedule_pool_state(self):
         """The enable switch beside the picker and the "switched off" note follow the chosen pool."""
@@ -10707,7 +10722,7 @@ class MultiAPIKeyDialog(QDialog):
                 pool_item = pool_items.get(number - 1)
                 item = QTreeWidgetItem([
                     str(number),
-                    self._mask_api_key(self._schedule_key_value(key, 'api_key')),
+                    self._short_api_key(self._schedule_key_value(key, 'api_key')),
                     str(self._schedule_key_value(key, 'model')),
                     self._schedule_parameters_text(key, pool_name),
                     request_schedule.key_schedule_overview(key),
@@ -10715,6 +10730,7 @@ class MultiAPIKeyDialog(QDialog):
                 ])
                 item.setData(0, Qt.UserRole, number - 1)
                 item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+                item.setToolTip(1, self._mask_api_key(self._schedule_key_value(key, 'api_key')))
                 item.setToolTip(self.SCHEDULE_MODEL_COLUMN, "Double-click to change the model")
                 item.setToolTip(self.SCHEDULE_PARAMETERS_COLUMN, self._schedule_parameters_tooltip(key, pool_name))
                 lines = request_schedule.key_schedule_summary(key)[1]
@@ -10748,18 +10764,20 @@ class MultiAPIKeyDialog(QDialog):
         "16384 · 0.7 · 2.0s" (delay with its unit; "global" as there), plus "⌛60s" for
         Translation keys (their list's cooldown column)."""
         limit, temperature, delay = self._key_parameter_texts(key)
-        parts = [limit, temperature, delay if delay == "global" else f"{delay}s"]
+        values = [limit, temperature, delay if delay == "global" else f"{delay}s"]
+        parts = [f"{icon}{value}" for icon, value in zip(self.SCHEDULE_PARAMETER_ICONS, values)]
         if 'cooldown' in self._pool_key_tree_columns(pool_name):
             parts.append(f"⌛{self._key_cooldown_text(key)}")
         return " · ".join(parts)
 
     def _schedule_parameters_tooltip(self, key, pool_name):
-        lines = self._key_parameter_tooltip_lines(key)
+        lines = [f"{icon} {line}" for icon, line in zip(self.SCHEDULE_PARAMETER_ICONS,
+                                                        self._key_parameter_tooltip_lines(key))]
         if 'cooldown' in self._pool_key_tree_columns(pool_name):
             lines.append(f"⌛ Rate-limit cooldown: {self._key_cooldown_text(key)}")
         return "\n".join(lines + ["", "Double-click to edit."])
 
-    SCHEDULE_PARAMETERS_MAX_WIDTH = "global · global · global · ⌛3600s"
+    SCHEDULE_PARAMETERS_MAX_WIDTH = "📤global · 🌡️global · ⏱️global · ⌛3600s"
 
     def _fit_schedule_parameters_column(self):
         """The Parameters column fits its texts (as compact as the Schedule column), up to the
