@@ -129,3 +129,33 @@ def test_target_language_is_editable_and_a_typed_language_is_saved():
     language.on_select(event("Korean"))
     assert screen.finish()["output_language"] == "Korean"
 
+
+@pytest.mark.parametrize("model", ["authchatgpt/auto", "local/qwen3-0.6b-q4"])
+def test_text_extraction_choice_sits_below_the_language_and_is_saved_for_every_model(model):
+    """Welcome › Text extraction: BeautifulSoup (recommended, the default) or html2text, a line on each; Finish
+    always saves ``text_extraction_method`` (the default too: the choice is what sets the method)."""
+    from glossarion_mobile.ui.screens.welcome_flow import EXTRACTION_CHOICES
+
+    screen = welcome(model)
+    rows = by_key(screen)
+    keys = [k for k in rows if k]
+    assert keys.index("welcome-language") < keys.index("welcome-extraction") < keys.index("welcome-max-tokens-slider")
+    group = rows["welcome-extraction"]
+    assert group.value == "standard"
+    assert [c[:2] for c in EXTRACTION_CHOICES] == [("standard", "BeautifulSoup (recommended)"),
+                                                  ("enhanced", "html2text")]
+    assert rows["welcome-extraction-standard"].label == "BeautifulSoup (recommended)"
+    assert welcome(model).finish()["text_extraction_method"] == "standard"
+    group.on_change(event("enhanced"))
+    group.on_change(event("bogus"))  # not a choice: ignored
+    assert screen.finish()["text_extraction_method"] == "enhanced"
+
+
+@pytest.mark.parametrize("saved,shown", [({"text_extraction_method": "enhanced"}, "enhanced"),
+                                         ({"text_extraction_method": "standard"}, "standard"),
+                                         ({"extraction_mode": "enhanced"}, "enhanced"), ({}, "standard")])
+def test_text_extraction_shows_the_saved_method_when_reopened(saved, shown):
+    screen = welcome("authchatgpt/auto", saved)
+    assert by_key(screen)["welcome-extraction"].value == shown
+    assert screen.finish()["text_extraction_method"] == shown
+

@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 __all__ = [
+    "DEFAULT_EXTRACTION_METHOD",
     "DEFAULT_GLOSSARY_MODE",
+    "EXTRACTION_CHOICES",
     "GLOSSARY_MODE_CARDS",
     "NOTE",
     "OFF_GLOSSARY_MODES",
@@ -57,6 +59,15 @@ DEFAULT_GLOSSARY_MODE = "balanced"  # desktop: selected_mode = ['balanced']
 NOTE = "⚠️ AI models may produce smaller glossaries due to training biases. Full mode captures the most terms but costs more."
 OFF_GLOSSARY_MODES = ("off", "off_fuzzy_automap", "off_no_automap", "no_glossary")
 
+#: "Text extraction" (owner 2026-10-19): the desktop Text Extraction Method (``text_extraction_method``) for
+#: every model: (value, label, one-line explanation). An on-device model's translation profile follows it
+#: (On-device_BeautifulSoup / On-device_html2text).
+EXTRACTION_CHOICES = (
+    ("standard", "BeautifulSoup (recommended)", "Sends the chapter's HTML; the translation keeps its HTML tags."),
+    ("enhanced", "html2text", "Turns the chapter into Markdown first; the translation comes back as Markdown."),
+)
+DEFAULT_EXTRACTION_METHOD = "standard"  # desktop default (owner_state.initialize_extraction_variables)
+
 
 def welcome_glossary_updates(mode: str) -> dict:
     """Config writes of the desktop welcome's glossary page on "Get Started"."""
@@ -91,6 +102,8 @@ class WelcomeFlow:
     temperature: Optional[float] = None  # ``translation_temperature``
     disable_temperature: Optional[bool] = None  # ``disable_temperature`` (send no temperature)
     batch_size: Optional[int] = None  # ``batch_size``
+    # "Text extraction": 'standard' / 'enhanced' (None: not touched; Finish saves the one shown)
+    text_extraction_method: Optional[str] = None
     finished: bool = False
     skipped: bool = False
     history: list = field(default_factory=list)
@@ -131,8 +144,14 @@ class WelcomeFlow:
         if mode in {card[0] for card in GLOSSARY_MODE_CARDS}:
             self.glossary_mode = mode
 
+    def select_extraction(self, method: str) -> None:
+        if method in {choice[0] for choice in EXTRACTION_CHOICES}:
+            self.text_extraction_method = method
+
     def finish_updates(self) -> dict:
         updates = welcome_glossary_updates(self.glossary_mode)
+        if self.text_extraction_method:
+            updates["text_extraction_method"] = self.text_extraction_method
         if self.target_language:
             updates["output_language"] = self.target_language
         if self.max_output_tokens:

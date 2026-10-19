@@ -680,11 +680,14 @@ class ChatFeature:
             if env is not None:
                 updates = dict(updates)
                 language = updates.pop("output_language", None)
+                extraction = updates.pop("text_extraction_method", None)
                 env.config_set_many(updates)  # the desktop welcome's glossary-page writes
-                if language:  # the main-window Target Language combo's fan-out
-                    from glossarion_mobile.state.setting_writes import write_setting
+                from glossarion_mobile.state.setting_writes import EXTRACTION_KEY, write_setting
 
+                if language:  # the main-window Target Language combo's fan-out
                     write_setting(env.store, "output_language", language)
+                if extraction:  # every model; an active On-device profile follows (On-device_<mode>)
+                    write_setting(env.store, EXTRACTION_KEY, extraction)
             prefs = getattr(self.app, "prefs", None)
             if prefs is not None:
                 try:

@@ -14,8 +14,10 @@
    model" (ModelSheet) and a local Ollama / LM Studio host on your PC (Settings › Endpoints). Next
    moves on (without a sign-in or a model it counts as skipped).
 2. **Target language and glossary mode** - the desktop first-run "Choose Your
-   Glossary Mode" cards (same eight modes, copy and ``balanced`` preselected) and
-   the target language (``output_language``).
+   Glossary Mode" cards (same eight modes, copy and ``balanced`` preselected), the
+   target language (``output_language``) and, right below it, "Text extraction"
+   (``text_extraction_method``: BeautifulSoup, recommended, or html2text; for every model,
+   and an on-device model's translation profile follows it).
 3. **Permissions** - notifications, battery optimisation (Android), the iOS
    background limits note.
 4. **Done** - try-chips: Paste text to translate · Import a book · Open Library.
@@ -43,7 +45,9 @@ from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.screens.welcome_flow import (
+    DEFAULT_EXTRACTION_METHOD,
     DEFAULT_GLOSSARY_MODE,
+    EXTRACTION_CHOICES,
     GLOSSARY_MODE_CARDS,
     NOTE,
     OFF_GLOSSARY_MODES,
@@ -699,6 +703,35 @@ class WelcomeScreen(Screen):
         field.on_change = from_field
         return ft.Row([slider, field], spacing=8, key="welcome-batch")
 
+    def shown_extraction_method(self) -> str:
+        """The "Text extraction" choice shown: the one picked here, else the saved method (a legacy
+        ``extraction_mode`` 'enhanced' counts, as at run time: ``owner_state.initialize_extraction_variables``),
+        else BeautifulSoup."""
+        if self.flow.text_extraction_method:
+            return self.flow.text_extraction_method
+        if self._saved("extraction_mode", None) == "enhanced":
+            return "enhanced"
+        saved = self._saved("text_extraction_method", DEFAULT_EXTRACTION_METHOD)
+        return saved if saved in {choice[0] for choice in EXTRACTION_CHOICES} else DEFAULT_EXTRACTION_METHOD
+
+    def _extraction_choice(self) -> ft.Control:
+        """"Text extraction": BeautifulSoup (recommended) or html2text, a line on each. Next to the target
+        language because both decide what the translation looks like (Request size is about the budget)."""
+        def on_change(e: Any) -> None:
+            self.flow.select_extraction(str(e.control.value or ""))
+
+        radios = []
+        for value, label, explanation in EXTRACTION_CHOICES:
+            radios.append(ft.Radio(value=value, label=label, key=f"welcome-extraction-{value}"))
+            radios.append(ft.Container(content=ft.Text(explanation, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                                       color=ft.Colors.ON_SURFACE_VARIANT),
+                                       padding=ft.Padding.only(left=40)))
+        return ft.Column([
+            ft.Text("Text extraction", theme_style=ft.TextThemeStyle.TITLE_SMALL),
+            ft.RadioGroup(value=self.shown_extraction_method(), on_change=on_change, key="welcome-extraction",
+                          content=ft.Column(radios, spacing=0, tight=True)),
+        ], spacing=4, tight=True)
+
     def _mode_card(self, card: tuple) -> ft.Control:
         value, emoji, title, subtitle, features, rec = card
         selected = value == self.flow.glossary_mode
@@ -747,6 +780,7 @@ class WelcomeScreen(Screen):
                 ft.Text(STEP_TITLES["language_glossary"], theme_style=ft.TextThemeStyle.HEADLINE_SMALL),
                 ft.Text("Select how glossary extraction runs when you translate", theme_style=ft.TextThemeStyle.BODY_SMALL),
                 language,
+                self._extraction_choice(),
                 self._run_budget(),
                 ft.ResponsiveRow([self._mode_card(card) for card in GLOSSARY_MODE_CARDS], spacing=8, run_spacing=8),
                 ft.Text(NOTE, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
@@ -917,6 +951,8 @@ class WelcomeScreen(Screen):
             self.flow.max_output_tokens = self.shown_max_output_tokens()
         if self.flow.temperature is None:
             self.flow.temperature = self.shown_temperature()
+        if self.flow.text_extraction_method is None:  # every model: the choice is what sets the method
+            self.flow.text_extraction_method = self.shown_extraction_method()
         updates = self.flow.finish_updates()
         if self.on_finish is not None:
             self.on_finish(updates)
