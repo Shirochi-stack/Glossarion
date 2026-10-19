@@ -269,6 +269,21 @@ def _drain(app, dialog, timeout=20.0):
         app.processEvents()
 
 
+#: Review prompt profiles (2026-10-19): the dialog keeps its prompts in review_prompt_profiles /
+#: active_review_prompt_profile and writes review_system_prompt / review_final_prompt as mirrors of the
+#: active profile (the Default texts instead of ''), so the config snapshot a run carries differs there.
+#: The prompts the runs send (system_prompt / final_review_prompt) are still compared exactly.
+_REVIEW_PROFILE_CONFIG_KEYS = ("review_prompt_profiles", "active_review_prompt_profile", "review_system_prompt",
+                               "review_final_prompt")
+
+
+def _without_review_profile_keys(call):
+    config = call.get("config")
+    if not isinstance(config, dict):
+        return call
+    return {**call, "config": {k: v for k, v in config.items() if k not in _REVIEW_PROFILE_CONFIG_KEYS}}
+
+
 def _run(module, handler, state, files, app, monkeypatch, gen_target):
     recorder = Recorder(state["fail"])
     monkeypatch.setattr(gen_target, "generate_review", recorder.make("single"))
@@ -293,8 +308,8 @@ def _run(module, handler, state, files, app, monkeypatch, gen_target):
         app.processEvents()
     restored = sys.stdout is stdout
     sys.stdout = stdout
-    calls = sorted(recorder.calls, key=lambda c: str(c["epub_path"]))
-    return {"calls": calls, "log_field": sorted(log_field.split("\n")), "main_log": sorted(gui.logs),
+    calls = sorted((_without_review_profile_keys(c) for c in recorder.calls), key=lambda c: str(c["epub_path"]))
+    return {"calls": calls,"log_field": sorted(log_field.split("\n")), "main_log": sorted(gui.logs),
             "streaming": os.environ.get("ENABLE_STREAMING"), "stdout_restored": restored}
 
 
@@ -370,20 +385,22 @@ def test_run_review_session_makes_the_dialogs_call(qapp, tmp_path, monkeypatch):
         volume = bool(cfg.get("review_volume_mode"))
         volume_paths = sorted([str(p) for p in files], key=review_dialog._natural_path_key)
         stdout = sys.stdout
+        # the mobile job's prompts: the active review prompt profile's (job_kinds.review.review_prompts)
+        prompt, final_prompt = review_generator.active_review_prompts(cfg)
         result = review_generator.run_review_session(
             gui,
-            prompt=cfg.get("review_system_prompt") or review_generator.DEFAULT_REVIEW_PROMPT,
+            prompt=prompt,
             spoiler_mode=bool(cfg.get("review_spoiler_mode")),
             chunk_mode=bool(cfg.get("review_chunk_mode")),
             wrap_chunks=bool(cfg.get("review_chunk_wrap", True)),
-            final_review_prompt=cfg.get("review_final_prompt") or review_generator.DEFAULT_FINAL_REVIEW_PROMPT,
+            final_review_prompt=final_prompt,
             file_path=str(files[0]),
             volume_paths=volume_paths,
             volume_mode=volume,
             stop_check_fn=lambda: False,
         )
         assert sys.stdout is stdout
-        assert recorder.calls == desk["calls"]
+        assert [_without_review_profile_keys(c) for c in recorder.calls] == desk["calls"]
         assert result.startswith("# Review of ")
         assert os.environ.get("ENABLE_STREAMING") == desk["streaming"]
         assert any(line.startswith("[Review] Reviewing") for line in gui.logs)

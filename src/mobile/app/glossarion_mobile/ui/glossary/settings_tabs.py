@@ -77,16 +77,29 @@ class ProfileBar:
     and writes what changed to config.json after each action (``persist_prompt_profiles``).
     The prompt tiles below edit the runtime prompt keys; such an edit is staged into the
     selected profile (``_auto_save_glossary_prompt_profile``).
+
+    Other prompt profile rows reuse the bar with a ``source`` (``open()`` -> a shared profiles object,
+    ``persist(profiles)`` -> bool), their ``label``, the profile's prompt ``fields`` (one per prompt key)
+    and the ``noun`` of its box texts: the review generator's ``review_generator.ReviewPromptProfiles``
+    (tools/review.py). A profiles object with built-ins (``is_builtin`` / ``reset``:
+    ``prompt_profiles.PromptSetProfiles``) turns 🗑 Delete into ↺ Reset for them. ``on_change`` runs after
+    every render.
     """
 
-    def __init__(self, ctx: Any, bucket_id: str, *, prompt_keys: Sequence[str]) -> None:
+    def __init__(self, ctx: Any, bucket_id: str, *, prompt_keys: Sequence[str], source: Any = None,
+                 label: Optional[str] = None, fields: Optional[Sequence[str]] = None, noun: Optional[str] = None,
+                 on_change: Optional[Callable[[], Any]] = None) -> None:
         self.ctx = ctx
-        self.service = ctx.service
-        self.settings = ctx.settings
+        self.service = getattr(ctx, "service", None)
+        self.settings = getattr(ctx, "settings", None)
         self.bucket_id = bucket_id
         self.prompt_keys = tuple(prompt_keys)
-        self.label = PROFILE_BUCKETS[bucket_id]
-        self.pair = bucket_id == "refinement"
+        self.source = source
+        self.label = label or PROFILE_BUCKETS[bucket_id]
+        self.fields = tuple(fields) if fields else (("system", "user") if bucket_id == "refinement" else ())
+        self.pair = bool(self.fields)
+        self.noun = noun or ("refinement" if bucket_id == "refinement" else "glossary")
+        self.on_change = on_change
         self.profiles: Any = None
         self.error: Optional[str] = None
         self._applying = False
@@ -96,6 +109,9 @@ class ProfileBar:
                                     on_select=lambda e: self.select(self.dropdown.value), key=f"pb-{bucket_id}")
         self.note = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                             visible=False, key=f"pb-note-{bucket_id}")
+        self.delete_button = ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="🗑 Delete Profile",
+                                           size_constraints=HIT_TARGET, key=f"pb-delete-{bucket_id}",
+                                           on_click=lambda e: self.ctx.spawn(self.delete()))
         self.control = ft.Container(content=ft.Column([
             ft.Row([
                 self.dropdown,
@@ -103,8 +119,7 @@ class ProfileBar:
                               on_click=lambda e: self.new(), key=f"pb-new-{bucket_id}"),
                 ft.IconButton(icon=ft.Icons.SAVE_OUTLINED, tooltip="💾 Save Profile", size_constraints=HIT_TARGET,
                               on_click=lambda e: self.ctx.spawn(self.save()), key=f"pb-save-{bucket_id}"),
-                ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="🗑 Delete Profile", size_constraints=HIT_TARGET,
-                              on_click=lambda e: self.ctx.spawn(self.delete()), key=f"pb-delete-{bucket_id}"),
+                self.delete_button,
             ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.note,
         ], spacing=2, tight=True), bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, border_radius=tokens.RADII["card"],
@@ -121,11 +136,20 @@ class ProfileBar:
     def load(self) -> None:
         """Open the row on the current config (the desktop tab opening)."""
         try:
-            self.profiles = self.service.prompt_profiles(self.bucket_id, default_text=self._default_text())
+            if self.source is not None:
+                self.profiles = self.source.open()
+            else:
+                self.profiles = self.service.prompt_profiles(self.bucket_id, default_text=self._default_text())
             self.error = None
         except CoreMissing as exc:
             self.profiles = None
             self.error = f"Prompt profiles need {exc.name} (not in this build)"
+        except Exception as exc:
+            if self.source is None:
+                raise
+            log.warning("%s prompt profiles unavailable", self.noun, exc_info=True)
+            self.profiles = None
+            self.error = f"Prompt profiles unavailable ({exc})"
         self._stale = False
         self.render()
 
@@ -136,6 +160,12 @@ class ProfileBar:
     @property
     def names(self) -> list:
         return list(self.profiles.names) if self.profiles is not None else []
+
+    def is_builtin(self, name: Optional[str] = None) -> bool:
+        """A built-in profile of a row that has Reset (``PromptSetProfiles``: Default and the shipped ones)."""
+        check = getattr(self.profiles, "is_builtin", None)
+        return bool(callable(check) and callable(getattr(self.profiles, "reset", None))
+                    and check(self.selected if name is None else name))
 
     def render(self) -> None:
         if self.profiles is None:
@@ -148,11 +178,18 @@ class ProfileBar:
             self.dropdown.options = [ft.DropdownOption(key=name, text=name) for name in self.names]
             self.dropdown.value = self.selected
             self.note.visible = False
+        builtin = self.profiles is not None and self.is_builtin()
+        self.delete_button.icon = ft.Icons.RESTORE if builtin else ft.Icons.DELETE_OUTLINE
+        self.delete_button.tooltip = "↺ Reset Profile" if builtin else "🗑 Delete Profile"
         self.ctx.push(self.control)
+        if self.on_change is not None:
+            self.on_change()
 
     def _persist(self) -> bool:
         self._applying = True
         try:
+            if self.source is not None:
+                return self.source.persist(self.profiles)
             return self.service.persist_prompt_profiles(self.profiles)
         finally:
             self._applying = False
@@ -178,7 +215,7 @@ class ProfileBar:
         if self.profiles is None:
             return None
         result = self.profiles.new()
-        if self.pair and result:  # RefinementPromptProfiles.new returns the "Save Failed" box
+        if self.pair and result:  # PromptSetProfiles.new returns the "Save Failed" box
             self._box(result)
             self.render()
             return None
@@ -189,10 +226,12 @@ class ProfileBar:
         return name
 
     def current_content(self) -> Any:
+        if self.source is not None and self.profiles is not None and self.pair:
+            return dict(self.profiles.texts)  # its prompt cards stage every edit into the profile itself
         store = getattr(self.settings, "store", None)
         get = store.get if store is not None else self.service.cfg
         if self.pair:
-            return {"system": str(get(self.prompt_keys[0], "") or ""), "user": str(get(self.prompt_keys[1], "") or "")}
+            return {name: str(get(key, "") or "") for name, key in zip(self.fields, self.prompt_keys)}
         return str(get(self.prompt_keys[0], "") or "")
 
     async def save(self, name: Optional[str] = None) -> Any:
@@ -216,6 +255,18 @@ class ProfileBar:
         if self.profiles is None:
             return None
         name = self.selected
+        if self.is_builtin(name):  # ↺ Reset Profile: the shipped prompts back
+            if confirm and not await ask(self.ctx, title="Reset Profile",
+                                         body=f"Reset the built-in '{name}' {self.noun} prompt profile to its "
+                                              "shipped prompts?", confirm="Yes", cancel="No"):
+                return None
+            box = self.profiles.reset(name)
+            if box:
+                return self._box(box)
+            self._persist()
+            self.render()
+            self.ctx.say(f"Reset profile “{name}”")
+            return None
         asked: list = []
 
         def answered(_name: str) -> bool:
@@ -223,7 +274,7 @@ class ProfileBar:
 
         if confirm and name in self.names[1:]:  # the desktop asks only for an existing named profile
             asked.append(await ask(self.ctx, title="Delete Profile",
-                                   body=f"Delete {'refinement' if self.pair else 'glossary'} prompt profile '{name}'?",
+                                   body=f"Delete {self.noun} prompt profile '{name}'?",
                                    confirm="Yes", cancel="No", destructive=True))
         box = self.profiles.delete(name, confirm=answered if confirm else None)
         if box:
@@ -240,7 +291,7 @@ class ProfileBar:
             return
         content = self.current_content()
         if self.pair:
-            if {k: v.strip() for k, v in content.items()} == {k: v.strip() for k, v in self.profiles.pair.items()}:
+            if {k: v.strip() for k, v in content.items()} == {k: v.strip() for k, v in self.profiles.texts.items()}:
                 return
         elif content.strip() == str(self.profiles.text or "").strip():
             return

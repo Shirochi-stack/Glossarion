@@ -248,6 +248,7 @@ tests/**
 !tests/test_respect_retry_after.py
 !tests/test_empty_tag_cleanup.py
 !tests/test_request_schedule.py
+!tests/test_review_prompt_profiles.py
 !tests/fixtures/
 !tests/fixtures/manga_editor/
 !tests/fixtures/manga_editor/**

@@ -22,6 +22,9 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect
 from review_generator import (
     DEFAULT_REVIEW_PROMPT,
     DEFAULT_FINAL_REVIEW_PROMPT,
+    # review prompt profiles (shared with the mobile review tool and both runs)
+    REVIEW_PROMPT_DEFAULT_PROFILE,
+    ReviewPromptProfiles,
     count_epub_tokens,
     count_review_tokens,
     generate_review,
@@ -53,6 +56,12 @@ _get_app_dir = review_app_dir
 
 
 _NATURAL_PART_RE = re.compile(r'(\d+)')
+
+
+def _halgakos_arrow_style(size=14):
+    """The dialog's dropdown arrow: the Halgakos icon (font combo, review profile combo)."""
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico').replace('\\', '/')
+    return f'QComboBox::down-arrow {{ image: url({icon_path}); width: {size}px; height: {size}px; }}'
 
 
 def _natural_path_key(path: str):
@@ -595,40 +604,6 @@ class ReviewDialog(QDialog):
         self._nav_counter.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
         header_container.addWidget(self._nav_counter)
 
-        # Reset to Default button (in the same header row)
-        reset_prompt_btn = QPushButton("↺ Reset")
-        reset_prompt_btn.setFixedHeight(26)
-        reset_prompt_btn.setCursor(Qt.PointingHandCursor)
-        reset_prompt_btn.setStyleSheet(
-            "QPushButton { background-color: #2b3a4a; color: #5a9fd4; border: 1px solid #3d5a73; "
-            "border-radius: 3px; padding: 2px 8px; font-size: 9pt; font-weight: 600; }"
-            "QPushButton:hover { background-color: #3a4f66; color: #7ab8e8; border-color: #5a9fd4; }"
-        )
-        reset_prompt_btn.setToolTip("Reset system prompt to default")
-        def _confirm_reset_prompt():
-            from PySide6.QtWidgets import QMessageBox, QDialogButtonBox
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Reset Prompt")
-            msg.setText("Reset system prompt to default?")
-            msg.setIcon(QMessageBox.Warning)
-            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-            msg.setDefaultButton(QMessageBox.No)
-            msg.setStyleSheet("""
-                QPushButton {
-                    min-width: 80px;
-                    min-height: 30px;
-                    padding: 6px 20px;
-                    font-size: 10pt;
-                }
-                QDialogButtonBox {
-                    qproperty-centerButtons: true;
-                }
-            """)
-            if msg.exec() == QMessageBox.Yes:
-                self.prompt_edit.setPlainText(DEFAULT_REVIEW_PROMPT)
-        reset_prompt_btn.clicked.connect(_confirm_reset_prompt)
-        header_container.addWidget(reset_prompt_btn)
-
         layout.addLayout(header_container)
 
         # Hide navigator if only 1 file
@@ -694,7 +669,9 @@ class ReviewDialog(QDialog):
         prompt_layout.setContentsMargins(8, 8, 8, 8)
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("Enter the system prompt for the review...")
+        prompt_layout.addWidget(self._create_review_profile_row())
         prompt_layout.addWidget(self.prompt_edit)
+        self.prompt_edit.textChanged.connect(self._stage_review_prompts)
 
         # ── 2. Log / Summary field ──
         log_group = QGroupBox("Review Output")
@@ -729,11 +706,7 @@ class ReviewDialog(QDialog):
         self._review_font_combo.setFocusPolicy(Qt.StrongFocus)
         self._review_font_combo.wheelEvent = lambda e: e.ignore()
         # Set dropdown arrow icon
-        import os as _os
-        _ico_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'Halgakos.ico').replace('\\', '/')
-        self._review_font_combo.setStyleSheet(
-            f'QComboBox::down-arrow {{ image: url({_ico_path}); width: 14px; height: 14px; }}'
-        )
+        self._review_font_combo.setStyleSheet(_halgakos_arrow_style())
         # Populate with system fonts
         from PySide6.QtGui import QFontDatabase
         families = sorted(set(
@@ -1387,8 +1360,9 @@ class ReviewDialog(QDialog):
     def _load_saved_prompt(self):
         """Load previously saved review prompt, spoiler mode, and chunk mode settings from config."""
         config = getattr(self.translator_gui, 'config', {})
-        saved = config.get('review_system_prompt', '')
-        self.prompt_edit.setPlainText(saved if saved else DEFAULT_REVIEW_PROMPT)
+        # The prompts are the active review prompt profile's (review_generator.ReviewPromptProfiles;
+        # a pre-profile custom prompt is migrated into "My review prompt" on first use).
+        self._load_review_profiles()
         # Load spoiler mode
         spoiler = config.get('review_spoiler_mode', False)
         self.spoiler_checkbox.setChecked(bool(spoiler))
@@ -1401,18 +1375,15 @@ class ReviewDialog(QDialog):
         self.volume_mode_checkbox.blockSignals(True)
         self.volume_mode_checkbox.setChecked(bool(volume_mode))
         self.volume_mode_checkbox.blockSignals(False)
-        # Load final review prompt (stored separately from the main system prompt)
-        self._final_review_prompt = config.get('review_final_prompt', '') or DEFAULT_FINAL_REVIEW_PROMPT
 
     def _sync_settings_to_gui(self):
         """Sync current dialog values to translator_gui _var attributes for save_config."""
         gui = self.translator_gui
-        gui.review_system_prompt_var = self.prompt_edit.toPlainText().strip()
+        self._stage_review_prompts()  # the editor's text into the active profile and the prompt mirrors
         gui.review_spoiler_mode_var = self.spoiler_checkbox.isChecked()
         gui.review_chunk_mode_var = self.chunk_mode_checkbox.isChecked()
         gui.review_chunk_wrap_var = self.chunk_wrap_checkbox.isChecked()
         gui.review_volume_mode_var = self.volume_mode_checkbox.isChecked()
-        gui.review_final_prompt_var = getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT)
 
     def _save_prompt_to_config(self):
         """Persist the current system prompt, spoiler mode, and chunk mode settings to config."""
@@ -1423,6 +1394,244 @@ class ReviewDialog(QDialog):
         except Exception:
             pass
 
+    # ─── Review prompt profiles (review_generator.ReviewPromptProfiles) ──────
+
+    def _create_review_profile_row(self):
+        """Profile dropdown + New / Save / Delete (Reset for the built-in Default and On-device), like the
+        Glossary Manager's prompt profile rows. A profile holds the review prompt (this editor) and the
+        Full Review Mode final prompt (📝 Final Prompt); edit the name and save to rename it."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 6)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("Profile:"))
+
+        combo = QComboBox()
+        combo.setObjectName("review_prompt_profile_combo")
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setCompleter(None)
+        combo.setMinimumWidth(220)
+        combo.setMaximumWidth(420)
+        combo.lineEdit().setPlaceholderText("Profile name")
+        combo.setToolTip("Select a review prompt profile, or edit its name and save to rename it.\n"
+                         "Each profile stores the review prompt and the Full Review Mode final prompt.")
+        combo.setFocusPolicy(Qt.StrongFocus)
+        combo.wheelEvent = lambda e: e.ignore()
+        combo.setStyleSheet(_halgakos_arrow_style(16) + """
+            QComboBox { padding-right: 4px; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
+        layout.addWidget(combo)
+        self._review_profile_combo = combo
+
+        self._review_profile_buttons = {}
+        actions = (
+            ('new', "+ New Profile", self._new_review_profile, None,
+             '#2d5a2d', '#3a7a3a', '#3a7a3a', '#4a9a4a', '#1e3e1e'),
+            ('save', "💾 Save Profile", self._save_review_profile, 120,
+             '#2f5f8f', '#4a78a8', '#3f78ad', '#5a91c8', '#244766'),
+            ('delete', "🗑 Delete Profile", self._delete_or_reset_review_profile, 128,
+             '#6f2f2f', '#944545', '#8a3a3a', '#b65252', '#512424'),
+        )
+        for key, label, callback, width, background, border, hover, hover_border, pressed in actions:
+            button = QPushButton(label)
+            button.setObjectName(f"review_profile_{key}_button")
+            button.setAutoDefault(False)
+            button.setFixedHeight(28)
+            if width is not None:
+                button.setFixedWidth(width)
+            button.setStyleSheet(f"""
+                QPushButton {{ background-color: {background}; color: #ffffff;
+                    font-size: 11px; font-weight: bold; border: 1px solid {border};
+                    border-radius: 4px; padding: 0px 8px; }}
+                QPushButton:hover {{ background-color: {hover}; border-color: {hover_border}; }}
+                QPushButton:pressed {{ background-color: {pressed}; }}
+            """)
+            button.clicked.connect(lambda _checked=False, action=callback: action())
+            layout.addWidget(button)
+            self._review_profile_buttons[key] = button
+        layout.addStretch()
+
+        combo.currentIndexChanged.connect(
+            lambda index: self._select_review_profile(combo.itemText(index)) if index >= 0 else None)
+        combo.lineEdit().returnPressed.connect(lambda: self._select_review_profile(combo.currentText()))
+        return row
+
+    def _load_review_profiles(self):
+        """Open the profile row on the config (migrating a pre-profile custom prompt) and show the active
+        profile's prompts."""
+        gui = self.translator_gui
+        if not isinstance(getattr(gui, 'config', None), dict):
+            try:
+                gui.config = {}
+            except Exception:
+                pass
+        log = getattr(gui, 'append_log', None)
+        self._review_profiles = ReviewPromptProfiles(
+            gui, persist=self._persist_review_profiles, log=log if callable(log) else None)
+        self._apply_review_profile_texts()
+
+    def _persist_review_profiles(self):
+        """The main config saver (False = failed: the profile action is rolled back)."""
+        save = getattr(self.translator_gui, 'save_config', None)
+        if not callable(save):
+            return None
+        try:
+            return save(show_message=False)
+        except Exception:
+            return False
+
+    def _review_profile_name(self):
+        profiles = getattr(self, '_review_profiles', None)
+        return profiles.selected_name() if profiles is not None else REVIEW_PROMPT_DEFAULT_PROFILE
+
+    def _refresh_review_profile_combo(self):
+        combo = getattr(self, '_review_profile_combo', None)
+        profiles = getattr(self, '_review_profiles', None)
+        if combo is None or profiles is None:
+            return
+        selected = profiles.selected_name()
+        blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItems(profiles.names)
+            combo.setCurrentIndex(max(0, combo.findText(selected)))
+            combo.setEditText(selected)
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                from PySide6.QtCore import QSize
+                icon = QIcon(icon_path)
+                for index in range(combo.count()):
+                    combo.setItemIcon(index, icon)
+                combo.setIconSize(QSize(18, 18))
+        finally:
+            combo.blockSignals(blocked)
+        button = getattr(self, '_review_profile_buttons', {}).get('delete')
+        if button is not None:
+            builtin = profiles.is_builtin(selected)
+            button.setText("↺ Reset Profile" if builtin else "🗑 Delete Profile")
+            button.setToolTip(
+                f"Restore the built-in '{selected}' review and final prompts" if builtin
+                else "Delete the selected review prompt profile")
+
+    def _apply_review_profile_texts(self):
+        """Show the selected profile: its review prompt in the editor, its final prompt for 📝 Final Prompt."""
+        profiles = getattr(self, '_review_profiles', None)
+        if profiles is None:
+            return
+        texts = profiles.texts
+        self._applying_review_profile = True
+        try:
+            self.prompt_edit.setPlainText(texts.get('system', ''))
+        finally:
+            self._applying_review_profile = False
+        self._final_review_prompt = texts.get('final', '')
+        dialog = getattr(self, '_final_prompt_dialog', None)
+        editor = getattr(self, '_final_prompt_editor', None)
+        if dialog is not None and editor is not None:
+            try:
+                if dialog.isVisible():
+                    editor.setPlainText(self._final_review_prompt or DEFAULT_FINAL_REVIEW_PROMPT)
+                    dialog.setWindowTitle(f"Final Review Prompt — {profiles.selected_name()}")
+            except RuntimeError:
+                pass
+        self._refresh_review_profile_combo()
+
+    def _stage_review_prompts(self, *_args):
+        """An edit of the review prompt (or a saved final prompt) goes into the selected profile and the
+        prompt mirrors (in memory; saved with the config)."""
+        profiles = getattr(self, '_review_profiles', None)
+        if profiles is None or getattr(self, '_applying_review_profile', False):
+            return
+        profiles.stage(profiles.selected_name(), {
+            'system': self.prompt_edit.toPlainText(),
+            'final': getattr(self, '_final_review_prompt', ''),
+        })
+
+    def _select_review_profile(self, name):
+        profiles = getattr(self, '_review_profiles', None)
+        if profiles is None or not str(name or '').strip() or profiles.select(name) is None:
+            return
+        self._apply_review_profile_texts()
+        self._persist_review_profiles()
+
+    def _review_profile_box(self, box):
+        if box:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, box[0], box[1])
+        return box
+
+    def _confirm_review_profile(self, title, text):
+        from PySide6.QtWidgets import QMessageBox
+        confirmation = QMessageBox(self)
+        confirmation.setWindowTitle(title)
+        confirmation.setIcon(QMessageBox.Question)
+        confirmation.setText(text)
+        confirmation.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        confirmation.setDefaultButton(QMessageBox.No)
+        button_box = confirmation.findChild(QDialogButtonBox)
+        if button_box is not None:
+            button_box.setCenterButtons(True)
+            button_box.layout().setSpacing(12)
+            for button in button_box.buttons():
+                button.setMinimumWidth(button.sizeHint().width() + 12)
+        return confirmation.exec() == QMessageBox.Yes
+
+    def _new_review_profile(self):
+        box = self._review_profiles.new()
+        self._apply_review_profile_texts()
+        self._review_profile_box(box)
+
+    def _save_review_profile(self):
+        """Save Profile under the combo's (edited) name: a new name renames a user profile and copies a
+        built-in; "Default" saves the Default profile."""
+        self._stage_review_prompts()
+        box = self._review_profiles.save(self._review_profile_combo.currentText(), {
+            'system': self.prompt_edit.toPlainText(),
+            'final': getattr(self, '_final_review_prompt', ''),
+        })
+        if box:
+            self._review_profile_box(box)
+            return
+        self._apply_review_profile_texts()
+
+    def _delete_or_reset_review_profile(self):
+        """Delete the selected user profile, or Reset a built-in one (both prompts) to its shipped texts."""
+        profiles = self._review_profiles
+        name = profiles.selected_name()
+        if profiles.is_builtin(name):
+            if not self._confirm_review_profile(
+                    "Reset Profile", f"Reset the built-in '{name}' review prompt profile to its shipped "
+                                     "review and final prompts?"):
+                return
+            box = profiles.reset(name)
+        else:
+            box = profiles.delete(name, confirm=lambda n: self._confirm_review_profile(
+                "Delete Profile", f"Delete review prompt profile '{n}'?"))
+        self._apply_review_profile_texts()
+        self._review_profile_box(box)
+
+    def _review_profile_shipped_final(self):
+        """The final prompt Reset to Default restores: the built-in profile's own, else the default one."""
+        profiles = getattr(self, '_review_profiles', None)
+        shipped = profiles.builtin_texts(profiles.selected_name()) if profiles is not None else None
+        return (shipped or {}).get('final') or DEFAULT_FINAL_REVIEW_PROMPT
+
+    def _review_run_prompts(self):
+        """(review prompt, final prompt) a Start sends: the active profile's (empty = the defaults)."""
+        self._stage_review_prompts()
+        profiles = getattr(self, '_review_profiles', None)
+        if profiles is None:
+            return (self.prompt_edit.toPlainText().strip() or DEFAULT_REVIEW_PROMPT,
+                    getattr(self, '_final_review_prompt', '') or DEFAULT_FINAL_REVIEW_PROMPT)
+        return profiles.run_prompts()
+
     def _open_final_prompt_dialog(self):
         """Open a dialog to edit the Final Review synthesis prompt."""
         # Reuse existing dialog if open
@@ -1432,7 +1641,7 @@ class ReviewDialog(QDialog):
             return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Final Review Prompt")
+        dialog.setWindowTitle(f"Final Review Prompt — {self._review_profile_name()}")
         dialog.setModal(False)
         dialog.setMinimumSize(600, 400)
         dialog.resize(700, 500)
@@ -1443,14 +1652,15 @@ class ReviewDialog(QDialog):
 
         info_label = QLabel(
             "This prompt is sent as the system prompt for the final synthesis call.\n"
-            "It receives all chunk reviews as user content and produces the combined review."
+            "It receives all chunk reviews as user content and produces the combined review.\n"
+            "It belongs to the selected review prompt profile, like the main prompt."
         )
         info_label.setStyleSheet("color: #94a3b8; font-size: 9pt;")
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
 
         prompt_edit = QPlainTextEdit()
-        prompt_edit.setPlainText(getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT))
+        prompt_edit.setPlainText(getattr(self, '_final_review_prompt', '') or DEFAULT_FINAL_REVIEW_PROMPT)
         prompt_edit.setPlaceholderText("Enter the final review synthesis prompt...")
         prompt_edit.setStyleSheet("""
             QPlainTextEdit {
@@ -1494,7 +1704,7 @@ class ReviewDialog(QDialog):
                 }
             """)
             if msg.exec() == QMessageBox.Yes:
-                prompt_edit.setPlainText(DEFAULT_FINAL_REVIEW_PROMPT)
+                prompt_edit.setPlainText(self._review_profile_shipped_final())
         reset_btn.clicked.connect(_confirm_reset_final_prompt)
         btn_row.addWidget(reset_btn)
 
@@ -1513,6 +1723,7 @@ class ReviewDialog(QDialog):
         )
         def _save_and_close():
             self._final_review_prompt = prompt_edit.toPlainText().strip() or DEFAULT_FINAL_REVIEW_PROMPT
+            self._stage_review_prompts()
             self._save_prompt_to_config()
             try:
                 import winsound
@@ -1526,6 +1737,7 @@ class ReviewDialog(QDialog):
         layout.addLayout(btn_row)
 
         self._final_prompt_dialog = dialog
+        self._final_prompt_editor = prompt_edit
         dialog.show()
 
     def _load_existing_review(self):
@@ -1736,11 +1948,12 @@ class ReviewDialog(QDialog):
 
         # Gather parameters from the GUI (review_generator.review_run_params, shared with mobile)
         gui = self.translator_gui
+        prompt, final_prompt = self._review_run_prompts()
         params = review_run_params(
             gui,
-            self.prompt_edit.toPlainText(),
+            prompt,
             self.spoiler_checkbox.isChecked(),
-            getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT),
+            final_prompt,
         )
         review_input = self._review_input()
         if isinstance(review_input, list):
@@ -1895,11 +2108,12 @@ class ReviewDialog(QDialog):
 
         # Gather parameters (review_generator.review_run_params, shared with mobile)
         gui = self.translator_gui
+        prompt, final_prompt = self._review_run_prompts()
         params = review_run_params(
             gui,
-            self.prompt_edit.toPlainText(),
+            prompt,
             self.spoiler_checkbox.isChecked(),
-            getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT),
+            final_prompt,
         )
         chunk_mode = self.chunk_mode_checkbox.isChecked()
         wrap_chunks = self.chunk_wrap_checkbox.isChecked()

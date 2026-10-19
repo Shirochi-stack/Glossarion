@@ -3563,159 +3563,46 @@ class GlossaryPromptProfiles:
         return None
 
 
-class RefinementPromptProfiles:
+def _prompt_set_profiles_base():
+    import prompt_profiles
+    return prompt_profiles.PromptSetProfiles
+
+
+class RefinementPromptProfiles(_prompt_set_profiles_base()):
     """The Glossary Refinement prompt profiles (a system + user prompt pair each), without widgets.
 
-    The same Default-plus-named engine as :class:`GlossaryPromptProfiles`; a pair travels through
-    it as one canonical text. Config keys as the desktop controls
-    (``_create_refinement_prompt_profile_controls``) write them after every action:
+    The same Default-plus-named engine as :class:`GlossaryPromptProfiles`, as
+    ``prompt_profiles.PromptSetProfiles`` (a pair travels through it as one canonical text). Config keys
+    as the desktop controls (``_create_refinement_prompt_profile_controls``) write them after every action:
     ``glossary_refinement_prompt_profiles`` / ``..._profile_default`` /
     ``active_glossary_refinement_prompt_profile`` and the runtime
     ``glossary_refinement_system_prompt`` / ``glossary_refinement_user_prompt`` (also set on
     ``owner``). ``system`` / ``user`` are what the desktop prompt editors show when it opens.
     """
 
+    FIELDS = ('system', 'user')
     PROFILES_KEY = 'glossary_refinement_prompt_profiles'
     DEFAULT_KEY = 'glossary_refinement_prompt_profile_default'
     ACTIVE_KEY = 'active_glossary_refinement_prompt_profile'
     SYSTEM_KEY = 'glossary_refinement_system_prompt'
     USER_KEY = 'glossary_refinement_user_prompt'
+    RUNTIME_KEYS = (SYSTEM_KEY, USER_KEY)
+    LABEL = 'refinement prompt profile'
 
     def __init__(self, owner, system='', user='', *, persist=None, log=None):
-        import prompt_profiles
-
-        self._pp = prompt_profiles
-        self.owner = owner
-        self.persist = persist
-        self.log = log or _noop_log
-        config = owner.config
-        initial = {'system': str(system or '').strip(), 'user': str(user or '').strip()}
-
-        def clean_pair(value, fallback):
-            if not isinstance(value, dict):
-                return dict(fallback)
-            return {key: str(value.get(key, fallback[key]) or '') for key in ('system', 'user')}
-
-        raw_profiles = config.get(self.PROFILES_KEY, {})
-        profiles = {
-            name: self._encode(clean_pair(pair, initial))
-            for name, pair in (raw_profiles.items() if isinstance(raw_profiles, dict) else ())
-            if isinstance(name, str) and name.strip() and name.strip().casefold() != 'default'
-            and isinstance(pair, dict)
-        }
-        self.state = prompt_profiles.PrefillState()
-        self._pp.prefill_load(self.state, profiles, self._encode(clean_pair(config.get(self.DEFAULT_KEY), initial)),
-                              config.get(self.ACTIVE_KEY, ''))
-        self._sync()
-
-    @staticmethod
-    def _encode(pair):
-        return json.dumps([pair.get('system', ''), pair.get('user', '')], ensure_ascii=False)
-
-    @staticmethod
-    def _decode(text):
-        if not text:
-            return {'system': '', 'user': ''}
-        system, user = json.loads(text)
-        return {'system': system, 'user': user}
+        super().__init__(owner, {'system': system, 'user': user}, persist=persist, log=log or _noop_log)
 
     @property
     def pair(self):
         """The system / user prompts the editors show."""
-        return self._decode(self.state.text)
+        return self.texts
 
-    @property
-    def names(self):
-        return [self._pp.PREFILL_DEFAULT_NAME] + list(self.state.profiles)
-
-    def selected_name(self):
-        return self.state.active_name or self._pp.PREFILL_DEFAULT_NAME
-
-    def _clean(self, pair):
-        return {'system': str(pair.get('system', '') or '').strip(), 'user': str(pair.get('user', '') or '').strip()}
-
-    def _sync(self):
+    def _write_runtime(self, pair):
         config = self.owner.config
-        pair = self._clean(self.pair)  # the editors' text, as the desktop reads it back
-        config[self.PROFILES_KEY] = {name: self._decode(text) for name, text in self.state.profiles.items()}
-        config[self.DEFAULT_KEY] = self._decode(self.state.default_prompt)
-        config[self.ACTIVE_KEY] = self.state.active_name
         self.owner.glossary_refinement_system_prompt = pair['system'] or default_glossary_refinement_system_prompt()
         self.owner.glossary_refinement_user_prompt = pair['user']
         config[self.SYSTEM_KEY] = self.owner.glossary_refinement_system_prompt
         config[self.USER_KEY] = self.owner.glossary_refinement_user_prompt
-
-    def _snapshot(self):
-        keys = (self.PROFILES_KEY, self.DEFAULT_KEY, self.ACTIVE_KEY, self.SYSTEM_KEY, self.USER_KEY)
-        return (_copy.deepcopy(self.state), {key: (key in self.owner.config, _copy.deepcopy(self.owner.config.get(key)))
-                                             for key in keys})
-
-    def _persist(self, before):
-        self._sync()
-        result = None
-        if self.persist is not None:
-            try:
-                result = self.persist()
-            except Exception:
-                result = False
-        if result is not False:
-            return True
-        self.state, saved_config = before
-        self._sync()
-        for key, (present, value) in saved_config.items():
-            if present:
-                self.owner.config[key] = value
-            else:
-                self.owner.config.pop(key, None)
-        return False
-
-    _SAVE_FAILED = ("Save Failed", "Could not save the refinement prompt profiles. Please try again.")
-
-    def select(self, name):
-        """Pick a profile (or Default); returns its pair, or None for an unknown name."""
-        text = self._pp.prefill_select(self.state, str(name or '').strip())
-        if text is None:
-            return None
-        self._sync()
-        return self.pair
-
-    def stage(self, name, pair):
-        """An edit in either prompt editor."""
-        self._pp.prefill_stage(self.state, str(name or ''), self._encode(self._clean(pair)))
-        self._sync()
-
-    def new(self):
-        before = self._snapshot()
-        name = self._pp.prefill_new(self.state)
-        if not self._persist(before):
-            return self._SAVE_FAILED
-        self.log(f"✅ Created refinement prompt profile: '{name}'")
-        return None
-
-    def save(self, name, pair):
-        before = self._snapshot()
-        outcome = self._pp.prefill_save(self.state, str(name or ''), self._encode(self._clean(pair)))
-        if not outcome.ok:
-            return outcome.title, outcome.error
-        if not self._persist(before):
-            return self._SAVE_FAILED
-        self.log(f"✅ Saved refinement prompt profile: '{self.state.active_name or 'Default'}'")
-        return None
-
-    def delete(self, name, confirm=None):
-        name = str(name or '').strip()
-        if name.casefold() == 'default':
-            return "Default Profile", "The Default refinement prompt profile cannot be deleted."
-        if name not in self.state.profiles:
-            return "Profile Not Found", "Select an existing profile to delete."
-        if confirm is not None and not confirm(name):
-            return None
-        before = self._snapshot()
-        self._pp.prefill_delete(self.state, name)
-        if not self._persist(before):
-            return self._SAVE_FAILED
-        self.log(f"\U0001f5d1️ Deleted refinement prompt profile: '{name}'")
-        return None
 
 
 # ---------------------------------------------------------------------------

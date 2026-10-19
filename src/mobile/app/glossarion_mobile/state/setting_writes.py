@@ -24,14 +24,15 @@ value changes are stored. An absent toggle counts as ON on mobile (``MOBILE_STRE
 desktop default stays off): every job's config snapshot gets it (``with_mobile_streaming_defaults``), and
 chat / Reader runs force streaming only while it is on (``streaming_enabled``).
 
-Choosing an on-device ``local/`` model (mobile only) also selects the built-in "On-device" translation
-and glossary prompt profiles, drops the glossary's extra columns (the "description" field; owner
-2026-10-19: a small model only writes name, translated name and gender) and sets its Request size
-(``ON_DEVICE_SETTINGS``: temperature 0.7, batch size 1, output limit half the context, input token limit
-the whole context, very short review generator prompts); choosing a model
+Choosing an on-device ``local/`` model (mobile only) also selects the built-in "On-device" translation,
+glossary and review generator prompt profiles (the review profile holds very short review and final
+prompts: ``review_generator.ON_DEVICE_REVIEW_PROMPT`` / ``ON_DEVICE_FINAL_REVIEW_PROMPT``), drops the
+glossary's extra columns (the "description" field; owner 2026-10-19: a small model only writes name,
+translated name and gender) and sets its Request size (``ON_DEVICE_SETTINGS``: temperature 0.7, batch
+size 1, output limit half the context, input token limit the whole context); choosing a model
 that is not ``local/`` again restores everything that was there before, where it still holds the
-On-device value (a value the user changed meanwhile stays) and the defaults where nothing was saved
-(``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``).
+On-device value (a value or profile the user changed meanwhile stays) and the defaults where nothing was
+saved (``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``).
 
 Every global writer on mobile (Settings tiles, ModelSheet / Plan chips, Chat settings › All chats,
 the Welcome flow) goes through ``write_setting`` / ``write_settings``, which run the shared rules
@@ -132,22 +133,9 @@ CUSTOM_FIELDS_KEY = "custom_glossary_fields"
 ON_DEVICE_TEMPERATURE = 0.7
 #: Request size settings an on-device model sets and a cloud model gets back (owner 2026-10-19: "choosing
 #: a non on device model should restore all the original defaults and vice versa"); the output limit is
-#: half the model's context (``local_output_limit``)
-#: Review generator prompts a 0.8B model follows (the desktop ones ask for seven sections and a table)
-ON_DEVICE_REVIEW_PROMPT = (
-    "Write a short review of this story in {target_lang}.\n"
-    "Say what happens, who the main characters are, and if the story is good.\n"
-    "Write 3 short paragraphs. Write only in {target_lang}."
-)
-ON_DEVICE_FINAL_REVIEW_PROMPT = (
-    "These are reviews of parts of one story.\n"
-    "Write one short review of the whole story in {target_lang}.\n"
-    "Say what happens, who the main characters are, and if the story is good.\n"
-    "Write 3 short paragraphs. Write only in {target_lang}."
-)
-ON_DEVICE_SETTINGS = {"translation_temperature": ON_DEVICE_TEMPERATURE, "batch_size": 1,
-                      "review_system_prompt": ON_DEVICE_REVIEW_PROMPT,
-                      "review_final_prompt": ON_DEVICE_FINAL_REVIEW_PROMPT}
+#: half the model's context (``local_output_limit``). The review generator's short prompts are the built-in
+#: "On-device" review prompt profile (``review_generator``), selected like the other On-device profiles.
+ON_DEVICE_SETTINGS = {"translation_temperature": ON_DEVICE_TEMPERATURE, "batch_size": 1}
 OUTPUT_LIMIT_KEY = "max_output_tokens"
 #: the input token limit (off unless enabled, ``token_limit_disabled``): the model's whole context
 INPUT_LIMIT_KEY = "token_limit"
@@ -156,6 +144,12 @@ ON_DEVICE_BEFORE_KEY = "profiles_before_on_device"
 _GLOSSARY_PROFILE_BUCKETS = ("balanced_full", "minimal")
 _GLOSSARY_PROFILE_KEYS = ("glossary_prompt_profiles", "active_glossary_prompt_profiles",
                           "glossary_prompt_profile_defaults")
+#: what selecting a review prompt profile writes (``review_generator.set_active_review_prompt_profile``:
+#: the profiles a migration creates, the active name and the two prompt mirrors)
+_REVIEW_PROFILE_KEYS = ("review_prompt_profiles", "active_review_prompt_profile", "review_system_prompt",
+                        "review_final_prompt")
+#: the review prompt mirrors a build before the review profiles swapped itself (an older ON_DEVICE_BEFORE_KEY)
+_LEGACY_REVIEW_PROMPT_KEYS = ("review_system_prompt", "review_final_prompt")
 #: ``settings_rules.DEFAULT_BATCH_SIZE`` / ``SERIAL_BATCH_ROUTES`` (literals: loads before the backend).
 _BATCH_SIZE = 5
 _SERIAL_BATCH_ROUTES = ("authds/", "authchatgpt/")
@@ -554,6 +548,65 @@ def _active_glossary_profiles(store: Any) -> dict:
     return {bucket: str(active.get(bucket) or "") for bucket in _GLOSSARY_PROFILE_BUCKETS}
 
 
+def _review_core() -> Any:
+    try:
+        rg = importlib.import_module("review_generator")
+    except Exception:
+        log.debug("review_generator unavailable", exc_info=True)
+        return None
+    return rg if callable(getattr(rg, "set_active_review_prompt_profile", None)) else None
+
+
+def _change_review_profiles(store: Any, change: Any) -> list:
+    """Run ``change(review_generator, config)`` on a copy of the config and write the review profile keys it
+    changed (a migration's new profile included)."""
+    snapshot = getattr(store, "snapshot", None)
+    rg = _review_core()
+    if not callable(snapshot) or rg is None:
+        return []
+    try:
+        import copy
+
+        config = dict(snapshot() or {})
+        mine = copy.deepcopy(config)
+        change(rg, mine)
+    except Exception:
+        log.debug("review prompt profile change failed", exc_info=True)
+        return []
+    updates = {k: mine[k] for k in _REVIEW_PROFILE_KEYS if k in mine and mine[k] != config.get(k)}
+    return _set_many(store, updates) if updates else []
+
+
+def _select_review_profile(store: Any, name: str) -> list:
+    """The review generator's profile picker choosing ``name`` (an unknown name picks Default)."""
+    def change(rg: Any, config: dict) -> None:
+        if not rg.set_active_review_prompt_profile(config, name):
+            rg.set_active_review_prompt_profile(config, rg.REVIEW_PROMPT_DEFAULT_PROFILE)
+
+    return _change_review_profiles(store, change)
+
+
+def _select_review_profile_for_prompts(store: Any, system: Any, final: Any) -> list:
+    """Select the profile holding ``system`` / ``final`` (a new "My review prompt" when none does)."""
+    def change(rg: Any, config: dict) -> None:
+        rg.set_active_review_prompt_profile(config, rg.review_profile_for_prompts(config, system, final))
+
+    return _change_review_profiles(store, change)
+
+
+def _active_review_profile(store: Any) -> Optional[str]:
+    """The selected review prompt profile (after the migration of older prompts); None without the core."""
+    snapshot = getattr(store, "snapshot", None)
+    rg = _review_core()
+    if not callable(snapshot) or rg is None:
+        return None
+    try:
+        return str(rg.active_review_prompt_profile(dict(snapshot() or {})))
+    except Exception:
+        log.debug("active review prompt profile unavailable", exc_info=True)
+        return None
+
+
 def _use_on_device_profiles(store: Any, model: Any = None) -> list:
     """A ``local/`` model was chosen: select the On-device translation and glossary profiles and remember
     what was active (``ON_DEVICE_BEFORE_KEY``). A part already on On-device keeps the remembered value."""
@@ -567,6 +620,9 @@ def _use_on_device_profiles(store: Any, model: Any = None) -> list:
         "glossary": {bucket: str(remembered.get(bucket) or "") if name == ON_DEVICE_PROFILE else name
                      for bucket, name in glossary.items()},
     }
+    review = _active_review_profile(store)
+    if review is not None:
+        before["review"] = str(record.get("review") or "") if review == ON_DEVICE_PROFILE else review
     fields_present, fields = _stored_value(store, CUSTOM_FIELDS_KEY)
     removed_present, removed = _stored_value(store, DESCRIPTION_REMOVED_KEY)
     if "fields" in record:  # already On-device: keep what was remembered then
@@ -593,6 +649,8 @@ def _use_on_device_profiles(store: Any, model: Any = None) -> list:
     before["applied"] = applied
     changed = _select_profile(store, ON_DEVICE_PROFILE)
     changed += _select_glossary_profiles(store, {bucket: ON_DEVICE_PROFILE for bucket in _GLOSSARY_PROFILE_BUCKETS})
+    if review is not None:
+        changed += _select_review_profile(store, ON_DEVICE_PROFILE)
     changed += _set_many(store, applied)
     # no extra glossary columns: the "removed" flag keeps the desktop from adding "description" back
     changed += _set_many(store, {CUSTOM_FIELDS_KEY: [], DESCRIPTION_REMOVED_KEY: True, ON_DEVICE_BEFORE_KEY: before})
@@ -616,6 +674,19 @@ def _restore_profiles_before_on_device(store: Any) -> list:
     names = {bucket: str(remembered.get(bucket) or "") or "Default"
              for bucket, name in _active_glossary_profiles(store).items() if name == ON_DEVICE_PROFILE}
     changed += _select_glossary_profiles(store, names)
+    settings = record.get("settings") if isinstance(record.get("settings"), Mapping) else {}
+    applied = record.get("applied") if isinstance(record.get("applied"), Mapping) else {}
+    legacy_review = "review" not in record and any(key in applied for key in _LEGACY_REVIEW_PROMPT_KEYS)
+    if _active_review_profile(store) == ON_DEVICE_PROFILE:
+        if legacy_review:  # an older build swapped the prompt texts: the profile holding the ones before
+            previous = {}
+            for key in _LEGACY_REVIEW_PROMPT_KEYS:
+                saved = settings.get(key)
+                ok = isinstance(saved, (list, tuple)) and len(saved) == 2 and saved[0]
+                previous[key] = saved[1] if ok else ""
+            changed += _select_review_profile_for_prompts(store, *(previous[key] for key in _LEGACY_REVIEW_PROMPT_KEYS))
+        elif "review" in record:
+            changed += _select_review_profile(store, str(record.get("review") or "") or "Default")
     _present, fields = _stored_value(store, CUSTOM_FIELDS_KEY)
     if "fields" in record and not fields:  # columns the user added meanwhile stay
         previous = record.get("fields")
@@ -624,9 +695,9 @@ def _restore_profiles_before_on_device(store: Any) -> list:
                                          DESCRIPTION_REMOVED_KEY: bool(previous.get(DESCRIPTION_REMOVED_KEY))})
         else:
             changed += _unset(store, CUSTOM_FIELDS_KEY) + _unset(store, DESCRIPTION_REMOVED_KEY)
-    settings = record.get("settings") if isinstance(record.get("settings"), Mapping) else {}
-    applied = record.get("applied") if isinstance(record.get("applied"), Mapping) else {}
     for key, on_device_value in applied.items():
+        if legacy_review and key in _LEGACY_REVIEW_PROMPT_KEYS:
+            continue  # the review profile above
         _present, current = _stored_value(store, key)
         if current != on_device_value:  # changed meanwhile: the user's value stays
             continue

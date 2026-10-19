@@ -5,9 +5,11 @@
 * the Balanced/Full and Minimal glossary buckets get an "On-device" profile (``glossary_document``),
   seeded without overwriting an edited text and protected from deletion like Default;
 * choosing a ``local/`` model (``setting_writes.write_setting(store, "model", ...)``, the path every
-  global model writer takes) selects the three On-device profiles and the current glossary prompt keys
-  runs read; choosing a model that is not ``local/`` again restores the remembered profiles where
-  On-device is still the active one.
+  global model writer takes) selects the On-device translation, glossary and review generator profiles
+  and the current prompt keys runs read; choosing a model that is not ``local/`` again restores the
+  remembered profiles where On-device is still the active one;
+* the review generator's "On-device" profile holds both of its prompts (the review prompt and the Full
+  Review Mode final prompt), and the review job sends the active profile's.
 
 Runs on the real shared ``prompt_profiles`` / ``glossary_document`` and a real ``MobileConfigStore``
 in a temp folder. Run from src/mobile:
@@ -279,7 +281,7 @@ def test_columns_added_while_on_device_stay(tmp_path):
 
 
 @pytest.mark.parametrize("config", [{}, {"translation_temperature": 0.3, "batch_size": 8, "max_output_tokens": 32768,
-                                         "token_limit": 200000, "review_system_prompt": "My review prompt"}],
+                                         "token_limit": 200000}],
                          ids=["fresh", "saved"])
 def test_local_model_sets_request_size_and_cloud_restores_it(tmp_path, monkeypatch, config):
     """On-device: temperature 0.7, batch size 1, output limit half the context; a cloud model gets the
@@ -292,12 +294,9 @@ def test_local_model_sets_request_size_and_cloud_restores_it(tmp_path, monkeypat
     sw.write_setting(store, "model", LOCAL)
     assert store.get("translation_temperature") == 0.7 and store.get("batch_size") == 1
     assert store.get("max_output_tokens") == 4096 and store.get("token_limit") == 8192
-    assert store.get("review_system_prompt") == sw.ON_DEVICE_REVIEW_PROMPT
-    assert store.get("review_final_prompt") == sw.ON_DEVICE_FINAL_REVIEW_PROMPT
-    assert "{target_lang}" in sw.ON_DEVICE_REVIEW_PROMPT and len(sw.ON_DEVICE_REVIEW_PROMPT) < 250
+    assert "review_system_prompt" not in sw.ON_DEVICE_SETTINGS  # the On-device review profile instead
     sw.write_setting(store, "model", CLOUD)
-    for key in ("translation_temperature", "batch_size", "max_output_tokens", "token_limit", "review_system_prompt",
-                "review_final_prompt"):
+    for key in ("translation_temperature", "batch_size", "max_output_tokens", "token_limit"):
         if key in config:
             assert store.get(key) == config[key], key
         else:  # nothing was saved: the default again
@@ -311,3 +310,104 @@ def test_local_model_sets_request_size_and_cloud_restores_it(tmp_path, monkeypat
         not config and not store.has("translation_temperature"))
     store._saver.close()
 
+
+# ---- the review generator's On-device prompt profile --------------------------------------------------------
+
+
+def _review_config(kind: str) -> dict:
+    if kind == "custom":  # a pre-profile custom prompt pair (both prompts)
+        return {"review_system_prompt": "My review in {target_lang}", "review_final_prompt": "My final synthesis"}
+    if kind == "profile":  # profiles already, a user profile active
+        return {"review_prompt_profiles": {"Mine": {"system": "Mine {target_lang}", "final": "Mine final"}},
+                "active_review_prompt_profile": "Mine"}
+    return {}
+
+
+@pytest.mark.parametrize("kind,restored", [("fresh", "Default"), ("custom", "My review prompt"), ("profile", "Mine")])
+def test_local_model_selects_the_on_device_review_profile_and_cloud_restores_it(tmp_path, kind, restored):
+    """Both review prompts follow the model: On-device's short review and final prompts for a local/ model, the
+    profile from before (a migrated custom pair included) for a cloud model again."""
+    import review_generator as rg
+    from glossarion_mobile.state.setting_writes import ON_DEVICE_BEFORE_KEY, write_setting
+
+    store = _store(tmp_path, _review_config(kind))
+    changed = write_setting(store, "model", LOCAL)
+    assert "active_review_prompt_profile" in changed
+    assert store.get("active_review_prompt_profile") == ON_DEVICE
+    assert store.get("review_system_prompt") == rg.ON_DEVICE_REVIEW_PROMPT
+    assert store.get("review_final_prompt") == rg.ON_DEVICE_FINAL_REVIEW_PROMPT
+    assert store.get(ON_DEVICE_BEFORE_KEY)["review"] == restored
+    profiles = store.get("review_prompt_profiles")
+    assert list(profiles)[:2] == ["Default", ON_DEVICE] and restored in profiles
+    write_setting(store, "model", "local/other")  # still On-device: the remembered profile stays
+    assert store.get(ON_DEVICE_BEFORE_KEY)["review"] == restored
+    write_setting(store, "model", CLOUD)
+    assert store.get("active_review_prompt_profile") == restored
+    texts = store.get("review_prompt_profiles")[restored]
+    assert store.get("review_system_prompt") == texts["system"].strip()
+    assert store.get("review_final_prompt") == texts["final"].strip()
+    if kind == "custom":  # the custom pair was migrated, final prompt included
+        assert texts == {"system": "My review in {target_lang}", "final": "My final synthesis"}
+    elif kind == "fresh":
+        assert texts == {"system": rg.DEFAULT_REVIEW_PROMPT, "final": rg.DEFAULT_FINAL_REVIEW_PROMPT}
+    store._saver.close()
+
+
+def test_review_profile_picked_while_on_device_stays(tmp_path):
+    import review_generator as rg
+    from glossarion_mobile.state.setting_writes import write_setting
+
+    store = _store(tmp_path, _review_config("profile"))
+    write_setting(store, "model", LOCAL)
+    config = store.snapshot()
+    assert rg.set_active_review_prompt_profile(config, "Default")  # the review tool's picker
+    store.set_many({key: config[key] for key in ("active_review_prompt_profile", "review_system_prompt",
+                                                 "review_final_prompt")})
+    write_setting(store, "model", CLOUD)
+    assert store.get("active_review_prompt_profile") == "Default"
+    assert store.get("review_final_prompt") == rg.DEFAULT_FINAL_REVIEW_PROMPT.strip()
+    store._saver.close()
+
+
+def test_older_on_device_prompt_swap_is_restored_into_a_profile(tmp_path):
+    """A build before the review profiles swapped the two prompt texts and remembered the old ones in
+    ON_DEVICE_BEFORE_KEY: switching back selects a profile holding those texts (the On-device one stays)."""
+    import review_generator as rg
+    from glossarion_mobile.state.setting_writes import ON_DEVICE_BEFORE_KEY, write_setting
+
+    record = {"active_profile": "", "glossary": {"balanced_full": "", "minimal": ""}, "fields": None,
+              "settings": {"translation_temperature": [False, None], "batch_size": [False, None],
+                           "review_system_prompt": [True, "Old custom review"],
+                           "review_final_prompt": [True, "Old custom final"]},
+              "applied": {"translation_temperature": 0.7, "batch_size": 1,
+                          "review_system_prompt": rg.ON_DEVICE_REVIEW_PROMPT,
+                          "review_final_prompt": rg.ON_DEVICE_FINAL_REVIEW_PROMPT}}
+    store = _store(tmp_path, {"model": LOCAL, "active_profile": ON_DEVICE, ON_DEVICE_BEFORE_KEY: record,
+                              "translation_temperature": 0.7, "batch_size": 1,
+                              "review_system_prompt": rg.ON_DEVICE_REVIEW_PROMPT,
+                              "review_final_prompt": rg.ON_DEVICE_FINAL_REVIEW_PROMPT})
+    write_setting(store, "model", CLOUD)
+    assert store.get("active_review_prompt_profile") == "My review prompt"
+    assert store.get("review_prompt_profiles")["My review prompt"] == {"system": "Old custom review",
+                                                                       "final": "Old custom final"}
+    assert store.get("review_system_prompt") == "Old custom review"
+    assert store.get("review_final_prompt") == "Old custom final"
+    assert not store.has(ON_DEVICE_BEFORE_KEY)
+    store._saver.close()
+
+
+@pytest.mark.parametrize("active", ["Default", ON_DEVICE, "Mine"])
+def test_review_job_sends_the_active_profiles_prompts(active):
+    """job_kinds.review: the active profile's review prompt and final prompt (not the mirrors)."""
+    import review_generator as rg
+    from glossarion_mobile.job_kinds.review import review_prompts
+
+    config = {"review_prompt_profiles": {"Mine": {"system": "Mine {target_lang}", "final": "Mine final"}},
+              "active_review_prompt_profile": active,
+              "review_system_prompt": "stale mirror", "review_final_prompt": "stale final"}
+    expected = {"Default": (rg.DEFAULT_REVIEW_PROMPT, rg.DEFAULT_FINAL_REVIEW_PROMPT),
+                ON_DEVICE: (rg.ON_DEVICE_REVIEW_PROMPT, rg.ON_DEVICE_FINAL_REVIEW_PROMPT),
+                "Mine": ("Mine {target_lang}", "Mine final")}[active]
+    before = json.loads(json.dumps(config))
+    assert review_prompts(rg, config) == expected
+    assert config == before  # the job's config snapshot is not changed
