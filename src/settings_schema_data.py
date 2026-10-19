@@ -10168,8 +10168,8 @@ SETTINGS = {
                 'empty paragraphs / <br> tags (empty <p> tags are removed). Source files are '
                 'unchanged.',
      'type': 'bool',
-     'ui_group': 'Meta Data',
-     'ui_sites': ('other.meta_data',),
+     'ui_group': 'Processing Options',
+     'ui_sites': ('other.processing',),
      'var_names': ('remove_excessive_empty_tags_all_models_var',)},
     'remove_excessive_empty_tags_on_device': {'converter': ('bool',),
      'default': True,

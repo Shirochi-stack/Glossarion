@@ -381,7 +381,7 @@ SECTION_OVERRIDES = {
     "REMOVE_AI_ARTIFACTS": "main.run",
     # Glossarion Mobile's on-device twin of "Remove excessive empty p and br tags (all models)" (no
     # desktop control: only the mobile app runs an on-device model), shown next to it
-    "remove_excessive_empty_tags_on_device": "other.meta_data",
+    "remove_excessive_empty_tags_on_device": "other.processing",  # beside its all-models twin
     "auto_update_check": "other.context",
     "vertex_ai_location": "main.model",
     "google_cloud_credentials": "main.model",

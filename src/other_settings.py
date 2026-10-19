@@ -8082,35 +8082,6 @@ def _create_prompt_management_section(self, parent):
 
     section_v.addWidget(ignore_row2)
 
-    # Remove excessive empty p and br tags (all models; default OFF). Glossarion Mobile also has an
-    # On-device twin (remove_excessive_empty_tags_on_device, default ON) for its local engine.
-    if not hasattr(self, 'remove_excessive_empty_tags_all_models_var'):
-        self.remove_excessive_empty_tags_all_models_var = bool(
-            self.config.get('remove_excessive_empty_tags_all_models', False)
-        )
-    empty_tags_row = QWidget()
-    empty_tags_h = QHBoxLayout(empty_tags_row)
-    empty_tags_h.setContentsMargins(20, 5, 0, 0)
-    empty_tags_cb = self._create_styled_checkbox("Remove excessive empty p and br tags (all models)")
-    try:
-        empty_tags_cb.setChecked(bool(self.remove_excessive_empty_tags_all_models_var))
-    except Exception:
-        pass
-    def _on_empty_tags_all_models_toggle(checked):
-        try:
-            self.remove_excessive_empty_tags_all_models_var = bool(checked)
-            self.config['remove_excessive_empty_tags_all_models'] = bool(checked)
-            os.environ['REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS'] = '1' if checked else '0'
-        except Exception:
-            pass
-    empty_tags_cb.toggled.connect(_on_empty_tags_all_models_toggle)
-    empty_tags_cb.setToolTip(
-        "Chapter text sent to the model keeps at most 2 line breaks for each run of\n"
-        "empty paragraphs / <br> tags (empty <p> tags are removed). Source files are unchanged."
-    )
-    empty_tags_h.addWidget(empty_tags_cb)
-    empty_tags_h.addStretch()
-    section_v.addWidget(empty_tags_row)
     
     # Buttons row (below ignore options)
     buttons_row = QWidget()
@@ -9279,6 +9250,38 @@ def _create_processing_options_section(self, parent):
     stray_p_gt_epub_desc.setContentsMargins(20, 0, 0, 5)
     stray_p_gt_epub_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(stray_p_gt_epub_desc)
+
+    # Remove excessive empty p and br tags (all models; default OFF). Glossarion Mobile also has an
+    # On-device twin (remove_excessive_empty_tags_on_device, default ON) for its local engine.
+    empty_tags_cb = self._create_styled_checkbox("Remove excessive empty p and br tags (all models)")
+    try:
+        if not hasattr(self, 'remove_excessive_empty_tags_all_models_var'):
+            self.remove_excessive_empty_tags_all_models_var = bool(
+                self.config.get('remove_excessive_empty_tags_all_models', False))
+        empty_tags_cb.setChecked(bool(self.remove_excessive_empty_tags_all_models_var))
+    except Exception:
+        pass
+    def _on_empty_tags_all_models_toggle(checked):
+        try:
+            self.remove_excessive_empty_tags_all_models_var = bool(checked)
+            self.config['remove_excessive_empty_tags_all_models'] = bool(checked)
+            os.environ['REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    empty_tags_cb.toggled.connect(_on_empty_tags_all_models_toggle)
+    empty_tags_cb.setToolTip(
+        "Chapter text sent to the model keeps at most 2 line breaks for each run of\n"
+        "empty paragraphs / <br> tags (empty <p> tags are removed). Source files are unchanged."
+    )
+    empty_tags_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(empty_tags_cb)
+
+    empty_tags_desc = QLabel("Chapter text sent to the model keeps at most 2 line breaks per run of empty "
+                             "paragraphs / &lt;br&gt; tags<br>(empty &lt;p&gt; tags are removed). Source files are unchanged.")
+    empty_tags_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    empty_tags_desc.setContentsMargins(20, 0, 0, 5)
+    empty_tags_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(empty_tags_desc)
 
     # Number Spacing Tokenization Fix
     number_spacing_row = QHBoxLayout()
