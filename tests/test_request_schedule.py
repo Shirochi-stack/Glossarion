@@ -814,7 +814,8 @@ def test_menu_entries_are_wired():
     assert "schedule_callback" not in manager and "_edit_selected_key_schedule" not in manager
     assert '"⏰ Schedules"' in manager and "def _ensure_schedules_tab" in manager
     gui = (SRC / "translator_gui.py").read_text(encoding="utf-8-sig")
-    assert 'menu.addAction("⏳ Request Queue…")' in gui and "def _edit_main_request_queue" in gui
+    assert '"⏳ Request Queue… · On" if queue_on else "⏳ Request Queue…"' in gui
+    assert "queue_action.setCheckable" not in gui and "def _edit_main_request_queue" in gui
 
 
 # ------------------------------------------- ⏰ Schedules tab ↔ 🔑 Key Pools tab: one set of keys

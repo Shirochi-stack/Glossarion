@@ -17275,15 +17275,14 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         refresh_action = menu.addAction("🌐 Refresh Online Models")
         manage_action = menu.addAction("⚙️ Manage Models...")
         menu.addSeparator()
-        # ⏳ Request Queue of the main key (checked while a schedule is enabled)
-        queue_action = menu.addAction("⏳ Request Queue…")
-        queue_action.setCheckable(True)
+        # ⏳ Request Queue of the main key ("· On" while a schedule is enabled; Qt's small check
+        # indicator looked low quality in this menu)
         try:
             import request_schedule as _request_schedule
             queue_on = _request_schedule.from_config(self.config.get('request_queue_schedule')) is not None
         except Exception:
             queue_on = False
-        queue_action.setChecked(queue_on)
+        queue_action = menu.addAction("⏳ Request Queue… · On" if queue_on else "⏳ Request Queue…")
         queue_action.setToolTip("Requests wait before sending during the schedule's windows")
 
         action = menu.exec(self.model_combo.mapToGlobal(position))
