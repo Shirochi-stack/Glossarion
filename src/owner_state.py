@@ -1248,7 +1248,7 @@ Text to analyze:
                 "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
             ),
             "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,
-            "On-device_BeautifulSoup": "You must only output {target_lang} translations with html tags.",
+            "On-device_BeautifulSoup": "You must only output {target_lang} translations while retaining the html tags of the following text.",
             "On-device_html2text": "You must only output {target_lang} translations with markdown.",
         }
 

@@ -54,7 +54,7 @@ CLOUD = "authchatgpt/auto"
 ON_DEVICE = "On-device"
 ON_DEVICE_BS = "On-device_BeautifulSoup"
 ON_DEVICE_H2T = "On-device_html2text"
-TRANSLATION_TEXT = "You must only output {target_lang} translations with html tags."
+TRANSLATION_TEXT = "You must only output {target_lang} translations while retaining the html tags of the following text."
 HTML2TEXT_TEXT = "You must only output {target_lang} translations with markdown."
 
 

@@ -55,7 +55,7 @@ _SAFETY_CATEGORY_ENV_PAIR = _after(
 
 # 2026-10-18 built-in On-device translation prompt profiles (small on-device models); 2026-10-19 split by
 # text extraction method: On-device_BeautifulSoup (html tags, the default) and On-device_html2text (markdown)
-_ON_DEVICE_PROMPT = "You must only output {target_lang} translations with html tags."
+_ON_DEVICE_PROMPT = "You must only output {target_lang} translations while retaining the html tags of the following text."
 _ON_DEVICE_HTML2TEXT_PROMPT = "You must only output {target_lang} translations with markdown."
 # one row patches both identical lists (always_include_profiles and the protected set)
 _ON_DEVICE_PROFILE_LIST_ROW = _after('            "Subtitle Translation",', '            "On-device_BeautifulSoup",',
