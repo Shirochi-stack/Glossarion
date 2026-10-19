@@ -17,6 +17,11 @@ The service has already scaled the images down (``vision.prepare_messages``).
 
 Qwen3.5 thinks by default; the chat template is rendered with ``enable_thinking=False`` unless the
 request asks otherwise (``chat_template_kwargs``), and the server strips a leading think block anyway.
+
+CJK ban (``params["ban_cjk"]``, decided by the service, ``script_ban``): ``LlamaEngine`` passes a logits
+processor that sets the model's Han / kana / Hangul token ids to -inf. The ids are computed from the
+vocabulary on the first such request after a load (about 0.6 s for Qwen3.5's 248k tokens on a desktop
+CPU; logged) and kept until the model is unloaded; a request without ``ban_cjk`` gets no processor.
 """
 
 from __future__ import annotations
@@ -224,6 +229,7 @@ class LlamaEngine(_Base):
         self.llm: Any = None
         self.formatter: Any = None
         self.vision_handler: Any = None
+        self._ban: Any = None  # the loaded model's script_ban.BanLogitsProcessor (computed on first use)
         self._lock = threading.RLock()
 
     def _module(self) -> Any:
@@ -266,6 +272,7 @@ class LlamaEngine(_Base):
             llm, self.llm = self.llm, None
             handler, self.vision_handler = self.vision_handler, None
             self.formatter = None
+            self._ban = None
             self.path = None
             self.mmproj = None
             if handler is not None:
@@ -279,6 +286,25 @@ class LlamaEngine(_Base):
                 except Exception:
                     log.debug("closing the model failed", exc_info=True)
                 del llm
+
+    def cjk_ban(self) -> Any:
+        """The loaded model's CJK-ban logits processor (``script_ban``), computed from its vocabulary on
+        the first call after a load and kept until the model is unloaded."""
+        llm = self.llm
+        if llm is None:
+            raise EngineUnavailable("No model is loaded")
+        with self._lock:
+            if self._ban is None:
+                from glossarion_mobile.services.local_llm import script_ban
+
+                started = time.monotonic()
+                n_vocab = int(llm.n_vocab())
+                pieces = (llm.detokenize([token], special=False) for token in range(n_vocab))
+                ids = script_ban.banned_token_ids(pieces)
+                self._ban = script_ban.BanLogitsProcessor(ids, n_vocab)
+                log.info("on-device CJK ban: %d of %d tokens in %.2f s", len(ids), n_vocab,
+                         time.monotonic() - started)
+            return self._ban
 
     def _prompt(self, messages: Sequence[dict]) -> str:
         if self.formatter is not None:
@@ -321,6 +347,12 @@ class LlamaEngine(_Base):
         }
         if params.get("seed") is not None:
             kwargs["seed"] = int(params["seed"])
+        if params.get("ban_cjk"):
+            try:
+                processors = importlib.import_module("llama_cpp").LogitsProcessorList
+            except Exception:  # a test's fake model: any list of processors works the same
+                processors = list
+            kwargs["logits_processor"] = processors([self.cjk_ban()])
         self.last_finish = "stop"
         completion = 0
         # 0.3.32's create_chat_completion takes no stopping_criteria: the stream is checked every

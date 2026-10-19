@@ -9,6 +9,7 @@ One tap on a model downloads its GGUF from Hugging Face and runs it inside the a
 * ``hf``: Hugging Face references (repo, repo:quant, file paths and URLs), file listing and auto-pick;
 * ``downloads``: resumable, cancellable GGUF downloads with sha256 verification and the registry;
 * ``engine``: ``LlamaEngine`` (llama_cpp, imported lazily) and ``FakeEngine`` (tests, offline e2e);
+* ``script_ban``: the adaptive CJK ban (which requests, which token ids, the logits processor);
 * ``server``: the loopback endpoint (``/v1/models``, ``/v1/chat/completions``, ``/health``);
 * ``service``: ``LocalEngineService`` (one model loaded at a time, RAM gate, unload policy, lifecycle).
 
