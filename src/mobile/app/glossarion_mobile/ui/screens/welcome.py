@@ -77,9 +77,8 @@ BATCH_SLIDER = (1, 50)
 #: desktop defaults when nothing is saved (``delay`` 5.0 s, ``translation_temperature`` 0.3)
 DEFAULT_DELAY = 5.0
 DEFAULT_TEMPERATURE = 0.3
-#: the temperature for an on-device model (Qwen's recommendation for its small models; owner 2026-10-18:
-#: only on-device models get it, cloud models keep the saved / desktop default)
-ONDEVICE_TEMPERATURE = 0.7
+#: the temperature for an on-device model (``setting_writes.ON_DEVICE_TEMPERATURE``)
+from glossarion_mobile.state.setting_writes import ON_DEVICE_TEMPERATURE as ONDEVICE_TEMPERATURE  # noqa: E402
 RATE_LIMIT_WARNING = ("Higher batch sizes send more requests at once and lower delays send them faster: respect your "
                       "provider's rate limits. authds/ (DeepSeek) and authchatgpt/ (ChatGPT) run on the sites' "
                       "own web chat; keep them at batch size 1 with a delay, or the site may limit or block you.")

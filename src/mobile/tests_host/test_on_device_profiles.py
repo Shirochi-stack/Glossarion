@@ -276,3 +276,38 @@ def test_columns_added_while_on_device_stay(tmp_path):
     write_setting(store, "model", CLOUD)
     assert store.get(CUSTOM_FIELDS_KEY) == ["age"]
     store._saver.close()
+
+
+@pytest.mark.parametrize("config", [{}, {"translation_temperature": 0.3, "batch_size": 8, "max_output_tokens": 32768,
+                                         "token_limit": 200000, "review_system_prompt": "My review prompt"}],
+                         ids=["fresh", "saved"])
+def test_local_model_sets_request_size_and_cloud_restores_it(tmp_path, monkeypatch, config):
+    """On-device: temperature 0.7, batch size 1, output limit half the context; a cloud model gets the
+    saved values back (or the defaults when nothing was saved) unless the user changed them meanwhile."""
+    from glossarion_mobile.state import setting_writes as sw
+
+    monkeypatch.setattr(sw, "local_output_limit", lambda model: 4096 if str(model).startswith("local/") else None)
+    monkeypatch.setattr(sw, "local_context_limit", lambda model: 8192 if str(model).startswith("local/") else None)
+    store = _store(tmp_path, config)
+    sw.write_setting(store, "model", LOCAL)
+    assert store.get("translation_temperature") == 0.7 and store.get("batch_size") == 1
+    assert store.get("max_output_tokens") == 4096 and store.get("token_limit") == 8192
+    assert store.get("review_system_prompt") == sw.ON_DEVICE_REVIEW_PROMPT
+    assert store.get("review_final_prompt") == sw.ON_DEVICE_FINAL_REVIEW_PROMPT
+    assert "{target_lang}" in sw.ON_DEVICE_REVIEW_PROMPT and len(sw.ON_DEVICE_REVIEW_PROMPT) < 250
+    sw.write_setting(store, "model", CLOUD)
+    for key in ("translation_temperature", "batch_size", "max_output_tokens", "token_limit", "review_system_prompt",
+                "review_final_prompt"):
+        if key in config:
+            assert store.get(key) == config[key], key
+        else:  # nothing was saved: the default again
+            assert not store.has(key), key
+    # a value changed while On-device stays
+    sw.write_setting(store, "model", LOCAL)
+    store.set_many({"batch_size": 3})
+    sw.write_setting(store, "model", CLOUD)
+    assert store.get("batch_size") == 3
+    assert store.get("translation_temperature") == config.get("translation_temperature", None) or (
+        not config and not store.has("translation_temperature"))
+    store._saver.close()
+

@@ -25,10 +25,13 @@ desktop default stays off): every job's config snapshot gets it (``with_mobile_s
 chat / Reader runs force streaming only while it is on (``streaming_enabled``).
 
 Choosing an on-device ``local/`` model (mobile only) also selects the built-in "On-device" translation
-and glossary prompt profiles and drops the glossary's extra columns (the "description" field; owner
-2026-10-19: a small model only writes name, translated name and gender); choosing a model that is not
-``local/`` again restores the profiles and columns that were active before, where they are still the
-On-device ones (``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``).
+and glossary prompt profiles, drops the glossary's extra columns (the "description" field; owner
+2026-10-19: a small model only writes name, translated name and gender) and sets its Request size
+(``ON_DEVICE_SETTINGS``: temperature 0.7, batch size 1, output limit half the context, input token limit
+the whole context, very short review generator prompts); choosing a model
+that is not ``local/`` again restores everything that was there before, where it still holds the
+On-device value (a value the user changed meanwhile stays) and the defaults where nothing was saved
+(``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``).
 
 Every global writer on mobile (Settings tiles, ModelSheet / Plan chips, Chat settings › All chats,
 the Welcome flow) goes through ``write_setting`` / ``write_settings``, which run the shared rules
@@ -124,6 +127,30 @@ ON_DEVICE_PROFILE = "On-device"
 #: the glossary's extra columns (desktop Glossary Manager › Custom Fields) and its "description was
 #: removed on purpose" flag (owner_state adds "description" back to an empty list without it)
 CUSTOM_FIELDS_KEY = "custom_glossary_fields"
+#: the temperature for an on-device model (Qwen's recommendation for its small models; owner 2026-10-18:
+#: only on-device models get it, cloud models keep the saved / desktop default)
+ON_DEVICE_TEMPERATURE = 0.7
+#: Request size settings an on-device model sets and a cloud model gets back (owner 2026-10-19: "choosing
+#: a non on device model should restore all the original defaults and vice versa"); the output limit is
+#: half the model's context (``local_output_limit``)
+#: Review generator prompts a 0.8B model follows (the desktop ones ask for seven sections and a table)
+ON_DEVICE_REVIEW_PROMPT = (
+    "Write a short review of this story in {target_lang}.\n"
+    "Say what happens, who the main characters are, and if the story is good.\n"
+    "Write 3 short paragraphs. Write only in {target_lang}."
+)
+ON_DEVICE_FINAL_REVIEW_PROMPT = (
+    "These are reviews of parts of one story.\n"
+    "Write one short review of the whole story in {target_lang}.\n"
+    "Say what happens, who the main characters are, and if the story is good.\n"
+    "Write 3 short paragraphs. Write only in {target_lang}."
+)
+ON_DEVICE_SETTINGS = {"translation_temperature": ON_DEVICE_TEMPERATURE, "batch_size": 1,
+                      "review_system_prompt": ON_DEVICE_REVIEW_PROMPT,
+                      "review_final_prompt": ON_DEVICE_FINAL_REVIEW_PROMPT}
+OUTPUT_LIMIT_KEY = "max_output_tokens"
+#: the input token limit (off unless enabled, ``token_limit_disabled``): the model's whole context
+INPUT_LIMIT_KEY = "token_limit"
 DESCRIPTION_REMOVED_KEY = "custom_field_description_removed"
 ON_DEVICE_BEFORE_KEY = "profiles_before_on_device"
 _GLOSSARY_PROFILE_BUCKETS = ("balanced_full", "minimal")
@@ -314,6 +341,22 @@ def local_output_limit(model: Any) -> Optional[int]:
         return int(service.output_limit_for(value[len("local/"):])) if service is not None else None
     except Exception:
         log.debug("local_output_limit failed", exc_info=True)
+        return None
+
+
+def local_context_limit(model: Any) -> Optional[int]:
+    """The configured context of an on-device ``local/<stem>`` model (``LocalEngineService.context_for``),
+    or None without the app's engine service."""
+    value = str(model or "").strip()
+    if not value.lower().startswith("local/"):
+        return None
+    try:
+        from glossarion_mobile.services.local_llm.service import default_service
+
+        service = default_service()
+        return int(service.context_for(value[len("local/"):])) if service is not None else None
+    except Exception:
+        log.debug("local_context_limit failed", exc_info=True)
         return None
 
 
@@ -511,7 +554,7 @@ def _active_glossary_profiles(store: Any) -> dict:
     return {bucket: str(active.get(bucket) or "") for bucket in _GLOSSARY_PROFILE_BUCKETS}
 
 
-def _use_on_device_profiles(store: Any) -> list:
+def _use_on_device_profiles(store: Any, model: Any = None) -> list:
     """A ``local/`` model was chosen: select the On-device translation and glossary profiles and remember
     what was active (``ON_DEVICE_BEFORE_KEY``). A part already on On-device keeps the remembered value."""
     _present, record = _stored_value(store, ON_DEVICE_BEFORE_KEY)
@@ -533,8 +576,24 @@ def _use_on_device_profiles(store: Any) -> list:
                             DESCRIPTION_REMOVED_KEY: removed}
     else:
         before["fields"] = None  # nothing stored: the desktop default ("description") again
+    applied = dict(ON_DEVICE_SETTINGS)
+    limit = local_output_limit(model)
+    if limit:
+        applied[OUTPUT_LIMIT_KEY] = int(limit)
+    context = local_context_limit(model)
+    if context:
+        applied[INPUT_LIMIT_KEY] = int(context)
+    if isinstance(record.get("settings"), Mapping):  # already On-device: keep what was remembered then
+        before["settings"] = dict(record["settings"])
+    else:
+        before["settings"] = {}
+        for key in applied:
+            present, value = _stored_value(store, key)
+            before["settings"][key] = [bool(present), value]
+    before["applied"] = applied
     changed = _select_profile(store, ON_DEVICE_PROFILE)
     changed += _select_glossary_profiles(store, {bucket: ON_DEVICE_PROFILE for bucket in _GLOSSARY_PROFILE_BUCKETS})
+    changed += _set_many(store, applied)
     # no extra glossary columns: the "removed" flag keeps the desktop from adding "description" back
     changed += _set_many(store, {CUSTOM_FIELDS_KEY: [], DESCRIPTION_REMOVED_KEY: True, ON_DEVICE_BEFORE_KEY: before})
     return changed
@@ -565,6 +624,17 @@ def _restore_profiles_before_on_device(store: Any) -> list:
                                          DESCRIPTION_REMOVED_KEY: bool(previous.get(DESCRIPTION_REMOVED_KEY))})
         else:
             changed += _unset(store, CUSTOM_FIELDS_KEY) + _unset(store, DESCRIPTION_REMOVED_KEY)
+    settings = record.get("settings") if isinstance(record.get("settings"), Mapping) else {}
+    applied = record.get("applied") if isinstance(record.get("applied"), Mapping) else {}
+    for key, on_device_value in applied.items():
+        _present, current = _stored_value(store, key)
+        if current != on_device_value:  # changed meanwhile: the user's value stays
+            continue
+        previous = settings.get(key)
+        if isinstance(previous, (list, tuple)) and len(previous) == 2 and previous[0]:
+            changed += _set_many(store, {key: previous[1]})
+        else:  # nothing was saved before: the default again
+            changed += _unset(store, key)
     changed += _unset(store, ON_DEVICE_BEFORE_KEY)
     return changed
 
@@ -574,7 +644,7 @@ def _write_model(store: Any, value: Any) -> list:
     _present, old = _stored_value(store, "model")
     changed = _set_many(store, {"model": value})
     if _is_local_model(value) and not _is_local_model(old):
-        changed += _use_on_device_profiles(store)
+        changed += _use_on_device_profiles(store, value)
     elif value and _is_local_model(old) and not _is_local_model(value):
         changed += _restore_profiles_before_on_device(store)
     return changed
