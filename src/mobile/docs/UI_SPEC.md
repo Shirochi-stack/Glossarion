@@ -1656,7 +1656,7 @@ Each tool picks its input through the **SourcePicker** sheet, with segments: Rec
 ### 4.4 QA Scanner (`/tools/qa`)
 
 - **Mode cards** (`RadioGroup` of 4 tonal cards with descriptions): **Quick Scan** (Recommended badge) · **Aggressive** · **AI Hunter** · **Custom** (opens the Custom Mode Settings sheet).
-- **Fields:** "Quick Scan duplicate sample size" (-1 = all text, 0 = duplicate check off; on mobile 0 when nothing is saved, and a saved desktop 1000 is migrated to 0 once: `qa_model.migrate_quick_sample_size` at app start and when the screen opens, flag in Prefs `qa_quick_sample_size_mobile_default`; Settings › QA shows the same default, `schema_access.MOBILE_DISPLAY_DEFAULTS`); switch "Auto-search output".
+- **Fields:** "Quick Scan duplicate sample size" (-1 = all text, 0 = duplicate check off; on mobile 0 when nothing is saved, a saved value wins; Settings › QA shows the same default, `schema_access.MOBILE_DISPLAY_DEFAULTS`); switch "Auto-search output".
 - **Source:** the SourcePicker (multi-select gives a bulk scan). A name mismatch triggers a warning dialog. Direct Text workspaces are listed but not picked here; a chat scans its own workspace (§2.12.4).
 - **Run:** a QA_SCAN job (JobCard in Jobs; also posted into the chat when started from chat: Quick Scan, same sample size).
 - **Reports** list. It opens the **QA report viewer** (`/tools/qa/report/<rid>`, an `HtmlView`):
@@ -1953,7 +1953,7 @@ Context & memory (rolling summary), Response handling (translation, truncation r
   - paths: Output, Library, Inbox, cache;
   - per-folder usage bars; clear caches (reader / covers / temp); ONNX models manager;
   - output folder choice (app storage or iOS Files-visible Documents; arbitrary SAF folders are not supported);
-  - Phone folder (Android 10+): where books go (U10: books reach Downloads/Glossarion/<book>/ only as the phone-folder destination of Settings › Cloud sync & sharing, overwritten in place under their first name), a link there and its "My cloud app isn't listed" help; the switch "Copy other outputs to Downloads/Glossarion" (Prefs `mirror_outputs`, the pre-U10 mirror key) copies the outputs that are not books (images, subtitles, glossaries, reports) once; chat runs are never copied from their run folder; a pre-U10 "on" becomes the phone-folder destination with automatic copies on, on first start. iOS shows the switch disabled with "Android only" (books are already in Files › On My iPhone › Glossarion); Android 9 with "Needs Android 10 or later" (the legacy branch needs WRITE_EXTERNAL_STORAGE, which the app does not request).
+  - Phone folder (Android 10+): where books go (U10: books reach Downloads/Glossarion/<book>/ only as the phone-folder destination of Settings › Cloud sync & sharing, overwritten in place under their first name), a link there and its "My cloud app isn't listed" help; the switch "Copy other outputs to Downloads/Glossarion" (Prefs `mirror_outputs`) copies the outputs that are not books (images, subtitles, glossaries, reports) once; chat runs are never copied from their run folder. iOS shows the switch disabled with "Android only" (books are already in Files › On My iPhone › Glossarion); Android 9 with "Needs Android 10 or later" (the legacy branch needs WRITE_EXTERNAL_STORAGE, which the app does not request).
 - **Backup & restore:**
   - automatic backups list (72 h retention, shared); Create backup / Restore (confirm) / Delete;
   - Export config (keys excluded, or encrypted with a passphrase) / Import config;
@@ -2512,7 +2512,6 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
 - haptics and appearance mirrors;
 - `chat_auto_accept_glossary`: the All-chats "Always accept generated glossaries" (bool, default off);
 - job / background flags: `jobs_notification_permission_asked` (set only after a definite permission answer), `jobs_notifications_off_hint_shown` (the one-time "Notifications are off" snackbar), `jobs_battery_prompt_done`, `keep_screen_on_during_jobs`;
-- `qa_quick_sample_size_mobile_default` (bool): the one-time QA sample-size migration (a saved 1000 → 0) has run;
 - `cloud_sync` (U10): `{v:1, enabled, kinds:{epub,pdf,txt,html}, destination:{id, mode: folder|files|phone, platform, target (the picked folder's native ref), label, provider, provider_label, can_create, can_write, layout, linked_at, needs_relink, persisted} | null, pending_pick}`; `mirror_outputs` stays the Storage switch for the outputs that are not books.
 
 **`mobile_cloud.json`** (U10, `state/cloud_records.CloudRecordStore`; nothing secret)

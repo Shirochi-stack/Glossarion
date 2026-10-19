@@ -518,48 +518,7 @@ def test_chat_qa_job_parts_summary_and_the_job_service(tmp_path, monkeypatch):
     assert isinstance(qm.chat_qa_job(str(chat), None, cid="c1", chat_title="Novel"), tuple)
 
 
-def test_quick_sample_size_migration_runs_once_and_only_on_the_desktop_1000(tmp_path):
-    from glossarion_mobile.state.config_store import MobileConfigStore
-    from glossarion_mobile.state.prefs import Prefs
-
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"model": "m", "qa_scanner_settings": {"quick_scan_sample_size": 1000,
-                                                                           "min_file_length": 5}}),
-                           encoding="utf-8")
-    store = MobileConfigStore(config_path, debounce=0.01)
-    prefs = Prefs(tmp_path / "mobile_state.json")
-    store.load()
-    prefs.load()
-    try:
-        assert qm.migrate_quick_sample_size(store.get, store.set, prefs) is True
-        assert store.get(qm.QUICK_SAMPLE_KEY) == 0 and qm.quick_sample_size(store.snapshot()) == 0
-        assert prefs.get(qm.QUICK_SAMPLE_MIGRATION_PREF) is True
-        store.set(qm.QUICK_SAMPLE_KEY, 1000)  # the owner types 1000 again later: it stays
-        assert qm.migrate_quick_sample_size(store.get, store.set, prefs) is False
-        assert store.get(qm.QUICK_SAMPLE_KEY) == 1000
-        store.flush()
-        prefs.flush()
-    finally:
-        store.close()
-        prefs.close()
-    saved = json.loads(config_path.read_text(encoding="utf-8"))
-    assert saved == {"model": "m", "qa_scanner_settings": {"quick_scan_sample_size": 1000, "min_file_length": 5}}
-    assert json.loads((tmp_path / "mobile_state.json").read_text(encoding="utf-8"))[qm.QUICK_SAMPLE_MIGRATION_PREF]
-    # only exactly 1000 is migrated; nothing saved stays unsaved (the job uses the mobile default)
-    for value in (500, -1, 0, "1000", 1000.5, True, None):
-        data = {} if value is None else {"qa_scanner_settings": {"quick_scan_sample_size": value}}
-        flags = FakePrefs()
-
-        def get(key, default=None, data=data):
-            return (data.get(key[0]) or {}).get(key[1], default)
-
-        def put(key, value, data=data):
-            data.setdefault(key[0], {})[key[1]] = value
-
-        assert qm.migrate_quick_sample_size(get, put, flags) is False, value
-        assert data == ({} if value is None else {"qa_scanner_settings": {"quick_scan_sample_size": value}})
-        assert flags.get(qm.QUICK_SAMPLE_MIGRATION_PREF) is True
-    assert qm.migrate_quick_sample_size(lambda k, d=None: 1000, lambda k, v: None, None) is False  # no Prefs
+def test_quick_sample_size_is_zero_on_mobile_unless_saved():
     assert qm.quick_sample_size({}) == 0 and qm.quick_sample_size(None) == 0
     assert qm.quick_sample_size({"qa_scanner_settings": {"quick_scan_sample_size": 300}}) == 300
 
@@ -1196,9 +1155,9 @@ def test_qa_screen_modes_sources_prechecks_and_job(tmp_path, monkeypatch):
 
 
 @needs_flet
-def test_qa_screen_shows_the_mobile_sample_size_and_migrates_a_saved_1000_once(tmp_path, monkeypatch):
+def test_qa_screen_shows_the_mobile_sample_size(tmp_path, monkeypatch):
     """Owner device report #7 (2026-10-08): the sample size field shows 0 (duplicate check off), not the
-    desktop 1000; a 1000 an earlier build saved becomes 0 once; the field stays editable."""
+    desktop 1000, when nothing is saved; a saved value wins; the field stays editable."""
     monkeypatch.setitem(sys.modules, "qa_scan_runtime", fake_qa_runtime())
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.tools.qa_screen import QaScannerScreen, open_qa_report
@@ -1215,26 +1174,25 @@ def test_qa_screen_shows_the_mobile_sample_size_and_migrates_a_saved_1000_once(t
         screen = QaScannerScreen(parse_route("/tools/qa"), ctx)
         _mount(page, screen.get_body())
         assert screen.sample_field.value == "0" and screen.mode == "quick-scan"
-        assert ctx.prefs.get(qm.QUICK_SAMPLE_MIGRATION_PREF) is True
         screen.set_targets([target])
         assert await screen.start() and fresh["qa_scanner_settings"] == {"check_word_count_ratio": False}
         assert ctx.jobs.specs[-1].params == {"mode": "quick-scan", "targets": [target.to_param()]}
-        # a config an earlier build saved with the desktop default: 0 after the one-time migration
+        # a saved value is shown as it is
         saved = {"qa_scanner_settings": {"quick_scan_sample_size": 1000, "check_word_count_ratio": False}}
         _conn2, session2 = tb._fake_session("android")  # a fresh page per screen (same control keys)
         ctx2 = _ctx(session2.page, store=saved)
         screen2 = QaScannerScreen(parse_route("/tools/qa"), ctx2)
         _mount(session2.page, screen2.get_body())
-        assert screen2.sample_field.value == "0"
-        assert saved["qa_scanner_settings"] == {"quick_scan_sample_size": 0, "check_word_count_ratio": False}
-        # still editable, and the migration never runs again: a 1000 typed now stays
-        screen2.sample_field.value = "1000"
-        assert screen2._on_sample() and saved["qa_scanner_settings"]["quick_scan_sample_size"] == 1000
+        assert screen2.sample_field.value == "1000"
+        assert saved["qa_scanner_settings"] == {"quick_scan_sample_size": 1000, "check_word_count_ratio": False}
+        # still editable: a value typed now stays
+        screen2.sample_field.value = "0"
+        assert screen2._on_sample() and saved["qa_scanner_settings"]["quick_scan_sample_size"] == 0
         _conn3, session3 = tb._fake_session("android")
         ctx2.page = session3.page
         screen3 = QaScannerScreen(parse_route("/tools/qa"), ctx2)
         _mount(session3.page, screen3.get_body())
-        assert screen3.sample_field.value == "1000" and saved["qa_scanner_settings"]["quick_scan_sample_size"] == 1000
+        assert screen3.sample_field.value == "0" and saved["qa_scanner_settings"]["quick_scan_sample_size"] == 0
         # the report opener the chat's QA card shares with the screen
         report = qa_kind.report_path_for(target.folder)
         rid = open_qa_report(ctx2, report)

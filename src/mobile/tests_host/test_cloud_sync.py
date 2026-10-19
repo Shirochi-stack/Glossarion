@@ -1209,16 +1209,6 @@ def test_phone_folder_overwrites_the_same_downloads_entry(tmp_path):
     run(scenario())
 
 
-def test_mirror_switch_becomes_the_phone_folder_destination(tmp_path):
-    async def scenario():
-        env = Env(tmp_path, prefs=FakePrefs({"mirror_outputs": True}))
-        await env.service.start()
-        dest = env.service.destination()
-        assert dest is not None and dest.mode == "phone" and env.service.settings().enabled
-
-    run(scenario())
-
-
 def test_same_title_books_never_share_a_cloud_file(tmp_path):
     async def scenario():
         env = Env(tmp_path)

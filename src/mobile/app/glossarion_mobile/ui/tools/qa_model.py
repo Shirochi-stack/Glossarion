@@ -14,8 +14,7 @@ module only shapes it for the screen:
 * pre-run checks with the desktop dialog texts (no source for word count, name mismatch);
 * the Quick Scan duplicate-check sample size on mobile (owner 2026-10-08): 0 (duplicate check
   off) when config.json has none (``job_kinds.qa.MOBILE_QUICK_SAMPLE_SIZE``; the desktop keeps
-  1000), a one-time migration of a saved desktop 1000 to 0 (``migrate_quick_sample_size``, flag
-  in Prefs), still editable in Tools › QA Scanner and Settings › QA Scanner Settings;
+  1000), editable in Tools › QA Scanner and Settings › QA Scanner Settings;
 * chat QA (owner 2026-10-08): ``chat_qa_job`` is the ``qa_scan`` job a chat submits for its own
   workspace - Quick Scan with the same sample size as Tools › QA Scanner, the Direct Text
   workspace flagged so the shared scan path's opt-in lets it through;
@@ -33,7 +32,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Union
+from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
 from glossarion_mobile.job_kinds.qa import (
     MOBILE_QUICK_SAMPLE_SIZE,
@@ -51,7 +50,6 @@ __all__ = [
     "CHAT_QA_UNAVAILABLE",
     "CUSTOM_LIMITS",
     "CUSTOM_THRESHOLDS",
-    "DESKTOP_QUICK_SAMPLE_SIZE",
     "DISPLAY_ORDER",
     "EVENT_PREFIX",
     "MISMATCH_TITLE",
@@ -63,7 +61,6 @@ __all__ = [
     "QUICK_SAMPLE_HINT",
     "QUICK_SAMPLE_KEY",
     "QUICK_SAMPLE_LABEL",
-    "QUICK_SAMPLE_MIGRATION_PREF",
     "ReportEntry",
     "ReportRow",
     "ReportSummary",
@@ -76,7 +73,6 @@ __all__ = [
     "effective_settings",
     "list_reports",
     "load_report_summary",
-    "migrate_quick_sample_size",
     "mismatch_text",
     "names_match",
     "needs_source",
@@ -172,42 +168,10 @@ def effective_settings(config: Mapping[str, Any]) -> dict:
         return with_mobile_qa_defaults(saved, config)
 
 
-#: Prefs flag (``mobile_state.json``) of the one-time migration below.
-QUICK_SAMPLE_MIGRATION_PREF = "qa_quick_sample_size_mobile_default"
-#: The desktop default (``qa_scan_runtime.default_qa_scan_settings``) the U6-U9 QA screen saved
-#: from its field on every Start / blur, so a phone's config.json very likely holds it.
-DESKTOP_QUICK_SAMPLE_SIZE = 1000
-
-
 def quick_sample_size(config: Optional[Mapping[str, Any]]) -> Any:
     """The Quick Scan sample size a mobile scan uses: the saved one, else ``MOBILE_QUICK_SAMPLE_SIZE``."""
     saved = saved_quick_sample_size(config)
     return MOBILE_QUICK_SAMPLE_SIZE if saved is None else saved
-
-
-def migrate_quick_sample_size(get_cfg: Callable[..., Any], set_cfg: Callable[[Any, Any], Any],
-                              prefs: Any) -> bool:
-    """One-time mobile migration (owner 2026-10-08): a saved sample size of exactly 1000 becomes 0.
-
-    ``get_cfg(key, default)`` / ``set_cfg(key, value)`` take the config path tuple
-    (``MobileConfigStore.get``/``set``, ``ToolsContext.cfg``/``set_cfg``). The flag goes into Prefs
-    (never config.json) whatever was saved, so a 1000 the owner types later stays 1000. Without
-    Prefs nothing happens (the run could not be recorded). True when the value was changed.
-    """
-    if prefs is None:
-        return False
-    try:
-        if prefs.get(QUICK_SAMPLE_MIGRATION_PREF):
-            return False
-        value = get_cfg(QUICK_SAMPLE_KEY, None)
-        changed = False
-        if type(value) is int and value == DESKTOP_QUICK_SAMPLE_SIZE:
-            set_cfg(QUICK_SAMPLE_KEY, MOBILE_QUICK_SAMPLE_SIZE)
-            changed = True
-        prefs.set(QUICK_SAMPLE_MIGRATION_PREF, True)
-        return changed
-    except Exception:
-        return False
 
 
 def sample_size_text(value: Any) -> str:

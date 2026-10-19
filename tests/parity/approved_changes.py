@@ -64,12 +64,6 @@ _ON_DEVICE_DEFAULT_PROMPT_ROW = _after(
     '            "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,',
     f'            "On-device_BeautifulSoup": "{_ON_DEVICE_PROMPT}",',
     f'            "On-device_html2text": "{_ON_DEVICE_HTML2TEXT_PROMPT}",')
-# start-up migration of a stored "On-device" (prompt_profiles.migrate_renamed_builtin_profiles)
-_ON_DEVICE_MIGRATION_ROW = _after(
-    "        # Profiles",
-    '        # built-in profiles renamed since (2026-10-19: "On-device" -> "On-device_BeautifulSoup")',
-    "        from prompt_profiles import migrate_renamed_builtin_profiles",
-    "        migrate_renamed_builtin_profiles(self.config)")
 
 # 2026-10-18 {split_marker_instruction} stays where the user put it: filled in place, or its own
 # line removed without joining the lines around it (prompt_defaults.apply_split_marker_instruction)
@@ -266,9 +260,8 @@ APPROVED = (
                 "cannot be deleted) for small on-device models; the mobile app selects the one matching the text "
                 "extraction method when a local/ model is chosen",
         "source": {
-            "src/owner_state.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW, _ON_DEVICE_MIGRATION_ROW],
-            "src/translator_gui.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW,
-                                      _ON_DEVICE_MIGRATION_ROW],
+            "src/owner_state.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW],
+            "src/translator_gui.py": [_ON_DEVICE_PROFILE_LIST_ROW, _ON_DEVICE_DEFAULT_PROMPT_ROW],
         },
         "values": {},
         # recorded profile dicts (under these keys) gain the new profile after the anchor key

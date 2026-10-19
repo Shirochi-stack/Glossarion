@@ -17,9 +17,8 @@ wrappers still run the real code.
   the duplicate check is off; the Direct Text workspace passes through ``run_bulk_qa_scan``'s
   ``allow_direct_text=True`` opt-in (the Library one does not need it); the chat's "QA scan" card opens the
   report in the QA report viewer.
-* config.json saved with the desktop 1000 (what the U6-U9 QA screen stored on the phone) becomes 0 once at
-  app start; Tools › QA Scanner shows 0 and stays editable (a typed 1000 survives a relaunch, and the next
-  chat scan uses it). A config without the key shows 0 in Tools › QA Scanner and Settings › QA Scanner
+* config.json saved with 0: Tools › QA Scanner shows 0 and stays editable (a typed 1000 survives a relaunch,
+  and the next chat scan uses it). A config without the key shows 0 in Tools › QA Scanner and Settings › QA Scanner
   Settings, scans with 0, and is never written.
 * Desktop: qa_scan_runtime's default stays 1000 and desktop callers still refuse Direct Text.
 
@@ -504,7 +503,7 @@ async def _shutdown(tf, app) -> None:
 
 
 # ==========================================================================
-# The owner's phone: config.json holds the desktop 1000
+# The owner's phone: config.json holds 0
 # ==========================================================================
 
 
@@ -512,22 +511,19 @@ async def _shutdown(tf, app) -> None:
 @needs_backend
 def test_owner_phone_chat_qa_quick_scan_sample_size_zero(phone_env):
     """Both chat books scan from the Result card, ＋ › QA scan and /qa in Quick Scan with sample size 0 (the
-    saved desktop 1000 is migrated once at app start); the reports open; Tools › QA Scanner shows 0 and stays
-    editable; after a relaunch the typed value is kept and the chat's next scan uses it."""
+    saved value); the reports open; Tools › QA Scanner shows 0 and stays editable; after a relaunch the typed
+    value is kept and the chat's next scan uses it."""
     from glossarion_mobile.job_kinds import qa as qa_kind
-    from glossarion_mobile.ui.tools import qa_model
 
     data, recorder = phone_env
-    phone = Phone(data, saved_sample=1000)
+    phone = Phone(data, saved_sample=0)
     tf = _tf()
 
     async def first_launch():
         _m, _conn, _session, _page, app = await tf._start("android")
         try:
             await tf._wait(lambda: app.state.engine_ready, timeout=15)
-            # --- the one-time mobile migration ran at app start (before any QA screen was opened)
             assert app.config_store.get(QUICK_KEY) == 0
-            assert app.prefs.get(qa_model.QUICK_SAMPLE_MIGRATION_PREF) is True
             # --- the startup auto-migrate: alpha joins the Library, beta stays (held by the test)
             sweep = getattr(app.chat_feature, "startup_task", None)
             if sweep is not None:
@@ -602,7 +598,7 @@ def test_owner_phone_chat_qa_quick_scan_sample_size_zero(phone_env):
         _m, _conn, _session, _page, app = await tf._start("android")
         try:
             await tf._wait(lambda: app.state.engine_ready, timeout=15)
-            # the migration is one-time: the 1000 the owner typed stays
+            # the 1000 the owner typed stays
             assert app.config_store.get(QUICK_KEY) == 1000
             screen = await _tools_qa_screen(app)
             assert screen.sample_field.value == "1000"
@@ -640,8 +636,6 @@ def test_owner_phone_chat_qa_quick_scan_sample_size_zero(phone_env):
 def test_unset_sample_size_is_zero_on_mobile_and_never_written(phone_env):
     """No saved sample size: Tools › QA Scanner and Settings › QA Scanner Settings show 0, a chat scan runs
     with 0 ("Glossarion Mobile default" in the job log) and config.json gets no value the owner never chose."""
-    from glossarion_mobile.ui.tools import qa_model
-
     data, recorder = phone_env
     phone = Phone(data, saved_sample=None)
     tf = _tf()
@@ -651,7 +645,6 @@ def test_unset_sample_size_is_zero_on_mobile_and_never_written(phone_env):
         try:
             await tf._wait(lambda: app.state.engine_ready, timeout=15)
             assert app.config_store.get(QUICK_KEY) is None
-            assert app.prefs.get(qa_model.QUICK_SAMPLE_MIGRATION_PREF) is True  # ran, nothing to move
             # Settings shows the value the scans use (display default; the desktop schema keeps 1000)
             assert app.config_store.effective(QUICK_KEY) == 0
             tile = await _settings_qa_tile(app)

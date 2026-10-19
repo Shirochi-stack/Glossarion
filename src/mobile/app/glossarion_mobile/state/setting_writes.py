@@ -64,7 +64,6 @@ __all__ = [
     "ON_DEVICE_BEFORE_KEY",
     "ON_DEVICE_PROFILE",
     "ON_DEVICE_TRANSLATION_PROFILES",
-    "migrate_on_device_profiles",
     "on_device_translation_profile",
     "PROFILE_KEY",
     "RULE_KEYS",
@@ -127,9 +126,9 @@ MOBILE_MAX_OUTPUT_TOKENS = 16384
 #: no API key and no sign-in. The desktop default stays authgpt/gpt-6-luna; the default is never written.
 MOBILE_DEFAULT_MODEL = "authchatgpt/auto"
 #: The built-in prompt profile for small on-device models (the Balanced/Full and Minimal glossary profiles and
-#: the review profile share the name; the translation profile had it before it was split by extraction
-#: method): choosing a ``local/`` model selects them, and choosing a model that is not ``local/`` again brings
-#: back what was active before (``ON_DEVICE_BEFORE_KEY``) wherever the On-device profile is still the active one.
+#: the review profile share the name; the translation profiles are ``ON_DEVICE_TRANSLATION_PROFILES``):
+#: choosing a ``local/`` model selects them, and choosing a model that is not ``local/`` again brings back what
+#: was active before (``ON_DEVICE_BEFORE_KEY``) wherever the On-device profile is still the active one.
 ON_DEVICE_PROFILE = "On-device"
 #: The built-in translation profiles for on-device models by ``text_extraction_method`` (owner 2026-10-19;
 #: ``prompt_profiles.ON_DEVICE_TRANSLATION_PROFILES`` - a literal: this module loads before the backend).
@@ -162,8 +161,6 @@ _GLOSSARY_PROFILE_KEYS = ("glossary_prompt_profiles", "active_glossary_prompt_pr
 #: the profiles a migration creates, the active name and the two prompt mirrors)
 _REVIEW_PROFILE_KEYS = ("review_prompt_profiles", "active_review_prompt_profile", "review_system_prompt",
                         "review_final_prompt")
-#: the review prompt mirrors a build before the review profiles swapped itself (an older ON_DEVICE_BEFORE_KEY)
-_LEGACY_REVIEW_PROMPT_KEYS = ("review_system_prompt", "review_final_prompt")
 #: ``settings_rules.DEFAULT_BATCH_SIZE`` / ``SERIAL_BATCH_ROUTES`` (literals: loads before the backend).
 _BATCH_SIZE = 5
 _SERIAL_BATCH_ROUTES = ("authds/", "authchatgpt/")
@@ -483,35 +480,8 @@ def on_device_translation_profile(method: Any = None) -> str:
 
 
 def _is_on_device_translation(name: Any) -> bool:
-    """One of the On-device translation profiles, or "On-device" (their name before the split)."""
-    return name in ON_DEVICE_TRANSLATION_PROFILES.values() or name == ON_DEVICE_PROFILE
-
-
-def migrate_on_device_profiles(store: Any) -> list:
-    """App start: move the stored config off the translation profile "On-device" (now
-    "On-device_BeautifulSoup"; ``prompt_profiles.migrate_renamed_builtin_profiles``: an edited text is kept,
-    an unedited one gives way to the new built-in, ``active_profile`` follows) and the profile remembered in
-    ``ON_DEVICE_BEFORE_KEY``. Chats and series naming it follow through ``profiles.follow_profile``.
-    Idempotent; returns the changed keys."""
-    snapshot = getattr(store, "snapshot", None)
-    if not callable(snapshot):
-        return []
-    try:
-        module = importlib.import_module("prompt_profiles")
-        config = snapshot()
-        changed = list(module.migrate_renamed_builtin_profiles(config))
-        renamed = dict(module.RENAMED_BUILTIN_PROFILES)
-    except Exception:
-        log.warning("the On-device profile migration is unavailable", exc_info=True)
-        return []
-    record = config.get(ON_DEVICE_BEFORE_KEY)
-    if isinstance(record, Mapping) and record.get(PROFILE_KEY) in renamed:
-        config[ON_DEVICE_BEFORE_KEY] = {**record, PROFILE_KEY: renamed[record[PROFILE_KEY]]}
-        changed.append(ON_DEVICE_BEFORE_KEY)
-    if not changed:
-        return []
-    log.info("built-in prompt profiles renamed: %s", changed)
-    return _set_many(store, {key: config[key] for key in changed})
+    """One of the On-device translation profiles."""
+    return name in ON_DEVICE_TRANSLATION_PROFILES.values()
 
 
 def _write_extraction_method(store: Any, method: Any) -> list:
@@ -666,14 +636,6 @@ def _select_review_profile(store: Any, name: str) -> list:
     return _change_review_profiles(store, change)
 
 
-def _select_review_profile_for_prompts(store: Any, system: Any, final: Any) -> list:
-    """Select the profile holding ``system`` / ``final`` (a new "My review prompt" when none does)."""
-    def change(rg: Any, config: dict) -> None:
-        rg.set_active_review_prompt_profile(config, rg.review_profile_for_prompts(config, system, final))
-
-    return _change_review_profiles(store, change)
-
-
 def _active_review_profile(store: Any) -> Optional[str]:
     """The selected review prompt profile (after the migration of older prompts); None without the core."""
     snapshot = getattr(store, "snapshot", None)
@@ -761,17 +723,8 @@ def _restore_profiles_before_on_device(store: Any) -> list:
     changed += _select_glossary_profiles(store, names)
     settings = record.get("settings") if isinstance(record.get("settings"), Mapping) else {}
     applied = record.get("applied") if isinstance(record.get("applied"), Mapping) else {}
-    legacy_review = "review" not in record and any(key in applied for key in _LEGACY_REVIEW_PROMPT_KEYS)
-    if _active_review_profile(store) == ON_DEVICE_PROFILE:
-        if legacy_review:  # an older build swapped the prompt texts: the profile holding the ones before
-            previous = {}
-            for key in _LEGACY_REVIEW_PROMPT_KEYS:
-                saved = settings.get(key)
-                ok = isinstance(saved, (list, tuple)) and len(saved) == 2 and saved[0]
-                previous[key] = saved[1] if ok else ""
-            changed += _select_review_profile_for_prompts(store, *(previous[key] for key in _LEGACY_REVIEW_PROMPT_KEYS))
-        elif "review" in record:
-            changed += _select_review_profile(store, str(record.get("review") or "") or "Default")
+    if _active_review_profile(store) == ON_DEVICE_PROFILE and "review" in record:
+        changed += _select_review_profile(store, str(record.get("review") or "") or "Default")
     _present, fields = _stored_value(store, CUSTOM_FIELDS_KEY)
     if "fields" in record and not fields:  # columns the user added meanwhile stay
         previous = record.get("fields")
@@ -781,8 +734,6 @@ def _restore_profiles_before_on_device(store: Any) -> list:
         else:
             changed += _unset(store, CUSTOM_FIELDS_KEY) + _unset(store, DESCRIPTION_REMOVED_KEY)
     for key, on_device_value in applied.items():
-        if legacy_review and key in _LEGACY_REVIEW_PROMPT_KEYS:
-            continue  # the review profile above
         _present, current = _stored_value(store, key)
         if current != on_device_value:  # changed meanwhile: the user's value stays
             continue

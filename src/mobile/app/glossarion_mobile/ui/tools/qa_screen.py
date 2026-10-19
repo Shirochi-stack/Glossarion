@@ -5,8 +5,7 @@
 * **Fields**: "Quick Scan duplicate check sample size (characters)" and "Auto-search
   output" (``qa_scanner_settings.quick_scan_sample_size`` / ``qa_auto_search_output``,
   saved like the desktop dialog saves them). On mobile the sample size shows 0 (duplicate
-  check off) when none is saved and a saved desktop 1000 is turned into 0 once (owner
-  2026-10-08, ``qa_model.migrate_quick_sample_size``); the chat's scans use the same value.
+  check off) when none is saved (owner 2026-10-08); the chat's scans use the same value.
 * **Source**: the SourcePicker (multi-select = bulk scan). Library rows carry the output
   folder and the raw source; Browse finds a picked file's folder with the auto-search.
   Direct Text workspaces are listed but not picked here (desktop rule); a chat scans its own
@@ -123,10 +122,8 @@ class QaScannerScreen(Screen):
     def build_body(self) -> ft.Control:
         self.mode_row = ft.ResponsiveRow(spacing=8, run_spacing=8, key="qa-modes")
         self._render_modes()
-        # owner 2026-10-08: a saved desktop 1000 becomes 0 once (also done at app start); nothing
-        # saved shows the mobile default 0 (duplicate check off) - the value the job scans with
-        if self.ctx.store is not None:
-            qm.migrate_quick_sample_size(self.ctx.cfg, self.ctx.set_cfg, self.ctx.prefs)
+        # owner 2026-10-08: nothing saved shows the mobile default 0 (duplicate check off) - the value
+        # the job scans with
         sample = self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None)
         if sample is None:
             sample = qm.MOBILE_QUICK_SAMPLE_SIZE

@@ -2348,11 +2348,6 @@ class ChatView:
             return None
         from glossarion_mobile.ui.tools import qa_model
 
-        # the one-time mobile move of a saved desktop 1000 to 0 (Tools › QA Scanner runs it too): a chat
-        # scan uses the same effective duplicate-check sample size the QA screen shows
-        store, prefs = getattr(self.env, "store", None), getattr(self.env, "prefs", None)
-        if store is not None and prefs is not None and callable(getattr(store, "set", None)):
-            qa_model.migrate_quick_sample_size(self.env.config_get, store.set, prefs)
         cid = self.cid
         chat_title = str((self.env.chats.session(cid) or {}).get("title") or "Chat")
         job = qa_model.chat_qa_job(folder, source, cid=cid, chat_title=chat_title)
