@@ -148,6 +148,9 @@ ON_DEVICE_TEMPERATURE = 0.7
 #: "On-device" review prompt profile (``review_generator``), selected like the other On-device profiles.
 ON_DEVICE_SETTINGS = {"translation_temperature": ON_DEVICE_TEMPERATURE, "batch_size": 1}
 OUTPUT_LIMIT_KEY = "max_output_tokens"
+#: Auto glossary on an on-device model (owner 2026-10-19): NO GLOSSARY (the Welcome card's writes,
+#: ``welcome_flow.welcome_glossary_updates("no_glossary")``), except the 9B model, which can extract one
+ON_DEVICE_GLOSSARY_SETTINGS = {"auto_glossary_mode": "no_glossary", "enable_auto_glossary": False}
 #: the input token limit (off unless enabled, ``token_limit_disabled``): the model's whole context
 INPUT_LIMIT_KEY = "token_limit"
 DESCRIPTION_REMOVED_KEY = "custom_field_description_removed"
@@ -347,6 +350,13 @@ def local_output_limit(model: Any) -> Optional[int]:
     except Exception:
         log.debug("local_output_limit failed", exc_info=True)
         return None
+
+
+def is_large_on_device_model(model: Any) -> bool:
+    """An on-device ``local/`` model big enough to extract its own glossary: the 9B one (the Heavy preset,
+    Qwen3.5-9B); smaller on-device models default to NO GLOSSARY."""
+    value = str(model or "").strip().lower()
+    return value.startswith("local/") and "9b" in value[len("local/"):].replace("-", "").replace("_", "")
 
 
 def local_context_limit(model: Any) -> Optional[int]:
@@ -711,6 +721,8 @@ def _use_on_device_profiles(store: Any, model: Any = None) -> list:
     context = local_context_limit(model)
     if context:
         applied[INPUT_LIMIT_KEY] = int(context)
+    if not is_large_on_device_model(model):
+        applied.update(ON_DEVICE_GLOSSARY_SETTINGS)
     if isinstance(record.get("settings"), Mapping):  # already On-device: keep what was remembered then
         before["settings"] = dict(record["settings"])
     else:

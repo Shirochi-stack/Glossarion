@@ -761,6 +761,7 @@ class WelcomeScreen(Screen):
 
     def _page_language_glossary(self) -> ft.Control:
         self.mode_cards = {}
+        self.flow.default_mode_for_model(str(self.current_model() if self.current_model is not None else "") or "")
         # editable: pick a listed language or type any other one (owner 2026-10-19); typing filters the list
         options = list(dict.fromkeys([*self.languages, self.flow.target_language] if self.flow.target_language
                                      else self.languages))
@@ -943,6 +944,7 @@ class WelcomeScreen(Screen):
                 pass
 
     def finish(self) -> dict:
+        self.flow.default_mode_for_model(str(self.current_model() if self.current_model is not None else "") or "")
         # Save what Request size showed even when it was left untouched (owner 2026-10-18: an on-device
         # model shows batch size 1 and half the context, yet Run options kept 5 and 128,000).
         if self.flow.batch_size is None:

@@ -642,3 +642,37 @@ def test_welcome_text_extraction_is_saved_and_selects_the_on_device_profile(tmp_
     else:
         assert not store.has("active_profile")
     store._saver.close()
+
+
+@pytest.mark.parametrize("config", [{}, {"auto_glossary_mode": "full", "enable_auto_glossary": True}],
+                         ids=["fresh", "saved"])
+def test_small_on_device_model_defaults_to_no_glossary_and_cloud_restores(tmp_path, config):
+    """Owner 2026-10-19: Auto glossary is NO GLOSSARY on an on-device model, except the 9B one."""
+    from glossarion_mobile.state import setting_writes as sw
+
+    assert not sw.is_large_on_device_model(LOCAL) and sw.is_large_on_device_model("local/Qwen3.5-9B-Q4_K_M")
+    assert not sw.is_large_on_device_model("authgpt/gpt-9b") and not sw.is_large_on_device_model(CLOUD)
+    store = _store(tmp_path, config)
+    sw.write_setting(store, "model", LOCAL)
+    assert store.get("auto_glossary_mode") == "no_glossary" and store.get("enable_auto_glossary") is False
+    sw.write_setting(store, "model", CLOUD)
+    for key in ("auto_glossary_mode", "enable_auto_glossary"):
+        if key in config:
+            assert store.get(key) == config[key], key
+        else:  # nothing was saved: the desktop default again
+            assert not store.has(key), key
+    # a mode picked while on-device stays
+    sw.write_setting(store, "model", LOCAL)
+    store.set_many({"auto_glossary_mode": "minimal", "enable_auto_glossary": True})
+    sw.write_setting(store, "model", CLOUD)
+    assert store.get("auto_glossary_mode") == "minimal"
+    store._saver.close()
+
+
+def test_the_9b_on_device_model_keeps_the_glossary_mode(tmp_path):
+    from glossarion_mobile.state import setting_writes as sw
+
+    store = _store(tmp_path, {"auto_glossary_mode": "balanced", "enable_auto_glossary": True})
+    sw.write_setting(store, "model", "local/Qwen3.5-9B-Q4_K_M")
+    assert store.get("auto_glossary_mode") == "balanced" and store.get("enable_auto_glossary") is True
+    store._saver.close()

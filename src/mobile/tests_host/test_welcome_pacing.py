@@ -159,3 +159,18 @@ def test_text_extraction_shows_the_saved_method_when_reopened(saved, shown):
     assert by_key(screen)["welcome-extraction"].value == shown
     assert screen.finish()["text_extraction_method"] == shown
 
+
+@pytest.mark.parametrize("model,mode", [("local/Qwen3.5-0.8B-UD-Q4_K_XL", "no_glossary"),
+                                        ("local/Qwen3.5-9B-Q4_K_M", "balanced"),
+                                        ("authchatgpt/auto", "balanced")])
+def test_glossary_card_default_follows_the_model(model, mode):
+    """Owner 2026-10-19: NO GLOSSARY is preselected for an on-device model, except the 9B one."""
+    screen = welcome(model)
+    assert screen.flow.glossary_mode == mode
+    assert screen.finish()["auto_glossary_mode"] == mode
+
+
+def test_a_tapped_glossary_card_wins_over_the_model_default():
+    screen = welcome("local/Qwen3.5-0.8B-UD-Q4_K_XL")
+    screen.select_mode("minimal")
+    assert screen.finish()["auto_glossary_mode"] == "minimal"

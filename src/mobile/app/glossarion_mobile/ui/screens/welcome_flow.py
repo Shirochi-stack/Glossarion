@@ -90,6 +90,7 @@ class WelcomeFlow:
 
     step: int = 0
     glossary_mode: str = DEFAULT_GLOSSARY_MODE
+    glossary_mode_chosen: bool = False  # the user tapped a card (a model default never overrides it)
     target_language: str = "English"
     signed_in: bool = False
     skipped_sign_in: bool = False
@@ -143,6 +144,17 @@ class WelcomeFlow:
     def select_mode(self, mode: str) -> None:
         if mode in {card[0] for card in GLOSSARY_MODE_CARDS}:
             self.glossary_mode = mode
+            self.glossary_mode_chosen = True
+
+    def default_mode_for_model(self, model: str) -> None:
+        """The glossary card preselected for ``model`` until the user taps one: NO GLOSSARY for an
+        on-device model other than the 9B one (owner 2026-10-19), else the desktop default."""
+        if self.glossary_mode_chosen:
+            return
+        from glossarion_mobile.state.setting_writes import is_large_on_device_model
+
+        local = str(model or "").strip().lower().startswith("local/")
+        self.glossary_mode = "no_glossary" if local and not is_large_on_device_model(model) else DEFAULT_GLOSSARY_MODE
 
     def select_extraction(self, method: str) -> None:
         if method in {choice[0] for choice in EXTRACTION_CHOICES}:
