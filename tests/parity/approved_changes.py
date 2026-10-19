@@ -54,7 +54,7 @@ _SAFETY_CATEGORY_ENV_PAIR = _after(
     "                ('GEMINI_SAFETY_CATEGORY_THRESHOLDS', json.dumps(self.config.get('gemini_safety_category_thresholds') or {})),")
 
 # 2026-10-18 built-in "On-device" translation prompt profile (small on-device models)
-_ON_DEVICE_PROMPT = "You must translate this into {target_lang}."
+_ON_DEVICE_PROMPT = "You must only output {target_lang} translations."
 # one row patches both identical lists (always_include_profiles and the protected set)
 _ON_DEVICE_PROFILE_LIST_ROW = _after('            "Subtitle Translation",', '            "On-device",')
 _ON_DEVICE_DEFAULT_PROMPT_ROW = _after(
