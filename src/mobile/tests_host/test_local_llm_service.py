@@ -132,9 +132,9 @@ def test_thread_and_context_defaults(tmp_path, monkeypatch):
     prefs = fakes.FakePrefs()
     service, engine = make_service(tmp_path, prefs=prefs)
     service.registry.add("fake-echo", {"repo": "t/fake-echo", "file": "fake-echo.gguf", "size": 1 * GB})
-    assert service.context_for("fake-echo") == 8192
+    assert service.context_for("fake-echo") == 4096  # small models (owner 2026-10-19: halved from 8192)
     service.registry.add("fake-echo", {"repo": "t/fake-echo", "file": "fake-echo.gguf", "size": 5 * GB})
-    assert service.context_for("fake-echo") == 4096
+    assert service.context_for("fake-echo") == 2048  # 4 GiB or more
     assert service.save_settings("4096x", "") == (None, "Context must be a whole number")
     assert service.save_settings("6000", "3") == ({"n_ctx": 6000, "n_threads": 3}, None)
     assert service.context_for("fake-echo") == 6000 and service.threads() == 3
