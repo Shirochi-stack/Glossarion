@@ -447,6 +447,23 @@ def test_skip_title_tag_translation_defaults_on_and_a_saved_value_wins(tmp_path,
     assert owner._collect_live_settings()["skip_title_tag_translation"] is False
 
 
+def test_remove_excessive_empty_tags_defaults_and_saved_values(tmp_path, monkeypatch):
+    # owner-approved 2026-10-19: On-device on, all models off; both exported for the pipeline
+    owner, _startup, env = _owner(tmp_path, monkeypatch, {})
+    assert owner.remove_excessive_empty_tags_on_device_var is True
+    assert owner.remove_excessive_empty_tags_all_models_var is False
+    assert env["REMOVE_EXCESSIVE_EMPTY_TAGS_ON_DEVICE"] == "1"
+    assert env["REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS"] == "0"
+
+    owner, _startup, env = _owner(tmp_path, monkeypatch, {"remove_excessive_empty_tags_on_device": False,
+                                                          "remove_excessive_empty_tags_all_models": True})
+    assert env["REMOVE_EXCESSIVE_EMPTY_TAGS_ON_DEVICE"] == "0"
+    assert env["REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS"] == "1"
+    collected = owner._collect_live_settings()
+    assert collected["remove_excessive_empty_tags_on_device"] is False
+    assert collected["remove_excessive_empty_tags_all_models"] is True
+
+
 def _legacy_statements(method, predicate):
     tree = ast.parse(_git_show("src/translator_gui.py"))
     fn = _method_nodes(tree, "TranslatorGUI")[method]

@@ -2766,6 +2766,7 @@ class AsyncBatchJobMixin:
         
         # Async processing does not support request merging logic, so force it off
         env_vars['REQUEST_MERGING_ENABLED'] = '0'
+        env_vars['REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS'] = "1" if _val(getattr(self.gui, 'remove_excessive_empty_tags_all_models_var', None), self.gui.config.get('remove_excessive_empty_tags_all_models', False)) else "0"
             
         env_vars['TRANSLATION_TEMPERATURE'] = _text(getattr(self.gui, 'trans_temp', None), '0.3')
         env_vars['TRANSLATION_HISTORY_LIMIT'] = _text(getattr(self.gui, 'trans_history', None), '8')
@@ -3205,6 +3206,10 @@ class AsyncBatchJobMixin:
                                         chapter_payload = chapter_html
                                 else:
                                     chapter_payload = chapter_html
+                                    if env_vars.get('REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS') == '1':
+                                        # "Remove excessive empty p and br tags (all models)": the text sent only
+                                        from html_duplicate_cleanup import collapse_empty_paragraphs
+                                        chapter_payload = collapse_empty_paragraphs(chapter_payload)
                                 raw_chapters.append((chapter_num, chapter_payload, html_file, spine_pos))
                                     
                             except Exception as e:

@@ -86,6 +86,8 @@ class FrozenDesktopTables:
             ('skip_pdf_title_translation', ['skip_pdf_title_translation_var'], True, bool),
             ('skip_image_title_translation', ['skip_image_title_translation_var'], True, bool),
             ('skip_title_tag_translation', ['skip_title_tag_translation_var'], True, bool),
+            ('remove_excessive_empty_tags_on_device', ['remove_excessive_empty_tags_on_device_var'], True, bool),
+            ('remove_excessive_empty_tags_all_models', ['remove_excessive_empty_tags_all_models_var'], False, bool),
             ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
             ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
             ('emergency_glossary_compliance', ['emergency_glossary_compliance_var'], False, bool),
@@ -536,6 +538,8 @@ class FrozenDesktopTables:
             ('scan_phase_enabled_var', 'scan_phase_enabled', True),
             ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', False),
             ('respect_retry_after_var', 'respect_retry_after', True),
+            ('remove_excessive_empty_tags_on_device_var', 'remove_excessive_empty_tags_on_device', True),
+            ('remove_excessive_empty_tags_all_models_var', 'remove_excessive_empty_tags_all_models', False),
             # Keep existing variables intact
             ('enable_image_translation_var', 'enable_image_translation', False),
             ('process_webnovel_images_var', 'process_webnovel_images', True),
