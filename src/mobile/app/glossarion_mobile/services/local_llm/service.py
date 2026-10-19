@@ -25,6 +25,11 @@
 * **Stop:** a queued request gives up on the client closing its connection or any job Stop
   (``process_stop_state``: graceful or immediate); the answer being generated stops within a few tokens
   on an immediate Stop, a disconnect or a forced unload, and runs to its end on a graceful one.
+* **Adaptive CJK ban** ("Block CJK in translations", Prefs ``BLOCK_CJK_KEY``, on by default): a request
+  that writes target-language text into a non-CJK target bans Han / kana / Hangul tokens; glossary
+  requests, a single-pass auto glossary's translations and CJK targets keep the default logits. The
+  request kind and target come from the body fields ``unified_api_client`` adds for this endpoint only
+  (``glossarion_task``, ``target_language``, ``glossarion_single_pass``); ``script_ban.wants_ban`` decides.
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ from typing import Any, Callable, Optional
 
 from glossarion_mobile.services.local_llm import downloads as dl
 from glossarion_mobile.services.local_llm import engine as eng
-from glossarion_mobile.services.local_llm import hf, presets, stem_of
+from glossarion_mobile.services.local_llm import hf, presets, script_ban, stem_of
 from glossarion_mobile.services.local_llm import vision as vis
 from glossarion_mobile.services.local_llm.server import ChatRun, LocalLLMError, LocalLLMServer
 
@@ -71,6 +76,9 @@ SAMPLING_LIMITS = {"top_p": (0.0, 1.0, float), "top_k": (0, 200, int),
 #: field labels (Model manager) and error messages
 SAMPLING_LABELS = {"top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
                    "presence_penalty": "Presence penalty", "repeat_penalty": "Repeat penalty"}
+#: Prefs key of "Block CJK in translations (adaptive)" (Model manager > On-device > engine card; a bool,
+#: on when unset): see ``script_ban``
+BLOCK_CJK_KEY = "local_llm_block_cjk"
 MAX_WAITERS = 8
 IDLE_UNLOAD = 600.0
 BACKGROUND_UNLOAD = 60.0
@@ -521,6 +529,20 @@ class LocalEngineService:
             self.prefs.set(SAMPLING_KEY, dict(out))
         return out, None
 
+    def block_cjk(self) -> bool:
+        """"Block CJK in translations (adaptive)": on unless switched off."""
+        try:
+            raw = self.prefs.get(BLOCK_CJK_KEY, None) if self.prefs is not None else None
+        except Exception:
+            raw = None
+        return raw is None or bool(raw)
+
+    def save_block_cjk(self, enabled: Any) -> bool:
+        value = bool(enabled)
+        if self.prefs is not None:
+            self.prefs.set(BLOCK_CJK_KEY, value)
+        return value
+
     def preset_for(self, stem: str) -> Optional[dict]:
         """The preset that brought ``stem`` (same repo and file; else a file-less preset of that repo)."""
         entry = self.registry.load().get(stem) or {}
@@ -839,6 +861,9 @@ class LocalEngineService:
             params["stop"] = [str(s) for s in stop][:8]
         kwargs = body.get("chat_template_kwargs") if isinstance(body.get("chat_template_kwargs"), dict) else {}
         params["enable_thinking"] = bool(kwargs.get("enable_thinking", False))
+        if script_ban.wants_ban(body.get("glossarion_task"), body.get("target_language"),
+                                single_pass=body.get("glossarion_single_pass"), enabled=self.block_cjk()):
+            params["ban_cjk"] = True
         return params
 
     # ---- downloads -----------------------------------------------------------------------------------

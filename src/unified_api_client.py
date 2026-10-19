@@ -3457,6 +3457,31 @@ class UnifiedClient:
         base = str(base_url or '').rstrip('/')
         return bool(published) and base == published and base.endswith('/v1')
 
+    @staticmethod
+    def _on_device_task_fields() -> dict:
+        """Body fields only Glossarion Mobile's on-device endpoint gets: the request kind (this request's
+        key context; a thread working on a glossary counts as glossary), the target language and whether
+        the single-pass auto glossary is on. Its adaptive CJK ban decides with them (mobile
+        ``local_llm.script_ban``)."""
+        try:
+            task = str(current_key_context() or 'translation')
+        except Exception:
+            task = 'translation'
+        try:
+            if 'glossary' in threading.current_thread().name.lower():
+                task = 'glossary'
+        except Exception:
+            pass
+        mode = (os.getenv('AUTO_GLOSSARY_MODE') or '').strip().lower().replace(' ', '_').replace('-', '_')
+        explicit = (os.getenv('SINGLE_PASS_GLOSSARY_MODE') or '').strip().lower().replace(' ', '_').replace('-', '_')
+        single_pass = (explicit in ('1', 'true', 'yes', 'single_pass', 'singlepass', 'single')
+                       or mode in ('single_pass', 'singlepass'))
+        fields = {'glossarion_task': task, 'glossarion_single_pass': single_pass}
+        target = (os.getenv('OUTPUT_LANGUAGE') or '').strip()
+        if target:
+            fields['target_language'] = target
+        return fields
+
     def _local_engine_health(self, base_url: str, model: str) -> Optional[dict]:
         """``GET <base>/../health?model=`` of Glossarion Mobile's on-device endpoint (None elsewhere:
         a user's own llama-server has no such route, so only the published endpoint is asked)."""
@@ -25401,6 +25426,11 @@ class UnifiedClient:
                         if os.getenv('OPENROUTER_ACCEPT_IDENTITY', '0') == '1':
                             extra_headers["Accept-Encoding"] = "identity"
                     
+                    if provider == 'local' and self._is_on_device_endpoint(base_url):
+                        # Glossarion Mobile's on-device engine only (never on desktop): what this
+                        # request is for, for its adaptive CJK ban
+                        extra_body.update(self._on_device_task_fields())
+
                     # Build call kwargs and include extra_body only when present
                     # Sanitize headers to prevent UnicodeEncodeError from httpx
                     # when header values contain non-ASCII characters.

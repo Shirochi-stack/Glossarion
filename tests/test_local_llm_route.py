@@ -116,3 +116,46 @@ def test_requests_strip_the_prefix_and_never_send_a_cloud_key(fake_llama_server)
     assert request["path"] == "/secret/v1/chat/completions"
     assert request["body"]["model"] == "Qwen3.5-2B-Q4_K_M"
     assert "sk-cloud-key-never-sent" not in str(request["auth"])
+
+def _send_local(context=None):
+    client = UC(api_key="", model="local/Qwen3.5-0.8B-UD-Q4_K_XL")
+    result = client.send([{"role": "user", "content": "ping"}], temperature=0.1, max_tokens=8, context=context)
+    content = result[0] if isinstance(result, tuple) else result.content
+    assert content == "pong"
+
+
+def test_on_device_requests_say_what_they_are_for(fake_llama_server, monkeypatch):
+    """Glossarion Mobile's on-device engine bans CJK tokens in translations (mobile local_llm.script_ban):
+    it gets the request kind, the target language and the single-pass auto glossary flag."""
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
+    monkeypatch.setenv("AUTO_GLOSSARY_MODE", "balanced")
+    monkeypatch.delenv("SINGLE_PASS_GLOSSARY_MODE", raising=False)
+    _send_local("translation")
+    body = fake_llama_server[-1]["body"]
+    assert body["glossarion_task"] == "translation" and body["target_language"] == "English"
+    assert body["glossarion_single_pass"] is False
+    _send_local("auto glossary (3/10)")  # GlossaryManager's progress label
+    assert "glossary" in fake_llama_server[-1]["body"]["glossarion_task"]
+    _send_local("glossary")
+    assert fake_llama_server[-1]["body"]["glossarion_task"] == "glossary"
+    monkeypatch.setenv("AUTO_GLOSSARY_MODE", "single_pass")
+    _send_local("translation")
+    assert fake_llama_server[-1]["body"]["glossarion_single_pass"] is True
+    monkeypatch.setenv("AUTO_GLOSSARY_MODE", "off")
+    monkeypatch.setenv("SINGLE_PASS_GLOSSARY_MODE", "1")
+    _send_local()
+    assert fake_llama_server[-1]["body"]["glossarion_single_pass"] is True
+    monkeypatch.delenv("OUTPUT_LANGUAGE")
+    _send_local("metadata")
+    body = fake_llama_server[-1]["body"]
+    assert body["glossarion_task"] == "metadata" and "target_language" not in body
+
+
+def test_other_local_endpoints_get_no_glossarion_fields(fake_llama_server, monkeypatch):
+    """A desktop llama-server / ollama / lmstudio endpoint (anything but the published on-device one)
+    gets the request exactly as before."""
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
+    monkeypatch.setattr(UC, "_is_on_device_endpoint", classmethod(lambda cls, base_url: False))
+    _send_local("translation")
+    body = fake_llama_server[-1]["body"]
+    assert not any(key in body for key in ("glossarion_task", "glossarion_single_pass", "target_language"))

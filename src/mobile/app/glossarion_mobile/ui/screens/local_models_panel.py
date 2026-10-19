@@ -6,7 +6,8 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   (``ContextControl``, also on the Welcome page) and the Threads default (Prefs ``local_llm_settings``) and
   the engine's system info after the first load. Choosing a model resets Context to that model's own
   (8,192 tokens, 4,096 for files of 4 GB and more); a job on it asks for half the context as output. Without
-  llama-cpp-python (a desktop dev run) the card says the engine is unavailable; nothing crashes.
+  llama-cpp-python (a desktop dev run) the card says the engine is unavailable; nothing crashes. Below
+  the on-device sampling fields, "Block CJK in translations (adaptive)" (on by default; ``script_ban``).
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
@@ -732,6 +733,8 @@ class LocalModelsPanel(OnDeviceFlow):
         }
         self.sampling_error = ft.Text("", color=ft.Colors.ERROR, visible=False,
                                       theme_style=ft.TextThemeStyle.BODY_SMALL)
+        self.block_cjk_switch = ft.Switch(label="Block CJK in translations (adaptive)", value=self.service.block_cjk(),
+                                          key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
         return [
             ft.Text("Sampling (on-device models only)", weight=ft.FontWeight.W_600, key="local-sampling-title"),
             _small("Qwen's recommended values reduce repetition loops. These replace the anti-duplicate "
@@ -741,7 +744,17 @@ class LocalModelsPanel(OnDeviceFlow):
                     ft.TextButton(content="Qwen defaults", key="local-sampling-reset",
                                   on_click=lambda e: self.reset_sampling())], spacing=4),
             self.sampling_error,
+            self.block_cjk_switch,
+            _small("Stops small models from slipping Chinese, Japanese or Korean characters into translations to "
+                   "a non-CJK language. Glossary requests, the single-pass auto glossary and Chinese, Japanese "
+                   "or Korean targets are never blocked.", key="local-block-cjk-note"),
         ]
+
+    def save_block_cjk(self) -> bool:
+        value = self.service.save_block_cjk(self.block_cjk_switch.value)
+        self.say("CJK characters are blocked in on-device translations." if value
+                 else "On-device translations may contain CJK characters again.")
+        return value
 
     def save_sampling(self) -> Optional[str]:
         values, error = self.service.save_sampling({k: f.value for k, f in self.sampling_fields.items()})
