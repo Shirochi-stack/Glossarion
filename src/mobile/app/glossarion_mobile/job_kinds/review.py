@@ -15,9 +15,10 @@ limit, the output language, batch settings, the streaming toggle):
   -> ``run_all_reviews`` (one review per input, in parallel when batch translation is on;
   its queue messages become job log lines).
 
-The prompts are the dialog's: ``review_system_prompt`` / ``review_final_prompt`` of the
-config snapshot, else ``DEFAULT_REVIEW_PROMPT`` / ``DEFAULT_FINAL_REVIEW_PROMPT``
-(``_load_saved_prompt``). params: ``mode``, ``spoiler_mode`` (50/50 split), ``chunk_mode``
+The prompts are the active review prompt profile's (``review_generator.active_review_prompts``
+of the config snapshot: its review prompt and its Full Review Mode final prompt, an empty one
+falling back to ``DEFAULT_REVIEW_PROMPT`` / ``DEFAULT_FINAL_REVIEW_PROMPT``, as on the desktop);
+a build without profiles reads the ``review_system_prompt`` / ``review_final_prompt`` mirrors. params: ``mode``, ``spoiler_mode`` (50/50 split), ``chunk_mode``
 (Full Review Mode), ``wrap_chunks``. Outputs: the review files that exist afterwards
 (``review_paths_for``).
 """
@@ -35,8 +36,12 @@ MODES = ("single", "volume", "all")
 
 
 def review_prompts(review_generator: Any, config: Any) -> tuple:
-    """The dialog's prompts (``_load_saved_prompt``): saved text, else the shared defaults."""
+    """The active review prompt profile's (review prompt, final prompt); the config is not changed."""
     config = config if isinstance(config, dict) else {}
+    active = getattr(review_generator, "active_review_prompts", None)
+    if callable(active):
+        prompt, final = active(config)
+        return str(prompt), str(final)
     prompt = config.get("review_system_prompt", "") or getattr(review_generator, "DEFAULT_REVIEW_PROMPT", "")
     final = config.get("review_final_prompt", "") or getattr(review_generator, "DEFAULT_FINAL_REVIEW_PROMPT", "")
     return str(prompt), str(final)

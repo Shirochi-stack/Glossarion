@@ -685,6 +685,215 @@ Your final rating and recommendation for the novel as a whole, considering all s
 IMPORTANT: Your entire output must be in {target_lang}. Do NOT include any raw/untranslated text. All names, places, and terms must be transliterated or translated into {target_lang}. Write in a professional but engaging tone. Be specific with examples from the text when possible."""
 
 
+# ─── Review prompt profiles (desktop dialog, mobile review tool, both runs) ─────
+#
+# Each profile holds both prompts of a review: "system" (the review prompt, also every chunk's
+# prompt in Full Review Mode) and "final" (the Full Review Mode synthesis prompt). Config:
+#   review_prompt_profiles        {name: {"system": str, "final": str}}, built-ins first
+#                                 ("Default", "On-device"; both protected, Reset restores them)
+#   active_review_prompt_profile  the selected name ("Default" when nothing else is)
+#   review_system_prompt / review_final_prompt
+#                                 MIRRORS of the active profile's texts, written on every profile
+#                                 change (older builds and owner_state's review_*_var read them).
+# The runs never trust the mirrors: active_review_prompts() derives the texts from the active
+# profile at run time. The first ensure_review_prompt_profiles() of a config without profiles
+# migrates the mirrors: texts equal to a built-in select it, other (custom) texts become the
+# user profile "My review prompt", selected, so nobody loses a prompt.
+
+from prompt_profiles import PromptSetProfiles as _PromptSetProfiles  # noqa: E402
+
+REVIEW_PROMPT_PROFILES_KEY = 'review_prompt_profiles'
+ACTIVE_REVIEW_PROMPT_PROFILE_KEY = 'active_review_prompt_profile'
+REVIEW_SYSTEM_PROMPT_KEY = 'review_system_prompt'
+REVIEW_FINAL_PROMPT_KEY = 'review_final_prompt'
+REVIEW_PROMPT_FIELDS = ('system', 'final')
+REVIEW_PROMPT_DEFAULT_PROFILE = "Default"
+#: Built-in profile for small on-device models (mobile llama.cpp, 0.8B-9B): the mobile app selects it
+#: when an on-device model is chosen (the desktop ones ask for seven sections and a table).
+REVIEW_PROMPT_ON_DEVICE_PROFILE = "On-device"
+#: The user profile a custom pre-profile prompt moves into.
+REVIEW_PROMPT_MIGRATED_PROFILE = "My review prompt"
+
+ON_DEVICE_REVIEW_PROMPT = (
+    "Write a short review of this story in {target_lang}.\n"
+    "Say what happens, who the main characters are, and if the story is good.\n"
+    "Write 3 short paragraphs. Write only in {target_lang}."
+)
+ON_DEVICE_FINAL_REVIEW_PROMPT = (
+    "These are reviews of parts of one story.\n"
+    "Write one short review of the whole story in {target_lang}.\n"
+    "Say what happens, who the main characters are, and if the story is good.\n"
+    "Write 3 short paragraphs. Write only in {target_lang}."
+)
+
+BUILTIN_REVIEW_PROMPT_PROFILES = {
+    REVIEW_PROMPT_DEFAULT_PROFILE: {'system': DEFAULT_REVIEW_PROMPT, 'final': DEFAULT_FINAL_REVIEW_PROMPT},
+    REVIEW_PROMPT_ON_DEVICE_PROFILE: {'system': ON_DEVICE_REVIEW_PROMPT, 'final': ON_DEVICE_FINAL_REVIEW_PROMPT},
+}
+#: Earlier shipped texts of a built-in, as (system, final) pairs: a stored copy still equal to one is
+#: brought up to date, an edited one is kept (like the glossary On-device profile).
+PREVIOUS_BUILTIN_REVIEW_PROMPTS = {}
+
+
+def is_default_review_prompt_profile(name) -> bool:
+    return str(name or '').strip().casefold() == REVIEW_PROMPT_DEFAULT_PROFILE.casefold()
+
+
+def is_builtin_review_prompt_profile(name) -> bool:
+    """Default and On-device: they cannot be deleted, Reset restores their shipped texts."""
+    name = str(name or '').strip()
+    return is_default_review_prompt_profile(name) or name in BUILTIN_REVIEW_PROMPT_PROFILES
+
+
+def _review_texts(value, fallback) -> dict:
+    if not isinstance(value, dict):
+        return dict(fallback)
+    return {key: str(value.get(key, fallback[key]) or '') for key in REVIEW_PROMPT_FIELDS}
+
+
+def _same_review_texts(a, b) -> bool:
+    return all(str(a.get(key, '') or '').strip() == str(b.get(key, '') or '').strip() for key in REVIEW_PROMPT_FIELDS)
+
+
+def _write_review_mirrors(config, texts, owner=None) -> None:
+    system = str(texts.get('system', '') or '').strip()
+    final = str(texts.get('final', '') or '').strip()
+    config[REVIEW_SYSTEM_PROMPT_KEY] = system
+    config[REVIEW_FINAL_PROMPT_KEY] = final
+    if owner is not None:  # TranslatorGUI.save_config writes the mirrors from these
+        try:
+            owner.review_system_prompt_var = system
+            owner.review_final_prompt_var = final
+        except Exception:
+            pass
+
+
+def review_profile_for_prompts(config, system, final) -> str:
+    """The profile holding ``system`` / ``final`` (empty = the Default texts): a built-in or a user profile
+    with the same texts, else a new user profile "My review prompt" (numbered when taken). Returns its name;
+    the active profile is not changed. Used by the migration of pre-profile prompts."""
+    profiles = ensure_review_prompt_profiles(config, _migrate=False)
+    default = BUILTIN_REVIEW_PROMPT_PROFILES[REVIEW_PROMPT_DEFAULT_PROFILE]
+    texts = {'system': str(system or '').strip() or default['system'],
+             'final': str(final or '').strip() or default['final']}
+    for name, shipped in BUILTIN_REVIEW_PROMPT_PROFILES.items():
+        if _same_review_texts(texts, shipped) or _same_review_texts(texts, profiles.get(name, {})):
+            return name
+    for name, stored in profiles.items():
+        if _same_review_texts(texts, stored):
+            return name
+    name, number = REVIEW_PROMPT_MIGRATED_PROFILE, 2
+    while name in profiles:
+        name = f"{REVIEW_PROMPT_MIGRATED_PROFILE} {number}"
+        number += 1
+    profiles[name] = texts
+    config[REVIEW_PROMPT_PROFILES_KEY] = profiles
+    return name
+
+
+def ensure_review_prompt_profiles(config, owner=None, *, _migrate=True) -> dict:
+    """Make ``config`` hold the review prompt profiles (built-ins first, edited built-in texts kept, unedited
+    earlier shipped texts updated) and a valid active name; returns the profiles dict stored in it.
+
+    A config without ``review_prompt_profiles`` is migrated once: the mirrors' texts select the matching
+    built-in, or become the user profile "My review prompt" (:func:`review_profile_for_prompts`); then the
+    mirrors are written (also on ``owner``)."""
+    stored = config.get(REVIEW_PROMPT_PROFILES_KEY)
+    migrate = _migrate and not isinstance(stored, dict)
+    stored = stored if isinstance(stored, dict) else {}
+    profiles = {}
+    for name, shipped in BUILTIN_REVIEW_PROMPT_PROFILES.items():
+        texts = _review_texts(stored.get(name), shipped)
+        previous = PREVIOUS_BUILTIN_REVIEW_PROMPTS.get(name, ())
+        if (texts['system'], texts['final']) in previous:
+            texts = dict(shipped)
+        profiles[name] = texts
+    for name, texts in stored.items():
+        if (isinstance(name, str) and name.strip() and name not in profiles
+                and not is_default_review_prompt_profile(name) and isinstance(texts, dict)):
+            profiles[name] = _review_texts(texts, BUILTIN_REVIEW_PROMPT_PROFILES[REVIEW_PROMPT_DEFAULT_PROFILE])
+    config[REVIEW_PROMPT_PROFILES_KEY] = profiles
+    if migrate:
+        name = review_profile_for_prompts(config, config.get(REVIEW_SYSTEM_PROMPT_KEY, ''),
+                                          config.get(REVIEW_FINAL_PROMPT_KEY, ''))
+        profiles = config[REVIEW_PROMPT_PROFILES_KEY]
+        config[ACTIVE_REVIEW_PROMPT_PROFILE_KEY] = name
+        _write_review_mirrors(config, profiles[name], owner)
+    active = config.get(ACTIVE_REVIEW_PROMPT_PROFILE_KEY)
+    if not isinstance(active, str) or active not in profiles:
+        config[ACTIVE_REVIEW_PROMPT_PROFILE_KEY] = REVIEW_PROMPT_DEFAULT_PROFILE
+    return profiles
+
+
+def active_review_prompt_profile(config) -> str:
+    """The selected review prompt profile's name (``config`` is brought up to date first)."""
+    ensure_review_prompt_profiles(config)
+    return config[ACTIVE_REVIEW_PROMPT_PROFILE_KEY]
+
+
+def set_active_review_prompt_profile(config, name, owner=None) -> bool:
+    """Select ``name`` (the profile picker, the mobile On-device switch): the active name and the mirrors.
+    False (nothing changed) for an unknown name."""
+    profiles = ensure_review_prompt_profiles(config, owner)
+    name = REVIEW_PROMPT_DEFAULT_PROFILE if is_default_review_prompt_profile(name) else str(name or '').strip()
+    if name not in profiles:
+        return False
+    config[ACTIVE_REVIEW_PROMPT_PROFILE_KEY] = name
+    _write_review_mirrors(config, profiles[name], owner)
+    return True
+
+
+def active_review_prompts(config) -> tuple:
+    """``(review prompt, final review prompt)`` a run sends: the active profile's texts (an empty one falls
+    back to the shipped default, as an empty prompt always did). ``config`` itself is not changed."""
+    config = dict(config) if isinstance(config, dict) else {}
+    profiles = ensure_review_prompt_profiles(config)
+    texts = profiles[config[ACTIVE_REVIEW_PROMPT_PROFILE_KEY]]
+    return (str(texts.get('system', '') or '').strip() or DEFAULT_REVIEW_PROMPT,
+            str(texts.get('final', '') or '').strip() or DEFAULT_FINAL_REVIEW_PROMPT)
+
+
+class ReviewPromptProfiles(_PromptSetProfiles):
+    """The review prompt profiles without widgets: the desktop Review dialog's profile row and the mobile
+    review tool drive this (``prompt_profiles.PromptSetProfiles``: select / stage / new / save / delete /
+    reset with the shared rules and box texts). ``texts`` is ``{"system": ..., "final": ...}`` of the
+    selected profile. Every action writes ``review_prompt_profiles``, ``active_review_prompt_profile`` and
+    the mirrors (also ``owner.review_system_prompt_var`` / ``review_final_prompt_var``), then calls
+    ``persist()``."""
+
+    FIELDS = REVIEW_PROMPT_FIELDS
+    PROFILES_KEY = REVIEW_PROMPT_PROFILES_KEY
+    DEFAULT_KEY = ''
+    ACTIVE_KEY = ACTIVE_REVIEW_PROMPT_PROFILE_KEY
+    RUNTIME_KEYS = (REVIEW_SYSTEM_PROMPT_KEY, REVIEW_FINAL_PROMPT_KEY)
+    LABEL = 'review prompt profile'
+    BUILTINS = {name: dict(texts) for name, texts in BUILTIN_REVIEW_PROMPT_PROFILES.items()
+                if name != REVIEW_PROMPT_DEFAULT_PROFILE}
+    DEFAULT_BUILTIN = dict(BUILTIN_REVIEW_PROMPT_PROFILES[REVIEW_PROMPT_DEFAULT_PROFILE])
+
+    def __init__(self, owner, *, persist=None, log=None):
+        super().__init__(owner, self.DEFAULT_BUILTIN, persist=persist, log=log)
+
+    def _read_stored(self, initial):
+        config = self.owner.config
+        profiles = ensure_review_prompt_profiles(config, self.owner)
+        named = {name: dict(texts) for name, texts in profiles.items() if not is_default_review_prompt_profile(name)}
+        active = config.get(self.ACTIVE_KEY, '')
+        return named, dict(profiles[REVIEW_PROMPT_DEFAULT_PROFILE]), '' if is_default_review_prompt_profile(active) else active
+
+    def _store(self, profiles, default_set, active_name):
+        config = self.owner.config
+        config[self.PROFILES_KEY] = {REVIEW_PROMPT_DEFAULT_PROFILE: default_set, **profiles}
+        config[self.ACTIVE_KEY] = active_name or REVIEW_PROMPT_DEFAULT_PROFILE
+
+    def _write_runtime(self, texts):
+        _write_review_mirrors(self.owner.config, texts, self.owner)
+
+    def run_prompts(self):
+        """``(review prompt, final review prompt)`` a run sends for the selected profile."""
+        return active_review_prompts(self.owner.config)
+
+
 # ─── Main review generation ─────────────────────────────────────────────
 
 def generate_review(

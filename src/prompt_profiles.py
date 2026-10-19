@@ -34,7 +34,12 @@ mobile app run the same functions:
   editor updates as the ``update_widgets`` hook (tests/parity/test_u4_dialog_parity.py:
   legacy dialog vs working tree).
 
-Config keys written: ``prompt_profiles``, ``active_profile``, ``text_extraction_method``,
+* **Prompt-set profiles** (``PromptSetProfiles``): the same prefill engine for profiles that hold
+  several prompts each, with optional built-ins (protected, Reset). Subclasses name their config keys:
+  glossary_document.RefinementPromptProfiles (refinement system + user prompt) and
+  review_generator.ReviewPromptProfiles (review prompt + Full Review Mode final prompt).
+
+Config keys written: ``prompt_profiles``,``active_profile``, ``text_extraction_method``,
 ``profile_name_autofill``, ``profile_mousewheel_locked`` (main profiles, through
 ``profiles_config_updates`` / ``write_profiles_to_config_file``) and
 ``assistant_prompt_profiles``, ``assistant_prompt_profile_default``,
@@ -63,6 +68,8 @@ __all__ = [
     "PrefillState", "PrefillOutcome", "PREFILL_DEFAULT_NAME", "PREFILL_CONFIG_KEYS",
     "prefill_state_from_config", "prefill_load", "prefill_stage", "prefill_select", "prefill_new", "prefill_save",
     "prefill_delete", "prefill_config_updates", "prefill_apply_to_config",
+    # prompt-set profiles (refinement, review generator)
+    "PromptSetProfiles",
 ]
 
 #: other_settings.delete_profile's protected set when ``_get_protected_prompt_profiles`` fails.
@@ -756,3 +763,244 @@ def prefill_apply_to_config(state, config, content=None):
     updates = prefill_config_updates(state, content)
     config.update(updates)
     return updates
+
+
+# =============================================================================================
+# 4. Prompt-set profiles: several prompts per profile (refinement system + user, review main + final)
+# =============================================================================================
+
+class PromptSetProfiles:
+    """Default-plus-named profiles whose every profile holds several prompts (``FIELDS``), without widgets.
+
+    The engine is the prefill one above (``PrefillState`` and the ``prefill_*`` steps); a set of prompts
+    travels through it as one canonical text (a JSON list in ``FIELDS`` order). Subclasses name the config
+    keys, the profile label of the box texts and log lines, and what a change writes for the runs
+    (:meth:`_write_runtime`). Every action writes the config and calls ``persist()`` (the config saver,
+    False = failed); a failed save rolls the drafts and the config keys back.
+
+    Built-ins: ``DEFAULT_BUILTIN`` (the texts Default resets to; None = Default has no Reset) and
+    ``BUILTINS`` (named built-in profiles, seeded when missing, protected from deletion, with Reset).
+    Saving a built-in under another name saves a copy (the built-in stays), like saving Default does.
+    Users: glossary_document.RefinementPromptProfiles, review_generator.ReviewPromptProfiles.
+    """
+
+    FIELDS = ('system', 'user')
+    PROFILES_KEY = ''
+    DEFAULT_KEY = ''
+    ACTIVE_KEY = ''
+    #: the config keys (besides the three above) that :meth:`_write_runtime` writes
+    RUNTIME_KEYS = ()
+    #: "<label>" in box texts and log lines ("refinement prompt profile")
+    LABEL = 'prompt profile'
+    BUILTINS: Dict[str, Dict[str, str]] = {}
+    DEFAULT_BUILTIN: Optional[Dict[str, str]] = None
+
+    def __init__(self, owner, initial=None, *, persist=None, log=None):
+        self.owner = owner
+        self.persist = persist
+        self.log = log or (lambda _message: None)
+        initial = {key: str((initial or {}).get(key, '') or '').strip() for key in self.FIELDS}
+        profiles, default_set, active = self._read_stored(initial)
+        self.state = PrefillState()
+        prefill_load(self.state, {name: self._encode(texts) for name, texts in profiles.items()},
+                     self._encode(default_set), active)
+        self._sync()
+
+    # ---- stored config <-> drafts (subclasses may store differently) ---------------------------
+    def _clean_set(self, value, fallback):
+        if not isinstance(value, dict):
+            return dict(fallback)
+        return {key: str(value.get(key, fallback[key]) or '') for key in self.FIELDS}
+
+    def _read_stored(self, initial):
+        """(named profiles, Default's texts, active name) from the config."""
+        config = self.owner.config
+        raw_profiles = config.get(self.PROFILES_KEY, {})
+        profiles = {
+            name: self._clean_set(texts, initial)
+            for name, texts in (raw_profiles.items() if isinstance(raw_profiles, dict) else ())
+            if isinstance(name, str) and name.strip() and name.strip().casefold() != 'default'
+            and isinstance(texts, dict)
+        }
+        for name, texts in self.BUILTINS.items():
+            profiles.setdefault(name, dict(texts))
+        return profiles, self._clean_set(config.get(self.DEFAULT_KEY), initial), config.get(self.ACTIVE_KEY, '')
+
+    def _store(self, profiles, default_set, active_name):
+        config = self.owner.config
+        config[self.PROFILES_KEY] = profiles
+        config[self.DEFAULT_KEY] = default_set
+        config[self.ACTIVE_KEY] = active_name
+
+    def _write_runtime(self, texts):
+        """Write what the runs read for the selected profile's (stripped) texts."""
+
+    @property
+    def config_keys(self):
+        return tuple(key for key in (self.PROFILES_KEY, self.DEFAULT_KEY, self.ACTIVE_KEY) if key) + tuple(
+            self.RUNTIME_KEYS)
+
+    # ---- encoding ------------------------------------------------------------------------------
+    def _encode(self, texts):
+        return json.dumps([texts.get(key, '') for key in self.FIELDS], ensure_ascii=False)
+
+    def _decode(self, text):
+        if not text:
+            return {key: '' for key in self.FIELDS}
+        return dict(zip(self.FIELDS, json.loads(text)))
+
+    def _clean(self, texts):
+        return {key: str(texts.get(key, '') or '').strip() for key in self.FIELDS}
+
+    # ---- views ---------------------------------------------------------------------------------
+    @property
+    def texts(self):
+        """The prompts the editors show for the selected profile."""
+        return self._decode(self.state.text)
+
+    @property
+    def names(self):
+        return [PREFILL_DEFAULT_NAME] + list(self.state.profiles)
+
+    def selected_name(self):
+        return self.state.active_name or PREFILL_DEFAULT_NAME
+
+    def profile_texts(self, name):
+        """The stored prompts of ``name`` ("Default" included), or None for an unknown name."""
+        name = str(name or '').strip()
+        if name.casefold() == 'default':
+            return self._decode(self.state.default_prompt)
+        if name in self.state.profiles:
+            return self._decode(self.state.profiles[name])
+        return None
+
+    def builtin_texts(self, name):
+        """The shipped prompts of a built-in profile ("Default" when it has a Reset), else None."""
+        name = str(name or '').strip()
+        if name.casefold() == 'default':
+            return dict(self.DEFAULT_BUILTIN) if self.DEFAULT_BUILTIN is not None else None
+        texts = self.BUILTINS.get(name)
+        return dict(texts) if texts is not None else None
+
+    def is_builtin(self, name):
+        return self.builtin_texts(name) is not None
+
+    # ---- config writes -------------------------------------------------------------------------
+    def _sync(self):
+        texts = self._clean(self.texts)  # the editors' text, as the desktop reads it back
+        self._store({name: self._decode(text) for name, text in self.state.profiles.items()},
+                    self._decode(self.state.default_prompt), self.state.active_name)
+        self._write_runtime(texts)
+
+    def _snapshot(self):
+        return (copy.deepcopy(self.state), {key: (key in self.owner.config, copy.deepcopy(self.owner.config.get(key)))
+                                            for key in self.config_keys})
+
+    def _persist(self, before):
+        self._sync()
+        result = None
+        if self.persist is not None:
+            try:
+                result = self.persist()
+            except Exception:
+                result = False
+        if result is not False:
+            return True
+        self.state, saved_config = before
+        self._sync()
+        for key, (present, value) in saved_config.items():
+            if present:
+                self.owner.config[key] = value
+            else:
+                self.owner.config.pop(key, None)
+        return False
+
+    @property
+    def _save_failed(self):
+        return "Save Failed", f"Could not save the {self.LABEL}s. Please try again."
+
+    # ---- actions -------------------------------------------------------------------------------
+    def select(self, name):
+        """Pick a profile (or Default); returns its texts, or None for an unknown name."""
+        text = prefill_select(self.state, str(name or '').strip())
+        if text is None:
+            return None
+        self._sync()
+        return self.texts
+
+    def stage(self, name, texts):
+        """An edit in any of the prompt editors (``texts``: every field's editor text)."""
+        prefill_stage(self.state, str(name or ''), self._encode(self._clean(texts)))
+        self._sync()
+
+    def new(self):
+        """+ New Profile: an empty profile, selected and saved; None, or the "Save Failed" box."""
+        before = self._snapshot()
+        name = prefill_new(self.state)
+        if not self._persist(before):
+            return self._save_failed
+        self.log(f"✅ Created {self.LABEL}: '{name}'")
+        return None
+
+    def save(self, name, texts):
+        """Save Profile under ``name`` (the edited name); None, or a ``(title, text)`` box."""
+        before = self._snapshot()
+        name = str(name or '').strip()
+        active = self.state.active_name
+        if active in self.BUILTINS and name and name != active and name.casefold() != 'default' \
+                and name not in self.state.profiles:
+            # a built-in keeps its name: saving it under another name saves a copy
+            text = self._encode(self._clean(texts))
+            self.state.profiles[name] = text
+            self.state.active_name = name
+            self.state.text = text
+        else:
+            outcome = prefill_save(self.state, name, self._encode(self._clean(texts)))
+            if not outcome.ok:
+                return outcome.title, outcome.error
+        if not self._persist(before):
+            return self._save_failed
+        self.log(f"✅ Saved {self.LABEL}: '{self.state.active_name or PREFILL_DEFAULT_NAME}'")
+        return None
+
+    def delete(self, name, confirm=None):
+        """Delete Profile ``name`` (``confirm(name)``: the Yes/No question); None, or a box."""
+        name = str(name or '').strip()
+        if name.casefold() == 'default':
+            return "Default Profile", f"The Default {self.LABEL} cannot be deleted."
+        if name in self.BUILTINS:
+            return "Built-in Profile", f"The built-in '{name}' {self.LABEL} cannot be deleted."
+        if name not in self.state.profiles:
+            return "Profile Not Found", "Select an existing profile to delete."
+        if confirm is not None and not confirm(name):
+            return None
+        before = self._snapshot()
+        prefill_delete(self.state, name)
+        if not self._persist(before):
+            return self._save_failed
+        self.log(f"\U0001f5d1️ Deleted {self.LABEL}: '{name}'")
+        return None
+
+    def reset(self, name=None, confirm=None):
+        """Reset Profile: a built-in profile (default: the selected one) gets its shipped texts back;
+        None, or a box."""
+        name = str(name or self.selected_name()).strip()
+        shipped = self.builtin_texts(name)
+        if shipped is None:
+            return "Not a Built-in Profile", f"Only built-in {self.LABEL}s can be reset."
+        if confirm is not None and not confirm(name):
+            return None
+        before = self._snapshot()
+        text = self._encode(self._clean(shipped))
+        if name.casefold() == 'default':
+            self.state.default_prompt = text
+            if not self.state.active_name:
+                self.state.text = text
+        else:
+            self.state.profiles[name] = text
+            if self.state.active_name == name:
+                self.state.text = text
+        if not self._persist(before):
+            return self._save_failed
+        self.log(f"↺ Reset {self.LABEL}: '{name}'")
+        return None

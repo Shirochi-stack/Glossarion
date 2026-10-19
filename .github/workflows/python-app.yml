@@ -118,6 +118,7 @@ jobs:
           tests/test_respect_retry_after.py \
           tests/test_empty_tag_cleanup.py \
           tests/test_request_schedule.py \
+          tests/test_review_prompt_profiles.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \

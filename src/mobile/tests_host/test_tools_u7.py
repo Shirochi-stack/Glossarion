@@ -2020,8 +2020,10 @@ def test_review_screen_modes_prompts_display_and_runs(tmp_path, monkeypatch):
             return [str(output_root / stem(p) / "review" / "combined_review" / "review.md") for p in volume_paths]
         return [str(output_root / stem(file_path) / "review" / "review.md")]
 
+    real_rg = pytest.importorskip("review_generator")  # the shared review prompt profiles
     monkeypatch.setitem(sys.modules, "review_generator", _module(
         "review_generator", DEFAULT_REVIEW_PROMPT="DEFAULT {target_lang}", DEFAULT_FINAL_REVIEW_PROMPT="FINAL",
+        ReviewPromptProfiles=real_rg.ReviewPromptProfiles,
         review_paths_for=review_paths_for, count_review_tokens=lambda review_input, log_fn=None: 1234,
         _save_review_text=lambda text, output_dir, log_fn, review_output_paths=None: rg_calls.append(
             (text, output_dir, list(review_output_paths or [])))))
@@ -2096,10 +2098,43 @@ def test_review_screen_modes_prompts_display_and_runs(tmp_path, monkeypatch):
         assert store["review_font_size"] == 12
         screen.reset_display()
         assert {k: store[k] for k in rv.DISPLAY_DEFAULTS} == rv.DISPLAY_DEFAULTS
-        # prompts reset to review_generator's defaults
-        ctx.extras["answers"] = ["yes"]
-        await screen.reset_prompts()
-        assert store["review_system_prompt"] == "DEFAULT {target_lang}" and store["review_final_prompt"] == "FINAL"
+        # prompts: the review prompt profile picker (Default + the built-in On-device) and two prompt cards
+        prompts = screen.prompts
+        assert prompts.bar.names == ["Default", "On-device"] and prompts.bar.selected == "Default"
+        assert store["active_review_prompt_profile"] == "Default"
+        assert store["review_final_prompt"] == real_rg.DEFAULT_FINAL_REVIEW_PROMPT.strip()
+        assert [c.key for c in prompts.cards.controls] == ["review-prompt-card", "review-final-card"]
+        assert prompts.cards.controls[1].visible  # Full Review Mode is on: the final prompt shows
+        prompts.bar.select("On-device")
+        assert store["active_review_prompt_profile"] == "On-device"
+        assert store["review_system_prompt"] == real_rg.ON_DEVICE_REVIEW_PROMPT
+        assert store["review_final_prompt"] == real_rg.ON_DEVICE_FINAL_REVIEW_PROMPT
+        assert prompts.bar.delete_button.tooltip == "↺ Reset Profile"
+        # Edit prompt of the final card changes the selected profile's final prompt
+        assert prompts.save_prompt("final", "Short final in {target_lang}") is None
+        assert store["review_prompt_profiles"]["On-device"]["final"] == "Short final in {target_lang}"
+        assert store["review_final_prompt"] == "Short final in {target_lang}"
+        # Reset Profile: both shipped prompts back
+        ctx.extras["answers"] = [True]
+        await prompts.bar.delete()
+        assert store["review_prompt_profiles"]["On-device"] == {"system": real_rg.ON_DEVICE_REVIEW_PROMPT,
+                                                               "final": real_rg.ON_DEVICE_FINAL_REVIEW_PROMPT}
+        # + New, Save under a new name (rename, both prompts kept), then Delete (a user profile)
+        name = prompts.bar.new()
+        assert name == "New Profile #1" and store["active_review_prompt_profile"] == name
+        assert prompts.bar.delete_button.tooltip == "🗑 Delete Profile"
+        assert prompts.save_prompt("system", "Mine {target_lang}") is None
+        assert prompts.save_prompt("final", "Mine final") is None
+        ctx.extras["answers"] = ["Mine"]
+        await prompts.bar.save()
+        assert store["active_review_prompt_profile"] == "Mine" and name not in store["review_prompt_profiles"]
+        assert store["review_prompt_profiles"]["Mine"] == {"system": "Mine {target_lang}", "final": "Mine final"}
+        assert (store["review_system_prompt"], store["review_final_prompt"]) == ("Mine {target_lang}", "Mine final")
+        ctx.extras["answers"] = [True]
+        await prompts.bar.delete()
+        assert "Mine" not in store["review_prompt_profiles"]
+        screen.set_mode("chunk_mode", False)
+        assert not prompts.cards.controls[1].visible
         # Delete / Restore need the shared backup helpers (disabled with the reason otherwise)
         reasons = [getattr(c, "controls", [None, None])[1] for c in screen.file_actions.controls[1:]]
         assert all(r is not None for r in reasons)

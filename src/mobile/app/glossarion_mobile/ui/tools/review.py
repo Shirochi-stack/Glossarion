@@ -6,9 +6,11 @@
   ``review_chunk_wrap`` / ``review_volume_mode``): "50/50 Split Mode" · "Full Review Mode"
   (+ "Wrap Chunks" and the Final prompt) · "Volume Mode" with "↕ File Order…" (a reorderable
   list; the run reviews the files in that order as one book).
-* **Prompts**: the Settings tiles of ``review_system_prompt`` / ``review_final_prompt``
-  (empty = ``review_generator``'s default; ``{target_lang}`` becomes the output language),
-  "↺ Reset" restores the defaults.
+* **Prompts**: the review prompt profile picker (``ReviewPrompts``: the Glossary settings'
+  ``ProfileBar`` over ``review_generator.ReviewPromptProfiles``, ＋ New · 💾 Save · 🗑 Delete, ↺ Reset
+  for the built-in Default and On-device; an on-device model selects "On-device") and the selected
+  profile's review prompt and Full Review Mode final prompt as prompt cards (Edit prompt;
+  ``{target_lang}`` becomes the output language). The runs send the active profile's prompts.
 * **Run**: "🚀 Start Review" / "📚 Review all Files" / Stop queue a ``review`` job (the shared
   review orchestration, ``job_kinds.review``); "~N tokens" is ``review_generator.count_review_tokens``.
 * **Output pane**: the review Markdown (``<output>/review/review.md``, Volume mode
@@ -41,7 +43,6 @@ from glossarion_mobile.ui.tools.common import (
     failed_job_card,
     hint_text,
     job_failed,
-    schema_tiles,
 )
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
@@ -57,6 +58,7 @@ MODE_KEYS = {
     "wrap_chunks": ("review_chunk_wrap", True, "Wrap Chunks"),
     "volume_mode": ("review_volume_mode", False, "Volume Mode"),
 }
+#: The active review prompt profile's prompts as config keys (mirrors ``review_generator`` writes).
 PROMPT_KEYS = ("review_system_prompt", "review_final_prompt")
 #: ``review_dialog`` Font Settings defaults (``_reset_font_settings``; config keys of ``_on_review_font_changed``).
 DISPLAY_DEFAULTS = {
@@ -157,6 +159,140 @@ def _helper(names: Sequence[str]) -> Any:
     return None
 
 
+class ReviewProfileSource:
+    """The review prompt profiles for the Glossary settings' ``ProfileBar``: ``review_generator``'s
+    ``ReviewPromptProfiles`` over a copy of config.json (opening it migrates a pre-profile custom prompt),
+    and ``persist`` writing the keys an action changed (the profiles, the active name, the two prompt mirrors)."""
+
+    def __init__(self, ctx: Any) -> None:
+        self.ctx = ctx
+
+    def open(self) -> Any:
+        import copy
+        import types
+
+        rg = _review_generator()
+        cls = getattr(rg, "ReviewPromptProfiles", None) if rg is not None else None
+        if cls is None:
+            raise RuntimeError("review_generator.ReviewPromptProfiles is not in this build")
+        owner = types.SimpleNamespace(config=copy.deepcopy(self.ctx.config_snapshot()))
+        holder: dict = {}
+        profiles = cls(owner, persist=lambda: self.persist(holder["profiles"]))
+        holder["profiles"] = profiles
+        self.persist(profiles)  # a migrated custom prompt (or the seeded built-ins) is stored at once
+        return profiles
+
+    def persist(self, profiles: Any) -> bool:
+        import copy
+
+        mine = profiles.owner.config
+        fresh = self.ctx.config_snapshot()
+        updates = {key: copy.deepcopy(mine[key]) for key in profiles.config_keys
+                   if key in mine and mine[key] != fresh.get(key)}
+        if not updates:
+            return True
+        store = self.ctx.store
+        try:
+            if store is not None and not isinstance(store, dict) and callable(getattr(store, "set_many", None)):
+                store.set_many(updates)
+            else:
+                for key, value in updates.items():
+                    self.ctx.set_cfg(key, value)
+        except Exception:
+            log.exception("saving the review prompt profiles failed")
+            return False
+        return True
+
+
+class ReviewPrompts:
+    """The Prompts card: the review prompt profile picker (the Glossary settings' ``ProfileBar`` over
+    ``ReviewProfileSource``: ＋ New · 💾 Save (rename) · 🗑 Delete, ↺ Reset for the built-in Default and
+    On-device) and the selected profile's two prompts as the shared prompt cards
+    (``profiles.profile_prompt_card``): the review prompt, and the final prompt Full Review Mode sends
+    (``chunk()``). Edit prompt changes the selected profile (Reset to default: its shipped text)."""
+
+    FIELDS = (("system", "Review prompt", "review-prompt-card"),
+              ("final", "Final prompt (Full Review Mode)", "review-final-card"))
+
+    def __init__(self, ctx: Any, *, chunk: Any = lambda: False) -> None:
+        from glossarion_mobile.ui.glossary.settings_tabs import ProfileBar
+
+        self.ctx = ctx
+        self.chunk = chunk
+        self.editor: Any = None
+        self.cards = ft.Column(spacing=8, tight=True, key="review-prompt-cards")
+        self.source = ReviewProfileSource(ctx)
+        self.bar: Any = None
+        self.bar = ProfileBar(ctx, "review", prompt_keys=PROMPT_KEYS, source=self.source,
+                              label="Review prompt profile", fields=("system", "final"), noun="review",
+                              on_change=lambda: self.render() if self.bar is not None else None)
+        self.control = ft.Column([self.bar.control, self.cards], spacing=8, tight=True, key="review-prompts-body")
+        self.render()
+
+    @property
+    def profiles(self) -> Any:
+        return self.bar.profiles
+
+    def reload(self) -> None:
+        """config.json may have changed elsewhere (an on-device model selects the On-device profile)."""
+        self.bar.load()
+
+    def render(self) -> None:
+        from glossarion_mobile.ui.screens.profiles import ProfileList, profile_prompt_card
+        from glossarion_mobile.ui.theme import mono_family
+
+        profiles = self.profiles
+        name = self.bar.selected
+        texts = profiles.texts if profiles is not None else {}
+        builtin = profiles.builtin_texts(name) if profiles is not None else None
+        controls = []
+        for field_name, heading, key in self.FIELDS:
+            listing = ProfileList(names=[name], texts={name: str(texts.get(field_name, "") or "")},
+                                  defaults={name: builtin[field_name]} if builtin else {},
+                                  protected=frozenset([name]) if builtin else frozenset())
+            card_control = profile_prompt_card(
+                listing, name, heading=heading, missing=False if profiles is not None else True,
+                on_edit=lambda f=field_name: self.edit_prompt(f), on_new=self.bar.new,
+                disabled_reason=self.bar.error, mono=mono_family(getattr(self.ctx, "page", None)), key=key)
+            card_control.visible = field_name != "final" or bool(self.chunk())
+            controls.append(card_control)
+        self.cards.controls = controls
+        self.ctx.push(self.cards)
+
+    def edit_prompt(self, field_name: str) -> Any:
+        """Edit prompt: the selected profile's review or final prompt in ``PromptEditorSheet``."""
+        from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
+
+        profiles = self.profiles
+        settings = getattr(self.ctx, "settings", None)
+        if profiles is None or settings is None:
+            self.ctx.say(self.bar.error or "The prompt editor needs the Settings context")
+            return None
+        name = self.bar.selected
+        builtin = profiles.builtin_texts(name) or {}
+        heading = dict((f, h) for f, h, _k in self.FIELDS)[field_name]
+        editor = PromptEditorSheet(
+            settings, title=name, subtitle=f"{heading} · review prompt profile · shared with the desktop",
+            value=str(profiles.texts.get(field_name, "") or ""), default=builtin.get(field_name),
+            placeholders=("{target_lang}",), on_save=lambda text, f=field_name: self.save_prompt(f, text))
+        self.editor = editor
+        editor.show()
+        return editor
+
+    def save_prompt(self, field_name: str, text: Any) -> Optional[str]:
+        """Store an edited prompt in the selected profile (None, or the error the editor shows)."""
+        profiles = self.profiles
+        if profiles is None:
+            return self.bar.error or "Review prompt profiles are unavailable"
+        texts = dict(profiles.texts)
+        texts[field_name] = str(text or "")
+        profiles.stage(self.bar.selected, texts)
+        if not self.bar._persist():
+            return "Could not save the review prompt profile. Please try again."
+        self.render()
+        return None
+
+
 class ReviewScreen(Screen):
     title = "Review generator"
 
@@ -204,12 +340,11 @@ class ReviewScreen(Screen):
                                self.switches["wrap_chunks"], ft.Row([self.switches["volume_mode"], self.order_button],
                                                                     wrap=True)],
                      icon="TUNE", key="review-modes")
-        tiles, self.prompt_tiles = schema_tiles(self.ctx, PROMPT_KEYS)
-        prompts = card("Prompts", (tiles or [hint_text("Settings › Review generator")]) + [
-            hint_text("Empty uses the default prompt; {target_lang} becomes the output language.",
-                      key="review-prompt-hint"),
-            ft.TextButton(content="↺ Reset prompts to default", key="review-reset-prompts",
-                          on_click=lambda e: self.ctx.spawn(self.reset_prompts())),
+        self.prompts = ReviewPrompts(self.ctx, chunk=lambda: bool(self.switches["chunk_mode"].value))
+        prompts = card("Prompts", [
+            self.prompts.control,
+            hint_text("Each profile holds the review prompt and the Full Review Mode final prompt; "
+                      "{target_lang} becomes the output language.", key="review-prompt-hint"),
         ], icon="EDIT_NOTE", key="review-prompts")
         self.start_button = ft.FilledButton(content="🚀 Start Review", key="review-start",
                                             on_click=lambda e: self.ctx.spawn(self.start("single")))
@@ -237,6 +372,8 @@ class ReviewScreen(Screen):
                            padding=ft.Padding.symmetric(horizontal=12, vertical=8), key="review-screen")
 
     def did_show(self) -> None:
+        if getattr(self, "prompts", None) is not None:
+            self.prompts.reload()  # the active review profile may have changed (an on-device model)
         for snap in self.watch.adopt((KIND,)):
             self._on_job_change(snap)
         out = self.match.get("out") if self.match is not None else None
@@ -307,8 +444,8 @@ class ReviewScreen(Screen):
         self.nav_next.disabled = self.nav_prev.disabled
         chunk = bool(self.switches["chunk_mode"].value)
         self.switches["wrap_chunks"].visible = chunk
-        if "review_final_prompt" in getattr(self, "prompt_tiles", {}):
-            self.prompt_tiles["review_final_prompt"].control.visible = chunk
+        if getattr(self, "prompts", None) is not None:
+            self.prompts.render()  # the final prompt card shows in Full Review Mode
         self.order_button.visible = self.volume
         busy = self.watch.active() is not None
         has_source = target is not None and bool(target.source)
@@ -391,20 +528,6 @@ class ReviewScreen(Screen):
         return text
 
     # ---- prompts / display ------------------------------------------------------------------------
-
-    async def reset_prompts(self) -> None:
-        answer = await ask(self.ctx, "Reset prompts", "Reset system prompt to default?",
-                           [("no", "No", "text"), ("yes", "Yes", "filled")], key="review-reset")
-        if answer != "yes":
-            return
-        rg = _review_generator()
-        self.ctx.set_cfg("review_system_prompt", getattr(rg, "DEFAULT_REVIEW_PROMPT", "") if rg else "")
-        self.ctx.set_cfg("review_final_prompt", getattr(rg, "DEFAULT_FINAL_REVIEW_PROMPT", "") if rg else "")
-        for tile in getattr(self, "prompt_tiles", {}).values():
-            try:
-                tile.refresh()
-            except Exception:
-                pass
 
     def open_display_sheet(self) -> Any:
         fields = {}
