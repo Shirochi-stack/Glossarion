@@ -6,6 +6,8 @@ from functools import wraps
 from inspect import signature
 import threading
 
+from request_schedule import key_disabled_by_schedule
+
 
 CONTEXT_LABELS = {
     'translation': '🌐 Translation',
@@ -91,8 +93,12 @@ def current_key_context():
     return _REQUEST_CONTEXT.get() or 'translation'
 
 
-def key_enabled_for_context(key, context=None):
-    """Global disabling wins; absent route restrictions preserve legacy behavior."""
+def key_enabled_for_context(key, context=None, include_schedule=True):
+    """Global disabling wins; absent route restrictions preserve legacy behavior.
+
+    A key's "🗓️ Disable schedule" (request_schedule) disables it during its windows exactly like
+    the manual flag, computed now; *include_schedule=False* asks for the stored settings only
+    (the request-context editor and its status column)."""
     if isinstance(key, dict):
         enabled = key.get('enabled', True)
         disabled = key.get('disabled_contexts', [])
@@ -101,7 +107,11 @@ def key_enabled_for_context(key, context=None):
         disabled = getattr(key, 'disabled_contexts', [])
     route = normalize_context(context if context is not None else current_key_context())
     blocked = normalize_disabled_contexts(disabled)
-    return bool(enabled) and route not in blocked and not (route not in CONTEXT_LABELS and 'other' in blocked)
+    if not (bool(enabled) and route not in blocked and not (route not in CONTEXT_LABELS and 'other' in blocked)):
+        return False
+    if include_schedule and key_disabled_by_schedule(key):
+        return False
+    return True
 
 
 @contextmanager

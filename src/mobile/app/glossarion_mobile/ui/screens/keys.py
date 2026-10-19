@@ -4,7 +4,9 @@ All eleven pools of the desktop ``MultiAPIKeyDialog`` (``key_pool_service.POOL_S
 fallback, glossary and the eight dedicated pools): rotation card (force rotation, every N
 requests), pool chips with the pool switch / description / count, key cards in rotation order
 (``ReorderableListView`` + drag handles), tap → ``KeyEditor``, long-press → selection with bulk
-enable / disable / test / remove / set contexts / move / copy to pool, pool ⋯ (Clear all keys
+enable / disable / test / remove / set contexts / "🗓️ Disable schedule…" / "⏳ Request Queue…"
+(``sheets.schedule_sheet.ScheduleSheet``; the card shows "🗓️ Disabled until 13:00" / "⏳ Queued until
+13:00" and the windows) / move / copy to pool, pool ⋯ (Clear all keys
 with confirm, import into / export this pool), app bar ⋯ (import / export all pools in the
 ``glossarion-key-pools`` v1 format through FileBridge, with a plain-text warning; Refusal
 patterns) and the two desktop-only rows (Lock mouse wheel, Key list zoom) disabled with a
@@ -510,6 +512,42 @@ def key_counts_text(entry: Mapping[str, Any], live: Optional[Mapping[str, Any]] 
     if not success and not errors:
         return ""
     return f"✅ {success} · ❌ {errors}"
+
+
+#: The key menu's time-based entries (desktop ``_show_shared_key_context_menu``): kind -> label.
+SCHEDULE_LABELS = {"disable": "🗓️ Disable schedule…", "queue": "⏳ Request Queue…"}
+
+
+def schedule_kinds(pool_id: str) -> tuple:
+    """The schedule entries a pool's key menu offers: "🗓️ Disable schedule…" on every pool, "⏳ Request
+    Queue…" on the pools that rotate keys (all but Fallback, like the desktop)."""
+    return ("disable",) if pool_id == "fallback" else ("disable", "queue")
+
+
+def schedule_field(kind: str) -> str:
+    """The key field of a schedule kind (``request_schedule.DISABLE_FIELD`` / ``QUEUE_FIELD``)."""
+    try:
+        import request_schedule as rs
+
+        return rs.DISABLE_FIELD if kind == "disable" else rs.QUEUE_FIELD
+    except Exception:
+        return "disable_schedule" if kind == "disable" else "queue_schedule"
+
+
+def key_schedule_info(entry: Mapping[str, Any], now: Any = None) -> tuple:
+    """``(status, lines)`` of a key's schedules (desktop key list Status column / tooltip,
+    ``request_schedule.key_schedule_summary``): status ``""``, "🗓️ Disabled until 13:00" or
+    "⏳ Queued until 13:00"; the lines describe each schedule in local time. ``("", [])`` without
+    a schedule or without the shared core."""
+    if not (entry.get("disable_schedule") or entry.get("queue_schedule")):
+        return "", []
+    try:
+        import request_schedule as rs
+
+        status, lines = rs.key_schedule_summary(dict(entry), now=now)
+        return str(status or ""), [str(line) for line in lines]
+    except Exception:
+        return "", []
 
 
 class KeysController:
@@ -1148,6 +1186,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         screen covers this one; one refresh when it is shown again."""
         interval = LIVE_REFRESH_SECONDS if interval is None else interval
         last = None
+        last_schedules: Optional[list] = None
         missed = False
         while not self._stop_tests.is_set():
             if await poll_sleep(self.page, interval):
@@ -1163,9 +1202,13 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
                 continue
             signature = repr([(row or {}).get(k) for row in live for k in ("success_count", "error_count",
                                                                             "is_cooling_down", "times_used")])
-            if signature != last or self.cooling or missed:
+            # a 🗓️ / ⏳ window starting or ending changes the card status ("Disabled until 13:00")
+            schedules = [key_schedule_info(entry, self._schedule_now())[0] for entry in self.controller.keys(self.pool)]
+            schedule_changed = last_schedules is not None and schedules != last_schedules
+            last_schedules = schedules
+            if signature != last or self.cooling or missed or schedule_changed:
                 last = signature
-                if any(live) or self.cooling or missed:
+                if any(live) or self.cooling or missed or schedule_changed:
                     missed = False
                     self._external_refresh()
 
@@ -1312,6 +1355,11 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             status, text = "testing", _STATUS_TEXT["testing"]
         else:
             status, text = key_status_info(entry, live)
+        # 🗓️ Disable schedule / ⏳ Request Queue: the current state replaces Active / Passed (desktop
+        # Status column), the windows (local time) are listed below the details
+        schedule_status, schedule_lines = key_schedule_info(entry, self._schedule_now())
+        if schedule_status and status in ("active", "passed"):
+            status, text = ("disabled" if schedule_status.startswith("🗓") else "cooling"), schedule_status
         color = status_color(_STATUS_PALETTE.get(status, "info"), self.dark)
         disabled_ctx = list(entry.get("disabled_contexts") or [])
         details = [str(entry.get("model") or "(no model)")]
@@ -1349,6 +1397,10 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         if message:
             lines.append(ft.Text(message, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ERROR, max_lines=2,
                                  overflow=ft.TextOverflow.ELLIPSIS))
+        if schedule_lines:
+            lines.append(ft.Text("\n".join(schedule_lines), theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                 color=ft.Colors.ON_SURFACE_VARIANT, max_lines=4, overflow=ft.TextOverflow.ELLIPSIS,
+                                 key=f"key-schedule-{index}"))
         excluded = excluded_model_reason(entry.get("model"))
         if excluded is not None:  # U9: a key imported from a desktop config whose route cannot run here
             lines.append(ft.Row([ReasonChip(reason=NOT_ON_MOBILE, detail=excluded[1])], wrap=True,
@@ -1460,6 +1512,11 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             ActionItem("Individual endpoint…", lambda: self.open_bulk_field("endpoint"), icon="LAN_OUTLINED"),
             ActionItem("🧩 Request parameters…", lambda: self.open_bulk_field("request_parameters"), icon="TUNE"),
             ActionItem("Set request contexts…", lambda: self.open_context_sheet(), icon="TUNE"),
+        ]
+        items += [ActionItem(SCHEDULE_LABELS[kind], lambda k=kind: self.open_schedule_sheet(k),
+                             icon="EVENT_BUSY" if kind == "disable" else "HOURGLASS_TOP", key=f"keys-schedule-{kind}")
+                  for kind in schedule_kinds(self.pool)]
+        items += [
             ActionItem("Copy key", lambda: self.spawn(self.copy_key_to_clipboard()), icon="CONTENT_COPY"),
         ]
         items += [ActionItem(f"Move to {s.title}", lambda s=s: self.copy_selected(s.id, move=True), icon="DRIVE_FILE_MOVE_OUTLINE")
@@ -1504,6 +1561,43 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         self.render()
         _push(self.list_view)
         return count
+
+    def _schedule_now(self) -> Any:
+        try:
+            return self.controller.clock()
+        except Exception:
+            return None
+
+    def open_schedule_sheet(self, kind: str) -> Any:
+        """"🗓️ Disable schedule…" (``kind`` "disable") / "⏳ Request Queue…" ("queue") for the selected
+        keys (desktop ``_edit_selected_key_schedule``): one ScheduleSheet opened on the first key's
+        schedule, the result written to every selected key (``{}`` removes it)."""
+        from glossarion_mobile.ui.sheets.schedule_sheet import ScheduleSheet
+
+        indices = sorted(self.selected)
+        keys = self.controller.keys(self.pool)
+        entries = [keys[i] for i in indices if 0 <= i < len(keys)]
+        if not entries:
+            return None
+        field = schedule_field(kind)
+        subject = f"{len(entries)} keys" if len(entries) > 1 else str(entries[0].get("model") or "")
+        sheet = ScheduleSheet(entries[0].get(field) or None, mode=kind, subject=subject, page=self.page,
+                              on_save=lambda config: self.apply_schedule(indices, kind, config))
+        self.last_sheet = sheet
+        if self.page is not None:
+            sheet.show(self.page)
+        return sheet
+
+    def apply_schedule(self, indices: list, kind: str, config: Mapping[str, Any]) -> Optional[str]:
+        """Write a schedule (``{}`` = remove) to the keys at ``indices`` through the KeyEditor's validation."""
+        changed, errors = self.controller.set_key_fields(self.pool, indices, {schedule_field(kind): dict(config)})
+        if errors and not changed:
+            return "; ".join(errors[:3])
+        label = "Disable schedule" if kind == "disable" else "Request Queue"
+        self.say(f"{label} {'saved' if config else 'removed'} for {len(indices)} key(s)")
+        self.render()
+        _push(self.list_view)
+        return None
 
     def open_context_sheet(self) -> "ContextSheet":
         indices = sorted(self.selected)

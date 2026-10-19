@@ -465,6 +465,28 @@ def test_keys_request_contexts_sheet_keeps_apply_in_reach(size):
 
 
 @needs_flet
+@pytest.mark.parametrize("size", PHONES)
+def test_schedule_sheet_scrolls_to_its_preview_and_keeps_save_in_reach(size):
+    """🗓️ Disable schedule / ⏳ Request Queue: windows, seven day chips, presets and the preview are taller
+    than a phone at large text; they scroll, Cancel / Save stay pinned and Save closes the sheet once."""
+    from glossarion_mobile.ui.sheets.schedule_sheet import ScheduleSheet
+
+    async def scenario():
+        _conn, _session, page = _phone(*size)
+        saved = []
+        sheet = ScheduleSheet(None, mode="main_queue", subject="deepseek-chat", on_save=saved.append).show(page)
+        sheet.add_window(20 * 60, 2 * 60)
+        assert_phone_sheet(sheet.sheet, sheet.rows[-1][2], sheet.add_button, sheet.day_chips[-1], sheet.clear_button,
+                           sheet.preview_text, sheet.save_button)
+        assert all(field.width <= 96 for _row, start, end in sheet.rows for field in (start, end))  # a row fits 360 dp
+        _tap(sheet.save_button)
+        _tap(sheet.save_button)  # a second tap while it closes
+        assert len(saved) == 1 and not sheet.sheet.open and sheet.sheet not in _open_dialogs(page)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 @needs_backend
 def test_mode_options_model_poe_manual_glossary_and_picker_sheets_reach_their_last_row():
     from glossarion_mobile.ui.chat.mode_options_sheet import ModeOptionsSheet

@@ -156,6 +156,21 @@ _EMPTY_TAGS_ASYNC_PAYLOAD = _after(
     "                                        from html_duplicate_cleanup import collapse_empty_paragraphs",
     "                                        chapter_payload = collapse_empty_paragraphs(chapter_payload)")
 
+# 2026-10-19 "⏳ Request Queue" of the main GUI key (request_queue_schedule / REQUEST_QUEUE_SCHEDULE, JSON;
+# {} = off): requests wait before sending during its schedule windows. Rows follow the respect_retry_after rows.
+_QUEUE_SETTINGS_ROW = _after(
+    "            ('respect_retry_after', ['respect_retry_after_var'], True, bool),",
+    "            ('request_queue_schedule', ['request_queue_schedule_var'], {}, dict),")
+_QUEUE_SETTINGS_ROW_GUI = _after(
+    "                ('respect_retry_after', ['respect_retry_after_var'], True, bool),",
+    "                ('request_queue_schedule', ['request_queue_schedule_var'], {}, dict),")
+_QUEUE_ENV_DICT = _after(
+    "            'GEMINI_SAFETY_CATEGORY_THRESHOLDS': json.dumps(self.config.get('gemini_safety_category_thresholds') or {}),",
+    "            'REQUEST_QUEUE_SCHEDULE': json.dumps(self.config.get('request_queue_schedule') or {}),")
+_QUEUE_ENV_PAIR = _after(
+    "                ('GEMINI_SAFETY_CATEGORY_THRESHOLDS', json.dumps(self.config.get('gemini_safety_category_thresholds') or {})),",
+    "                ('REQUEST_QUEUE_SCHEDULE', json.dumps(self.config.get('request_queue_schedule') or {})),")
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -324,6 +339,18 @@ APPROVED = (
             "src/async_api_processor.py": [_EMPTY_TAGS_ASYNC_ENV, _EMPTY_TAGS_ASYNC_PAYLOAD],
         },
         # new keys: nothing recorded before they existed changes value
+        "values": {},
+    },
+    {
+        "date": "2026-10-19",
+        "what": "Time-based API key scheduling: the main key's '⏳ Request Queue' schedule (model name right-click; "
+                "{} = off) makes requests wait before sending during its windows (DeepSeek peak hours preset)",
+        "source": {
+            "src/settings_persistence.py": [_QUEUE_SETTINGS_ROW],
+            "src/translator_gui.py": [_QUEUE_SETTINGS_ROW_GUI, _QUEUE_ENV_DICT, _QUEUE_ENV_PAIR],
+            "src/run_env.py": [_QUEUE_ENV_DICT, _QUEUE_ENV_PAIR],
+        },
+        # a new key: nothing recorded before it existed changes value
         "values": {},
     },
 )

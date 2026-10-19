@@ -8,7 +8,8 @@ content in the sheet, capped at 420 dp wide):
 
 * title row "Model" (or "Use once" in one-shot mode) with ⋯: Refresh online models (the
   selected model's provider, ignoring the 24 h TTL = desktop "🌐 Refresh Online Models"),
-  Manage models, Hide unpolled models;
+  Manage models, Hide unpolled models, "⏳ Request Queue…" (the main key's schedule, desktop model-name
+  right-click; not in field / one-shot mode), the saved schedule shown under the title;
 * Model · Profile · Language segments (field mode: Model only);
 * Model tab: search (exact > prefix > path-segment > contains; numbered account aliases such as
   ``authgpt2/…`` while typing one), provider chips, then ★ Favorites (Prefs) · Recent (last 8) ·
@@ -291,6 +292,9 @@ def refresh_outcome_text(provider: str, outcome: Any) -> str:
 # ---- the sheet ------------------------------------------------------------------------------------
 
 
+#: The main key's ⏳ Request Queue schedule (``request_schedule.MAIN_QUEUE_CONFIG_KEY``).
+REQUEST_QUEUE_KEY = "request_queue_schedule"
+
 #: the On-device tab's segment label and the link under its rows
 ONDEVICE_TAB_LABEL = "On-device"
 ONDEVICE_MANAGER_LABEL = "Model manager › On-device"
@@ -373,15 +377,26 @@ class ModelSheet:
                                           checked=self.snapshot.hide_unpolled, on_click=self._toggle_hide_unpolled)
         self.refresh_item = ft.PopupMenuItem(content=REFRESH_LABEL, icon=ft.Icons.PUBLIC,
                                              on_click=lambda e: self.refresh_selected_provider())
-        self.menu = ft.PopupMenuButton(
-            icon=ft.Icons.MORE_VERT,
-            tooltip="More",
-            items=[
-                self.refresh_item,
-                ft.PopupMenuItem(content="Manage models", icon=ft.Icons.TUNE, on_click=lambda e: self._nav("settings.models")),
-                self.hide_item,
-            ],
-        )
+        menu_items = [
+            self.refresh_item,
+            ft.PopupMenuItem(content="Manage models", icon=ft.Icons.TUNE, on_click=lambda e: self._nav("settings.models")),
+            self.hide_item,
+        ]
+        # ⏳ Request Queue of the main key (desktop model-name right-click; checked while a schedule is
+        # saved). Not in the field / one-shot sheets: they pick a model, the main key is not theirs.
+        self.queue_item: Optional[ft.PopupMenuItem] = None
+        if self.request_queue_available:
+            self.queue_item = ft.PopupMenuItem(content="⏳ Request Queue…", icon=ft.Icons.HOURGLASS_TOP,
+                                               checked=bool(self.request_queue_config()),
+                                               on_click=lambda e: self.open_request_queue())
+            menu_items.append(self.queue_item)
+        self.menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="More", items=menu_items)
+        # the saved schedule under the title (tap: edit it)
+        self.queue_text = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.queue_row = ft.Container(content=self.queue_text, visible=False, on_click=lambda e: self.open_request_queue(),
+                                      key="model-request-queue")
+        self.queue_sheet: Any = None
+        self._sync_request_queue(push=False)
         labels = {"model": "Model", "ondevice": ONDEVICE_TAB_LABEL, "profile": "Profile", "language": "Language"}
         self.tabs = ft.SegmentedButton(
             segments=[ft.Segment(value=t, label=labels[t]) for t in self.tab_ids],
@@ -437,6 +452,7 @@ class ModelSheet:
                 content=scroll_column(
                     [
                         ft.Row([self.title_text, self.menu], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        self.queue_row,
                         self.tabs_row,
                         self.search_border.control,
                         self.chip_row,
@@ -467,6 +483,60 @@ class ModelSheet:
             self._unsub()
             self._unsub = None
         self._stop_ondevice_updates()
+
+    # ---- ⏳ Request Queue (main key) -----------------------------------------------------------------
+
+    @property
+    def request_queue_available(self) -> bool:
+        return not self.field_mode and not self.one_shot and self.env.store is not None
+
+    def request_queue_config(self) -> dict:
+        """The main key's saved schedule (config ``request_queue_schedule``, ``{}`` = off)."""
+        store = self.env.store
+        if store is None:
+            return {}
+        effective = getattr(store, "effective", None)
+        try:
+            value = effective(REQUEST_QUEUE_KEY) if callable(effective) else store.get(REQUEST_QUEUE_KEY, {})
+        except Exception:
+            value = None
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _sync_request_queue(self, push: bool = True) -> None:
+        from glossarion_mobile.ui.sheets.schedule_sheet import queue_summary
+
+        text = queue_summary(self.request_queue_config()) if self.request_queue_available else ""
+        self.queue_text.value = text
+        self.queue_row.visible = bool(text)
+        if self.queue_item is not None:
+            self.queue_item.checked = bool(text)
+        if push:
+            _push(self.queue_row, self.menu)
+
+    def open_request_queue(self) -> Any:
+        """⏳ Request Queue… (desktop ``_edit_main_request_queue``): the ScheduleSheet on the main key's
+        schedule; Save / Clear write ``request_queue_schedule`` (run_env exports it as
+        ``REQUEST_QUEUE_SCHEDULE`` to the next run)."""
+        if not self.request_queue_available:
+            return None
+        from glossarion_mobile.ui.sheets.schedule_sheet import ScheduleSheet
+
+        sheet = ScheduleSheet(self.request_queue_config() or None, mode="main_queue",
+                              subject=str(self.current.get("model") or ""), page=self._page,
+                              on_save=self.save_request_queue)
+        self.queue_sheet = sheet
+        if self._page is not None:
+            sheet.show(self._page)
+        return sheet
+
+    def save_request_queue(self, config: dict) -> Optional[str]:
+        store = self.env.store
+        if store is None:
+            return "Settings are not available"
+        store.set(REQUEST_QUEUE_KEY, dict(config or {}))
+        self._sync_request_queue()
+        self._say("⏳ Request Queue saved for the main key" if config else "⏳ Request Queue removed for the main key")
+        return None
 
     # ---- state helpers -----------------------------------------------------------------------------
 

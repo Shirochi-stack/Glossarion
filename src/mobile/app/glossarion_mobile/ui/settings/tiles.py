@@ -1193,6 +1193,32 @@ class MultiplierGridTile(SettingTile):
         return self.editor
 
 
+#: The main key's ⏳ Request Queue (``request_schedule.MAIN_QUEUE_CONFIG_KEY``): the ScheduleSheet, not JSON.
+REQUEST_QUEUE_KEY = "request_queue_schedule"
+
+
+class RequestQueueTile(SettingTile):
+    """``request_queue_schedule``: the schedule ("⏳ Request Queue · 01:00–04:00 … (UTC), Mon–Fri") and
+    the ScheduleSheet the ModelSheet ⋯ "⏳ Request Queue…" opens (desktop model-name right-click)."""
+
+    kind = "json"
+
+    def summary(self) -> str:
+        from glossarion_mobile.ui.sheets.schedule_sheet import queue_summary
+
+        return queue_summary(self.value()) or "Off: requests are sent at once"
+
+    def activate(self) -> Any:
+        from glossarion_mobile.ui.sheets.schedule_sheet import ScheduleSheet
+
+        value = self.value()
+        model = self.store.effective("model") if self.store is not None else ""
+        self.editor = ScheduleSheet(value if isinstance(value, dict) and value else None, mode="main_queue",
+                                    subject=str(model or ""), page=getattr(self.ctx, "page", None),
+                                    on_save=self.save_from_editor).show()
+        return self.editor
+
+
 TILE_CLASSES: dict[str, type] = {
     "switch": SwitchTile,
     "number": NumberTile,
@@ -1218,6 +1244,8 @@ def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> Setti
         cls = EntryTypePickerTile
     elif key == CUSTOM_FIELDS_KEY:
         cls = CustomFieldsTile
+    elif key == REQUEST_QUEUE_KEY:
+        cls = RequestQueueTile
     elif pool_slug_for(key):  # an API-key pool: count + tap opens Settings › API keys › <pool>
         cls = JsonTile
     elif key == CONTEXT_MODE_KEY and getattr(spec, "virtual", "") == "context_mode":

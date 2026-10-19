@@ -5423,6 +5423,7 @@ class UnifiedClient:
                 else:
                     assigned_key = self._api_key_pool.keys[assigned_index]
                     should_rotate = (not key_enabled_for_context(assigned_key)
+                                     or (hasattr(assigned_key, 'queue_deferred') and assigned_key.queue_deferred())
                                      or assigned_key.api_key != getattr(tls, 'api_key', None)
                                      or assigned_key.model != getattr(tls, 'model', None))
             
@@ -5919,9 +5920,10 @@ class UnifiedClient:
                 if key.is_available() and not is_limited:
                     return (key, i)
             
-            # Still no keys? Return the first enabled one (last resort)
+            # Still no keys? Return the first enabled one (last resort); a queued key yields
+            # to usable peers outside its Request Queue window.
             for i, key in enumerate(self._api_key_pool.keys):
-                if key_enabled_for_context(key):
+                if key_enabled_for_context(key) and not (hasattr(key, 'queue_deferred') and key.queue_deferred()):
                     print(f"[Thread-{thread_name}] WARNING: Using potentially rate-limited key as last resort")
                     return (key, i)
         
@@ -7657,6 +7659,8 @@ class UnifiedClient:
         for _attempt in range(max_attempts):
             if self._is_stop_requested():
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            # ⏳ Request Queue: every usable key of this pool in its window -> wait before sending
+            self._wait_for_request_queue(pool=pool, request_id=request_id)
 
             try:
                 key_info = pool.get_key_for_request(
@@ -8861,6 +8865,8 @@ class UnifiedClient:
                     if self._is_stop_requested():
                         self._cancelled = True
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                    # ⏳ Request Queue: every usable pool key in its window -> wait before sending
+                    self._wait_for_request_queue(request_id=request_id)
                     try:
                         if image_data is None:
                             return self._send_internal(messages, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
@@ -8943,6 +8949,8 @@ class UnifiedClient:
                     raise UnifiedClientError("All multi-key attempts failed", error_type="no_keys")
             else:
                 # Single key mode - direct call
+                # ⏳ Request Queue of the main key: wait before sending
+                self._wait_for_request_queue(request_id=request_id)
                 if image_data is None:
                     return self._send_internal(messages, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
                 else:
@@ -10091,6 +10099,9 @@ class UnifiedClient:
                 _api_watchdog_update_model(getattr(self, "model", None), request_id)
 
             tts_pool, tts_key_list = self._resolve_tts_key_pool()
+            if tts_pool is None:
+                # ⏳ Request Queue (main key / main pool): wait before synthesizing
+                self._wait_for_request_queue(request_id=request_id)
             if tts_pool is not None:
                 # Isolated one-shot client per call: batch TTS workers keep
                 # running in parallel instead of serializing on a shared
@@ -17760,6 +17771,74 @@ class UnifiedClient:
                     self.__class__._last_api_call_start_by_scope[self._get_api_stagger_scope()] = time.time()
         except Exception:
             pass
+
+    def _request_queue_stop_requested(self) -> bool:
+        """Stop check of a ⏳ Request Queue wait: graceful AND forced stops end it at once (no
+        provider call is in flight yet), as do request-local cancels and the glossary stop file."""
+        if self._should_abort_retry() or self._is_instance_cancel_requested():
+            return True
+        stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+        if stop_file:
+            try:
+                if os.path.exists(stop_file):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _request_queue_target(self, pool=None, now=None):
+        """``(target, label)``: when this request must wait for a ⏳ Request Queue window to end,
+        or ``(None, None)`` to send now.
+
+        A key pool (the active multi-key pool, or *pool* for a dedicated one) waits only when
+        every usable key (enabled for this route, outside its 🗓️ Disable schedule) is in its
+        queue window, and then until the earliest window end. Single-key mode follows the main
+        key's schedule (config ``request_queue_schedule`` / env ``REQUEST_QUEUE_SCHEDULE``)."""
+        import request_schedule as _rs
+        if pool is None and getattr(self, '_multi_key_mode', False):
+            try:
+                pool = self._get_active_key_pool()
+            except Exception:
+                pool = None
+        keys = list(getattr(pool, 'keys', None) or ()) if pool is not None else []
+        if keys:
+            target = _rs.pool_queue_wait_until(keys, now, enabled=key_enabled_for_context)
+            return (target, getattr(pool, 'pool_name', None) or 'key pool') if target else (None, None)
+        if getattr(self, '_multi_key_mode', False):
+            return None, None
+        schedule = _rs.main_queue_schedule_from_env()
+        if schedule and _rs.is_in_window(schedule, now):
+            return _rs.next_window_end(schedule, now), 'main key'
+        return None, None
+
+    def _wait_for_request_queue(self, pool=None, request_id=None):
+        """⏳ Request Queue: block BEFORE the request is sent while its schedule window applies.
+
+        Runs before key rotation sends anything and before the provider boundary, so no request
+        is in flight while waiting. One shared waiter logs the start (local time and UTC) and a
+        progress line every 3 minutes for all worker threads. A graceful or forced stop ends the
+        wait immediately (cancelled). Wrapper timeouts (chunk timeout) leave the wait out through
+        request_schedule.is_thread_waiting / thread_wait_seconds."""
+        try:
+            import request_schedule as _rs
+        except Exception:
+            return
+        waiter = _rs.WAITER
+        while True:
+            target, label = self._request_queue_target(pool, waiter.now())
+            if target is None:
+                return
+            try:
+                _api_watchdog_mark_waiting(
+                    request_id, model=getattr(self, 'model', None),
+                    reason=f"Request Queue until {_rs.format_clock(target, 'local', waiter.now())}",
+                )
+            except Exception:
+                pass
+            if not waiter.wait_until(target, stop_check=self._request_queue_stop_requested, log=print,
+                                     label=label if label != 'main key' else ''):
+                self._cancelled = True
+                raise UnifiedClientError("Operation cancelled by user (Request Queue wait)", error_type="cancelled")
 
     def _sleep_with_cancel(self, duration: float, interval: float = 0.1) -> bool:
         """Sleep in small increments, aborting if stop/cancel is requested."""

@@ -11,6 +11,7 @@ from gender_tracking import looks_like_gender_value as _shared_looks_like_gender
 from gender_tracking import is_name_only_header as _is_name_only_header, name_only_row as _name_only_row
 import zipfile
 import time
+import request_schedule
 import sys
 import unicodedata
 import tiktoken
@@ -934,6 +935,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         print(f"⚠️ Failed to register pre-send glossary progress callback: {cb_err}")
 
                 start_time = time.time()
+                # ⏳ Request Queue waits inside client.send() do not count as API time
+                queue_wait_start = request_schedule.thread_wait_seconds()
                 try:
                     _emit_direct_text_glossary_stream_start(
                         chapter_label,
@@ -946,7 +949,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             tls_for_callback.pre_api_call_callback = None
                         except Exception:
                             pass
-                elapsed = time.time() - start_time
+                elapsed = time.time() - start_time - (request_schedule.thread_wait_seconds() - queue_wait_start)
 
                 if attempt_cancel_event.is_set():
                     return
@@ -1139,8 +1142,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         # Don't wait for the thread to finish - just raise immediately
                         raise UnifiedClientError("Glossary extraction stopped by user")
                     
-                    if timeout is not None:
+                    # The chunk timeout starts after a ⏳ Request Queue wait (never counts it)
+                    if timeout is not None and not request_schedule.is_thread_waiting(api_thread):
                         elapsed += check_interval
+                    if timeout is not None:
                         if elapsed >= timeout:
                             if hasattr(client, '_in_cleanup'):
                                 client._in_cleanup = True

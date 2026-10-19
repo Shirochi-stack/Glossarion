@@ -66,6 +66,7 @@ import enum
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -702,7 +703,29 @@ class _Job:
 #: How long an issue chip stays after its line when the line names no wait (seconds).
 ISSUE_DEFAULT_SECONDS = 45.0
 #: Labels of the running card's issue chips (UI_SPEC §2.12.3).
-ISSUE_LABELS = {"rate_limited": "Rate limited", "key_cooling": "Key cooling", "network_wait": "Waiting for network…"}
+ISSUE_LABELS = {"rate_limited": "Rate limited", "key_cooling": "Key cooling", "network_wait": "Waiting for network…",
+                "request_queue": "⏳ Request Queue"}
+#: The issue kind of a ⏳ Request Queue wait (``request_schedule.QueueWaiter`` log lines).
+REQUEST_QUEUE_ISSUE = "request_queue"
+_RQ_PREFIX = "⏳ Request Queue"
+_RQ_LEFT = re.compile(r"(?:waiting (\d+)h (\d+)m|(\d+)h (\d+)m left)")
+_RQ_STARTS = re.compile(r"(?:requests start at|starts) (\d{1,2}:\d{2}(?: [A-Z][a-z]{2})?)")
+
+
+def request_queue_issue(line: str) -> Optional[tuple]:
+    """``(seconds left, start clock)`` of a ⏳ Request Queue wait line ("⏳ Request Queue: waiting 4h 59m —
+    requests start at 13:00 (local, UTC+4) / 09:00 UTC", "… waited 0h 03m, 4h 56m left (starts 13:00
+    local)"), else None. The wait itself is ``UnifiedClient._wait_for_request_queue``; a job that waits
+    for hours is not stuck: this only labels it."""
+    text = str(line or "")
+    if _RQ_PREFIX not in text:
+        return None
+    left = _RQ_LEFT.search(text)
+    if left is None:
+        return None
+    hours, minutes = (left.group(1), left.group(2)) if left.group(1) is not None else (left.group(3), left.group(4))
+    starts = _RQ_STARTS.search(text)
+    return int(hours) * 3600 + int(minutes) * 60, (starts.group(1) if starts else "")
 
 
 def classify_issue(line: str) -> Optional[tuple]:
@@ -726,6 +749,8 @@ def issue_label(issue: Optional[Mapping[str, Any]], now: Optional[float] = None,
         return ""
     kind = str(issue.get("kind") or "")
     label = ISSUE_LABELS.get(kind, kind.replace("_", " ").capitalize())
+    if kind == REQUEST_QUEUE_ISSUE and issue.get("starts"):
+        return f"{label} · until {issue.get('starts')}"
     if kind == "key_cooling" and cooling_keys:
         return f"{label} ({cooling_keys})"
     if kind == "rate_limited" and issue.get("seconds"):
@@ -778,6 +803,16 @@ def kind_icon(kind: str) -> str:
     return getattr(info, "icon", None) or "WORK_HISTORY"
 
 
+def _request_queue_note(snap: Any, now: Optional[float] = None) -> str:
+    """"⏳ waiting until 13:00" while the job waits for a Request Queue window (else "")."""
+    active_issue = getattr(snap, "active_issue", None)
+    issue = active_issue(now) if callable(active_issue) else None
+    if not issue or issue.get("kind") != REQUEST_QUEUE_ISSUE:
+        return ""
+    starts = str(issue.get("starts") or "")
+    return f"⏳ waiting until {starts}" if starts else "⏳ waiting (Request Queue)"
+
+
 def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
     """"Ch 12/80 · 3 in flight · 12:41" (UI_SPEC §1.7 subtitle); the phase while the total is unknown."""
     parts: list[str] = []
@@ -800,6 +835,9 @@ def progress_line(snap: JobSnapshot, now: Optional[float] = None) -> str:
         parts.append(snap.phase)
     if snap.in_flight:
         parts.append(f"{snap.in_flight} in flight")
+    queue_note = _request_queue_note(snap, now)
+    if queue_note:
+        parts.append(queue_note)
     if progress.failed:
         parts.append(f"{progress.failed} failed")
     elapsed = snap.elapsed(now)
@@ -821,6 +859,9 @@ def notification_text(snap: JobSnapshot) -> str:
         details.append(f"{progress.completed}/{progress.total} chapters")
     if snap.in_flight:
         details.append(f"{snap.in_flight} in flight")
+    queue_note = _request_queue_note(snap)
+    if queue_note:
+        details.append(queue_note)
     if snap.state is JobState.STOPPING:
         details.append("stopping after current request")
     elif snap.state is JobState.FORCE_STOPPING:
@@ -1733,6 +1774,8 @@ class JobService:
             job.stop_mode = mode
             job.stop_requested_at = self.clock()
             job.state = JobState.STOPPING if mode == STOP_GRACEFUL else JobState.FORCE_STOPPING
+            if job.issue and job.issue.get("kind") == REQUEST_QUEUE_ISSUE:
+                job.issue = None  # every Stop ends a Request Queue wait at once (nothing was sent)
             snap = job.snapshot()
         # The job's own latch at once: queued questions give up, a starting job is cancelled
         # before its run reset and the adapters see the Stop (the backend reads the owner's
@@ -2285,7 +2328,19 @@ class JobService:
         return str(model) if model else None
 
     def _note_issue(self, job: _Job, line: str) -> None:
-        """A rate-limit / key-cooldown / network wait line sets the job's issue chip (UI_SPEC §2.12.3)."""
+        """A rate-limit / key-cooldown / network wait line sets the job's issue chip (UI_SPEC §2.12.3); a
+        ⏳ Request Queue wait line sets "⏳ Request Queue · until 13:00" for the time left of the wait."""
+        queued = request_queue_issue(line)
+        if queued is not None:
+            left, starts = queued
+            now = self.clock()
+            with self._lock:
+                if job.stop_mode is not None:
+                    return  # a Stop ended the wait
+                job.issue = {"kind": REQUEST_QUEUE_ISSUE, "seconds": left, "since": now,
+                             "until": now + max(60.0, float(left)), "starts": starts, "line": line[:200]}
+            self._changed()
+            return
         found = classify_issue(line)
         if found is None:
             return

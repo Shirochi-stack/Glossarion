@@ -594,6 +594,17 @@ def validate_entry(entry, pool='main'):
                                       data.get('azure_api_version'))
     if error:
         return None, error
+    # 🗓️ Disable schedule / ⏳ Request Queue (request_schedule): canonical dicts, dropped when empty
+    import request_schedule
+    for name in (request_schedule.DISABLE_FIELD, request_schedule.QUEUE_FIELD):
+        if name not in data:
+            continue
+        problems = request_schedule.validate(data[name])
+        if problems:
+            return None, f"{name.replace('_', ' ').capitalize()}: {problems[0]}"
+        data[name] = request_schedule.normalize_config(data[name])
+        if not data[name]:
+            del data[name]
     try:
         normalized = _api_key_entry_class().from_dict(data).to_dict()
     except Exception as exc:
