@@ -28,7 +28,8 @@ try:
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
         QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox,
-        QStyledItemDelegate, QStyleOptionViewItem, QStyle, QToolButton, QTimeEdit
+        QStyledItemDelegate, QStyleOptionViewItem, QStyle, QToolButton, QTimeEdit,
+        QSplitter, QTabWidget,
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot, QSize, QRect, QEvent, QTime
     from PySide6.QtGui import (
@@ -74,6 +75,8 @@ except ImportError:
     QStyle = object
     QToolButton = object
     QTimeEdit = object
+    QSplitter = object
+    QTabWidget = object
     QTime = object
     QIcon = object
     QFont = object
@@ -2009,44 +2012,104 @@ def _apply_halgakos_combobox_icon(combobox, icon_path=None):
     return combobox
 
 
-class RequestScheduleDialog(QDialog):
-    """One schedule editor for every time-based key setting (request_schedule).
+#: Disabled look of the schedule editor body while its schedule is switched off. The app's dark
+#: theme (translator_gui's main stylesheet) colours every QWidget white, so labels, group box
+#: titles and time spin boxes would stay bright inside a disabled body; these rules give them the
+#: same disabled colours the theme uses for QCheckBox / QComboBox / QPushButton:disabled
+#: (text #666666, field background #1a1a1a, border #3a3a3a).
+SCHEDULE_EDITOR_DISABLED_STYLE = """
+    QLabel:disabled, QGroupBox:disabled, QGroupBox::title:disabled { color: #666666; }
+    QAbstractSpinBox:disabled {
+        color: #666666;
+        background-color: #1a1a1a;
+        border: 1px solid #3a3a3a;
+        selection-color: #666666;
+        selection-background-color: #1a1a1a;
+    }
+"""
 
-    Used by the Multi API Key Manager's "🗓️ Disable schedule…" / "⏳ Request Queue…" key menu
-    entries and by the main window's model-name "⏳ Request Queue…" entry. Windows are edited
-    in the zone chosen under "Times are in" (Local by default; the DeepSeek preset keeps UTC so
-    it stays right across DST); the preview shows them in local time, UTC and one more zone.
-    ``result_config`` is the saved config dict ({} = schedule removed) after ``exec()``.
+
+class _ReservedHeightLabel(QLabel):
+    """A word-wrapped label that always reserves the height of its tallest alternative text
+    (``alternatives``), so swapping between them never moves the widgets around it."""
+
+    def __init__(self, text=''):
+        super().__init__(text)
+        self.alternatives = ()
+        self.setWordWrap(True)
+
+    def _text_height(self, text, width):
+        margins = self.contentsMargins()
+        inner = max(1, width - margins.left() - margins.right() - 2 * self.margin())
+        rect = self.fontMetrics().boundingRect(QRect(0, 0, inner, 100000), int(Qt.TextWordWrap), text)
+        return rect.height() + margins.top() + margins.bottom() + 2 * self.margin()
+
+    def heightForWidth(self, width):
+        # the same measure for every text (plus whatever QLabel itself adds), so each variant
+        # reserves exactly the same height
+        own = self._text_height(self.text(), width)
+        extra = max(0, super().heightForWidth(width) - own)
+        return max([own] + [self._text_height(text, width) for text in self.alternatives]) + extra
+
+
+class ScheduleEditor(QWidget):
+    """The schedule editor shared by :class:`RequestScheduleDialog` and the Multi API Key
+    Manager's "⏰ Schedules" tab (request_schedule; mobile ``ScheduleSheet`` mirrors it).
+
+    The off-by-default enable switch comes first; everything below it is disabled (and greyed,
+    ``SCHEDULE_EDITOR_DISABLED_STYLE``) until it is on. Mode ``'key'`` (pool keys) adds the
+    "During the windows:" choice (``request_schedule.KIND_CHOICES``: 🗓️ disable the key /
+    ⏳ queue requests); :meth:`set_kinds` greys out the ones a pool does not offer (Fallback: no
+    queue). Windows are edited in the zone chosen under "Times are in" (Local by default; the
+    DeepSeek preset keeps UTC so it stays right across DST); the preview shows them in local
+    time, UTC and one more zone, below an always-present on / off status line (the layout never
+    jumps when the switch is toggled). :meth:`result` gives the config dict to save.
     """
 
     MODES = request_schedule.EDITOR_MODES
 
-    def __init__(self, parent=None, schedule=None, *, mode='queue', subject=''):
+    def __init__(self, parent=None, schedule=None, *, mode='queue', kind='disable', kinds=None,
+                 on_clear=None, clear_tooltip="Remove this schedule", icon_path=None):
         super().__init__(parent)
-        title, explanation = self.MODES.get(mode, self.MODES['queue'])
-        self.setWindowTitle(f"{title} — {subject}" if subject else title)
-        self.result_config = None
+        self.mode = mode if mode in self.MODES else 'queue'
+        self._icon_path = icon_path or _halgakos_icon_path(getattr(parent, 'base_dir', '') if parent else '')
         self._rows = []
         self._zone = 'local'
-        current, enabled = request_schedule.editable_config(schedule)
-        self._suggested = current is None
+        self._suggested = True
+        self._on_clear = on_clear
+        _title, explanation = self.MODES[self.mode]
 
         outer = QVBoxLayout(self)
-        text = QLabel(explanation)
-        text.setWordWrap(True)
-        outer.addWidget(text)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.explanation_label = self._wrapped_label(explanation)
+        outer.addWidget(self.explanation_label)
 
         # Off by default: everything below is greyed out until the schedule is enabled
         self.enable_check = MultiAPIKeyDialog._create_styled_checkbox(
-            self, request_schedule.ENABLE_LABELS.get(mode, request_schedule.ENABLE_LABELS['queue']))
-        self.enable_check.setChecked(bool(enabled))
+            self, request_schedule.ENABLE_LABELS.get(self.mode, request_schedule.ENABLE_LABELS['queue']))
         outer.addWidget(self.enable_check)
         self.body = QWidget()
+        self.body.setObjectName('scheduleEditorBody')
+        self.body.setStyleSheet(SCHEDULE_EDITOR_DISABLED_STYLE)
         layout = QVBoxLayout(self.body)
         layout.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self.body)
-        self.body.setEnabled(bool(enabled))
         self.enable_check.toggled.connect(self._on_enabled_toggled)
+
+        # Pool keys: what happens during the windows (one schedule per key)
+        self.kind_combo = None
+        if self.mode == 'key':
+            kind_row = QHBoxLayout()
+            kind_row.addWidget(QLabel(request_schedule.KIND_LABEL))
+            self.kind_combo = QComboBox()
+            for name in request_schedule.SCHEDULE_KINDS:
+                self.kind_combo.addItem(request_schedule.KIND_CHOICES[name], name)
+            self._apply_arrow(self.kind_combo)
+            self.kind_combo.currentIndexChanged.connect(self._update_preview)
+            kind_row.addWidget(self.kind_combo, 1)
+            layout.addLayout(kind_row)
+            self.set_kinds(kinds or request_schedule.SCHEDULE_KINDS)
+            self.set_kind(kind)
 
         zone_row = QHBoxLayout()
         zone_row.addWidget(QLabel("Times are in:"))
@@ -2075,14 +2138,14 @@ class RequestScheduleDialog(QDialog):
         layout.addWidget(days_box)
 
         presets = QHBoxLayout()
-        deepseek = QPushButton("🐋 Use DeepSeek peak hours")
-        deepseek.setToolTip(request_schedule.DEEPSEEK_PRESET_HELP)
-        deepseek.clicked.connect(lambda: self._load(request_schedule.DEEPSEEK_PEAK_SCHEDULE))
-        presets.addWidget(deepseek)
-        clear = QPushButton("🧹 Clear schedule")
-        clear.setToolTip("Remove this schedule and close")
-        clear.clicked.connect(self._clear_and_accept)
-        presets.addWidget(clear)
+        self.deepseek_button = QPushButton("🐋 Use DeepSeek peak hours")
+        self.deepseek_button.setToolTip(request_schedule.DEEPSEEK_PRESET_HELP)
+        self.deepseek_button.clicked.connect(lambda: self._load(request_schedule.DEEPSEEK_PEAK_SCHEDULE))
+        presets.addWidget(self.deepseek_button)
+        self.clear_button = QPushButton("🧹 Clear schedule")
+        self.clear_button.setToolTip(clear_tooltip)
+        self.clear_button.clicked.connect(self._clear)
+        presets.addWidget(self.clear_button)
         presets.addStretch(1)
         layout.addLayout(presets)
 
@@ -2094,25 +2157,28 @@ class RequestScheduleDialog(QDialog):
         self.preview_zone_combo.activated.connect(self._update_preview)
         also_row.addWidget(self.preview_zone_combo, 1)
         preview_layout.addLayout(also_row)
-        self.preview_label = QLabel()
-        self.preview_label.setWordWrap(True)
+        # the on / off status line differs in length: reserve the taller variant (no jumps)
+        self.preview_label = _ReservedHeightLabel('')
         self.preview_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         preview_layout.addWidget(self.preview_label)
         layout.addWidget(preview_box)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.setCenterButtons(True)
-        buttons.layout().setSpacing(16)
-        for button in buttons.buttons():
-            button.setMinimumWidth(120)
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
-
-        self._load(current or request_schedule.DEEPSEEK_PEAK_SCHEDULE)
-        self.resize(640, 640)
+        self.load_config(schedule)
 
     # ------------------------------------------------------------------ widgets
+    @staticmethod
+    def _wrapped_label(text):
+        """A word-wrapped label that takes only its text height (extra height goes elsewhere)."""
+        label = QLabel(text)
+        label.setWordWrap(True)
+        policy = label.sizePolicy()
+        policy.setVerticalPolicy(policy.Policy.Maximum)
+        label.setSizePolicy(policy)
+        return label
+
+    def _apply_arrow(self, combo):
+        return _apply_halgakos_combobox_icon(combo, self._icon_path)
+
     def _zone_combo(self, include_local=True):
         combo = QComboBox()
         combo.setEditable(True)
@@ -2120,7 +2186,7 @@ class RequestScheduleDialog(QDialog):
         for label, zone in request_schedule.zone_choices(include_local):
             combo.addItem(label, zone)
         combo.setToolTip("Pick a zone or type an IANA name (e.g. Asia/Shanghai)")
-        _apply_halgakos_combobox_icon(combo, _halgakos_icon_path(getattr(self.parent(), 'base_dir', '')))
+        self._apply_arrow(combo)
         return combo
 
     @staticmethod
@@ -2170,7 +2236,58 @@ class RequestScheduleDialog(QDialog):
             entry[0].deleteLater()
         self._update_preview()
 
+    # ------------------------------------------------------------------ behaviour (mode 'key')
+    def kind(self):
+        """The chosen "During the windows:" behaviour ('disable' / 'queue'); None outside mode 'key'."""
+        if self.kind_combo is None:
+            return None
+        return self.kind_combo.currentData()
+
+    def set_kind(self, kind):
+        if self.kind_combo is None:
+            return
+        index = self.kind_combo.findData(kind)
+        if index < 0 or not self._kind_allowed(index):
+            index = next((i for i in range(self.kind_combo.count()) if self._kind_allowed(i)), 0)
+        self.kind_combo.setCurrentIndex(index)
+
+    def _kind_allowed(self, index):
+        item = self.kind_combo.model().item(index)
+        return item is None or item.isEnabled()
+
+    def set_kinds(self, kinds):
+        """Offer only *kinds* (``request_schedule.pool_schedule_kinds``); the others stay listed,
+        disabled, with the reason as tooltip (Fallback keys cannot queue)."""
+        if self.kind_combo is None:
+            return
+        kinds = tuple(kinds or request_schedule.SCHEDULE_KINDS)
+        tips = []
+        for index in range(self.kind_combo.count()):
+            name = self.kind_combo.itemData(index)
+            allowed = name in kinds
+            item = self.kind_combo.model().item(index)
+            if item is not None:
+                item.setEnabled(allowed)
+            tip = self.MODES[name][1] if allowed else request_schedule.QUEUE_UNAVAILABLE_HELP
+            self.kind_combo.setItemData(index, tip, Qt.ToolTipRole)
+            if not allowed:
+                tips.append(request_schedule.QUEUE_UNAVAILABLE_HELP)
+        self.kind_combo.setToolTip("\n".join(tips) or "What happens during the windows")
+        self.set_kind(self.kind())
+
     # ------------------------------------------------------------------ state
+    def load_config(self, config, kind=None):
+        """Show a saved config (dict / Schedule / None): its windows (the DeepSeek peak hours are
+        suggested when nothing is saved) and whether it is switched on; *kind* picks the
+        behaviour in mode 'key'."""
+        current, enabled = request_schedule.editable_config(config)
+        self._suggested = current is None
+        if kind is not None:
+            self.set_kind(kind)
+        self.enable_check.setChecked(bool(enabled))
+        self.body.setEnabled(bool(enabled))
+        self._load(current or request_schedule.DEEPSEEK_PEAK_SCHEDULE)
+
     def _load(self, schedule):
         for entry in list(self._rows):
             self._remove_row(entry)
@@ -2217,26 +2334,77 @@ class RequestScheduleDialog(QDialog):
         self.body.setEnabled(bool(checked))
         self._update_preview()
 
+    def preview_lines(self, enabled=None):
+        if enabled is None:
+            enabled = self.enable_check.isChecked()
+        return request_schedule.editor_preview_lines(
+            self._schedule(), self._combo_zone(self.preview_zone_combo),
+            enabled=bool(enabled), suggested=self._suggested)
+
     def _update_preview(self, *_args):
         if not hasattr(self, 'preview_label'):
             return
-        lines = request_schedule.preview_lines(self._schedule(), self._combo_zone(self.preview_zone_combo),
-                                               suggested=self._suggested)
-        if not self.enable_check.isChecked():
-            lines = [request_schedule.OFF_PREVIEW_LINE] + lines
-        self.preview_label.setText("\n".join(lines))
+        enabled = self.enable_check.isChecked()
+        self.preview_label.alternatives = ("\n".join(self.preview_lines(not enabled)),)
+        self.preview_label.setText("\n".join(self.preview_lines(enabled)))
+        self.preview_label.updateGeometry()
+
+    def _clear(self):
+        if self._on_clear is not None:
+            self._on_clear()
+
+    def result(self):
+        """``(config, error)``: the config dict to save ({} = no schedule; switched off it keeps
+        the windows with "enabled": false), or ``(None, message)`` when it cannot be saved."""
+        schedule = self._schedule()
+        enabled = self.enable_check.isChecked()
+        if enabled and schedule.windows and not schedule.weekdays:
+            return None, "Tick at least one day, or use 🧹 Clear schedule."
+        return request_schedule.to_config(schedule, enabled=enabled), None
+
+
+class RequestScheduleDialog(QDialog):
+    """A :class:`ScheduleEditor` with Save / Cancel: the main window's model-name
+    "⏳ Request Queue…" entry (mode 'main_queue'; the pool keys use the Multi API Key Manager's
+    ⏰ Schedules tab). ``result_config`` is the saved config dict ({} = schedule removed) after
+    ``exec()``.
+    """
+
+    MODES = request_schedule.EDITOR_MODES
+
+    def __init__(self, parent=None, schedule=None, *, mode='queue', subject=''):
+        super().__init__(parent)
+        title, _explanation = self.MODES.get(mode, self.MODES['queue'])
+        self.setWindowTitle(f"{title} — {subject}" if subject else title)
+        self.result_config = None
+
+        outer = QVBoxLayout(self)
+        self.editor = ScheduleEditor(self, schedule, mode=mode, on_clear=self._clear_and_accept,
+                                     clear_tooltip="Remove this schedule and close",
+                                     icon_path=_halgakos_icon_path(getattr(parent, 'base_dir', '')))
+        outer.addWidget(self.editor)
+        outer.addStretch(1)  # extra height goes here, never between the wrapped labels
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.setCenterButtons(True)
+        buttons.layout().setSpacing(16)
+        for button in buttons.buttons():
+            button.setMinimumWidth(120)
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+        self.resize(640, self.sizeHint().height())
 
     def _clear_and_accept(self):
         self.result_config = {}
         self.accept()
 
     def _save(self):
-        schedule = self._schedule()
-        enabled = self.enable_check.isChecked()
-        if enabled and schedule.windows and not schedule.weekdays:
-            QMessageBox.warning(self, "No days", "Tick at least one day, or use 🧹 Clear schedule.")
+        config, error = self.editor.result()
+        if error:
+            QMessageBox.warning(self, "No days", error)
             return
-        self.result_config = request_schedule.to_config(schedule, enabled=enabled)
+        self.result_config = config
         self.accept()
 
 
@@ -3853,11 +4021,11 @@ class MultiAPIKeyDialog(QDialog):
         scrollable_layout.setSpacing(10)  # Set spacing between widgets
         scroll_area.setWidget(scrollable_widget)
 
-        # Set main layout - will have scroll area AND button bar
+        # Set main layout - will have the tabs AND button bar
         dialog_layout = QVBoxLayout(self)
         dialog_layout.setContentsMargins(0, 0, 0, 0)
         dialog_layout.setSpacing(0)
-        dialog_layout.addWidget(scroll_area)
+        self._create_manager_tabs(dialog_layout, scroll_area)
 
         # Store references
         self.main_frame = scrollable_widget
@@ -4508,7 +4676,6 @@ class MultiAPIKeyDialog(QDialog):
             set_delay_callback=self._set_fallback_api_call_delay_for_selected,
             clear_delay_callback=self._clear_fallback_api_call_delay_for_selected,
             configure_contexts_callback=lambda: self._edit_selected_key_contexts('fallback'),
-            disable_schedule_callback=lambda: self._edit_selected_key_schedule('fallback', 'disable'),
             test_callback=self._test_selected_fallback,
             enable_callback=self._enable_selected_fallback,
             disable_callback=self._disable_selected_fallback,
@@ -6479,8 +6646,7 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_callback, clear_temp_callback, set_delay_callback,
         clear_delay_callback, test_callback, enable_callback, disable_callback,
         remove_callback, clear_all_callback=None, index_resolver=None,
-        configure_contexts_callback=None, disable_schedule_callback=None,
-        queue_schedule_callback=None
+        configure_contexts_callback=None
     ):
         """Shared context menu for every API key tree."""
         item = tree.itemAt(position)
@@ -6541,10 +6707,6 @@ class MultiAPIKeyDialog(QDialog):
         menu.addAction("🧪 Test Selected").triggered.connect(test_callback)
         if configure_contexts_callback:
             menu.addAction(selected_label("🎛️ Configure Request Contexts…")).triggered.connect(configure_contexts_callback)
-        if disable_schedule_callback:
-            menu.addAction(selected_label("🗓️ Disable schedule…")).triggered.connect(disable_schedule_callback)
-        if queue_schedule_callback:
-            menu.addAction(selected_label("⏳ Request Queue…")).triggered.connect(queue_schedule_callback)
         menu.addAction("✅ Enable Selected").triggered.connect(enable_callback)
         menu.addAction("🚫 Disable Selected").triggered.connect(disable_callback)
         menu.addAction("🗑️ Remove Selected").triggered.connect(remove_callback)
@@ -6596,8 +6758,6 @@ class MultiAPIKeyDialog(QDialog):
             set_delay_callback=self._set_api_call_delay_for_selected,
             clear_delay_callback=self._clear_api_call_delay_for_selected,
             configure_contexts_callback=lambda: self._edit_selected_key_contexts('main'),
-            disable_schedule_callback=lambda: self._edit_selected_key_schedule('main', 'disable'),
-            queue_schedule_callback=lambda: self._edit_selected_key_schedule('main', 'queue'),
             test_callback=self._test_selected,
             enable_callback=self._enable_selected,
             disable_callback=self._disable_selected,
@@ -7817,8 +7977,6 @@ class MultiAPIKeyDialog(QDialog):
             set_delay_callback=self._set_glossary_api_call_delay_for_selected,
             clear_delay_callback=self._clear_glossary_api_call_delay_for_selected,
             configure_contexts_callback=lambda: self._edit_selected_key_contexts('glossary'),
-            disable_schedule_callback=lambda: self._edit_selected_key_schedule('glossary', 'disable'),
-            queue_schedule_callback=lambda: self._edit_selected_key_schedule('glossary', 'queue'),
             test_callback=self._test_selected_glossary,
             enable_callback=self._enable_selected_glossary,
             disable_callback=self._disable_selected_glossary,
@@ -10005,17 +10163,21 @@ class MultiAPIKeyDialog(QDialog):
             tooltip.extend(schedule_lines)
         item.setToolTip(column, '\n'.join(tooltip))
 
+    def _pool_key_list(self, pool_name):
+        """The live key list of a pool (Translation keys are APIKeyEntry objects, the other
+        pools config dicts); edits to its entries are persisted by ``_save_pool_key_entries``."""
+        if pool_name == 'main':
+            return self.key_pool.keys
+        if pool_name in ('fallback', 'glossary'):
+            return self.translator_gui.config.get(f'{pool_name}_keys', []) or []
+        return self._dedicated_keys(pool_name)
+
     def _selected_pool_key_entries(self, pool_name, items=None):
         """``(pool keys, selected entries)`` of a key tree (Translation keys are APIKeyEntry
         objects, the other pools config dicts)."""
         tree = self._key_context_tree(pool_name)
         selected = tree.selectedItems() if items is None else items
-        if pool_name == 'main':
-            keys = self.key_pool.keys
-        elif pool_name in ('fallback', 'glossary'):
-            keys = self.translator_gui.config.get(f'{pool_name}_keys', [])
-        else:
-            keys = self._dedicated_keys(pool_name)
+        keys = self._pool_key_list(pool_name)
         indices = [self._fallback_config_index_for_item(item) if pool_name == 'fallback'
                    else tree.indexOfTopLevelItem(item) for item in selected]
         return keys, [keys[i] for i in indices if 0 <= i < len(keys)]
@@ -10031,11 +10193,13 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.save_config(show_message=False)
             if self._can_emit_live_key_pool_updates():
                 os.environ['FALLBACK_KEYS'] = json.dumps(keys)
-            self._load_fallback_keys()
+            if hasattr(self, 'fallback_tree'):
+                self._load_fallback_keys()
             self._broadcast_key_pool_config_changed('fallback', refresh_keys=True)
         elif pool_name == 'glossary':
             self.translator_gui.save_config(show_message=False)
-            self._load_glossary_keys()
+            if hasattr(self, 'glossary_tree'):
+                self._load_glossary_keys()
             self._refresh_glossary_pool()
             self._broadcast_key_pool_config_changed('glossary', refresh_keys=True)
         else:
@@ -10043,35 +10207,278 @@ class MultiAPIKeyDialog(QDialog):
             self._dedicated_load_keys(pool_name)
         self._notify_authgpt_visibility()
 
-    def _edit_selected_key_schedule(self, pool_name, kind):
-        """"🗓️ Disable schedule…" (*kind* 'disable') / "⏳ Request Queue…" ('queue') for the
-        selected keys: one RequestScheduleDialog, the result written to every selected key."""
-        keys, entries = self._selected_pool_key_entries(pool_name)
-        if not entries:
+    # ------------------------------------------------------------------ ⏰ Schedules tab
+    MANAGER_TABS_STYLE = """
+        QTabWidget#multiKeyManagerTabs::pane {
+            border: none;
+            border-top: 1px solid #3a3a3a;
+        }
+        QTabWidget#multiKeyManagerTabs::tab-bar {
+            left: 12px;
+        }
+        QTabWidget#multiKeyManagerTabs QTabBar::tab {
+            background-color: #404040;
+            color: #cccccc;
+            padding: 8px 16px;
+            margin-right: 2px;
+            margin-top: 6px;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            min-width: 80px;
+            font-weight: 500;
+        }
+        QTabWidget#multiKeyManagerTabs QTabBar::tab:selected {
+            background-color: #2d2d2d;
+            color: #ffffff;
+            border-bottom: 2px solid #0078d4;
+            font-weight: bold;
+        }
+        QTabWidget#multiKeyManagerTabs QTabBar::tab:hover:!selected {
+            background-color: #4a4a4a;
+            color: #ffffff;
+        }
+    """
+    SCHEDULE_TREE_COLUMNS = ("#", "API Key", "Model", "Schedule")
+
+    def _create_manager_tabs(self, parent_layout, key_pools_widget):
+        """The manager's tabs: "🔑 Key Pools" (every pool section) and "⏰ Schedules" (one
+        schedule per key, any pool; built when first opened)."""
+        self.manager_tabs = QTabWidget()
+        self.manager_tabs.setObjectName('multiKeyManagerTabs')
+        self.manager_tabs.setStyleSheet(self.MANAGER_TABS_STYLE)
+        self.manager_tabs.tabBar().setDrawBase(False)
+        self.manager_tabs.addTab(key_pools_widget, "🔑 Key Pools")
+        self.schedules_tab = QWidget()
+        self.manager_tabs.addTab(self.schedules_tab, "⏰ Schedules")
+        self.manager_tabs.setTabToolTip(
+            1, "Time windows per key: disable the key or queue its requests during them")
+        self.manager_tabs.currentChanged.connect(self._on_manager_tab_changed)
+        parent_layout.addWidget(self.manager_tabs)
+
+    def _on_manager_tab_changed(self, index):
+        if getattr(self, 'manager_tabs', None) is None:
             return
-        field = request_schedule.DISABLE_FIELD if kind == 'disable' else request_schedule.QUEUE_FIELD
-        first = entries[0]
-        current = first.get(field) if isinstance(first, dict) else getattr(first, field, None)
-        subject = f"{len(entries)} keys" if len(entries) > 1 else (
-            first.get('model', '') if isinstance(first, dict) else getattr(first, 'model', ''))
-        result = edit_request_schedule(self, current, mode=kind, subject=subject)
-        if result is None:
+        if self.manager_tabs.widget(index) is getattr(self, 'schedules_tab', None):
+            self._ensure_schedules_tab()
+            self._refresh_schedule_tab()
+
+    def _schedule_pool_ids(self):
+        """Every key pool the manager has (Translation, Fallback, Glossary, the dedicated pools)."""
+        return [pool for pool in key_pool_service.POOL_IDS if pool in POOL_CONTEXTS]
+
+    @staticmethod
+    def _schedule_key_value(key, name, default=''):
+        value = key.get(name, default) if isinstance(key, dict) else getattr(key, name, default)
+        return default if value is None else value
+
+    @staticmethod
+    def _mask_api_key(api_key):
+        api_key = str(api_key or '')
+        return api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+
+    def _ensure_schedules_tab(self):
+        """Build the ⏰ Schedules tab once: pool picker, the pool's keys with their schedule,
+        and the shared :class:`ScheduleEditor` (mode 'key') with Save / Clear for the selection."""
+        if getattr(self, 'schedule_editor', None) is not None:
+            return self.schedules_tab
+        tab_layout = QVBoxLayout(self.schedules_tab)
+        tab_layout.setContentsMargins(20, 12, 20, 12)
+        tab_layout.setSpacing(10)
+
+        intro = ScheduleEditor._wrapped_label(
+            "Pick a pool, select one or more keys and give them one schedule: during its windows the "
+            "key is either skipped (🗓️ disabled; other keys take over) or its requests wait "
+            "(⏳ queued) until the window ends. Schedules are off until you enable them.")
+        intro.setStyleSheet("color: gray;")
+        tab_layout.addWidget(intro)
+
+        pool_row = QHBoxLayout()
+        pool_row.addWidget(QLabel("Key pool:"))
+        self.schedule_pool_combo = QComboBox()
+        for pool in self._schedule_pool_ids():
+            self.schedule_pool_combo.addItem(key_pool_service.POOL_SPECS[pool]['title'], pool)
+        self._apply_combobox_icon(self.schedule_pool_combo)
+        self._disable_combobox_mousewheel(self.schedule_pool_combo)
+        self.schedule_pool_combo.currentIndexChanged.connect(lambda *_: self._on_schedule_pool_changed())
+        pool_row.addWidget(self.schedule_pool_combo, 1)
+        tab_layout.addLayout(pool_row)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        list_panel = QWidget()
+        list_layout = QVBoxLayout(list_panel)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+        self.schedule_key_tree = QTreeWidget()
+        self.schedule_key_tree.setHeaderLabels(list(self.SCHEDULE_TREE_COLUMNS))
+        self.schedule_key_tree.setRootIsDecorated(False)
+        self.schedule_key_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        header = self.schedule_key_tree.header()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.schedule_key_tree.setColumnWidth(1, 120)
+        self.schedule_key_tree.setColumnWidth(2, 140)
+        self.schedule_key_tree.itemSelectionChanged.connect(self._on_schedule_selection_changed)
+        list_layout.addWidget(self.schedule_key_tree, 1)
+        self.schedule_selection_label = ScheduleEditor._wrapped_label('')
+        self.schedule_selection_label.setStyleSheet("color: gray;")
+        list_layout.addWidget(self.schedule_selection_label)
+        splitter.addWidget(list_panel)
+
+        editor_scroll = QScrollArea()
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setFrameShape(QFrame.NoFrame)
+        editor_panel = QWidget()
+        editor_layout = QVBoxLayout(editor_panel)
+        editor_layout.setContentsMargins(8, 0, 0, 0)
+        self.schedule_editor = ScheduleEditor(
+            editor_panel, None, mode='key', on_clear=self._clear_schedule_for_selected,
+            clear_tooltip="Remove the schedule from the selected keys", icon_path=self._halgakos_icon_path())
+        editor_layout.addWidget(self.schedule_editor)
+        save_row = QHBoxLayout()
+        self.schedule_status_label = QLabel('')
+        self.schedule_status_label.setStyleSheet("color: gray;")
+        save_row.addWidget(self.schedule_status_label, 1)
+        self.schedule_save_button = QPushButton("💾 Save schedule")
+        self.schedule_save_button.setToolTip("Write this schedule to the selected keys "
+                                             "(a key holds one schedule: the other behaviour is removed)")
+        self.schedule_save_button.setMinimumHeight(34)
+        self.schedule_save_button.clicked.connect(self._apply_schedule_to_selected)
+        save_row.addWidget(self.schedule_save_button)
+        editor_layout.addLayout(save_row)
+        editor_layout.addStretch(1)
+        editor_scroll.setWidget(editor_panel)
+        splitter.addWidget(editor_scroll)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([460, 640])
+        tab_layout.addWidget(splitter, 1)
+
+        self._on_schedule_pool_changed()
+        return self.schedules_tab
+
+    def _schedule_pool(self):
+        combo = getattr(self, 'schedule_pool_combo', None)
+        return combo.currentData() if combo is not None else 'main'
+
+    def select_schedule_pool(self, pool_name):
+        """Show *pool_name* in the ⏰ Schedules tab (built if needed)."""
+        self._ensure_schedules_tab()
+        index = self.schedule_pool_combo.findData(pool_name)
+        if index >= 0:
+            self.schedule_pool_combo.setCurrentIndex(index)
+        return index >= 0
+
+    def _on_schedule_pool_changed(self):
+        self.schedule_editor.set_kinds(request_schedule.pool_schedule_kinds(self._schedule_pool()))
+        self._refresh_schedule_key_list(selected=[])
+
+    def _refresh_schedule_tab(self):
+        if getattr(self, 'schedule_editor', None) is None:
             return
-        for key in entries:
-            if isinstance(key, dict):
-                if result:
-                    key[field] = dict(result)
-                else:
-                    key.pop(field, None)
-            else:
-                setattr(key, field, dict(result))
+        combo = self.schedule_pool_combo
+        for index in range(combo.count()):
+            pool = combo.itemData(index)
+            count = len(self._pool_key_list(pool) or [])
+            combo.setItemText(index, f"{key_pool_service.POOL_SPECS[pool]['title']} ({count})")
+        self._refresh_schedule_key_list()
+
+    def _schedule_selected_indices(self):
+        tree = self.schedule_key_tree
+        return sorted(tree.indexOfTopLevelItem(item) for item in tree.selectedItems())
+
+    def _refresh_schedule_key_list(self, selected=None):
+        """Fill the key list of the chosen pool: key (masked), model and schedule state."""
+        if selected is None:
+            selected = self._schedule_selected_indices()
+        tree = self.schedule_key_tree
+        keys = self._pool_key_list(self._schedule_pool()) or []
+        blocked = tree.blockSignals(True)
+        try:
+            tree.clear()
+            for number, key in enumerate(keys, 1):
+                item = QTreeWidgetItem([
+                    str(number),
+                    self._mask_api_key(self._schedule_key_value(key, 'api_key')),
+                    str(self._schedule_key_value(key, 'model')),
+                    request_schedule.key_schedule_overview(key),
+                ])
+                lines = request_schedule.key_schedule_summary(key)[1]
+                if lines:
+                    item.setToolTip(3, "\n".join(lines))
+                if not self._schedule_key_value(key, 'enabled', True):
+                    for column in range(item.columnCount()):
+                        item.setForeground(column, Qt.gray)
+                tree.addTopLevelItem(item)
+            for index in selected:
+                if 0 <= index < tree.topLevelItemCount():
+                    tree.topLevelItem(index).setSelected(True)
+        finally:
+            tree.blockSignals(blocked)
+        self._on_schedule_selection_changed()
+
+    def _on_schedule_selection_changed(self):
+        """Load the first selected key's schedule (and its behaviour) into the editor."""
+        keys = self._pool_key_list(self._schedule_pool()) or []
+        indices = [i for i in self._schedule_selected_indices() if 0 <= i < len(keys)]
+        has_keys = bool(keys)
+        editing = bool(indices)
+        self.schedule_editor.setEnabled(editing)
+        self.schedule_save_button.setEnabled(editing)
+        if not has_keys:
+            self.schedule_selection_label.setText("This pool has no keys.")
+            return
+        if not editing:
+            self.schedule_selection_label.setText("Select one or more keys to edit their schedule "
+                                                  "(Ctrl / Shift for several).")
+            return
+        entries = [keys[i] for i in indices]
+        kind, config = request_schedule.key_schedule_config(entries[0])
+        self.schedule_editor.load_config(config or None, kind=kind)
+        text = f"Editing {len(entries)} key(s)."
+        if len(entries) > 1 and any(request_schedule.key_schedule_config(key) != (kind, config)
+                                    for key in entries[1:]):
+            text += " Their schedules differ: the first key's is shown; saving gives all of them this one."
+        self.schedule_selection_label.setText(text)
+
+    def _write_schedule_to_selected(self, kind, config):
+        pool_name = self._schedule_pool()
+        keys = self._pool_key_list(pool_name) or []
+        indices = [i for i in self._schedule_selected_indices() if 0 <= i < len(keys)]
+        if not indices:
+            return 0
+        for index in indices:
+            request_schedule.set_key_schedule(keys[index], kind, config)
         self._save_pool_key_entries(pool_name, keys)
-        label = "Disable schedule" if kind == 'disable' else "Request Queue"
-        if hasattr(self, '_show_status'):
-            try:
-                self._show_status(f"{label} {'saved' if result else 'removed'} for {len(entries)} key(s)")
-            except Exception:
-                pass
+        self._refresh_schedule_key_list(selected=indices)
+        return len(indices)
+
+    def _apply_schedule_to_selected(self):
+        """💾 Save schedule: the editor's schedule and behaviour to every selected key (the other
+        behaviour's field is removed: a key holds one schedule)."""
+        config, error = self.schedule_editor.result()
+        if error:
+            QMessageBox.warning(self, "No days", error)
+            return None
+        kind = self.schedule_editor.kind() or 'disable'
+        if kind not in request_schedule.pool_schedule_kinds(self._schedule_pool()):
+            kind = 'disable'
+        count = self._write_schedule_to_selected(kind, config)
+        if count:
+            state = ('removed' if not config else
+                     'saved (off until enabled)' if not request_schedule.is_enabled_config(config) else 'saved')
+            message = f"{request_schedule.KIND_CHOICES[kind].split(' (')[0]}: schedule {state} for {count} key(s)"
+            self.schedule_status_label.setText(message)
+            self._show_status(message)
+        return config
+
+    def _clear_schedule_for_selected(self):
+        """🧹 Clear schedule: remove the schedule (both behaviours) from the selected keys."""
+        count = self._write_schedule_to_selected('disable', {})
+        if count:
+            message = f"Schedule removed from {count} key(s)"
+            self.schedule_status_label.setText(message)
+            self._show_status(message)
 
     def _edit_selected_key_contexts(self, pool_name, items=None):
         keys, entries = self._selected_pool_key_entries(pool_name, items)
@@ -11151,8 +11558,6 @@ class MultiAPIKeyDialog(QDialog):
             set_delay_callback=lambda: self._dedicated_set_api_call_delay_for_selected(pool_name),
             clear_delay_callback=lambda: self._dedicated_clear_api_call_delay_for_selected(pool_name),
             configure_contexts_callback=lambda: self._edit_selected_key_contexts(pool_name),
-            disable_schedule_callback=lambda: self._edit_selected_key_schedule(pool_name, 'disable'),
-            queue_schedule_callback=lambda: self._edit_selected_key_schedule(pool_name, 'queue'),
             test_callback=lambda: self._dedicated_test_selected(pool_name),
             enable_callback=lambda: self._dedicated_enable_selected(pool_name),
             disable_callback=lambda: self._dedicated_disable_selected(pool_name),

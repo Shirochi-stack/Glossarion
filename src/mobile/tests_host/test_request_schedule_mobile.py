@@ -5,8 +5,8 @@ Run from src/mobile:
 
 * ScheduleSheet (``ui/sheets/schedule_sheet.py``): DeepSeek preset prefilled, window / day edits,
   "Times are in" conversion, validation, Save / Clear, a phone-sized scrolling body.
-* API keys: the selection ⋯ entries ("🗓️ Disable schedule…" on every pool, "⏳ Request Queue…" on the
-  pools with rotation), the card status ("🗓️ Disabled until …" / "⏳ Queued until …") and the key fields
+* API keys: the selection ⋯ "⏰ Schedule…" entry (one schedule per key, "During the windows:" 🗓️ / ⏳;
+  no queue for Fallback keys), the card status ("🗓️ Disabled until …" / "⏳ Queued until …") and the key fields
   written through the key service (round trip with the desktop ``APIKeyEntry``).
 * The main key: ModelSheet ⋯ "⏳ Request Queue…", the Settings tile, config ``request_queue_schedule``
   exported as ``REQUEST_QUEUE_SCHEDULE`` by the job's HeadlessOwner, pool key schedules reaching the
@@ -106,9 +106,12 @@ def test_schedule_sheet_suggests_deepseek_and_saves_edits():
         preview = sheet.preview_text.value
         # off by default: the windows are dimmed until the switch is turned on
         assert not sheet.enabled and sheet.body.disabled and preview.startswith(rs.OFF_PREVIEW_LINE)
-        assert "Suggested: DeepSeek peak hours" in preview
+        assert "Suggested: DeepSeek peak hours" in preview and sheet.kind is None and sheet.kind_group is None
         assert sheet.set_enabled(True) and not sheet.body.disabled
-        assert sheet.preview_text.value.startswith("Suggested: DeepSeek peak hours")
+        # the status line swaps, the line count stays (no layout jump)
+        on = sheet.preview_text.value
+        assert on.startswith(rs.ON_PREVIEW_LINE) and on.count("\n") == preview.count("\n")
+        assert on.split("\n")[1:] == preview.split("\n")[1:]
         assert "• UTC: 01:00–04:00, 06:00–10:00 (UTC), Mon–Fri" in preview and "inside a window until" in preview
         # edit a time (a phone keyboard may drop the colon), add / remove a window, tick Saturday
         sheet.rows[0][1].value = "0030"
@@ -167,7 +170,7 @@ def test_schedule_sheet_zones_days_clear_and_errors():
         empty = ScheduleSheet(DEEPSEEK, on_save=saved.append).show(page)
         while empty.rows:
             empty.remove_window(0)
-        assert empty.preview_text.value.startswith("No windows or no days")
+        assert empty.preview_text.value.split("\n")[1].startswith("No windows or no days")
         assert empty.save() is None and saved[-1] == {}
         # an on_save error keeps the sheet open
         failing = ScheduleSheet(None, on_save=lambda config: "Disk full").show(page)
@@ -189,13 +192,13 @@ def _controller(tmp_path, data, clock, module=None):
 
 
 def test_schedule_menu_kinds_follow_the_desktop_pools():
-    from glossarion_mobile.ui.screens.keys import SCHEDULE_LABELS, key_schedule_info, schedule_kinds
+    from glossarion_mobile.ui.screens.keys import SCHEDULE_LABEL, key_schedule_info, schedule_kinds
 
-    assert SCHEDULE_LABELS == {"disable": "🗓️ Disable schedule…", "queue": "⏳ Request Queue…"}
-    assert schedule_kinds("fallback") == ("disable",)
+    assert SCHEDULE_LABEL == "⏰ Schedule…"
+    assert schedule_kinds("fallback") == ("disable",) == rs.pool_schedule_kinds("fallback")
     for pool in ("main", "glossary", "glossary_refinement", "qa_scan", "metadata", "ai_truncation_detection",
                  "rolling_summary", "truncation_retry", "inpainter", "tts"):
-        assert schedule_kinds(pool) == ("disable", "queue")
+        assert schedule_kinds(pool) == ("disable", "queue") == rs.pool_schedule_kinds(pool)
     key = {"api_key": "k", "model": "deepseek-chat", "queue_schedule": DEEPSEEK}
     status, lines = key_schedule_info(key, at(MON, 2).timestamp())
     assert status == rs.key_schedule_summary(key, now=at(MON, 2))[0] and status.startswith("⏳ Queued until ")
@@ -204,8 +207,31 @@ def test_schedule_menu_kinds_follow_the_desktop_pools():
 
 
 @needs_flet
-def test_keys_screen_schedule_entries_status_and_clear(tmp_path):
-    from glossarion_mobile.ui.screens.keys import KeysScreen
+def test_schedule_sheet_key_mode_offers_the_pool_behaviours():
+    """Mode "key": "During the windows:" 🗓️ / ⏳ (the desktop ⏰ Schedules tab); Fallback has no queue."""
+    from glossarion_mobile.ui.sheets.schedule_sheet import ScheduleSheet
+
+    sheet = ScheduleSheet(None, mode="key", subject="2 keys", kind="queue")
+    assert sheet.title == "⏰ Schedule · 2 keys" and sheet.kind == "queue"
+    assert [radio.label for radio in sheet.kind_group.content.controls] == [rs.KIND_CHOICES["disable"],
+                                                                            rs.KIND_CHOICES["queue"]]
+    assert not any(radio.disabled for radio in sheet.kind_group.content.controls) and not sheet.kind_note.visible
+    assert sheet.kind_group in sheet.body.controls  # dimmed with the rest while the schedule is off
+    assert sheet.set_kind("disable") == "disable"
+    fallback = ScheduleSheet(None, mode="key", kind="queue", kinds=("disable",))
+    assert fallback.kind == "disable" and fallback.set_kind("queue") == "disable"
+    radios = {radio.value: radio for radio in fallback.kind_group.content.controls}
+    assert radios["queue"].disabled and not radios["disable"].disabled
+    assert fallback.kind_note.visible and fallback.kind_note.value == rs.QUEUE_UNAVAILABLE_HELP
+    # off by default: Save keeps the windows switched off
+    saved = []
+    fallback.on_save = saved.append
+    assert fallback.save() is None and saved == [rs.to_config(rs.DEEPSEEK_PEAK_SCHEDULE, enabled=False)]
+
+
+@needs_flet
+def test_keys_screen_schedule_entry_status_and_clear(tmp_path):
+    from glossarion_mobile.ui.screens.keys import SCHEDULE_LABEL, KeysScreen
     from glossarion_mobile.ui.sheets.schedule_sheet import ScheduleSheet
 
     async def scenario():
@@ -226,46 +252,85 @@ def test_keys_screen_schedule_entries_status_and_clear(tmp_path):
         screen.toggle_select(0)
         screen.toggle_select(1)
         labels = [item.label for item in screen.open_bulk_more().items]
-        assert "🗓️ Disable schedule…" in labels and "⏳ Request Queue…" in labels
-        assert labels.index("⏳ Request Queue…") == labels.index("Set request contexts…") + 2
-        # ⏳ Request Queue for both keys: the DeepSeek preset is suggested, Save writes it to each
-        sheet = screen.open_schedule_sheet("queue")
-        assert isinstance(sheet, ScheduleSheet) and sheet.title == "⏳ Request Queue · 2 keys" and sheet.suggested
-        assert not sheet.enabled and sheet.set_enabled(True)
-        assert sheet.save() is None
+        # one merged entry replaces "🗓️ Disable schedule…" / "⏳ Request Queue…"
+        assert labels.count(SCHEDULE_LABEL) == 1 and labels.index(SCHEDULE_LABEL) == labels.index(
+            "Set request contexts…") + 1
+        assert not any(label in labels for label in ("🗓️ Disable schedule…", "⏳ Request Queue…"))
+        # saving without enabling stores "enabled": false and nothing is active
+        sheet = screen.open_schedule_sheet()
+        assert isinstance(sheet, ScheduleSheet) and sheet.title == "⏰ Schedule · 2 keys" and sheet.suggested
+        assert sheet.mode == "key" and sheet.kinds == ("disable", "queue") and not sheet.enabled
+        assert sheet.set_kind("queue") == "queue" and sheet.save() is None
+        off = rs.to_config(rs.DEEPSEEK_PEAK_SCHEDULE, enabled=False)
+        assert [k.get("queue_schedule") for k in keys.keys("main")] == [off, off]
+        assert not any(rs.key_queued_now(k, now) for k in keys.keys("main"))
+        assert notes[-1] == "Request Queue saved (off until enabled) for 2 key(s)"
+        # switched on: ⏳ queue for both keys
+        sheet = screen.open_schedule_sheet()
+        assert sheet.kind == "queue" and not sheet.enabled and not sheet.suggested
+        assert sheet.set_enabled(True) and sheet.save() is None
         assert [k.get("queue_schedule") for k in keys.keys("main")] == [DEEPSEEK, DEEPSEEK]
         assert notes[-1] == "Request Queue saved for 2 key(s)"
         queued = rs.key_schedule_summary({"queue_schedule": DEEPSEEK}, now=now)[0]
         for card in screen.cards:  # "Passed" / "Active" give way to the schedule state, windows listed
             assert _find_text(card, lambda v: v == queued)
             assert _find_text(card, lambda v: v.startswith("⏳ Request Queue "))
-        # 🗓️ Disable schedule on the first key only: opened on its (empty) schedule, the model as subject
+        # the first key only, switched to 🗓️ Disable: the queue field is removed (one schedule per key)
         screen.clear_selection()
         screen.toggle_select(0)
-        sheet = screen.open_schedule_sheet("disable")
-        assert sheet.title == "🗓️ Disable schedule · deepseek-chat" and sheet.set_enabled(True)
-        assert sheet.save() is None
-        assert keys.keys("main")[0]["disable_schedule"] == DEEPSEEK and "disable_schedule" not in keys.keys("main")[1]
+        sheet = screen.open_schedule_sheet()
+        assert sheet.title == "⏰ Schedule · deepseek-chat" and sheet.kind == "queue" and sheet.enabled
+        assert sheet.set_kind("disable") == "disable" and sheet.save() is None
+        first, second = keys.keys("main")
+        assert first["disable_schedule"] == DEEPSEEK and "queue_schedule" not in first
+        assert second["queue_schedule"] == DEEPSEEK and "disable_schedule" not in second
         disabled = rs.key_schedule_summary({"disable_schedule": DEEPSEEK}, now=now)[0]
         assert disabled.startswith("🗓️ Disabled until ") and _find_text(screen.cards[0], lambda v: v == disabled)
         # 🧹 Clear removes it again
-        sheet = screen.open_schedule_sheet("disable")
-        assert sheet.schedule()[0] == rs.DEEPSEEK_PEAK_SCHEDULE and not sheet.suggested
+        sheet = screen.open_schedule_sheet()
+        assert sheet.kind == "disable" and sheet.schedule()[0] == rs.DEEPSEEK_PEAK_SCHEDULE
         assert sheet.clear() is None and not keys.keys("main")[0].get("disable_schedule")
-        assert notes[-1] == "Disable schedule removed for 1 key(s)"
-        # Fallback keys: only the Disable schedule (no rotation to queue in)
+        assert "queue_schedule" not in keys.keys("main")[0]
+        assert notes[-1] == "Schedule removed for 1 key(s)"
+        # Fallback keys: the same entry, without the queue behaviour (tried one by one)
         screen.clear_selection()
         screen.select_pool("fallback")
         screen.toggle_select(0)
-        labels = [item.label for item in screen.open_bulk_more().items]
-        assert "🗓️ Disable schedule…" in labels and "⏳ Request Queue…" not in labels
+        assert SCHEDULE_LABEL in [item.label for item in screen.open_bulk_more().items]
+        sheet = screen.open_schedule_sheet()
+        assert sheet.kinds == ("disable",) and sheet.kind == "disable" and sheet.kind_note.visible
+        assert screen.apply_schedule([0], "queue", DEEPSEEK) is None  # a forced queue falls back to disable
+        assert keys.keys("fallback")[0].get("disable_schedule") == DEEPSEEK
+        assert "queue_schedule" not in keys.keys("fallback")[0]
         # stored on disk exactly as the desktop writes it
         on_disk = MK._on_disk(store)
         assert on_disk["multi_api_keys"][1]["queue_schedule"] == DEEPSEEK
+        assert "disable_schedule" not in on_disk["multi_api_keys"][1]
         screen.dispose()
         store._saver.close()
 
     asyncio.run(scenario())
+
+
+def test_one_schedule_per_key_round_trips_with_the_desktop_tab(tmp_path):
+    """The mobile write ({chosen: config, other: {}}) through the real key service equals the desktop
+    tab's ``request_schedule.set_key_schedule`` on the same key, switched-off configs included."""
+    import key_pool_service
+
+    from multi_api_key_manager import APIKeyEntry
+
+    off = rs.to_config(rs.DEEPSEEK_PEAK_SCHEDULE, enabled=False)
+    start = {"api_key": "sk-aaaa", "model": "deepseek-chat", "queue_schedule": DEEPSEEK}
+    store, keys = _controller(tmp_path, {"multi_api_keys": [dict(start)]}, clock=time.time, module=key_pool_service)
+    changed, errors = keys.set_key_fields("main", [0], {"disable_schedule": off, "queue_schedule": {}})
+    assert (changed, errors) == (1, [])
+    mobile = keys.keys("main")[0]
+    desktop = rs.set_key_schedule(APIKeyEntry.from_dict(start), "disable", off).to_dict()
+    assert mobile["disable_schedule"] == desktop["disable_schedule"] == off
+    assert "queue_schedule" not in mobile and "queue_schedule" not in desktop
+    assert rs.key_schedule_config(mobile) == rs.key_schedule_config(APIKeyEntry.from_dict(mobile)) == ("disable", off)
+    assert not rs.key_disabled_by_schedule(mobile, at(MON, 2))  # off: never active
+    store._saver.close()
 
 
 def test_real_key_service_normalizes_schedules_and_round_trips_with_the_desktop(tmp_path):

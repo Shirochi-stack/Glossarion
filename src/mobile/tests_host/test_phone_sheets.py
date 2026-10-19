@@ -487,6 +487,29 @@ def test_schedule_sheet_scrolls_to_its_preview_and_keeps_save_in_reach(size):
 
 
 @needs_flet
+@pytest.mark.parametrize("size", PHONES)
+def test_key_schedule_sheet_behaviour_choice_fits_and_scrolls(size):
+    """Keys ⋯ "⏰ Schedule…" (mode "key"): the "During the windows:" radios and the Fallback note sit
+    above the windows in the scrolling body; Save stays pinned and the preview keeps its line count."""
+    from glossarion_mobile.ui.sheets.schedule_sheet import ScheduleSheet
+
+    async def scenario():
+        _conn, _session, page = _phone(*size)
+        saved = []
+        sheet = ScheduleSheet(None, mode="key", subject="fallback key", kinds=("disable",),
+                              on_save=saved.append).show(page)
+        assert_phone_sheet(sheet.sheet, sheet.kind_group, sheet.kind_note, sheet.rows[-1][2], sheet.preview_text,
+                           sheet.save_button)
+        off_lines = sheet.preview_text.value.count("\n")
+        sheet.set_enabled(True)
+        assert sheet.preview_text.value.count("\n") == off_lines
+        _tap(sheet.save_button)
+        assert len(saved) == 1 and "disable" == sheet.kind and not sheet.sheet.open
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 @needs_backend
 def test_mode_options_model_poe_manual_glossary_and_picker_sheets_reach_their_last_row():
     from glossarion_mobile.ui.chat.mode_options_sheet import ModeOptionsSheet
