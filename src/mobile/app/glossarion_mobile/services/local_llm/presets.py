@@ -8,11 +8,6 @@ used when it has one (``hf.pick_projector``). ``file`` may be
 empty (the auto-pick of ``hf.pick_file`` applies), ``quant`` may name one (``Q5_K_M``), ``n_ctx`` 0
 means the engine default. ``DEFAULT_PRESETS`` are only the first-run data; a saved list (even an empty
 one) wins.
-
-The Model manager's earlier Ollama presets (``LEGACY_PREF_KEY``, Ollama tags) are migrated
-once: the four Qwen3.5 tags become the matching GGUF rows under the user's own names and notes, an
-``hf.co/<user>/<repo>[:quant]`` entry becomes that repo; Ollama library tags with no GGUF equivalent
-are dropped.
 """
 
 from __future__ import annotations
@@ -27,12 +22,11 @@ from glossarion_mobile.services.local_llm import hf
 log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
-    "DEFAULT_PRESETS", "LEGACY_PREF_KEY", "MAX_PRESETS", "PREF_KEY", "download_size", "load_presets", "migrate_legacy",
+    "DEFAULT_PRESETS", "MAX_PRESETS", "PREF_KEY", "download_size", "load_presets",
     "restore_defaults", "save_presets", "validate_preset",
 ]
 
 PREF_KEY = "local_model_presets"
-LEGACY_PREF_KEY = "ollama_presets"
 MAX_PRESETS = 50
 MAX_CTX = 262144
 
@@ -63,12 +57,6 @@ DEFAULT_PRESETS: tuple = (
      "mmproj": "mmproj-F16.gguf", "mmproj_size": 918166080,
      "mmproj_sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"},
 )
-#: The old Ollama presets' tags and the default row each one became.
-LEGACY_TAGS = {"qwen3.5:0.8b": 0, "qwen3.5:2b": 1, "qwen3.5:4b": 2, "qwen3.5:9b": 3}
-_LEGACY_NOTES = {
-    "Qwen3.5 0.8B · fastest, rough translations", "Qwen3.5 2B · quick drafts on most phones",
-    "Qwen3.5 4B · better quality, needs about 4 GB free RAM", "Qwen3.5 9B · best of the four, needs about 8 GB free RAM",
-}
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -121,56 +109,15 @@ def _defaults() -> list:
     return [copy.deepcopy(p) for p in DEFAULT_PRESETS]
 
 
-def migrate_legacy(rows: Any) -> list:
-    """The old Ollama preset rows as GGUF preset rows (user names and own notes kept)."""
-    out: list = []
-    for row in rows if isinstance(rows, list) else ():
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or "").strip()
-        model = str(row.get("model") or "").strip()
-        note = str(row.get("note") or "").strip()
-        if not name or not model:
-            continue
-        index = LEGACY_TAGS.get(model.lower())
-        if index is not None:
-            new = copy.deepcopy(DEFAULT_PRESETS[index])
-            new["name"] = name
-            if note and note not in _LEGACY_NOTES:
-                new["note"] = note
-            out.append(new)
-            continue
-        if model.lower().startswith(("hf.co/", "huggingface.co/")):
-            try:
-                ref = hf.parse_ref(model)
-            except hf.HfError:
-                continue
-            out.append({"name": name, "repo": ref.repo, "file": ref.file or "", "quant": ref.quant or "",
-                        "note": note, "n_ctx": 0})
-            continue
-        log.info("on-device presets: dropped the Ollama-only preset %s (%s)", name, model)
-    return [row for row in (_clean(r) for r in out) if row is not None][:MAX_PRESETS]
-
-
 def load_presets(prefs: Any) -> list:
-    """The saved presets; on first use the migrated Ollama presets, else the defaults."""
+    """The saved presets, else the defaults."""
     saved = None
-    legacy = None
     try:
         if prefs is not None:
             saved = prefs.get(PREF_KEY, None)
-            legacy = prefs.get(LEGACY_PREF_KEY, None)
     except Exception:
-        saved = legacy = None
+        saved = None
     if not isinstance(saved, list):
-        if isinstance(legacy, list):
-            rows = migrate_legacy(legacy)
-            try:
-                prefs.set(PREF_KEY, copy.deepcopy(rows))
-                prefs.set(LEGACY_PREF_KEY, None)  # Ollama tags cannot run here any more
-            except Exception:
-                log.debug("saving the migrated presets failed", exc_info=True)
-            return rows
         return _defaults()
     return [row for row in (_clean(r) for r in saved) if row is not None]
 

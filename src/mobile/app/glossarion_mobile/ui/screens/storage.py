@@ -7,15 +7,14 @@
   folders are not supported (ReasonChip).
 * **Clear caches:** empties the cache and temp folders, keeping the seeded tiktoken
   cache (offline token counting) - the OS may purge them anyway.
-* **Phone folder (Android 10+, U10):** the public ``Downloads/Glossarion`` folder. The
-  pre-U10 "Mirror outputs" switch is folded into U10: books (EPUB, PDF, TXT, HTML) go
-  there when the phone folder is the destination in Settings › Cloud sync & sharing
+* **Phone folder (Android 10+, U10):** the public ``Downloads/Glossarion`` folder. Books
+  (EPUB, PDF, TXT, HTML) go there when the phone folder is the destination in Settings › Cloud sync & sharing
   (``services/cloud_sync``: one entry per output in ``Downloads/Glossarion/<book>/``,
   overwritten on every recompile, so a backup app watching the folder sees one file per
   output). This page says where books go (the cloud sync's ``ui_state``, read through the
   Cloud sync screen's ``CloudFacade``), links there and shows its "My cloud app isn't
   listed" help (TeraBox and other folder-backup apps). The ``Prefs`` switch
-  ``mirror_outputs`` now copies only the other finished outputs (images, subtitles,
+  ``mirror_outputs`` copies only the other finished outputs (images, subtitles,
   glossaries, reports) there once: ``mirror_output``, the call the Library makes when a
   job finishes. iOS and Android 9 or older show the switch disabled with a ReasonChip.
 """

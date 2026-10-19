@@ -1570,9 +1570,6 @@ Text to analyze:
             self.config['book_title_system_prompt'] = "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."
         
         # Profiles
-        # built-in profiles renamed since (2026-10-19: "On-device" -> "On-device_BeautifulSoup")
-        from prompt_profiles import migrate_renamed_builtin_profiles
-        migrate_renamed_builtin_profiles(self.config)
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
         self.config['prompt_profiles'] = self.prompt_profiles
         

@@ -1,8 +1,7 @@
 """Built-in "On-device" prompt profiles for small on-device models (mobile llama.cpp, ``local/<stem>``).
 
 * the translation profiles "On-device_BeautifulSoup" (html tags) and "On-device_html2text" (markdown) are
-  desktop built-ins (always included, protected), so a fresh and an existing config both list them; a
-  stored "On-device" (their name before the split, owner 2026-10-19) becomes "On-device_BeautifulSoup";
+  desktop built-ins (always included, protected), so a fresh and an existing config both list them;
 * the Balanced/Full and Minimal glossary buckets get an "On-device" profile (``glossary_document``),
   seeded without overwriting an edited text and protected from deletion like Default;
 * choosing a ``local/`` model (``setting_writes.write_setting(store, "model", ...)``, the path every
@@ -144,7 +143,6 @@ def test_mobile_on_device_names_match_the_shared_core():
     from glossarion_mobile.state import setting_writes as sw
 
     assert sw.ON_DEVICE_TRANSLATION_PROFILES == prompt_profiles.ON_DEVICE_TRANSLATION_PROFILES
-    assert prompt_profiles.RENAMED_BUILTIN_PROFILES == {ON_DEVICE: ON_DEVICE_BS}
 
 
 @pytest.mark.parametrize("name,text", [(ON_DEVICE_BS, TRANSLATION_TEXT), (ON_DEVICE_H2T, HTML2TEXT_TEXT)])
@@ -155,88 +153,6 @@ def test_on_device_translation_profiles_cannot_be_deleted_and_reset_restores_the
     state.prompt_profiles[name] = "edited"
     outcome = prompt_profiles.delete_or_reset_profile(state, name, confirm=lambda *a, **k: True)
     assert outcome.kind == "reset" and state.prompt_profiles[name] == text
-
-
-# ---- migration of the translation profile "On-device" ------------------------------------------------------
-
-
-def _legacy_config(text: str = TRANSLATION_TEXT, active: str = ON_DEVICE) -> dict:
-    """A config saved by a build with the single "On-device" translation profile."""
-    import prompt_profiles
-
-    defaults = dict(prompt_profiles.profile_state_from_config({}).default_prompts)
-    profiles = {}
-    for name, value in defaults.items():
-        if name == ON_DEVICE_BS:
-            profiles[ON_DEVICE] = text
-        elif name != ON_DEVICE_H2T:
-            profiles[name] = value
-    profiles["My style"] = "Translate to {target_lang}, my way."
-    return {"prompt_profiles": profiles, "active_profile": active}
-
-
-@pytest.mark.parametrize("text", ["You must only output {target_lang} translations.", TRANSLATION_TEXT],
-                         ids=["older-builtin", "builtin"])
-def test_migration_unedited_on_device_takes_the_new_builtin(text):
-    import prompt_profiles
-
-    config = _legacy_config(text)
-    assert prompt_profiles.migrate_renamed_builtin_profiles(config) == ["prompt_profiles", "active_profile"]
-    assert ON_DEVICE not in config["prompt_profiles"] and config["active_profile"] == ON_DEVICE_BS
-    state = prompt_profiles.profile_state_from_config(config)
-    assert state.prompt_profiles[ON_DEVICE_BS] == TRANSLATION_TEXT
-    assert state.prompt_profiles[ON_DEVICE_H2T] == HTML2TEXT_TEXT
-    assert state.profile_var == ON_DEVICE_BS
-    assert prompt_profiles.migrate_renamed_builtin_profiles(config) == []  # idempotent
-
-
-def test_migration_edited_on_device_keeps_its_text_in_place():
-    import prompt_profiles
-
-    config = _legacy_config("My tiny prompt for {target_lang}", active="My style")
-    order = list(config["prompt_profiles"])
-    assert prompt_profiles.migrate_renamed_builtin_profiles(config) == ["prompt_profiles"]
-    assert config["prompt_profiles"][ON_DEVICE_BS] == "My tiny prompt for {target_lang}"
-    assert list(config["prompt_profiles"]) == [ON_DEVICE_BS if n == ON_DEVICE else n for n in order]
-    assert config["active_profile"] == "My style"
-    state = prompt_profiles.profile_state_from_config(config)
-    assert state.prompt_profiles[ON_DEVICE_BS] == "My tiny prompt for {target_lang}"
-    assert state.prompt_profiles[ON_DEVICE_H2T] == HTML2TEXT_TEXT
-
-
-def test_migration_runs_at_desktop_start_up():
-    """ConfigStateMixin._init_variables (desktop start-up, HeadlessOwner): the active "On-device" follows."""
-    import prompt_profiles
-
-    state = prompt_profiles.profile_state_from_config(_legacy_config())
-    assert state.profile_var == ON_DEVICE_BS and ON_DEVICE not in state.prompt_profiles
-
-
-def test_mobile_start_up_migration_store_and_remembered_record(tmp_path):
-    from glossarion_mobile.state.setting_writes import ON_DEVICE_BEFORE_KEY, migrate_on_device_profiles
-
-    config = _legacy_config("edited {target_lang}")
-    config[ON_DEVICE_BEFORE_KEY] = {"active_profile": ON_DEVICE, "glossary": {}}
-    store = _store(tmp_path, config)
-    changed = migrate_on_device_profiles(store)
-    assert set(changed) == {"prompt_profiles", "active_profile", ON_DEVICE_BEFORE_KEY}
-    assert store.get("active_profile") == ON_DEVICE_BS
-    assert store.get("prompt_profiles")[ON_DEVICE_BS] == "edited {target_lang}"
-    assert store.get(ON_DEVICE_BEFORE_KEY)["active_profile"] == ON_DEVICE_BS
-    assert migrate_on_device_profiles(store) == []  # idempotent
-    store._saver.close()
-
-
-def test_chat_and_series_overrides_naming_on_device_follow_the_rename():
-    """Chats / series store a profile name: the start-up re-check (``reconcile_profile_overrides`` ->
-    ``follow_profile``) moves "On-device" to "On-device_BeautifulSoup"; a run re-checks before it starts."""
-    import prompt_profiles
-    from glossarion_mobile.ui.screens.profiles import follow_profile
-
-    names = list(prompt_profiles.profile_state_from_config({}).prompt_profiles)
-    assert follow_profile(ON_DEVICE, names) == ON_DEVICE_BS
-    assert follow_profile(ON_DEVICE_H2T, names) == ON_DEVICE_H2T
-    assert follow_profile("Gone", names) is None
 
 
 @pytest.mark.parametrize("config", [{}, "existing", "edited"])
@@ -476,33 +392,6 @@ def test_review_profile_picked_while_on_device_stays(tmp_path):
     write_setting(store, "model", CLOUD)
     assert store.get("active_review_prompt_profile") == "Default"
     assert store.get("review_final_prompt") == rg.DEFAULT_FINAL_REVIEW_PROMPT.strip()
-    store._saver.close()
-
-
-def test_older_on_device_prompt_swap_is_restored_into_a_profile(tmp_path):
-    """A build before the review profiles swapped the two prompt texts and remembered the old ones in
-    ON_DEVICE_BEFORE_KEY: switching back selects a profile holding those texts (the On-device one stays)."""
-    import review_generator as rg
-    from glossarion_mobile.state.setting_writes import ON_DEVICE_BEFORE_KEY, write_setting
-
-    record = {"active_profile": "", "glossary": {"balanced_full": "", "minimal": ""}, "fields": None,
-              "settings": {"translation_temperature": [False, None], "batch_size": [False, None],
-                           "review_system_prompt": [True, "Old custom review"],
-                           "review_final_prompt": [True, "Old custom final"]},
-              "applied": {"translation_temperature": 0.7, "batch_size": 1,
-                          "review_system_prompt": rg.ON_DEVICE_REVIEW_PROMPT,
-                          "review_final_prompt": rg.ON_DEVICE_FINAL_REVIEW_PROMPT}}
-    store = _store(tmp_path, {"model": LOCAL, "active_profile": ON_DEVICE, ON_DEVICE_BEFORE_KEY: record,
-                              "translation_temperature": 0.7, "batch_size": 1,
-                              "review_system_prompt": rg.ON_DEVICE_REVIEW_PROMPT,
-                              "review_final_prompt": rg.ON_DEVICE_FINAL_REVIEW_PROMPT})
-    write_setting(store, "model", CLOUD)
-    assert store.get("active_review_prompt_profile") == "My review prompt"
-    assert store.get("review_prompt_profiles")["My review prompt"] == {"system": "Old custom review",
-                                                                       "final": "Old custom final"}
-    assert store.get("review_system_prompt") == "Old custom review"
-    assert store.get("review_final_prompt") == "Old custom final"
-    assert not store.has(ON_DEVICE_BEFORE_KEY)
     store._saver.close()
 
 

@@ -47,28 +47,6 @@ def test_edit_rename_remove_restore_persist_in_prefs():
         {"name": "ok", "repo": "a/b", "file": "", "quant": "", "note": "", "n_ctx": 0}]
 
 
-def test_legacy_ollama_presets_migrate_once_keeping_user_names():
-    legacy = [
-        {"name": "Trash", "model": "qwen3.5:0.8b", "note": "Qwen3.5 0.8B · fastest, rough translations"},
-        {"name": "Mine", "model": "qwen3.5:4b", "note": "my own note"},
-        {"name": "Gemma", "model": "hf.co/unsloth/gemma-4-E2B-it-GGUF:Q5_K_M", "note": ""},
-        {"name": "Llama", "model": "llama3.2:3b", "note": ""},  # an Ollama library tag: no GGUF equivalent
-    ]
-    prefs = FakePrefs({presets.LEGACY_PREF_KEY: legacy})
-    rows = presets.load_presets(prefs)
-    assert [r["name"] for r in rows] == ["Trash", "Mine", "Gemma"]
-    assert rows[0]["file"] == "Qwen3.5-0.8B-UD-Q4_K_XL.gguf" and rows[0]["note"].startswith("Qwen3.5 0.8B · fastest")
-    assert rows[0]["note"].endswith("~1 GB RAM")  # the old default note became the new one
-    assert rows[1]["repo"] == "unsloth/Qwen3.5-4B-GGUF" and rows[1]["note"] == "my own note"
-    assert rows[1]["sha256"] == presets.DEFAULT_PRESETS[2]["sha256"]
-    assert rows[2] == {"name": "Gemma", "repo": "unsloth/gemma-4-E2B-it-GGUF", "file": "", "quant": "Q5_K_M",
-                       "note": "", "n_ctx": 0}
-    assert prefs.data[presets.LEGACY_PREF_KEY] is None and prefs.data[presets.PREF_KEY] == rows
-    # once migrated, the saved list wins
-    prefs.data[presets.PREF_KEY] = []
-    assert presets.load_presets(prefs) == []
-
-
 def test_validation_messages_and_hf_forms():
     rows = presets.load_presets(FakePrefs())
     ok = lambda row, index=None: presets.validate_preset(row, rows, index)  # noqa: E731

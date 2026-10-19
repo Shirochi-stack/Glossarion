@@ -730,9 +730,6 @@ BUILTIN_REVIEW_PROMPT_PROFILES = {
     REVIEW_PROMPT_DEFAULT_PROFILE: {'system': DEFAULT_REVIEW_PROMPT, 'final': DEFAULT_FINAL_REVIEW_PROMPT},
     REVIEW_PROMPT_ON_DEVICE_PROFILE: {'system': ON_DEVICE_REVIEW_PROMPT, 'final': ON_DEVICE_FINAL_REVIEW_PROMPT},
 }
-#: Earlier shipped texts of a built-in, as (system, final) pairs: a stored copy still equal to one is
-#: brought up to date, an edited one is kept (like the glossary On-device profile).
-PREVIOUS_BUILTIN_REVIEW_PROMPTS = {}
 
 
 def is_default_review_prompt_profile(name) -> bool:
@@ -792,8 +789,8 @@ def review_profile_for_prompts(config, system, final) -> str:
 
 
 def ensure_review_prompt_profiles(config, owner=None, *, _migrate=True) -> dict:
-    """Make ``config`` hold the review prompt profiles (built-ins first, edited built-in texts kept, unedited
-    earlier shipped texts updated) and a valid active name; returns the profiles dict stored in it.
+    """Make ``config`` hold the review prompt profiles (built-ins first, edited built-in texts kept) and a
+    valid active name; returns the profiles dict stored in it.
 
     A config without ``review_prompt_profiles`` is migrated once: the mirrors' texts select the matching
     built-in, or become the user profile "My review prompt" (:func:`review_profile_for_prompts`); then the
@@ -803,11 +800,7 @@ def ensure_review_prompt_profiles(config, owner=None, *, _migrate=True) -> dict:
     stored = stored if isinstance(stored, dict) else {}
     profiles = {}
     for name, shipped in BUILTIN_REVIEW_PROMPT_PROFILES.items():
-        texts = _review_texts(stored.get(name), shipped)
-        previous = PREVIOUS_BUILTIN_REVIEW_PROMPTS.get(name, ())
-        if (texts['system'], texts['final']) in previous:
-            texts = dict(shipped)
-        profiles[name] = texts
+        profiles[name] = _review_texts(stored.get(name), shipped)
     for name, texts in stored.items():
         if (isinstance(name, str) and name.strip() and name not in profiles
                 and not is_default_review_prompt_profile(name) and isinstance(texts, dict)):

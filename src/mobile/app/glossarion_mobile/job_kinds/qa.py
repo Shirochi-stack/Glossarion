@@ -28,8 +28,7 @@ pickers, mismatch question - happen on the QA screen before the job is queued):
   scans with ``MOBILE_QUICK_SAMPLE_SIZE`` (0 = duplicate check off, owner 2026-10-08; the
   desktop default stays ``qa_scan_runtime``'s 1000). It is applied inside the per-folder
   settings loader, so every folder of a bulk scan gets it; a saved value always wins and the
-  config is never written here (``qa_model.migrate_quick_sample_size`` turns a saved desktop
-  1000 into 0 once);
+  config is never written here;
 * Stop follows the desktop QA escalation (``next_qa_stop_phase``): the first Stop sets the
   graceful flags (``apply_qa_graceful_stop_flags``: scan loop stop, ``GRACEFUL_STOP``,
   ``TRANSLATION_CANCELLED``), a force stop (graceful stop off, or the second Stop) the force

@@ -3797,17 +3797,15 @@ Owner-approved security change (research workflow wf_25aa917f-10b, critic-correc
   off; `job_kinds.qa.MOBILE_QUICK_SAMPLE_SIZE`, applied inside the per-folder settings loader, config never
   written). Settings › QA shows the same default (`ui/settings/schema_access.MOBILE_DISPLAY_DEFAULTS`), so
   "Reset this section" means 0.
-- A saved value of exactly 1000 is turned into 0 once (`qa_model.migrate_quick_sample_size`, run at app start
-  by `SettingsFeature.load`, when Tools › QA Scanner opens and before a chat scan; flag in Prefs
-  `qa_quick_sample_size_mobile_default`). A 1000 typed later stays.
+- A saved value always wins (a desktop 1000 included).
 - The Tools field shows 0 when nothing is saved and does not save an untouched default; the value stays
   editable (Tools › QA Scanner, Settings › QA). Chat scans run Quick Scan with the same value.
 - The desktop default stays 1000 (`qa_scan_runtime.default_qa_scan_settings`, settings_schema_data). The
-  pipeline's failed-multipass-refinement QA scans (TransateKRtoEN, shared) read the migrated or saved value,
+  pipeline's failed-multipass-refinement QA scans (TransateKRtoEN, shared) read the saved value,
   but with nothing saved they keep the desktop 1000.
 - Tests: tests_host/test_tools_ui.py `test_qa_adapter_mobile_sample_size_default_survives_the_per_folder_reload`,
-  `test_quick_sample_size_migration_runs_once_and_only_on_the_desktop_1000`,
-  `test_qa_screen_shows_the_mobile_sample_size_and_migrates_a_saved_1000_once`; tests_host/test_chat.py
+  `test_quick_sample_size_is_zero_on_mobile_unless_saved`,
+  `test_qa_screen_shows_the_mobile_sample_size`; tests_host/test_chat.py
   `test_result_card_qa_scans_the_turn_workspace`.
 
 ### Library auto-migrate (mobile automatic; desktop manual Migrate / Organize)

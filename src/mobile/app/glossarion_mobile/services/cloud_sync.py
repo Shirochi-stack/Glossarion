@@ -1249,25 +1249,6 @@ class CloudSyncService:
             return True
         return self.settings().enabled
 
-    def _migrate_mirror_pref(self) -> bool:
-        """First U10 run on Android with the old "Mirror outputs to Downloads/Glossarion" switch on: the
-        phone folder becomes the destination and sync starts on (the user had opted in already). True when
-        it migrated: ``start`` then queues every Library book, as turning the switch on by hand does."""
-        if self.prefs is None or self.platform != "android":
-            return False
-        try:
-            existing = self.prefs.get(PREF_KEY, None)
-            mirror = bool(self.prefs.get(files_mod.MIRROR_PREF, False))
-        except Exception:
-            return False
-        if existing is not None or not mirror:
-            return False
-        dest = Destination(id=PHONE_TARGET_ID, mode=MODE_PHONE, platform=self.platform, label=_phone_label(),
-                           provider="phone", provider_label="Phone", linked_at=self.clock())
-        self._write_settings({"enabled": True, "kinds": {k: True for k in KINDS}, "destination": dest.as_dict()})
-        self._event("phone folder destination from the mirror switch")
-        return True
-
     # ---- lifecycle -------------------------------------------------------------------------------
 
     async def start(self) -> None:
@@ -1285,7 +1266,6 @@ class CloudSyncService:
         for old, new, merged in moves:  # chat books the startup sweep moved while the records were loading
             self.on_workspace_moved(old, new, merged=merged)
         await self._io(self._clean_snapshots_blocking)
-        migrated = self._migrate_mirror_pref()
         pending = self.settings().pending_pick
         await self._take_late_results()
         if self.settings().pending_pick and pending:
@@ -1293,8 +1273,6 @@ class CloudSyncService:
             # reports it cancelled; a per-file record keeps asking for its save location.
             self._event(f"picker interrupted ({pending.get('op')})")
             self._update_settings(pending_pick=None)
-        if migrated:
-            self._sync_all_when_ready("phone folder (mirror switch)")
         self._kick("start")
 
     def attach(self, *, jobs: Any = None, native: Any = None) -> None:
@@ -1487,32 +1465,6 @@ class CloudSyncService:
         self.store.enqueue(str(identity), "manual", manual=True, kinds=kinds)
         self._kick("send now")
         return _answer(True, f"Saving to {dest.display}…")
-
-    def _sync_all_when_ready(self, reason: str) -> None:
-        """``sync_all`` once the Library has published its books (app start: its first scan may still run; a
-        scan is never started from here, the Library's own one is waited for)."""
-        if self._library_books():
-            self._spawn(self.sync_all(reason, refresh=False))
-            return
-        subscribe = getattr(self.library, "subscribe", None) if self.library is not None else None
-        if not callable(subscribe):
-            return
-        holder: dict = {}
-
-        def on_snapshot(snapshot: Any) -> None:
-            try:
-                books = list(snapshot.all_books()) if hasattr(snapshot, "all_books") else []
-            except Exception:
-                books = []
-            if not books or holder.get("done"):
-                return
-            holder["done"] = True
-            unsubscribe = holder.pop("unsubscribe", None)
-            if callable(unsubscribe):
-                unsubscribe()
-            self._spawn(self.sync_all(reason, refresh=False))
-
-        holder["unsubscribe"] = subscribe(on_snapshot)
 
     async def sync_all(self, reason: str = "all", *, refresh: bool = True) -> int:
         """Queue every Library book sync wants (switch turned on, a format turned on, a destination

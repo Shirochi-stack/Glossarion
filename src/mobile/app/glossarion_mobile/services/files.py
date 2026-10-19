@@ -104,9 +104,8 @@ _RESERVED = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
 #: Downloads", the copy-once mirror of the other outputs and the cloud sync's phone-folder destination.
 DOWNLOADS_SUBDIR = "Glossarion"
 PHONE_FOLDER_LABEL = "Downloads/Glossarion"
-#: ``Prefs`` switch (Settings › Storage; the pre-U10 "Mirror outputs" key): copy the finished outputs
-#: that are not books into ``Downloads/Glossarion`` once. Books follow the U10 destination; the cloud
-#: sync turns a pre-U10 "on" into the phone-folder destination.
+#: ``Prefs`` switch (Settings › Storage): copy the finished outputs that are not books into
+#: ``Downloads/Glossarion`` once. Books follow the U10 destination.
 MIRROR_PREF = "mirror_outputs"
 #: ``FileBridge.phone_folder_reason`` results (ReasonChip text).
 PHONE_FOLDER_ONLY_ANDROID = "Android only"

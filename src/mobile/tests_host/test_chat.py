@@ -1927,8 +1927,6 @@ def test_result_card_qa_scans_the_turn_workspace(desktop_store_cls, isolated_env
             await _settle(calls)
             assert calls.notes[-1][0] == cv.NOTHING_TO_SCAN and not jobs.submitted
             (workspace / "response_001_ch001.html").write_text("<p>Chapter one</p>", encoding="utf-8")
-            # a desktop 1000 saved by the U6-U9 QA screen: the one-time mobile move to 0 (owner decision)
-            chat.store.set(("qa_scanner_settings", "quick_scan_sample_size"), 1000)
             # a finished run's temp root is deleted: the turn's workspace comes first (U9 Progress bug)
             gone = tmp_path / "cache" / "glossarion_input_output_x" / "book"
             view.env.runs.run_for = lambda cid: types.SimpleNamespace(output_dir=str(gone), output_folder=str(gone),
@@ -1954,8 +1952,7 @@ def test_result_card_qa_scans_the_turn_workspace(desktop_store_cls, isolated_env
             assert stored["qa_job"] == "job1" and stored["source"] == source
             assert adapter.meta("2")[cv.TOOL_JOBS_META][last[6]["created_at"]]["qa_job"] == "job1"
             assert "duplicate check off (sample size 0)" in stored["summary"]  # the mobile default
-            assert chat.store.get(("qa_scanner_settings", "quick_scan_sample_size")) == 0
-            assert prefs.values[qa_model.QUICK_SAMPLE_MIGRATION_PREF] is True
+            assert chat.store.get(("qa_scanner_settings", "quick_scan_sample_size")) is None  # never written
             assert calls.notes[-1][0] == "QA scan · book"
             # its own card: Job · Report · Chapters
             card = next(c for c in _cards(view, JobCard) if c.title_text.value == "QA scan · book")

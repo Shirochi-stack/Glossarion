@@ -150,36 +150,18 @@ def note_renamed(old: Any, new: Any) -> None:
         _RENAMED[str(old)] = str(new)
 
 
-def _builtin_renames() -> dict:
-    """Built-in profiles a release renamed (``prompt_profiles.RENAMED_BUILTIN_PROFILES``: "On-device" ->
-    "On-device_BeautifulSoup"); empty without the shared core."""
-    try:
-        import prompt_profiles
-
-        return dict(prompt_profiles.RENAMED_BUILTIN_PROFILES)
-    except Exception:
-        return {}
-
-
 def follow_profile(name: Any, names: Any) -> Optional[str]:
     """What a chat's or series' stored profile choice means now: ``name`` while it exists, the profile it
-    was renamed to on this device or by a release (a renamed built-in; following renames of renames), else
-    None: the profile is gone and the chat inherits the series / All chats profile (never a silent first
-    profile)."""
+    was renamed to on this device (following renames of renames), else None: the profile is gone and the
+    chat inherits the series / All chats profile (never a silent first profile)."""
     known = set(names or ())
     current = str(name or "")
     seen: set = set()
-    builtin = None
     while current and current not in known:
         if current in seen:
             return None
         seen.add(current)
-        if current in _RENAMED:
-            current = _RENAMED[current]
-            continue
-        if builtin is None:
-            builtin = _builtin_renames()
-        current = builtin.get(current, "")
+        current = _RENAMED.get(current, "")
     return current or None
 
 

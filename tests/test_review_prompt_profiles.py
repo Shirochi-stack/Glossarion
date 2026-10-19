@@ -46,11 +46,9 @@ def test_builtins_are_seeded_first_with_both_prompts():
     assert not rg.is_builtin_review_prompt_profile("Mine")
 
 
-def test_edited_builtin_survives_and_unedited_previous_text_is_updated(monkeypatch):
-    config = {"review_prompt_profiles": {"On-device": {"system": "edited", "final": "edited final"},
-                                         "Default": {"system": "old shipped", "final": "old final"}},
+def test_edited_builtin_survives():
+    config = {"review_prompt_profiles": {"On-device": {"system": "edited", "final": "edited final"}},
               "active_review_prompt_profile": "Default"}
-    monkeypatch.setitem(rg.PREVIOUS_BUILTIN_REVIEW_PROMPTS, "Default", (("old shipped", "old final"),))
     profiles = rg.ensure_review_prompt_profiles(config)
     assert profiles["On-device"] == {"system": "edited", "final": "edited final"}
     assert profiles["Default"] == DEFAULT
