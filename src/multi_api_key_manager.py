@@ -2106,6 +2106,11 @@ class ScheduleEditor(QWidget):
             for name in request_schedule.SCHEDULE_KINDS:
                 self.kind_combo.addItem(request_schedule.KIND_CHOICES[name], name)
             self._apply_arrow(self.kind_combo)
+            # the choices are long: the closed combo may elide them (the list shows them in full),
+            # so the editor stays as narrow as its Days row
+            self.kind_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            self.kind_combo.setMinimumContentsLength(22)
+            self.kind_combo.view().setMinimumWidth(self.kind_combo.view().sizeHintForColumn(0) + 24)
             self.kind_combo.currentIndexChanged.connect(self._update_preview)
             kind_row.addWidget(self.kind_combo, 1)
             layout.addLayout(kind_row)
@@ -2119,8 +2124,11 @@ class ScheduleEditor(QWidget):
         zone_row.addWidget(self.zone_combo, 1)
         layout.addLayout(zone_row)
 
-        windows_box = QGroupBox("Windows (start → end; an end before the start runs past midnight)")
+        windows_box = QGroupBox("Windows (start → end)")
         windows_outer = QVBoxLayout(windows_box)
+        midnight_note = self._wrapped_label("An end before the start runs past midnight.")
+        midnight_note.setStyleSheet("color: gray;")
+        windows_outer.addWidget(midnight_note)
         self.rows_layout = QVBoxLayout()
         windows_outer.addLayout(self.rows_layout)
         add_button = QPushButton("➕ Add window")
@@ -4767,27 +4775,8 @@ class MultiAPIKeyDialog(QDialog):
             # Mask API key
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
 
-            # Determine per-key output token limit display value
-            try:
-                raw_limit = key_data.get('individual_output_token_limit')
-                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
-            except Exception:
-                per_key_limit = None
-            if per_key_limit and per_key_limit > 0:
-                output_limit_str = str(per_key_limit)
-            else:
-                output_limit_str = "global"
-
-            # Determine per-key temperature display value
-            try:
-                raw_temp = key_data.get('individual_key_temperature')
-                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
-            except Exception:
-                per_key_temp = None
-            if per_key_temp is not None:
-                temp_str = str(per_key_temp)
-            else:
-                temp_str = "global"
+            # Per-key output token limit / temperature / API call delay ("global" when unset)
+            output_limit_str, temp_str, delay_str = self._key_parameter_texts(key_data)
 
             # Determine status and coloring (match multi-key tree style)
             enabled = key_data.get('enabled', True)
@@ -4811,13 +4800,6 @@ class MultiAPIKeyDialog(QDialog):
                 status = "Enabled"
                 color = Qt.gray
 
-            # Determine per-key API call delay display value
-            try:
-                raw_delay = key_data.get('api_call_delay')
-                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
-            except Exception:
-                per_key_delay = 0.0
-            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
 
             # Insert into tree (with Success and Errors columns matching multi-key tree)
             success_count = int(key_data.get('success_count', 0))
@@ -4830,20 +4812,7 @@ class MultiAPIKeyDialog(QDialog):
                 item.setForeground(col, color)
 
             # Tooltip for per-key settings
-            tooltip_parts = []
-            if per_key_limit and per_key_limit > 0:
-                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
-            else:
-                tooltip_parts.append("Using global output token limit")
-            if per_key_temp is not None:
-                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
-            else:
-                tooltip_parts.append("Using global temperature")
-            if per_key_delay > 0:
-                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
-            else:
-                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
-            tooltip = "\n".join(tooltip_parts)
+            tooltip = "\n".join(self._key_parameter_tooltip_lines(key_data))
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
 
@@ -6230,26 +6199,8 @@ class MultiAPIKeyDialog(QDialog):
             # Mask API key for display
             masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
 
-            # Determine per-key output token limit display value
-            per_key_limit = getattr(key, 'individual_output_token_limit', None)
-            if per_key_limit and per_key_limit > 0:
-                output_limit_str = str(per_key_limit)
-            else:
-                output_limit_str = "global"
-
-            # Determine per-key temperature display value
-            per_key_temp = getattr(key, 'individual_key_temperature', None)
-            if per_key_temp is not None:
-                temp_str = str(per_key_temp)
-            else:
-                temp_str = "global"
-
-            # Determine per-key API call delay display value
-            per_key_delay = getattr(key, 'api_call_delay', 0.0)
-            if per_key_delay and per_key_delay > 0:
-                delay_str = str(per_key_delay)
-            else:
-                delay_str = "global"
+            # Per-key output token limit / temperature / API call delay ("global" when unset)
+            output_limit_str, temp_str, delay_str = self._key_parameter_texts(key)
 
             # Position indicator (not currently shown in a column, but kept for potential future use)
             position = f"#{i+1}"
@@ -6266,7 +6217,7 @@ class MultiAPIKeyDialog(QDialog):
             item = QTreeWidgetItem([
                 masked_key,
                 key.model,
-                f"{key.cooldown}s",
+                self._key_cooldown_text(key),
                 output_limit_str,
                 temp_str,
                 delay_str,
@@ -6278,20 +6229,7 @@ class MultiAPIKeyDialog(QDialog):
             self._center_api_key_tree_item_text(item)
 
             # Tooltip for per-key settings
-            tooltip_parts = []
-            if per_key_limit and per_key_limit > 0:
-                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
-            else:
-                tooltip_parts.append("Using global output token limit")
-            if per_key_temp is not None:
-                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
-            else:
-                tooltip_parts.append("Using global temperature")
-            if per_key_delay and per_key_delay > 0:
-                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
-            else:
-                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
-            tooltip = "\n".join(tooltip_parts)
+            tooltip = "\n".join(self._key_parameter_tooltip_lines(key))
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
 
@@ -7328,26 +7266,8 @@ class MultiAPIKeyDialog(QDialog):
 
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
 
-            try:
-                raw_limit = key_data.get('individual_output_token_limit')
-                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
-            except Exception:
-                per_key_limit = None
-            if per_key_limit and per_key_limit > 0:
-                output_limit_str = str(per_key_limit)
-            else:
-                output_limit_str = "global"
-
-            # Determine per-key temperature display value
-            try:
-                raw_temp = key_data.get('individual_key_temperature')
-                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
-            except Exception:
-                per_key_temp = None
-            if per_key_temp is not None:
-                temp_str = str(per_key_temp)
-            else:
-                temp_str = "global"
+            # Per-key output token limit / temperature / API call delay ("global" when unset)
+            output_limit_str, temp_str, delay_str = self._key_parameter_texts(key_data)
 
             enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
@@ -7370,13 +7290,6 @@ class MultiAPIKeyDialog(QDialog):
                 status = "Enabled"
                 color = Qt.gray
 
-            # Determine per-key API call delay display value
-            try:
-                raw_delay = key_data.get('api_call_delay')
-                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
-            except Exception:
-                per_key_delay = 0.0
-            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
 
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
@@ -7386,20 +7299,7 @@ class MultiAPIKeyDialog(QDialog):
                 item.setForeground(col, color)
 
             # Tooltip for per-key settings
-            tooltip_parts = []
-            if per_key_limit and per_key_limit > 0:
-                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
-            else:
-                tooltip_parts.append("Using global output token limit")
-            if per_key_temp is not None:
-                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
-            else:
-                tooltip_parts.append("Using global temperature")
-            if per_key_delay > 0:
-                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
-            else:
-                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
-            tooltip = "\n".join(tooltip_parts)
+            tooltip = "\n".join(self._key_parameter_tooltip_lines(key_data))
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
 
@@ -10093,7 +9993,13 @@ class MultiAPIKeyDialog(QDialog):
 
     # The Key Pools tab's own handlers of a pool's key list. The ⏰ Schedules tab mirrors its
     # selection into that list and runs these, so both tabs share one code path per action.
-    KEY_TREE_MODEL_COLUMN = 1
+    # The editable columns of the lists (the Translation list has the extra ⌛ cooldown column):
+    POOL_KEY_TREE_COLUMNS = {'model': 1, 'output_limit': 2, 'temperature': 3, 'api_call_delay': 4}
+    MAIN_KEY_TREE_COLUMNS = {'model': 1, 'cooldown': 2, 'output_limit': 3, 'temperature': 4, 'api_call_delay': 5}
+
+    def _pool_key_tree_columns(self, pool_name):
+        """``{field: column}`` of *pool_name*'s Key Pools list (its double-click handler's columns)."""
+        return self.MAIN_KEY_TREE_COLUMNS if pool_name == 'main' else self.POOL_KEY_TREE_COLUMNS
 
     def _pool_key_tree_actions(self, pool_name):
         """``menu(position, **anchor)``, ``move(direction)``, ``double_click(item, column)``,
@@ -10219,6 +10125,47 @@ class MultiAPIKeyDialog(QDialog):
             tooltip.extend(schedule_lines)
         item.setToolTip(column, '\n'.join(tooltip))
 
+    # ---- a key's per-key request parameters, as the Key Pools columns show them (Output Limit,
+    # Temperature, Delay (s) and the Translation list's ⌛ cooldown); the ⏰ Schedules tab's
+    # Parameters column combines the same texts
+    @classmethod
+    def _key_parameter_values(cls, key):
+        """``(output token limit or None, temperature or None, API call delay)`` of a key entry or
+        config dict (None / 0.0 = the global setting)."""
+        def number(name, convert):
+            raw = cls._schedule_key_value(key, name, None)
+            try:
+                return convert(raw) if raw not in (None, "") else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+        limit = number('individual_output_token_limit', int)
+        delay = number('api_call_delay', float) or 0.0
+        return (limit if limit and limit > 0 else None,
+                number('individual_key_temperature', float),
+                delay if delay > 0 else 0.0)
+
+    @classmethod
+    def _key_parameter_texts(cls, key):
+        """The Output Limit / Temperature / Delay (s) column texts of a key ("global" when unset)."""
+        limit, temperature, delay = cls._key_parameter_values(key)
+        return (str(limit) if limit else "global",
+                str(temperature) if temperature is not None else "global",
+                str(delay) if delay > 0 else "global")
+
+    @classmethod
+    def _key_parameter_tooltip_lines(cls, key):
+        limit, temperature, delay = cls._key_parameter_values(key)
+        return [f"Individual Output Token Limit: {limit}" if limit else "Using global output token limit",
+                f"Individual Key Temperature: {temperature}" if temperature is not None
+                else "Using global temperature",
+                f"API Call Delay: {delay}s (overrides global SEND_INTERVAL_SECONDS)" if delay > 0
+                else "Using global API call delay (SEND_INTERVAL_SECONDS)"]
+
+    @classmethod
+    def _key_cooldown_text(cls, key):
+        """The Translation list's ⌛ column: the key's rate-limit cooldown."""
+        return f"{cls._schedule_key_value(key, 'cooldown', 60)}s"
+
     def _pool_key_list(self, pool_name):
         """The live key list of a pool (Translation keys are APIKeyEntry objects, the other
         pools config dicts); edits to its entries are persisted by ``_save_pool_key_entries``."""
@@ -10294,8 +10241,19 @@ class MultiAPIKeyDialog(QDialog):
             color: #ffffff;
         }
     """
-    SCHEDULE_TREE_COLUMNS = ("#", "API Key", "Model", "Schedule", "Status")
+    SCHEDULE_TREE_COLUMNS = ("#", "API Key", "Model", "Parameters", "Schedule", "Status")
     SCHEDULE_MODEL_COLUMN = 2
+    SCHEDULE_PARAMETERS_COLUMN = 3
+    SCHEDULE_SCHEDULE_COLUMN = 4
+    SCHEDULE_STATUS_COLUMN = 5
+    SCHEDULE_PARAMETERS_HELP = ("Output limit · temperature · API call delay (and ⌛ cooldown for "
+                                "Translation keys), as in the 🔑 Key Pools columns; \"global\" uses "
+                                "the global setting. Double-click to edit.")
+    # the Parameters double-click menu: (label, Key Pools column field), in the text's order
+    SCHEDULE_PARAMETER_EDITS = (("Output limit…", 'output_limit'), ("Temperature…", 'temperature'),
+                                ("API call delay…", 'api_call_delay'), ("Cooldown…", 'cooldown'))
+    # the editor panel's width cap: its widest rows (Days, the windows box title) without clipping
+    SCHEDULE_EDITOR_MIN_WIDTH = 520
 
     def _create_manager_tabs(self, parent_layout, key_pools_widget):
         """The manager's tabs: "🔑 Key Pools" (every pool section) and "⏰ Schedules" (one
@@ -10422,11 +10380,13 @@ class MultiAPIKeyDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.schedule_key_tree.setColumnWidth(1, 120)
         self.schedule_key_tree.setColumnWidth(2, 140)
+        self.schedule_key_tree.headerItem().setToolTip(self.SCHEDULE_PARAMETERS_COLUMN, self.SCHEDULE_PARAMETERS_HELP)
         # just wide enough for the "Schedule" header; longer states are elided (the cell tooltip lists them)
         self.schedule_key_tree.setColumnWidth(
-            3, header.fontMetrics().horizontalAdvance(self.SCHEDULE_TREE_COLUMNS[3]) + 24)
-        self.schedule_key_tree.setToolTip("Double-click a model to change it; right-click for the key menu; "
-                                          "drag rows or use Reorder to change the key order.")
+            self.SCHEDULE_SCHEDULE_COLUMN,
+            header.fontMetrics().horizontalAdvance(self.SCHEDULE_TREE_COLUMNS[self.SCHEDULE_SCHEDULE_COLUMN]) + 24)
+        self.schedule_key_tree.setToolTip("Double-click a model or the parameters to change them; right-click for "
+                                          "the key menu; drag rows or use Reorder to change the key order.")
         self.schedule_key_tree.itemSelectionChanged.connect(self._on_schedule_selection_changed)
         list_row.addWidget(self.schedule_key_tree, 1)
         list_layout.addLayout(list_row, 1)
@@ -10445,29 +10405,45 @@ class MultiAPIKeyDialog(QDialog):
             editor_panel, None, mode='key', on_clear=self._clear_schedule_for_selected,
             clear_tooltip="Remove the schedule from the selected keys", icon_path=self._halgakos_icon_path())
         editor_layout.addWidget(self.schedule_editor)
-        save_row = QHBoxLayout()
-        self.schedule_status_label = QLabel('')
-        self.schedule_status_label.setStyleSheet("color: gray;")
-        save_row.addWidget(self.schedule_status_label, 1)
         self.schedule_save_button = QPushButton("💾 Save schedule")
         self.schedule_save_button.setToolTip("Write this schedule to the selected keys "
                                              "(a key holds one schedule: the other behaviour is removed)")
         self.schedule_save_button.setMinimumHeight(34)
         self.schedule_save_button.clicked.connect(self._apply_schedule_to_selected)
-        save_row.addWidget(self.schedule_save_button)
-        editor_layout.addLayout(save_row)
+        editor_layout.addWidget(self.schedule_save_button, 0, Qt.AlignHCenter)
+        self.schedule_status_label = QLabel('')
+        self.schedule_status_label.setStyleSheet("color: gray;")
+        self.schedule_status_label.setAlignment(Qt.AlignHCenter)
+        self.schedule_status_label.setWordWrap(True)
+        editor_layout.addWidget(self.schedule_status_label)
         editor_layout.addStretch(1)
         editor_scroll.setWidget(editor_panel)
+        # the editor keeps the width of its widest row; the key list takes the rest
+        editor_width = self._schedule_editor_width(editor_panel, editor_scroll)
+        editor_scroll.setMaximumWidth(editor_width)
         splitter.addWidget(editor_scroll)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 3)
-        splitter.setSizes([560, 560])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([10 ** 6, editor_width])
+        self.schedule_splitter = splitter
         tab_layout.addWidget(splitter, 1)
 
         self._watch_key_pool_trees()
         self._refresh_schedule_pool_items()
         self._on_schedule_pool_changed()
         return self.schedules_tab
+
+    def _schedule_editor_width(self, editor_panel, editor_scroll):
+        """The editor panel's width: its own minimum (the Days checkboxes, time rows and combos)
+        or the "Windows (…)" box title, at least ``SCHEDULE_EDITOR_MIN_WIDTH``, plus room for the
+        scroll area's vertical scroll bar."""
+        editor_panel.ensurePolished()
+        widths = [self.SCHEDULE_EDITOR_MIN_WIDTH, editor_panel.minimumSizeHint().width()]
+        for box in editor_panel.findChildren(QGroupBox):
+            widths.append(box.fontMetrics().horizontalAdvance(box.title()) + 40)
+        scroll_bar = editor_scroll.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+        margins = editor_panel.layout().contentsMargins()
+        return max(widths) + margins.left() + margins.right() + scroll_bar + 4
 
     # ---- keeping the two tabs in sync: the Schedules list is rebuilt from the stored keys
     # whenever a pool's Key Pools list changes (any add / edit / test / reorder / reload there,
@@ -10733,22 +10709,25 @@ class MultiAPIKeyDialog(QDialog):
                     str(number),
                     self._mask_api_key(self._schedule_key_value(key, 'api_key')),
                     str(self._schedule_key_value(key, 'model')),
+                    self._schedule_parameters_text(key, pool_name),
                     request_schedule.key_schedule_overview(key),
                     pool_item.text(status_column) if pool_item is not None else '',
                 ])
                 item.setData(0, Qt.UserRole, number - 1)
                 item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
                 item.setToolTip(self.SCHEDULE_MODEL_COLUMN, "Double-click to change the model")
+                item.setToolTip(self.SCHEDULE_PARAMETERS_COLUMN, self._schedule_parameters_tooltip(key, pool_name))
                 lines = request_schedule.key_schedule_summary(key)[1]
                 if lines:
-                    item.setToolTip(3, "\n".join(lines))
+                    item.setToolTip(self.SCHEDULE_SCHEDULE_COLUMN, "\n".join(lines))
                 if not self._schedule_key_value(key, 'enabled', True):
                     for column in range(item.columnCount()):
                         item.setForeground(column, Qt.gray)
                 if pool_item is not None:
-                    item.setToolTip(4, pool_item.toolTip(status_column))
-                    item.setForeground(4, pool_item.foreground(status_column))
+                    item.setToolTip(self.SCHEDULE_STATUS_COLUMN, pool_item.toolTip(status_column))
+                    item.setForeground(self.SCHEDULE_STATUS_COLUMN, pool_item.foreground(status_column))
                 tree.addTopLevelItem(item)
+            self._fit_schedule_parameters_column()
             for index in selected:
                 if 0 <= index < tree.topLevelItemCount():
                     tree.topLevelItem(index).setSelected(True)
@@ -10757,6 +10736,43 @@ class MultiAPIKeyDialog(QDialog):
         self._schedule_row_entries = keys
         tree.verticalScrollBar().setValue(scroll)
         self._on_schedule_selection_changed()
+
+    def _schedule_parameter_fields(self, pool_name):
+        """The Parameters column's fields of *pool_name*, in order (⌛ cooldown only where the
+        Key Pools list has that column: Translation keys)."""
+        columns = self._pool_key_tree_columns(pool_name)
+        return [(label, field) for label, field in self.SCHEDULE_PARAMETER_EDITS if field in columns]
+
+    def _schedule_parameters_text(self, key, pool_name):
+        """The Key Pools Output Limit · Temperature · Delay (s) texts in one cell, e.g.
+        "16384 · 0.7 · 2.0s" (delay with its unit; "global" as there), plus "⌛60s" for
+        Translation keys (their list's cooldown column)."""
+        limit, temperature, delay = self._key_parameter_texts(key)
+        parts = [limit, temperature, delay if delay == "global" else f"{delay}s"]
+        if 'cooldown' in self._pool_key_tree_columns(pool_name):
+            parts.append(f"⌛{self._key_cooldown_text(key)}")
+        return " · ".join(parts)
+
+    def _schedule_parameters_tooltip(self, key, pool_name):
+        lines = self._key_parameter_tooltip_lines(key)
+        if 'cooldown' in self._pool_key_tree_columns(pool_name):
+            lines.append(f"⌛ Rate-limit cooldown: {self._key_cooldown_text(key)}")
+        return "\n".join(lines + ["", "Double-click to edit."])
+
+    SCHEDULE_PARAMETERS_MAX_WIDTH = "global · global · global · ⌛3600s"
+
+    def _fit_schedule_parameters_column(self):
+        """The Parameters column fits its texts (as compact as the Schedule column), up to the
+        width of all-global values with a cooldown; longer texts are elided (the tooltip has them)."""
+        tree = self.schedule_key_tree
+        metrics = tree.fontMetrics()
+        column = self.SCHEDULE_PARAMETERS_COLUMN
+        texts = [self.SCHEDULE_TREE_COLUMNS[column]] + [
+            tree.topLevelItem(row).text(column) for row in range(tree.topLevelItemCount())]
+        width = max(metrics.horizontalAdvance(text) for text in texts)
+        width = min(width, metrics.horizontalAdvance(self.SCHEDULE_PARAMETERS_MAX_WIDTH))
+        if tree.columnWidth(column) != width + 24:
+            tree.setColumnWidth(column, width + 24)
 
     def _on_schedule_selection_changed(self):
         """Load the first selected key's schedule (and its behaviour) into the editor; a refresh
@@ -10832,15 +10848,48 @@ class MultiAPIKeyDialog(QDialog):
         self._refresh_schedule_tab_after_action(selected_entries)
 
     def _on_schedule_item_double_clicked(self, item, column):
-        """Double-click on a model: the Key Pools list's own double-click model editor."""
-        if item is None or column != self.SCHEDULE_MODEL_COLUMN:
+        """Double-click on a model: the Key Pools list's own double-click model editor; on the
+        parameters: a menu of them, each running the Key Pools list's double-click editor of its
+        column (the clicked key, as a double-click there)."""
+        if item is None:
+            return
+        if column == self.SCHEDULE_MODEL_COLUMN:
+            field = 'model'
+        elif column == self.SCHEDULE_PARAMETERS_COLUMN:
+            field = self._choose_schedule_parameter(item)
+        else:
+            return
+        if field:
+            self._edit_schedule_key_field(item, field)
+
+    def _choose_schedule_parameter(self, item):
+        """The Parameters double-click menu; returns the chosen field (None when dismissed)."""
+        tree = self.schedule_key_tree
+        menu = QMenu(tree)
+        chosen = {}
+        for label, field in self._schedule_parameter_fields(self._schedule_pool()):
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _checked=False, f=field: chosen.setdefault('field', f))
+        rect = tree.visualItemRect(item)
+        rect.setLeft(tree.header().sectionViewportPosition(self.SCHEDULE_PARAMETERS_COLUMN))
+        self._exec_key_context_menu(menu, tree.viewport().mapToGlobal(rect.bottomLeft()))
+        return chosen.get('field')
+
+    def _edit_schedule_key_field(self, item, field):
+        """Run the pool's Key Pools double-click handler on *item*'s key for *field*'s column, with
+        the selection mirrored there too: as on 🔑 Key Pools, the Translation / Fallback / Glossary
+        editors change the double-clicked key and the dedicated pools' editors every selected key."""
+        pool_name = self._schedule_pool()
+        column = self._pool_key_tree_columns(pool_name).get(field)
+        if column is None:
             return
         row = self.schedule_key_tree.indexOfTopLevelItem(item)
-        pool_item = self._mirror_schedule_selection([row]).get(row)
+        rows = sorted(set(self._schedule_selected_indices()) | {row})
+        pool_item = self._mirror_schedule_selection(rows).get(row)
         if pool_item is None:
             return
         selected_entries = self._schedule_selected_entries()
-        self._pool_key_tree_actions(self._schedule_pool())['double_click'](pool_item, self.KEY_TREE_MODEL_COLUMN)
+        self._pool_key_tree_actions(pool_name)['double_click'](pool_item, column)
         self._refresh_schedule_tab_after_action(selected_entries)
 
     def _schedule_move_selected(self, direction):
@@ -11622,16 +11671,7 @@ class MultiAPIKeyDialog(QDialog):
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-            per_key_limit = key_data.get('individual_output_token_limit') or None
-            output_limit_str = str(per_key_limit) if per_key_limit else "global"
-            key_temp = key_data.get('individual_key_temperature')
-            temp_str = str(key_temp) if key_temp not in (None, "") else "global"
-            raw_delay = key_data.get('api_call_delay', 0.0) or 0.0
-            try:
-                per_key_delay = float(raw_delay)
-            except Exception:
-                per_key_delay = 0.0
-            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+            output_limit_str, temp_str, delay_str = self._key_parameter_texts(key_data)
             enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
             if not enabled:
