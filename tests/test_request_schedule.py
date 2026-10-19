@@ -815,3 +815,316 @@ def test_menu_entries_are_wired():
     assert '"⏰ Schedules"' in manager and "def _ensure_schedules_tab" in manager
     gui = (SRC / "translator_gui.py").read_text(encoding="utf-8-sig")
     assert 'menu.addAction("⏳ Request Queue…")' in gui and "def _edit_main_request_queue" in gui
+
+
+# ------------------------------------------- ⏰ Schedules tab ↔ 🔑 Key Pools tab: one set of keys
+def _sync_config():
+    return {
+        "use_multi_api_keys": True,
+        "multi_api_keys": [
+            {"api_key": "sk-main-one-local-test", "model": "deepseek-chat", "enabled": True},
+            {"api_key": "sk-main-two-local-test", "model": "gemini-3-pro", "enabled": True},
+            {"api_key": "sk-main-three-local-test", "model": "gpt-5.6-sol", "enabled": True},
+        ],
+        "use_fallback_keys": True,
+        "fallback_keys": [
+            {"api_key": "fb-one-local-test-key", "model": "gemini-3-pro", "enabled": True},
+            {"api_key": "fb-two-local-test-key", "model": "deepseek-chat", "enabled": True},
+        ],
+        "glossary_keys": [
+            {"api_key": "gl-one-local-test-key", "model": "gemini-3-pro", "enabled": True},
+            {"api_key": "gl-two-local-test-key", "model": "deepseek-chat", "enabled": True},
+        ],
+        "metadata_keys": [
+            {"api_key": "md-one-local-test-key", "model": "gemini-3-pro", "enabled": True},
+            {"api_key": "md-two-local-test-key", "model": "deepseek-chat", "enabled": True},
+        ],
+    }
+
+
+def _schedules_dialog(monkeypatch, config=None):
+    app, mkm = _qt(monkeypatch)
+    config = config or _sync_config()
+    dialog, saved = _manager(mkm, config)
+    dialog.manager_tabs.setCurrentIndex(1)
+    app.processEvents()
+    return app, mkm, dialog, config, saved
+
+
+def _close(app, dialog):
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def _models(tree, column):
+    return [tree.topLevelItem(row).text(column) for row in range(tree.topLevelItemCount())]
+
+
+def _menu_texts(menu):
+    texts = []
+    for action in menu.actions():
+        if action.isSeparator():
+            texts.append("-")
+        else:
+            texts.append(action.text())
+            if action.menu() is not None:
+                texts.extend(f"  {sub.text()}" for sub in action.menu().actions())
+    return texts
+
+
+def test_schedules_tab_adds_keys_with_the_key_pools_form(monkeypatch):
+    app, mkm, dialog, config, saved = _schedules_dialog(monkeypatch)
+    errors = []
+    monkeypatch.setattr(mkm.QMessageBox, "critical", lambda *args, **_kw: errors.append(args[2]))
+    try:
+        host, tree = dialog.schedule_add_host, dialog.schedule_key_tree
+        # the Translation pool's own add form (same widgets) sits in the tab
+        assert host.isAncestorOf(dialog.add_key_frame) and host.isAncestorOf(dialog.model_combo)
+        assert "Halgakos" in dialog.model_combo.styleSheet()
+        # same validation: no model → the Key Pools error, nothing added
+        dialog.api_key_entry.setText("sk-added-from-schedules")
+        dialog._set_combo_text_silently(dialog.model_combo, "")
+        dialog.add_key_btn.click()
+        assert errors and len(dialog.key_pool.keys) == 3
+        dialog.model_combo.setCurrentText("deepseek-chat")
+        dialog.add_key_btn.click()
+        app.processEvents()
+        assert [k["api_key"] for k in config["multi_api_keys"]][-1] == "sk-added-from-schedules"
+        assert dialog.tree.topLevelItemCount() == 4 and tree.topLevelItemCount() == 4
+        assert tree.topLevelItem(3).text(1) == "sk-added...ules" and tree.topLevelItem(3).text(2) == "deepseek-chat"
+        assert dialog.schedule_pool_combo.itemText(0) == "Translation Keys (4)"
+        # another pool: its form comes in, the Translation form goes home
+        assert dialog.select_schedule_pool("fallback")
+        assert host.isAncestorOf(dialog.add_fallback_frame) and not host.isAncestorOf(dialog.add_key_frame)
+        assert dialog.translation_key_pool_frame.isAncestorOf(dialog.add_key_frame)
+        dialog.fallback_key_entry.setText("fb-added-from-schedules")
+        dialog.fallback_model_combo.setCurrentText("gemini-3-pro")
+        dialog._add_fallback_key()
+        app.processEvents()
+        assert config["fallback_keys"][-1]["api_key"] == "fb-added-from-schedules"
+        assert dialog.fallback_tree.topLevelItemCount() == 3 and tree.topLevelItemCount() == 3
+        # a dedicated pool too
+        assert dialog.select_schedule_pool("metadata")
+        assert host.isAncestorOf(dialog.metadata_add_frame)
+        # back on 🔑 Key Pools every form is in its own section
+        dialog.manager_tabs.setCurrentIndex(0)
+        assert not host.isAncestorOf(dialog.metadata_add_frame) and not dialog.schedule_add_hint.isVisibleTo(dialog)
+        assert dialog.add_fallback_frame.parentWidget() is not host
+        # a key added on 🔑 Key Pools shows in the Schedules list
+        dialog.select_schedule_pool("fallback")
+        dialog.fallback_key_entry.setText("fb-added-on-key-pools")
+        dialog.fallback_model_combo.setCurrentText("gemini-3-pro")
+        dialog._add_fallback_key()
+        app.processEvents()
+        assert tree.topLevelItemCount() == 4 and tree.topLevelItem(3).text(1) == "fb-added...ools"
+    finally:
+        _close(app, dialog)
+
+
+def test_schedules_tab_context_menu_is_the_key_pools_menu(monkeypatch):
+    app, mkm, dialog, config, saved = _schedules_dialog(monkeypatch)
+    from PySide6.QtCore import QPoint
+    menus, choose = [], {"text": None}
+
+    def fake_exec(menu, _position):
+        menus.append(_menu_texts(menu))
+        for action in menu.actions():
+            if choose["text"] and action.text().startswith(choose["text"]):
+                action.trigger()
+
+    dialog._exec_key_context_menu = fake_exec
+    monkeypatch.setattr(mkm.QMessageBox, "question", lambda *_a, **_k: mkm.QMessageBox.Yes)
+    tree = dialog.schedule_key_tree
+    tree.itemAt = lambda _pos: tree.topLevelItem(0)
+    try:
+        for pool in ("main", "fallback", "glossary", "metadata"):
+            assert dialog.select_schedule_pool(pool)
+            pool_tree = dialog._key_context_tree(pool)
+            pool_tree.itemAt = lambda _pos, t=pool_tree: t.topLevelItem(0)
+            _select(pool_tree, 0, 1)
+            dialog._pool_key_tree_actions(pool)["menu"](QPoint(1, 1))
+            _select(tree, 0, 1)
+            dialog._show_schedule_key_context_menu(QPoint(1, 1))
+            key_pools_menu, schedules_menu = menus[-2:]
+            assert schedules_menu == key_pools_menu, pool
+            assert "📝 Change Model (2 selected)" in schedules_menu and "🚫 Disable Selected" in schedules_menu
+            # the menu acts on the keys selected in the Schedules list, in both tabs
+            choose["text"] = "🚫 Disable Selected"
+            _select(tree, 0, 1)
+            dialog._show_schedule_key_context_menu(QPoint(1, 1))
+            app.processEvents()
+            keys = dialog._pool_key_list(pool)
+            assert [dialog._schedule_key_value(k, "enabled", True) for k in keys][:2] == [False, False], pool
+            status_column = 6 if pool == "main" else 5
+            assert pool_tree.topLevelItem(0).text(status_column) == "Disabled"
+            assert tree.topLevelItem(0).text(4) == "Disabled" and tree.topLevelItem(1).text(4) == "Disabled"
+            assert tree.topLevelItem(0).isSelected() and tree.topLevelItem(1).isSelected()
+            choose["text"] = "✅ Enable Selected"
+            dialog._show_schedule_key_context_menu(QPoint(1, 1))
+            app.processEvents()
+            assert all(dialog._schedule_key_value(k, "enabled", True) for k in dialog._pool_key_list(pool))
+            assert tree.topLevelItem(0).text(4) != "Disabled"
+            # remove the second key from the Schedules menu
+            choose["text"] = "🗑️ Remove Selected"
+            count = len(dialog._pool_key_list(pool))
+            removed = dialog._pool_key_list(pool)[1]
+            _select(tree, 1)
+            tree.itemAt = lambda _pos: tree.topLevelItem(1)
+            dialog._show_schedule_key_context_menu(QPoint(1, 1))
+            tree.itemAt = lambda _pos: tree.topLevelItem(0)
+            choose["text"] = None
+            app.processEvents()
+            keys = dialog._pool_key_list(pool)
+            assert len(keys) == count - 1 and all(k is not removed for k in keys), pool
+            assert pool_tree.topLevelItemCount() == count - 1 and tree.topLevelItemCount() == count - 1
+        assert config["fallback_keys"][0]["enabled"] and len(saved[-1]["metadata_keys"]) == 1
+    finally:
+        _close(app, dialog)
+
+
+def test_schedules_tab_double_click_model_uses_the_key_pools_editor(monkeypatch):
+    app, mkm, dialog, config, saved = _schedules_dialog(monkeypatch)
+    editors = []
+
+    def fake_editor(current_value="", title="Edit Model", label_text="Model Name:", accept_text="OK"):
+        editors.append((current_value, title))
+        return f"renamed-{len(editors)}", True
+
+    dialog._show_model_selection_dialog = fake_editor
+    tree = dialog.schedule_key_tree
+    try:
+        # Translation: the Key Pools double-click handler and its "Edit Model" editor
+        tree.itemDoubleClicked.emit(tree.topLevelItem(1), dialog.SCHEDULE_MODEL_COLUMN)
+        app.processEvents()
+        assert editors[-1] == ("gemini-3-pro", "Edit Model")
+        assert dialog.key_pool.keys[1].model == "renamed-1"
+        assert dialog.tree.topLevelItem(1).text(1) == "renamed-1" and tree.topLevelItem(1).text(2) == "renamed-1"
+        # other columns are not editors
+        tree.itemDoubleClicked.emit(tree.topLevelItem(1), 1)
+        assert len(editors) == 1
+        # renamed on 🔑 Key Pools → shows here
+        dialog.tree.itemDoubleClicked.emit(dialog.tree.topLevelItem(0), 1)
+        app.processEvents()
+        assert tree.topLevelItem(0).text(2) == "renamed-2"
+        # Fallback: saved to config through the Key Pools path
+        dialog.select_schedule_pool("fallback")
+        tree.itemDoubleClicked.emit(tree.topLevelItem(0), dialog.SCHEDULE_MODEL_COLUMN)
+        app.processEvents()
+        assert editors[-1] == ("gemini-3-pro", "Edit Model")
+        assert config["fallback_keys"][0]["model"] == "renamed-3" and saved[-1]["fallback_keys"][0]["model"] == "renamed-3"
+        assert dialog.fallback_tree.topLevelItem(0).text(1) == "renamed-3" and tree.topLevelItem(0).text(2) == "renamed-3"
+        dialog.fallback_tree.itemDoubleClicked.emit(dialog.fallback_tree.topLevelItem(1), 1)
+        app.processEvents()
+        assert tree.topLevelItem(1).text(2) == "renamed-4"
+        # a dedicated pool: its double-click → its change-model editor
+        dialog.select_schedule_pool("metadata")
+        tree.itemDoubleClicked.emit(tree.topLevelItem(1), dialog.SCHEDULE_MODEL_COLUMN)
+        app.processEvents()
+        assert editors[-1][0] == "deepseek-chat" and editors[-1][1].startswith("Change Model for 1")
+        assert config["metadata_keys"][1]["model"] == "renamed-5" and tree.topLevelItem(1).text(2) == "renamed-5"
+        assert dialog.metadata_tree.topLevelItem(1).text(1) == "renamed-5"
+    finally:
+        _close(app, dialog)
+
+
+def _fake_internal_move(tree, to_row):
+    """What Qt's InternalMove drop does: take the selected rows out, insert them at *to_row*."""
+    def drop(_event):
+        taken = [tree.takeTopLevelItem(tree.indexOfTopLevelItem(item)) for item in tree.selectedItems()]
+        for offset, item in enumerate(taken):
+            tree.insertTopLevelItem(to_row + offset, item)
+    return drop
+
+
+def test_schedules_tab_reorders_keys_like_the_key_pools_tab(monkeypatch):
+    app, mkm, dialog, config, saved = _schedules_dialog(monkeypatch)
+    tree = dialog.schedule_key_tree
+    keys = lambda: [k.api_key for k in dialog.key_pool.keys]  # noqa: E731
+    try:
+        one, two, three = keys()
+        # the reorder buttons: the Key Pools move handler; the moved key stays selected
+        _select(tree, 2)
+        dialog._schedule_move_selected("up")
+        assert keys() == [one, three, two]
+        assert _models(dialog.tree, 0)[1] == _models(tree, 1)[1] == "sk-main-...test"
+        assert [i for i in range(3) if tree.topLevelItem(i).isSelected()] == [1]
+        dialog._schedule_move_selected("top")
+        assert keys() == [three, one, two] and tree.topLevelItem(0).isSelected()
+        assert saved[-1]["multi_api_keys"][0]["api_key"] == three
+        # a drop on the Schedules list (Qt's InternalMove) → the stored order and the Key Pools list
+        tree.dropEvent = _fake_internal_move(tree, 2)
+        dialog._install_key_tree_drop_sync(tree, None)
+        _select(tree, 0)
+        tree.dropEvent(None)
+        assert keys() == [one, two, three]
+        assert [k["api_key"] for k in config["multi_api_keys"]] == [one, two, three]
+        assert [dialog.tree.topLevelItem(i).text(0) for i in range(3)] == [tree.topLevelItem(i).text(1) for i in range(3)]
+        assert [i for i in range(3) if tree.topLevelItem(i).isSelected()] == [2]
+        # a drop on the Key Pools list shows here (and is stored: QTreeWidget never emits rowsMoved)
+        dialog.tree.dropEvent = _fake_internal_move(dialog.tree, 0)
+        dialog._install_key_tree_drop_sync(dialog.tree, "main")
+        _select(dialog.tree, 1)
+        dialog.tree.dropEvent(None)
+        app.processEvents()
+        assert keys() == [two, one, three] and dialog.tree.topLevelItem(0).isSelected()
+        assert tree.topLevelItem(0).text(1) == "sk-main-...test" and dialog.key_pool.keys[0].api_key == two
+        assert [i for i in range(3) if tree.topLevelItem(i).isSelected()] == [2]   # selection follows its key
+        # Fallback: buttons and drops write the config list
+        dialog.select_schedule_pool("fallback")
+        _select(tree, 1)
+        dialog._schedule_move_selected("up")
+        assert [k["api_key"] for k in config["fallback_keys"]] == ["fb-two-local-test-key", "fb-one-local-test-key"]
+        assert _models(dialog.fallback_tree, 1) == _models(tree, 2) == ["deepseek-chat", "gemini-3-pro"]
+        tree.dropEvent = _fake_internal_move(tree, 1)
+        dialog._install_key_tree_drop_sync(tree, None)
+        _select(tree, 0)
+        tree.dropEvent(None)
+        assert [k["api_key"] for k in saved[-1]["fallback_keys"]] == ["fb-one-local-test-key", "fb-two-local-test-key"]
+        assert _models(dialog.fallback_tree, 1) == _models(tree, 2) == ["gemini-3-pro", "deepseek-chat"]
+        # Key Pools reorder buttons → here
+        _select(dialog.fallback_tree, 1)
+        dialog._move_fallback_key("top")
+        app.processEvents()
+        assert _models(tree, 2) == ["deepseek-chat", "gemini-3-pro"]
+    finally:
+        _close(app, dialog)
+
+
+def test_schedules_tab_never_writes_stale_keys(monkeypatch):
+    app, mkm, dialog, config, saved = _schedules_dialog(monkeypatch)
+    tree, editor = dialog.schedule_key_tree, dialog.schedule_editor
+    dialog._show_model_selection_dialog = lambda *_a, **_k: ("renamed-on-key-pools", True)
+    try:
+        dialog.select_schedule_pool("fallback")
+        _select(tree, 0)
+        editor.enable_check.setChecked(True)            # unsaved edit in the editor
+        # meanwhile on 🔑 Key Pools: rename key 2, add a key
+        dialog.fallback_tree.itemDoubleClicked.emit(dialog.fallback_tree.topLevelItem(1), 1)
+        dialog.fallback_key_entry.setText("fb-added-meanwhile")
+        dialog.fallback_model_combo.setCurrentText("gemini-3-pro")
+        dialog._add_fallback_key()
+        app.processEvents()
+        # the pool, the selection and the unsaved editor survive the refresh
+        assert dialog._schedule_pool() == "fallback" and tree.topLevelItemCount() == 3
+        assert [i for i in range(3) if tree.topLevelItem(i).isSelected()] == [0]
+        assert editor.enable_check.isChecked()
+        dialog._apply_schedule_to_selected()
+        stored = saved[-1]["fallback_keys"]
+        assert [k["api_key"] for k in stored] == ["fb-one-local-test-key", "fb-two-local-test-key", "fb-added-meanwhile"]
+        assert stored[1]["model"] == "renamed-on-key-pools" and rs.is_enabled_config(stored[0]["disable_schedule"])
+        # Translation keys: a Key Pools edit and a Schedules save write the same objects
+        dialog.select_schedule_pool("main")
+        dialog.tree.itemDoubleClicked.emit(dialog.tree.topLevelItem(2), 1)
+        _select(tree, 0)
+        dialog._apply_schedule_to_selected()
+        assert saved[-1]["multi_api_keys"][2]["model"] == "renamed-on-key-pools"
+        assert len(saved[-1]["multi_api_keys"]) == 3 and "disable_schedule" in saved[-1]["multi_api_keys"][0]
+    finally:
+        _close(app, dialog)
+
+
+def test_one_reorder_column_and_drop_sync_for_every_key_list():
+    manager = (SRC / "multi_api_key_manager.py").read_text(encoding="utf-8")
+    assert manager.count("QPushButton(\"↑ ↑\")") == 0 and manager.count("_create_key_reorder_column(") == 6
+    assert "rowsMoved.connect" not in manager and manager.count("_install_key_tree_drop_sync(") == 6

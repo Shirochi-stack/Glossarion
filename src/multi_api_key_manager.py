@@ -4497,48 +4497,8 @@ class MultiAPIKeyDialog(QDialog):
         container_layout.setContentsMargins(0, 0, 0, 0)
 
         # Left side: Move buttons - store reference for hide/show
-        self.fallback_move_frame = QWidget()
-        move_layout = QVBoxLayout(self.fallback_move_frame)
-        move_layout.setContentsMargins(0, 0, 5, 0)
-
-        order_label = QLabel("Reorder")
-        order_font = QFont()
-        order_font.setBold(True)
-        order_label.setFont(order_font)
-        move_layout.addWidget(order_label)
-
-        # Move to top button
-        top_btn = QPushButton("↑ ↑")
-        top_btn.setFixedSize(55, 32)
-        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        top_btn.clicked.connect(lambda: self._move_fallback_key('top'))
-        move_layout.addWidget(top_btn)
-
-        up_btn = QPushButton("↑")
-        up_btn.setFixedSize(55, 32)
-        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        up_btn.clicked.connect(lambda: self._move_fallback_key('up'))
-        move_layout.addWidget(up_btn)
-
-        down_btn = QPushButton("↓")
-        down_btn.setFixedSize(55, 32)
-        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        down_btn.clicked.connect(lambda: self._move_fallback_key('down'))
-        move_layout.addWidget(down_btn)
-
-        # Move to bottom button
-        bottom_btn = QPushButton("↓ ↓")
-        bottom_btn.setFixedSize(55, 32)
-        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        bottom_btn.clicked.connect(lambda: self._move_fallback_key('bottom'))
-        move_layout.addWidget(bottom_btn)
-
-        move_layout.addSpacing(10)
-
-        self.fallback_position_label = QLabel()
-        self.fallback_position_label.setStyleSheet("color: gray;")
-        move_layout.addWidget(self.fallback_position_label)
-        move_layout.addStretch()
+        self.fallback_move_frame, self.fallback_position_label = self._create_key_reorder_column(
+            self._move_fallback_key)
         container_layout.addWidget(self.fallback_move_frame)
 
         # Right side: TreeWidget with drag and drop
@@ -4577,8 +4537,8 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.setDragDropMode(QAbstractItemView.InternalMove)
         self.fallback_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
-        # Connect to model's rowsMoved signal to sync data after Qt moves items
-        self.fallback_tree.model().rowsMoved.connect(self._on_fallback_rows_moved)
+        # Sync the stored order after Qt moved the dropped rows
+        self._install_key_tree_drop_sync(self.fallback_tree, 'fallback')
         self.fallback_tree.itemSelectionChanged.connect(self._on_fallback_selection_change)
 
         # Connect double-click for inline editing (consistent with multi-key tree)
@@ -4652,7 +4612,7 @@ class MultiAPIKeyDialog(QDialog):
         for i, key_data in enumerate(fallback_keys):
             self._test_single_fallback_key(key_data, i)
 
-    def _show_fallback_context_menu(self, position):
+    def _show_fallback_context_menu(self, position, **anchor):
         """Show context menu for fallback keys."""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         self._show_shared_key_context_menu(
@@ -4682,6 +4642,7 @@ class MultiAPIKeyDialog(QDialog):
             remove_callback=self._remove_selected_fallback,
             clear_all_callback=self._clear_all_fallbacks,
             index_resolver=lambda item, _visual: self._fallback_config_index_for_item(item),
+            **anchor,
         )
 
     def _change_fallback_model_for_selected(self):
@@ -5717,53 +5678,7 @@ class MultiAPIKeyDialog(QDialog):
         main_container_layout.setContentsMargins(0, 0, 0, 0)
 
         # Left side: Move buttons
-        move_frame = QWidget()
-        move_layout = QVBoxLayout(move_frame)
-        move_layout.setContentsMargins(0, 0, 5, 0)
-
-        reorder_label = QLabel("Reorder")
-        reorder_font = QFont()
-        reorder_font.setBold(True)
-        reorder_label.setFont(reorder_font)
-        move_layout.addWidget(reorder_label)
-
-        # Move to top button with expanded width
-        top_btn = QPushButton("↑ ↑")
-        top_btn.setFixedSize(55, 32)
-        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        top_btn.clicked.connect(lambda: self._move_key('top'))
-        move_layout.addWidget(top_btn)
-
-        # Move up button with expanded width
-        up_btn = QPushButton("↑")
-        up_btn.setFixedSize(55, 32)
-        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        up_btn.clicked.connect(lambda: self._move_key('up'))
-        move_layout.addWidget(up_btn)
-
-        # Move down button with expanded width
-        down_btn = QPushButton("↓")
-        down_btn.setFixedSize(55, 32)
-        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        down_btn.clicked.connect(lambda: self._move_key('down'))
-        move_layout.addWidget(down_btn)
-
-        # Move to bottom button with expanded width
-        bottom_btn = QPushButton("↓ ↓")
-        bottom_btn.setFixedSize(55, 32)
-        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        bottom_btn.clicked.connect(lambda: self._move_key('bottom'))
-        move_layout.addWidget(bottom_btn)
-
-        # Spacer
-        move_layout.addSpacing(10)
-
-        # Position label
-        self.position_label = QLabel()
-        self.position_label.setStyleSheet("color: gray;")
-        move_layout.addWidget(self.position_label)
-        move_layout.addStretch()
-
+        move_frame, self.position_label = self._create_key_reorder_column(self._move_key)
         main_container_layout.addWidget(move_frame)
 
         # Right side: TreeWidget with drag and drop support
@@ -5807,8 +5722,8 @@ class MultiAPIKeyDialog(QDialog):
         # This is the simplest approach - let Qt handle everything
         self.tree.setDragDropMode(QAbstractItemView.InternalMove)
 
-        # Connect to model's rowsMoved signal to sync data after Qt moves items
-        self.tree.model().rowsMoved.connect(self._on_tree_rows_moved)
+        # Sync the stored order after Qt moved the dropped rows
+        self._install_key_tree_drop_sync(self.tree, 'main')
 
         # Connect signals
         self.tree.itemDoubleClicked.connect(self._on_click)
@@ -6054,6 +5969,8 @@ class MultiAPIKeyDialog(QDialog):
             with self.key_pool.lock:
                 self.key_pool.keys[index], self.key_pool.keys[new_index] = \
                     self.key_pool.keys[new_index], self.key_pool.keys[index]
+            # Store the order (rotation follows it), like a drag-and-drop does
+            self._save_keys_to_config()
 
             # Refresh display
             self._refresh_key_list()
@@ -6646,14 +6563,22 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_callback, clear_temp_callback, set_delay_callback,
         clear_delay_callback, test_callback, enable_callback, disable_callback,
         remove_callback, clear_all_callback=None, index_resolver=None,
-        configure_contexts_callback=None
+        configure_contexts_callback=None, anchor_tree=None, anchor_item=None
     ):
-        """Shared context menu for every API key tree."""
-        item = tree.itemAt(position)
-        if not item:
-            return
-        if item not in tree.selectedItems():
-            tree.setCurrentItem(item)
+        """Shared context menu for every API key tree.
+
+        *anchor_tree* / *anchor_item*: the menu was requested on another view of the same keys
+        (the ⏰ Schedules tab's list, which has already mirrored its selection into *tree*):
+        *anchor_item* is the clicked key's item in *tree*, the menu opens at *position* of
+        *anchor_tree*."""
+        if anchor_item is not None:
+            item = anchor_item
+        else:
+            item = tree.itemAt(position)
+            if not item:
+                return
+            if item not in tree.selectedItems():
+                tree.setCurrentItem(item)
 
         visual_index = tree.indexOfTopLevelItem(item)
         key_index = index_resolver(item, visual_index) if index_resolver else visual_index
@@ -6713,7 +6638,11 @@ class MultiAPIKeyDialog(QDialog):
         if clear_all_callback and total_keys:
             menu.addAction("🧨 Clear All").triggered.connect(clear_all_callback)
 
-        menu.exec_(tree.viewport().mapToGlobal(position))
+        self._exec_key_context_menu(menu, (anchor_tree or tree).viewport().mapToGlobal(position))
+
+    def _exec_key_context_menu(self, menu, global_position):
+        """Run a key tree's context menu (one place, so tests can read the menu instead)."""
+        menu.exec_(global_position)
 
     def _edit_key_request_parameters(self, key_data, save_callback):
         """Edit the request-body fields belonging to one key entry."""
@@ -6735,7 +6664,7 @@ class MultiAPIKeyDialog(QDialog):
             key_data.request_parameters = dialog.request_parameters
         save_callback()
 
-    def _show_context_menu(self, position):
+    def _show_context_menu(self, position, **anchor):
         """Show context menu with reorder and per-key settings"""
         self._show_shared_key_context_menu(
             tree=self.tree,
@@ -6762,6 +6691,7 @@ class MultiAPIKeyDialog(QDialog):
             enable_callback=self._enable_selected,
             disable_callback=self._disable_selected,
             remove_callback=self._remove_selected,
+            **anchor,
         )
 
     def _set_cooldown_for_selected(self):
@@ -7224,46 +7154,8 @@ class MultiAPIKeyDialog(QDialog):
         container_layout.setContentsMargins(0, 0, 0, 0)
 
         # Left side: Move buttons
-        self.glossary_move_frame = QWidget()
-        move_layout = QVBoxLayout(self.glossary_move_frame)
-        move_layout.setContentsMargins(0, 0, 5, 0)
-
-        order_label = QLabel("Reorder")
-        order_font = QFont()
-        order_font.setBold(True)
-        order_label.setFont(order_font)
-        move_layout.addWidget(order_label)
-
-        top_btn = QPushButton("↑ ↑")
-        top_btn.setFixedSize(55, 32)
-        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        top_btn.clicked.connect(lambda: self._move_glossary_key('top'))
-        move_layout.addWidget(top_btn)
-
-        up_btn = QPushButton("↑")
-        up_btn.setFixedSize(55, 32)
-        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        up_btn.clicked.connect(lambda: self._move_glossary_key('up'))
-        move_layout.addWidget(up_btn)
-
-        down_btn = QPushButton("↓")
-        down_btn.setFixedSize(55, 32)
-        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        down_btn.clicked.connect(lambda: self._move_glossary_key('down'))
-        move_layout.addWidget(down_btn)
-
-        bottom_btn = QPushButton("↓ ↓")
-        bottom_btn.setFixedSize(55, 32)
-        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        bottom_btn.clicked.connect(lambda: self._move_glossary_key('bottom'))
-        move_layout.addWidget(bottom_btn)
-
-        move_layout.addSpacing(10)
-
-        self.glossary_position_label = QLabel()
-        self.glossary_position_label.setStyleSheet("color: gray;")
-        move_layout.addWidget(self.glossary_position_label)
-        move_layout.addStretch()
+        self.glossary_move_frame, self.glossary_position_label = self._create_key_reorder_column(
+            self._move_glossary_key)
         container_layout.addWidget(self.glossary_move_frame)
 
         # Right side: TreeWidget with drag and drop
@@ -7299,7 +7191,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_tree.setDragDropMode(QAbstractItemView.InternalMove)
         self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
-        self.glossary_tree.model().rowsMoved.connect(self._on_glossary_rows_moved)
+        self._install_key_tree_drop_sync(self.glossary_tree, 'glossary')
         self.glossary_tree.itemSelectionChanged.connect(self._on_glossary_selection_change)
         self.glossary_tree.itemDoubleClicked.connect(self._on_glossary_click)
         self.glossary_tree.itemClicked.connect(lambda item, col: self._key_status_clicked('glossary', item, col))
@@ -7953,7 +7845,7 @@ class MultiAPIKeyDialog(QDialog):
             self.glossary_azure_endpoint_entry.clear()
             self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
 
-    def _show_glossary_context_menu(self, position):
+    def _show_glossary_context_menu(self, position, **anchor):
         """Show context menu for glossary keys."""
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         self._show_shared_key_context_menu(
@@ -7982,6 +7874,7 @@ class MultiAPIKeyDialog(QDialog):
             disable_callback=self._disable_selected_glossary,
             remove_callback=self._remove_selected_glossary,
             clear_all_callback=self._clear_all_glossary,
+            **anchor,
         )
 
     def _change_glossary_model_for_selected(self):
@@ -10132,6 +10025,103 @@ class MultiAPIKeyDialog(QDialog):
             return self.glossary_tree
         return self._dedicated_widget(pool_name, 'tree')
 
+    # The Key Pools tab's own handlers of a pool's key list. The ⏰ Schedules tab mirrors its
+    # selection into that list and runs these, so both tabs share one code path per action.
+    KEY_TREE_MODEL_COLUMN = 1
+
+    def _pool_key_tree_actions(self, pool_name):
+        """``menu(position, **anchor)``, ``move(direction)``, ``double_click(item, column)``,
+        ``rows_moved()`` (store the list's order) and ``reload()`` of *pool_name*'s key list."""
+        if pool_name == 'main':
+            return {'menu': self._show_context_menu, 'move': self._move_key,
+                    'double_click': self._on_click, 'rows_moved': self._on_tree_rows_moved,
+                    'reload': self._refresh_key_list}
+        if pool_name == 'fallback':
+            return {'menu': self._show_fallback_context_menu, 'move': self._move_fallback_key,
+                    'double_click': self._on_fallback_click, 'rows_moved': self._on_fallback_rows_moved,
+                    'reload': self._load_fallback_keys}
+        if pool_name == 'glossary':
+            return {'menu': self._show_glossary_context_menu, 'move': self._move_glossary_key,
+                    'double_click': self._on_glossary_click, 'rows_moved': self._on_glossary_rows_moved,
+                    'reload': self._load_glossary_keys}
+        return {
+            'menu': lambda position, **anchor: self._dedicated_show_context_menu(pool_name, position, **anchor),
+            'move': lambda direction: self._dedicated_move_key(pool_name, direction),
+            'double_click': lambda item, column: self._dedicated_on_click(pool_name, item, column),
+            'rows_moved': lambda: self._dedicated_on_rows_moved(pool_name),
+            'reload': lambda: self._dedicated_load_keys(pool_name),
+        }
+
+    def _pool_tree_items_by_index(self, pool_name):
+        """``{key index: item}`` of *pool_name*'s Key Pools list."""
+        tree = self._key_context_tree(pool_name)
+        items = {}
+        if tree is None:
+            return items
+        for row in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(row)
+            index = self._fallback_config_index_for_item(item) if pool_name == 'fallback' else row
+            items.setdefault(index, item)
+        return items
+
+    def _create_key_reorder_column(self, move_callback):
+        """The "Reorder" column beside a key list: ↑↑ ↑ ↓ ↓↓ call *move_callback(direction)*;
+        returns ``(frame, position label)``."""
+        frame = QWidget()
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 5, 0)
+        label = QLabel("Reorder")
+        font = QFont()
+        font.setBold(True)
+        label.setFont(font)
+        layout.addWidget(label)
+        for text, direction, size in (("↑ ↑", "top", 14), ("↑", "up", 16), ("↓", "down", 16), ("↓ ↓", "bottom", 14)):
+            button = QPushButton(text)
+            button.setFixedSize(55, 32)
+            button.setStyleSheet(f"QPushButton {{ font-size: {size}pt; padding: 2px; }}")
+            button.clicked.connect(lambda _checked=False, d=direction: move_callback(d))
+            layout.addWidget(button)
+        layout.addSpacing(10)
+        position_label = QLabel()
+        position_label.setStyleSheet("color: gray;")
+        layout.addWidget(position_label)
+        layout.addStretch()
+        return frame, position_label
+
+    def _install_key_tree_drop_sync(self, tree, pool_name):
+        """Drag-and-drop reordering of a key list. Qt's InternalMove takes the dragged rows out
+        and inserts them at the drop row (QTreeWidget never emits ``rowsMoved``), so the order
+        is stored after the drop: ``_sync_dropped_key_order`` for a pool's Key Pools list, or
+        ``_on_schedule_rows_dropped`` for the ⏰ Schedules list (*pool_name* None)."""
+        original_drop_event = tree.dropEvent
+
+        def drop_event(event):
+            moved = list(tree.selectedItems())
+            before = [tree.topLevelItem(row) for row in range(tree.topLevelItemCount())]
+            original_drop_event(event)
+            after = [tree.topLevelItem(row) for row in range(tree.topLevelItemCount())]
+            if not moved or (len(before) == len(after) and all(a is b for a, b in zip(before, after))):
+                return
+            if pool_name is None:
+                self._on_schedule_rows_dropped(moved)
+            else:
+                self._sync_dropped_key_order(pool_name, moved)
+
+        tree.dropEvent = drop_event
+
+    def _sync_dropped_key_order(self, pool_name, moved_items):
+        """After a drop on *pool_name*'s key list: store the list's new order (the pool's own
+        rows-moved handler), rebuild the list from storage and keep the moved keys selected."""
+        tree = self._key_context_tree(pool_name)
+        rows = sorted(tree.indexOfTopLevelItem(item) for item in moved_items)
+        actions = self._pool_key_tree_actions(pool_name)
+        actions['rows_moved']()
+        actions['reload']()
+        tree.clearSelection()
+        for row in rows:
+            if 0 <= row < tree.topLevelItemCount():
+                tree.topLevelItem(row).setSelected(True)
+
     def _key_status_clicked(self, pool_name, item, column):
         if column == (6 if pool_name == 'main' else 5):
             self._edit_selected_key_contexts(pool_name, items=[item])
@@ -10238,7 +10228,8 @@ class MultiAPIKeyDialog(QDialog):
             color: #ffffff;
         }
     """
-    SCHEDULE_TREE_COLUMNS = ("#", "API Key", "Model", "Schedule")
+    SCHEDULE_TREE_COLUMNS = ("#", "API Key", "Model", "Schedule", "Status")
+    SCHEDULE_MODEL_COLUMN = 2
 
     def _create_manager_tabs(self, parent_layout, key_pools_widget):
         """The manager's tabs: "🔑 Key Pools" (every pool section) and "⏰ Schedules" (one
@@ -10255,12 +10246,19 @@ class MultiAPIKeyDialog(QDialog):
         self.manager_tabs.currentChanged.connect(self._on_manager_tab_changed)
         parent_layout.addWidget(self.manager_tabs)
 
+    def _schedules_tab_is_current(self):
+        tabs = getattr(self, 'manager_tabs', None)
+        return tabs is not None and tabs.currentWidget() is getattr(self, 'schedules_tab', None)
+
     def _on_manager_tab_changed(self, index):
         if getattr(self, 'manager_tabs', None) is None:
             return
         if self.manager_tabs.widget(index) is getattr(self, 'schedules_tab', None):
             self._ensure_schedules_tab()
             self._refresh_schedule_tab()
+            self._borrow_pool_add_form()
+        else:
+            self._return_pool_add_form()
 
     def _schedule_pool_ids(self):
         """Every key pool the manager has (Translation, Fallback, Glossary, the dedicated pools)."""
@@ -10276,11 +10274,21 @@ class MultiAPIKeyDialog(QDialog):
         api_key = str(api_key or '')
         return api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
 
+    def _build_pending_key_pool_sections(self):
+        """Build the Key Pools sections still waiting for the deferred render now: the
+        ⏰ Schedules tab works through their key lists and add forms."""
+        self._deferred_key_pool_render_started = True
+        while getattr(self, '_pending_key_pool_section_builders', None):
+            self._render_next_deferred_key_pool_section()
+
     def _ensure_schedules_tab(self):
-        """Build the ⏰ Schedules tab once: pool picker, the pool's keys with their schedule,
-        and the shared :class:`ScheduleEditor` (mode 'key') with Save / Clear for the selection."""
+        """Build the ⏰ Schedules tab once: pool picker, the pool's add-key form (borrowed from
+        the 🔑 Key Pools tab), the pool's keys with their schedule (reorder column, drag and drop,
+        the Key Pools context menu, double-click the model) and the shared :class:`ScheduleEditor`
+        (mode 'key') with Save / Clear for the selection."""
         if getattr(self, 'schedule_editor', None) is not None:
             return self.schedules_tab
+        self._build_pending_key_pool_sections()
         tab_layout = QVBoxLayout(self.schedules_tab)
         tab_layout.setContentsMargins(20, 12, 20, 12)
         tab_layout.setSpacing(10)
@@ -10288,7 +10296,8 @@ class MultiAPIKeyDialog(QDialog):
         intro = ScheduleEditor._wrapped_label(
             "Pick a pool, select one or more keys and give them one schedule: during its windows the "
             "key is either skipped (🗓️ disabled; other keys take over) or its requests wait "
-            "(⏳ queued) until the window ends. Schedules are off until you enable them.")
+            "(⏳ queued) until the window ends. Schedules are off until you enable them. Keys added, "
+            "edited or reordered here change the same keys as the 🔑 Key Pools tab.")
         intro.setStyleSheet("color: gray;")
         tab_layout.addWidget(intro)
 
@@ -10303,23 +10312,46 @@ class MultiAPIKeyDialog(QDialog):
         pool_row.addWidget(self.schedule_pool_combo, 1)
         tab_layout.addLayout(pool_row)
 
+        # the pool's own add-key form from the 🔑 Key Pools tab sits here while this tab is open
+        self.schedule_add_host = QWidget()
+        self.schedule_add_layout = QVBoxLayout(self.schedule_add_host)
+        self.schedule_add_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(self.schedule_add_host)
+        self.schedule_add_hint = QLabel("This pool is switched off: turn it on in 🔑 Key Pools to add keys.")
+        self.schedule_add_hint.setStyleSheet("color: gray;")
+        self.schedule_add_hint.hide()
+        tab_layout.addWidget(self.schedule_add_hint)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
 
         list_panel = QWidget()
         list_layout = QVBoxLayout(list_panel)
         list_layout.setContentsMargins(0, 0, 0, 0)
+        list_row = QHBoxLayout()
+        list_row.setContentsMargins(0, 0, 0, 0)
+        reorder_column, self.schedule_position_label = self._create_key_reorder_column(self._schedule_move_selected)
+        list_row.addWidget(reorder_column)
         self.schedule_key_tree = QTreeWidget()
         self.schedule_key_tree.setHeaderLabels(list(self.SCHEDULE_TREE_COLUMNS))
         self.schedule_key_tree.setRootIsDecorated(False)
         self.schedule_key_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.schedule_key_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self._install_key_tree_drop_sync(self.schedule_key_tree, None)
+        self.schedule_key_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.schedule_key_tree.customContextMenuRequested.connect(self._show_schedule_key_context_menu)
+        self.schedule_key_tree.itemDoubleClicked.connect(self._on_schedule_item_double_clicked)
         header = self.schedule_key_tree.header()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.schedule_key_tree.setColumnWidth(1, 120)
         self.schedule_key_tree.setColumnWidth(2, 140)
+        self.schedule_key_tree.setColumnWidth(3, 130)
+        self.schedule_key_tree.setToolTip("Double-click a model to change it; right-click for the key menu; "
+                                          "drag rows or use Reorder to change the key order.")
         self.schedule_key_tree.itemSelectionChanged.connect(self._on_schedule_selection_changed)
-        list_layout.addWidget(self.schedule_key_tree, 1)
+        list_row.addWidget(self.schedule_key_tree, 1)
+        list_layout.addLayout(list_row, 1)
         self.schedule_selection_label = ScheduleEditor._wrapped_label('')
         self.schedule_selection_label.setStyleSheet("color: gray;")
         list_layout.addWidget(self.schedule_selection_label)
@@ -10349,13 +10381,86 @@ class MultiAPIKeyDialog(QDialog):
         editor_layout.addStretch(1)
         editor_scroll.setWidget(editor_panel)
         splitter.addWidget(editor_scroll)
-        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 3)
-        splitter.setSizes([460, 640])
+        splitter.setSizes([560, 560])
         tab_layout.addWidget(splitter, 1)
 
+        self._watch_key_pool_trees()
         self._on_schedule_pool_changed()
         return self.schedules_tab
+
+    # ---- keeping the two tabs in sync: the Schedules list is rebuilt from the stored keys
+    # whenever a pool's Key Pools list changes (any add / edit / test / reorder / reload there,
+    # including the config broadcasts), so it never keeps keys of its own to write back.
+    def _watch_key_pool_trees(self):
+        for pool_name in self._schedule_pool_ids():
+            tree = self._key_context_tree(pool_name)
+            if tree is None or bool(tree.property('scheduleTabWatched')):
+                continue
+            tree.setProperty('scheduleTabWatched', True)
+            model = tree.model()
+            for signal in (model.dataChanged, model.rowsInserted, model.rowsRemoved,
+                           model.modelReset, model.layoutChanged):
+                signal.connect(lambda *_args: self._queue_schedule_tab_sync())
+
+    def _queue_schedule_tab_sync(self):
+        if getattr(self, '_schedule_tab_sync_queued', False):
+            return
+        try:
+            QTimer.singleShot(0, self, self._sync_schedule_tab)
+        except RuntimeError:
+            return  # the dialog is being destroyed (its key lists are emptied on the way out)
+        self._schedule_tab_sync_queued = True
+
+    def _sync_schedule_tab(self):
+        self._schedule_tab_sync_queued = False
+        tree = getattr(self, 'schedule_key_tree', None)
+        if tree is None:
+            return
+        if tree.state() == QAbstractItemView.DraggingState:
+            self._schedule_tab_sync_queued = True
+            QTimer.singleShot(200, self, self._sync_schedule_tab)
+            return
+        self._refresh_schedule_tab()
+
+    # ---- the pool's add-key form: the Key Pools widget itself, moved here while this tab shows
+    def _pool_add_form(self, pool_name):
+        attr = {'main': 'add_key_frame', 'fallback': 'add_fallback_frame',
+                'glossary': 'add_glossary_frame'}.get(pool_name)
+        return getattr(self, attr, None) if attr else self._dedicated_widget(pool_name, 'add_frame')
+
+    def _borrow_pool_add_form(self):
+        """Show the chosen pool's 🔑 Key Pools add-key form (same widgets, validation and save)
+        in this tab; it goes back to its section when the tab or the pool changes."""
+        if getattr(self, 'schedule_editor', None) is None or not self._schedules_tab_is_current():
+            return None
+        self._return_pool_add_form()
+        form = self._pool_add_form(self._schedule_pool())
+        home = form.parentWidget().layout() if form is not None and form.parentWidget() else None
+        if home is None:
+            self.schedule_add_hint.hide()
+            return None
+        hidden = form.isHidden()
+        index = home.indexOf(form)
+        home.removeWidget(form)
+        self.schedule_add_layout.addWidget(form)
+        form.setVisible(not hidden)
+        self._borrowed_add_form = (form, home, index)
+        self.schedule_add_hint.setVisible(hidden)
+        return form
+
+    def _return_pool_add_form(self):
+        borrowed = getattr(self, '_borrowed_add_form', None)
+        if not borrowed:
+            return
+        self._borrowed_add_form = None
+        form, home, index = borrowed
+        hidden = form.isHidden()
+        self.schedule_add_layout.removeWidget(form)
+        home.insertWidget(index, form)
+        form.setVisible(not hidden)
+        self.schedule_add_hint.hide()
 
     def _schedule_pool(self):
         combo = getattr(self, 'schedule_pool_combo', None)
@@ -10370,10 +10475,12 @@ class MultiAPIKeyDialog(QDialog):
         return index >= 0
 
     def _on_schedule_pool_changed(self):
+        self._return_pool_add_form()
         self.schedule_editor.set_kinds(request_schedule.pool_schedule_kinds(self._schedule_pool()))
         self._refresh_schedule_key_list(selected=[])
+        self._borrow_pool_add_form()
 
-    def _refresh_schedule_tab(self):
+    def _refresh_schedule_tab(self, selected_entries=None):
         if getattr(self, 'schedule_editor', None) is None:
             return
         combo = self.schedule_pool_combo
@@ -10381,65 +10488,191 @@ class MultiAPIKeyDialog(QDialog):
             pool = combo.itemData(index)
             count = len(self._pool_key_list(pool) or [])
             combo.setItemText(index, f"{key_pool_service.POOL_SPECS[pool]['title']} ({count})")
-        self._refresh_schedule_key_list()
+        self._refresh_schedule_key_list(selected_entries=selected_entries)
 
     def _schedule_selected_indices(self):
         tree = self.schedule_key_tree
         return sorted(tree.indexOfTopLevelItem(item) for item in tree.selectedItems())
 
-    def _refresh_schedule_key_list(self, selected=None):
-        """Fill the key list of the chosen pool: key (masked), model and schedule state."""
-        if selected is None:
-            selected = self._schedule_selected_indices()
+    def _schedule_selected_entries(self):
+        """The stored key entries behind the selected rows (rows keep their entry's index)."""
+        entries = getattr(self, '_schedule_row_entries', [])
+        rows = []
+        for item in self.schedule_key_tree.selectedItems():
+            index = item.data(0, Qt.UserRole)
+            if isinstance(index, int) and 0 <= index < len(entries):
+                rows.append((self.schedule_key_tree.indexOfTopLevelItem(item), entries[index]))
+        return [entry for _row, entry in sorted(rows, key=lambda pair: pair[0])]
+
+    def _refresh_schedule_key_list(self, selected=None, selected_entries=None):
+        """Fill the key list of the chosen pool from the stored keys: key (masked), model,
+        schedule state and the Key Pools list's status. The selection follows the selected
+        keys (by entry, so it survives reorders); *selected* rows replace it."""
         tree = self.schedule_key_tree
-        keys = self._pool_key_list(self._schedule_pool()) or []
+        pool_name = self._schedule_pool()
+        keys = list(self._pool_key_list(pool_name) or [])
+        previous_entries = list(getattr(self, '_schedule_row_entries', []))
+        if selected is None:
+            if selected_entries is None:
+                selected_entries = self._schedule_selected_entries()
+            selected = [row for row, key in enumerate(keys) if any(key is entry for entry in selected_entries)]
+            if not selected and selected_entries and not any(
+                    key is entry for key in keys for entry in previous_entries):
+                # the pool's list was replaced (reloaded config): keep the rows
+                selected = [row for row in self._schedule_selected_indices() if row < len(keys)]
+        pool_items = self._pool_tree_items_by_index(pool_name)
+        if len(pool_items) != len(keys):
+            pool_items = {}
+        status_column = 6 if pool_name == 'main' else 5
+        scroll = tree.verticalScrollBar().value()
         blocked = tree.blockSignals(True)
         try:
             tree.clear()
             for number, key in enumerate(keys, 1):
+                pool_item = pool_items.get(number - 1)
                 item = QTreeWidgetItem([
                     str(number),
                     self._mask_api_key(self._schedule_key_value(key, 'api_key')),
                     str(self._schedule_key_value(key, 'model')),
                     request_schedule.key_schedule_overview(key),
+                    pool_item.text(status_column) if pool_item is not None else '',
                 ])
+                item.setData(0, Qt.UserRole, number - 1)
+                item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+                item.setToolTip(self.SCHEDULE_MODEL_COLUMN, "Double-click to change the model")
                 lines = request_schedule.key_schedule_summary(key)[1]
                 if lines:
                     item.setToolTip(3, "\n".join(lines))
                 if not self._schedule_key_value(key, 'enabled', True):
                     for column in range(item.columnCount()):
                         item.setForeground(column, Qt.gray)
+                if pool_item is not None:
+                    item.setToolTip(4, pool_item.toolTip(status_column))
+                    item.setForeground(4, pool_item.foreground(status_column))
                 tree.addTopLevelItem(item)
             for index in selected:
                 if 0 <= index < tree.topLevelItemCount():
                     tree.topLevelItem(index).setSelected(True)
         finally:
             tree.blockSignals(blocked)
+        self._schedule_row_entries = keys
+        tree.verticalScrollBar().setValue(scroll)
         self._on_schedule_selection_changed()
 
     def _on_schedule_selection_changed(self):
-        """Load the first selected key's schedule (and its behaviour) into the editor."""
+        """Load the first selected key's schedule (and its behaviour) into the editor; a refresh
+        that keeps the same keys and schedules leaves unsaved edits in the editor alone."""
         keys = self._pool_key_list(self._schedule_pool()) or []
         indices = [i for i in self._schedule_selected_indices() if 0 <= i < len(keys)]
         has_keys = bool(keys)
         editing = bool(indices)
         self.schedule_editor.setEnabled(editing)
         self.schedule_save_button.setEnabled(editing)
+        self.schedule_position_label.setText(f"#{indices[0] + 1}/{len(keys)}" if editing else "")
         if not has_keys:
+            self._schedule_editor_source = None
             self.schedule_selection_label.setText("This pool has no keys.")
             return
         if not editing:
+            self._schedule_editor_source = None
             self.schedule_selection_label.setText("Select one or more keys to edit their schedule "
                                                   "(Ctrl / Shift for several).")
             return
         entries = [keys[i] for i in indices]
         kind, config = request_schedule.key_schedule_config(entries[0])
-        self.schedule_editor.load_config(config or None, kind=kind)
+        source = ([id(entry) for entry in entries], kind, json.dumps(config, sort_keys=True, default=str))
+        if source != getattr(self, '_schedule_editor_source', None):
+            self._schedule_editor_source = source
+            self.schedule_editor.load_config(config or None, kind=kind)
         text = f"Editing {len(entries)} key(s)."
         if len(entries) > 1 and any(request_schedule.key_schedule_config(key) != (kind, config)
                                     for key in entries[1:]):
             text += " Their schedules differ: the first key's is shown; saving gives all of them this one."
         self.schedule_selection_label.setText(text)
+
+    # ---- key actions: the pool's Key Pools handlers run on the mirrored selection
+    def _mirror_schedule_selection(self, rows=None):
+        """Select the ⏰ Schedules list's selected keys (or *rows*) in the pool's Key Pools list,
+        so that list's own handlers act on them; returns ``{row: Key Pools item}``."""
+        pool_name = self._schedule_pool()
+        tree = self._key_context_tree(pool_name)
+        if tree is None:
+            return {}
+        keys = self._pool_key_list(pool_name) or []
+        items = self._pool_tree_items_by_index(pool_name)
+        if len(items) != len(keys):
+            self._pool_key_tree_actions(pool_name)['reload']()
+            items = self._pool_tree_items_by_index(pool_name)
+        if rows is None:
+            rows = self._schedule_selected_indices()
+        tree.clearSelection()
+        mirrored = {}
+        for row in rows:
+            item = items.get(row)
+            if item is not None:
+                item.setSelected(True)
+                mirrored[row] = item
+        return mirrored
+
+    def _show_schedule_key_context_menu(self, position):
+        """The Key Pools context menu of the pool, for the keys selected here."""
+        tree = self.schedule_key_tree
+        item = tree.itemAt(position)
+        if item is None:
+            return
+        if not item.isSelected():
+            tree.setCurrentItem(item)
+        row = tree.indexOfTopLevelItem(item)
+        anchor_item = self._mirror_schedule_selection().get(row)
+        if anchor_item is None:
+            return
+        selected_entries = self._schedule_selected_entries()
+        self._pool_key_tree_actions(self._schedule_pool())['menu'](
+            position, anchor_tree=tree, anchor_item=anchor_item)
+        self._refresh_schedule_tab_after_action(selected_entries)
+
+    def _on_schedule_item_double_clicked(self, item, column):
+        """Double-click on a model: the Key Pools list's own double-click model editor."""
+        if item is None or column != self.SCHEDULE_MODEL_COLUMN:
+            return
+        row = self.schedule_key_tree.indexOfTopLevelItem(item)
+        pool_item = self._mirror_schedule_selection([row]).get(row)
+        if pool_item is None:
+            return
+        selected_entries = self._schedule_selected_entries()
+        self._pool_key_tree_actions(self._schedule_pool())['double_click'](pool_item, self.KEY_TREE_MODEL_COLUMN)
+        self._refresh_schedule_tab_after_action(selected_entries)
+
+    def _schedule_move_selected(self, direction):
+        """Reorder buttons: the Key Pools list's own move handler; the moved key stays selected."""
+        if not self._mirror_schedule_selection():
+            return
+        selected_entries = self._schedule_selected_entries()
+        self._pool_key_tree_actions(self._schedule_pool())['move'](direction)
+        self._refresh_schedule_tab_after_action(selected_entries)
+
+    def _on_schedule_rows_dropped(self, moved_items):
+        """A drop on the ⏰ Schedules list: give the pool's Key Pools list the same order and run
+        that list's drop sync (one reorder path for both tabs); the dropped keys stay selected."""
+        pool_name = self._schedule_pool()
+        tree = self.schedule_key_tree
+        entries = list(getattr(self, '_schedule_row_entries', []))
+        order = [tree.topLevelItem(row).data(0, Qt.UserRole) for row in range(tree.topLevelItemCount())]
+        pool_tree = self._key_context_tree(pool_name)
+        items = self._pool_tree_items_by_index(pool_name)
+        if pool_tree is None or sorted(order) != sorted(items) or len(entries) != len(order):
+            self._refresh_schedule_key_list()
+            return
+        moved_indices = [item.data(0, Qt.UserRole) for item in moved_items]
+        for item in items.values():
+            pool_tree.takeTopLevelItem(pool_tree.indexOfTopLevelItem(item))
+        pool_tree.addTopLevelItems([items[index] for index in order])
+        self._sync_dropped_key_order(pool_name, [items[index] for index in moved_indices])
+        self._refresh_schedule_tab_after_action([entries[index] for index in moved_indices])
+
+    def _refresh_schedule_tab_after_action(self, selected_entries):
+        if getattr(self, 'schedule_key_tree', None) is not None:
+            self._refresh_schedule_tab(selected_entries)
 
     def _write_schedule_to_selected(self, kind, config):
         pool_name = self._schedule_pool()
@@ -11110,26 +11343,9 @@ class MultiAPIKeyDialog(QDialog):
         layout = QHBoxLayout(tree_container)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        move_frame = QWidget()
-        move_layout = QVBoxLayout(move_frame)
-        move_layout.setContentsMargins(0, 0, 5, 0)
-        order_label = QLabel("Reorder")
-        order_font = QFont()
-        order_font.setBold(True)
-        order_label.setFont(order_font)
-        move_layout.addWidget(order_label)
-        for text, direction, size in (("↑ ↑", "top", 14), ("↑", "up", 16), ("↓", "down", 16), ("↓ ↓", "bottom", 14)):
-            btn = QPushButton(text)
-            btn.setFixedSize(55, 32)
-            btn.setStyleSheet(f"QPushButton {{ font-size: {size}pt; padding: 2px; }}")
-            btn.clicked.connect(lambda _checked=False, p=pool_name, d=direction: self._dedicated_move_key(p, d))
-            move_layout.addWidget(btn)
-        move_layout.addSpacing(10)
-        position_label = QLabel()
-        position_label.setStyleSheet("color: gray;")
+        move_frame, position_label = self._create_key_reorder_column(
+            lambda direction, p=pool_name: self._dedicated_move_key(p, direction))
         setattr(self, self._dedicated_attr(pool_name, 'position_label'), position_label)
-        move_layout.addWidget(position_label)
-        move_layout.addStretch()
         layout.addWidget(move_frame)
 
         tree = QTreeWidget()
@@ -11153,7 +11369,7 @@ class MultiAPIKeyDialog(QDialog):
         tree.setMinimumHeight(150)
         tree.setDragDropMode(QAbstractItemView.InternalMove)
         tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        tree.model().rowsMoved.connect(lambda *args, p=pool_name: self._dedicated_on_rows_moved(p))
+        self._install_key_tree_drop_sync(tree, pool_name)
         tree.itemSelectionChanged.connect(lambda p=pool_name: self._dedicated_on_selection_change(p))
         tree.itemDoubleClicked.connect(lambda item, column, p=pool_name: self._dedicated_on_click(p, item, column))
         tree.itemClicked.connect(lambda item, col, p=pool_name: self._key_status_clicked(p, item, col))
@@ -11534,7 +11750,7 @@ class MultiAPIKeyDialog(QDialog):
             if version is not None:
                 version.setCurrentText('2025-01-01-preview')
 
-    def _dedicated_show_context_menu(self, pool_name: str, position):
+    def _dedicated_show_context_menu(self, pool_name: str, position, **anchor):
         tree = self._dedicated_widget(pool_name, 'tree')
         keys = self._dedicated_keys(pool_name)
         self._show_shared_key_context_menu(
@@ -11563,6 +11779,7 @@ class MultiAPIKeyDialog(QDialog):
             disable_callback=lambda: self._dedicated_disable_selected(pool_name),
             remove_callback=lambda: self._dedicated_remove_selected(pool_name),
             clear_all_callback=lambda: self._dedicated_clear_all(pool_name),
+            **anchor,
         )
 
     def _dedicated_change_model_for_selected(self, pool_name: str):
