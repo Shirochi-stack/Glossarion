@@ -398,7 +398,7 @@ def test_owner_issue16_fresh_install_lists_every_builtin_profile(isolated):
             assert [k for k, _t, _d in options if not k.startswith(GROUP_PREFIX)] != ["Universal"], (
                 "owner #16: the chat picker still offers only Universal")
             _assert_grouped(options, BUILTINS)
-            assert len([k for k, _t, _d in options if not k.startswith(GROUP_PREFIX)]) == 19
+            assert len([k for k, _t, _d in options if not k.startswith(GROUP_PREFIX)]) == len(BUILTINS)
             for name in ("Manga_JP", "Korean_BeautifulSoup", "SDLXLIFF Editing v2", "Subtitle Translation"):
                 await driver.wait(text=name, timeout=5)  # on screen in the open sheet
             # the profile the desktop start-up runs on a fresh config, shown (never written)
@@ -487,7 +487,7 @@ def test_owner_issue16_desktop_profiles_custom_ones_and_no_silent_universal(isol
         files[DESKTOP_V1].write_text(json.dumps(v1, ensure_ascii=False, indent=2), encoding="utf-8")
         files[DESKTOP_V2].write_text(json.dumps(v2, ensure_ascii=False, indent=2), encoding="utf-8")
         expected = list(prompt_profiles.profile_state_from_config(v1).prompt_profiles)  # desktop start-up order
-        assert len(expected) == 22 and set(BUILTINS) | set(MARKERS) == set(expected), expected
+        assert len(expected) == len(BUILTINS) + len(MARKERS) and set(BUILTINS) | set(MARKERS) == set(expected), expected
 
         app, page, tester, driver = await _host_driver(tf, files)
         try:
@@ -640,7 +640,7 @@ def test_owner_issue16_desktop_profiles_custom_ones_and_no_silent_universal(isol
             assert dropdown.value == "Korean_html2text"  # the newly imported All chats profile
             options = _option_rows(dropdown)
             expected_v2 = list(prompt_profiles.profile_state_from_config(_stored(app)).prompt_profiles)
-            assert len(expected_v2) == 20 and WUXIA in expected_v2 and RENAMED not in expected_v2, expected_v2
+            assert len(expected_v2) == len(BUILTINS) + 1 and WUXIA in expected_v2 and RENAMED not in expected_v2, expected_v2
             _assert_grouped(options, expected_v2)
             sheet.close()
             snap, payloads = await _send_text(app, driver, server, captured, "네 번째 메시지입니다.")
@@ -927,7 +927,7 @@ def test_owner_issue16_settings_profile_section_leads_to_every_profile_never_to_
         files = {DESKTOP_V1: picks / DESKTOP_V1}
         files[DESKTOP_V1].write_text(json.dumps(v1, ensure_ascii=False, indent=2), encoding="utf-8")
         expected = list(prompt_profiles.profile_state_from_config(v1).prompt_profiles)
-        assert len(expected) == 22, expected
+        assert len(expected) == len(BUILTINS) + len(MARKERS), expected
         app, page, tester, driver = await _host_driver(tf, files)
         try:
             await flows.wait_home(driver)
