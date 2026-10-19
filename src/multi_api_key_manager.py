@@ -10422,7 +10422,9 @@ class MultiAPIKeyDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.schedule_key_tree.setColumnWidth(1, 120)
         self.schedule_key_tree.setColumnWidth(2, 140)
-        self.schedule_key_tree.setColumnWidth(3, 130)
+        # just wide enough for the "Schedule" header; longer states are elided (the cell tooltip lists them)
+        self.schedule_key_tree.setColumnWidth(
+            3, header.fontMetrics().horizontalAdvance(self.SCHEDULE_TREE_COLUMNS[3]) + 24)
         self.schedule_key_tree.setToolTip("Double-click a model to change it; right-click for the key menu; "
                                           "drag rows or use Reorder to change the key order.")
         self.schedule_key_tree.itemSelectionChanged.connect(self._on_schedule_selection_changed)
