@@ -1227,6 +1227,58 @@ class ChatFeature:
 
         return same_chapters(folder, target)
 
+    @classmethod
+    def _library_twin(cls, root: str, folder: str, source: str) -> str:
+        """The Library folder of the same book under another name, in the output ``root`` ('' when none):
+        a first-level folder whose ``source_epub.txt`` names the same bytes as the attachment and whose
+        translation is of the same chapters (``_same_book``). One that holds a translation wins over an
+        untouched Library import."""
+        if not root or not source or not os.path.isfile(source):
+            return ""
+        from glossarion_mobile.services.workspace_sync import chapter_hashes
+
+        found = []
+        try:
+            entries = [e for e in os.scandir(root) if e.is_dir(follow_symlinks=False)
+                       and not e.name.startswith(".") and os.path.isfile(os.path.join(e.path, "source_epub.txt"))]
+        except OSError:
+            return ""
+        for entry in sorted(entries, key=lambda e: e.name.casefold()):
+            if _norm(entry.path) == _norm(folder):
+                continue
+            try:
+                if cls._same_book(entry.path, folder, source):
+                    found.append(entry.path)
+            except Exception:
+                log.debug("comparing %s with the chat book failed", entry.path, exc_info=True)
+        found.sort(key=lambda path: not chapter_hashes(path))
+        return found[0] if found else ""
+
+    @staticmethod
+    def _library_raw_twin(target: str, source: str) -> str:
+        """The raw file the Library folder ``target`` points at when it is another copy of the same bytes as
+        the attachment ``source`` ('' otherwise): after the merge the folder keeps pointing at it."""
+        try:
+            import library_core  # shared (U5)
+
+            pointed = library_core._read_source_epub_pointer(target) or ""
+            if pointed and _norm(pointed) != _norm(source) and library_core._same_file_content(pointed, source):
+                return pointed
+        except Exception:
+            log.debug("reading the Library raw of %s failed", target, exc_info=True)
+        return ""
+
+    @staticmethod
+    def _point_at(target: str, raw: str) -> bool:
+        """Write ``raw`` into ``<target>/source_epub.txt`` (True when written)."""
+        try:
+            with open(os.path.join(target, "source_epub.txt"), "w", encoding="utf-8") as stream:
+                stream.write(raw)
+            return True
+        except OSError:
+            log.debug("repointing %s failed", target, exc_info=True)
+            return False
+
     def auto_migrate_blocking(self, cid: Any, folder: str) -> dict:
         """Blocking: move one chat book's ``Attachments/<stem>`` workspace into the Library when it is
         safe (the desktop Migrate, ``ChatStoreAdapter.migrate_attachment``). Returns the outcome dict
@@ -1300,8 +1352,18 @@ class ChatFeature:
                     return done(MIGRATE_DEFERRED, "the output folder points at a run root", jobs_running=True)
                 # an existing Library folder of the same name is reused quietly: the workspace merges into
                 # it (owner 2026-10-19: no "A Library book named … already exists" snackbar)
+                moving = folder
+                twin = "" if os.path.exists(target) else self._library_twin(os.path.dirname(target), folder, source)
+                if twin:
+                    # the same book under another folder name (the chat's copy got "X (2).epub" or a stem cut
+                    # to 120 characters): the workspace takes the Library folder's name and merges into it
+                    renamed = self.chats.rename_attachment_workspace(cid, folder, os.path.basename(twin))
+                    if renamed:
+                        moving, target = renamed, twin
+                        outcome["target"] = target
                 merge = os.path.exists(target)
-                result = self.chats.migrate_attachment(cid, folder, (lambda _target: True) if merge else None)
+                library_raw = self._library_raw_twin(target, source) if merge else ""
+                result = self.chats.migrate_attachment(cid, moving, (lambda _target: True) if merge else None)
             finally:
                 if lock is not None:
                     lock.release()
@@ -1313,7 +1375,10 @@ class ChatFeature:
 
             target = migrated_target(result) or target
             self._merge_approved.discard(_norm(folder))
-            self._record_raw_blocking(source)
+            # merged into a Library book whose own raw is the same file: it keeps pointing at that raw, and
+            # the chat's copy is not recorded as a second raw input
+            if not (library_raw and self._point_at(target, library_raw)):
+                self._record_raw_blocking(source)
             self.runs.relocate_output(cid, folder, target)
             self._cloud_moved(folder, target, merge)  # U10: records follow (a merge keeps the Library book's)
             shares = getattr(self.app, "share_links", None)
