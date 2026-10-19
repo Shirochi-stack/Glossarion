@@ -290,7 +290,7 @@ from txt_processor import TextFileProcessor, build_source_structure_metadata
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
-from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
+from html_duplicate_cleanup import prepare_html_for_model, remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import (
     VALID_ENTITY_TAGS as _VALID_ENTITY_HTML_TAGS,
     fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts,
@@ -449,6 +449,8 @@ def _split_chapter_for_translation(chapter_splitter, chapter, available_tokens, 
             if chunks:
                 return chunks
 
+    # "Remove excessive empty p and br tags" (On-device / all models): only the text sent to the model
+    body = prepare_html_for_model(body)
     return chapter_splitter.split_chapter(body, available_tokens, filename=filename)
 
 
@@ -12522,6 +12524,8 @@ class BatchTranslationProcessor:
                     return '\n'.join(result)
                 chapter_body = remove_markdown_duplicate_headers_input(chapter_body)
             
+            # "Remove excessive empty p and br tags" (On-device / all models)
+            chapter_body = prepare_html_for_model(chapter_body)
             chapters_data.append((actual_num, chapter_body, idx, chapter, content_hash))
         
         try:

@@ -379,6 +379,9 @@ SECTION_OVERRIDES = {
     "auto_glossary_mode": "main.run",
     "output_language": "main.run",
     "REMOVE_AI_ARTIFACTS": "main.run",
+    # Glossarion Mobile's on-device twin of "Remove excessive empty p and br tags (all models)" (no
+    # desktop control: only the mobile app runs an on-device model), shown next to it
+    "remove_excessive_empty_tags_on_device": "other.meta_data",
     "auto_update_check": "other.context",
     "vertex_ai_location": "main.model",
     "google_cloud_credentials": "main.model",
@@ -824,6 +827,9 @@ TOOLTIP_OVERRIDES = {
         "Send all entry types combines them within the token budget. If splitting is needed, "
         "characters and surnames are grouped first, followed by enabled gendered types, then other types. "
         "A type that exceeds the budget on its own is split into smaller requests."),
+    "remove_excessive_empty_tags_on_device": (
+        "Chapter text sent to the on-device model keeps at most 2 line breaks for each run of\n"
+        "empty paragraphs / <br> tags (empty <p> tags are removed). Source files are unchanged."),
 }
 
 # Rule ids evaluated by settings_rules.evaluate (U4). locked_if: the keys a registered
@@ -884,6 +890,7 @@ LABEL_OVERRIDES = {
     "token_limit": "Input token limit",
     "token_limit_disabled": "Disable input token limit",
     "max_output_tokens": "Max output tokens",
+    "remove_excessive_empty_tags_on_device": "Remove excessive empty p and br tags (On-device)",
 }
 
 

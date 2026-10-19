@@ -113,6 +113,49 @@ _TITLE_TAG_SETTINGS_ROW = ("('skip_title_tag_translation', ['skip_title_tag_tran
 _USE_TITLE_SETTINGS_ROW = ("('use_title', ['use_title_var'], True, bool)",
                            "('use_title', ['use_title_var'], False, bool)")
 
+# 2026-10-19 "Remove excessive empty p and br tags" (On-device: remove_excessive_empty_tags_on_device /
+# REMOVE_EXCESSIVE_EMPTY_TAGS_ON_DEVICE, on; all models: remove_excessive_empty_tags_all_models /
+# REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS, off). Rows follow the (already approved) title tag rows.
+_EMPTY_TAGS_SETTINGS_ROWS = (
+    "('remove_excessive_empty_tags_on_device', ['remove_excessive_empty_tags_on_device_var'], True, bool),",
+    "('remove_excessive_empty_tags_all_models', ['remove_excessive_empty_tags_all_models_var'], False, bool),",
+)
+_EMPTY_TAGS_SETTINGS_ROW = _after(
+    "            ('skip_title_tag_translation', ['skip_title_tag_translation_var'], True, bool),",
+    *("            " + row for row in _EMPTY_TAGS_SETTINGS_ROWS))
+_EMPTY_TAGS_SETTINGS_ROW_GUI = _after(
+    "                ('skip_title_tag_translation', ['skip_title_tag_translation_var'], True, bool),",
+    *("                " + row for row in _EMPTY_TAGS_SETTINGS_ROWS))
+_EMPTY_TAGS_BOOL_ROW = _after(
+    "            ('respect_retry_after_var', 'respect_retry_after', True),",
+    "            ('remove_excessive_empty_tags_on_device_var', 'remove_excessive_empty_tags_on_device', True),",
+    "            ('remove_excessive_empty_tags_all_models_var', 'remove_excessive_empty_tags_all_models', False),")
+_EMPTY_TAGS_ENV_DICT = _after(
+    "            'RESPECT_RETRY_AFTER': '1' if getattr(self, 'respect_retry_after_var', True) else '0',",
+    "            'REMOVE_EXCESSIVE_EMPTY_TAGS_ON_DEVICE': '1' if getattr(self, "
+    "'remove_excessive_empty_tags_on_device_var', True) else '0',",
+    "            'REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS': '1' if getattr(self, "
+    "'remove_excessive_empty_tags_all_models_var', False) else '0',")
+_EMPTY_TAGS_ENV_PAIR = _after(
+    "                ('RESPECT_RETRY_AFTER', '1' if getattr(self, 'respect_retry_after_var', True) else '0'),",
+    "                ('REMOVE_EXCESSIVE_EMPTY_TAGS_ON_DEVICE', '1' if getattr(self, "
+    "'remove_excessive_empty_tags_on_device_var', True) else '0'),",
+    "                ('REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS', '1' if getattr(self, "
+    "'remove_excessive_empty_tags_all_models_var', False) else '0'),")
+# the async batch dialog (frozen async_api_processor) exports the all-models toggle and applies it
+_EMPTY_TAGS_ASYNC_ENV = _after(
+    "        env_vars['REQUEST_MERGING_ENABLED'] = '0'",
+    "        env_vars['REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS'] = \"1\" if _val(getattr(self.gui, "
+    "'remove_excessive_empty_tags_all_models_var', None), self.gui.config.get("
+    "'remove_excessive_empty_tags_all_models', False)) else \"0\"")
+_EMPTY_TAGS_ASYNC_PAYLOAD = _after(
+    "                                else:\n"
+    "                                    chapter_payload = chapter_html",
+    "                                    if env_vars.get('REMOVE_EXCESSIVE_EMPTY_TAGS_ALL_MODELS') == '1':",
+    "                                        # \"Remove excessive empty p and br tags (all models)\": the text sent only",
+    "                                        from html_duplicate_cleanup import collapse_empty_paragraphs",
+    "                                        chapter_payload = collapse_empty_paragraphs(chapter_payload)")
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -266,6 +309,22 @@ APPROVED = (
             "use_title_var": (True, False),
             "USE_TITLE": ("1", "0"),
         },
+    },
+    {
+        "date": "2026-10-19",
+        "what": "New 'Remove excessive empty p and br tags' toggles: On-device (on by default, Glossarion Mobile's "
+                "on-device model) and all models (off by default, Other Settings); runs of empty <p>/<br> in the "
+                "chapter text sent to the model keep at most two <br/>",
+        "source": {
+            "src/settings_persistence.py": [_EMPTY_TAGS_SETTINGS_ROW],
+            "src/owner_state.py": [_EMPTY_TAGS_BOOL_ROW],
+            "src/translator_gui.py": [_EMPTY_TAGS_SETTINGS_ROW_GUI, _EMPTY_TAGS_BOOL_ROW, _EMPTY_TAGS_ENV_DICT,
+                                      _EMPTY_TAGS_ENV_PAIR],
+            "src/run_env.py": [_EMPTY_TAGS_ENV_DICT, _EMPTY_TAGS_ENV_PAIR],
+            "src/async_api_processor.py": [_EMPTY_TAGS_ASYNC_ENV, _EMPTY_TAGS_ASYNC_PAYLOAD],
+        },
+        # new keys: nothing recorded before they existed changes value
+        "values": {},
     },
 )
 
