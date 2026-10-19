@@ -1,13 +1,18 @@
-"""ScheduleSheet: the "🗓️ Disable schedule" / "⏳ Request Queue" editor (desktop ``RequestScheduleDialog``).
+"""ScheduleSheet: the time-based key schedule editor (desktop ``ScheduleEditor``).
 
 One sheet for every time-based key setting of the shared ``request_schedule`` core:
 
-* API keys › selection ⋯ "🗓️ Disable schedule…" (every pool, key field ``disable_schedule``) and
-  "⏳ Request Queue…" (pools with rotation, key field ``queue_schedule``);
+* API keys › selection ⋯ "⏰ Schedule…" (mode ``"key"``; desktop Multi API Key Manager ⏰ Schedules
+  tab): one schedule per key, "During the windows:" picks "🗓️ Disable the key" (key field
+  ``disable_schedule``) or "⏳ Queue requests" (``queue_schedule``; not offered for Fallback keys,
+  which are tried one by one); saving writes the chosen field and removes the other;
 * the ModelSheet ⋯ "⏳ Request Queue…" and Settings › Models & keys (the main key, config
   ``request_queue_schedule``; run_env exports it as ``REQUEST_QUEUE_SCHEDULE``).
 
-Field for field the desktop dialog: "Times are in" zone (Local by default; switching converts the
+The schedule is off until its switch is turned on (the rest of the sheet is dimmed meanwhile); the
+preview's first line always says on / off, so toggling never changes its line count.
+
+Field for field the desktop editor: "Times are in" zone (Local by default; switching converts the
 windows, ``request_schedule.convert``), the windows (HH:MM start → end, an end before the start runs
 past midnight; ➕ Add window, 🗑️ per row), the weekday chips (the day a window starts), "🐋 Use
 DeepSeek peak hours" (prefilled when nothing is saved, kept in UTC), "🧹 Clear schedule" (removes it
@@ -96,10 +101,29 @@ class ScheduleSheet:
         on_save: Optional[Callable[[dict], Optional[str]]] = None,
         page: Any = None,
         now: Optional[Callable[[], Any]] = None,
+        kind: str = "disable",
+        kinds: Any = None,
     ) -> None:
         rs = _rs()
         self.rs = rs
         self.mode = mode if mode in rs.EDITOR_MODES else "queue"
+        # mode "key": "During the windows:" (one schedule per key); kinds a pool does not offer
+        # (Fallback: queue) stay listed, disabled, with the reason underneath
+        self.kinds = tuple(k for k in (kinds or rs.SCHEDULE_KINDS) if k in rs.SCHEDULE_KINDS) or ("disable",)
+        self.kind_group: Any = None
+        self.kind_note: Any = None
+        kind_controls: list = []
+        if self.mode == "key":
+            self.kind_group = ft.RadioGroup(
+                value=kind if kind in self.kinds else self.kinds[0], key="schedule-kind",
+                content=ft.Column([ft.Radio(value=name, label=rs.KIND_CHOICES[name], key=f"schedule-kind-{name}",
+                                            disabled=name not in self.kinds)
+                                   for name in rs.SCHEDULE_KINDS], spacing=0, tight=True))
+            self.kind_note = ft.Text(rs.QUEUE_UNAVAILABLE_HELP, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                                     color=ft.Colors.ON_SURFACE_VARIANT, key="schedule-kind-note",
+                                     visible="queue" not in self.kinds)
+            kind_controls = [ft.Text(rs.KIND_LABEL, theme_style=ft.TextThemeStyle.LABEL_LARGE,
+                                     weight=ft.FontWeight.W_600), self.kind_group, self.kind_note]
         self.subject = subject
         self.on_save = on_save
         self.page = page
@@ -145,6 +169,7 @@ class ScheduleSheet:
             return ft.Text(text, theme_style=ft.TextThemeStyle.LABEL_LARGE, weight=ft.FontWeight.W_600)
 
         self.body = ft.Column([
+            *kind_controls,
             ft.Row([self.zone_dropdown]),
             heading("Windows (start → end; an end before the start runs past midnight)"),
             self.rows_column,
@@ -226,6 +251,23 @@ class ScheduleSheet:
     def enabled(self) -> bool:
         return bool(self.enable_switch.value)
 
+    @property
+    def kind(self) -> Optional[str]:
+        """The "During the windows:" choice ("disable" / "queue"); None outside mode "key"."""
+        if self.kind_group is None:
+            return None
+        value = self.kind_group.value
+        return value if value in self.kinds else self.kinds[0]
+
+    def set_kind(self, kind: str) -> Optional[str]:
+        """Pick a behaviour; one the pool does not offer is refused (the current one stays)."""
+        if self.kind_group is None:
+            return None
+        if kind in self.kinds:
+            self.kind_group.value = kind
+            _push(self.kind_group)
+        return self.kind
+
     def set_enabled(self, on: bool) -> bool:
         """The off-by-default switch: the rest of the sheet is disabled and dimmed while off."""
         self.enable_switch.value = bool(on)
@@ -279,9 +321,9 @@ class ScheduleSheet:
         schedule, error = self.schedule()
         if error:
             return [error]
-        lines = self.rs.preview_lines(schedule, self.preview_zone_dropdown.value, suggested=self.suggested,
-                                      now=self._clock())
-        return lines if self.enabled else [self.rs.OFF_PREVIEW_LINE] + lines
+        # the on / off status line is always first: toggling never changes the line count
+        return self.rs.editor_preview_lines(schedule, self.preview_zone_dropdown.value, enabled=self.enabled,
+                                            suggested=self.suggested, now=self._clock())
 
     def update_preview(self, *, push: bool = True) -> str:
         text = "\n".join(self.preview_lines())

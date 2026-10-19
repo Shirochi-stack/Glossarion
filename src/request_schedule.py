@@ -47,7 +47,15 @@ Editors (desktop RequestScheduleDialog, mobile ScheduleSheet)
     ``editable_config(value)`` -> (schedule or None, enabled): the saved windows even while
     switched off; ``to_config(schedule, enabled=False)`` saves them switched off,
     ``zone_choices(include_local=True)`` -> [(label, zone)], ``preview_lines(schedule,
-    extra_zone, suggested=False)`` -> the preview text lines.
+    extra_zone, suggested=False)`` -> the preview text lines; ``editor_preview_lines(schedule,
+    extra_zone, enabled=..., suggested=...)`` puts the always-present ``ON_PREVIEW_LINE`` /
+    ``OFF_PREVIEW_LINE`` status line first (switching on / off never changes the line count).
+Pool keys: one schedule per key (desktop ⏰ Schedules tab, mobile Keys ⋯ "⏰ Schedule…"; mode "key")
+    ``SCHEDULE_KINDS`` ("disable", "queue"), ``KIND_FIELDS``, ``KIND_LABEL`` ("During the
+    windows:"), ``KIND_CHOICES``, ``pool_schedule_kinds(pool)`` (Fallback: "disable" only,
+    ``QUEUE_UNAVAILABLE_HELP``), ``key_schedule_config(key)`` -> (kind, config) of the field it
+    holds, ``set_key_schedule(key, kind, config)`` writes that field and removes the other,
+    ``key_schedule_overview(key)`` -> "Off" / the state / the windows for a key list row.
 Keys (dicts or ``APIKeyEntry`` objects)
     ``DISABLE_FIELD`` / ``QUEUE_FIELD``; ``key_schedule(key, field)``;
     ``key_disabled_by_schedule(key, now)``; ``key_queued_now(key, now)``;
@@ -79,7 +87,10 @@ from typing import Callable, Iterable, NamedTuple, Optional
 
 __all__ = [
     "ALL_WEEKDAYS", "DEEPSEEK_PEAK_SCHEDULE", "DEEPSEEK_PRESET_HELP", "DISABLE_FIELD", "EDITOR_MODES",
-    "ENABLE_LABELS", "OFF_PREVIEW_LINE", "editable_config", "is_enabled_config",
+    "ENABLE_LABELS", "OFF_PREVIEW_LINE", "ON_PREVIEW_LINE", "editable_config", "editor_preview_lines",
+    "is_enabled_config", "KIND_CHOICES", "KIND_FIELDS", "KIND_LABEL", "QUEUE_UNAVAILABLE_HELP",
+    "SCHEDULE_KINDS", "key_schedule_config", "key_schedule_overview", "pool_schedule_kinds",
+    "set_key_schedule",
     "LOG_INTERVAL_SECONDS",
     "MAIN_QUEUE_CONFIG_KEY", "MAIN_QUEUE_ENV", "QUEUE_FIELD", "QueueWaiter", "Schedule",
     "ScheduleError", "WAITER", "WEEKDAYS", "WEEKDAY_NAMES", "Window", "common_timezones", "convert",
@@ -638,14 +649,33 @@ EDITOR_MODES = {
                    "the window ends (logged every 3 minutes; Stop ends the wait). Translation, glossary "
                    "extraction and the other runs follow it. With Translation Keys (multi-key mode) on, "
                    "each pool key's own Request Queue applies instead."),
+    # pool keys (Multi API Key Manager ⏰ Schedules tab, mobile Keys ⋯ "⏰ Schedule…"): one schedule
+    # per key, its behaviour chosen under "During the windows:" (SCHEDULE_KINDS)
+    "key": ("⏰ Schedule",
+            "Time windows for the selected keys. Choose what happens during them: the key is skipped "
+            "(other keys take over) or requests wait until the window ends. A key holds one schedule."),
 }
 #: The editors' on/off switch (off by default: nothing is scheduled until the user turns it on).
 ENABLE_LABELS = {
     "disable": "🗓️ Enable Disable schedule",
     "queue": "⏳ Enable Request Queue",
     "main_queue": "⏳ Enable Request Queue",
+    "key": "⏰ Enable schedule",
 }
+#: The preview's first line says whether the schedule is on; it is always there, so switching the
+#: schedule on / off never changes the preview's height.
 OFF_PREVIEW_LINE = "Off: saving keeps these windows but nothing is scheduled until this is enabled."
+ON_PREVIEW_LINE = "On: requests follow these windows once saved (switch off to keep them unused)."
+#: The per-key behaviours ("During the windows:"): kind -> key field / choice label.
+SCHEDULE_KINDS = ("disable", "queue")
+KIND_FIELDS = {"disable": DISABLE_FIELD, "queue": QUEUE_FIELD}
+KIND_LABEL = "During the windows:"
+KIND_CHOICES = {
+    "disable": "🗓️ Disable the key (skip it; other keys take over)",
+    "queue": "⏳ Queue requests (wait until the window ends)",
+}
+QUEUE_UNAVAILABLE_HELP = ("Fallback keys are tried one by one (no rotation), so there is nothing to queue "
+                          "in: use 🗓️ Disable the key.")
 DEEPSEEK_PRESET_HELP = ("DeepSeek peak pricing: 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday "
                         "(off-peak costs half). Kept in UTC so it stays right when your clocks change.")
 
@@ -683,6 +713,19 @@ def preview_lines(schedule, extra_zone=None, *, suggested=False, now=None):
     return lines
 
 
+def editor_preview_lines(schedule, extra_zone=None, *, enabled=False, suggested=False, now=None):
+    """The editors' preview text: the on / off status line (:data:`ON_PREVIEW_LINE` /
+    :data:`OFF_PREVIEW_LINE`, always present) followed by :func:`preview_lines`."""
+    status = ON_PREVIEW_LINE if enabled else OFF_PREVIEW_LINE
+    return [status] + preview_lines(schedule, extra_zone, suggested=suggested, now=now)
+
+
+def pool_schedule_kinds(pool) -> tuple:
+    """The "During the windows:" behaviours a pool's keys offer: both, except Fallback keys (tried
+    one by one, no rotation to queue in), which only have "disable"."""
+    return ("disable",) if pool == "fallback" else SCHEDULE_KINDS
+
+
 # -------------------------------------------------------------------------------------------- keys
 def key_schedule(key, field) -> Optional[Schedule]:
     """The Schedule a key (dict or ``APIKeyEntry``) holds in *field*, or None."""
@@ -704,7 +747,7 @@ def key_queued_now(key, now=None) -> bool:
     return bool(schedule) and is_in_window(schedule, now)
 
 
-def _usable(key, enabled) -> bool:
+def _usable(key, enabled, now=None) -> bool:
     if enabled is not None:
         try:
             return bool(enabled(key))
@@ -714,7 +757,8 @@ def _usable(key, enabled) -> bool:
         flag = key.get("enabled", True)
     else:
         flag = getattr(key, "enabled", True)
-    return bool(flag) and not key_disabled_by_schedule(key)
+    # the Disable schedule is checked at the caller's moment (not the wall clock)
+    return bool(flag) and not key_disabled_by_schedule(key, now)
 
 
 def pool_queue_wait_until(keys, now=None, enabled=None) -> Optional[datetime]:
@@ -726,7 +770,7 @@ def pool_queue_wait_until(keys, now=None, enabled=None) -> Optional[datetime]:
     earliest = None
     any_queued = False
     for key in keys or ():
-        if not _usable(key, enabled):
+        if not _usable(key, enabled, moment):
             continue
         schedule = key_schedule(key, QUEUE_FIELD)
         if not schedule or not is_in_window(schedule, moment):
@@ -751,7 +795,7 @@ def queue_deferred(key, peers, now=None, enabled=None) -> bool:
     if not is_in_window(schedule, moment):
         return False
     for peer in peers or ():
-        if peer is key or not _usable(peer, enabled):
+        if peer is key or not _usable(peer, enabled, moment):
             continue
         if not key_queued_now(peer, moment):
             return True
@@ -775,6 +819,60 @@ def key_schedule_summary(key, tz="local", now=None):
         if not status and is_in_window(queue, moment):
             status = f"⏳ Queued until {format_clock(next_window_end(queue, moment), tz, moment)}"
     return status, lines
+
+
+def _raw_field(key, field):
+    if key is None:
+        return None
+    return key.get(field) if isinstance(key, dict) else getattr(key, field, None)
+
+
+def key_schedule_config(key):
+    """``(kind, config)`` of the one schedule a key holds (the editors load it): the field that is
+    set ("disable" / "queue"), switched-off configs included; a key carrying both (older configs)
+    gives the switched-on one, else the Disable schedule. ``("disable", {})`` without a schedule."""
+    found = []
+    for kind in SCHEDULE_KINDS:
+        config = normalize_config(_raw_field(key, KIND_FIELDS[kind]))
+        if config:
+            found.append((kind, config))
+    for kind, config in found:
+        if is_enabled_config(config):
+            return kind, config
+    return found[0] if found else ("disable", {})
+
+
+def set_key_schedule(key, kind, config):
+    """Store *config* as the key's one schedule: the *kind* field gets it and the other field is
+    removed (``{}`` / None removes both). Works on config dicts and ``APIKeyEntry`` objects (an
+    object field is set to ``{}``, which ``to_dict`` leaves out). Returns *key*."""
+    if kind not in KIND_FIELDS:
+        raise ValueError(f"unknown schedule kind {kind!r}")
+    config = normalize_config(config)
+    for name, field in KIND_FIELDS.items():
+        value = dict(config) if (name == kind and config) else None
+        if isinstance(key, dict):
+            if value:
+                key[field] = value
+            else:
+                key.pop(field, None)
+        else:
+            setattr(key, field, value or {})
+    return key
+
+
+def key_schedule_overview(key, tz="local", now=None) -> str:
+    """One line for a key in the schedule lists: "Off", "Off (🗓️ windows saved)", the current
+    state ("⏳ Queued until 13:00") or the windows ("🗓️ 10:00–13:00 (local), Mon–Fri")."""
+    kind, config = key_schedule_config(key)
+    icon = "🗓️" if kind == "disable" else "⏳"
+    schedule, enabled = editable_config(config)
+    if not schedule:
+        return "Off"
+    if not enabled:
+        return f"Off ({icon} windows saved)"
+    status, _lines = key_schedule_summary(key, tz, now)
+    return status or f"{icon} {describe(schedule, tz, now)}"
 
 
 def main_queue_schedule_from_env(environ=None) -> Optional[Schedule]:

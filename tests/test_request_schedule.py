@@ -230,7 +230,8 @@ def _window_around_now(offset_hours=0.0, length_hours=1.0):
 
 def test_editor_helpers_shared_by_desktop_and_mobile():
     """EDITOR_MODES / zone_choices / preview_lines: the desktop dialog and the mobile ScheduleSheet show these."""
-    assert set(rs.EDITOR_MODES) == {"disable", "queue", "main_queue"}
+    assert set(rs.EDITOR_MODES) == {"disable", "queue", "main_queue", "key"}
+    assert set(rs.ENABLE_LABELS) == set(rs.EDITOR_MODES)
     assert rs.EDITOR_MODES["disable"][0] == "🗓️ Disable schedule" and rs.EDITOR_MODES["queue"][0] == "⏳ Request Queue"
     choices = rs.zone_choices()
     assert choices[0][1] == "local" and choices[0][0].startswith("Local (local") and choices[1] == ("UTC", "UTC")
@@ -582,8 +583,59 @@ def test_sources_have_uniform_line_endings():
         assert data.count(b"\r\n") in (0, data.count(b"\n")), name
 
 
+def test_one_schedule_per_key_helpers():
+    """key_schedule_config / set_key_schedule / key_schedule_overview / pool_schedule_kinds: the
+    ⏰ Schedules tab and the mobile "⏰ Schedule…" sheet store one schedule per key."""
+    peak, off = rs.to_config(DEEPSEEK_PEAK_SCHEDULE), rs.to_config(DEEPSEEK_PEAK_SCHEDULE, enabled=False)
+    assert rs.pool_schedule_kinds("fallback") == ("disable",)
+    for pool in ("main", "glossary", "metadata", "tts"):
+        assert rs.pool_schedule_kinds(pool) == ("disable", "queue")
+    assert set(rs.KIND_CHOICES) == set(rs.SCHEDULE_KINDS) == set(rs.KIND_FIELDS)
+    assert rs.KIND_CHOICES["disable"].startswith("🗓️") and rs.KIND_CHOICES["queue"].startswith("⏳")
+    # loading: whichever field is set, switched-off configs included
+    assert rs.key_schedule_config({"api_key": "k"}) == ("disable", {})
+    assert rs.key_schedule_config({"queue_schedule": off}) == ("queue", off)
+    assert rs.key_schedule_config({"disable_schedule": peak}) == ("disable", peak)
+    assert rs.key_schedule_config({"disable_schedule": off, "queue_schedule": peak}) == ("queue", peak)
+    # switching behaviour moves the schedule to the other field
+    key = {"api_key": "k", "queue_schedule": peak}
+    rs.set_key_schedule(key, "disable", peak)
+    assert key == {"api_key": "k", "disable_schedule": peak}
+    rs.set_key_schedule(key, "queue", off)
+    assert key == {"api_key": "k", "queue_schedule": off}
+    rs.set_key_schedule(key, "disable", {})
+    assert key == {"api_key": "k"}
+    from multi_api_key_manager import APIKeyEntry
+    entry = APIKeyEntry("k", "m")
+    rs.set_key_schedule(entry, "queue", peak)
+    assert entry.to_dict()["queue_schedule"] == peak and "disable_schedule" not in entry.to_dict()
+    rs.set_key_schedule(entry, "disable", peak)
+    assert entry.to_dict()["disable_schedule"] == peak and "queue_schedule" not in entry.to_dict()
+    with pytest.raises(ValueError):
+        rs.set_key_schedule({}, "sometimes", peak)
+    # list overview: Off / saved but off / windows / current state
+    monday_2 = at(2026, 10, MON, 2)
+    assert rs.key_schedule_overview({"api_key": "k"}) == "Off"
+    assert rs.key_schedule_overview({"queue_schedule": off}) == "Off (⏳ windows saved)"
+    assert rs.key_schedule_overview({"disable_schedule": peak}, "UTC", monday_2).startswith("🗓️ Disabled until 04:00")
+    assert rs.key_schedule_overview({"queue_schedule": peak}, "UTC", at(2026, 10, SAT, 12)) == \
+        "⏳ 01:00–04:00, 06:00–10:00 (UTC), Mon–Fri"
+    # off by default: a saved-but-off schedule is never active
+    assert not rs.key_queued_now({"queue_schedule": off}, monday_2)
+    assert not rs.key_disabled_by_schedule({"disable_schedule": off}, monday_2)
+
+
+def test_preview_status_line_keeps_the_line_count():
+    """The on / off status line is always the first preview line (switching never moves the layout)."""
+    for schedule in (DEEPSEEK_PEAK_SCHEDULE, None):
+        on = rs.editor_preview_lines(schedule, "UTC", enabled=True, now=at(2026, 10, MON, 2))
+        off = rs.editor_preview_lines(schedule, "UTC", enabled=False, now=at(2026, 10, MON, 2))
+        assert on[0] == rs.ON_PREVIEW_LINE and off[0] == rs.OFF_PREVIEW_LINE
+        assert len(on) == len(off) and on[1:] == off[1:]
+
+
 # ------------------------------------------------------------------------------------- desktop UI
-def test_schedule_dialog_edits_presets_and_zones(monkeypatch):
+def _qt(monkeypatch):
     pytest.importorskip("PySide6")
     monkeypatch.setenv("QT_QPA_PLATFORM", os.environ.get("QT_QPA_PLATFORM", "offscreen"))
     from PySide6.QtWidgets import QApplication
@@ -591,44 +643,175 @@ def test_schedule_dialog_edits_presets_and_zones(monkeypatch):
     import multi_api_key_manager as mkm
     if not mkm.HAS_GUI:
         pytest.skip("key manager imported headless")
+    return app, mkm
+
+
+def test_schedule_dialog_edits_presets_and_zones(monkeypatch):
+    app, mkm = _qt(monkeypatch)
     # no schedule yet: the DeepSeek peak hours are suggested (kept in UTC)
-    dialog = mkm.RequestScheduleDialog(None, None, mode="queue", subject="deepseek-chat")
-    assert dialog._schedule() == DEEPSEEK_PEAK_SCHEDULE
-    assert "Suggested" in dialog.preview_label.text() and "UTC" in dialog.preview_label.text()
+    dialog = mkm.RequestScheduleDialog(None, None, mode="main_queue", subject="deepseek-chat")
+    editor = dialog.editor
+    assert isinstance(editor, mkm.ScheduleEditor) and editor.kind_combo is None and editor.kind() is None
+    assert editor._schedule() == DEEPSEEK_PEAK_SCHEDULE
+    assert "Suggested" in editor.preview_label.text() and "UTC" in editor.preview_label.text()
     # off by default: the body is greyed out and Save keeps the windows switched off
-    assert not dialog.enable_check.isChecked() and not dialog.body.isEnabled()
-    assert dialog.preview_label.text().startswith(rs.OFF_PREVIEW_LINE)
+    assert not editor.enable_check.isChecked() and not editor.body.isEnabled()
+    assert editor.preview_label.text().startswith(rs.OFF_PREVIEW_LINE)
+    assert "QLabel:disabled" in editor.body.styleSheet() and "QAbstractSpinBox:disabled" in editor.body.styleSheet()
     dialog._save()
     assert dialog.result_config == rs.to_config(DEEPSEEK_PEAK_SCHEDULE, enabled=False)
     assert rs.from_config(dialog.result_config) is None
-    reopened = mkm.RequestScheduleDialog(None, dialog.result_config, mode="queue")
-    assert not reopened.enable_check.isChecked() and reopened._schedule() == DEEPSEEK_PEAK_SCHEDULE
-    assert not reopened._suggested
-    dialog.enable_check.setChecked(True)
-    assert dialog.body.isEnabled()
+    reopened = mkm.RequestScheduleDialog(None, dialog.result_config, mode="main_queue")
+    assert not reopened.editor.enable_check.isChecked() and reopened.editor._schedule() == DEEPSEEK_PEAK_SCHEDULE
+    assert not reopened.editor._suggested
+    # switching on keeps the preview's line count and reserved height (no layout jump)
+    lines_off = editor.preview_label.text().count("\n")
+    height_off = editor.preview_label.heightForWidth(420)
+    editor.enable_check.setChecked(True)
+    assert editor.body.isEnabled() and editor.preview_label.text().startswith(rs.ON_PREVIEW_LINE)
+    assert editor.preview_label.text().count("\n") == lines_off
+    assert editor.preview_label.heightForWidth(420) == height_off
     dialog._save()
     assert dialog.result_config == rs.to_config(DEEPSEEK_PEAK_SCHEDULE)
     # switching "Times are in" rewrites the same instants in that zone
-    dialog = mkm.RequestScheduleDialog(None, rs.to_config(DEEPSEEK_PEAK_SCHEDULE), mode="disable")
-    dialog._set_combo_zone(dialog.zone_combo, "Asia/Tokyo")
-    dialog._on_zone_changed()
-    assert dialog._schedule() == Schedule((Window(600, 780), Window(900, 1140)), rs.WEEKDAYS, "Asia/Tokyo")
+    dialog = mkm.RequestScheduleDialog(None, rs.to_config(DEEPSEEK_PEAK_SCHEDULE), mode="queue")
+    editor = dialog.editor
+    editor._set_combo_zone(editor.zone_combo, "Asia/Tokyo")
+    editor._on_zone_changed()
+    assert editor._schedule() == Schedule((Window(600, 780), Window(900, 1140)), rs.WEEKDAYS, "Asia/Tokyo")
     # add / remove windows, days, clear
-    dialog._add_row(20 * 60, 2 * 60)
-    assert dialog._schedule().windows[-1] == Window(1200, 120)
-    dialog._remove_row(dialog._rows[-1])
-    dialog.day_checks[5].setChecked(True)
-    assert 5 in dialog._schedule().weekdays
-    dialog._clear_and_accept()
+    editor._add_row(20 * 60, 2 * 60)
+    assert editor._schedule().windows[-1] == Window(1200, 120)
+    editor._remove_row(editor._rows[-1])
+    editor.day_checks[5].setChecked(True)
+    assert 5 in editor._schedule().weekdays
+    editor.clear_button.click()
     assert dialog.result_config == {}
+    # the explanation takes only its text height
+    assert editor.explanation_label.sizePolicy().verticalPolicy() == editor.explanation_label.sizePolicy().Policy.Maximum
     app.processEvents()
+
+
+def _manager(mkm, config):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    saved = []
+    gui = SimpleNamespace(config=config, save_config=lambda **_kwargs: saved.append(deepcopy(config)))
+    return mkm.MultiAPIKeyDialog(None, gui), saved
+
+
+def _select(tree, *rows):
+    tree.clearSelection()
+    for row in rows:
+        tree.topLevelItem(row).setSelected(True)
+
+
+def test_schedules_tab_edits_one_schedule_per_key(monkeypatch):
+    app, mkm = _qt(monkeypatch)
+    peak = rs.to_config(DEEPSEEK_PEAK_SCHEDULE)
+    config = {
+        "use_multi_api_keys": True,
+        "multi_api_keys": [
+            {"api_key": "sk-first-local-test-key", "model": "deepseek-chat", "enabled": True, "queue_schedule": peak},
+            {"api_key": "sk-second-local-test-key", "model": "deepseek-chat", "enabled": True},
+        ],
+        "fallback_keys": [{"api_key": "fb-local-test-key", "model": "gemini-3-pro", "enabled": True}],
+    }
+    dialog, saved = _manager(mkm, config)
+    try:
+        tabs = dialog.manager_tabs
+        assert [tabs.tabText(i) for i in range(tabs.count())] == ["🔑 Key Pools", "⏰ Schedules"]
+        tabs.setCurrentIndex(1)
+        editor, tree = dialog.schedule_editor, dialog.schedule_key_tree
+        assert editor.mode == "key" and editor.kind_combo is not None
+        # every pool of the manager can be picked; Halgakos arrows on every dropdown of the tab
+        pools = [dialog.schedule_pool_combo.itemData(i) for i in range(dialog.schedule_pool_combo.count())]
+        assert pools[:3] == ["main", "fallback", "glossary"] and set(pools) == set(mkm.POOL_CONTEXTS)
+        for combo in (dialog.schedule_pool_combo, editor.kind_combo, editor.zone_combo, editor.preview_zone_combo):
+            assert "down-arrow" in combo.styleSheet() and "Halgakos" in combo.styleSheet()
+        assert dialog.schedule_pool_combo.itemText(0) == "Translation Keys (2)"
+        # the list: masked key, model, schedule state
+        assert tree.topLevelItemCount() == 2
+        assert tree.topLevelItem(0).text(1) == "sk-first...-key" and tree.topLevelItem(0).text(2) == "deepseek-chat"
+        assert tree.topLevelItem(0).text(3).startswith("⏳") and tree.topLevelItem(1).text(3) == "Off"
+        assert not editor.isEnabled()          # nothing selected
+        # loading a key shows its field and enabled state
+        _select(tree, 0)
+        assert editor.isEnabled() and editor.kind() == "queue" and editor.enable_check.isChecked()
+        _select(tree, 1)
+        assert editor.kind() == "disable" and not editor.enable_check.isChecked() and editor._suggested
+        editor.set_kind("queue")
+        # off by default: saving without enabling stores "enabled": false and nothing is active
+        dialog._apply_schedule_to_selected()
+        second = config["multi_api_keys"][1]
+        assert second["queue_schedule"] == rs.to_config(DEEPSEEK_PEAK_SCHEDULE, enabled=False)
+        assert rs.key_schedule(dialog.key_pool.keys[1], rs.QUEUE_FIELD) is None
+        assert not rs.key_queued_now(second, at(2026, 10, MON, 2))
+        assert tree.topLevelItem(1).text(3) == "Off (⏳ windows saved)" and saved
+        # switching the behaviour writes the chosen field and removes the other one
+        _select(tree, 0, 1)
+        assert "differ" in dialog.schedule_selection_label.text()
+        editor.set_kind("disable")
+        editor.enable_check.setChecked(True)
+        dialog._apply_schedule_to_selected()
+        for key in config["multi_api_keys"]:
+            assert key["disable_schedule"] == peak and "queue_schedule" not in key
+        assert all(entry.queue_schedule == {} and entry.disable_schedule == peak for entry in dialog.key_pool.keys)
+        assert saved[-1]["multi_api_keys"][0] == config["multi_api_keys"][0]
+        # the key list's Status column keeps showing the schedule state
+        status, _lines = rs.key_schedule_summary(dialog.key_pool.keys[0])
+        column = dialog.tree.topLevelItem(0).text(6)
+        assert (status and column == status) or "🗓️" in column
+        # 🧹 Clear removes both fields
+        _select(tree, 0)
+        editor.clear_button.click()
+        first = config["multi_api_keys"][0]
+        assert "disable_schedule" not in first and "queue_schedule" not in first
+        assert tree.topLevelItem(0).text(3) == "Off"
+        # Fallback keys are tried one by one: no queue option (disabled, with the reason)
+        assert dialog.select_schedule_pool("fallback")
+        queue_index = editor.kind_combo.findData("queue")
+        assert not editor.kind_combo.model().item(queue_index).isEnabled()
+        assert editor.kind_combo.itemData(queue_index, mkm.Qt.ToolTipRole) == rs.QUEUE_UNAVAILABLE_HELP
+        _select(tree, 0)
+        editor.set_kind("queue")
+        assert editor.kind() == "disable"
+        editor.enable_check.setChecked(True)
+        dialog._apply_schedule_to_selected()
+        assert config["fallback_keys"][0]["disable_schedule"] == peak
+        assert "queue_schedule" not in config["fallback_keys"][0]
+        # back on a rotating pool the queue option is offered again
+        assert dialog.select_schedule_pool("glossary")
+        assert editor.kind_combo.model().item(queue_index).isEnabled()
+        assert tree.topLevelItemCount() == 0 and "no keys" in dialog.schedule_selection_label.text()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
+def test_desktop_and_mobile_store_the_same_schedule_config():
+    """A schedule written by the desktop tab (set_key_schedule on a config dict) validates unchanged
+    through the shared key_pool_service (the mobile KeyEditor / set_key_fields path) and back."""
+    import key_pool_service
+    from multi_api_key_manager import APIKeyEntry
+    off = rs.to_config(DEEPSEEK_PEAK_SCHEDULE, enabled=False)
+    key = rs.set_key_schedule({"api_key": "k", "model": "deepseek-chat", "disable_schedule": off}, "queue", off)
+    data, error = key_pool_service.validate_entry(dict(key), pool="main")
+    assert error is None and data["queue_schedule"] == off and "disable_schedule" not in data
+    entry = APIKeyEntry.from_dict(data)
+    assert entry.to_dict()["queue_schedule"] == off
+    assert rs.key_schedule_config(entry) == ("queue", off)
+    # the mobile write ({chosen: config, other: {}}) gives the same dict
+    mobile = dict(key, disable_schedule={}, queue_schedule=off)
+    assert key_pool_service.validate_entry(mobile, pool="main")[0] == data
 
 
 def test_menu_entries_are_wired():
     manager = (SRC / "multi_api_key_manager.py").read_text(encoding="utf-8")
-    assert 'selected_label("🗓️ Disable schedule…")' in manager
-    assert 'selected_label("⏳ Request Queue…")' in manager
-    assert manager.count("disable_schedule_callback=lambda") == 4      # main, fallback, glossary, dedicated
-    assert manager.count("queue_schedule_callback=lambda") == 3        # every pool with a key rotation
+    # the per-kind key menu entries moved into the ⏰ Schedules tab
+    assert "Disable schedule…" not in manager and "Request Queue…\")" not in manager
+    assert "schedule_callback" not in manager and "_edit_selected_key_schedule" not in manager
+    assert '"⏰ Schedules"' in manager and "def _ensure_schedules_tab" in manager
     gui = (SRC / "translator_gui.py").read_text(encoding="utf-8-sig")
     assert 'menu.addAction("⏳ Request Queue…")' in gui and "def _edit_main_request_queue" in gui
