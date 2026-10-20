@@ -18,8 +18,9 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   Cancel / Resume / Use / In use / Retry. Rows of models that read images say so ("Reads images").
   The ⋮ menu edits, removes the preset, adds the image support to a text-only download or deletes the
   file; Add preset sits in the card's header, Restore defaults closes the card.
-* **Add from Hugging Face**: any repo, repo:quant or huggingface.co link; the usual quant is picked
-  (else a file chooser), optionally saved as a preset.
+* **Add from Hugging Face**: any repo, repo:quant or huggingface.co link. A repo (or repo link) lists
+  every GGUF file of the repository with its size (``FileChooser``, the usual quant preselected); a
+  quant or file reference goes straight to the download question. Optionally saved as a preset.
 * **Downloaded models**: files no preset covers, and paused downloads (Resume / Cancel).
 
 Models are ``local/<stem>`` (the GGUF file name), routed by the shared ``local/`` route to the in-app
@@ -45,6 +46,8 @@ from glossarion_mobile.services.local_llm.service import DEFAULT_CONTEXT_SMALL
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.section_card import SectionCard
+from glossarion_mobile.ui.components.sheet import (bottom_sheet, fits_compact, page_width, scroll_column, sheet_frame,
+                                                   text_height)
 from glossarion_mobile.ui.theme import HIT_TARGET, semantic
 
 __all__ = ["CONTEXT_SLIDER", "ContextControl", "FileChooser", "LocalModelsPanel", "LocalPresetEditor", "OnDeviceFlow",
@@ -191,25 +194,47 @@ class LocalPresetEditor:
 
 
 class FileChooser:
-    """Pick one GGUF file of a repository (name and size); ``future`` gets the HfFile or None."""
+    """Pick one GGUF file (quant) of a repository: one radio row per file (name and size; ``selected``,
+    the automatic choice, is preselected and marked "Recommended"), Cancel / Next under the list (pinned
+    when the list scrolls); ``future`` gets the HfFile or None."""
 
-    def __init__(self, repo: str, files: list) -> None:
+    def __init__(self, repo: str, files: list, selected: Optional[hf.HfFile] = None) -> None:
         self.future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._page: Any = None
-        rows = [ft.ListTile(title=ft.Text(f.name, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                            subtitle=ft.Text(dl.format_bytes(f.size)), dense=True, key=f"local-file-{i}",
-                            on_click=lambda e, f=f: self.pick(f)) for i, f in enumerate(files)]
-        self.dialog = ft.BottomSheet(
-            content=ft.Container(padding=ft.Padding.only(left=8, right=8, bottom=16), content=ft.Column([
-                ft.Text(f"Choose a file of {repo}", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
-                        weight=ft.FontWeight.W_600),
-                *rows,
-                ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.pick(None))],
-                       alignment=ft.MainAxisAlignment.END),
-            ], tight=True, spacing=4, scroll=ft.ScrollMode.AUTO)),
-            show_drag_handle=True, scrollable=True, on_dismiss=lambda e: self.pick(None),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
-        )
+        self.files = list(files)
+        self.selected = selected if selected in self.files else None
+        self.group = ft.RadioGroup(
+            value=self.selected.path if self.selected else None, on_change=lambda e: self.select(self.group.value),
+            content=ft.Column([self._row(i, f) for i, f in enumerate(self.files)], spacing=0, tight=True),
+            key="local-file-group")
+        self.next_button = ft.FilledButton(content="Next", disabled=self.selected is None, key="local-file-next",
+                                           on_click=lambda e: self.pick(self.chosen()))
+        self.title = ft.Text(f"Choose a file of {repo}", theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
+                             weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
+        self.actions = ft.Row([ft.TextButton(content="Cancel", on_click=lambda e: self.pick(None)), self.next_button],
+                              alignment=ft.MainAxisAlignment.END, wrap=True, spacing=8)
+        self.dialog = bottom_sheet(sheet_frame(self._body(compact=False)), key="local-file-sheet")
+        self.dialog.on_dismiss = lambda e: self.pick(None)
+
+    def _row(self, index: int, file: hf.HfFile) -> ft.ListTile:
+        size = dl.format_bytes(file.size)
+        return ft.ListTile(leading=ft.Radio(value=file.path, key=f"local-file-radio-{index}"),
+                           title=ft.Text(file.name, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                           subtitle=ft.Text(f"{size} · Recommended" if file is self.selected else size),
+                           dense=True, key=f"local-file-{index}", on_click=lambda e, f=file: self.select(f.path))
+
+    def _body(self, *, compact: bool) -> ft.Column:
+        if compact:
+            return scroll_column([self.title, self.group, self.actions], spacing=4, scroll=False)
+        return scroll_column([self.title, self.group], footer=[self.actions], spacing=4)
+
+    def select(self, path: Optional[str]) -> None:
+        self.group.value = path
+        self.next_button.disabled = self.chosen() is None
+        _push(self.group, self.next_button)
+
+    def chosen(self) -> Optional[hf.HfFile]:
+        return next((f for f in self.files if f.path == self.group.value), None)
 
     def pick(self, file: Optional[hf.HfFile]) -> None:
         if not self.future.done():
@@ -218,6 +243,11 @@ class FileChooser:
 
     def show(self, page: Any) -> None:
         self._page = page
+        # a short list keeps a compact sheet; a long one opens full height and scrolls under pinned buttons
+        width = page_width(page) - 96
+        estimate = 140 + sum(text_height(f.name, width) + text_height("0", width, 12) + 16 for f in self.files)
+        if fits_compact(page, estimate):
+            self.dialog.content = sheet_frame(self._body(compact=True))
         page.show_dialog(self.dialog)
 
 
@@ -362,32 +392,40 @@ class OnDeviceFlow:
         dialog.show(self.page)
         return bool(await future)
 
-    async def choose(self, repo: str, files: list) -> Optional[hf.HfFile]:
+    async def choose(self, repo: str, files: list, selected: Optional[hf.HfFile] = None) -> Optional[hf.HfFile]:
         if self.choose_fn is not None:
-            result = self.choose_fn(repo, files)
+            result = self.choose_fn(repo, files, selected)
             return await result if asyncio.iscoroutine(result) else result
         if self.page is None:
-            return None
-        chooser = FileChooser(repo, files)
+            return selected
+        chooser = FileChooser(repo, files, selected)
         self.last_dialog = chooser
         chooser.show(self.page)
         return await chooser.future
 
     # ---- the one-tap flow -------------------------------------------------------------------------
 
-    async def fetch(self, ref: hf.HfRef, *, preset: Optional[dict] = None) -> Optional[str]:
+    async def fetch(self, ref: hf.HfRef, *, preset: Optional[dict] = None, choose: bool = False) -> Optional[str]:
         """Resolve ``ref`` on Hugging Face, ask for big files, download the model and, when the preset or
         the repository has one, its vision projector (the same tap); the stem, or None (cancelled /
-        failed: the row or status line says why). A failed projector keeps the model (text only)."""
+        failed: the row or status line says why). A failed projector keeps the model (text only).
+
+        ``choose`` (Add from Hugging Face): a ref naming no file and no quant lists every runnable file of
+        the repository (smallest first; split GGUF sets are left out) with the automatic pick preselected;
+        presets keep the one-tap automatic pick (the chooser then opens only when there is none)."""
         try:
             listing = await self.service.resolve(ref)
-            file = hf.pick_file(listing.files, quant=ref.quant, file=ref.file)
+            choosing = choose and not (ref.file or ref.quant)
+            file = None if choosing else hf.pick_file(listing.files, quant=ref.quant, file=ref.file)
             if file is None:
-                file = await self.choose(ref.repo, list(listing.files))
+                runnable = sorted((f for f in listing.files if not f.split), key=lambda f: (f.size or 0, f.name.lower()))
+                if not runnable:
+                    raise hf.HfError("Split GGUF files are not supported yet" if listing.files
+                                     else "This repository has no GGUF model files")
+                default = hf.pick_file(runnable)
+                file = default if len(runnable) == 1 else await self.choose(ref.repo, runnable, default)
                 if file is None:
                     return None
-                if file.split:
-                    raise hf.HfError("Split GGUF files are not supported yet")
         except hf.HfError as exc:
             raise _Failed(str(exc)) from exc
         projector = hf.pick_projector(listing.projectors, (preset or {}).get("mmproj") or None)
@@ -859,7 +897,7 @@ class LocalModelsPanel(OnDeviceFlow):
         self.hf_field.error = None
         self._status("Looking up the model on Hugging Face…")
         try:
-            stem = await self.fetch(ref)
+            stem = await self.fetch(ref, choose=True)
         except _Failed as exc:
             self._status(str(exc), error=True)
             return None
