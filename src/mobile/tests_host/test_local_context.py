@@ -9,6 +9,8 @@ Run from src/mobile:
 
 from __future__ import annotations
 
+import types
+
 import asyncio
 import sys
 from pathlib import Path
@@ -96,7 +98,7 @@ def test_a_changed_context_reloads_the_loaded_model(tmp_path):
     assert [load[1] for load in engine.loads] == [4096, 12288]
 
 
-def test_local_jobs_use_batch_size_1_and_half_the_context_as_output(tmp_path):
+def test_local_jobs_use_batch_size_1_and_the_saved_output_up_to_the_context(tmp_path):
     service, _engine = _service(tmp_path)
     assert sw.default_batch_size(f"local/{LIGHT}") == 1
     assert sw.default_batch_size("gpt-6") == 5 and sw.default_batch_size("authds/deepseek") == 1
@@ -107,7 +109,10 @@ def test_local_jobs_use_batch_size_1_and_half_the_context_as_output(tmp_path):
         service.save_context(20000)
         config = sw.with_mobile_streaming_defaults({"model": f"local/{LIGHT}", "max_output_tokens": 16384,
                                                     "batch_size": 3})
-        assert config["max_output_tokens"] == 10000 and config["batch_size"] == 3  # a saved batch size wins
+        # owner 2026-10-20: a saved output budget is used, up to the context; a saved batch size wins
+        assert config["max_output_tokens"] == 16384 and config["batch_size"] == 3
+        config = sw.with_mobile_streaming_defaults({"model": f"local/{LIGHT}", "max_output_tokens": 50000})
+        assert config["max_output_tokens"] == 20000  # never more than the context
         service.save_context(0)
         assert sw.with_mobile_streaming_defaults({"model": f"local/{HEAVY}"})["max_output_tokens"] == 1024
         # a cloud model keeps the saved budget
@@ -172,12 +177,20 @@ def test_welcome_request_size_shows_the_context_for_an_on_device_model(tmp_path)
     s = _welcome(service, f"local/{HEAVY}")
     rows = _by_key(s._run_budget())
     assert rows["welcome-ctx"].value == "2048" and rows["welcome-ctx-slider"].value == 2048
-    assert rows["welcome-max-tokens"].value == "1024" and rows["welcome-max-tokens"].disabled
-    assert rows["welcome-max-tokens-slider"].disabled
+    # owner 2026-10-20: both editable; the output starts at half the context and never exceeds it
+    assert rows["welcome-max-tokens"].value == "1024" and not rows["welcome-max-tokens"].disabled
+    assert not rows["welcome-max-tokens-slider"].disabled
     assert s.default_batch_size() == 1
     s.context_control._from_slider(_event(10240.0))
     assert service.settings()["n_ctx"] == 10240 and rows["welcome-max-tokens"].value == "5120"
-    assert s.flow.max_output_tokens is None  # the saved budget stays for cloud models
+    assert s.flow.max_output_tokens is None  # untouched: half the context
+    rows["welcome-max-tokens"].on_change(types.SimpleNamespace(control=types.SimpleNamespace(value="3000")))
+    assert s.flow.max_output_tokens == 3000 and s.shown_max_output_tokens() == 3000
+    rows["welcome-max-tokens"].on_change(types.SimpleNamespace(control=types.SimpleNamespace(value="50000")))
+    assert s.flow.max_output_tokens == 10240 and rows["welcome-max-tokens"].value == "10240"  # capped
+    s.context_control._from_slider(_event(4096.0))  # a smaller context pulls the output down with it
+    assert s.flow.max_output_tokens == 4096 and rows["welcome-max-tokens"].value == "4096"
+    assert s.finish()["max_output_tokens"] == 4096
 
     cloud = _by_key(_welcome(service, "gpt-6")._run_budget())
     assert "welcome-ctx" not in cloud and not cloud["welcome-max-tokens"].disabled

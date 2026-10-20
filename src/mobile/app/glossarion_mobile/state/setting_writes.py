@@ -398,6 +398,7 @@ def with_mobile_streaming_defaults(config: Any) -> Any:
         return config
     for key in STREAMING_KEYS:
         config.setdefault(key, MOBILE_STREAMING_DEFAULT)
+    saved_output = config.get("max_output_tokens")
     # owner (U13): a phone run asks for at most 16,384 output tokens unless the user saved another budget
     config.setdefault("max_output_tokens", MOBILE_MAX_OUTPUT_TOKENS)
     if not config.get("model"):
@@ -408,10 +409,18 @@ def with_mobile_streaming_defaults(config: Any) -> Any:
         # the on-device engine (services.local_llm) answers one request at a time: parallel requests would
         # only queue at its endpoint and spend the client's timeout waiting
         config.update(LOCAL_ENGINE_JOB_CONFIG)
-        # owner 2026-10-18: half the configured context is the output budget; the prompt keeps the rest
-        limit = local_output_limit(config.get("model"))
+        # the saved output budget (owner 2026-10-20: editable on the Welcome), never more than the model's
+        # context; without one, half the context (owner 2026-10-18), the prompt keeping the rest
+        context = local_context_limit(config.get("model"))
+        try:
+            saved_output = int(saved_output) if saved_output not in (None, "") else 0
+        except (TypeError, ValueError):
+            saved_output = 0
+        limit = saved_output or local_output_limit(config.get("model"))
+        if limit and context:
+            limit = min(int(limit), int(context))
         if limit:
-            config["max_output_tokens"] = limit
+            config["max_output_tokens"] = int(limit)
     if bool(config.get("stream_thinking_logs")) and not bool(config.get("enable_thoughts", THOUGHTS_DEFAULT)):
         rules = _rules()
         try:

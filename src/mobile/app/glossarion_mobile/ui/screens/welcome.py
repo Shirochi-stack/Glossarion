@@ -502,12 +502,19 @@ class WelcomeScreen(Screen):
         return self.ondevice_flow()
 
     def shown_max_output_tokens(self) -> int:
-        """The output-token limit Request size shows: half the context for an on-device model, else the
-        value set here, else the saved one, else 16,384."""
+        """The output-token limit Request size shows: the value set here, else (on-device) half the context or
+        the saved one / 16,384; an on-device model's never exceeds its context (owner 2026-10-20)."""
         ondevice = self.local_context()
         if ondevice is not None:
-            return max(256, ondevice.current_context() // 2)
+            context = ondevice.current_context()
+            value = int(self.flow.max_output_tokens or 0) or max(256, context // 2)
+            return min(value, context)
         return int(self.flow.max_output_tokens or self.default_max_tokens or 16384)
+
+    def _clamp_output(self, value: int) -> int:
+        """An on-device model's output limit is at most its context."""
+        ondevice = self.local_context()
+        return min(int(value), ondevice.current_context()) if ondevice is not None else int(value)
 
     def _run_budget(self) -> ft.Control:
         """U13: the output-token budget (slider + field; mobile default 16,384) and the chunk size (blank: auto).
@@ -518,20 +525,22 @@ class WelcomeScreen(Screen):
         ondevice = self.local_context()
         current = self.shown_max_output_tokens()
         low, high = TOKEN_SLIDER
-        field = ft.TextField(label="Output token limit" + (" (half the context)" if ondevice is not None else ""),
-                             value=str(current), dense=True, width=170, disabled=ondevice is not None,
+        field = ft.TextField(label="Output token limit" + (" (up to the context)" if ondevice is not None else ""),
+                             value=str(current), dense=True, width=170,
                              keyboard_type=number_keyboard(), key="welcome-max-tokens")
         slider = ft.Slider(min=low, max=high, value=max(low, min(high, current)), expand=True,
-                           disabled=ondevice is not None, key="welcome-max-tokens-slider")
+                           key="welcome-max-tokens-slider")
         context_rows: list[ft.Control] = []
         if ondevice is not None:
             from glossarion_mobile.ui.screens.local_models_panel import ContextControl
 
             def on_context(tokens: int) -> None:
                 ondevice.service.save_context(tokens)
-                half = max(256, tokens // 2)
-                field.value = str(half)
-                slider.value = max(low, min(high, half))
+                if self.flow.max_output_tokens and self.flow.max_output_tokens > tokens:
+                    self.flow.max_output_tokens = tokens  # the output never exceeds the context
+                shown = self.shown_max_output_tokens()
+                field.value = str(shown)
+                slider.value = max(low, min(high, shown))
                 for control in (field, slider):
                     try:
                         control.update()
@@ -541,12 +550,12 @@ class WelcomeScreen(Screen):
             self.context_control = ContextControl(ondevice.current_context(), on_context, key="welcome-ctx",
                                                   label="Context (tokens)")
             context_rows = [self.context_control.control,
-                            ft.Text("On-device model: the context holds the prompt and the answer; half of it is the "
-                                    "output limit, and requests go one at a time.",
+                            ft.Text("On-device model: the context holds the prompt and the answer, so the output limit "
+                                    "can't exceed it (half of it by default); requests go one at a time.",
                                     theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)]
 
         def from_slider(e: Any) -> None:
-            value = int(round(float(e.control.value) / 1024.0)) * 1024 or low
+            value = self._clamp_output(int(round(float(e.control.value) / 1024.0)) * 1024 or low)
             self.flow.max_output_tokens = value
             field.value = str(value)
             try:
@@ -557,8 +566,15 @@ class WelcomeScreen(Screen):
         def from_field(e: Any) -> None:
             text = str(e.control.value or "").strip()
             if text.isdigit() and int(text) > 0:
-                self.flow.max_output_tokens = int(text)
-                slider.value = max(low, min(high, int(text)))
+                value = self._clamp_output(int(text))
+                self.flow.max_output_tokens = value
+                if value != int(text):  # more than the context: shown clamped
+                    field.value = str(value)
+                    try:
+                        field.update()
+                    except Exception:
+                        pass
+                slider.value = max(low, min(high, value))
                 try:
                     slider.update()
                 except Exception:
@@ -950,7 +966,7 @@ class WelcomeScreen(Screen):
         if self.flow.batch_size is None:
             self.flow.batch_size = self.default_batch_size()
         if self.flow.max_output_tokens is None or self.local_context() is not None:
-            self.flow.max_output_tokens = self.shown_max_output_tokens()
+            self.flow.max_output_tokens = self.shown_max_output_tokens()  # on-device: clamped to the context
         if self.flow.temperature is None:
             self.flow.temperature = self.shown_temperature()
         if self.flow.text_extraction_method is None:  # every model: the choice is what sets the method
