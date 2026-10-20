@@ -10999,6 +10999,8 @@ class MultiAPIKeyDialog(QDialog):
         """The Parameters double-click menu; returns the chosen field (None when dismissed)."""
         tree = self.schedule_key_tree
         menu = QMenu(tree)
+        # the shared key menu's item padding: no empty icon / check column before the labels
+        menu.setStyleSheet("QMenu::item { padding: 4px 16px; }")
         chosen = {}
         for label, field in self._schedule_parameter_fields(self._schedule_pool()):
             action = menu.addAction(label)
