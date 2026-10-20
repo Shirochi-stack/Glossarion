@@ -310,8 +310,7 @@ def test_columns_added_while_on_device_stay(tmp_path):
                                          "token_limit": 200000}],
                          ids=["fresh", "saved"])
 def test_local_model_sets_request_size_and_cloud_restores_it(tmp_path, monkeypatch, config):
-    """On-device: batch size 1, output limit half the context (no temperature of its own: owner 2026-10-20);
-    a cloud model gets the
+    """On-device: temperature 0.4, batch size 1, output limit half the context; a cloud model gets the
     saved values back (or the defaults when nothing was saved) unless the user changed them meanwhile."""
     from glossarion_mobile.state import setting_writes as sw
 
@@ -319,8 +318,7 @@ def test_local_model_sets_request_size_and_cloud_restores_it(tmp_path, monkeypat
     monkeypatch.setattr(sw, "local_context_limit", lambda model: 8192 if str(model).startswith("local/") else None)
     store = _store(tmp_path, config)
     sw.write_setting(store, "model", LOCAL)
-    assert store.get("batch_size") == 1 and "translation_temperature" not in sw.ON_DEVICE_SETTINGS
-    assert store.get("translation_temperature") == config.get("translation_temperature")  # left alone
+    assert store.get("translation_temperature") == 0.4 and store.get("batch_size") == 1
     assert store.get("max_output_tokens") == 4096 and store.get("token_limit") == 8192
     assert "review_system_prompt" not in sw.ON_DEVICE_SETTINGS  # the On-device review profile instead
     sw.write_setting(store, "model", CLOUD)

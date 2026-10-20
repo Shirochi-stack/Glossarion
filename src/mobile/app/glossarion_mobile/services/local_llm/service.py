@@ -75,7 +75,7 @@ SETTINGS_KEY = "local_llm_settings"
 SAMPLING_KEY = "local_llm_sampling"
 #: Qwen's recommended non-thinking sampling for its small models (owner 2026-10-18: no penalty let a 0.8B
 #: model loop on "<p><br/>"); presence_penalty 1.5 counters endless repetition. The
-#: temperature is the global one (0.3 by default, like every model).
+#: temperature is the global one (an on-device model sets 0.4: setting_writes.ON_DEVICE_TEMPERATURE).
 DEFAULT_ONDEVICE_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5,
                              "repeat_penalty": 1.0}
 #: (low, high, type) of each sampling setting

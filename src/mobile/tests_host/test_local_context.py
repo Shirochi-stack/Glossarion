@@ -250,8 +250,8 @@ def test_on_device_engine_card_saves_and_resets_sampling(tmp_path):
     assert panel.sampling_fields["presence_penalty"].value == "1.5"
     panel.dispose()
 
-def test_welcome_temperature_is_the_same_for_on_device_and_cloud_models(tmp_path):
-    """Owner 2026-10-20: no on-device temperature of its own — every model shows the saved one, else 0.3."""
+def test_welcome_temperature_is_0_4_only_for_an_on_device_model(tmp_path):
+    """An on-device model gets temperature 0.4 (owner 2026-10-21; was 0.7); cloud models keep the saved one / 0.3."""
     from glossarion_mobile.ui.router import parse_route
     from glossarion_mobile.ui.screens.welcome import WelcomeScreen
 
@@ -261,9 +261,9 @@ def test_welcome_temperature_is_the_same_for_on_device_and_cloud_models(tmp_path
         s.get_body()
         return s
 
-    for saved, expected in (({}, 0.3), ({"translation_temperature": 0.5}, 0.5), ({"translation_temperature": 1.1}, 1.1)):
+    for saved in ({}, {"translation_temperature": 0.3}, {"translation_temperature": 1.1}):
         s = welcome(saved, f"local/{LIGHT}")
-        assert s.shown_temperature() == expected and s.finish()["translation_temperature"] == expected
+        assert s.shown_temperature() == 0.4 and s.finish()["translation_temperature"] == 0.4
     s = welcome({}, "gpt-6")
     assert s.shown_temperature() == 0.3 and s.finish()["translation_temperature"] == 0.3
     s = welcome({"translation_temperature": 1.1}, "gpt-6")
