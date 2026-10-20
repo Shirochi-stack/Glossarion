@@ -140,7 +140,10 @@ libmtmd (the image encoder of vision models).
   i8mm, and ggml's SVE repack kernels want 256-bit vectors (phones have 128). The engine card shows the
   CPU line of the registered backend (`DOTPROD = 1`, `MATMUL_INT8 = 1`, ...) and `(CPU variant
   android_armv8.6_1)`; `LLAMA_CPP_CPU_VARIANT=<variant>` in the environment tries one first (ggml still
-  refuses a variant the CPU cannot run). Cost: about 3 MB more per arm64 APK.
+  refuses a variant the CPU cannot run). Cost: each variant is about 0.8 MB, so the arm64 APK grows
+  by about 2.4 MB. Measured on GitHub's arm64 runner (Neoverse N2, 4 threads, Qwen2.5 0.5B; the
+  `cpu_check` job, see below), armv8.0 baseline -> best variant: Q4_0 prompt 89 -> 619 tok/s and
+  generation 48 -> 94 tok/s; Q4_K_M prompt 83 -> 153 tok/s and generation 45 -> 68 tok/s.
   x86_64 (emulator, Chromebooks) keeps the single built-in libggml-cpu. iOS keeps it too: the floor is
   iOS 13 (A9 / A10 / A11 / A12 iPhones have no dotprod, A13+ do, i8mm from A15), dylibs in an app are
   framework-relocated and code-signed, and llama.cpp's Apple variant list starts at dotprod; Metal
