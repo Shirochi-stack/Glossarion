@@ -36,6 +36,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
+from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip, unavailable_tile
 from glossarion_mobile.ui.screens.base import Screen
@@ -583,8 +584,9 @@ class GcpProjectPicker:
             expand=True,
             key=self.key,
         )
-        self.field = ft.TextField(hint_text="Or type a project id", dense=True, expand=True,
-                                  on_submit=lambda e: self.select_project(e.control.value or ""))
+        # A value: tapping away sets the typed project like Done does (a blank field sets nothing).
+        self.field = commit_on_blur(ft.TextField(hint_text="Or type a project id", dense=True, expand=True),
+                                    self.select_project, current=lambda: self._cfg("authgem_project", "") or "")
         self.note.value = "Vertex AI needs a Google Cloud project with billing. authgem/ (AI Studio) does not."
         self.control = ft.Column(
             [

@@ -43,6 +43,7 @@ import flet as ft
 
 from glossarion_mobile.services import manga as svc
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.tools.common import hint_text, schema_tiles
 from glossarion_mobile.ui.tools.manga.common import MangaTab, push, reason_or_chip
@@ -495,9 +496,10 @@ class SettingsTab(MangaTab):
                            on_click=lambda e: self.edit_secret(title, key))
 
     def _text_row(self, title: str, key: str, ui_key: str, cfg: dict, *, hint: str = "") -> ft.Control:
-        return ft.TextField(label=title, value=str(cfg.get(key) or ""), hint_text=hint or None, dense=True,
-                            key=self.k(ui_key), on_blur=lambda e: self.set(key, str(e.control.value or "").strip()),
-                            on_submit=lambda e: self.set(key, str(e.control.value or "").strip()))
+        return commit_on_blur(
+            ft.TextField(label=title, value=str(cfg.get(key) or ""), hint_text=hint or None, dense=True,
+                         key=self.k(ui_key)),
+            lambda text: self.set(key, text.strip()), current=lambda: str(self.config().get(key) or ""))
 
     def edit_secret(self, title: str, key: str) -> Any:
         from glossarion_mobile.ui.settings.editors import SecretEditor
@@ -966,10 +968,10 @@ class SettingsTab(MangaTab):
             size = int(svc.effective_setting(cfg, "manga_batch_image_requests_size", 5) or 5)
         except (TypeError, ValueError):
             size = 5
-        self.endpoint_field = ft.TextField(label="Image edit endpoint (blank = the main image provider)",
-                                           value=endpoint, dense=True, key=self.k("ms-edit-endpoint"),
-                                           on_blur=lambda e: self.set_image_edit_endpoint(e.control.value),
-                                           on_submit=lambda e: self.set_image_edit_endpoint(e.control.value))
+        self.endpoint_field = commit_on_blur(
+            ft.TextField(label="Image edit endpoint (blank = the main image provider)", value=endpoint, dense=True,
+                         key=self.k("ms-edit-endpoint")),
+            self.set_image_edit_endpoint, current=lambda: str(self.config().get(svc.K_EDIT_ENDPOINT) or ""))
         self.test_result = hint_text("", key=self.k("ms-edit-test-result"))
         can_test = callable(svc.core_attr("manga_env", "test_custom_image_edit_endpoint",
                                           "check_custom_image_edit_endpoint"))
@@ -1222,10 +1224,11 @@ class SettingsTab(MangaTab):
         lo, hi = FONT_BOUNDS
 
         def field(label: str, which: str, value: int, ui_key: str) -> ft.TextField:
-            return ft.TextField(label=label, value=str(value), width=170, dense=True,
-                                keyboard_type=number_keyboard(), helper=f"{lo}–{hi}", key=self.k(ui_key),
-                                on_submit=lambda e: self.set_font_bound(which, e.control.value),
-                                on_blur=lambda e: self.set_font_bound(which, e.control.value))
+            return commit_on_blur(
+                ft.TextField(label=label, value=str(value), width=170, dense=True, keyboard_type=number_keyboard(),
+                             helper=f"{lo}–{hi}", key=self.k(ui_key)),
+                lambda text: self.set_font_bound(which, text),
+                current=lambda: self._font_bounds(self.get)[0 if which == "min" else 1])
 
         return ft.Row([field("Minimum font size", "min", low, "ms-min-font"),
                        field("Maximum font size", "max", high, "ms-max-font")], wrap=True, spacing=12)
@@ -1266,9 +1269,9 @@ class SettingsTab(MangaTab):
                                                               ft.Colors.PRIMARY if color == rgb else ft.Colors.OUTLINE),
                                          on_click=lambda e, c=color: self._set_and_refresh(key, list(c)),
                                          key=self.k(f"{ui_key}-{index}"), tooltip=_hex(color)))
-        field = ft.TextField(value=_hex(rgb), width=110, dense=True, key=self.k(f"{ui_key}-hex"),
-                             on_submit=lambda e: self._set_hex(key, e.control.value),
-                             on_blur=lambda e: self._set_hex(key, e.control.value))
+        field = commit_on_blur(ft.TextField(value=_hex(rgb), width=110, dense=True, key=self.k(f"{ui_key}-hex")),
+                               lambda text: self._set_hex(key, text),
+                               current=lambda: _hex(_rgb(self.get(key, list(rgb)), rgb)))
         return ft.Column([ft.Text(label, theme_style=ft.TextThemeStyle.BODY_SMALL),
                           ft.Row([*swatches, field], wrap=True, spacing=6)], spacing=2, tight=True)
 

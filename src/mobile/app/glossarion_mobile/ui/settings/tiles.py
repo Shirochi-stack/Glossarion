@@ -48,6 +48,7 @@ from glossarion_mobile.state.setting_writes import (
     write_setting,
 )
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.scroll_anchor import anchored_column
@@ -562,11 +563,11 @@ class NumberTile(SettingTile):
         low, high = self.bounds()
         hint = " · ".join(p for p in (f"min {summarize(low, 'number')}" if low is not None else "",
                                       f"max {summarize(high, 'number')}" if high is not None else "") if p)
-        self.field = ft.TextField(
+        self.field = commit_on_blur(ft.TextField(
             color=ft.Colors.ON_SURFACE,
             value="", dense=True, width=150, keyboard_type=number_keyboard(),
-            border_radius=tokens.RADII["field"], on_submit=self._on_submit, on_blur=self._on_submit,
-        )
+            border_radius=tokens.RADII["field"],
+        ), lambda _text: self._on_submit())
         self.minus = ft.IconButton(icon=ft.Icons.REMOVE, tooltip="Decrease", on_click=lambda e: self.step(-1),
                                    size_constraints=HIT_TARGET)
         self.plus = ft.IconButton(icon=ft.Icons.ADD, tooltip="Increase", on_click=lambda e: self.step(1),
@@ -981,9 +982,9 @@ class TextTile(SettingTile):
         return super().readonly() or _foreign_value_reason(self)
 
     def build_editor_row(self) -> Optional[ft.Control]:
-        self.field = ft.TextField(color=ft.Colors.ON_SURFACE, value="", dense=True, expand=True,
-                                  border_radius=tokens.RADII["field"], on_submit=self._on_submit,
-                                  on_blur=self._on_submit)
+        self.field = commit_on_blur(ft.TextField(color=ft.Colors.ON_SURFACE, value="", dense=True, expand=True,
+                                                 border_radius=tokens.RADII["field"]),
+                                    lambda _text: self._on_submit())
         return ft.Row([self.field])
 
     def refresh_value(self) -> None:

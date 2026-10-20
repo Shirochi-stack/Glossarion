@@ -30,6 +30,7 @@ from typing import Any, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
@@ -142,9 +143,10 @@ class AsyncBatchScreen(Screen):
         self.wait_switch = ft.Switch(label="Wait for completion (the job keeps polling)",
                                      value=bool(self.ctx.cfg(WAIT_KEY, False)), on_change=self._on_wait,
                                      key="async-wait")
-        self.poll_field = ft.TextField(label="Poll interval (seconds)", value=str(self.ctx.cfg(POLL_KEY, 60)),
-                                       dense=True, keyboard_type=number_keyboard(), width=200,
-                                       on_blur=self._on_poll, on_submit=self._on_poll, key="async-poll")
+        self.poll_field = commit_on_blur(
+            ft.TextField(label="Poll interval (seconds)", value=str(self.ctx.cfg(POLL_KEY, 60)), dense=True,
+                         keyboard_type=number_keyboard(), width=200, key="async-poll"),
+            lambda _text: self._on_poll(), current=lambda: self.ctx.cfg(POLL_KEY, 60))
         config = card("Async Processing Configuration", [self.wait_switch, self.poll_field,
                                                          hint_text(CHUNKING_NOTE, key="async-chunk-note")],
                       icon="TUNE", key="async-config")
