@@ -251,6 +251,45 @@ def has_deep_link(tree: XmlElement, scheme: str, host: str) -> bool:
     return False
 
 
+def optional_native_libraries(tree: XmlElement) -> dict[str, bool]:
+    """{name: required} of the merged manifest's ``<uses-native-library>`` elements."""
+    out: dict[str, bool] = {}
+    for node in tree.iter("uses-native-library"):
+        name = attr_text(node.attrs.get("name"))
+        raw = node.attrs.get("required")
+        text = attr_text(raw).lower()
+        if raw is None:
+            required = True  # Android's default
+        elif text in ("true", "false"):
+            required = text == "true"
+        else:
+            number = attr_int(raw)  # aapt2 may print a boolean as 0x0 / 0xffffffff
+            required = bool(number) if number is not None else True
+        if name:
+            out[name] = required
+    return out
+
+
+def gpu_problems(tree: XmlElement, apk_names: list[str]) -> list[str]:
+    """The on-device engine's optional OpenCL backend (arm64): the vendor libOpenCL.so must be declared
+    optional in the merged manifest, and no libOpenCL.so may ship in the APK (the app must load the
+    phone's own driver, never a bundled ICD loader)."""
+    problems = []
+    if not any(n.startswith("lib/arm64-v8a/libggml-opencl.so") for n in apk_names):
+        return problems
+    declared = optional_native_libraries(tree)
+    if "libOpenCL.so" not in declared:
+        problems.append("lib/arm64-v8a/libggml-opencl.so ships but the merged manifest has no "
+                        "<uses-native-library android:name=\"libOpenCL.so\"> (Android 12+ hides the vendor driver)")
+    elif declared["libOpenCL.so"]:
+        problems.append("<uses-native-library libOpenCL.so> is required=\"true\": phones without OpenCL could not "
+                        "install the app")
+    bundled = [n for n in apk_names if re.match(r"^lib/[^/]+/libOpenCL\.so", n)]
+    if bundled:
+        problems.append(f"the APK bundles {bundled}: the GPU backend must use the phone's own libOpenCL.so")
+    return problems
+
+
 def manifest_flag(tree: XmlElement, element: str, attribute: str) -> str | None:
     for node in tree.iter(element):
         if attribute in node.attrs:
@@ -424,6 +463,12 @@ def check_apk(report: Report, args, build_tools: Path | None, required: set[str]
         if missing:
             report.error("merged <application> lacks the pyproject manifest_application attribute(s): "
                          + ", ".join(missing) + " (the Reader WebView needs networkSecurityConfig for 127.0.0.1)")
+        with zipfile.ZipFile(apk) as archive:
+            names = archive.namelist()
+        for problem in gpu_problems(tree, names):
+            report.error(problem)
+        if any(n.startswith("lib/arm64-v8a/libggml-opencl.so") for n in names):
+            report.facts["GPU backend"] = "OpenCL (libOpenCL.so optional)"
         debuggable = manifest_flag(tree, "application", "debuggable")
         if debuggable and debuggable.lower() in ("true", "0xffffffff", "-1"):
             report.warn("application is debuggable")

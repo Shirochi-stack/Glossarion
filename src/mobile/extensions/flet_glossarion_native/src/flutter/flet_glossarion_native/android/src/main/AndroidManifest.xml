@@ -19,6 +19,11 @@
     picked folder (resolveContentProvider) and keeps third-party document
     providers reachable after a reboot ("Unknown authority" otherwise). No
     storage permission is added; the system picker grants access per folder.
+  * <uses-native-library libOpenCL.so required="false">: the on-device engine's
+    optional GPU backend (libggml-opencl.so, "Use GPU" in Model manager ›
+    On-device) loads the phone's own OpenCL driver. Android 12+ (targetSdk 31+)
+    hides vendor libraries from apps that do not declare them; required="false"
+    keeps the app installable everywhere (no OpenCL: the GPU falls back to the CPU).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -34,6 +39,10 @@
     </queries>
 
     <application>
+
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
 
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"

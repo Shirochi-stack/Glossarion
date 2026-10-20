@@ -1,7 +1,8 @@
 Glossarion overlay of flet-dev/mobile-forge recipes/llama-cpp-python/patches/mobile.patch
 (0fadbfab0d63d11164030dfddc955ed980e32e2c, BSD-3-Clause, see ../../LICENSE.mobile-forge):
-upstream's five changes below, unchanged, plus a sixth one for the vision build (LLAVA_BUILD=ON)
-and a seventh one for the runtime CPU variants of the Android arm64 build:
+upstream's five changes below, unchanged, plus a sixth one for the vision build (LLAVA_BUILD=ON),
+a seventh one for the runtime CPU variants of the Android arm64 build and an eighth one for the
+optional GPU backends:
 
 6. Drops SONAME versioning from libmtmd too (single unversioned libmtmd, like the others).
 
@@ -18,13 +19,26 @@ and a seventh one for the runtime CPU variants of the Android arm64 build:
      directory and the cwd). CPU_BACKEND_VARIANT names the registered variant ("builtin" when
      libggml links the CPU backend itself: x86_64, iOS).
 
+8. Optional GPU backends, registered only when the app asks (its "Use GPU" setting, off by
+   default; meta.yaml builds Android arm64 with GGML_OPENCL=ON and iOS with GGML_METAL=ON):
+   - _ctypes_extensions.py: register_gpu_backend() loads libggml-opencl.so with
+     ggml_backend_load() (Android arm64: the only library that needs the vendor's libOpenCL.so,
+     so a phone without OpenCL just gets an error string) or registers the linked Metal backend
+     with ggml_backend_register(ggml_backend_metal_reg()) (iOS), and reports the first usable
+     GPU device or why there is none (GPU_STATE). The preload chain loads libggml-metal before
+     libggml where it exists. gpu_backend_name() says which backend the build ships, loading
+     nothing.
+   - ggml/src/ggml-backend-reg.cpp: the registry no longer registers Metal when it starts, so
+     Metal's device setup and runtime shader compilation never run while the GPU is off
+     (GLOSSARION_GGML_EAGER_METAL=1 restores upstream's behaviour).
+
 Upstream's description:
 
 It does five things:
 
 1. Stops llama-cpp-python's CMakeLists from FORCE-enabling GGML_METAL on all
-   Apple platforms (it would override our -DGGML_METAL=OFF for the iOS cross
-   build, which has no Metal toolchain).
+   Apple platforms (it would override the recipe's own GGML_METAL / embed flags for
+   the iOS cross build and guess the arch with `uname -m`).
 2. Skips building llama.cpp's unused `common` helper lib (~5 MB).
 3. Drops SONAME versioning from the shipped libs (ggml-base/ggml/ggml-cpu/
    llama) so the wheel carries single unversioned files instead of a
@@ -71,8 +85,8 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 -    if (APPLE)
 +    # mobile-forge: skip this macOS-host block when cross-compiling to iOS.
 +    # It FORCEs GGML_METAL=ON (overriding our -DGGML_METAL=OFF) and guesses
-+    # the arch via `uname -m`. For iOS we build CPU-only and pass the arch
-+    # explicitly via CMAKE_OSX_ARCHITECTURES.
++    # the arch via `uname -m`. For iOS the recipe sets GGML_METAL itself and
++    # passes the arch explicitly via CMAKE_OSX_ARCHITECTURES.
 +    if (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
          # Get the target architecture
          execute_process(
@@ -80,7 +94,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 --- a/llama_cpp/_ctypes_extensions.py
 +++ b/llama_cpp/_ctypes_extensions.py
-@@ -21,39 +21,171 @@
+@@ -21,39 +21,285 @@
  
  _EMSCRIPTEN_SIDE_MODULE_SUFFIX = ".cpython-00-wasm32-emscripten.so"
  
@@ -197,6 +211,120 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 +    CPU_BACKEND_VARIANT = "none"  # llama_backend_init() falls back to ggml_backend_load_all()
 +    return CPU_BACKEND_VARIANT
 +
++
++# Glossarion: optional GPU backend, registered on demand only (the app's "Use GPU" setting).
++#   * Android arm64: libggml-opencl.so (GGML_OPENCL + the Adreno kernels, a GGML_BACKEND_DL
++#     module next to the CPU variants). It alone needs the vendor's libOpenCL.so, so nothing
++#     else breaks on a phone without OpenCL: ggml_backend_load() just fails.
++#   * iOS: libggml-metal.dylib (GGML_METAL, embedded shader source), linked into libggml but
++#     no longer registered when the registry starts (patched ggml-backend-reg.cpp): Metal's
++#     device setup (and its shader compilation) runs only in register_gpu_backend().
++# A registered backend stays for the process; the CPU path then keeps llama.cpp off it with
++# split_mode NONE + main_gpu -1 (no offload device at all).
++#: {"backend", "device", "error"} after register_gpu_backend(); {} before.
++GPU_STATE: dict = {}
++_LIBGGML = None
++_LIBGGML_METAL = None
++_BASE_PATH: Optional[pathlib.Path] = None
++
++
++def gpu_backend_name() -> Optional[str]:
++    """The GPU backend this build ships ("Metal", "OpenCL") or None; loads nothing."""
++    if _LIBGGML_METAL is not None:
++        return "Metal"
++    base = _BASE_PATH
++    if base is not None:
++        try:
++            if (base / "libggml-opencl.so").exists():
++                return "OpenCL"
++        except OSError:
++            pass
++    if sys.platform == "android" or hasattr(sys, "getandroidapilevel"):
++        import platform as _platform
++
++        if _platform.machine().lower() in ("aarch64", "arm64"):
++            return "OpenCL"  # the arm64 wheel's libggml-opencl.so sits in the APK's jniLibs
++    return None
++
++
++def _ggml(name: str, restype, argtypes):
++    fn = getattr(_LIBGGML, name)
++    fn.restype = restype
++    fn.argtypes = argtypes
++    return fn
++
++
++def _gpu_devices(reg) -> List[str]:
++    """Descriptions of the GPU devices of backend registry ``reg``."""
++    count = _ggml("ggml_backend_reg_dev_count", ctypes.c_size_t, [ctypes.c_void_p])
++    get = _ggml("ggml_backend_reg_dev_get", ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_size_t])
++    desc = _ggml("ggml_backend_dev_description", ctypes.c_char_p, [ctypes.c_void_p])
++    memory = _ggml("ggml_backend_dev_memory", None,
++                   [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)])
++    out = []
++    for i in range(int(count(reg))):
++        dev = get(reg, i)
++        free, total = ctypes.c_size_t(0), ctypes.c_size_t(0)
++        memory(dev, ctypes.byref(free), ctypes.byref(total))
++        text = (desc(dev) or b"").decode("utf-8", "replace").strip()
++        if text and total.value:  # Metal keeps a device without an MTLDevice: no name, no memory
++            out.append(text)
++    return out
++
++
++def register_gpu_backend() -> dict:
++    """Register this build's GPU backend with ggml (once per process; later calls return the
++    first result): {"backend": "OpenCL"|"Metal"|None, "device": description or None,
++    "error": why there is no usable GPU, or None}."""
++    if GPU_STATE:
++        return dict(GPU_STATE)
++    name = gpu_backend_name()
++    state = {"backend": name, "device": None, "error": None}
++    try:
++        if _LIBGGML is None:
++            state["error"] = "the engine's libraries are not loaded"
++        elif name is None:
++            state["error"] = "this build has no GPU backend"
++        elif name == "Metal":
++            fn = getattr(_LIBGGML_METAL, "ggml_backend_metal_reg")
++            fn.restype = ctypes.c_void_p
++            fn.argtypes = []
++            reg = fn()
++            if not reg:
++                state["error"] = "Metal backend did not start"
++            else:
++                _ggml("ggml_backend_register", None, [ctypes.c_void_p])(reg)
++                devices = _gpu_devices(reg)
++                if devices:
++                    state["device"] = devices[0]
++                else:
++                    state["error"] = "Metal found no usable GPU"
++        else:
++            load = _ggml("ggml_backend_load", ctypes.c_void_p, [ctypes.c_char_p])
++            base = _BASE_PATH
++            path = str(base / "libggml-opencl.so") if base is not None and (base / "libggml-opencl.so").exists() \
++                else "libggml-opencl.so"
++            reg = load(path.encode("utf-8"))
++            if not reg:
++                # ggml only logs dlerror(); load it once more to say why (usually: no libOpenCL.so)
++                try:
++                    ctypes.CDLL(path, mode=getattr(ctypes, "RTLD_LOCAL", 0))
++                    why = "the OpenCL backend did not register"
++                except OSError as exc:
++                    why = str(exc).strip() or "the OpenCL backend did not load"
++                state["error"] = f"no OpenCL driver ({why})"
++            else:
++                devices = _gpu_devices(reg)
++                if devices:
++                    state["device"] = devices[0]
++                else:
++                    state["error"] = ("no supported GPU: llama.cpp's OpenCL backend runs on Qualcomm Adreno "
++                                      "GPUs only (OpenCL 2.0+, FP16)")
++    except Exception as exc:  # a missing symbol, a bad handle: report, never raise into the app
++        state["error"] = f"{type(exc).__name__}: {exc}"
++    GPU_STATE.update(state)
++    return dict(GPU_STATE)
++
  
  # Load the library
  def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
@@ -278,7 +406,7 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
      if sys.platform == "win32":
          os.add_dll_directory(str(base_path))
          os.environ["PATH"] = str(base_path) + os.pathsep + os.environ["PATH"]
-@@ -67,9 +199,14 @@
+@@ -67,9 +313,14 @@
              os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "bin"))
              os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "lib"))
          cdll_args["winmode"] = ctypes.RTLD_GLOBAL
@@ -294,7 +422,7 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
          lib_dir = str(base_path)
          ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
          if lib_dir not in ld_library_path.split(os.pathsep):
-@@ -79,42 +216,62 @@
+@@ -79,43 +330,70 @@
                  else f"{lib_dir}{os.pathsep}{ld_library_path}"
              )
  
@@ -307,32 +435,7 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 -                base_path / f"lib{dependency}{_EMSCRIPTEN_SIDE_MODULE_SUFFIX}"
 -            )
 -            if dependency_path.exists():
-+    # Preload dependencies in dependency order so the main library resolves them
-+    # from the already-loaded set: ggml-base before ggml-cpu/ggml, all before
-+    # llama/mtmd. On iOS the libs are framework-relocated with sibling @rpath refs
-+    # that dyld cannot resolve on its own, but each preloaded framework's
-+    # install-id (@rpath/lib<name>.dylib, which serious-python leaves unchanged for
-+    # dylibs) matches the ref, so RTLD_GLOBAL preloading satisfies them.
-+    dependencies = {
-+        "llama": ("ggml-base", "ggml-cpu", "ggml"),
-+        "mtmd": ("ggml-base", "ggml-cpu", "ggml", "llama"),
-+        "llava": ("ggml-base", "ggml-cpu", "ggml", "llama"),
-+    }
-+    libggml = None
-+    for dependency in dependencies.get(lib_base_name, ()):
-+        loaded = None
-+        for dependency_path in _candidate_paths(dependency):
-+            try:
-+                loaded = ctypes.CDLL(str(dependency_path), **cdll_args)  # type: ignore
-+                break
-+            except Exception:
-+                continue
-+        if loaded is None:
-+            # Android: the bundled lib is not a file on disk (Flet 0.86 ships
-+            # site-packages as a zip and serious-python relocated it into the APK's
-+            # jniLibs); load it by bare soname so the linker resolves it there.
-+            for _n in (f"lib{dependency}.so", f"lib{dependency}.dylib"):
-                 try:
+-                try:
 -                    ctypes.CDLL(str(dependency_path), **cdll_args)  # type: ignore
 -                except Exception as e:
 -                    raise RuntimeError(
@@ -342,20 +445,52 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 -    # Try to load the shared library, handling potential errors
 -    for lib_path in lib_paths:
 -        if lib_path.exists():
--            try:
++    # Preload dependencies in dependency order so the main library resolves them
++    # from the already-loaded set: ggml-base before ggml-cpu/ggml, all before
++    # llama/mtmd. On iOS the libs are framework-relocated with sibling @rpath refs
++    # that dyld cannot resolve on its own, but each preloaded framework's
++    # install-id (@rpath/lib<name>.dylib, which serious-python leaves unchanged for
++    # dylibs) matches the ref, so RTLD_GLOBAL preloading satisfies them.
++    # ggml-metal (iOS only; linked into libggml, so it must be loaded before it) is skipped
++    # silently where it does not exist.
++    dependencies = {
++        "llama": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml"),
++        "mtmd": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml", "llama"),
++        "llava": ("ggml-base", "ggml-cpu", "ggml-metal", "ggml", "llama"),
++    }
++    global _LIBGGML, _LIBGGML_METAL, _BASE_PATH
++    _BASE_PATH = base_path
++    libggml = None
++    for dependency in dependencies.get(lib_base_name, ()):
++        loaded = None
++        for dependency_path in _candidate_paths(dependency):
+             try:
 -                return ctypes.CDLL(str(lib_path), **cdll_args)  # type: ignore
 -            except Exception as e:
 -                raise RuntimeError(f"Failed to load shared library '{lib_path}': {e}")
++                loaded = ctypes.CDLL(str(dependency_path), **cdll_args)  # type: ignore
++                break
++            except Exception:
++                continue
++        if loaded is None:
++            # Android: the bundled lib is not a file on disk (Flet 0.86 ships
++            # site-packages as a zip and serious-python relocated it into the APK's
++            # jniLibs); load it by bare soname so the linker resolves it there.
++            for _n in (f"lib{dependency}.so", f"lib{dependency}.dylib"):
++                try:
 +                    loaded = ctypes.CDLL(_n, **cdll_args)  # type: ignore
 +                    break
 +                except OSError:
 +                    continue
 +        if dependency == "ggml":
 +            libggml = loaded
++        elif dependency == "ggml-metal" and loaded is not None:
++            _LIBGGML_METAL = loaded
 +
 +    # Glossarion: with GGML_BACKEND_DL (the Android arm64 wheel) libggml links no CPU
 +    # backend; register the best CPU variant before libllama runs.
 +    if libggml is not None:
++        _LIBGGML = libggml
 +        register_cpu_backend(libggml, base_path)
 +
 +    # Load the main library.
@@ -376,7 +511,7 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
      raise FileNotFoundError(
          f"Shared library with base name '{lib_base_name}' not found"
      )
--
+ 
 -
 -# ctypes sane type hint helpers
 -#
@@ -385,9 +520,10 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 -#
 -# NOTE: Only use these for static type checking not for runtime checks
 -# no good will come of that
- 
+-
  if TYPE_CHECKING:
      CtypesCData = TypeVar("CtypesCData", bound=ctypes._CData)  # type: ignore
+ 
 diff --git a/vendor/llama.cpp/ggml/src/CMakeLists.txt b/vendor/llama.cpp/ggml/src/CMakeLists.txt
 --- a/vendor/llama.cpp/ggml/src/CMakeLists.txt
 +++ b/vendor/llama.cpp/ggml/src/CMakeLists.txt
@@ -474,6 +610,23 @@ diff --git a/vendor/llama.cpp/ggml/src/CMakeLists.txt b/vendor/llama.cpp/ggml/sr
          elseif (APPLE)
              ggml_add_cpu_backend_variant(apple_m1             DOTPROD)
              ggml_add_cpu_backend_variant(apple_m2_m3          DOTPROD MATMUL_INT8)
+diff --git a/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp b/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp
+--- a/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp
++++ b/vendor/llama.cpp/ggml/src/ggml-backend-reg.cpp
+@@ -117,7 +117,12 @@
+         register_backend(ggml_backend_cuda_reg());
+ #endif
+ #ifdef GGML_USE_METAL
+-        register_backend(ggml_backend_metal_reg());
++        // Glossarion: Metal registers on demand (llama_cpp._ctypes_extensions.register_gpu_backend,
++        // the app's "Use GPU" setting), so its device setup and shader compilation never run
++        // while the GPU is off. GLOSSARION_GGML_EAGER_METAL=1 restores upstream's behaviour.
++        if (getenv("GLOSSARION_GGML_EAGER_METAL") != nullptr) {
++            register_backend(ggml_backend_metal_reg());
++        }
+ #endif
+ #ifdef GGML_USE_SYCL
+         register_backend(ggml_backend_sycl_reg());
 diff --git a/vendor/llama.cpp/src/CMakeLists.txt b/vendor/llama.cpp/src/CMakeLists.txt
 --- a/vendor/llama.cpp/src/CMakeLists.txt
 +++ b/vendor/llama.cpp/src/CMakeLists.txt

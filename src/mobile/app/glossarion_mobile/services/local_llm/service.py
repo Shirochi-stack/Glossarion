@@ -30,6 +30,15 @@
   requests, a single-pass auto glossary's translations and CJK targets keep the default logits. The
   request kind and target come from the body fields ``unified_api_client`` adds for this endpoint only
   (``glossarion_task``, ``target_language``, ``glossarion_single_pass``); ``script_ban.wants_ban`` decides.
+* **GPU (experimental, off by default;** Prefs ``GPU_KEY``, Model manager › On-device › engine card): offered
+  where the build has a GPU backend (``engine.gpu_offer``: Metal on iOS, OpenCL / Adreno on Android
+  arm64). With it on, a load first tries the GPU (``engine.load(..., gpu=True)``); when that fails
+  (``GpuUnavailable``: no backend / device, the model or its first token failed) or a GPU answer fails,
+  the reason is logged and kept (Prefs ``GPU_FALLBACK_KEY``), the model loads on the CPU, and that model
+  stays on the CPU until the setting or the model changes; the engine card says "GPU unavailable: …".
+  A GPU load leaves a marker (``GPU_ATTEMPT_KEY``) until the model's first answer ends: when the app
+  died in between (a driver crash aborts the process), the next start records the fallback instead of
+  crashing again. The RAM gate adds ``gpu_extra`` (GPU memory is shared with the CPU on phones).
 """
 
 from __future__ import annotations
@@ -79,6 +88,14 @@ SAMPLING_LABELS = {"top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
 #: Prefs key of "Block CJK in translations (adaptive)" (Model manager > On-device > engine card; a bool,
 #: on when unset): see ``script_ban``
 BLOCK_CJK_KEY = "local_llm_block_cjk"
+#: Prefs key of "Use GPU (experimental)" (a bool, off when unset)
+GPU_KEY = "local_llm_gpu"
+#: Prefs key of the GPU fallback: ``{"stem", "reason"}`` (that model runs on the CPU until the setting or
+#: the model changes)
+GPU_FALLBACK_KEY = "local_llm_gpu_fallback"
+#: Prefs key of a GPU load whose first answer has not ended yet: ``{"stem"}`` (crash detection)
+GPU_ATTEMPT_KEY = "local_llm_gpu_attempt"
+CRASH_REASON = "Glossarion closed while the GPU was starting this model"
 MAX_WAITERS = 8
 IDLE_UNLOAD = 600.0
 BACKGROUND_UNLOAD = 60.0
@@ -177,6 +194,12 @@ def ram_need(size: int, n_ctx: int) -> int:
 def projector_need(size: int) -> int:
     """What a vision projector adds once it is loaded: its weights plus the image encoder's buffers."""
     return int(int(size) * 1.2 + 256 * MIB) if size else 0
+
+
+def gpu_extra(size: int) -> int:
+    """What a GPU load adds on a phone (shared memory): the driver, the compiled kernels and the GPU's
+    own copies / repacked weights where it cannot map the file (OpenCL)."""
+    return int(int(size) * 0.10 + 256 * MIB)
 
 
 def _gb(count: float) -> str:
@@ -301,6 +324,8 @@ class EngineSnapshot:
     load_seconds: Optional[float] = None
     running: bool = False  # the endpoint is up
     vision: bool = False  # the loaded model has a vision projector
+    device: Optional[str] = None  # what runs the loaded model ("GPU: Adreno (TM) 830 (OpenCL)", "CPU (…)")
+    gpu_note: Optional[str] = None  # "GPU unavailable: <reason> — using CPU"
 
 
 class LocalEngineService:
@@ -310,7 +335,8 @@ class LocalEngineService:
                  active_job_model: Optional[Callable[[], Optional[str]]] = None, platform: Optional[str] = None,
                  clock: Callable[[], float] = time.monotonic, memory: Optional[Callable[[], tuple]] = None,
                  watch: bool = True, downloads: Optional[dl.DownloadManager] = None,
-                 stop_state: Callable[[], Optional[str]] = process_stop_state) -> None:
+                 stop_state: Callable[[], Optional[str]] = process_stop_state,
+                 gpu_backend: Optional[str] = None) -> None:
         self.prefs = prefs
         self.stop_state = stop_state
         self.registry = registry or dl.Registry()
@@ -322,6 +348,10 @@ class LocalEngineService:
         self.refresh_catalog = refresh_catalog
         self.active_job_model = active_job_model
         self.platform = (platform or _platform()).lower()
+        # the GPU backend offered here ("Metal" / "OpenCL"; "" or None: no GPU option)
+        self.gpu_backend = (gpu_backend if gpu_backend is not None else eng.gpu_offer(self.platform)) or None
+        self._loaded_gpu = False  # the loaded model was asked for on the GPU (whatever it got)
+        self._gpu_attempt: Optional[str] = None  # stem of a GPU load whose first answer has not ended
         self.clock = clock
         self.memory = memory or memory_info
         self.server = LocalLLMServer(self)
@@ -377,7 +407,8 @@ class LocalEngineService:
                               self._stem if (loaded or self._state == "loading") else None,
                               self.gate.waiting(), self._error, self._system_info, available, reason,
                               self._load_seconds, self.server.running,
-                              bool(loaded and getattr(self.engine, "vision", False)))
+                              bool(loaded and getattr(self.engine, "vision", False)),
+                              getattr(self.engine, "device", None) if loaded else None, self.gpu_note())
 
     def health(self, model: Optional[str] = None) -> dict:
         """``{"state", "model", "queue"}`` (plus ``busy`` and ``load_seconds`` of the last load); with
@@ -428,6 +459,7 @@ class LocalEngineService:
         _redact_token_in("httpx", self.server.token)  # "HTTP Request: POST http://127.0.0.1:<port>/<token>/v1/…"
         os.environ[URL_ENV] = self.server.base_url
         set_default_service(self)
+        self._recover_gpu_attempt()
         self.downloads.scan()
         if self._watch and self._watcher is None:
             self._stop_watch.clear()
@@ -555,6 +587,88 @@ class LocalEngineService:
             self.prefs.set(BLOCK_CJK_KEY, value)
         return value
 
+    # ---- GPU -------------------------------------------------------------------------------------------
+
+    def _pref(self, key: str) -> Any:
+        try:
+            return self.prefs.get(key, None) if self.prefs is not None else None
+        except Exception:
+            return None
+
+    def _set_pref(self, key: str, value: Any) -> None:
+        if self.prefs is None:
+            return
+        try:
+            self.prefs.set(key, value)
+        except Exception:
+            log.debug("saving %s failed", key, exc_info=True)
+
+    def use_gpu(self) -> bool:
+        """"Use GPU (experimental)": off unless switched on, and only where a GPU backend is offered."""
+        return bool(self.gpu_backend) and bool(self._pref(GPU_KEY))
+
+    def gpu_fallback(self) -> Optional[dict]:
+        """``{"stem", "reason"}`` of the model kept on the CPU after a GPU failure, else None."""
+        raw = self._pref(GPU_FALLBACK_KEY)
+        if isinstance(raw, dict) and raw.get("stem"):
+            return {"stem": str(raw["stem"]), "reason": str(raw.get("reason") or "unknown reason")}
+        return None
+
+    def gpu_note(self) -> Optional[str]:
+        """The engine card's GPU line while the GPU is on: why a model runs on the CPU instead."""
+        if not self.use_gpu():
+            return None
+        fallback = self.gpu_fallback()
+        if fallback is None:
+            return None
+        return f"GPU unavailable for {fallback['stem']}: {fallback['reason']} — using CPU"
+
+    def save_gpu(self, enabled: Any) -> bool:
+        """Switch the GPU on or off: forgets any GPU fallback and frees an idle loaded model, so the next
+        request loads it on the new device (a model that is answering reloads on its next request)."""
+        value = bool(enabled) and bool(self.gpu_backend)
+        self._set_pref(GPU_KEY, value)
+        self._set_pref(GPU_FALLBACK_KEY, None)
+        self._clear_gpu_attempt()
+        if self.loaded_stem is not None and self._loaded_gpu != value:
+            self.unload()
+        self._notify()
+        return value
+
+    def _gpu_wanted(self, stem: str) -> bool:
+        if not self.use_gpu():
+            return False
+        fallback = self.gpu_fallback()
+        return not (fallback and fallback["stem"] == stem)
+
+    def _gpu_failed(self, stem: str, reason: str) -> None:
+        """Keep ``stem`` on the CPU (until the setting or the model changes) and say why."""
+        reason = " ".join(str(reason or "unknown reason").split())[:300]
+        log.warning("on-device GPU unavailable for %s: %s; using the CPU", stem, reason)
+        self._set_pref(GPU_FALLBACK_KEY, {"stem": stem, "reason": reason})
+        self._clear_gpu_attempt()
+
+    def _mark_gpu_attempt(self, stem: str) -> None:
+        self._gpu_attempt = stem
+        self._set_pref(GPU_ATTEMPT_KEY, {"stem": stem, "at": int(time.time())})
+
+    def _clear_gpu_attempt(self) -> None:
+        if self._gpu_attempt is not None or self._pref(GPU_ATTEMPT_KEY):
+            self._gpu_attempt = None
+            self._set_pref(GPU_ATTEMPT_KEY, None)
+
+    def _recover_gpu_attempt(self) -> Optional[str]:
+        """At start: a GPU load whose first answer never ended means the process died on the GPU (a
+        driver abort cannot be caught): keep that model on the CPU. Returns its stem."""
+        raw = self._pref(GPU_ATTEMPT_KEY)
+        if not isinstance(raw, dict) or not raw.get("stem"):
+            return None
+        stem = str(raw["stem"])
+        self._set_pref(GPU_ATTEMPT_KEY, None)
+        if self.use_gpu():
+            self._gpu_failed(stem, CRASH_REASON)
+        return stem
+
     def preset_for(self, stem: str) -> Optional[dict]:
         """The preset that brought ``stem`` (same repo and file; else a file-less preset of that repo)."""
         entry = self.registry.load().get(stem) or {}
@@ -588,8 +702,9 @@ class LocalEngineService:
 
     # ---- RAM gate --------------------------------------------------------------------------------
 
-    def ram_check(self, stem: str, n_ctx: Optional[int] = None, *, vision: bool = False) -> tuple:
-        """``("ok"|"confirm"|"refuse", message)`` for loading ``stem`` (``vision``: with its projector)."""
+    def ram_check(self, stem: str, n_ctx: Optional[int] = None, *, vision: bool = False, gpu: bool = False) -> tuple:
+        """``("ok"|"confirm"|"refuse", message)`` for loading ``stem`` (``vision``: with its projector;
+        ``gpu``: on the GPU, ``gpu_extra`` more)."""
         entry = self.registry.load().get(stem) or {}
         size = int(entry.get("size") or 0)
         if not size:
@@ -598,6 +713,8 @@ class LocalEngineService:
             except OSError:
                 size = 0
         need = ram_need(size, n_ctx or self.context_for(stem))
+        if gpu:
+            need += gpu_extra(size)
         projector = entry.get("mmproj") if isinstance(entry.get("mmproj"), dict) else {}
         if vision and projector:
             need += projector_need(int(projector.get("size") or 0))
@@ -636,10 +753,16 @@ class LocalEngineService:
                        vision: bool = False) -> None:
         engine = self._engine()
         n_ctx = self.context_for(stem)
-        # a changed Context (Model manager or Welcome slider) reloads the model with it on the next request
-        if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx):
+        fallback = self.gpu_fallback()
+        if fallback and fallback["stem"] != stem:
+            self._set_pref(GPU_FALLBACK_KEY, None)  # another model: the GPU gets a new try
+        gpu = self._gpu_wanted(stem)
+        # a changed Context (Model manager or Welcome slider) or GPU setting reloads the model on the next request
+        if self._stem == stem and engine.loaded and (not engine.n_ctx or engine.n_ctx == n_ctx) \
+                and self._loaded_gpu == gpu:
             if vision and not engine.vision_loaded:  # the projector loads with the first image
-                self._gate_ram(stem, engine.n_ctx or self.context_for(stem), force, interactive, vision=True)
+                self._gate_ram(stem, engine.n_ctx or self.context_for(stem), force, interactive, vision=True,
+                               gpu=bool(getattr(engine, "on_gpu", False)))
             return
         available, reason = self.engine_status()
         if not available:
@@ -647,31 +770,45 @@ class LocalEngineService:
         path = self.registry.file_path(stem)
         if not os.path.isfile(path):
             raise LocalLLMError(404, "model_not_found", f"local/{stem} is not downloaded. {NOT_DOWNLOADED}.")
-        self._gate_ram(stem, n_ctx, force, interactive, vision=vision)
+        self._gate_ram(stem, n_ctx, force, interactive, vision=vision, gpu=gpu)
         if engine.loaded:
             self._unload_locked()
         self._unload_when_idle = False
         self._set("loading", stem)
         size = int((self.registry.load().get(stem) or {}).get("size") or 0)
-        log.info("loading on-device model %s (%s, n_ctx %d)", stem, _gb(size) if size else "size unknown", n_ctx)
+        log.info("loading on-device model %s (%s, n_ctx %d%s)", stem, _gb(size) if size else "size unknown", n_ctx,
+                 f", GPU {self.gpu_backend}" if gpu else "")
         started = time.monotonic()
+        mmproj = self.registry.projector_path(stem)
         try:
-            engine.load(path, n_ctx, self.threads(), mmproj=self.registry.projector_path(stem))
+            if gpu:
+                self._mark_gpu_attempt(stem)
+                try:
+                    engine.load(path, n_ctx, self.threads(), mmproj=mmproj, gpu=True)
+                except Exception as exc:  # GpuUnavailable, or anything else the GPU path raised
+                    self._gpu_failed(stem, str(exc) or type(exc).__name__)
+                    engine.load(path, n_ctx, self.threads(), mmproj=mmproj)
+            else:
+                engine.load(path, n_ctx, self.threads(), mmproj=mmproj)
         except Exception as exc:
+            self._clear_gpu_attempt()
+            self._loaded_gpu = False
             self._set("idle", None, f"Could not load {stem}: {exc}")
             log.exception("loading %s failed", stem)
             raise LocalLLMError(500, "load_failed", f"Could not load local/{stem}: {exc}", "server_error") from exc
+        self._loaded_gpu = self._gpu_wanted(stem)  # False after a fallback: no reload loop
         self._load_seconds = round(time.monotonic() - started, 2)
         self.log.append((stem, self._load_seconds))
-        log.info("on-device model %s loaded in %.1f s (n_ctx %d, %d threads)", stem, self._load_seconds, n_ctx,
-                 self.threads())
+        log.info("on-device model %s loaded in %.1f s (n_ctx %d, %d threads, %s)", stem, self._load_seconds, n_ctx,
+                 self.threads(), getattr(engine, "device", None) or "CPU")
         if self._system_info is None and not isinstance(engine, eng.FakeEngine):
             self._system_info = eng.system_info()
         self.last_used = self.clock()
         self._set("ready", stem)
 
-    def _gate_ram(self, stem: str, n_ctx: int, force: bool, interactive: bool, *, vision: bool) -> None:
-        verdict, message = self.ram_check(stem, n_ctx, vision=vision)
+    def _gate_ram(self, stem: str, n_ctx: int, force: bool, interactive: bool, *, vision: bool,
+                  gpu: bool = False) -> None:
+        verdict, message = self.ram_check(stem, n_ctx, vision=vision, gpu=gpu)
         if verdict == "refuse" or (verdict == "confirm" and not force):
             if verdict == "confirm" and not interactive:
                 message = message.replace(" Load anyway?", " Load it in Model manager › On-device to run it anyway.")
@@ -683,6 +820,8 @@ class LocalEngineService:
             stem = self._stem
             engine.unload()
             log.info("on-device model %s unloaded", stem)
+        self._loaded_gpu = False
+        self._clear_gpu_attempt()  # unloaded normally: the GPU did not take the app down
         self._set("idle", None)
 
     def load_blocking(self, stem: str, *, force: bool = False) -> tuple:
@@ -828,6 +967,8 @@ class LocalEngineService:
                 return
             released[0] = True
             self.last_used = self.clock()
+            if self._gpu_attempt is not None:
+                self._clear_gpu_attempt()  # the GPU's first answer ended without taking the app down
             if self._state == "generating":
                 self._set("ready", self._stem)
             self.gate.release()
@@ -846,7 +987,19 @@ class LocalEngineService:
                                     f"resulted in {prompt_tokens} tokens. Please reduce the length of the messages.")
             params = self._params(body, n_ctx - prompt_tokens)
             self._set("generating", stem)
-            deltas = _primed(engine.chat(messages, params, stop_generating), n_ctx)
+            try:
+                deltas = _primed(engine.chat(messages, params, stop_generating), n_ctx)
+            except (LocalLLMError, KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as exc:
+                if not getattr(engine, "on_gpu", False):
+                    raise
+                # the GPU failed on this prompt: the same request again on the CPU
+                self._gpu_failed(stem, f"the GPU failed while answering ({exc})")
+                self._ensure_loaded(stem, force=True, vision=bool(images))
+                engine = self.engine
+                self._set("generating", stem)
+                deltas = _primed(engine.chat(messages, params, stop_generating), n_ctx)
         except BaseException:
             release()
             raise

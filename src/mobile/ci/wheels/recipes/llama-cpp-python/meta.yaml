@@ -20,6 +20,16 @@
 #     installed next to the others (CMAKE_INSTALL_BINDIR: ggml installs MODULE backends there), and
 #     the patched loader registers the best one the CPU supports (patches/mobile.patch, 7.).
 #     x86_64 (emulator, Chromebooks) and iOS keep the single built-in CPU backend.
+#   - optional GPU backends, used only when the app's "Use GPU" setting is on (registered on demand
+#     by the patched loader, patches/mobile.patch 8.):
+#       Android arm64: GGML_OPENCL=ON with the Adreno kernels and embedded kernel sources, a
+#       separate libggml-opencl (GGML_BACKEND_DL module) that alone needs libOpenCL.so. The OpenCL
+#       headers and a Khronos ICD loader to link against are put into the NDK sysroot by
+#       wheels.py stage-opencl (wheelhouse.toml [opencl]); the device's own libOpenCL.so is used
+#       at run time (AndroidManifest uses-native-library, required=false), never a bundled one.
+#       x86_64: no GPU backend.
+#       iOS: GGML_METAL=ON + GGML_METAL_EMBED_LIBRARY=ON (the shader source is embedded and
+#       compiled on the device: no Metal toolchain at build time), libggml-metal linked into libggml.
 package:
   name: llama-cpp-python
   version: "0.3.32"
@@ -48,8 +58,7 @@ build:
       -DGGML_CUDA=OFF
       -DGGML_HIP=OFF
       -DGGML_VULKAN=OFF
-      -DGGML_OPENCL=OFF
-      -DGGML_RPC=OFF{% if arch == 'arm64-v8a' %} -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_INSTALL_BINDIR=llama_cpp/lib{% endif %}
+      -DGGML_RPC=OFF{% if arch == 'arm64-v8a' %} -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_INSTALL_BINDIR=llama_cpp/lib -DGGML_OPENCL=ON -DGGML_OPENCL_EMBED_KERNELS=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON{% else %} -DGGML_OPENCL=OFF{% endif %}
 # {% else %}
     # The `ninja` pip package crashes importing on the iOS crossenv python
     # (sysconfig.get_preferred_scheme('user') -> 'posix_user' invalid on iOS),
@@ -71,8 +80,8 @@ build:
       -DGGML_LLAMAFILE=OFF
       -DGGML_BLAS=OFF
       -DGGML_ACCELERATE=OFF
-      -DGGML_METAL=OFF
-      -DGGML_METAL_EMBED_LIBRARY=OFF
+      -DGGML_METAL=ON
+      -DGGML_METAL_EMBED_LIBRARY=ON
       -DGGML_CUDA=OFF
       -DGGML_HIP=OFF
       -DGGML_VULKAN=OFF

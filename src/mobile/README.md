@@ -146,8 +146,8 @@ libmtmd (the image encoder of vision models).
   generation 48 -> 94 tok/s; Q4_K_M prompt 83 -> 153 tok/s and generation 45 -> 68 tok/s.
   x86_64 (emulator, Chromebooks) keeps the single built-in libggml-cpu. iOS keeps it too: the floor is
   iOS 13 (A9 / A10 / A11 / A12 iPhones have no dotprod, A13+ do, i8mm from A15), dylibs in an app are
-  framework-relocated and code-signed, and llama.cpp's Apple variant list starts at dotprod; Metal
-  (phase 2) is the larger iOS gain.
+  framework-relocated and code-signed, and llama.cpp's Apple variant list starts at dotprod; the
+  optional Metal backend (GPU, below) is the larger iOS gain.
   `wheels.py verify-native` / `verify-site-packages` expect exactly these eight arm64 libraries and scan
   their code: SDOT/UDOT, SMMLA/USDOT, SVE and SME instructions may appear only in the variants that
   promise them, and each variant must contain its own (proof that its `-march` took effect).
@@ -156,13 +156,61 @@ libmtmd (the image encoder of vision models).
   under `qemu-aarch64 -cpu cortex-a53 / cortex-a76` that older cores get the baseline / dotprod variant
   and generate without SIGILL.
 
+* **GPU (optional, experimental; Android arm64 OpenCL, iOS Metal).** Model manager › On-device › engine
+  card › "Use GPU (experimental)", off by default and shown only where the build has a GPU backend. With
+  it on, a load offloads every layer to the GPU and runs a short check (a prompt and one more token,
+  finite logits); when the backend finds no usable GPU, the model does not load on it, that check fails,
+  or a later answer fails on the GPU, the reason is logged, the model reloads on the CPU and the card
+  says "GPU unavailable for <model>: <reason> — using CPU" until the setting or the model changes. The
+  card also says what runs the model ("Runs on GPU: QUALCOMM Adreno(TM) 830 (OpenCL)", "Runs on CPU
+  (android_armv8.6_1)"). A driver crash cannot be caught in Python, so a GPU load leaves a marker in
+  Prefs until the model's first answer ends; when the app died in between, the next start keeps that
+  model on the CPU ("Glossarion closed while the GPU was starting this model"). The RAM gate adds 10 %
+  of the file + 256 MiB for a GPU load (phone GPUs share the RAM). The vision projector stays on the CPU.
+  - Android arm64: llama.cpp's OpenCL backend by Qualcomm (`GGML_OPENCL=ON`, Adreno kernels, kernels
+    embedded) as `libggml-opencl.so`, a `GGML_BACKEND_DL` module next to the CPU variants. It is the only
+    library that needs `libOpenCL.so`, and the patched loader (`patches/mobile.patch`, 8.) loads it with
+    `ggml_backend_load()` only when the GPU is switched on, so phones without OpenCL lose nothing. At
+    run time the phone's own `/vendor/lib64/libOpenCL.so` is used: the native extension's manifest
+    declares `<uses-native-library android:name="libOpenCL.so" android:required="false"/>` (Android 12+
+    hides vendor libraries otherwise; `ci/verify_apk.py` checks the merged manifest and that no
+    `libOpenCL.so` is bundled). At build time `wheels.py stage-opencl` puts the Khronos OpenCL headers
+    and a `libOpenCL.so` built from the Khronos ICD loader (SONAME `libOpenCL.so`; wheelhouse.toml
+    `[opencl]`, sha256-pinned) into the NDK sysroot; it never ships. The backend supports Adreno only
+    (verified upstream on Adreno 830 / Snapdragon 8 Elite, Adreno 7xx too; A6xx and older are likely
+    refused or slow): Mali, Xclipse (Exynos) and Tensor GPUs are dropped by the backend and the card says
+    "no supported GPU". Its fast kernels are for Q4_0 (Q6_K runs unoptimized, other K-quants can be
+    slower than the CPU), so with the GPU on, "Add GPU-friendly presets (Q4_0)" appends
+    `presets.GPU_PRESETS` (unsloth's `Qwen3.5-{0.8B,2B,4B,9B}-Q4_0.gguf`: 507 MB / 1215 MB / 2583 MB /
+    5379 MB). Those files keep a few tensors (e.g. the output) in higher quants, which run unoptimized.
+    Vulkan is not built (often slower than the CPU on Adreno). x86_64 has no GPU backend. Size:
+    `libggml-opencl.so` is 2.0 MB (stripped, kernels embedded), so the arm64 APK grows by about 2 MB.
+  - iOS: `GGML_METAL=ON` + `GGML_METAL_EMBED_LIBRARY=ON` (the shader source is embedded and compiled on
+    the device, so the iOS cross build needs no Metal toolchain); `libggml-metal.dylib` is linked into
+    libggml, but the patched registry no longer registers Metal at start, so with the GPU off no Metal
+    code runs (no device setup, no shader compilation); the loader registers it on demand. iOS keeps
+    the default quants (UD-Q4_K_XL / Q4_K_M): Metal runs K-quants well. The simulator may have no usable
+    Metal device: the GPU then falls back like any other failure. Size: `libggml-metal.dylib` is
+    0.85 MB per slice (links Metal, MetalKit, Foundation; newer Metal APIs are weak-linked, so the iOS 13
+    floor still loads it). One method (`waitUntilSignaledValue:timeoutMS:`, iOS 15) is called without an
+    availability check, so the option is hidden on iOS 13 / 14 (`engine.gpu_offer`).
+  - Checks: `wheels.py verify-native` / `verify-site-packages` expect `libggml-opencl` in the arm64 set
+    (NEEDED `libOpenCL.so` allowed for it alone, its `cl*` imports exempt from the NDK stub check, no
+    library may need it) and `libggml-metal` in every iOS slice (it alone may link Metal, MetalKit,
+    Foundation). The smoke suite's engine check fails when a GPU backend is registered although the GPU
+    was never switched on. `mobile-wheels.yml` dispatched with `gpu_check=true` builds the arm64 set
+    with the OpenCL backend on a Linux arm64 runner and runs `ci/wheels/gpu_backend_check.py` without any
+    OpenCL driver and with pocl (OpenCL, no Adreno): the backend loads only on demand, reports why, and
+    the app's engine falls back to the CPU and generates. Real GPU execution is only tested on a phone.
+
 * Size: about 4 MB of native libraries per ABI, plus jinja2, MarkupSafe and diskcache (about 1 MB
   of Python, resolved by pip). Android also installs `flet-libcpp-shared` (`libc++_shared.so`,
   which must exist exactly once in the APK: Gradle merges jniLibs).
 * `wheels.py verify-native` checks the built wheels and, after every `flet build`, `wheels.py
   verify-site-packages --platform <p> --package llama-cpp-python build/site-packages` checks what
   pip installed, both against the same profile: the pinned version and build >= 1000, exactly the
-  five libraries, then per arch the ELF machine, 16 KB LOAD alignment, NEEDED (siblings,
+  profile's libraries (the five; arm64: the CPU variants instead of libggml-cpu, plus libggml-opencl;
+  iOS: plus libggml-metal), then per arch the ELF machine, 16 KB LOAD alignment, NEEDED (siblings,
   libc++_shared, libc/libm/libdl/liblog) and every strong import resolved by a sibling,
   libc++_shared or the NDK API-24 stubs (Android); the slice's CPU and platform, minos <= 13.0
   (14.0 on the arm64 simulator), only sibling and `/usr/lib` dylibs and no DYNAMIC_LOOKUP binds (iOS).

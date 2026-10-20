@@ -859,8 +859,8 @@ def _patched_cpu_loader(ctypes_ns) -> dict:
         if not line.startswith("+"):
             break
         block.append(line[1:])
-    ns = {"ctypes": ctypes_ns, "os": os, "pathlib": __import__("pathlib"), "List": List, "Optional": Optional,
-          "__name__": "fake_ctypes_extensions"}
+    ns = {"ctypes": ctypes_ns, "os": os, "sys": sys, "pathlib": __import__("pathlib"), "List": List,
+          "Optional": Optional, "__name__": "fake_ctypes_extensions"}
     exec(compile("\n".join(block), "mobile.patch", "exec"), ns)
     assert callable(ns["register_cpu_backend"]) and ns["CPU_BACKEND_VARIANT"] is None
     return ns
@@ -1177,7 +1177,10 @@ def test_build_script_runs_end_to_end_with_stubbed_tools(tmp_path, platform, pac
         ["git", "-C", f, "checkout", "-q", "--detach", "FETCH_HEAD"],
         ["git", "-C", f, "rev-parse", "HEAD"],
         ["uv-python", w, "fetch", "--platform", platform, "--dest", _arg(str(forge / "downloads")), *packages],
-        *([["install_ndk.sh", tc["android_ndk"]]] if platform == "android" else []),
+        *([["install_ndk.sh", tc["android_ndk"]],
+           ["uv-python", w, "stage-opencl", "--platform", "android", "--downloads", _arg(str(forge / "downloads")),
+            "--ndk", _arg(str(sdk / "ndk" / tc["android_ndk"])), "--work", _arg(str(tmp / "opencl")), *packages]]
+          if platform == "android" else []),
         ["setup.sh", tc["python_version"], host],
         ["python", w, "stage-openssl", "--platform", platform, "--downloads", _arg(str(forge / "downloads")),
          "--forge", f, *packages],
@@ -1204,12 +1207,12 @@ UND, DEF = False, True
 
 
 def make_elf(machine=183, align=0x4000, needed=("libc.so",), extra=b"", symbols=(), sections=True,
-             code=()) -> bytes:
-    """A 64-bit little-endian ELF shared object: one LOAD, a PT_DYNAMIC with DT_NEEDED and, with
-    ``sections``, section headers for .dynstr, a .dynsym of ``symbols`` [(name, binding, defined)]
-    and a .text of the 32-bit instruction words ``code``."""
+             code=(), soname=None) -> bytes:
+    """A 64-bit little-endian ELF shared object: one LOAD, a PT_DYNAMIC with DT_NEEDED (and DT_SONAME
+    ``soname``) and, with ``sections``, section headers for .dynstr, a .dynsym of ``symbols``
+    [(name, binding, defined)] and a .text of the 32-bit instruction words ``code``."""
     strtab, name_off = b"\0", {}
-    for n in list(needed) + [s[0] for s in symbols]:
+    for n in list(needed) + [s[0] for s in symbols] + ([soname] if soname else []):
         if n not in name_off:
             name_off[n] = len(strtab)
             strtab += n.encode() + b"\0"
@@ -1217,6 +1220,8 @@ def make_elf(machine=183, align=0x4000, needed=("libc.so",), extra=b"", symbols=
     pad = b"\0" * ((-(dynstr_off + len(strtab))) % 8)
     dyn_off = dynstr_off + len(strtab) + len(pad)
     dyn = b"".join(struct.pack("<qQ", 1, name_off[n]) for n in needed)
+    if soname:
+        dyn += struct.pack("<qQ", 14, name_off[soname])
     dyn += struct.pack("<qQ", 5, dynstr_off) + struct.pack("<qQ", 0, 0)
     sym_off = dyn_off + len(dyn)
     syms = struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)
@@ -1283,7 +1288,8 @@ OPENSSL_TEXT = b"\0OpenSSL 3.5.9 30 Sep 2026\0"
 def test_parse_elf_reads_machine_alignment_and_needed():
     elf = wh.parse_elf(make_elf(needed=("libpython3.13.so", "libdl.so", "libc.so")))
     assert elf == {"class": 64, "machine": 183, "load_aligns": [0x4000],
-                   "needed": ["libpython3.13.so", "libdl.so", "libc.so"]}
+                   "needed": ["libpython3.13.so", "libdl.so", "libc.so"], "soname": None}
+    assert wh.parse_elf(make_elf(needed=("libc.so",), soname="libOpenCL.so"))["soname"] == "libOpenCL.so"
     with pytest.raises(ValueError):
         wh.parse_elf(b"MZ\0\0")
 
@@ -1898,11 +1904,19 @@ LLAMA_NEEDED = {"libggml-base": (), "libggml-cpu": ("libggml-base.so",),
 # Android arm64 (GGML_BACKEND_DL): no libggml-cpu, four CPU variants that only need libggml-base.
 CPU_VARIANTS = ("libggml-cpu-android_armv8.0_1", "libggml-cpu-android_armv8.2_1", "libggml-cpu-android_armv8.2_2",
                 "libggml-cpu-android_armv8.6_1")
-LLAMA_LIBS_ARM64 = ("libggml-base", "libggml", "libllama", "libmtmd") + CPU_VARIANTS
+# The optional OpenCL backend (GPU): a module that alone needs the device's libOpenCL.so.
+LLAMA_LIBS_ARM64 = ("libggml-base", "libggml", "libllama", "libmtmd") + CPU_VARIANTS + ("libggml-opencl",)
 LLAMA_NEEDED_ARM64 = {"libggml-base": (), "libggml": ("libggml-base.so",),
                       "libllama": ("libggml.so", "libggml-base.so"),
                       "libmtmd": ("libllama.so", "libggml.so", "libggml-base.so"),
-                      **{v: ("libggml-base.so",) for v in CPU_VARIANTS}}
+                      **{v: ("libggml-base.so",) for v in CPU_VARIANTS},
+                      "libggml-opencl": ("libggml-base.so", "libOpenCL.so")}
+# iOS: libggml-metal (GPU, registered on demand) is linked into libggml and links the system frameworks.
+IOS_LLAMA_LIBS = ("libggml-base", "libggml-cpu", "libggml-metal", "libggml", "libllama", "libmtmd")
+IOS_LLAMA_NEEDED = {**LLAMA_NEEDED, "libggml-metal": ("libggml-base.so",),
+                    "libggml": ("libggml-cpu.so", "libggml-metal.so", "libggml-base.so")}
+METAL_FRAMEWORKS = ("/System/Library/Frameworks/Metal.framework/Metal",
+                    "/System/Library/Frameworks/Foundation.framework/Foundation")
 # Real A64 words: plain armv8.0 code, then one instruction of each optional extension.
 A64_BASE = (0x8B020020, 0x4E22CC20, 0xA9BF7BFD, 0x94000010, 0x52800000, 0xD65F03C0)   # add, fmla, stp, bl, mov, ret
 SDOT, UDOT_ELEM, SMMLA, PTRUE = 0x4E829420, 0x6F82E020, 0x4E82A420, 0x2518E3E0
@@ -1934,7 +1948,8 @@ def make_llama_android(sp: Path, target="x86_64", build="1000", align=0x4000, ex
     for stem in libs:
         needed = deps.get(stem, ()) + ("libc++_shared.so", "libm.so", "libdl.so", "libc.so") + tuple(extra_needed)
         imports = [("malloc", GLOBAL, UND), ("_ZNSt6__ndk14cout", GLOBAL, UND), ("getauxval", WEAK, UND)]
-        imports += [(f"{dep[3:-3]}_api", GLOBAL, UND) for dep in deps.get(stem, ())]
+        imports += [(f"{dep[3:-3]}_api" if dep != "libOpenCL.so" else "clGetPlatformIDs", GLOBAL, UND)
+                    for dep in deps.get(stem, ())]
         imports += [(n, GLOBAL, UND) for n in unresolved if stem == "libllama"]
         (lib / f"{stem}.so").write_bytes(make_elf(machine=machine, align=align, needed=needed,
                                                   symbols=imports + [(f"{stem[3:]}_api", GLOBAL, DEF)],
@@ -2062,15 +2077,18 @@ IOS_SLICES = {"iphoneos.arm64": (ARM64, 2, (13, 0, 0)), "iphonesimulator.arm64":
               "iphonesimulator.x86_64": (X86_64, 7, (13, 0, 0))}
 
 
-def make_llama_ios(sp: Path, target: str, minos=None, extra_dylib=None, lookup=False) -> Path:
+def make_llama_ios(sp: Path, target: str, minos=None, extra_dylib=None, lookup=False, libs=IOS_LLAMA_LIBS,
+                   frameworks_in="libggml-metal") -> Path:
     arch = sp / target
     _llama_dist_info(arch)
     lib = arch / "llama_cpp" / "lib"
     lib.mkdir(parents=True)
     cpu, platform, default_minos = IOS_SLICES[target]
-    for stem in LLAMA_LIBS:
-        dylibs = [f"@rpath/{d[:-3]}.dylib" for d in LLAMA_NEEDED[stem]] + ["/usr/lib/libc++.1.dylib",
-                                                                          "/usr/lib/libSystem.B.dylib"]
+    for stem in libs:
+        dylibs = [f"@rpath/{d[:-3]}.dylib" for d in IOS_LLAMA_NEEDED[stem]] + ["/usr/lib/libc++.1.dylib",
+                                                                              "/usr/lib/libSystem.B.dylib"]
+        if stem == frameworks_in:
+            dylibs += list(METAL_FRAMEWORKS)
         if extra_dylib and stem == "libllama":
             dylibs.append(extra_dylib)
         imports = [("_malloc", len(dylibs)), ("__ZNSt3__14cout", len(dylibs) - 1)]
@@ -2091,7 +2109,12 @@ def test_verify_site_packages_ios_accepts_our_vision_build(tmp_path):
 
 @pytest.mark.parametrize("change, message", [
     ({"minos": (14, 0, 0)}, "minos 14.0.0 (LC_BUILD_VERSION) is above 13.0"),
-    ({"extra_dylib": "@rpath/libvulkan.dylib"}, "links ['@rpath/libvulkan.dylib'] (only its siblings and /usr/lib)"),
+    ({"extra_dylib": "@rpath/libvulkan.dylib"}, "links ['@rpath/libvulkan.dylib'] (only its siblings, /usr/lib)"),
+    # only the Metal backend may link Metal / Foundation
+    ({"frameworks_in": "libllama"}, "lib/libllama.dylib: links ['/System/Library/Frameworks/Metal.framework/Metal'"),
+    # the old CPU-only layout (no libggml-metal)
+    ({"libs": LLAMA_LIBS, "frameworks_in": None}, "expected exactly ['libggml', 'libggml-base', 'libggml-cpu', "
+                                                  "'libggml-metal', 'libllama', 'libmtmd']"),
     ({"lookup": True}, "_ggml_backend_metal_init (DYNAMIC_LOOKUP_ORDINAL)"),
 ])
 def test_verify_site_packages_ios_rejects(tmp_path, change, message):

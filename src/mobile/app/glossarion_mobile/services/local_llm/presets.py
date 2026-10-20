@@ -22,8 +22,8 @@ from glossarion_mobile.services.local_llm import hf
 log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
-    "DEFAULT_PRESETS", "MAX_PRESETS", "PREF_KEY", "download_size", "load_presets",
-    "restore_defaults", "save_presets", "validate_preset",
+    "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "PREF_KEY", "add_gpu_presets", "download_size", "load_presets",
+    "missing_gpu_presets", "restore_defaults", "save_presets", "validate_preset",
 ]
 
 PREF_KEY = "local_model_presets"
@@ -54,6 +54,34 @@ DEFAULT_PRESETS: tuple = (
     {"name": "Heavy", "repo": "unsloth/Qwen3.5-9B-GGUF", "file": "Qwen3.5-9B-Q4_K_M.gguf", "quant": "",
      "note": "Qwen3.5 9B · best of the four · needs ~8 GB free RAM", "n_ctx": 0, "size": 5680522464,
      "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+     "mmproj": "mmproj-F16.gguf", "mmproj_size": 918166080,
+     "mmproj_sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"},
+)
+#: Optional GPU-friendly variants of the four defaults for Android's OpenCL backend (Qualcomm Adreno), whose
+#: fast kernels are for Q4_0 (Q6_K runs unoptimized, the other K-quants may be slow or fall back to the
+#: CPU). Not first-run data: "Add GPU-friendly presets (Q4_0)" (Model manager › On-device, Android with
+#: "Use GPU" on) appends them (``add_gpu_presets``). Unsloth's Q4_0 files keep a few tensors (e.g. the
+#: output) in higher quants, which run unoptimized. iOS (Metal) and the CPU keep the defaults above.
+#: Verified on Hugging Face 2026-10-20 (size and sha256 = the LFS oid); same repos, so same projectors.
+GPU_PRESETS: tuple = (
+    {"name": "Garbage · GPU (Q4_0)", "repo": "unsloth/Qwen3.5-0.8B-GGUF", "file": "Qwen3.5-0.8B-Q4_0.gguf",
+     "quant": "", "note": "Qwen3.5 0.8B · Q4_0 for the Adreno GPU (OpenCL) · ~1 GB RAM", "n_ctx": 0,
+     "size": 507154688, "sha256": "444406ddd926550c724ec18d5120a9d40ded44908a063b0e66e9a7e5464c652c",
+     "mmproj": "mmproj-F16.gguf", "mmproj_size": 204987232,
+     "mmproj_sha256": "56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453"},
+    {"name": "Light · GPU (Q4_0)", "repo": "unsloth/Qwen3.5-2B-GGUF", "file": "Qwen3.5-2B-Q4_0.gguf", "quant": "",
+     "note": "Qwen3.5 2B · Q4_0 for the Adreno GPU (OpenCL) · ~2 GB RAM", "n_ctx": 0, "size": 1214873856,
+     "sha256": "cd70221bebaee0503e0f6717e174250cd7825aa88438b3aabec9ad55731d9bb1",
+     "mmproj": "mmproj-F16.gguf", "mmproj_size": 668227264,
+     "mmproj_sha256": "7035e9cb8d7c6a9681d07eef9a364783e86ea4cd73faab2eabb4f43a101830c7"},
+    {"name": "Medium · GPU (Q4_0)", "repo": "unsloth/Qwen3.5-4B-GGUF", "file": "Qwen3.5-4B-Q4_0.gguf", "quant": "",
+     "note": "Qwen3.5 4B · Q4_0 for the Adreno GPU (OpenCL) · needs ~4 GB free RAM", "n_ctx": 0,
+     "size": 2583221408, "sha256": "298fcb5fe7a77ccc79745ae24751560c5ac56874caff4bb39b1f2055bd72b8bb",
+     "mmproj": "mmproj-F16.gguf", "mmproj_size": 672423616,
+     "mmproj_sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"},
+    {"name": "Heavy · GPU (Q4_0)", "repo": "unsloth/Qwen3.5-9B-GGUF", "file": "Qwen3.5-9B-Q4_0.gguf", "quant": "",
+     "note": "Qwen3.5 9B · Q4_0 for the Adreno GPU (OpenCL) · needs ~8 GB free RAM", "n_ctx": 0,
+     "size": 5379417312, "sha256": "17670346b4260ddcb0173965145155885024f3c9a4a24389a3370751edbcde24",
      "mmproj": "mmproj-F16.gguf", "mmproj_size": 918166080,
      "mmproj_sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"},
 )
@@ -131,6 +159,29 @@ def save_presets(prefs: Any, presets: Sequence[dict]) -> list:
 
 def restore_defaults(prefs: Any) -> list:
     return save_presets(prefs, _defaults())
+
+
+def missing_gpu_presets(rows: Sequence[dict]) -> list:
+    """The ``GPU_PRESETS`` rows whose file no row of ``rows`` already names (same repo and file)."""
+    have = {(str(r.get("repo") or "").casefold(), str(r.get("file") or "")) for r in rows}
+    return [copy.deepcopy(p) for p in GPU_PRESETS if (p["repo"].casefold(), p["file"]) not in have]
+
+
+def add_gpu_presets(prefs: Any) -> tuple:
+    """Append the missing ``GPU_PRESETS`` to the saved presets (a name already taken gets " 2"):
+    ``(presets, added names)``. The defaults and the user's rows stay as they are."""
+    rows = load_presets(prefs)
+    taken = {str(r.get("name") or "").casefold() for r in rows}
+    added = []
+    for row in missing_gpu_presets(rows):
+        name, n = row["name"], 2
+        while name.casefold() in taken:
+            name, n = f"{row['name'][:56]} {n}", n + 1
+        row["name"] = name
+        taken.add(name.casefold())
+        rows.append(row)
+        added.append(name)
+    return (save_presets(prefs, rows) if added else rows), added
 
 
 def validate_preset(row: dict, presets: Sequence[dict], index: Optional[int] = None) -> tuple:

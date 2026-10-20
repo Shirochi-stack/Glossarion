@@ -18,6 +18,16 @@ The service has already scaled the images down (``vision.prepare_messages``).
 Qwen3.5 thinks by default; the chat template is rendered with ``enable_thinking=False`` unless the
 request asks otherwise (``chat_template_kwargs``), and the server strips a leading think block anyway.
 
+GPU (optional, ``load(..., gpu=True)``; the service decides): Metal on iOS, OpenCL (Qualcomm Adreno) on
+Android arm64 (``gpu_offer``). Our llama-cpp-python build registers the GPU backend only on the first
+GPU load (``llama_cpp._ctypes_extensions.register_gpu_backend``), so with the GPU off no GPU code runs.
+A GPU load offloads every layer (``n_gpu_layers=-1``, one device), then evaluates a short prompt and
+one more token and checks the logits are finite; when the backend has no device, the model does not
+load or that first token fails, it raises ``GpuUnavailable`` (the service reloads on the CPU). A CPU
+load uses ``split_mode`` NONE with ``main_gpu`` -1: no offload device at all, even after a GPU backend
+was registered earlier in the process. ``device`` names what runs the model. The vision projector
+always stays on the CPU.
+
 CJK ban (``params["ban_cjk"]``, decided by the service, ``script_ban``): ``LlamaEngine`` passes a logits
 processor that sets the model's Han / kana / Hangul token ids to -inf. The ids are computed from the
 vocabulary on the first such request after a load (about 0.6 s for Qwen3.5's 248k tokens on a desktop
@@ -37,8 +47,8 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 
 log = logging.getLogger("glossarion.local_llm")
 
-__all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "LlamaEngine", "cpu_variant",
-           "default_threads", "engine_status", "system_info", "vision_status"]
+__all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "GpuUnavailable", "LlamaEngine",
+           "cpu_variant", "default_threads", "engine_status", "gpu_offer", "gpu_state", "system_info", "vision_status"]
 
 #: The llama-cpp-python pin of ``src/mobile/pyproject.toml`` (``[tool.flet.android/ios].dependencies``).
 ENGINE_VERSION = "0.3.32"
@@ -52,6 +62,61 @@ _VISION: list = []  # cached vision_status() result
 
 class EngineUnavailable(RuntimeError):
     pass
+
+
+class GpuUnavailable(RuntimeError):
+    """The GPU path failed (no GPU backend / device, the model did not load on it, or its first token
+    failed); the message says why. The engine holds no model afterwards."""
+
+
+#: llama.cpp's LLAMA_SPLIT_MODE_NONE: the whole model on ``main_gpu`` (-1: on no device = the CPU).
+SPLIT_MODE_NONE = 0
+#: what the GPU check evaluates (a batch, then one more token)
+GPU_CHECK_PROMPT = ("The lighthouse keeper climbed the stairs every evening, counted each step and wrote the "
+                    "weather into a book that nobody had read for forty years.")
+
+
+def gpu_offer(platform: Optional[str] = None, machine: Optional[str] = None) -> Optional[str]:
+    """The GPU backend this app build offers on the device, without loading anything: ``"Metal"`` on iOS,
+    ``"OpenCL"`` on Android arm64 (Qualcomm Adreno only; other GPUs are refused when it loads), None
+    elsewhere (x86_64 Android, desktop)."""
+    name = (platform or os.environ.get("GLOSSARION_PLATFORM") or "").strip().lower()
+    if name == "ios":
+        # ggml-metal calls an iOS 15 API without an availability check: no GPU option on iOS 13 / 14
+        return "Metal" if ios_major() >= 15 else None
+    if name == "android":
+        import platform as _platform
+
+        arch = (machine if machine is not None else _platform.machine()).strip().lower()
+        return "OpenCL" if arch in ("aarch64", "arm64", "arm64-v8a") else None
+    return None
+
+
+def ios_major() -> int:
+    """The running iOS major version (``platform.ios_ver``, Python 3.13+); 99 when unknown (off iOS)."""
+    import platform as _platform
+
+    try:
+        release = _platform.ios_ver().release  # type: ignore[attr-defined]
+        return int(str(release).split(".")[0])
+    except Exception:
+        return 99
+
+
+def gpu_state() -> dict:
+    """``register_gpu_backend()`` of our llama-cpp-python build (registers the GPU backend once per
+    process): ``{"backend", "device", "error"}``. A build without it gives an error."""
+    try:
+        ext = importlib.import_module("llama_cpp._ctypes_extensions")
+    except Exception as exc:
+        return {"backend": None, "device": None, "error": f"{UNAVAILABLE}: {exc}"}
+    register = getattr(ext, "register_gpu_backend", None)
+    if register is None:
+        return {"backend": None, "device": None, "error": "this engine build has no GPU support"}
+    try:
+        return dict(register())
+    except Exception as exc:  # pragma: no cover - the loader never raises
+        return {"backend": None, "device": None, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def engine_status() -> tuple:
@@ -140,6 +205,8 @@ class _Base:
         self.n_threads = 0
         self.last_usage: dict = {}
         self.last_finish = "stop"
+        self.on_gpu = False  # the loaded model runs on the GPU
+        self.device: Optional[str] = None  # what runs the loaded model ("GPU: … (OpenCL)", "CPU …")
 
     @property
     def loaded(self) -> bool:
@@ -167,25 +234,36 @@ class FakeEngine(_Base):
     name = "fake"
 
     def __init__(self, *, delay: float = 0.0, think: bool = False, load_delay: float = 0.0,
-                 reply: Optional[Callable[[list], str]] = None) -> None:
+                 reply: Optional[Callable[[list], str]] = None, gpu_device: str = "Fake GPU (Test)",
+                 gpu_error: Optional[str] = None, gpu_chat_error: Optional[str] = None) -> None:
         super().__init__()
         self.delay = delay
         self.think = think
         self.load_delay = load_delay
         self.reply = reply
+        self.gpu_device = gpu_device
+        self.gpu_error = gpu_error  # a GPU load raises GpuUnavailable(gpu_error)
+        self.gpu_chat_error = gpu_chat_error  # a chat on the GPU raises RuntimeError(gpu_chat_error)
         self.loads: list = []
+        self.gpu_loads: list = []  # the gpu flag of every load attempt
         self.unloads = 0
         self.generated = 0  # tokens produced since the last chat started
         self.calls: list = []
         self.projector_loads = 0
         self._projector = False
 
-    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None) -> None:
+    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False) -> None:
         if self.load_delay:
             time.sleep(self.load_delay)
+        self.gpu_loads.append(bool(gpu))
+        if gpu and self.gpu_error:
+            self.unload()
+            raise GpuUnavailable(self.gpu_error)
         self.path, self.n_ctx, self.n_threads = path, int(n_ctx), int(n_threads)
         self.mmproj = mmproj
         self._projector = False
+        self.on_gpu = bool(gpu)
+        self.device = f"GPU: {self.gpu_device}" if gpu else "CPU"
         self.loads.append((path, int(n_ctx), int(n_threads)))
 
     def unload(self) -> None:
@@ -194,6 +272,8 @@ class FakeEngine(_Base):
         self.path = None
         self.mmproj = None
         self._projector = False
+        self.on_gpu = False
+        self.device = None
 
     @property
     def vision_loaded(self) -> bool:
@@ -203,8 +283,10 @@ class FakeEngine(_Base):
         return sum(len(_text_of(m.get("content")).split()) + 4 for m in messages) + self._image_tokens(messages)
 
     def chat(self, messages: Sequence[dict], params: dict, should_stop: Callable[[], bool]) -> Iterator[str]:
-        self.calls.append({"messages": list(messages), "params": dict(params)})
+        self.calls.append({"messages": list(messages), "params": dict(params), "gpu": self.on_gpu})
         self.generated = 0
+        if self.on_gpu and self.gpu_chat_error:
+            raise RuntimeError(self.gpu_chat_error)
         images = image_count(messages)
         if images:
             if not self.mmproj:
@@ -255,19 +337,45 @@ class LlamaEngine(_Base):
         except Exception as exc:
             raise EngineUnavailable(f"{UNAVAILABLE}: {exc}") from exc
 
-    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None) -> None:
+    def load(self, path: str, n_ctx: int, n_threads: int, mmproj: Optional[str] = None, gpu: bool = False) -> None:
         llama_cpp = self._module()
         with self._lock:
             self.unload()
-            llm = llama_cpp.Llama(model_path=str(path), n_ctx=int(n_ctx), n_threads=int(n_threads),
-                                  n_threads_batch=int(n_threads), n_batch=512, n_ubatch=512, n_gpu_layers=0,
-                                  use_mmap=True, use_mlock=False, verbose=False)
+            device = None
+            if gpu:
+                state = gpu_state()
+                if not state.get("device"):
+                    raise GpuUnavailable(state.get("error") or "no GPU device")
+                device = f"GPU: {state['device']} ({state.get('backend')})"
+                # every layer on the one GPU device (index 0: the only GPU backend this build registers)
+                placement = {"n_gpu_layers": -1, "split_mode": SPLIT_MODE_NONE, "main_gpu": 0}
+            else:
+                placement = {"n_gpu_layers": 0, "split_mode": SPLIT_MODE_NONE, "main_gpu": -1}
+            try:
+                llm = llama_cpp.Llama(model_path=str(path), n_ctx=int(n_ctx), n_threads=int(n_threads),
+                                      n_threads_batch=int(n_threads), n_batch=512, n_ubatch=512, use_mmap=True,
+                                      use_mlock=False, verbose=False, **placement)
+            except Exception as exc:
+                if gpu:
+                    raise GpuUnavailable(f"the model did not load on the GPU ({exc})") from exc
+                raise
+            if gpu:
+                try:
+                    _gpu_check(llm)
+                except Exception as exc:
+                    _close(llm)
+                    raise GpuUnavailable(f"the first token on the GPU failed ({exc})") from exc
             self.formatter = _make_formatter(llm)
             if self.formatter is not None:
                 llm.chat_handler = self.formatter.to_chat_handler()
             self.llm = llm
             self.path, self.n_ctx, self.n_threads = str(path), int(n_ctx), int(n_threads)
             self.mmproj = str(mmproj) if mmproj else None
+            self.on_gpu = bool(gpu)
+            if device is None:
+                variant = cpu_variant()
+                device = f"CPU ({variant})" if variant and variant not in ("builtin", "none") else "CPU"
+            self.device = device
 
     @property
     def vision_loaded(self) -> bool:
@@ -292,6 +400,8 @@ class LlamaEngine(_Base):
             self._ban = None
             self.path = None
             self.mmproj = None
+            self.on_gpu = False
+            self.device = None
             if handler is not None:
                 try:
                     handler._exit_stack.close()  # mtmd_free: the projector, before its model goes
@@ -416,6 +526,38 @@ class LlamaEngine(_Base):
 
 class ContextOverflow(ValueError):
     """The prompt with its images does not fit ``n_ctx`` (libmtmd's own count, after the estimate)."""
+
+
+def _close(llm: Any) -> None:
+    try:
+        llm.close()
+    except Exception:
+        log.debug("closing the model failed", exc_info=True)
+
+
+def _gpu_check(llm: Any) -> None:
+    """The GPU's first tokens: evaluate ``GPU_CHECK_PROMPT`` (a batch) and one more token; the last
+    logits must be finite and not all equal (a broken kernel gives NaN / inf / zeros). Leaves the
+    model reset."""
+    import math
+
+    tokens = list(llm.tokenize(GPU_CHECK_PROMPT.encode("utf-8"), add_bos=True, special=False))[:64]
+    if not tokens:
+        raise RuntimeError("the check prompt has no tokens")
+    try:
+        llm.reset()
+        llm.eval(tokens)
+        llm.eval(tokens[-1:])
+        n_vocab = int(llm.n_vocab())
+        logits = llm._ctx.get_logits()
+        values = [float(logits[i]) for i in range(n_vocab)]
+    finally:
+        llm.reset()
+    bad = sum(1 for v in values if not math.isfinite(v))
+    if bad:
+        raise RuntimeError(f"{bad} of {n_vocab} logits are NaN or infinite")
+    if not values or max(values) == min(values):
+        raise RuntimeError("the logits are all equal")
 
 
 def _vision_message(message: dict) -> dict:
