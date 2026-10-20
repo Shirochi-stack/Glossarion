@@ -2930,9 +2930,25 @@ _MOBILE_BRIDGE_JS = r"""
     var b = bodyMotion('translateX(' + (dir > 0 ? 24 : -24) + '%%)', '0', 'none');
     if (!b) { return; }
     void b.offsetWidth;
-    bodyMotion('translateX(0)', '1', 'transform ' + ms + 'ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity '
-               + ms + 'ms ease-out');
-    setTimeout(function () { if (!drag || drag.mode !== 'h') { bodyMotion('', '', ''); } }, ms + 80);
+    // slide in once the page is really on screen: start() runs at DOMContentLoaded, and a freshly
+    // loaded page paints later (web fonts, the WebView keeps the old frame meanwhile), so a slide
+    // begun here was over before the first frame showed (the device recording had no entrance)
+    afterPaint(function () {
+      if (drag && drag.mode === 'h') { return; }
+      bodyMotion('translateX(0)', '1', 'transform ' + ms + 'ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity '
+                 + ms + 'ms ease-out');
+      setTimeout(function () { if (!drag || drag.mode !== 'h') { bodyMotion('', '', ''); } }, ms + 80);
+    });
+  }
+  function afterPaint(fn) {
+    var done = false, raf = window.requestAnimationFrame;
+    function once() { if (!done) { done = true; fn(); } }
+    function frames() { raf(function () { raf(once); }); }  // the second frame: the first one was drawn
+    var fonts = document.fonts;
+    if (fonts && fonts.ready && fonts.status !== 'loaded') {
+      fonts.ready.then(frames, frames);
+      setTimeout(once, 600);  // never keep the page hidden on a slow font
+    } else { frames(); }
   }
   function leavePage(dir, dragged) {
     // dragged: the page's offset (px) when a swipe dragged it past the edge; it leaves from there

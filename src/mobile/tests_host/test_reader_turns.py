@@ -25,7 +25,8 @@ from one page to another ... as my fingers slide from right to left or left to r
   prefers-reduced-motion, which the shell obeyed: every turn was a one-frame jump. Now a swipe drags
   the page with the finger (the neighbour page beside it; at a chapter edge the whole page) and
   settles on release (next / previous past 0.3 of the width or on a flick, else back); only the app's
-  own switches turn the motion off.
+  own switches turn the motion off. The neighbour chapter's entrance starts two frames after the
+  page starts (once it is drawn): begun at DOMContentLoaded it was over before the first paint.
 
 Run from src/mobile (mobile venv):
     python -m pytest -p no:cacheprovider -W ignore tests_host/test_reader_turns.py
@@ -262,6 +263,8 @@ const out = {};
 // 9 pages of 400 px + the 1 px gap; this page was turned to from the previous chapter (enter 1)
 let env = makeEnv({scrollWidth: 3600});
 env.run();
+out.enterBeforePaint = env.bodyLog.slice();
+env.frame(1); env.frame(2); env.run();  // the entrance starts on the second frame
 out.enterLog = env.bodyLog.slice();
 out.turn = env.G.turn();
 env.click(390);                       // next: the page index moves at once, the columns slide
@@ -290,11 +293,11 @@ env.G.setTurn({next: false}); env.bodyLog.length = 0;
 env.click(390); out.lastChapter = env.bodyLog.slice();
 // prefers-reduced-motion (Android's "Remove animations") is not the app's switch: the page still slides
 env = makeEnv({scrollWidth: 3600, reduce: true});
-env.run(); out.reduceEnter = env.bodyLog.slice();
+env.run(); env.frame(1); env.frame(2); out.reduceEnter = env.bodyLog.slice();
 env.click(390); out.reduce = {page: env.G.page(), left: env.columns.scrollLeft, pending: env.frames.size};
 // ---- the page follows the finger ----
 env = makeEnv({scrollWidth: 3600});
-env.run(); const pages = () => env.posted.filter(e => e.type === 'page' && e.reason !== 'initial').length;
+env.run(); env.frame(1); env.frame(2); env.run(); const pages = () => env.posted.filter(e => e.type === 'page' && e.reason !== 'initial').length;
 const d = out.drag = {};
 env.touch('start', 300); env.touch('move', 295, 300, 50); d.slop = env.columns.scrollLeft;
 env.touch('move', 280, 300, 50); d.locked = env.columns.scrollLeft;       // past the slop: no jump
@@ -362,6 +365,8 @@ def test_paged_page_slides_on_turns_and_enters_from_the_turned_side(tmp_path, no
     assert "transform=translateX(24%)" in log and "opacity=0" in log
     assert log.index("transform=translateX(24%)") < log.index("transform=translateX(0)")
     assert any(entry.startswith("transition=transform 260ms") for entry in log)
+    # ... once the page has been drawn (two frames after start), not before
+    assert "transform=translateX(0)" not in out["enterBeforePaint"] and "transform=translateX(24%)" in out["enterBeforePaint"]
     # next: page 1 at once (the event too), the columns slide from 0 to 401 with an ease-out
     assert out["tap"]["page"] == 1 and out["tap"]["left"] == 0 and out["tap"]["pending"] == 1
     assert out["tap"]["event"]["type"] == "page" and out["tap"]["event"]["reason"] == "next"
