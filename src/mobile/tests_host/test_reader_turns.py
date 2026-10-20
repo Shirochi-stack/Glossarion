@@ -362,7 +362,8 @@ def test_paged_page_slides_on_turns_and_enters_from_the_turned_side(tmp_path, no
     # the chapter page enters from the right (it was turned to from the previous chapter)
     assert out["turn"] == {"ms": 260, "enter": 1, "next": True, "prev": True}
     log = out["enterLog"]
-    assert "transform=translateX(24%)" in log and "opacity=0" in log
+    # (faded, not invisible: opacity 0 text is no first contentful paint, the WebView would keep the old frame)
+    assert "transform=translateX(24%)" in log and "opacity=0.2" in log and "opacity=0" not in log
     assert log.index("transform=translateX(24%)") < log.index("transform=translateX(0)")
     assert any(entry.startswith("transition=transform 260ms") for entry in log)
     # ... once the page has been drawn (two frames after start), not before

@@ -2927,12 +2927,14 @@ _MOBILE_BRIDGE_JS = r"""
   function enterPage(dir) {
     var ms = turnMs();
     if (!ms || !dir) { return; }
-    var b = bodyMotion('translateX(' + (dir > 0 ? 24 : -24) + '%%)', '0', 'none');
+    // not fully transparent: Chromium keeps the previous document on screen until the new one's first
+    // contentful paint, and opacity 0 text is not contentful, so an entrance from 0 (a compositor
+    // animation, no further paints) stayed invisible until it had ended (device recording)
+    var b = bodyMotion('translateX(' + (dir > 0 ? 24 : -24) + '%%)', '0.2', 'none');
     if (!b) { return; }
     void b.offsetWidth;
     // slide in once the page is really on screen: start() runs at DOMContentLoaded, and a freshly
-    // loaded page paints later (web fonts, the WebView keeps the old frame meanwhile), so a slide
-    // begun here was over before the first frame showed (the device recording had no entrance)
+    // loaded page paints later (web fonts), so a slide begun at once could end before it showed
     afterPaint(function () {
       if (drag && drag.mode === 'h') { return; }
       bodyMotion('translateX(0)', '1', 'transform ' + ms + 'ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity '
