@@ -338,7 +338,10 @@ def test_intent_router_imports_shared_files_and_offers_actions(tmp_path):
 
     async def scenario():
         imports = await router.handle(items)
-        assert [i.label for i in imports] == ["번역해 주세요", "https://example.com/novel", "Book.epub", "Pack.zip"]
+        assert [i.label for i in imports] == ["번역해 주세요", "https://example.com/novel", "Book.epub", "Pack.zip",
+                                              "Shared item"]
+        # a file the platform could not copy is reported, not dropped (share crash fix)
+        assert imports[4].error == "Could not open the shared file: copy failed" and imports[4].actions == []
         assert presented == [imports]
         book, zipped = imports[2], imports[3]
         assert book.imported.path == str(tmp_path / "data" / "Inbox" / "Book.epub") and not os.path.exists(shared)

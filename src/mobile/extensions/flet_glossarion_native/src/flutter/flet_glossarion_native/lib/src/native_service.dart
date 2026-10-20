@@ -1,11 +1,9 @@
 import 'dart:async';
-import 'dart:io' show File;
 
 import 'package:flet/flet.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 
 import 'task_handler.dart';
 
@@ -57,7 +55,6 @@ class GlossarionNativeService extends FletService {
   /// the system picker was open); Python collects them with take_document_results.
   final List<Map<String, dynamic>> _documentResults = <Map<String, dynamic>>[];
   Map<String, dynamic>? _launchNotification;
-  StreamSubscription<List<SharedMediaFile>>? _shareSubscription;
   bool _taskCallbackAdded = false;
   String? _lastError;
   int _sequence = 0;
@@ -88,17 +85,6 @@ class GlossarionNativeService extends FletService {
       _taskCallbackAdded = true;
     }
 
-    try {
-      _shareSubscription = ReceiveSharingIntent.instance.getMediaStream().listen(
-        (List<SharedMediaFile> files) => _onSharingIntentMedia(files, initial: false),
-        onError: (Object error) {
-          debugPrint("GlossarionNative: share stream error: $error");
-        },
-      );
-    } catch (e) {
-      debugPrint("GlossarionNative: cannot listen to receive_sharing_intent: $e");
-    }
-
     unawaited(_attach());
   }
 
@@ -109,8 +95,6 @@ class GlossarionNativeService extends FletService {
   void dispose() {
     debugPrint("GlossarionNativeService(${control.id}).dispose()");
     control.removeInvokeMethodListener(_invokeMethod);
-    _shareSubscription?.cancel();
-    _shareSubscription = null;
     if (_taskCallbackAdded) {
       FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
       _taskCallbackAdded = false;
@@ -159,17 +143,6 @@ class GlossarionNativeService extends FletService {
     } catch (e) {
       _lastError = 'attach: $e';
       debugPrint("GlossarionNative: $_lastError");
-    }
-
-    try {
-      final List<SharedMediaFile> initial =
-          await ReceiveSharingIntent.instance.getInitialMedia();
-      if (initial.isNotEmpty) {
-        _onSharingIntentMedia(initial, initial: true);
-        await ReceiveSharingIntent.instance.reset();
-      }
-    } catch (e) {
-      debugPrint("GlossarionNative: receive_sharing_intent initial media: $e");
     }
 
     if (!_ready.isCompleted) {
@@ -242,60 +215,6 @@ class GlossarionNativeService extends FletService {
     if (emit && added.isNotEmpty) {
       control.triggerEvent('share', <String, dynamic>{'items': added});
     }
-  }
-
-  /// receive_sharing_intent delivers SEND intents that reach MainActivity
-  /// directly and (in a later milestone) the iOS Share Extension. Android
-  /// "Open with"/"Share" normally go through ShareReceiverActivity and the
-  /// Kotlin plugin instead.
-  void _onSharingIntentMedia(List<SharedMediaFile> files, {required bool initial}) {
-    final List<Map<String, dynamic>> items = <Map<String, dynamic>>[];
-    for (final SharedMediaFile file in files) {
-      final Map<String, dynamic>? mapped = _fromSharingIntent(file);
-      if (mapped != null) items.add(mapped);
-    }
-    if (items.isNotEmpty) {
-      _addShared(items, emit: !initial);
-    }
-  }
-
-  Map<String, dynamic>? _fromSharingIntent(SharedMediaFile file) {
-    final String path = file.path;
-    final String id = _newId('rsi');
-    switch (file.type) {
-      case SharedMediaType.url:
-        // Deep links into this app are routed by Flet (page.route); never
-        // treat them as shared content.
-        if (path.toLowerCase().startsWith('glossarion:')) return null;
-        return <String, dynamic>{
-          'id': id,
-          'kind': 'url',
-          'text': path,
-          'source': 'share',
-        };
-      case SharedMediaType.text:
-        // A text/* file shared as a stream is reported as "text" with a path.
-        if (!_isExistingFile(path)) {
-          return <String, dynamic>{
-            'id': id,
-            'kind': 'text',
-            'text': path,
-            'mime_type': file.mimeType,
-            'source': 'share',
-          };
-        }
-        break;
-      default:
-        break;
-    }
-    return <String, dynamic>{
-      'id': id,
-      'kind': 'file',
-      'path': path,
-      'name': _basename(path),
-      'mime_type': file.mimeType,
-      'source': 'share',
-    };
   }
 
   // -------------------------------------------------------- Python -> Dart
@@ -484,9 +403,6 @@ class GlossarionNativeService extends FletService {
     } catch (e) {
       debugPrint("GlossarionNative: clear_shared: $e");
     }
-    try {
-      await ReceiveSharingIntent.instance.reset();
-    } catch (_) {}
   }
 
   // ------------------------------------------ Android foreground service
@@ -600,20 +516,6 @@ class GlossarionNativeService extends FletService {
   String _newId(String prefix) {
     _sequence += 1;
     return '$prefix-${DateTime.now().microsecondsSinceEpoch}-$_sequence';
-  }
-
-  static bool _isExistingFile(String path) {
-    if (!path.startsWith('/')) return false;
-    try {
-      return File(path).existsSync();
-    } catch (_) {
-      return false;
-    }
-  }
-
-  static String _basename(String path) {
-    final int slash = path.lastIndexOf('/');
-    return slash >= 0 ? path.substring(slash + 1) : path;
   }
 
   static Map<String, dynamic> _stringMap(Map<dynamic, dynamic> source) {

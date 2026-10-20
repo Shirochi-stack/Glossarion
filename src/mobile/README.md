@@ -497,8 +497,8 @@ Routes: `ui/router.py` whitelists every route of UI_SPEC (opaque ids only, never
 text); deep links `glossarion://app/<route>` go through the same whitelist. Flet hands
 Python the path form of a deep link (`glossarion://app/x?y` → `/x?y`); everything
 else (content:/file: paths from Open-with, foreign links) is ignored and recorded.
-On iOS a cold-start `glossarion://app/...` link is swallowed by receive_sharing_intent's
-UIScene hook; the extension re-delivers it as a shared item (`kind="url"`,
+On iOS a cold-start `glossarion://app/...` link could be swallowed by another plugin's
+UIScene hook (receive_sharing_intent did, before it was dropped); the extension re-delivers it as a shared item (`kind="url"`,
 `source="launch"`), which the spike routes through the same whitelist (de-duplicated
 against `page.route`).
 

@@ -29,8 +29,7 @@ extensions (`flet-secure-storage`, `flet-permission-handler`):
 pyproject.toml                       wheel = Python package + flutter/<pkg> package data
 src/flet_glossarion_native/          GlossarionNative(ft.Service) + dataclass types
 src/flutter/flet_glossarion_native/  Dart package / Flutter plugin
-  pubspec.yaml                       flet 1.0.3 (lockstep), flutter_foreground_task ^11.0.3,
-                                     receive_sharing_intent ^1.9.0
+  pubspec.yaml                       flet 1.0.3 (lockstep), flutter_foreground_task ^11.0.3
   lib/flet_glossarion_native.dart    exports Extension (Flet's generated main imports it)
   lib/src/extension.dart             createService("GlossarionNative"), FGS port init
   lib/src/native_service.dart        every invoke method + events
@@ -176,18 +175,19 @@ MainActivity is `singleTop`, so a running app gets `onNewIntent`.
 `GlossarionNativePlugin` copies the streams on a background executor and
 emits `share`.
 
-The custom action also keeps `receive_sharing_intent` out of these intents,
-for three reasons:
+A SEND / SEND_MULTIPLE / VIEW intent that reaches MainActivity directly (an
+explicit component such as `am start -n com.glossarion.app/.MainActivity`,
+never the chooser) is imported by `GlossarionNativePlugin` the same way:
+`ShareReceiverActivity.readShare` collects its URIs and text, and the copy runs
+on the executor. A URI the app cannot read becomes an item with `error`
+("Could not open the shared file: ..." in the app), never a crash.
 
-- With a null data URI it would emit an item with a null path, which breaks
-  its Dart decoder.
-- It copies SEND streams on the UI thread, which risks an ANR on large PDFs.
-- It would emit duplicates.
-
-`receive_sharing_intent` stays wired in Dart for SEND intents that reach
-MainActivity directly and for an optional iOS Share Extension (U9). Its
-`url` items for `glossarion:` deep links are dropped, because Flet routes
-deep links itself.
+`receive_sharing_intent` is no longer a dependency. Its Android plugin
+handled every SEND intent that reached MainActivity on the UI thread
+(`FileDirectory.getAbsolutePath` -> `getDataColumn` -> `openInputStream`) and
+let a `SecurityException` for a URI without a read grant kill the app. It
+offered nothing else: the iOS Share Extension is not shipped (see
+`src/mobile/README.md`), and iOS "Open in" is handled by this plugin.
 
 ### Save to Downloads
 
@@ -344,7 +344,8 @@ to every plugin.
   with security-scoped access and `NSFileCoordinator` into
   `tmp/shared/<batch>/`. The handler returns `true`, so Flutter never routes
   a file URL.
-- **Cold-start deep links.** `receive_sharing_intent` 1.9.0 returns `YES`
+- **Cold-start deep links.** `receive_sharing_intent` 1.9.0 (a dependency
+  until the Android share crash fix) returned `YES`
   from `scene(_:willConnectTo:options:)` for every connection. Flutter then
   skips its own deep-link handling for cold-start URLs, so
   `glossarion://app/...` opened while the app is not running would be lost.

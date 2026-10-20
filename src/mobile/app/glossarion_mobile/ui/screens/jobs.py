@@ -1023,9 +1023,10 @@ class JobsFeature:
         files = [imp for imp in imports if imp.imported is not None]
         texts = [imp for imp in imports if imp.imported is None and imp.text]
         errors = [imp for imp in imports if imp.error]
-        if errors and not files and not texts:
+        if errors:  # also next to files that did import (a multi-file share)
             self._notify(errors[0].error or "The shared file could not be imported")
-            return None
+            if not files and not texts:
+                return None
         if texts and not files:
             compose = getattr(self.app, "prefill_composer", None)
             if compose is not None:

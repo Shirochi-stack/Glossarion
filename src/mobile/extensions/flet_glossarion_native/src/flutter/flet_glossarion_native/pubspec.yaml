@@ -17,7 +17,12 @@ dependencies:
   flet: 1.0.3
 
   flutter_foreground_task: ^11.0.3
-  receive_sharing_intent: ^1.9.0
+
+  # receive_sharing_intent is intentionally NOT a dependency: on Android its
+  # plugin read every SEND intent that reached MainActivity on the UI thread
+  # and crashed the app on an unreadable URI (SecurityException from
+  # FileDirectory.getDataColumn). Shares go through ShareReceiverActivity and
+  # GlossarionNativePlugin; iOS "Open in" through GlossarionNativePlugin.swift.
 
   # flutter_local_notifications is intentionally NOT a dependency: it requires
   # core-library desugaring in :app, which a plugin cannot enable in the Flet

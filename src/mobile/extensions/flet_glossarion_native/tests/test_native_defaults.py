@@ -444,10 +444,9 @@ def test_shared_item_keys_match_dataclass():
     swift_keys = set(re.findall(r'item\["([a-z_]+)"\]', swift))
     for block in re.findall(r"(?:var|let) item: \[String: Any\] = \[(.*?)\]", swift, flags=re.S):
         swift_keys |= set(re.findall(r'"([a-z_]+)":', block))
-    dart = DART_SERVICE.read_text(encoding="utf-8")
-    dart_block = dart[dart.index("Map<String, dynamic>? _fromSharingIntent"):dart.index("// -------------------------------------------------------- Python -> Dart")]
-    dart_keys = set(re.findall(r"'([a-z_]+)':", dart_block))
-    for keys in (kotlin_keys, swift_keys, dart_keys):
+    # Dart builds no items of its own since receive_sharing_intent was dropped; it only relays these.
+    assert "_fromSharingIntent" not in DART_SERVICE.read_text(encoding="utf-8")
+    for keys in (kotlin_keys, swift_keys):
         assert {"id", "kind"} <= keys
         assert keys <= allowed, keys - allowed
 
@@ -461,7 +460,7 @@ def test_channel_name_and_plugin_classes_consistent():
     pubspec = (FLUTTER_PKG / "pubspec.yaml").read_text(encoding="utf-8")
     assert re.search(r"^  flet: 1\.0\.3$", pubspec, flags=re.M)
     assert "flutter_foreground_task: ^11.0.3" in pubspec
-    assert "receive_sharing_intent: ^1.9.0" in pubspec
+    assert not re.search(r"^\s+receive_sharing_intent:", pubspec, flags=re.M)
     assert not re.search(r"^\s+flutter_local_notifications:", pubspec, flags=re.M)
     assert "package: com.glossarion.flet_glossarion_native" in pubspec
     assert pubspec.count("pluginClass: GlossarionNativePlugin") == 2

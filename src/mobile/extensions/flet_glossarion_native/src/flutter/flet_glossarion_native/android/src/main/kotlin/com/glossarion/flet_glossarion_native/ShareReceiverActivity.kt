@@ -46,41 +46,15 @@ class ShareReceiverActivity : Activity() {
             return
         }
 
-        val uris = ArrayList<Uri>()
-        var text: String? = null
-        var subject: String? = null
-        val origin: String
-
-        when (source.action) {
-            Intent.ACTION_VIEW -> {
-                origin = ORIGIN_VIEW
-                source.data?.let { uris.add(it) }
-            }
-            Intent.ACTION_SEND -> {
-                origin = ORIGIN_SEND
-                safeExtra { readUriExtra(source, Intent.EXTRA_STREAM) }?.let { uris.add(it) }
-                text = safeExtra { source.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() }
-                subject = safeExtra { source.getStringExtra(Intent.EXTRA_SUBJECT) }
-            }
-            Intent.ACTION_SEND_MULTIPLE -> {
-                origin = ORIGIN_SEND_MULTIPLE
-                safeExtra { readUriListExtra(source, Intent.EXTRA_STREAM) }?.let { uris.addAll(it) }
-                subject = safeExtra { source.getStringExtra(Intent.EXTRA_SUBJECT) }
-            }
-            else -> {
-                Log.w(TAG, "Ignoring action ${source.action}")
-                return
-            }
+        val share = readShare(source)
+        if (share == null) {
+            Log.w(TAG, "Ignoring action ${source.action}")
+            return
         }
-
-        // ClipData is filled by the sender (or by the framework for SEND) and
-        // carries the URIs the read grant applies to.
-        source.clipData?.let { clip ->
-            for (i in 0 until clip.itemCount) {
-                val uri = clip.getItemAt(i).uri ?: continue
-                if (!uris.contains(uri)) uris.add(uri)
-            }
-        }
+        val uris = share.uris
+        val text = share.text
+        val subject = share.subject
+        val origin = share.origin
 
         if (uris.isEmpty() && text.isNullOrEmpty()) {
             Log.w(TAG, "Nothing to forward for ${source.action}")
@@ -119,13 +93,13 @@ class ShareReceiverActivity : Activity() {
         }
     }
 
-    private inline fun <T> safeExtra(block: () -> T?): T? =
-        try {
-            block()
-        } catch (e: Exception) {
-            Log.w(TAG, "Unreadable share extra", e)
-            null
-        }
+    /** What a VIEW / SEND / SEND_MULTIPLE intent carries; see [readShare]. */
+    class SharedContent(
+        val origin: String,
+        val uris: ArrayList<Uri>,
+        val text: String?,
+        val subject: String?,
+    )
 
     companion object {
         private const val TAG = "GlossarionShare"
@@ -141,6 +115,55 @@ class ShareReceiverActivity : Activity() {
         const val ORIGIN_VIEW = "view"
         const val ORIGIN_SEND = "send"
         const val ORIGIN_SEND_MULTIPLE = "send_multiple"
+
+        /**
+         * The URIs (EXTRA_STREAM or data, plus ClipData, de-duplicated), text and
+         * subject of a VIEW / SEND / SEND_MULTIPLE intent; null for any other
+         * action. Never throws: an unreadable extra is logged and skipped. Used
+         * by this trampoline and by GlossarionNativePlugin for a share sent
+         * straight to MainActivity (explicit component).
+         */
+        fun readShare(source: Intent): SharedContent? {
+            val uris = ArrayList<Uri>()
+            var text: String? = null
+            var subject: String? = null
+            val origin: String
+            when (source.action) {
+                Intent.ACTION_VIEW -> {
+                    origin = ORIGIN_VIEW
+                    safeExtra { source.data }?.let { uris.add(it) }
+                }
+                Intent.ACTION_SEND -> {
+                    origin = ORIGIN_SEND
+                    safeExtra { readUriExtra(source, Intent.EXTRA_STREAM) }?.let { uris.add(it) }
+                    text = safeExtra { source.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() }
+                    subject = safeExtra { source.getStringExtra(Intent.EXTRA_SUBJECT) }
+                }
+                Intent.ACTION_SEND_MULTIPLE -> {
+                    origin = ORIGIN_SEND_MULTIPLE
+                    safeExtra { readUriListExtra(source, Intent.EXTRA_STREAM) }?.let { uris.addAll(it) }
+                    subject = safeExtra { source.getStringExtra(Intent.EXTRA_SUBJECT) }
+                }
+                else -> return null
+            }
+            // ClipData is filled by the sender (or by the framework for SEND) and
+            // carries the URIs the read grant applies to.
+            safeExtra { source.clipData }?.let { clip ->
+                for (i in 0 until clip.itemCount) {
+                    val uri = clip.getItemAt(i).uri ?: continue
+                    if (!uris.contains(uri)) uris.add(uri)
+                }
+            }
+            return SharedContent(origin, uris, text, subject)
+        }
+
+        private inline fun <T> safeExtra(block: () -> T?): T? =
+            try {
+                block()
+            } catch (e: Exception) {
+                Log.w(TAG, "Unreadable share extra", e)
+                null
+            }
 
         // getParcelableExtra(String, Class) is unreliable on API 33; use it from 34.
         @Suppress("DEPRECATION")
