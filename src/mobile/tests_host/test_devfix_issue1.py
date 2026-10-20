@@ -1081,7 +1081,7 @@ def test_owner_report_1_every_chapter_change_turns_the_page(phone, platform):
 @pytest.mark.skipif(not _has("msgpack"), reason="msgpack not installed")
 def test_owner_report_1_reopening_shows_the_saved_page(phone):
     """The saved position is the page that was on screen, so ▶ Continue reopens there (not one chapter
-    further on), again and again; a plain open offers Resume, and Resume loads that page."""
+    further on), again and again; a plain open goes straight there too (owner 2026-10-20: no Resume snackbar)."""
     async def scenario():
         await phone.start()
         engine = _engine(phone)
@@ -1119,18 +1119,15 @@ def test_owner_report_1_reopening_shows_the_saved_page(phone):
                 await _leave(phone, screen)
                 assert phone.app.prefs.reader_position(screen.bid)["chapter"] == LONG
 
-            # a plain open starts at the book's start and offers Resume; leaving untouched keeps the saved page
-            for resume in (False, True):
+            # a plain open goes straight to the saved page, with no "Resume at …" snackbar
+            for _ in range(2):
                 offers = len(snackbars)
                 screen = await _open(phone)
                 turns = Turns(phone, client, screen)
-                await turns.page_ready(set(), 0)
-                assert await _wait(lambda: any(m.startswith("Resume at Ch 2") for m, _ in snackbars[offers:]), 10)
-                message, bar = [s for s in snackbars[offers:] if s[0].startswith("Resume at Ch 2")][-1]
-                assert bar.action == "Resume"
-                if resume:
-                    shown = await turns.turn(lambda: _fire(phone, bar, "action"), LONG)
-                    assert shown["page"] == 2
+                await turns.page_ready(set(), LONG)
+                plain = await turns.check_shown(LONG)
+                assert plain["page"] == 2
+                assert not [m for m, _ in snackbars[offers:] if m.startswith("Resume at")]
                 await _leave(phone, screen)
                 saved = phone.app.prefs.reader_position(screen.bid)
                 assert (saved["chapter"], saved["page"]) == (LONG, 2)

@@ -1144,10 +1144,9 @@ def test_reader_settings_scopes_and_resume(novel):
         screen = _screen(novel, config={"epub_reader_theme": 1})
         screen.deps.prefs.set_reader_position("ab12cd34ef56", "chapter0002.xhtml", 0.5, page=2, mode="original")
         await screen.open()
-        assert screen.session.flavor == rm.ORIGINAL and screen.index == 0  # saved mode, opened at the start
-        assert screen.resume_offer is not None and screen.resume_offer.chapter == 1
-        total = screen.session.count
-        assert screen.notes[-1][0] == f"Resume at Ch 2 · {rm.book_percent(1, 0.5, total)}%"
+        # saved mode, opened straight at the saved chapter (owner 2026-10-20: no "Resume at …" snackbar)
+        assert screen.session.flavor == rm.ORIGINAL and screen.index == 1
+        assert screen.resume_offer is None and not [n for n in screen.notes if str(n[0]).startswith("Resume at")]
         screen._apply_settings({"theme": 4, "line_spacing": 2.4}, "book")
         screen._flush_style()
         assert screen.deps.prefs.reader_book_settings("ab12cd34ef56") == {"theme": 4, "line_spacing": 2.4}
@@ -1161,7 +1160,7 @@ def test_reader_settings_scopes_and_resume(novel):
         screen._flush_style()
         assert screen.deps.prefs.get("reader_prefs") == {"tap_zones": False, "keep_screen_on": False}
         await screen.set_mode(rm.TRANSLATED)
-        assert screen.session.flavor == rm.TRANSLATED and screen.index == 0
+        assert screen.session.flavor == rm.TRANSLATED and screen.index == 1  # stays on the resumed chapter
         screen.dispose()
 
     asyncio.run(scenario())
@@ -2041,8 +2040,8 @@ def test_external_book_links_open_only_after_confirmation(novel):
 
 @needs_flet
 def test_continue_opens_at_the_saved_position_and_a_plain_open_keeps_it(novel, monkeypatch):
-    """U5 review: ▶ Continue opens at the saved position; a plain open offers it and does not
-    overwrite it with the untouched start (1 s debounce, dispose) until the reader moves."""
+    """▶ Continue and a plain open both open at the saved position (owner 2026-10-20: no Resume snackbar);
+    the position follows the reader once it moves."""
     from glossarion_mobile.ui.reader import reader_view
     from glossarion_mobile.ui.reader.reader_view import ReaderScreen
 
@@ -2061,17 +2060,14 @@ def test_continue_opens_at_the_saved_position_and_a_plain_open_keeps_it(novel, m
                                   pages=5)
         plain = ReaderScreen(base.match, base.deps, args={"book": dict(novel.book)})
         await plain.open()
-        assert plain.index == 0 and plain.resume_offer is not None and plain.resume_offer.chapter == 1
-        await asyncio.sleep(0.2)  # the debounced save of the start fired
-        assert prefs.reader_position("ab12cd34ef56")["href"] == "chapter0002.xhtml"
-        plain.handle_payload({"type": "ready", "seq": 1, "page": 0, "count": 3, "chapter": 0})
+        assert plain.index == 1 and plain.fraction == 0.5 and plain.resume_offer is None
         await asyncio.sleep(0.2)
         assert prefs.reader_position("ab12cd34ef56")["href"] == "chapter0002.xhtml"
         await plain.go_chapter(2)  # the reader moved: from now on its position is saved
         await asyncio.sleep(0.2)
         assert prefs.reader_position("ab12cd34ef56")["href"] == "chapter0003.xhtml"
         plain.dispose()
-        # dispose with the offer still pending keeps the saved position too
+        # an untouched reopen keeps the saved position too
         prefs.set_reader_position("ab12cd34ef56", "chapter0002.xhtml", 0.5, page=2, mode="translated", chapter=1)
         untouched = ReaderScreen(base.match, base.deps, args={"book": dict(novel.book)})
         await untouched.open()

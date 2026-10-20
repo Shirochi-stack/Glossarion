@@ -781,17 +781,14 @@ class ReaderScreen(Screen):
             return
         hint: Optional[dict] = None
         offer: Optional[rm.Position] = None
-        if positions is not None and not positions.at_start:
-            if self.args.get("resume"):
-                # ▶ Continue / "Continue · Ch N · P%": open at the saved position (UI_SPEC §3.2)
-                start, hint = positions.chapter, positions.hint()
-            elif positions.chapter != start or positions.fraction:
-                offer = positions
-        # While a resume offer is pending, the untouched start must not overwrite the saved position
-        # (a chapter the caller asked for -- a Chapters row, ?ch= -- is the reader's choice and is kept).
+        # a chapter the caller asked for (a Chapters row, ?ch=, a chapter file) is the reader's choice
         explicit = bool(self.args.get("chapter_filename")) or self.route_chapter is not None \
             or self._file_chapter is not None
-        self._hold_position = offer is not None and not explicit
+        if positions is not None and not positions.at_start and (self.args.get("resume") or not explicit):
+            # ▶ Continue, and every plain open: straight to the saved position (owner 2026-10-20: no
+            # "Resume at Ch N · P%" snackbar to tap; UI_SPEC §3.2)
+            start, hint = positions.chapter, positions.hint()
+        self._hold_position = False
         self.state = "ready"
         self._refresh_toc()
         custom_family = self.settings.font_family not in rm.FONT_FAMILIES
@@ -875,11 +872,8 @@ class ReaderScreen(Screen):
         session = self.session
         if session is None:
             return
+        # remembered, no "… · Resume" snackbar (owner 2026-10-20: informational pop-ups are removed)
         self.resume_offer = position
-        number = session.chapter_info(position.chapter).number
-        percent = rm.book_percent(position.chapter, position.fraction, session.count)
-        self.notify(rm.resume_label(number, percent), "Resume",
-                    lambda: self._spawn(self.go_chapter(position.chapter, hint=position.hint())))
 
     def _choose_renderer(self) -> str:
         if self.settings.lightweight:
@@ -1604,13 +1598,7 @@ class ReaderScreen(Screen):
         state = (self.deps.extras or {}).get("state")
         if effective(state) < ui_tokens.COMPACT_TEXT_SCALE:
             return False
-        self.scale_hint_shown = True
-        notify = self.deps.notify
-        if notify is not None:
-            try:
-                notify(TEXT_SIZE_HINT, "Aa", self.open_aa)
-            except TypeError:
-                notify(TEXT_SIZE_HINT)
+        self.scale_hint_shown = True  # no text-size snackbar (owner 2026-10-20); Aa is in the chrome
         return True
 
     def _on_scope(self, scope: str) -> None:
@@ -1853,9 +1841,7 @@ class ReaderScreen(Screen):
             return None
         number = self.session.chapter_info(position.chapter).number
         label = f"Ch {number} · {self.session.chapter_title(position.chapter)} · {int(round(position.fraction * 100))}%"
-        mark = prefs.add_bookmark(self.bid, position.href, position.fraction, label)
-        self.notify("Bookmark added")
-        return mark
+        return prefs.add_bookmark(self.bid, position.href, position.fraction, label)
 
     def open_bookmarks(self) -> Optional[BookmarksSheet]:
         prefs = self.deps.prefs
