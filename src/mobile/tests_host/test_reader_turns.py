@@ -16,7 +16,16 @@ Page turns
   over ``turn.ms`` (rAF, ease-out); at a chapter edge the page leaves to the other side when a
   neighbour exists, and the neighbour chapter's page enters from the side it was turned from. The
   native reader slides ``page_slot`` on chapter turns. Aa > Layout "Page turn animation" and Reduce
-  motion switch it off (``turn.ms`` 0; the page also honours prefers-reduced-motion).
+  motion switch it off (``turn.ms`` 0).
+
+Follow-up (2026-10-20): "I want to be able to see the page actually move, but it just instantly moves
+from one page to another ... as my fingers slide from right to left or left to right. Like a mid turn."
+  On the emulator the timed slide ran, but only after the finger let go, and with Android's "Remove
+  animations" (animator scale 0, Samsung's accessibility switch) the WebView reports
+  prefers-reduced-motion, which the shell obeyed: every turn was a one-frame jump. Now a swipe drags
+  the page with the finger (the neighbour page beside it; at a chapter edge the whole page) and
+  settles on release (next / previous past 0.3 of the width or on a flick, else back); only the app's
+  own switches turn the motion off.
 
 Run from src/mobile (mobile venv):
     python -m pytest -p no:cacheprovider -W ignore tests_host/test_reader_turns.py
@@ -212,7 +221,9 @@ function makeEnv(opts) {
     querySelectorAll() { return []; }, getElementsByName() { return []; },
     addEventListener(name, fn) { (handlers[name] = handlers[name] || []).push(fn); },
   };
+  const clock = {t: 0};
   const sandbox = {document, location: {hash: opts.hash || ''}, innerWidth: 400, innerHeight: 800, scrollY: 0,
+    performance: {now() { return clock.t; }},
     console: {log(s) { if (String(s).startsWith('GLRDR:')) { posted.push(JSON.parse(String(s).slice(6))); } }},
     setTimeout(fn) { timers.push(fn); return timers.length; }, clearTimeout() {},
     requestAnimationFrame(fn) { fid += 1; frames.set(fid, fn); return fid; },
@@ -233,7 +244,19 @@ function makeEnv(opts) {
     if (!ev.stopped) { for (const fn of (handlers.click || [])) { fn(ev); } }
   };
   const key = (k) => { for (const fn of (handlers.keydown || [])) { fn({key: k, preventDefault() {}}); } };
-  return {G: sandbox.GLRDR, posted, columns, run, frame, frames, click, key, bodyLog};
+  // one finger: touch('start', x) / touch('move', x, y, ms later) / touch('end', x, y, ms later)
+  const touch = (kind, x, y, later) => {
+    clock.t += later || 0;
+    const pt = {clientX: x, clientY: y === undefined ? 300 : y};
+    const ev = {touches: kind === 'end' ? [] : [pt], changedTouches: [pt]};
+    for (const fn of (handlers['touch' + kind] || [])) { fn(ev); }
+  };
+  // a swipe from x0 through the given x positions (every `step` ms), then rest ms and lift
+  const swipe = (x0, xs, step, rest) => {
+    touch('start', x0); for (const x of xs) { touch('move', x, 300, step); }
+    touch('end', xs[xs.length - 1], 300, rest || 0);
+  };
+  return {G: sandbox.GLRDR, posted, columns, run, frame, frames, click, key, bodyLog, touch, swipe, clock};
 }
 const out = {};
 // 9 pages of 400 px + the 1 px gap; this page was turned to from the previous chapter (enter 1)
@@ -265,10 +288,51 @@ env.click(390);                      // past the last page with a next chapter: 
 out.leave = {log: env.bodyLog.slice(), event: env.posted[env.posted.length - 1]};
 env.G.setTurn({next: false}); env.bodyLog.length = 0;
 env.click(390); out.lastChapter = env.bodyLog.slice();
-// prefers-reduced-motion: no slide, no entrance
+// prefers-reduced-motion (Android's "Remove animations") is not the app's switch: the page still slides
 env = makeEnv({scrollWidth: 3600, reduce: true});
 env.run(); out.reduceEnter = env.bodyLog.slice();
 env.click(390); out.reduce = {page: env.G.page(), left: env.columns.scrollLeft, pending: env.frames.size};
+// ---- the page follows the finger ----
+env = makeEnv({scrollWidth: 3600});
+env.run(); const pages = () => env.posted.filter(e => e.type === 'page' && e.reason !== 'initial').length;
+const d = out.drag = {};
+env.touch('start', 300); env.touch('move', 295, 300, 50); d.slop = env.columns.scrollLeft;
+env.touch('move', 280, 300, 50); d.locked = env.columns.scrollLeft;       // past the slop: no jump
+env.touch('move', 200, 300, 200); d.mid = {left: env.columns.scrollLeft, page: env.G.page(), events: pages()};
+env.touch('move', 150, 300, 200); d.far = env.columns.scrollLeft;
+env.touch('end', 150, 300, 200);                                          // rested, 140 px > 0.3 of a page: next page
+d.release = {page: env.G.page(), left: env.columns.scrollLeft, pending: env.frames.size, events: pages()};
+env.frame(10000); env.frame(10080); d.settleMid = env.columns.scrollLeft; env.frame(10400);
+d.settled = env.columns.scrollLeft;
+env.click(390); d.clickAfterSwipe = env.G.page();                         // the swipe's click does not turn again
+env.swipe(300, [280, 260, 240], 200, 200);                                // 50 px and rested: springs back
+d.partial = {page: env.G.page(), left: env.columns.scrollLeft, events: pages()};
+env.frame(11000); env.frame(11400); d.back = env.columns.scrollLeft;
+env.swipe(300, [280, 255, 230], 8, 4);                                    // a quick flick of 60 px turns
+d.flick = env.G.page(); env.frame(12000); env.frame(12400); d.flickLeft = env.columns.scrollLeft;
+env.swipe(100, [120, 200, 260], 200, 200);                                // dragging right goes back a page
+d.prev = env.G.page(); env.frame(13000); env.frame(13400);
+env.touch('start', 200, 300); env.touch('move', 205, 360, 30); env.touch('move', 210, 420, 30);
+d.vertical = env.columns.scrollLeft; env.touch('end', 210, 420, 30);      // mostly vertical: no drag
+env.touch('start', 300, 300); env.touch('move', 250, 300, 600); env.touch('end', 250, 300, 10);
+d.held = {page: env.G.page(), left: env.columns.scrollLeft};              // a held press (selection) never drags
+// last page, a next chapter: the whole page follows the finger, then leaves from there
+env.G.go(8); env.bodyLog.length = 0; env.posted.length = 0;
+env.touch('start', 300); env.touch('move', 280, 300, 50); env.touch('move', 110, 300, 200);
+d.edgeDrag = {log: env.bodyLog.slice(), left: env.columns.scrollLeft};
+env.bodyLog.length = 0; env.touch('end', 110, 300, 200);
+d.edgeLeave = {log: env.bodyLog.slice(), event: env.posted[env.posted.length - 1]};
+env.G.setTurn({next: false}); env.run(); env.bodyLog.length = 0;
+env.touch('start', 300); env.touch('move', 280, 300, 50); env.touch('move', 110, 300, 200);
+d.bookEnd = env.bodyLog.slice(); env.bodyLog.length = 0; env.touch('end', 110, 300, 200);
+d.bookEndRelease = {log: env.bodyLog.slice(), event: env.posted[env.posted.length - 1]};
+env.G.setTurn({next: true}); env.run(); env.bodyLog.length = 0; env.posted.length = 0;
+env.touch('start', 300); env.touch('move', 280, 300, 50); env.touch('move', 250, 300, 200);
+env.touch('end', 250, 300, 200);                                          // a short pull at the edge: back
+d.edgeBack = {log: env.bodyLog.slice(), events: env.posted.length};
+env.G.setTurn({ms: 0}); env.G.go(2); env.frame(14000); env.frame(14400);
+env.touch('start', 300); env.touch('move', 200, 300, 50); d.offMove = env.columns.scrollLeft;
+env.touch('end', 200, 300, 50); d.off = {page: env.G.page(), left: env.columns.scrollLeft};
 console.error(JSON.stringify(out));
 """
 
@@ -315,8 +379,39 @@ def test_paged_page_slides_on_turns_and_enters_from_the_turned_side(tmp_path, no
     assert "transform=translateX(-24%)" in out["leave"]["log"] and "opacity=0" in out["leave"]["log"]
     assert out["leave"]["event"]["type"] == "edge" and out["leave"]["event"]["edge"] == "end"
     assert out["lastChapter"] == []  # the book's last chapter: nothing to leave for
-    # prefers-reduced-motion: no entrance, no slide
-    assert out["reduceEnter"] == [] and out["reduce"] == {"page": 1, "left": 401, "pending": 0}
+    # prefers-reduced-motion is not consulted (Android reports it for "Remove animations"): the app's
+    # switch (turn.ms, 0 under the app's Reduce motion) decides, so the page still enters and slides
+    assert "transform=translateX(24%)" in out["reduceEnter"]
+    assert out["reduce"] == {"page": 1, "left": 0, "pending": 1}
+    # ---- a swipe drags the page with the finger, then settles ----
+    d = out["drag"]
+    assert d["slop"] == 0 and d["locked"] == 10  # nothing moves inside the slop, then no jump by it
+    assert d["mid"] == {"left": 90, "page": 0, "events": 0}  # the columns follow the finger, no turn yet
+    assert d["far"] == 140
+    # let go past 0.3 of a page: the next page, sliding on from where the finger left it (no restart)
+    assert d["release"] == {"page": 1, "left": 140, "pending": 1, "events": 1}
+    assert 140 < d["settleMid"] < 401 and d["settled"] == 401
+    assert d["clickAfterSwipe"] == 1  # the click that may follow the swipe does not turn again
+    # a short drag springs back to the same page (no page event); a quick flick turns; right goes back
+    assert d["partial"] == {"page": 1, "left": 451, "events": 1} and d["back"] == 401
+    assert d["flick"] == 2 and d["flickLeft"] == 802 and d["prev"] == 1
+    assert d["vertical"] == 401  # a vertical move never drags
+    assert d["held"] == {"page": 1, "left": 401}  # nor does a held press (text selection), nor turns
+    # the chapter's last page with a next chapter: the whole page follows and fades a little ...
+    assert d["edgeDrag"]["left"] == 8 * 401
+    assert "transform=translateX(-180px)" in d["edgeDrag"]["log"] and "opacity=0.775" in d["edgeDrag"]["log"]
+    # ... and leaves from where it was let go; the app gets the edge event (the next chapter enters)
+    assert "transform=translateX(-276px)" in d["edgeLeave"]["log"] and "opacity=0" in d["edgeLeave"]["log"]
+    assert d["edgeLeave"]["event"]["type"] == "edge" and d["edgeLeave"]["event"]["edge"] == "end"
+    # the book's last page: the page only gives a little (at most 0.12 of the width) and comes back
+    assert "transform=translateX(-48px)" in d["bookEnd"] and not any(
+        e.startswith("transform=translateX(-1") for e in d["bookEnd"])
+    assert "transform=translateX(0)" in d["bookEndRelease"]["log"]
+    assert d["bookEndRelease"]["event"]["edge"] == "end"  # the app still hears it (end of the book)
+    # a short pull at a chapter edge comes back without an edge event
+    assert d["edgeBack"]["log"][-2:] == ["transform=translateX(0)", "opacity=1"] and d["edgeBack"]["events"] == 0
+    # the switch off: nothing follows the finger, the swipe turns at once on release
+    assert d["offMove"] == 802 and d["off"] == {"page": 3, "left": 1203}
     builder.close()
     session.close()
 
