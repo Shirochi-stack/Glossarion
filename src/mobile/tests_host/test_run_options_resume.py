@@ -322,3 +322,142 @@ def test_jobs_page_resume_of_a_chat_job_runs_with_the_settings(desktop_store_cls
     finally:
         runs.detach()
         adapter.close()
+
+
+#: Global run settings the owner changes in Settings between a stop and Resume: (key, Send-time value, new value).
+#: Every number / text Run option shares the bug (their tiles hold a field the panel's commit writes back).
+_SETTINGS_CHANGES = (
+    ("translation_temperature", 0.7, 0.5),
+    ("batch_size", 3, 5),
+    ("max_output_tokens", 8192, 4096),
+    ("translation_history_limit", 2, 4),
+    ("chapter_range", "1-3", "4-6"),
+)
+
+
+def _settings_write(store, schema, key, value) -> None:
+    """The Settings page's own write: its schema tile for ``key`` (``settings.tiles.make_tile``)."""
+    from glossarion_mobile.ui.settings.tiles import make_tile
+
+    tile = make_tile(schema.spec(key), _SettingsCtx(store, schema))
+    assert tile.apply(value), (key, tile.error)
+    assert store.get(key) == value
+
+
+def _shown(panel, key) -> str:
+    tile = panel.tiles[key]
+    field = getattr(tile, "field", None)
+    return str(field.value) if field is not None else str(tile.value())
+
+
+@needs_flet
+def test_resume_runs_with_settings_changed_after_the_card_was_shown(desktop_store_cls, isolated_env):
+    """Owner 2026-10-20: "I changed translation default temperature to 0.5, but when I jumped back to chat to
+    click resume, it reset to 0.7 ... I had to create a new chat for the change to apply." The stopped card's
+    Run options were built while the temperature was 0.7; Resume committed the panel and its stale field
+    ("0.7", never typed into) was written back to Settings over the user's 0.5. Resume (and the panel) now
+    follow the settings; the Settings value survives Resume."""
+    tmp_path = isolated_env
+
+    async def scenario():
+        chat = TC._chat_view(desktop_store_cls, tmp_path)
+        view, store = chat.view, chat.store
+        schema = view.env.schema
+        try:
+            await _settle(chat.calls)
+            store.set_many({"batch_translation": True, **{k: old for k, old, _new in _SETTINGS_CHANGES}})
+            book = tmp_path / "novel.epub"
+            book.write_bytes(b"PK\x03\x04")
+            assert view.attach_file(str(book))
+            view.begin_send()
+            view.start_plan()
+            await _settle(chat.calls)
+            first = _job_config(store, chat.jobs.submitted[-1])
+            assert all(first[k] == old for k, old, _new in _SETTINGS_CHANGES)
+
+            panel = await _stop(chat)  # the card (and its Run options) shown with the Send-time settings
+            assert panel.only is False and _shown(panel, "translation_temperature") == "0.7"
+            for key, _old, new in _SETTINGS_CHANGES:  # the user goes to Settings and changes them there
+                _settings_write(store, schema, key, new)
+            # back in the chat: the card's Run options show the settings now
+            for key, _old, new in _SETTINGS_CHANGES:
+                assert _shown(panel, key) == str(new), key
+            assert "Temp 0.5" in panel.summary_text.value and "Batch 5" in panel.summary_text.value
+            config = await _resume(chat)
+            for key, _old, new in _SETTINGS_CHANGES:
+                assert config[key] == new, (key, config[key])
+                assert store.get(key) == new, (key, store.get(key))  # Resume did not write the old value back
+
+            # an explicit per-run value still wins: "Only for this run" on the next stopped card
+            panel = await _stop(chat)
+            panel.switch.value = True
+            panel._on_switch()
+            assert panel.tiles["translation_temperature"].apply(1.1)
+            _settings_write(store, schema, "translation_temperature", 0.2)  # Settings change meanwhile
+            config = await _resume(chat)
+            assert config["translation_temperature"] == 1.1 and store.get("translation_temperature") == 0.2
+
+            # a value typed into the card's field (not submitted yet) still goes with Resume
+            panel = await _stop(chat)
+            _settings_write(store, schema, "batch_size", 7)
+            panel.tiles["batch_size"].field.value = "9"
+            config = await _resume(chat)
+            assert config["batch_size"] == 9 and store.get("batch_size") == 9
+            assert config["translation_temperature"] == 0.2  # the settings now (last card was off)
+        finally:
+            TC._close(chat)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_plan_start_runs_with_settings_changed_after_the_plan_was_shown(desktop_store_cls, isolated_env):
+    """The same stale-field write-back on the Plan card: a Settings change made while the plan waits is what
+    Start runs with, and Start does not put the old value back into Settings."""
+    tmp_path = isolated_env
+
+    async def scenario():
+        chat = TC._chat_view(desktop_store_cls, tmp_path)
+        view, store = chat.view, chat.store
+        schema = view.env.schema
+        try:
+            await _settle(chat.calls)
+            store.set_many({"batch_translation": True, "batch_size": 3, "translation_temperature": 0.7})
+            book = tmp_path / "novel.epub"
+            book.write_bytes(b"PK\x03\x04")
+            assert view.attach_file(str(book))
+            view.begin_send()
+            panel = view._run_panel(chat.adapter.meta(view.cid)["pending_plan"])
+            assert _shown(panel, "translation_temperature") == "0.7"
+            _settings_write(store, schema, "translation_temperature", 0.5)
+            _settings_write(store, schema, "batch_size", 6)
+            assert _shown(panel, "translation_temperature") == "0.5" and _shown(panel, "batch_size") == "6"
+            view.start_plan()
+            await _settle(chat.calls)
+            config = _job_config(store, chat.jobs.submitted[-1])
+            assert (config["translation_temperature"], config["batch_size"]) == (0.5, 6)
+            assert (store.get("translation_temperature"), store.get("batch_size")) == (0.5, 6)
+        finally:
+            TC._close(chat)
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_run_options_commit_saves_only_typed_fields(desktop_store_cls, isolated_env):
+    """``RunOptionsPanel.commit`` (Start / Resume) saves a number typed and not submitted yet, never a field
+    the user did not touch (its text is what the panel last showed), whatever changed in Settings since."""
+    from glossarion_mobile.ui.chat.plan_card import RunOptionsPanel
+
+    store, schema = TC._config_store(isolated_env)
+    ctx = _SettingsCtx(store, schema)
+    try:
+        store.set_many({"batch_translation": True, "batch_size": 3, "translation_temperature": 0.7})
+        panel = RunOptionsPanel(ctx)
+        panel.release()  # no observer: the fields cannot follow the store, commit still must not write them
+        store.set_many({"batch_size": 5, "translation_temperature": 0.5})
+        panel.tiles["batch_size"].field.value = "8"
+        panel.commit()
+        assert store.get("translation_temperature") == 0.5 and store.get("batch_size") == 8
+    finally:
+        store._saver.close()
