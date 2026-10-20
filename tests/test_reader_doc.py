@@ -1265,7 +1265,16 @@ result["scroll_loaded"] = wait(lambda: any(e.get("type") == "ready" for e in CON
 pump(0.8)
 result["scroll_start"] = list(CONSOLE)
 result["scroll"] = act("window.scrollTo(0, 400)", 1.0)
-result["scroll_tap"] = act(click(10))
+result["scroll_tap"] = act(click(10), 1.0)
+result["scroll_y"] = run_js("window.scrollY")
+result["scroll_tap_right"] = act(click(410), 1.0)
+result["scroll_y_right"] = run_js("window.scrollY")
+act("window.scrollTo(0, document.documentElement.scrollHeight)", 1.0)
+result["scroll_end_tap"] = act(click(410))
+result["scroll_end_swipe"] = act(swipe(300, 100))
+act("window.scrollTo(0, 0); document.dispatchEvent(new TouchEvent('touchstart', {touches: [], changedTouches: []}))", 1.0)
+result["scroll_top_tap"] = act(click(10))
+result["scroll_y_top"] = run_js("window.scrollY")
 print("RESULT " + json.dumps(result))
 server.shutdown()
 '''
@@ -1322,14 +1331,22 @@ def test_mobile_bridge_pages_in_webengine(tmp_path):
     assert sorted(result["posted"], key=lambda e: e["seq"]) == result["console"]
     assert result["fetch_only"]["console"] == []
     only(result["fetch_only"]["posted"], type="page", page=1)
-    # scroll layout: no columns, fraction events, side taps are plain taps
+    # scroll layout: no columns, fraction events; a side tap / swipe scrolls 90% of a screen and at the
+    # chapter's end (start) is the chapter edge (owner 2026-10-21: it only showed the bars)
     assert result["scroll_loaded"]
     scroll_ready = next(e for e in result["scroll_start"] if e["type"] == "ready")
     assert scroll_ready["paginated"] is False and scroll_ready["chapter"] == 4 and scroll_ready["count"] == 1
     fractions = [e["fraction"] for e in result["scroll_start"] + result["scroll"] if e["type"] == "scroll"]
     assert fractions and all(0 <= f <= 1 for f in fractions)
     assert any(0.3 <= f <= 0.7 for f in fractions)  # '#f=0.5' restored the position
-    only(result["scroll_tap"], type="tap", zone="left")
+    assert not [e for e in result["scroll_tap"] if e["type"] in ("tap", "edge")]
+    assert result["scroll_y"] == 0  # 400 px down: back to the top (a screen is 648 px)
+    assert not [e for e in result["scroll_tap_right"] if e["type"] in ("tap", "edge")]
+    assert result["scroll_y_right"] == 648
+    only(result["scroll_end_tap"], type="edge", edge="end", chapter=4)
+    only(result["scroll_end_swipe"], type="edge", edge="end", chapter=4)
+    only(result["scroll_top_tap"], type="edge", edge="start", chapter=4)
+    assert result["scroll_y_top"] == 0
 
 
 # =============================================================================================

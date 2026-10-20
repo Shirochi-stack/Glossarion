@@ -1373,7 +1373,10 @@ class ReaderScreen(Screen):
             self._refresh_chrome()
             self.schedule_position_save()
         elif kind == "edge":
-            self._turn_chapter(event.direction)
+            # only the chapter on screen turns: a second swipe on the outgoing page (its chapter, until the
+            # next page replaces it) must not turn again from the chapter that is already loading
+            if event.chapter is None or event.chapter == self.index:
+                self._turn_chapter(event.direction)
         elif kind == "tap":
             if self.selection.visible:
                 self.selection.hide()
