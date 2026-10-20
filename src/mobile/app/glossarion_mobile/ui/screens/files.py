@@ -422,18 +422,21 @@ class FileBrowserScreen(Screen):
     def open_with(self, entry: FileEntry) -> Optional[ActionSheet]:
         """Open with: Text editor (text files) · Reader (books) · Media viewer (images, video, audio) ·
         another app (Share)."""
+        from glossarion_mobile.ui.reader.session import reader_file_reason
         from glossarion_mobile.ui.tools import text_editor
 
-        ext = os.path.splitext(entry.name)[1].lower()
-        is_book = ext in (".epub", ".txt", ".pdf", ".html", ".xhtml", ".htm", ".md")
+        # EPUB, TXT / Markdown, HTML (a translated book's chapter opens the book at that chapter);
+        # PDF and anything else say why the Reader can't open them
+        not_readable = reader_file_reason(entry.name)
         kind = media_kind(entry.path)
         items = [
             ActionItem("Text editor", lambda: self.open_text(entry), icon="EDIT_NOTE", key="open-text",
                        disabled_reason=None if text_editor.is_text_file(entry.path) else "Not a text file"),
             ActionItem("Reader", lambda: self.open_reader(path=entry.path) if self.open_reader else None,
                        icon="AUTO_STORIES", key="open-reader",
-                       disabled_reason=(None if is_book and self.open_reader is not None
-                                        else "Not a book file" if not is_book else "The Reader is not available here")),
+                       disabled_reason=(not_readable if not_readable
+                                        else None if self.open_reader is not None
+                                        else "The Reader is not available here")),
             ActionItem("Media viewer", lambda: self.open_media(entry), icon="PERM_MEDIA", key="open-media",
                        disabled_reason=(None if kind and self.push_overlay is not None
                                         else "Not an image, video or audio file" if not kind

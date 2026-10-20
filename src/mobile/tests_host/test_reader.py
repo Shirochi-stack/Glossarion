@@ -2302,3 +2302,184 @@ def test_server_answers_oversized_events_with_a_readable_413(server):
                                       headers=as_json)
         assert status == 413 and body == b"too large"
     assert server.events == []
+
+
+# =====================================================================================
+# Files › Open with › Reader on a file: workspace chapters, single HTML, Markdown, PDF
+# =====================================================================================
+
+
+def _second_chapter_translated(novel, output_file="response_chapter0002.html"):
+    """Chapter 2 of ``novel`` translated into ``output_file`` (the progress file maps it)."""
+    path = novel.workspace / output_file
+    path.write_text("<html><head><title>Ch Two EN</title></head><body><h1>Ch Two EN</h1>"
+                    "<p>The second chapter.</p></body></html>", encoding="utf-8")
+    progress = json.loads((novel.workspace / "translation_progress.json").read_text(encoding="utf-8"))
+    progress["chapters"]["2"].update(status="completed", output_file=output_file)
+    (novel.workspace / "translation_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+    return path
+
+
+def test_chapter_index_for_file_maps_workspace_files(novel):
+    from glossarion_mobile.ui.reader import session as rs
+
+    second = _second_chapter_translated(novel, "translated_two.html")  # not named after its chapter
+    notice = novel.workspace / "response_chapter_notice0001.html"
+    notice.write_text("<h1>Notice</h1>", encoding="utf-8")
+    sub = novel.workspace / "images" / "page.html"
+    sub.write_text("<p>x</p>", encoding="utf-8")
+    assert rs.workspace_for_chapter_file(str(second)) == str(novel.workspace)
+    assert rs.workspace_for_chapter_file(str(sub)) == str(novel.workspace)  # an ancestor holds the progress
+    assert rs.workspace_for_chapter_file(str(novel.workspace / "translation_progress.json")) == ""  # not HTML
+    loose = novel.tmp / "loose.html"
+    loose.write_text("<p>x</p>", encoding="utf-8")
+    assert rs.workspace_for_chapter_file(str(loose)) == ""
+    session = _overlay_session(novel)
+    assert rs.chapter_index_for_file(session, str(novel.workspace / "response_chapter0001.html")) == 0
+    assert rs.chapter_index_for_file(session, str(second)) == 1  # via the progress file's output_file
+    assert rs.chapter_index_for_file(session, str(notice)) is None
+    session.close()
+
+
+@needs_flet
+def test_reader_opens_a_workspace_chapter_file_at_its_chapter(novel):
+    """Owner report: Files › Output › <book> › response_chapter0002.html › Open with › Reader opened
+    "This item is no longer available". The workspace opens (the same plan as the folder) on that
+    chapter, in its translation, and reading goes on to the next chapter."""
+    from glossarion_mobile.ui.reader.reader_view import ReaderScreen
+
+    async def scenario():
+        base = _screen(novel, config={"epub_reader_show_raw": True})
+        second = _second_chapter_translated(novel)
+        screen = ReaderScreen(base.match, base.deps, args={"path": str(second)})
+        await screen.open()
+        assert screen.state == "ready" and screen.session.plan.mode == "overlay"
+        assert screen.session.plan.output_folder == str(novel.workspace)
+        assert screen.index == 1 and screen.session.flavor == rm.TRANSLATED
+        assert screen.session.count >= 3  # the whole book, not one file
+        await screen.go_chapter(2)
+        assert screen.index == 2
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_reader_opens_a_notice_file_of_a_workspace_on_its_own(novel):
+    """A workspace file that is not one of the book's chapters (a notice) opens as a one-chapter
+    document, with a note saying why."""
+    from glossarion_mobile.ui.reader import session as rs
+    from glossarion_mobile.ui.reader.reader_view import ReaderScreen
+
+    async def scenario():
+        base = _screen(novel)
+        notice = novel.workspace / "response_chapter_notice0001.html"
+        notice.write_text("<html><head><title>Notice</title></head><body><p>Read this first.</p></body></html>",
+                          encoding="utf-8")
+        screen = ReaderScreen(base.match, base.deps, args={"path": str(notice)})
+        await screen.open()
+        assert screen.state == "ready" and screen.session.plan.source_kind == rs.SOURCE_HTML
+        assert screen.session.count == 1 and screen.session.titles() == ["Notice"]
+        assert any("not one of this book's chapters" in str(n[0]) for n in base.notes)
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_reader_opens_a_standalone_html_and_markdown_file(novel):
+    from glossarion_mobile.ui.reader import session as rs
+    from glossarion_mobile.ui.reader.reader_view import ReaderScreen
+
+    async def scenario():
+        base = _screen(novel)
+        page = novel.tmp / "Saved Page.html"
+        page.write_text("<html><head><title>A Page</title></head><body><p>Standalone words.</p>"
+                        "<img src='pic.png'/></body></html>", encoding="utf-8")
+        (novel.tmp / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\nlocal")
+        notes = novel.tmp / "Notes.md"
+        notes.write_text("# Heading\n\nMarkdown paragraph.\n", encoding="utf-8")
+        for path, words in ((page, "Standalone words."), (notes, "Markdown paragraph.")):
+            screen = ReaderScreen(base.match, base.deps, args={"path": str(path)})
+            await screen.open()
+            assert screen.state == "ready" and screen.session.plan.mode == rs.MODE_PLAIN
+            texts = [t for c in screen.fallback.list_view.controls for t in _all_texts(c)]
+            shown = " ".join(str(t.value or "") + "".join(s.text for s in (t.spans or [])) for t in texts)
+            assert words in shown
+            if path == page:
+                assert screen.session.count == 1 and screen.session.titles() == ["A Page"]
+                assert screen.session.image_bytes("pic.png") == b"\x89PNG\r\n\x1a\nlocal"
+                assert not screen.session.translate_visible(0) and screen.session.translate_target(0)[2]
+            else:
+                assert screen.session.plan.source_kind == rs.SOURCE_TXT
+            screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_reader_errors_name_the_unsupported_type(novel):
+    """A file the Reader does not open says so; "no longer available" only when the file is gone."""
+    from glossarion_mobile.ui.reader import session as rs
+    from glossarion_mobile.ui.reader.reader_view import ReaderScreen
+
+    base = _screen(novel)
+    odd = novel.tmp / "data.xyz"
+    odd.write_bytes(b"x")
+    pdf = novel.tmp / "Doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    with pytest.raises(LookupError, match=r"can't open \.xyz files"):
+        ReaderScreen(base.match, base.deps, args={"path": str(odd)})._plan()
+    with pytest.raises(LookupError, match="PDF"):
+        ReaderScreen(base.match, base.deps, args={"path": str(pdf)})._plan()
+    with pytest.raises(LookupError, match="no longer available"):
+        ReaderScreen(base.match, base.deps, args={"path": str(novel.tmp / "gone.html")})._plan()
+    assert rs.reader_file_reason("a.pdf") == rs.PDF_REASON and rs.reader_file_reason("a.zip")
+    assert all(rs.reader_file_reason(f"a{ext}") is None for ext in (".epub", ".txt", ".md", ".html", ".xhtml", ".htm"))
+
+    async def scenario():
+        screen = ReaderScreen(base.match, base.deps, args={"path": str(odd)})
+        await screen.open()
+        assert screen.state != "ready"
+        shown = [str(c.value) for c in screen.loading.content.controls if hasattr(c, "value")]
+        assert any("can't open .xyz files" in s for s in shown)
+        screen.dispose()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+def test_reader_feature_opens_a_chapter_file_as_its_workspace(novel):
+    """Files › Open with › Reader hands the feature the chapter file: the route is the workspace's
+    (its reading position and bookmarks), the file rides along once."""
+    import os
+
+    from glossarion_mobile.ui.reader.feature import ReaderFeature
+    from glossarion_mobile.ui.router import parse_route
+
+    registered = []
+    app = types.SimpleNamespace(page=None, navigate_to=lambda *a: None,
+                                prefs=types.SimpleNamespace(file_ref=lambda p, kind: registered.append(p) or "ab12cd34ef99"),
+                                library=None)
+    feature = ReaderFeature(app)
+    feature._deps = lambda: types.SimpleNamespace()
+    import glossarion_mobile.ui.reader.reader_view as reader_view
+
+    built = []
+
+    class Probe:
+        def __init__(self, match, deps, *, args=None):
+            built.append(dict(args or {}))
+
+    chapter = novel.workspace / "response_chapter0001.html"
+    original = reader_view.ReaderScreen
+    reader_view.ReaderScreen = Probe
+    try:
+        assert feature.open_book(path=str(chapter)) == "ab12cd34ef99"
+        feature.make_screen(parse_route("/reader/ab12cd34ef99"))
+        feature.open_book(path=str(novel.raw))  # a book file is unchanged
+    finally:
+        reader_view.ReaderScreen = original
+    assert registered == [os.path.abspath(str(novel.workspace)), os.path.abspath(str(novel.raw))]
+    assert built[0]["path"] == os.path.abspath(str(novel.workspace))
+    assert built[0]["chapter_file"] == os.path.abspath(str(chapter))
