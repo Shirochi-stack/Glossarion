@@ -126,6 +126,33 @@ cryptography). The wheels are CPU-only (`GGML_NATIVE=OFF`, no Metal / Vulkan / O
 ctypes over five libraries in `llama_cpp/lib`: libggml-base, libggml-cpu, libggml, libllama and
 libmtmd (the image encoder of vision models).
 
+* **CPU variants (Android arm64).** One armv8.0 build would leave out the int8 dot-product (`dotprod`,
+  Cortex-A55/A75 and later, Snapdragon 845+) and matrix-multiply (`i8mm`, Cortex-A510/A710/X2 and
+  later, Snapdragon 8 Gen 1+) instructions that make Q4/Q8 matmuls several times faster, but a build
+  that needs them would crash (SIGILL) on the Cortex-A53 phones that `min_sdk_version = 26` still
+  allows. The arm64 wheel is therefore built with `GGML_BACKEND_DL=ON` + `GGML_CPU_ALL_VARIANTS=ON`:
+  libggml-cpu is replaced by four CPU backends, `libggml-cpu-android_armv8.0_1` (baseline),
+  `_armv8.2_1` (dotprod), `_armv8.2_2` (dotprod + fp16) and `_armv8.6_1` (dotprod + fp16 + i8mm), and
+  the patched loader (`patches/mobile.patch`, 7.) asks each for its `ggml_backend_score()` (a feature
+  probe built without the variant's flags; 0 when the CPU lacks one) and registers the best one,
+  loading it by bare soname from the APK's jniLibs (ggml's own `ggml_backend_load_all()` only looks in
+  the executable's directory and the cwd). No SVE / SVE2 / SME variants: every such phone core also has
+  i8mm, and ggml's SVE repack kernels want 256-bit vectors (phones have 128). The engine card shows the
+  CPU line of the registered backend (`DOTPROD = 1`, `MATMUL_INT8 = 1`, ...) and `(CPU variant
+  android_armv8.6_1)`; `LLAMA_CPP_CPU_VARIANT=<variant>` in the environment tries one first (ggml still
+  refuses a variant the CPU cannot run). Cost: about 3 MB more per arm64 APK.
+  x86_64 (emulator, Chromebooks) keeps the single built-in libggml-cpu. iOS keeps it too: the floor is
+  iOS 13 (A9 / A10 / A11 / A12 iPhones have no dotprod, A13+ do, i8mm from A15), dylibs in an app are
+  framework-relocated and code-signed, and llama.cpp's Apple variant list starts at dotprod; Metal
+  (phase 2) is the larger iOS gain.
+  `wheels.py verify-native` / `verify-site-packages` expect exactly these eight arm64 libraries and scan
+  their code: SDOT/UDOT, SMMLA/USDOT, SVE and SME instructions may appear only in the variants that
+  promise them, and each variant must contain its own (proof that its `-march` took effect).
+  `mobile-wheels.yml` dispatched with `cpu_check=true` builds the same set on a Linux arm64 runner and
+  runs `ci/wheels/cpu_variants_check.py`: the variant picked natively, tokens/s per forced variant, and
+  under `qemu-aarch64 -cpu cortex-a53 / cortex-a76` that older cores get the baseline / dotprod variant
+  and generate without SIGILL.
+
 * Size: about 4 MB of native libraries per ABI, plus jinja2, MarkupSafe and diskcache (about 1 MB
   of Python, resolved by pip). Android also installs `flet-libcpp-shared` (`libc++_shared.so`,
   which must exist exactly once in the APK: Gradle merges jniLibs).

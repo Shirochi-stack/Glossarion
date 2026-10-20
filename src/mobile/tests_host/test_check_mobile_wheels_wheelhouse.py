@@ -823,6 +823,152 @@ def test_recipes_render_like_forge():
     assert (recipes / "pillow" / "patches" / "setup-12.x.patch").is_file()
 
 
+def test_llama_recipe_builds_cpu_variants_only_for_android_arm64():
+    """Runtime CPU variants (GGML_BACKEND_DL) on arm64 phones; x86_64 and iOS keep the built-in backend."""
+    recipe = MOBILE / "ci" / "wheels" / "recipes" / "llama-cpp-python" / "meta.yaml"
+    variants = ("-DGGML_BACKEND_DL=ON", "-DGGML_CPU_ALL_VARIANTS=ON", "-DCMAKE_INSTALL_BINDIR=llama_cpp/lib")
+    for sdk, arch, dl in (("android", "arm64-v8a", True), ("android", "x86_64", False), ("iphoneos", "arm64", False),
+                          ("iphonesimulator", "arm64", False), ("iphonesimulator", "x86_64", False)):
+        args = _render_recipe(recipe, sdk, arch)["build"]["script_env"]["CMAKE_ARGS"].split()
+        assert all((v in args) is dl for v in variants), (sdk, arch, args)
+        assert "-DGGML_NATIVE=OFF" in args and "-DLLAVA_BUILD=ON" in args and not any("CPU_ARM_ARCH" in a for a in args)
+    patch = (recipe.parent / "patches" / "mobile.patch").read_text(encoding="utf-8")
+    # the variant list the loader probes is the one CMake builds, and the profile expects
+    added = "\n".join(line for line in patch.splitlines() if line.startswith("+"))
+    built = re.findall(r"ggml_add_cpu_backend_variant\((android_[\w.]+)", added)
+    probed = re.findall(r'^\+    "(android_[^"]+)",', patch, re.M)
+    assert sorted(built) == sorted(probed) == ["android_armv8.0_1", "android_armv8.2_1", "android_armv8.2_2",
+                                               "android_armv8.6_1"]
+    profile = wh.SITE_PROFILES["llama-cpp-python"]
+    assert sorted(f"libggml-cpu-{v}" for v in built) == sorted(profile["aarch64_variants"]) == \
+        sorted(s for s in wh.profile_libs(profile, "arm64-v8a") if s.startswith("libggml-cpu"))
+    assert "libggml-cpu" in wh.profile_libs(profile, "x86_64") and "libggml-cpu" in wh.profile_libs(profile, "iphoneos.arm64")
+
+
+def _patched_cpu_loader(ctypes_ns) -> dict:
+    """The loader code mobile.patch adds to llama_cpp/_ctypes_extensions.py (the contiguous + block from
+    the runtime CPU-variant comment to register_cpu_backend), run over a fake ``ctypes``."""
+    import types
+    from typing import List, Optional
+
+    patch = (MOBILE / "ci" / "wheels" / "recipes" / "llama-cpp-python" / "patches" / "mobile.patch").read_text(
+        encoding="utf-8").splitlines()
+    start = patch.index("+# Glossarion: runtime CPU-variant selection (GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS).")
+    block = []
+    for line in patch[start:]:
+        if not line.startswith("+"):
+            break
+        block.append(line[1:])
+    ns = {"ctypes": ctypes_ns, "os": os, "pathlib": __import__("pathlib"), "List": List, "Optional": Optional,
+          "__name__": "fake_ctypes_extensions"}
+    exec(compile("\n".join(block), "mobile.patch", "exec"), ns)
+    assert callable(ns["register_cpu_backend"]) and ns["CPU_BACKEND_VARIANT"] is None
+    return ns
+
+
+class _FakeFn:
+    def __init__(self, fn):
+        self.fn, self.restype, self.argtypes = fn, None, None
+
+    def __call__(self, *a):
+        return self.fn(*a)
+
+
+def _fake_ctypes(scores: dict, loadable=None, reg_count=0):
+    """scores: {variant library name: ggml_backend_score()} of the libraries dlopen finds; ``loadable``:
+    what ggml_backend_load accepts (default: a library with a score > 0)."""
+    import types
+
+    opened, loaded = [], []
+
+    def cdll(name, mode=0):
+        base = name.replace("\\", "/").rsplit("/", 1)[-1]
+        if base not in scores:
+            raise OSError(f"dlopen failed: library {name!r} not found")
+        opened.append(name)
+        return types.SimpleNamespace(ggml_backend_score=_FakeFn(lambda: scores[base]))
+
+    def load(path):
+        name = path.decode()
+        base = name.replace("\\", "/").rsplit("/", 1)[-1]
+        ok = (loadable(base) if loadable else scores.get(base, 0) > 0)
+        loaded.append(name)
+        return 0x1000 if ok else None
+
+    libggml = types.SimpleNamespace(ggml_backend_reg_count=_FakeFn(lambda: reg_count),
+                                    ggml_backend_load=_FakeFn(load))
+    ns = types.SimpleNamespace(CDLL=cdll, RTLD_LOCAL=0, c_int=int, c_size_t=int, c_void_p=int, c_char_p=bytes)
+    return ns, libggml, opened, loaded
+
+
+V = "libggml-cpu-android_armv8.{}.so".format
+
+
+def test_patched_loader_registers_the_best_cpu_variant_by_bare_soname(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLAMA_CPP_CPU_VARIANT", raising=False)
+    zipped = tmp_path / "sitepackages.zip" / "llama_cpp" / "lib"     # Android: base_path is inside a zip
+    # a Cortex-A76 phone: dotprod + fp16, no i8mm -> android_armv8.2_2
+    ns_ctypes, libggml, opened, loaded = _fake_ctypes({V("6_1"): 0, V("2_2"): 7, V("2_1"): 3, V("0_1"): 1})
+    ns = _patched_cpu_loader(ns_ctypes)
+    assert ns["register_cpu_backend"](libggml, zipped) == "android_armv8.2_2"
+    assert opened == [V("6_1"), V("2_2"), V("2_1"), V("0_1")] and loaded == [V("2_2")]
+    assert ns["CPU_BACKEND_VARIANT"] == "android_armv8.2_2"
+    assert ns["register_cpu_backend"](libggml, zipped) == "android_armv8.2_2" and loaded == [V("2_2")]  # once
+    # a Cortex-A53 phone: only the baseline scores; the i8mm / dotprod variants are never registered
+    ns_ctypes, libggml, _o, loaded = _fake_ctypes({V("6_1"): 0, V("2_2"): 0, V("2_1"): 0, V("0_1"): 1})
+    assert _patched_cpu_loader(ns_ctypes)["register_cpu_backend"](libggml, zipped) == "android_armv8.0_1"
+    assert loaded == [V("0_1")]
+    # an X2 / A710 core with i8mm
+    ns_ctypes, libggml, _o, loaded = _fake_ctypes({V("6_1"): 23, V("2_2"): 7, V("2_1"): 3, V("0_1"): 1})
+    assert _patched_cpu_loader(ns_ctypes)["register_cpu_backend"](libggml, zipped) == "android_armv8.6_1"
+
+
+def test_patched_loader_override_static_build_and_fallbacks(tmp_path, monkeypatch):
+    scores = {V("6_1"): 23, V("2_2"): 7, V("2_1"): 3, V("0_1"): 1}
+    # LLAMA_CPP_CPU_VARIANT tries a supported variant first ...
+    monkeypatch.setenv("LLAMA_CPP_CPU_VARIANT", "android_armv8.0_1")
+    ns_ctypes, libggml, _o, loaded = _fake_ctypes(scores)
+    assert _patched_cpu_loader(ns_ctypes)["register_cpu_backend"](libggml, tmp_path / "x") == "android_armv8.0_1"
+    # ... but never one the CPU lacks a feature of (score 0)
+    ns_ctypes, libggml, _o, loaded = _fake_ctypes({**scores, V("6_1"): 0})
+    monkeypatch.setenv("LLAMA_CPP_CPU_VARIANT", "android_armv8.6_1")
+    assert _patched_cpu_loader(ns_ctypes)["register_cpu_backend"](libggml, tmp_path / "x") == "android_armv8.2_2"
+    assert V("6_1") not in loaded
+    monkeypatch.delenv("LLAMA_CPP_CPU_VARIANT")
+    # x86_64 / iOS: libggml links the CPU backend, nothing is probed
+    ns_ctypes, libggml, opened, loaded = _fake_ctypes(scores, reg_count=1)
+    assert _patched_cpu_loader(ns_ctypes)["register_cpu_backend"](libggml, tmp_path / "x") == "builtin"
+    assert opened == loaded == []
+    # files next to libggml (desktop Linux, extracted jniLibs) are probed by path
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    for name in (V("0_1"), V("2_1")):
+        (lib / name).write_bytes(b"\x7fELF")
+    ns_ctypes, libggml, opened, loaded = _fake_ctypes({V("0_1"): 1, V("2_1"): 3})
+    assert _patched_cpu_loader(ns_ctypes)["register_cpu_backend"](libggml, lib) == "android_armv8.2_1"
+    assert opened[:2] == [str(lib / V("0_1")), str(lib / V("2_1"))] and loaded == [str(lib / V("2_1"))]
+    # a DL build without variants, then nothing at all: llama_backend_init's own search remains
+    ns_ctypes, libggml, _o, loaded = _fake_ctypes({}, loadable=lambda base: base == "libggml-cpu.so")
+    assert _patched_cpu_loader(ns_ctypes)["register_cpu_backend"](libggml, tmp_path / "x") == "default"
+    ns_ctypes, libggml, _o, loaded = _fake_ctypes({}, loadable=lambda base: False)
+    assert _patched_cpu_loader(ns_ctypes)["register_cpu_backend"](libggml, tmp_path / "x") == "none"
+
+
+def test_cpu_variants_check_expects_what_ggml_scores():
+    spec = importlib.util.spec_from_file_location("cpu_variants_check", MOBILE / "ci" / "wheels" / "cpu_variants_check.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cobalt = "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop " \
+             "sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp sve2 i8mm bf16"
+    assert mod.expected_variant(cobalt) == "android_armv8.6_1"
+    assert mod.expected_variant("fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm "
+                                "lrcpc dcpop asimddp") == "android_armv8.2_2"            # Cortex-A76
+    assert mod.expected_variant("fp asimd evtstrm aes pmull sha1 sha2 crc32 cpuid") == "android_armv8.0_1"  # A53
+    assert mod.expected_variant("fp asimd asimddp") == "android_armv8.2_1"
+    assert tuple(mod.VARIANTS) == tuple(f"android_armv8.{v}" for v in ("6_1", "2_2", "2_1", "0_1"))
+    assert set(mod.QEMU_EXPECT.values()) <= set(mod.VARIANTS)
+
+
 def test_recipe_meta_reader():
     recipes = MOBILE / "ci" / "wheels" / "recipes"
     assert wh.recipe_meta(recipes / "cryptography" / "meta.yaml") == {
@@ -1057,9 +1203,11 @@ GLOBAL, WEAK = 1, 2
 UND, DEF = False, True
 
 
-def make_elf(machine=183, align=0x4000, needed=("libc.so",), extra=b"", symbols=(), sections=True) -> bytes:
+def make_elf(machine=183, align=0x4000, needed=("libc.so",), extra=b"", symbols=(), sections=True,
+             code=()) -> bytes:
     """A 64-bit little-endian ELF shared object: one LOAD, a PT_DYNAMIC with DT_NEEDED and, with
-    ``sections``, section headers for .dynstr and a .dynsym of ``symbols`` [(name, binding, defined)]."""
+    ``sections``, section headers for .dynstr, a .dynsym of ``symbols`` [(name, binding, defined)]
+    and a .text of the 32-bit instruction words ``code``."""
     strtab, name_off = b"\0", {}
     for n in list(needed) + [s[0] for s in symbols]:
         if n not in name_off:
@@ -1074,14 +1222,17 @@ def make_elf(machine=183, align=0x4000, needed=("libc.so",), extra=b"", symbols=
     syms = struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)
     for n, bind, defined in symbols:
         syms += struct.pack("<IBBHQQ", name_off[n], (bind << 4) | 2, 0, 7 if defined else 0, 0, 0)
-    body = strtab + pad + dyn + syms + extra
+    text = b"".join(struct.pack("<I", w) for w in code)
+    text_off = sym_off + len(syms) + len(extra)
+    body = strtab + pad + dyn + syms + extra + text
     total = dynstr_off + len(body)
     shoff = total + (-total) % 8
     shdrs = b"\0" * 64                                                                   # SHN_UNDEF
     shdrs += struct.pack("<IIQQQQIIQQ", 0, 3, 2, dynstr_off, dynstr_off, len(strtab), 0, 0, 1, 0)       # .dynstr
     shdrs += struct.pack("<IIQQQQIIQQ", 0, 11, 2, sym_off, sym_off, len(syms), 1, 1, 8, 24)            # .dynsym
+    shdrs += struct.pack("<IIQQQQIIQQ", 0, 1, 6, text_off, text_off, len(text), 0, 0, 4, 0)           # .text
     ehdr = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\0" * 8 + struct.pack(
-        "<HHIQQQIHHHHHH", 3, machine, 1, 0, 64, shoff if sections else 0, 0, 64, 56, 2, 64, 3 if sections else 0, 0)
+        "<HHIQQQIHHHHHH", 3, machine, 1, 0, 64, shoff if sections else 0, 0, 64, 56, 2, 64, 4 if sections else 0, 0)
     load = struct.pack("<IIQQQQQQ", 1, 5, 0, 0, 0, total, total, align)
     dynamic = struct.pack("<IIQQQQQQ", 2, 6, dyn_off, dyn_off, dyn_off, len(dyn), len(dyn), 8)
     out = ehdr + load + dynamic + body
@@ -1744,6 +1895,19 @@ LLAMA_NEEDED = {"libggml-base": (), "libggml-cpu": ("libggml-base.so",),
                 "libggml": ("libggml-cpu.so", "libggml-base.so"),
                 "libllama": ("libggml.so", "libggml-cpu.so", "libggml-base.so"),
                 "libmtmd": ("libllama.so", "libggml.so", "libggml-base.so")}
+# Android arm64 (GGML_BACKEND_DL): no libggml-cpu, four CPU variants that only need libggml-base.
+CPU_VARIANTS = ("libggml-cpu-android_armv8.0_1", "libggml-cpu-android_armv8.2_1", "libggml-cpu-android_armv8.2_2",
+                "libggml-cpu-android_armv8.6_1")
+LLAMA_LIBS_ARM64 = ("libggml-base", "libggml", "libllama", "libmtmd") + CPU_VARIANTS
+LLAMA_NEEDED_ARM64 = {"libggml-base": (), "libggml": ("libggml-base.so",),
+                      "libllama": ("libggml.so", "libggml-base.so"),
+                      "libmtmd": ("libllama.so", "libggml.so", "libggml-base.so"),
+                      **{v: ("libggml-base.so",) for v in CPU_VARIANTS}}
+# Real A64 words: plain armv8.0 code, then one instruction of each optional extension.
+A64_BASE = (0x8B020020, 0x4E22CC20, 0xA9BF7BFD, 0x94000010, 0x52800000, 0xD65F03C0)   # add, fmla, stp, bl, mov, ret
+SDOT, UDOT_ELEM, SMMLA, PTRUE = 0x4E829420, 0x6F82E020, 0x4E82A420, 0x2518E3E0
+LLAMA_CODE_ARM64 = {"libggml-cpu-android_armv8.2_1": (SDOT,), "libggml-cpu-android_armv8.2_2": (UDOT_ELEM,),
+                    "libggml-cpu-android_armv8.6_1": (SDOT, SMMLA)}
 
 
 def _llama_dist_info(arch_dir: Path, build="1000", version="0.3.32", tag="cp313-cp313-x"):
@@ -1754,20 +1918,27 @@ def _llama_dist_info(arch_dir: Path, build="1000", version="0.3.32", tag="cp313-
 
 
 def make_llama_android(sp: Path, target="x86_64", build="1000", align=0x4000, extra_needed=(), unresolved=(),
-                       libs=LLAMA_LIBS, cxx_copies=1) -> Path:
-    """build/site-packages/<target> with llama-cpp-python's five ELF libraries + flet-libcpp-shared."""
+                       libs=None, cxx_copies=1, code=None) -> Path:
+    """build/site-packages/<target> with llama-cpp-python's ELF libraries + flet-libcpp-shared: the five
+    of x86_64, or on arm64 the four plus the CPU variants, whose code holds their extensions' instructions
+    (``code``: {stem: extra words}, replacing LLAMA_CODE_ARM64)."""
+    arm64 = target == "arm64-v8a"
+    libs = libs if libs is not None else (LLAMA_LIBS_ARM64 if arm64 else LLAMA_LIBS)
+    deps = LLAMA_NEEDED_ARM64 if arm64 else LLAMA_NEEDED
+    code = code if code is not None else (LLAMA_CODE_ARM64 if arm64 else {})
     arch = sp / target
     _llama_dist_info(arch, build)
     lib = arch / "llama_cpp" / "lib"
     lib.mkdir(parents=True)
     machine = wh.ELF_MACHINE[target]
     for stem in libs:
-        needed = LLAMA_NEEDED.get(stem, ()) + ("libc++_shared.so", "libm.so", "libdl.so", "libc.so") + tuple(extra_needed)
+        needed = deps.get(stem, ()) + ("libc++_shared.so", "libm.so", "libdl.so", "libc.so") + tuple(extra_needed)
         imports = [("malloc", GLOBAL, UND), ("_ZNSt6__ndk14cout", GLOBAL, UND), ("getauxval", WEAK, UND)]
-        imports += [(f"{dep[3:-3]}_api", GLOBAL, UND) for dep in LLAMA_NEEDED.get(stem, ())]
+        imports += [(f"{dep[3:-3]}_api", GLOBAL, UND) for dep in deps.get(stem, ())]
         imports += [(n, GLOBAL, UND) for n in unresolved if stem == "libllama"]
         (lib / f"{stem}.so").write_bytes(make_elf(machine=machine, align=align, needed=needed,
-                                                  symbols=imports + [(f"{stem[3:]}_api", GLOBAL, DEF)]))
+                                                  symbols=imports + [(f"{stem[3:]}_api", GLOBAL, DEF)],
+                                                  code=(A64_BASE if arm64 else ()) + tuple(code.get(stem, ()))))
     (lib / "cmake").mkdir()
     for i in range(cxx_copies):
         d = arch / ("opt/lib" if i == 0 else f"other{i}")
@@ -1794,6 +1965,56 @@ def test_verify_site_packages_android_accepts_our_vision_build(tmp_path):
     assert any("x86_64: llama-cpp-python 0.3.32 build 1000" in n for n in notes)
     assert any("arm64-v8a: lib/libmtmd.so NEEDED" in n for n in notes)
     assert any("arm64-v8a: lib/libllama.so NEEDED" in n for n in notes)
+    assert "arm64-v8a: lib/libggml-base.so armv8.0 only: optional instructions none" in notes
+    assert ("arm64-v8a: lib/libggml-cpu-android_armv8.6_1.so CPU variant [dotprod, i8mm]: optional instructions "
+            "dotprod 1, i8mm 1") in notes
+    assert "arm64-v8a: lib/libggml-cpu-android_armv8.0_1.so CPU variant [armv8.0]: optional instructions none" in notes
+    assert not any("optional instructions" in n for n in notes if n.startswith("x86_64"))
+
+
+def test_aarch64_code_features_counts_the_optional_extensions():
+    elf = make_elf(code=A64_BASE + (SDOT, UDOT_ELEM, SMMLA, 0x4E80AC00, 0x0F80F000, PTRUE, 0xC0080000))
+    assert wh.aarch64_code_features(elf) == {"dotprod": 2, "i8mm": 3, "sve": 1, "sme": 1}
+    assert wh.aarch64_code_features(make_elf(code=A64_BASE)) == {"dotprod": 0, "i8mm": 0, "sve": 0, "sme": 0}
+    # instruction words outside the code sections (data) are not instructions
+    assert wh.aarch64_code_features(make_elf(extra=struct.pack("<I", SDOT)))["dotprod"] == 0
+    with pytest.raises(ValueError, match="no section headers"):
+        wh.aarch64_code_features(make_elf(sections=False))
+
+
+@pytest.mark.parametrize("change, message", [
+    # an armv8.0 library with a dot product would SIGILL on a Cortex-A53
+    ({"code": {**LLAMA_CODE_ARM64, "libggml-base": (SDOT,)}},
+     "lib/libggml-base.so: uses dotprod (1 instructions) outside a runtime-selected CPU variant"),
+    ({"code": {**LLAMA_CODE_ARM64, "libggml-cpu-android_armv8.2_2": (SDOT, SMMLA)}},
+     "libggml-cpu-android_armv8.2_2.so: uses i8mm (1 instructions) outside"),
+    ({"code": {**LLAMA_CODE_ARM64, "libggml-cpu-android_armv8.0_1": (PTRUE,)}},
+     "libggml-cpu-android_armv8.0_1.so: uses sve (1 instructions)"),
+    ({"code": {**LLAMA_CODE_ARM64, "libggml-cpu-android_armv8.6_1": (SDOT,)}},
+     "libggml-cpu-android_armv8.6_1.so: CPU variant without any i8mm instruction"),
+    # the old single-backend layout (or a forgotten variant) on arm64
+    ({"libs": LLAMA_LIBS}, "holds ['libggml', 'libggml-base', 'libggml-cpu', 'libllama', 'libmtmd'], expected exactly"),
+    ({"libs": LLAMA_LIBS_ARM64[:-1]}, "expected exactly ['libggml', 'libggml-base', 'libggml-cpu-android_armv8.0_1'"),
+])
+def test_verify_site_packages_android_arm64_cpu_variants(tmp_path, change, message):
+    sp = tmp_path / "site-packages"
+    make_llama_android(sp, "arm64-v8a", **change)
+    errors, _ = _verify_llama(sp, "android", make_ndk(tmp_path / "ndk", LLAMA_NDK_EXPORTS))
+    assert any(message in e for e in errors), errors
+
+
+def test_verify_native_checks_the_arm64_variants_of_the_wheel(tmp_path):
+    sp = tmp_path / "site-packages"
+    arch = make_llama_android(sp, "arm64-v8a", code={**LLAMA_CODE_ARM64, "libllama": (SMMLA,)})
+    whl = tmp_path / "llama_cpp_python-0.3.32-1000-cp313-cp313-android_24_arm64_v8a.whl"
+    with zipfile.ZipFile(whl, "w") as zf:
+        for p in sorted((arch / "llama_cpp" / "lib").glob("*.so")):
+            zf.write(p, f"llama_cpp/lib/{p.name}")
+    stubs = wh.NdkStubs(make_ndk(tmp_path / "ndk", LLAMA_NDK_EXPORTS))
+    errors, notes = wh.verify_profile_wheel(whl, "llama-cpp-python", "arm64-v8a", (13, 0), stubs)
+    assert any("lib/libllama.so: uses i8mm (1 instructions) outside a runtime-selected CPU variant" in e
+               for e in errors), errors
+    assert any("libggml-cpu-android_armv8.6_1.so CPU variant [dotprod, i8mm]" in n for n in notes)
 
 
 @pytest.mark.parametrize("change, message", [

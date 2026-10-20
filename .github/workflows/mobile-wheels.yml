@@ -14,6 +14,12 @@
 #
 # Outputs: artifact mobile-wheelhouse-<platform> (wheels + SHA256SUMS + provenance.json, 7 days);
 # on failure, mobile-wheels-logs-<platform> (forge logs, 14 days).
+#
+# cpu_check (dispatch only, android): job arm64-cpu-variants builds the same llama-cpp-python sdist
+# and patch on a Linux arm64 runner with the Android arm64 build's four CPU variants and runs
+# src/mobile/ci/wheels/cpu_variants_check.py: the variant the patched loader picks natively, tokens/s
+# per variant, and under qemu-aarch64 that a Cortex-A53 gets the armv8.0 baseline without SIGILL
+# (the Android libraries themselves need bionic, so no runner can load them).
 
 name: Mobile wheels (cryptography, Pillow, llama-cpp-python)
 
@@ -40,6 +46,10 @@ on:
         description: Ignore the wheel cache and build again
         type: boolean
         default: true
+      cpu_check:
+        description: Also check the engine's runtime CPU variants on Linux arm64 + qemu (android)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -240,5 +250,75 @@ jobs:
           path: |
             ${{ runner.temp }}/forge/logs/
             ${{ runner.temp }}/forge/errors/
+          if-no-files-found: warn
+          retention-days: 14
+
+  arm64-cpu-variants:
+    name: Engine CPU variants (Linux arm64 + qemu)
+    if: inputs.platform == 'android' && inputs.cpu_check
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    env:
+      # Qwen2.5 0.5B Instruct GGUF at a fixed revision (Q4_0: the repacked i8mm path; Q4_K_M: the usual quant)
+      MODEL_REPO: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67
+      Q4_0_SHA256: 7671c0c304e6ce5a7fc577bcb12aba01e2c155cc2efd29b2213c95b18edaf6ed
+      Q4_K_M_SHA256: 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up uv (Python 3.13)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Toolchain (cmake, ninja, qemu-user)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build qemu-user patch
+          qemu-aarch64 --version | head -1
+          grep -m1 -i '^features' /proc/cpuinfo
+
+      - name: Build llama-cpp-python with the Android arm64 CPU variants
+        run: |
+          read -r url sha < <(uv run --no-project python -c 'import tomllib; d = tomllib.load(open("src/mobile/ci/wheels/wheelhouse.toml", "rb")); w = [w for w in d["wheel"] if w["name"] == "llama-cpp-python"][0]; print(w["sdist_url"], w["sdist_sha256"])')
+          curl -fsSL --retry 3 "$url" -o "$RUNNER_TEMP/llama.tar.gz"
+          echo "$sha  $RUNNER_TEMP/llama.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/llama-src"
+          tar xzf "$RUNNER_TEMP/llama.tar.gz" -C "$RUNNER_TEMP/llama-src" --strip-components=1
+          patch -d "$RUNNER_TEMP/llama-src" -p1 --ignore-whitespace --input "$GITHUB_WORKSPACE/src/mobile/ci/wheels/recipes/llama-cpp-python/patches/mobile.patch"
+          uv venv "$RUNNER_TEMP/venv" --python 3.13
+          # The recipe's Android arm64 CMake arguments, plus the option that builds the Android variant
+          # set on Linux (mobile.patch 7.).
+          export CMAKE_ARGS="-DLLAVA_BUILD=ON -DMTMD_VIDEO=OFF -DCMAKE_INSTALL_LIBDIR=llama_cpp/lib -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF -DGGML_BLAS=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_OPENCL=OFF -DGGML_RPC=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_INSTALL_BINDIR=llama_cpp/lib -DGLOSSARION_ANDROID_CPU_VARIANTS=ON"
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" -v "$RUNNER_TEMP/llama-src" 2>&1 | tail -n 60
+          ls -l "$("$RUNNER_TEMP/venv/bin/python" -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("llama_cpp").origin).parent / "lib")')"
+
+      - name: Download the test models
+        run: |
+          curl -fsSL --retry 3 "$MODEL_REPO/qwen2.5-0.5b-instruct-q4_0.gguf" -o "$RUNNER_TEMP/q4_0.gguf"
+          curl -fsSL --retry 3 "$MODEL_REPO/qwen2.5-0.5b-instruct-q4_k_m.gguf" -o "$RUNNER_TEMP/q4_k_m.gguf"
+          printf '%s  %s\n%s  %s\n' "$Q4_0_SHA256" "$RUNNER_TEMP/q4_0.gguf" "$Q4_K_M_SHA256" "$RUNNER_TEMP/q4_k_m.gguf" | sha256sum -c -
+
+      - name: Check the CPU variants (native benchmark, qemu Cortex-A53 / A76)
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" src/mobile/ci/wheels/cpu_variants_check.py run \
+            --model "$RUNNER_TEMP/q4_0.gguf" --bench-model "$RUNNER_TEMP/q4_0.gguf" --bench-model "$RUNNER_TEMP/q4_k_m.gguf" \
+            --json "$RUNNER_TEMP/cpu_variants.json" --summary "$RUNNER_TEMP/cpu_variants.md"
+
+      - name: Report
+        if: always()
+        run: |
+          [ -f "$RUNNER_TEMP/cpu_variants.md" ] && cat "$RUNNER_TEMP/cpu_variants.md" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-cpu-variants-report
+          path: ${{ runner.temp }}/cpu_variants.*
           if-no-files-found: warn
           retention-days: 14

@@ -74,10 +74,12 @@ def engine_check() -> dict:
     info = eng.system_info()
     if not info or info.startswith("unavailable"):
         raise AssertionError(f"llama_print_system_info failed: {info}")
+    if "CPU" not in info:  # Android arm64 loads its CPU backend at run time (a variant per feature set)
+        raise AssertionError(f"no CPU backend registered (CPU variant {eng.cpu_variant()}): {info!r}")
     vision, reason = eng.vision_status()  # libmtmd (our own build): the vision models' image encoder
     if not vision:
         raise AssertionError(reason or eng.NO_MTMD)
-    return {"version": version, "system_info": info[:300], "vision": vision}
+    return {"version": version, "system_info": info[:300], "cpu_variant": eng.cpu_variant(), "vision": vision}
 
 
 def _client_send(model: str, messages: list, *, stream: bool, max_tokens: int) -> tuple:

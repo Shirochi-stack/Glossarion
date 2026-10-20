@@ -415,3 +415,33 @@ def test_the_llama_suite_describes_an_image_and_the_smoke_check_needs_libmtmd(mo
         selfcheck.engine_check()
     monkeypatch.setattr(eng, "vision_status", lambda: (True, None))
     assert selfcheck.engine_check()["vision"] is True
+    # a GGML_BACKEND_DL build that registered no CPU backend fails the smoke check
+    monkeypatch.setattr(eng, "system_info", lambda: "")
+    with pytest.raises(AssertionError, match="llama_print_system_info failed"):
+        selfcheck.engine_check()
+    monkeypatch.setattr(eng, "system_info", lambda: "RPC : 1 |")
+    with pytest.raises(AssertionError, match="no CPU backend registered"):
+        selfcheck.engine_check()
+
+
+def test_system_info_names_the_runtime_selected_cpu_variant(monkeypatch):
+    """Android arm64 registers one of four CPU backends at import; the engine card says which."""
+    modules = {"llama_cpp": type("L", (), {"llama_print_system_info": staticmethod(
+                   lambda: b"CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | REPACK = 1 | ")})(),
+               "llama_cpp._ctypes_extensions": type("E", (), {"CPU_BACKEND_VARIANT": "android_armv8.6_1"})()}
+
+    def fake_import(name):
+        if name not in modules:
+            raise ImportError(name)
+        return modules[name]
+
+    monkeypatch.setattr(eng.importlib, "import_module", fake_import)
+    assert eng.cpu_variant() == "android_armv8.6_1"
+    assert eng.system_info() == ("CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | "
+                                 "REPACK = 1 | (CPU variant android_armv8.6_1)")
+    modules["llama_cpp._ctypes_extensions"].CPU_BACKEND_VARIANT = "builtin"   # x86_64 / iOS: nothing to add
+    assert eng.system_info().endswith("REPACK = 1 |")
+    del modules["llama_cpp._ctypes_extensions"]                                # pypi.flet.dev's loader
+    assert eng.cpu_variant() is None and eng.system_info().endswith("REPACK = 1 |")
+    del modules["llama_cpp"]
+    assert eng.system_info() is None
