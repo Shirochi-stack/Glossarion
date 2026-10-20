@@ -2887,12 +2887,15 @@ _MOBILE_BRIDGE_JS = r"""
   // leaves to the other side at an edge when a neighbour chapter exists (turn.next/prev).
   // A horizontal swipe drags the page with the finger (the neighbour page shows beside it;
   // at a chapter edge the whole page follows) and settles on release: the next / previous
-  // page past DRAG_TURN of the width or on a flick, else back where it was.
+  // page past DRAG_TURN of the width or on a flick, else back where it was. Past the chapter's
+  // last (first) page a turn is the chapter edge: the next (previous) chapter.
+  // Scroll / Scroll all (no #columns): a turn (side tap, swipe, arrow key) scrolls 90%% of a
+  // screen; at the chapter's end (start) it is the chapter edge too, like the native reader.
   // turn.ms is the app's switch (Aa > Layout "Page turn animation", off under the app's
   // Reduce motion); the WebView's prefers-reduced-motion is not consulted: Android maps the
   // system "Remove animations" (animator scale 0) to it, which made every turn a jump.
   var turn = {ms: 0, enter: 0, next: false, prev: false}, slide = null, leaveTimer = null;
-  var DRAG_TURN = 0.3, FLICK_V = 0.3, DRAG_SLOP = 10;
+  var DRAG_TURN = 0.3, FLICK_V = 0.3, DRAG_SLOP = 10, END_SLACK = 4, pinEnd = false;
   function cols() { return document.getElementById('columns'); }
   function turnMs() {
     if (!(turn.ms > 0) || !window.requestAnimationFrame) { return 0; }
@@ -2964,8 +2967,13 @@ _MOBILE_BRIDGE_JS = r"""
     bodyMotion('translateX(' + to + ')', '0',
                'transform ' + out + 'ms ease-in, opacity ' + out + 'ms ease-in');
     if (leaveTimer) { clearTimeout(leaveTimer); }
-    // the app replaces this page with the neighbour chapter; if it does not, come back
-    leaveTimer = setTimeout(function () { leaveTimer = null; bodyMotion('', '', 'none'); }, 2500);
+    // the app replaces this page with the neighbour chapter; if it does not, come back (on this page)
+    leaveTimer = setTimeout(function () {
+      leaveTimer = null;
+      bodyMotion('', '', 'none');
+      var c = cols();
+      if (c && !drag) { stopSlide(); c.scrollLeft = Math.round(page * pageSpan(c)); }
+    }, 2500);
   }
   function post(evt) {
     evt = evt || {};
@@ -2987,6 +2995,11 @@ _MOBILE_BRIDGE_JS = r"""
     stopSlide();
     if (typeof _setupColumns === 'function') { _setupColumns(); }
     count = (typeof _pageCountFor === 'function') ? _pageCountFor(c) : 1;
+    return count;
+  }
+  function recount(c) {
+    // the page count now (late images / fonts change it), without measure()'s re-anchoring of the columns
+    if (c && typeof _pageCountFor === 'function') { count = Math.max(1, _pageCountFor(c)); }
     return count;
   }
   function pageSpan(c) {
@@ -3016,19 +3029,35 @@ _MOBILE_BRIDGE_JS = r"""
     post({type: 'page', page: page, count: count, reason: reason || 'goto'});
   }
   function next() {
-    if (!cols()) { post({type: 'tap', zone: 'right'}); return; }
-    if (page < count - 1) { goTo(page + 1, 'next'); }
+    var c = cols();
+    if (!c) { scrollTurn(1); return; }
+    if (page < recount(c) - 1) { goTo(page + 1, 'next'); }
     else { leavePage(1); post({type: 'edge', edge: 'end', page: page, count: count}); }
   }
   function prev() {
-    if (!cols()) { post({type: 'tap', zone: 'left'}); return; }
+    if (!cols()) { scrollTurn(-1); return; }
     if (page > 0) { goTo(page - 1, 'prev'); }
     else { leavePage(-1); post({type: 'edge', edge: 'start', page: page, count: count}); }
   }
+  function scrollMax() {
+    var d = document.documentElement, b = document.body;
+    var h = Math.max((d && d.scrollHeight) || 0, (b && b.scrollHeight) || 0);
+    return Math.max(0, h - (window.innerHeight || 0));
+  }
+  function scrollTurn(dir) {
+    // Scroll / Scroll all: a screen on (90%%: no line skipped); at the chapter's end (start) the chapter
+    // edge -- the app opens the next (previous) chapter. Scroll all is the whole book: no edge to turn.
+    var y = window.scrollY || window.pageYOffset || 0, max = scrollMax();
+    if (dir > 0 ? y >= max - END_SLACK : y <= END_SLACK) {
+      if (CHAPTER !== null) { post({type: 'edge', edge: dir > 0 ? 'end' : 'start'}); }
+      return;
+    }
+    var step = Math.max(1, Math.round(0.9 * (window.innerHeight || 1)));
+    window.scrollTo(0, Math.max(0, Math.min(max, y + dir * step)));
+  }
   function goToFraction(fraction) {
     if (cols()) { measure(); goTo(Math.round((count - 1) * (+fraction || 0)), 'fraction'); return; }
-    var max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-    window.scrollTo(0, Math.round(max * (+fraction || 0)));
+    window.scrollTo(0, Math.round(scrollMax() * (+fraction || 0)));
   }
   function selectionText() {
     try { return String(window.getSelection ? window.getSelection() : '').trim(); }
@@ -3076,29 +3105,32 @@ _MOBILE_BRIDGE_JS = r"""
     var ms = turnMs() || 1, span = pageSpan(c), dir = d.dx < 0 ? 1 : -1;
     var flick = Math.abs(d.v) > FLICK_V && (d.v < 0) === (d.dx < 0) && Math.abs(d.dx) > DRAG_SLOP * 2;
     var go = !cancelled && (Math.abs(d.dx) > DRAG_TURN * span || flick);
-    if (d.over) {  // dragged past the chapter's first / last page
-      var edge = d.over > 0 ? 1 : -1;
-      var turned = go && edge === dir && Math.abs(d.over) > DRAG_SLOP;
-      if (turned && (edge > 0 ? turn.next : turn.prev)) {
-        leavePage(edge, d.tx);
-        post({type: 'edge', edge: edge > 0 ? 'end' : 'start', page: page, count: count});
+    // A turn from the chapter's last (first) page is the chapter edge: the next (previous) chapter. The page
+    // decides, not only how far the whole page was dragged past the edge (d.over): a swipe begun while the
+    // columns still slid onto the last page, or one the columns could not follow (the browser stops them at
+    // the content's end, the count grew late), moved the columns and left little or no overshoot, and was
+    // swallowed -- the reader stayed on the chapter.
+    var beyond = go && (dir > 0 ? page >= recount(c) - 1 : page <= 0);
+    if (beyond) {
+      var edge = {type: 'edge', edge: dir > 0 ? 'end' : 'start', page: page, count: count};
+      if (dir > 0 ? turn.next : turn.prev) {
+        leavePage(dir, d.tx);
+        post(edge);
         return true;
       }
-      springBody(Math.max(1, Math.round(ms * 0.6)));
-      if (turned) { post({type: 'edge', edge: edge > 0 ? 'end' : 'start', page: page, count: count}); }
-      var home = Math.round(page * span);
-      if (Math.abs((c.scrollLeft || 0) - home) > 1) { slideTo(c, c.scrollLeft || 0, home, settleMs(ms, home - c.scrollLeft, span)); }
+      post(edge);  // the book's last (first) page: the page comes back below; the app still hears it
+    } else if (go) {
+      if (d.over) { springBody(Math.max(1, Math.round(ms * 0.6))); } else { bodyMotion('', '', ''); }
+      goTo(dir > 0 ? page + 1 : page - 1, dir > 0 ? 'next' : 'prev');
       return true;
     }
-    bodyMotion('', '', '');
-    if (go && dir > 0 && page < count - 1) { goTo(page + 1, 'next'); return true; }
-    if (go && dir < 0 && page > 0) { goTo(page - 1, 'prev'); return true; }
+    if (d.over) { springBody(Math.max(1, Math.round(ms * 0.6))); } else { bodyMotion('', '', ''); }
     var back = Math.round(page * span), from = c.scrollLeft || 0;  // not far enough: back to this page
-    if (from !== back) { slideTo(c, from, back, settleMs(ms, back - from, span)); }
+    if (Math.abs(from - back) > 1) { slideTo(c, from, back, settleMs(ms, back - from, span)); }
     return true;
   }
   document.addEventListener('touchstart', function (e) {
-    swiped = false;
+    swiped = false; pinEnd = false;
     if (e.touches.length === 2) {
       if (drag) { dragEnd(true); swiped = false; }
       pinch = {start: dist(e.touches), scale: 1}; touch = null; drag = null; return;
@@ -3127,6 +3159,7 @@ _MOBILE_BRIDGE_JS = r"""
       if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
       var c = cols();
       drag.base = c ? (c.scrollLeft || 0) : 0;
+      recount(c);  // where the chapter's last page really is: the whole page follows past it
       drag.x = x - (dx > 0 ? DRAG_SLOP : -DRAG_SLOP);  // no jump by the slop when the page starts to move
       dx = x - drag.x;
     }
@@ -3220,6 +3253,10 @@ _MOBILE_BRIDGE_JS = r"""
       enterPage(turn.enter);
     } else if ((m = /[#&]f=([0-9.]+)/.exec(hash))) {
       goToFraction(parseFloat(m[1]));
+    } else if (first >= 1000000) {
+      // "the last page" (a turn back from the next chapter): its end, again once images have loaded
+      pinEnd = true;
+      goToFraction(1);
     }
     post({type: 'ready', page: page, count: count, paginated: !!c});
   }
@@ -3248,7 +3285,9 @@ _MOBILE_BRIDGE_JS = r"""
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () { setTimeout(start, 0); });
   } else { setTimeout(start, 0); }
-  window.addEventListener('load', function () { if (ready && cols()) { goTo(page, 'load'); } });
+  window.addEventListener('load', function () {
+    if (ready && cols()) { goTo(page, 'load'); } else if (ready && pinEnd) { goToFraction(1); }
+  });
 })();
 """
 

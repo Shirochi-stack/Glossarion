@@ -465,8 +465,8 @@ class ShellModel:
 
     def _next(self) -> None:
         state = self.page
-        if not state["paged"]:
-            self._post({"type": "tap", "zone": "right"})
+        if not state["paged"]:  # Scroll: the simulated chapter fits a screen, a turn is its edge
+            self._post({"type": "edge", "edge": "end"})
         elif state["page"] < state["count"] - 1:
             state["page"] += 1
             self._post({"type": "page", "page": state["page"], "count": state["count"], "reason": "next"})
@@ -476,7 +476,7 @@ class ShellModel:
     def _prev(self) -> None:
         state = self.page
         if not state["paged"]:
-            self._post({"type": "tap", "zone": "left"})
+            self._post({"type": "edge", "edge": "start"})
         elif state["page"] > 0:
             state["page"] -= 1
             self._post({"type": "page", "page": state["page"], "count": state["count"], "reason": "prev"})
@@ -485,7 +485,7 @@ class ShellModel:
 
     def tap(self, x: float, y: float) -> None:
         side = x < WIDTH / 3 or x > 2 * WIDTH / 3
-        if side and self.page["cfg"].get("zones") is False and self.page["paged"]:
+        if side and self.page["cfg"].get("zones") is False:
             self._post({"type": "tap", "zone": "center"}, doc=True)
         elif x < WIDTH / 3:
             self._prev()

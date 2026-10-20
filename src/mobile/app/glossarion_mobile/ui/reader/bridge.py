@@ -175,9 +175,9 @@ READER_EXTRAS_JS = r"""
     }
     return null;
   }
-  if (C.zones === false) {
+  if (C.zones === false) {  // every layout: a side tap scrolls a screen in Scroll / Scroll all too
     window.addEventListener('click', function (e) {
-      if (!cols() || linkOf(e.target) || selText()) { return; }
+      if (linkOf(e.target) || selText()) { return; }
       var w = window.innerWidth || document.documentElement.clientWidth || 1, x = e.clientX / w;
       if (x < 1 / 3 || x > 2 / 3) {
         e.stopPropagation();

@@ -28,6 +28,19 @@ from one page to another ... as my fingers slide from right to left or left to r
   own switches turn the motion off. The neighbour chapter's entrance starts two frames after the
   page starts (once it is drawn): begun at DOMContentLoaded it was over before the first paint.
 
+Follow-up (2026-10-21): "When I'm at the last page of a chapter and swipe right. It doesn't swipe to the
+next chapter. It stays stuck on the same chapter."
+  On the emulator (build e592cac5) the paged layouts turned the chapter on every slow / fast swipe and
+  edge tap, both directions, with or without "Remove animations" and "Page turn animation". The Scroll
+  layout never did: without #columns the shell's next() / prev() posted a side ``tap`` that the
+  Reader takes for "show the chrome", so a swipe (or side tap) at the end of a chapter only toggled
+  the bars and the reader stayed on the chapter. Now a turn in Scroll scrolls 90% of a screen and at
+  the chapter's end (start) is the chapter edge (as in the native reader); a turn back lands on the
+  previous chapter's end. In the paged layouts a turn from the last (first) page is the chapter edge
+  whatever the columns did: a swipe begun while the columns still slid onto the last page, or one the
+  columns could not follow (the page count changed after it was measured), was swallowed. The Reader
+  turns only from the chapter on screen: a second swipe on the outgoing page does not skip a chapter.
+
 Run from src/mobile (mobile venv):
     python -m pytest -p no:cacheprovider -W ignore tests_host/test_reader_turns.py
 """
@@ -202,7 +215,7 @@ def test_document_builder_prefetch_warms_the_next_chapter(novel):
 # Page turns: the page (shared shell + extras) under node
 # =====================================================================================
 
-_NODE_TURN_HARNESS = r"""
+_NODE_ENV = r"""
 const vm = require('vm');
 const SCRIPTS = %(scripts)s;
 function makeEnv(opts) {
@@ -214,9 +227,11 @@ function makeEnv(opts) {
   const bodyStyle = new Proxy({}, {set(t, k, v) { t[k] = v; bodyLog.push(k + '=' + v); return true; }});
   const body = {scrollHeight: 1000, offsetWidth: 400, style: bodyStyle};
   const elements = {};
+  const docEl = {scrollHeight: opts.docHeight || 1000, clientWidth: 400};
+  if (opts.docHeight) { body.scrollHeight = opts.docHeight; }
   const document = {
-    readyState: 'complete', head: {appendChild() {}}, body, documentElement: {scrollHeight: 1000, clientWidth: 400},
-    getElementById(id) { return id === 'columns' ? columns : (elements[id] || null); },
+    readyState: 'complete', head: {appendChild() {}}, body, documentElement: docEl,
+    getElementById(id) { return id === 'columns' ? (opts.scroll ? null : columns) : (elements[id] || null); },
     createElement(tag) { const el = {tagName: tag.toUpperCase(), id: '', textContent: ''};
       return new Proxy(el, {set(t, k, v) { t[k] = v; if (k === 'id') { elements[v] = t; } return true; }}); },
     querySelectorAll() { return []; }, getElementsByName() { return []; },
@@ -230,7 +245,7 @@ function makeEnv(opts) {
     requestAnimationFrame(fn) { fid += 1; frames.set(fid, fn); return fid; },
     cancelAnimationFrame(id) { frames.delete(id); },
     getSelection() { return {toString() { return ''; }, rangeCount: 0, removeAllRanges() {}}; },
-    scrollTo() {}, scrollBy() {},
+    scrollTo(x, y) { sandbox.scrollY = y; }, scrollBy() {},
     addEventListener(name, fn, capture) { (winHandlers[name] = winHandlers[name] || []).push({fn, capture: !!capture}); }};
   if (opts.reduce) { sandbox.matchMedia = (q) => ({matches: q.indexOf('reduce') >= 0}); }
   sandbox.window = sandbox;
@@ -257,8 +272,14 @@ function makeEnv(opts) {
     touch('start', x0); for (const x of xs) { touch('move', x, 300, step); }
     touch('end', xs[xs.length - 1], 300, rest || 0);
   };
-  return {G: sandbox.GLRDR, posted, columns, run, frame, frames, click, key, bodyLog, touch, swipe, clock};
+  const load = () => { for (const h of (winHandlers.load || [])) { h.fn({}); } };
+  const setHeight = (h) => { docEl.scrollHeight = h; body.scrollHeight = h; };
+  return {G: sandbox.GLRDR, posted, columns, run, frame, frames, click, key, bodyLog, touch, swipe, clock,
+          win: sandbox, load, setHeight};
 }
+"""
+
+_NODE_TURN_HARNESS = _NODE_ENV + r"""
 const out = {};
 // 9 pages of 400 px + the 1 px gap; this page was turned to from the previous chapter (enter 1)
 let env = makeEnv({scrollWidth: 3600});
@@ -420,6 +441,198 @@ def test_paged_page_slides_on_turns_and_enters_from_the_turned_side(tmp_path, no
     assert d["offMove"] == 802 and d["off"] == {"page": 3, "left": 1203}
     builder.close()
     session.close()
+
+
+_NODE_EDGE_SCENARIO = r"""
+const out = {};
+const turns = (env) => env.posted.filter(e => e.type === 'edge' || (e.type === 'page' && e.reason !== 'initial'))
+  .map(e => e.type === 'edge' ? 'edge:' + e.edge : 'page:' + e.page);
+// 9 pages of 400 px + the 1 px gap, a next and a previous chapter
+let env = makeEnv({scrollWidth: 3600});
+env.run(); env.frame(1); env.frame(2); env.run();
+// (a) the last page reached by a tap whose slide is still running: a quick flick at once
+env.G.go(7); env.posted.length = 0; env.bodyLog.length = 0;
+env.click(390); env.frame(1000); env.frame(1040);
+const a = out.midSlide = {from: env.columns.scrollLeft};
+env.swipe(300, [290, 230, 160], 16, 4);
+a.turns = turns(env); a.page = env.G.page(); a.log = env.bodyLog.slice();
+// (b) the page count shrank after it was measured (a late font / image): page 7 is now the last one
+env = makeEnv({scrollWidth: 3600});
+env.run(); env.frame(1); env.frame(2); env.run();
+env.G.go(7); env.columns.scrollWidth = 3200; env.posted.length = 0; env.bodyLog.length = 0;
+env.touch('start', 300); env.touch('move', 280, 300, 50); env.touch('move', 100, 300, 200);
+const b = out.shrunk = {drag: env.bodyLog.slice()};
+env.bodyLog.length = 0; env.touch('end', 100, 300, 200);
+b.turns = turns(env); b.page = env.G.page(); b.log = env.bodyLog.slice();
+env = makeEnv({scrollWidth: 3600});
+env.run(); env.G.go(7); env.columns.scrollWidth = 3200; env.posted.length = 0;
+env.click(390); out.shrunkTap = turns(env);
+// (c) the first page: dragging right is the previous chapter, the page leaves to the right
+env = makeEnv({scrollWidth: 3600});
+env.run(); env.frame(1); env.frame(2); env.run(); env.posted.length = 0; env.bodyLog.length = 0;
+env.swipe(100, [110, 200, 300], 200, 200);
+out.first = {turns: turns(env), log: env.bodyLog.slice()};
+// (d) the book's last page (no next chapter): a mid-slide flick comes back, the app still hears the edge
+env = makeEnv({scrollWidth: 3600});
+env.run(); env.frame(1); env.frame(2); env.run(); env.G.setTurn({next: false});
+env.G.go(7); env.click(390); env.frame(1000); env.frame(1040); env.posted.length = 0; env.bodyLog.length = 0;
+env.swipe(300, [290, 230, 160], 16, 4); env.frame(2000); env.frame(2400);
+out.bookEnd = {turns: turns(env), page: env.G.page(), left: env.columns.scrollLeft, log: env.bodyLog.slice()};
+console.error(JSON.stringify(out));
+"""
+
+_NODE_SCROLL_SCENARIO = r"""
+const out = {};
+const edges = (env) => env.posted.filter(e => e.type === 'edge' || e.type === 'tap')
+  .map(e => e.type === 'edge' ? 'edge:' + e.edge : 'tap:' + e.zone);
+// 3000 px of chapter in an 800 px window: the end is at 2200
+let env = makeEnv({scroll: true, docHeight: 3000});
+env.run();
+out.start = env.win.scrollY;                               // turned back to: the chapter's end
+env.setHeight(3500); env.load(); out.afterLoad = env.win.scrollY;  // still its end once images are in
+env.touch('start', 200, 300); env.touch('end', 200, 300, 50);
+env.setHeight(4000); env.load(); out.afterTouch = env.win.scrollY;  // the reader took over: stays
+env.win.scrollY = 3200; env.posted.length = 0;
+env.click(390); out.endTap = edges(env);                   // the end: a side tap is the chapter edge
+env.posted.length = 0; env.swipe(300, [280, 200, 100], 30, 0);
+out.endSwipe = edges(env); out.endSwipeY = env.win.scrollY;
+env.click(390); out.clickAfterSwipe = edges(env).length;  // the swipe's click does not turn again
+env.win.scrollY = 1000; env.posted.length = 0;
+env.click(390); out.mid = {y: env.win.scrollY, events: edges(env)};  // mid-chapter: a screen on (90%)
+env.click(5); out.midBack = env.win.scrollY;
+env.swipe(300, [280, 200, 100], 30, 0); out.midSwipe = env.win.scrollY;
+env.click(200);                                            // (the swipe's click)
+env.win.scrollY = 2; env.posted.length = 0;
+env.click(5); env.swipe(100, [120, 200, 300], 30, 0); env.click(200);
+env.click(200); out.top = edges(env);                      // the start: the chapter edge; the centre: chrome
+console.error(JSON.stringify(out));
+"""
+
+_NODE_SCROLL_OTHER = r"""
+const out = {};
+let env = makeEnv({scroll: true, docHeight: 3000});
+env.run(); out.start = env.win.scrollY;
+env.win.scrollY = 2200; env.posted.length = 0;
+env.click(390); env.swipe(300, [280, 200, 100], 30, 0);
+out.events = env.posted.filter(e => e.type === 'edge' || e.type === 'tap').map(e => e.type + ':' + (e.edge || e.zone));
+out.y = env.win.scrollY;
+console.error(JSON.stringify(out));
+"""
+
+
+def _run_node(tmp_path, built, scenario: str) -> dict:
+    path = tmp_path / "edge.js"
+    path.write_text((_NODE_ENV % {"scripts": json.dumps(_page_scripts(built))}) + scenario, encoding="utf-8")
+    proc = subprocess.run([R.NODE, str(path)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stderr.strip().splitlines()[-1])
+
+
+@needs_node
+def test_paged_turn_from_the_chapters_last_or_first_page_always_turns_the_chapter(tmp_path, novel):
+    """Owner 2026-10-21: at the last page a swipe "stays stuck on the same chapter". A turn from the last
+    (first) page is the chapter edge whatever the columns did during the swipe."""
+    from glossarion_mobile.ui.reader.document import DocumentBuilder
+
+    session = R._overlay_session(novel)
+    builder = DocumentBuilder(session, lambda key, source=None: "/t/img/x")
+    turn = bridge.turn_config(rm.PAGE_TURN_MS, enter=1, has_next=True, has_prev=True)
+    built = builder.build(1, settings=rm.ReaderSettings(), layout=rm.LAYOUT_SINGLE, theme=R.DESKTOP_THEMES[0],
+                          doc_id="d1", event_url="/t/__ev", turn=turn)
+    out = _run_node(tmp_path, built, _NODE_EDGE_SCENARIO)
+    # (a) the columns were still sliding onto the last page (not at its place yet) when the flick began:
+    # the flick moved them the rest of the way, so the page itself barely went past the edge -- it used to
+    # spring back on the chapter; now it is the next chapter (the page leaves to the left)
+    a = out["midSlide"]
+    assert 7 * 401 < a["from"] < 8 * 401
+    assert a["turns"] == ["page:8", "edge:end"] and a["page"] == 8
+    assert "opacity=0" in a["log"] and any(e.startswith("transform=translateX(-") for e in a["log"])
+    # (b) the count shrank after it was measured: the drag knows page 7 is the last (the whole page follows
+    # the finger) and the release turns the chapter instead of a "next" that clamps back onto page 7
+    b = out["shrunk"]
+    assert "transform=translateX(-190px)" in b["drag"]
+    assert b["turns"] == ["edge:end"] and b["page"] == 7
+    assert "transform=translateX(-286px)" in b["log"] and "opacity=0" in b["log"]
+    assert out["shrunkTap"] == ["edge:end"]  # an edge tap there too
+    # (c) the first page, dragged right: the previous chapter, the page leaves to the right
+    assert out["first"]["turns"] == ["edge:start"]
+    assert any(e.startswith("transform=translateX(") and not e.startswith("transform=translateX(-")
+               and e != "transform=translateX(0)" for e in out["first"]["log"])
+    # (d) the book's last page: the page comes back to its place; the app hears the edge (book end)
+    d = out["bookEnd"]
+    assert d["turns"] == ["edge:end"] and d["page"] == 8 and d["left"] == 8 * 401
+    assert "opacity=0" not in d["log"]
+    builder.close()
+    session.close()
+
+
+@needs_node
+def test_scroll_layout_turns_scroll_a_screen_and_turn_the_chapter_at_its_ends(tmp_path, novel):
+    """The owner's "stuck" chapter end in the Scroll layout: a swipe / side tap there only toggled the
+    chrome (the shell posted a side ``tap``). Now a turn scrolls 90% of a screen, and at the chapter's
+    end (start) it is the chapter edge; a turn back opens the previous chapter at its end."""
+    from glossarion_mobile.ui.reader.document import DocumentBuilder
+
+    session = R._overlay_session(novel)
+    builder = DocumentBuilder(session, lambda key, source=None: "/t/img/x")
+    built = builder.build(1, settings=rm.ReaderSettings(), layout=rm.LAYOUT_SCROLL, theme=R.DESKTOP_THEMES[0],
+                          doc_id="d1", event_url="/t/__ev", hint={"last": True})
+    out = _run_node(tmp_path, built, _NODE_SCROLL_SCENARIO)
+    assert out["start"] == 2200 and out["afterLoad"] == 2700 and out["afterTouch"] == 2700
+    assert out["endTap"] == ["edge:end"]
+    assert out["endSwipe"] == ["edge:end"] and out["endSwipeY"] == 3200
+    assert out["clickAfterSwipe"] == 1
+    assert out["mid"] == {"y": 1720, "events": []} and out["midBack"] == 1000 and out["midSwipe"] == 1720
+    assert out["top"] == ["edge:start", "edge:start", "tap:center"]
+    # Scroll all is the whole book: its end only stops; "Tap edges" off: a side tap is a centre tap
+    built = builder.build(1, settings=rm.ReaderSettings(), layout=rm.LAYOUT_ALL, theme=R.DESKTOP_THEMES[0],
+                          doc_id="d2", event_url="/t/__ev")
+    out = _run_node(tmp_path, built, _NODE_SCROLL_OTHER)
+    assert out["events"] == [] and out["y"] == 2200
+    built = builder.build(1, settings=rm.ReaderSettings(tap_zones=False), layout=rm.LAYOUT_SCROLL,
+                          theme=R.DESKTOP_THEMES[0], doc_id="d3", event_url="/t/__ev")
+    out = _run_node(tmp_path, built, _NODE_SCROLL_OTHER)
+    assert out["start"] == 0 and out["events"] == ["tap:center", "edge:end"]  # the swipe still turns
+    builder.close()
+    session.close()
+
+
+@needs_flet
+def test_reader_turns_only_from_the_chapter_on_screen(novel, monkeypatch):
+    """The edge event of the chapter on screen turns; one from the outgoing page (a second swipe before
+    the next chapter replaced it) does not turn again from the chapter already loading."""
+    from glossarion_mobile.ui.reader import reader_view as rv
+
+    monkeypatch.setattr(rv, "PREFETCH_DELAY", 0.01)
+    renders: list = []
+    real_render = rv.ReaderScreen.render
+
+    async def recording_render(self, index, **kwargs):
+        renders.append((index, kwargs.get("enter", 0)))
+        return await real_render(self, index, **kwargs)
+
+    monkeypatch.setattr(rv.ReaderScreen, "render", recording_render)
+
+    async def scenario():
+        screen = R._screen(novel, route="/reader/ab12cd34ef56?ch=1")
+        await screen.open()
+        renders.clear()
+        screen.handle_payload({"type": "edge", "seq": 1, "edge": "end", "chapter": 1})
+        for _ in range(5):  # the turn starts: chapter 2 is loading, chapter 1's page is still on screen
+            await asyncio.sleep(0)
+        assert screen.index == 2 and renders == [(2, 1)]
+        screen.handle_payload({"type": "edge", "seq": 2, "edge": "end", "chapter": 1})  # a second swipe there
+        await asyncio.sleep(0.3)
+        assert screen.index == 2 and renders == [(2, 1)]  # not on to chapter 3
+        screen.handle_payload({"type": "edge", "seq": 1, "edge": "start", "chapter": 2})
+        await asyncio.sleep(0.3)
+        assert screen.index == 1 and renders[-1] == (1, -1) and screen.last_page
+        screen.handle_payload({"type": "edge", "seq": 2, "edge": "end"})  # no chapter (Scroll all): turns
+        await asyncio.sleep(0.3)
+        assert screen.index == 2
+        screen.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_turn_config_and_bridge_config():
