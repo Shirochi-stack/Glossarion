@@ -16,6 +16,8 @@ Used by ``build_wheels.sh`` and ``.github/workflows/mobile-wheels.yml``:
     stage-openssl    swap the support tree's OpenSSL 3.0.x for BeeWare's static 3.5.9, delete every
                      other static OpenSSL in the support tree (it shadows the staged one on forge's
                      link line) and rebuild forge's openssl dependency wheel (forge's make_dep_wheels)
+    stage-opencl     Android: the Khronos OpenCL headers and a link-time libOpenCL.so (ICD loader
+                     built with the NDK) into the NDK sysroot, for the engine's optional OpenCL backend
     collect          copy only the promised wheels from forge's dist/ into <cache>/<package>/
     assemble         copy a platform's cached wheels into the wheelhouse, write SHA256SUMS
     provenance       write provenance.json into the wheelhouse
@@ -343,6 +345,9 @@ def fetch_plan(ctx: Ctx, packages, dest: Path) -> list:
                 raise WheelsError(f"{ctx.manifest_path.name}: no OpenSSL asset for {target}")
             url = GITHUB_ASSET_URL.format(repo=spec["repo"], tag=spec["tag"], file=asset["file"])
             items.append((url, dest / asset["file"], asset["sha256"]))
+    if needs_opencl(ctx, packages):
+        for source in opencl_sources(ctx).values():
+            items.append((source["url"], dest / source["file"], source["sha256"]))
     lock_path = ctx.pyproject.parent / "uv.lock"
     lock = cmw.load_uv_lock_sdists(lock_path)
     for w in ctx.wheels(packages):
@@ -493,6 +498,116 @@ def cmd_stage_openssl(ctx: Ctx, args) -> None:
             raise WheelsError(f"make_dep_wheels did not produce {whl.name}")
         check_openssl_wheel(whl)
         log(f"ok {whl.name}")
+
+
+# ============================================================================ OpenCL staging (Android)
+#: The package whose Android arm64 build links the optional OpenCL backend (libggml-opencl).
+OPENCL_PACKAGE = "llama-cpp-python"
+OPENCL_SONAME = "libOpenCL.so"
+
+
+def opencl_sources(ctx: Ctx) -> dict:
+    """{"headers": {...}, "icd_loader": {...}} of [opencl] (url, sha256, file)."""
+    spec = ctx.data.get("opencl") or {}
+    out = {}
+    for key in ("headers", "icd_loader"):
+        item = spec.get(key)
+        if not isinstance(item, dict) or not all(item.get(k) for k in ("url", "sha256", "file")):
+            raise WheelsError(f"{ctx.manifest_path.name}: [opencl] needs {key} = {{url, sha256, file}}")
+        out[key] = item
+    return out
+
+
+def opencl_abis(ctx: Ctx) -> list:
+    return [str(a) for a in (ctx.data.get("opencl") or {}).get("abis") or []]
+
+
+def needs_opencl(ctx: Ctx, packages=None) -> bool:
+    """Android builds of OPENCL_PACKAGE link the OpenCL backend for [opencl] abis."""
+    if ctx.platform != "android" or not opencl_abis(ctx):
+        return False
+    return OPENCL_PACKAGE in {w.name for w in ctx.wheels(packages)}
+
+
+def _ndk_sysroot(ndk: Path) -> Path:
+    found = sorted((Path(ndk) / "toolchains" / "llvm" / "prebuilt").glob("*/sysroot"))
+    if len(found) != 1:
+        raise WheelsError(f"{ndk}: expected one toolchains/llvm/prebuilt/<host>/sysroot, found {found}")
+    return found[0]
+
+
+def _extract_tree(tarball: Path, dest: Path) -> Path:
+    """Unpack a GitHub tag archive into ``dest``; returns its single top-level directory."""
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    with tarfile.open(tarball, "r:gz") as tf:
+        for m in tf.getmembers():
+            if cmw.unsafe_member_name(_tar_rel(m.name)) or not (m.isfile() or m.isdir()):
+                raise WheelsError(f"{tarball.name}: unexpected member {m.name}")
+        kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        tf.extractall(dest, **kwargs)
+    tops = [p for p in dest.iterdir() if p.is_dir()]
+    if len(tops) != 1:
+        raise WheelsError(f"{tarball.name}: expected one top-level directory, found {[p.name for p in tops]}")
+    return tops[0]
+
+
+def check_opencl_stub(path: Path, target: str) -> None:
+    """The link-time libOpenCL.so: the target's ELF machine and SONAME libOpenCL.so (a NEEDED the
+    vendor's /vendor/lib64/libOpenCL.so satisfies; libOpenCL.so.1 would never be found there)."""
+    elf = parse_elf(Path(path).read_bytes())
+    if elf["machine"] != ELF_MACHINE[target]:
+        raise WheelsError(f"{path}: ELF machine {elf['machine']} is not {target}")
+    if elf["soname"] != OPENCL_SONAME:
+        raise WheelsError(f"{path}: SONAME {elf['soname']!r}, expected {OPENCL_SONAME!r}")
+
+
+def cmd_stage_opencl(ctx: Ctx, args) -> None:
+    """Put the OpenCL headers into the NDK sysroot and a libOpenCL.so built from the Khronos ICD
+    loader into sysroot/usr/lib/<triple>/ for each [opencl] ABI, so ggml-opencl's
+    find_package(OpenCL) finds both inside forge's NDK cross build. Link-time only: the loader
+    never ships (verify-native checks the wheel holds exactly the profile's libraries)."""
+    if not needs_opencl(ctx, args.packages):
+        log("no Android OpenCL backend in these packages; nothing to stage")
+        return
+    sources = opencl_sources(ctx)
+    downloads, work = Path(args.downloads), Path(args.work)
+    for key, source in sources.items():
+        tarball = downloads / source["file"]
+        if not tarball.is_file() or file_sha256(tarball) != source["sha256"]:
+            raise WheelsError(f"{tarball}: missing or its sha256 differs from the manifest (run fetch)")
+    headers = _extract_tree(downloads / sources["headers"]["file"], work / "headers")
+    loader = _extract_tree(downloads / sources["icd_loader"]["file"], work / "icd-loader")
+    if not (headers / "CL" / "cl.h").is_file():
+        raise WheelsError(f"{headers}: no CL/cl.h")
+    ndk = Path(args.ndk)
+    sysroot = _ndk_sysroot(ndk)
+    include = sysroot / "usr" / "include" / "CL"
+    if include.exists():
+        shutil.rmtree(include)
+    shutil.copytree(headers / "CL", include)
+    log(f"OpenCL headers -> {include}")
+    toolchain = ndk / "build" / "cmake" / "android.toolchain.cmake"
+    for target in opencl_abis(ctx):
+        if target not in NDK_TRIPLE:
+            raise WheelsError(f"[opencl] abis: {target} is not an Android ABI")
+        api = cmw.TARGETS[target].max_version[0]
+        build = work / f"icd-loader-build-{target}"
+        if build.exists():
+            shutil.rmtree(build)
+        subprocess.run(["cmake", "-S", str(loader), "-B", str(build), f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
+                        f"-DANDROID_ABI={target}", f"-DANDROID_PLATFORM=android-{api}", "-DCMAKE_BUILD_TYPE=Release",
+                        f"-DOPENCL_ICD_LOADER_HEADERS_DIR={headers}", "-DBUILD_TESTING=OFF",
+                        "-DENABLE_OPENCL_LAYERINFO=OFF", "-DCMAKE_PLATFORM_NO_VERSIONED_SONAME=ON"], check=True)
+        subprocess.run(["cmake", "--build", str(build), "--target", "OpenCL", "--parallel"], check=True)
+        built = sorted(p for p in build.rglob("libOpenCL.so") if p.is_file() and not p.is_symlink())
+        if len(built) != 1:
+            raise WheelsError(f"{build}: expected one libOpenCL.so, found {[str(p) for p in built]}")
+        check_opencl_stub(built[0], target)
+        dest = sysroot / "usr" / "lib" / NDK_TRIPLE[target] / OPENCL_SONAME
+        shutil.copy2(built[0], dest)
+        log(f"ok {dest} (Khronos ICD loader, SONAME {OPENCL_SONAME}, link-time only)")
 
 
 # ============================================================================ collect / assemble / provenance
@@ -704,7 +819,7 @@ def parse_elf(data: bytes) -> dict:
                 return offset + (addr - vaddr)
         raise ValueError(f"address {addr:#x} is outside every LOAD segment")
 
-    needed_offsets, strtab = [], None
+    needed_offsets, strtab, soname_offset = [], None, None
     if dynamic is not None:
         size = struct.calcsize(dyn_fmt)
         for i in range(dynamic[1] // size):
@@ -715,16 +830,22 @@ def parse_elf(data: bytes) -> dict:
                 needed_offsets.append(val)
             elif tag == 5:   # DT_STRTAB
                 strtab = val
-    needed = []
-    if needed_offsets:
+            elif tag == 14:  # DT_SONAME
+                soname_offset = val
+    needed, soname = [], None
+    if needed_offsets or soname_offset is not None:
         if strtab is None:
-            raise ValueError("DT_NEEDED without DT_STRTAB")
+            raise ValueError("DT_NEEDED / DT_SONAME without DT_STRTAB")
         base = vaddr_to_offset(strtab)
-        for off in needed_offsets:
+
+        def string_at(off: int) -> str:
             endpos = data.index(b"\0", base + off)
-            needed.append(data[base + off:endpos].decode("utf-8", "replace"))
+            return data[base + off:endpos].decode("utf-8", "replace")
+
+        needed = [string_at(off) for off in needed_offsets]
+        soname = string_at(soname_offset) if soname_offset is not None else None
     return {"class": 64 if ei_class == 2 else 32, "machine": e_machine,
-            "load_aligns": [a for _v, _o, _s, a in loads], "needed": needed}
+            "load_aligns": [a for _v, _o, _s, a in loads], "needed": needed, "soname": soname}
 
 
 def elf_dynsym(data: bytes) -> list:
@@ -1199,6 +1320,7 @@ def cmd_verify_native(ctx: Ctx, args) -> int:
 # ============================================================================ installed index packages
 # Native packages `flet build` installs from pypi.flet.dev (not from our wheelhouse) whose libraries we
 # check after every build: what pip put into build/site-packages/<arch> is what the app loads.
+IOS_LLAMA_LIBS = ("libggml-base", "libggml-cpu", "libggml-metal", "libggml", "libllama", "libmtmd")
 SITE_PROFILES = {
     # The built-in llama.cpp engine: pure ctypes over five shared libraries (our own build of forge's
     # recipes/llama-cpp-python with LLAVA_BUILD=ON, wheelhouse.toml build_tag 1000: the four of
@@ -1211,11 +1333,23 @@ SITE_PROFILES = {
         "libs": ("libggml-base", "libggml-cpu", "libggml", "libllama", "libmtmd"),
         # Android arm64 is built with GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS: four CPU backends
         # instead of libggml-cpu, one picked at run time (recipe meta.yaml and mobile.patch, 7.).
+        # The optional GPU backends (mobile.patch 8.): libggml-opencl next to the arm64 CPU variants,
+        # libggml-metal (linked into libggml) in every iOS slice.
         "target_libs": {
             "arm64-v8a": ("libggml-base", "libggml", "libllama", "libmtmd", "libggml-cpu-android_armv8.0_1",
                           "libggml-cpu-android_armv8.2_1", "libggml-cpu-android_armv8.2_2",
-                          "libggml-cpu-android_armv8.6_1"),
+                          "libggml-cpu-android_armv8.6_1", "libggml-opencl"),
+            "iphoneos.arm64": IOS_LLAMA_LIBS,
+            "iphonesimulator.arm64": IOS_LLAMA_LIBS,
+            "iphonesimulator.x86_64": IOS_LLAMA_LIBS,
         },
+        # Libraries that may need a device library outside the wheel: only the GPU backend needs
+        # libOpenCL.so (the vendor's, Android 12+ via uses-native-library), and nothing may need the
+        # GPU backend itself, so a phone without OpenCL loads everything else. Its cl* imports
+        # resolve against that library (``imports``) and are not checked against the NDK.
+        "android_optional": {"libggml-opencl": {"needed": "libOpenCL.so", "imports": r"^cl[A-Z]\w*$"}},
+        # System frameworks an iOS library may link besides /usr/lib (Metal is in every iOS 13+).
+        "ios_frameworks": {"libggml-metal": ("Foundation", "Metal", "MetalKit", "CoreFoundation", "CoreGraphics")},
         # The optional AArch64 instructions each arm64 library may use (aarch64_code_features); every
         # other library must run on an armv8.0 core. A variant must also contain the instructions its
         # feature set promises (proof that its -march flags took effect).
@@ -1278,6 +1412,8 @@ def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: d
         except (ValueError, struct.error) as e:
             errors.append(f"{target}: {cxx[0].name}: cannot read the dynamic symbols ({e})")
     imports = {}
+    optional = profile.get("android_optional", {})
+    gpu_backends = {f"{stem}.so" for stem in optional}
     for stem, path in libs.items():
         name = f"{path.parent.name}/{path.name}"
         data = path.read_bytes()
@@ -1291,13 +1427,27 @@ def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: d
         if not elf["load_aligns"] or any(a < ANDROID_PAGE for a in elf["load_aligns"]):
             errors.append(f"{target}: {name}: LOAD alignment {[hex(a) for a in elf['load_aligns']]} "
                           f"(need >= {ANDROID_PAGE:#x} for 16 KB page devices)")
-        extra = sorted(set(elf["needed"]) - allowed)
+        device_lib = (optional.get(stem) or {}).get("needed")
+        own_allowed = (allowed - gpu_backends) | ({device_lib} if device_lib else set())
+        extra = sorted(set(elf["needed"]) - own_allowed)
         if extra:
-            errors.append(f"{target}: {name}: NEEDED {extra} beyond {sorted(allowed)}")
+            loads_gpu = sorted(set(extra) & gpu_backends)
+            errors.append(f"{target}: {name}: NEEDED {extra} beyond {sorted(own_allowed)}"
+                          + (f" ({', '.join(loads_gpu)} is the optional GPU backend: only loaded on demand, "
+                             f"never NEEDED)" if loads_gpu else ""))
+        if device_lib and device_lib not in elf["needed"]:
+            errors.append(f"{target}: {name}: does not need {device_lib} (was the GPU backend built?)")
         system_needed |= set(elf["needed"]) & set(profile["android_system"])
         exports |= {n for n, bind, defined in symbols if defined and bind in (STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE)}
-        imports[name] = [n for n, bind, defined in symbols if not defined and bind != STB_WEAK]
-        notes.append(f"{target}: {name} NEEDED {elf['needed']}; {len(imports[name])} strong imports")
+        strong = [n for n, bind, defined in symbols if not defined and bind != STB_WEAK]
+        if device_lib:
+            from_device = re.compile(optional[stem]["imports"])
+            strong = [n for n in strong if not from_device.match(n)]
+            notes.append(f"{target}: {name} optional GPU backend: NEEDED {device_lib} (the device's; loaded only "
+                         f"when the GPU is switched on)")
+        imports[name] = strong
+        notes.append(f"{target}: {name} NEEDED {elf['needed']}; {len(imports[name])} strong imports; "
+                     f"{len(data) / 1e6:.2f} MB")
         if target == "arm64-v8a" and "aarch64_variants" in profile:
             errs, note = _check_aarch64_features(f"{target}: {name}", data, profile["aarch64_variants"].get(stem))
             errors += errs
@@ -1318,15 +1468,20 @@ def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: d
     return errors, notes
 
 
-def _check_ios_site_libs(target: str, libs: dict, minos: tuple) -> tuple:
+def _check_ios_site_libs(target: str, libs: dict, minos: tuple, frameworks=None) -> tuple:
+    """``frameworks``: {stem: (framework names)} a library may link from /System/Library/Frameworks."""
     errors, notes = [], []
-    allowed = re.compile(r"^(@rpath/(" + "|".join(re.escape(s) for s in libs) + r")\.dylib|/usr/lib/.+)$")
+    siblings = r"@rpath/(" + "|".join(re.escape(s) for s in libs) + r")\.dylib|/usr/lib/.+"
     cputype, platform = MACHO_EXPECT[target]
     limit = ios_minos_limit(target, minos)
     for stem, path in libs.items():
         name = f"{path.parent.name}/{path.name}"
+        own = (frameworks or {}).get(stem) or ()
+        allowed = re.compile(r"^(" + siblings + "".join(
+            f"|/System/Library/Frameworks/{re.escape(f)}\\.framework/{re.escape(f)}" for f in own) + r")$")
         try:
-            macho = parse_macho(path.read_bytes())
+            data = path.read_bytes()
+            macho = parse_macho(data)
         except (ValueError, struct.error) as e:
             errors.append(f"{target}: {name}: {e}")
             continue
@@ -1344,7 +1499,8 @@ def _check_ios_site_libs(target: str, libs: dict, minos: tuple) -> tuple:
                               f"{'.'.join(map(str, limit))}")
         bad = [d for d in macho["dylibs"] if not allowed.match(d)]
         if bad:
-            errors.append(f"{target}: {name}: links {bad} (only its siblings and /usr/lib)")
+            errors.append(f"{target}: {name}: links {bad} (only its siblings, /usr/lib"
+                          f"{' and the ' + ', '.join(own) + ' frameworks' if own else ''})")
         if not macho["flags"] & MH_TWOLEVEL:
             errors.append(f"{target}: {name}: flat namespace (MH_TWOLEVEL not set)")
         if macho["undefined"] is None:
@@ -1354,7 +1510,7 @@ def _check_ios_site_libs(target: str, libs: dict, minos: tuple) -> tuple:
         if unbound:
             errors.append(f"{target}: {name}: {len(unbound)} undefined symbols bound to none of its dylibs "
                           f"{_brief(unbound)} (DYNAMIC_LOOKUP: dyld fails on them at run time)")
-        notes.append(f"{target}: {name} {describe_macho(macho)}")
+        notes.append(f"{target}: {name} {describe_macho(macho)}; {len(data) / 1e6:.2f} MB")
     return errors, notes
 
 
@@ -1390,7 +1546,7 @@ def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, st
                 errors.append(f"{path.name}: cannot check the imports against {profile['android_cxx']}: {problem}")
             errs, ns = _check_android_site_libs(target, root, libs, profile, stubs, cxx=[cxx] if cxx else [])
         else:
-            errs, ns = _check_ios_site_libs(target, libs, minos)
+            errs, ns = _check_ios_site_libs(target, libs, minos, profile.get("ios_frameworks"))
     errors += [f"{path.name}: {e}" for e in errs if not (platform == "android" and cxx is None and "copies of" in e)]
     notes += [f"{path.name}: {n}" for n in ns]
     return errors, notes
@@ -1447,7 +1603,7 @@ def verify_site_packages(site_packages, platform: str, package: str, version: st
         if platform == "android":
             errs, ns = _check_android_site_libs(target, arch_dir, libs, profile, stubs)
         else:
-            errs, ns = _check_ios_site_libs(target, libs, minos)
+            errs, ns = _check_ios_site_libs(target, libs, minos, profile.get("ios_frameworks"))
         errors += errs
         notes += ns
     if not seen:
@@ -1676,6 +1832,11 @@ def main(argv=None) -> int:
     p = add("stage-openssl", "swap in the static BeeWare OpenSSL", packages=True)
     p.add_argument("--downloads", required=True)
     p.add_argument("--forge", required=True, help="the mobile-forge checkout (cwd of setup.sh)")
+    p = add("stage-opencl", "Android: OpenCL headers + a link-time libOpenCL.so into the NDK sysroot",
+            packages=True)
+    p.add_argument("--downloads", required=True)
+    p.add_argument("--ndk", required=True, help="the NDK forge builds with ($NDK_HOME)")
+    p.add_argument("--work", required=True, help="scratch directory for the sources and the loader build")
     p = add("collect", "copy the promised wheels from forge's dist/ into the wheel cache", packages=True)
     p.add_argument("--dist", required=True)
     p.add_argument("--cache", required=True)
@@ -1713,6 +1874,8 @@ def main(argv=None) -> int:
             cmd_fetch(ctx, args)
         elif args.cmd == "stage-openssl":
             cmd_stage_openssl(ctx, args)
+        elif args.cmd == "stage-opencl":
+            cmd_stage_opencl(ctx, args)
         elif args.cmd == "collect":
             cmd_collect(ctx, args)
         elif args.cmd == "assemble":

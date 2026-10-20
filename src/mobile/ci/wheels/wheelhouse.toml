@@ -79,6 +79,17 @@ build = "1"
 "iphonesimulator.arm64" = { file = "openssl-3.5.9-1-iphonesimulator.arm64.tar.gz", sha256 = "3617fe2d80bb2f0cd981f39d32b0bd651c36b86efe71b9d4025ca3befd229461" }
 "iphonesimulator.x86_64" = { file = "openssl-3.5.9-1-iphonesimulator.x86_64.tar.gz", sha256 = "bd27471f292d501906a6d7ee36ce8ffe4d39ebb1c00ffe3c06e679b090d13f4d" }
 
+# Khronos OpenCL headers and ICD loader (Apache-2.0), link-time only: the Android arm64
+# llama-cpp-python build's optional OpenCL backend (libggml-opencl, Adreno) is compiled against
+# the headers and linked against a libOpenCL.so (SONAME libOpenCL.so) built from the loader with
+# the NDK. wheels.py stage-opencl puts both into the NDK sysroot before forge runs; neither ships:
+# on the phone the vendor's /vendor/lib64/libOpenCL.so is loaded (uses-native-library). GitHub's
+# tag archives, sha256 of the downloaded bytes checked 2026-10-20.
+[opencl]
+abis = ["arm64-v8a"]
+headers = { url = "https://github.com/KhronosGroup/OpenCL-Headers/archive/refs/tags/v2026.05.29.tar.gz", sha256 = "d9e6c48357de5002da11ce45de600e0c3ffe6ab4f628a3b9fe2b38603161658a", file = "OpenCL-Headers-2026.05.29.tar.gz" }
+icd_loader = { url = "https://github.com/KhronosGroup/OpenCL-ICD-Loader/archive/refs/tags/v2026.05.29.tar.gz", sha256 = "48fd0c5181db7cd046f4f731d5955694892e10998d49d09ee0d997e7e04fd939", file = "OpenCL-ICD-Loader-2026.05.29.tar.gz" }
+
 # The wheels we promise. version must equal the pyproject pin, sdist_sha256 the uv.lock sdist
 # hash, and requires_dist the wheel METADATA's Requires-Dist entries that carry no extra marker.
 # serious_python installs all three iOS slices, so iOS needs all three.

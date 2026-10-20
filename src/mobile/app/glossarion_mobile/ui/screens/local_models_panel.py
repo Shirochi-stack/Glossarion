@@ -8,6 +8,10 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   (8,192 tokens, 4,096 for files of 4 GB and more); a job on it asks for half the context as output. Without
   llama-cpp-python (a desktop dev run) the card says the engine is unavailable; nothing crashes. Below
   the on-device sampling fields, "Block CJK in translations (adaptive)" (on by default; ``script_ban``).
+  Where the build has a GPU backend (iOS Metal, Android arm64 OpenCL), "Use GPU (experimental)" (off by
+  default): the card then says what runs the model ("Runs on GPU: … (OpenCL)" / "Runs on CPU (…)") and,
+  after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU"; on Android "Add GPU-friendly
+  presets (Q4_0)" appends ``presets.GPU_PRESETS``.
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
@@ -621,6 +625,7 @@ class LocalModelsPanel(OnDeviceFlow):
                     ft.TextButton(content="Save", key="local-settings-save", on_click=lambda e: self.save_settings())],
                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             self.settings_error,
+            *self._gpu_section(),
             *self._sampling_section(),
         ])
         self.preset_column = ft.Column([], spacing=6, tight=True, key="local-presets")
@@ -694,6 +699,9 @@ class LocalModelsPanel(OnDeviceFlow):
         details = []
         if snap.load_seconds is not None and snap.model:
             details.append(f"Loaded in {snap.load_seconds:.1f} s")
+        device = getattr(snap, "device", None)
+        if device and snap.model and snap.state != "idle":
+            details.append(f"Runs on {device}")
         if snap.system_info:
             details.append(snap.system_info)
         if snap.error:
@@ -703,8 +711,11 @@ class LocalModelsPanel(OnDeviceFlow):
         self.unload_button.disabled = snap.state not in ("ready",)
         self.unavailable_text.visible = not snap.available
         self.unavailable_text.value = snap.unavailable_reason or ""
+        note = getattr(snap, "gpu_note", None)
+        self.gpu_status.value = note or ""
+        self.gpu_status.visible = bool(note)
         if push:
-            _push(self.engine_state, self.engine_detail, self.unload_button, self.unavailable_text)
+            _push(self.engine_state, self.engine_detail, self.unload_button, self.unavailable_text, self.gpu_status)
 
     def context_changed(self, stem: Optional[str]) -> None:
         if getattr(self, "context", None) is not None:
@@ -751,6 +762,55 @@ class LocalModelsPanel(OnDeviceFlow):
     def save_block_cjk(self) -> bool:
         value = self.service.save_block_cjk(self.block_cjk_switch.value)
         return value
+
+    # ---- GPU ------------------------------------------------------------------------------------------
+
+    def _gpu_backend(self) -> Optional[str]:
+        return getattr(self.service, "gpu_backend", None)
+
+    def _gpu_section(self) -> list:
+        """"Use GPU (experimental)" (off by default; only where the build has a GPU backend), its note, the
+        fallback line ("GPU unavailable: … — using CPU") and, on Android, "Add GPU-friendly presets (Q4_0)"."""
+        backend = self._gpu_backend()
+        use = bool(backend) and bool(getattr(self.service, "use_gpu", lambda: False)())
+        self.gpu_switch = ft.Switch(label="Use GPU (experimental)", value=use, key="local-gpu", visible=bool(backend),
+                                    on_change=lambda e: self.save_gpu())
+        if backend == "OpenCL":
+            text = ("Runs the model on a Qualcomm Adreno GPU (Snapdragon) through OpenCL. Fastest with Q4_0 models; "
+                    "other quantizations can be slower than the CPU. Other GPUs, or a failure, fall back to the "
+                    "CPU automatically.")
+        else:
+            text = ("Runs the model on the iPhone's or iPad's GPU through Metal. A failure falls back to the CPU "
+                    "automatically. The GPU shares the device's memory.")
+        self.gpu_note = _small(text, key="local-gpu-note", visible=bool(backend))
+        self.gpu_status = ft.Text("", color=semantic("warning"), visible=False, key="local-gpu-status",
+                                  theme_style=ft.TextThemeStyle.BODY_SMALL, selectable=True)
+        self.gpu_presets_button = ft.TextButton(content="Add GPU-friendly presets (Q4_0)", icon=ft.Icons.ADD,
+                                                key="local-gpu-presets", on_click=lambda e: self.add_gpu_presets())
+        self._render_gpu_presets_button()
+        return [self.gpu_switch, self.gpu_note, self.gpu_status, self.gpu_presets_button]
+
+    def _render_gpu_presets_button(self) -> None:
+        missing = presets.missing_gpu_presets(self.presets())
+        self.gpu_presets_button.visible = (self._gpu_backend() == "OpenCL" and bool(self.gpu_switch.value)
+                                           and bool(missing))
+
+    def save_gpu(self) -> bool:
+        value = bool(self.service.save_gpu(self.gpu_switch.value))
+        self.gpu_switch.value = value
+        self._render_gpu_presets_button()
+        _push(self.gpu_switch, self.gpu_presets_button)
+        return value
+
+    def add_gpu_presets(self) -> list:
+        """Append the Q4_0 presets (``presets.GPU_PRESETS``) the list does not have yet."""
+        _rows, added = presets.add_gpu_presets(self.prefs)
+        self._render_gpu_presets_button()
+        _push(self.gpu_presets_button)
+        self.render()
+        self.say(f"Added {len(added)} GPU-friendly preset{'s' if len(added) != 1 else ''} (Q4_0)" if added
+                 else "The GPU-friendly presets are already in the list")
+        return added
 
     def save_sampling(self) -> Optional[str]:
         values, error = self.service.save_sampling({k: f.value for k, f in self.sampling_fields.items()})

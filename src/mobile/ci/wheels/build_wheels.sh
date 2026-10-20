@@ -12,7 +12,8 @@
 #   2. clone mobile-forge at the pinned commit and pin its crossenv dependency to a commit;
 #   3. wheels.py fetch: the support tarball, BeeWare OpenSSL 3.5.9 and the sdists (from uv.lock),
 #      sha256-checked and stored under the names forge expects, so forge downloads nothing itself;
-#   4. Android: the pinned NDK (forge's .ci/install_ndk.sh, a no-op when installed) -> NDK_HOME;
+#   4. Android: the pinned NDK (forge's .ci/install_ndk.sh, a no-op when installed) -> NDK_HOME, and
+#      wheels.py stage-opencl: OpenCL headers + a link-time libOpenCL.so in its sysroot (llama-cpp-python);
 #   5. source forge's setup.sh: support tree, uv venv on CPython 3.13.15, dependency wheels;
 #   6. wheels.py stage-openssl: static OpenSSL 3.5.9 replaces the support tree's 3.0.x, and every
 #      other libcrypto.a/libssl.a in the support tree is deleted (see "Link order" below);
@@ -105,6 +106,11 @@ if [ "$platform" = android ]; then
   export NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
   compgen -G "$NDK_HOME/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android24-clang" > /dev/null \
     || die "NDK $ANDROID_NDK_VERSION has no aarch64-linux-android24-clang under $NDK_HOME"
+  echo "::endgroup::"
+  echo "::group::OpenCL headers + link-time libOpenCL.so (the engine's optional GPU backend)"
+  # A no-op unless llama-cpp-python is built; the loader never ships (the device's libOpenCL.so is used).
+  host_py "$wheels_py" stage-opencl --platform android --downloads "$FORGE_DIR/downloads" --ndk "$NDK_HOME" \
+    --work "$tmp_root/opencl" "${packages[@]}"
   echo "::endgroup::"
 fi
 

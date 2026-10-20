@@ -2,7 +2,8 @@
 
 * ``engine_check()`` (smoke ``llama_engine``): ``llama_cpp`` imports, its version is
   ``ENGINE_VERSION``, ``llama_print_system_info()`` loads the native libraries and libmtmd (vision)
-  loads.
+  loads; ``gpu_backend_check()``: the build ships the GPU backend the app offers (Metal on iOS, OpenCL
+  on Android arm64, none on x86_64) and nothing registered it while the GPU is off.
 * ``fake_route_check(root)`` (e2e ``local_route_fake_engine``): ``LocalLLMServer`` + ``FakeEngine`` +
   ``UnifiedClient`` with ``local/fake-echo``, offline, plain and streaming.
 * ``llama_suite()`` (suite ``llama``, ``glossarion://app/__selftest__?suite=llama``): downloads the
@@ -79,7 +80,36 @@ def engine_check() -> dict:
     vision, reason = eng.vision_status()  # libmtmd (our own build): the vision models' image encoder
     if not vision:
         raise AssertionError(reason or eng.NO_MTMD)
-    return {"version": version, "system_info": info[:300], "cpu_variant": eng.cpu_variant(), "vision": vision}
+    return {"version": version, "system_info": info[:300], "cpu_variant": eng.cpu_variant(), "vision": vision,
+            "gpu": gpu_backend_check()}
+
+
+def gpu_backend_check() -> dict:
+    """The optional GPU backend is shipped where it should be and inert until the app asks for it:
+    iOS loaded libggml-metal (linked into libggml), the Android arm64 build names OpenCL, and no GPU
+    backend is registered with ggml unless ``register_gpu_backend`` ran (the "Use GPU" setting)."""
+    ext = importlib.import_module("llama_cpp._ctypes_extensions")
+    name_of = getattr(ext, "gpu_backend_name", None)
+    if name_of is None:
+        raise AssertionError("this llama-cpp-python build has no GPU loader (mobile.patch 8.)")
+    backend = name_of()
+    offered = eng.gpu_offer()
+    if offered != backend:
+        raise AssertionError(f"the app offers GPU backend {offered!r}, the engine build ships {backend!r}")
+    requested = bool(getattr(ext, "GPU_STATE", {}))
+    registered = []
+    libggml = getattr(ext, "_LIBGGML", None)
+    if libggml is not None:
+        import ctypes
+
+        by_name = libggml.ggml_backend_reg_by_name
+        by_name.restype = ctypes.c_void_p
+        by_name.argtypes = [ctypes.c_char_p]
+        registered = [n for n in ("Metal", "OpenCL") if by_name(n.encode("ascii"))]
+    if registered and not requested:
+        raise AssertionError(f"GPU backend {registered} registered although the GPU was never switched on")
+    return {"backend": backend, "registered": registered, "requested": requested,
+            "state": dict(getattr(ext, "GPU_STATE", {}) or {})}
 
 
 def _client_send(model: str, messages: list, *, stream: bool, max_tokens: int) -> tuple:

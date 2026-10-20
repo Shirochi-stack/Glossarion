@@ -409,7 +409,8 @@ def test_the_llama_suite_describes_an_image_and_the_smoke_check_needs_libmtmd(mo
     assert selfcheck.MARKER_LLAMA_VISION == "GLOSSARION_LLAMA_VISION"
     monkeypatch.setattr(eng, "vision_status", lambda: (False, "no libmtmd"))
     monkeypatch.setattr(selfcheck.importlib, "import_module",
-                        lambda name: type("M", (), {"__version__": eng.ENGINE_VERSION})())
+                        lambda name: type("M", (), {"__version__": eng.ENGINE_VERSION, "GPU_STATE": {}, "_LIBGGML": None,
+                                                    "gpu_backend_name": staticmethod(lambda: None)})())
     monkeypatch.setattr(eng, "system_info", lambda: "CPU : SSE3 = 1")
     with pytest.raises(AssertionError, match="no libmtmd"):
         selfcheck.engine_check()

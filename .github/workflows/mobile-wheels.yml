@@ -20,6 +20,12 @@
 # src/mobile/ci/wheels/cpu_variants_check.py: the variant the patched loader picks natively, tokens/s
 # per variant, and under qemu-aarch64 that a Cortex-A53 gets the armv8.0 baseline without SIGILL
 # (the Android libraries themselves need bionic, so no runner can load them).
+#
+# gpu_check (dispatch only, android): the same job (built with the Android arm64 build's OpenCL
+# backend too) runs src/mobile/ci/wheels/gpu_backend_check.py twice: without any libOpenCL (the ICD
+# loader removed after the build) and with pocl's CPU-only OpenCL (no Adreno GPU). Both times the
+# backend must load only on demand, report why there is no GPU, and the app's engine must fall back
+# to the CPU and generate. Real Adreno execution needs a phone.
 
 name: Mobile wheels (cryptography, Pillow, llama-cpp-python)
 
@@ -48,6 +54,10 @@ on:
         default: true
       cpu_check:
         description: Also check the engine's runtime CPU variants on Linux arm64 + qemu (android)
+        type: boolean
+        default: false
+      gpu_check:
+        description: Also check the engine's optional OpenCL backend loads on demand and falls back (android)
         type: boolean
         default: false
 
@@ -254,8 +264,8 @@ jobs:
           retention-days: 14
 
   arm64-cpu-variants:
-    name: Engine CPU variants (Linux arm64 + qemu)
-    if: inputs.platform == 'android' && inputs.cpu_check
+    name: Engine CPU variants / GPU loader (Linux arm64 + qemu)
+    if: inputs.platform == 'android' && (inputs.cpu_check || inputs.gpu_check)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
     env:
@@ -275,14 +285,14 @@ jobs:
           python-version: '3.13'
           enable-cache: false
 
-      - name: Toolchain (cmake, ninja, qemu-user)
+      - name: Toolchain (cmake, ninja, qemu-user, OpenCL headers + ICD loader)
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build qemu-user patch
+          sudo apt-get install -y cmake ninja-build qemu-user patch opencl-headers ocl-icd-opencl-dev
           qemu-aarch64 --version | head -1
           grep -m1 -i '^features' /proc/cpuinfo
 
-      - name: Build llama-cpp-python with the Android arm64 CPU variants
+      - name: Build llama-cpp-python with the Android arm64 CPU variants and OpenCL backend
         run: |
           read -r url sha < <(uv run --no-project python -c 'import tomllib; d = tomllib.load(open("src/mobile/ci/wheels/wheelhouse.toml", "rb")); w = [w for w in d["wheel"] if w["name"] == "llama-cpp-python"][0]; print(w["sdist_url"], w["sdist_sha256"])')
           curl -fsSL --retry 3 "$url" -o "$RUNNER_TEMP/llama.tar.gz"
@@ -293,7 +303,7 @@ jobs:
           uv venv "$RUNNER_TEMP/venv" --python 3.13
           # The recipe's Android arm64 CMake arguments, plus the option that builds the Android variant
           # set on Linux (mobile.patch 7.).
-          export CMAKE_ARGS="-DLLAVA_BUILD=ON -DMTMD_VIDEO=OFF -DCMAKE_INSTALL_LIBDIR=llama_cpp/lib -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF -DGGML_BLAS=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_OPENCL=OFF -DGGML_RPC=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_INSTALL_BINDIR=llama_cpp/lib -DGLOSSARION_ANDROID_CPU_VARIANTS=ON"
+          export CMAKE_ARGS="-DLLAVA_BUILD=ON -DMTMD_VIDEO=OFF -DCMAKE_INSTALL_LIBDIR=llama_cpp/lib -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF -DGGML_BLAS=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_RPC=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_INSTALL_BINDIR=llama_cpp/lib -DGGML_OPENCL=ON -DGGML_OPENCL_EMBED_KERNELS=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON -DGLOSSARION_ANDROID_CPU_VARIANTS=ON"
           uv pip install --python "$RUNNER_TEMP/venv/bin/python" -v "$RUNNER_TEMP/llama-src" 2>&1 | tail -n 60
           ls -l "$("$RUNNER_TEMP/venv/bin/python" -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("llama_cpp").origin).parent / "lib")')"
 
@@ -304,21 +314,45 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$Q4_0_SHA256" "$RUNNER_TEMP/q4_0.gguf" "$Q4_K_M_SHA256" "$RUNNER_TEMP/q4_k_m.gguf" | sha256sum -c -
 
       - name: Check the CPU variants (native benchmark, qemu Cortex-A53 / A76)
+        if: inputs.cpu_check
         run: |
           "$RUNNER_TEMP/venv/bin/python" src/mobile/ci/wheels/cpu_variants_check.py run \
             --model "$RUNNER_TEMP/q4_0.gguf" --bench-model "$RUNNER_TEMP/q4_0.gguf" --bench-model "$RUNNER_TEMP/q4_k_m.gguf" \
             --json "$RUNNER_TEMP/cpu_variants.json" --summary "$RUNNER_TEMP/cpu_variants.md"
 
+      - name: GPU loader without any OpenCL driver
+        if: inputs.gpu_check
+        run: |
+          # A phone without libOpenCL.so: remove the ICD loader the build linked against.
+          sudo apt-get remove -y ocl-icd-libopencl1
+          if ldconfig -p | grep -q 'libOpenCL\.so'; then ldconfig -p | grep libOpenCL; echo "::error::libOpenCL is still installed"; exit 1; fi
+          "$RUNNER_TEMP/venv/bin/python" src/mobile/ci/wheels/gpu_backend_check.py --expect no-driver \
+            --model "$RUNNER_TEMP/q4_0.gguf" --json "$RUNNER_TEMP/gpu_no_driver.json"
+
+      - name: GPU loader with OpenCL but no Adreno GPU (pocl)
+        if: inputs.gpu_check
+        run: |
+          # A phone with another vendor's OpenCL (Mali, Xclipse): pocl's CPU device stands in.
+          sudo apt-get install -y ocl-icd-libopencl1 pocl-opencl-icd
+          "$RUNNER_TEMP/venv/bin/python" src/mobile/ci/wheels/gpu_backend_check.py --expect no-adreno \
+            --model "$RUNNER_TEMP/q4_0.gguf" --json "$RUNNER_TEMP/gpu_no_adreno.json"
+
       - name: Report
         if: always()
         run: |
           [ -f "$RUNNER_TEMP/cpu_variants.md" ] && cat "$RUNNER_TEMP/cpu_variants.md" >> "$GITHUB_STEP_SUMMARY" || true
+          for f in "$RUNNER_TEMP"/gpu_no_*.json; do
+            [ -f "$f" ] || continue
+            { echo "### $(basename "$f" .json)"; echo '```json'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: mobile-cpu-variants-report
-          path: ${{ runner.temp }}/cpu_variants.*
+          path: |
+            ${{ runner.temp }}/cpu_variants.*
+            ${{ runner.temp }}/gpu_no_*.json
           if-no-files-found: warn
           retention-days: 14
