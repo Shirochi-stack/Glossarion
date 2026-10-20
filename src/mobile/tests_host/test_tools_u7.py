@@ -1774,6 +1774,17 @@ def test_file_browser_open_with_rename_and_delete(tmp_path):
         assert [i.label for i in open_sheet.items] == ["Text editor", "Reader", "Media viewer", "Another app…"]
         assert open_sheet.items[0].disabled_reason is None
         assert open_sheet.items[2].disabled_reason == "Not an image, video or audio file"
+        # Open with › Reader: EPUB, TXT, Markdown and HTML (a translated chapter opens its book there);
+        # a PDF or another type says why instead of failing after the Reader opened
+        for name in ("response_chapter0001.html", "page.xhtml", "notes.md", "book.epub"):
+            reader_item = screen.open_with(FileEntry(name, str(root / "Book" / name), False, 1, 0.0)).items[1]
+            assert reader_item.disabled_reason is None, name
+        reader_item.on_select()
+        assert opened.pop() == {"path": str(root / "Book" / "book.epub")} and opened == []
+        pdf_item = screen.open_with(FileEntry("doc.pdf", str(root / "Book" / "doc.pdf"), False, 1, 0.0)).items[1]
+        assert "PDF" in pdf_item.disabled_reason
+        other = screen.open_with(FileEntry("data.json", str(root / "Book" / "data.json"), False, 1, 0.0)).items[1]
+        assert other.disabled_reason == "The Reader opens EPUB, TXT, HTML and Markdown files"
         # UI_SPEC §4.10 Open with › MediaViewer: images, video and audio open in the full-screen viewer
         image = FileEntry(picture.name, str(picture), False, 8, 0.0)
         media_sheet = screen.open_with(image)

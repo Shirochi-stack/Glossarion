@@ -42,8 +42,10 @@ from __future__ import annotations
 
 import hashlib
 import html as html_lib
+import json
 import logging
 import os
+import re
 import threading
 import zipfile
 from dataclasses import dataclass, field
@@ -61,11 +63,17 @@ __all__ = [
     "MODE_WORKSPACE",
     "OpenPlan",
     "ReaderSession",
+    "READER_FILE_EXTENSIONS",
     "SOURCE_EPUB",
+    "SOURCE_HTML",
     "SOURCE_TXT",
     "TXT_TRANSLATE_REASON",
+    "chapter_index_for_file",
     "plan_for_file",
     "plan_open",
+    "reader_file_reason",
+    "unsupported_file_message",
+    "workspace_for_chapter_file",
 ]
 
 log = logging.getLogger("glossarion.reader")
@@ -75,12 +83,119 @@ MODE_OVERLAY = "overlay"
 MODE_DUAL = "dual"
 MODE_WORKSPACE = "workspace"
 
-#: ``OpenPlan.source_kind``: "txt" for a TXT book (text mode) or a TXT translation workspace.
+#: ``OpenPlan.source_kind``: "txt" for a TXT book (text mode) or a TXT translation workspace;
+#: "html" for one HTML file read as a single-chapter document.
 SOURCE_EPUB = "epub"
 SOURCE_TXT = "txt"
+SOURCE_HTML = "html"
 TXT_TRANSLATE_REASON = "Translate TXT files from the Library (whole file)"
 
 _HTML_EXT = (".html", ".xhtml", ".htm")
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+#: Files the Reader opens from a path (Files › Open with, the Converter): EPUB, TXT and Markdown
+#: (text mode), HTML (a chapter of a translation workspace opens that book at the chapter; any other
+#: HTML file is a one-chapter document).
+READER_FILE_EXTENSIONS = (".epub", ".txt", ".md") + _HTML_EXT
+_TEXT_EXT = (".txt", ".md")
+_PROGRESS_FILE = "translation_progress.json"
+_WORKSPACE_DEPTH = 3  # a chapter file up to this many folders below its workspace (images/, sub folders)
+PDF_REASON = "The Reader can't open PDF files directly; translate the PDF, then read it from the Library"
+UNSUPPORTED_REASON = "The Reader opens EPUB, TXT, HTML and Markdown files"
+
+
+def reader_file_reason(path: Any) -> Optional[str]:
+    """Why the Reader can't open the file at ``path`` (None: it can) -- Files › Open with › Reader."""
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    if ext in READER_FILE_EXTENSIONS:
+        return None
+    if ext == ".pdf":
+        return PDF_REASON
+    return UNSUPPORTED_REASON
+
+
+def unsupported_file_message(path: Any) -> str:
+    """The Reader's error for a file it does not open (the file is there, its type is not readable)."""
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    if ext == ".pdf":
+        return PDF_REASON
+    if ext:
+        return f"The Reader can't open {ext} files. {UNSUPPORTED_REASON}."
+    return f"The Reader can't open this file. {UNSUPPORTED_REASON}."
+
+
+def workspace_for_chapter_file(path: Any) -> str:
+    """The translation workspace an HTML chapter file belongs to (its folder or an ancestor a few
+    levels up holds ``translation_progress.json``); "" for any other file."""
+    text = str(path or "")
+    if not text.lower().endswith(_HTML_EXT) or not os.path.isfile(text):
+        return ""
+    folder = os.path.dirname(os.path.abspath(text))
+    for _level in range(_WORKSPACE_DEPTH):
+        if os.path.isfile(os.path.join(folder, _PROGRESS_FILE)):
+            return folder
+        parent = os.path.dirname(folder)
+        if not parent or parent == folder:
+            break
+        folder = parent
+    return ""
+
+
+def _chapter_stem(name: Any) -> str:
+    """``response_0001_ch.xhtml.html`` -> ``0001_ch`` (the ``reader_overlay`` chapter-name rule)."""
+    base = _base(name)
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    while base.endswith(_HTML_EXT):
+        base = os.path.splitext(base)[0]
+    return base
+
+
+def _progress_chapters(folder: str) -> dict:
+    try:
+        with open(os.path.join(folder, _PROGRESS_FILE), "r", encoding="utf-8") as stream:
+            data = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    chapters = data.get("chapters") if isinstance(data, dict) else None
+    return chapters if isinstance(chapters, dict) else {}
+
+
+def chapter_index_for_file(session: "ReaderSession", path: Any) -> Optional[int]:
+    """The index of the loaded book's chapter that the file at ``path`` is (blocking): an overlay's
+    response file, a workspace manifest entry, a ``translation_progress.json`` ``output_file`` mapped
+    to its source chapter, or the same chapter name. None when the file is not one of the chapters
+    (a notice / special file that is hidden, a stray file)."""
+    filenames = list(session.filenames)
+    if not filenames or not path:
+        return None
+    target = _norm(path)
+    name = _base(path)
+    for key, entry in dict(session.overlay).items():
+        if key in filenames and isinstance(entry, Mapping) and _norm(entry.get("path") or "") == target:
+            return filenames.index(key)
+    for index, entry in enumerate((session.manifest or {}).get("entries") or []):
+        if index < len(filenames) and isinstance(entry, Mapping) and any(
+                entry.get(k) and _norm(entry.get(k)) == target for k in ("translated_path", "raw_path", "path")):
+            return index
+    if name in filenames:
+        return filenames.index(name)
+    by_stem: dict = {}
+    for index, filename in enumerate(filenames):
+        by_stem.setdefault(_chapter_stem(filename), index)
+    folder = session.plan.output_folder or session.plan.workspace_dir
+    if folder:
+        for key, entry in _progress_chapters(folder).items():
+            if not isinstance(entry, Mapping) or _base(entry.get("output_file") or "") != name:
+                continue
+            for candidate in (entry.get("original_basename"), entry.get("original_filename"),
+                              entry.get("chapter_file"), entry.get("source_filename"), entry.get("filename"), key):
+                if not candidate:
+                    continue
+                if _base(candidate) in filenames:
+                    return filenames.index(_base(candidate))
+                if _chapter_stem(candidate) in by_stem:
+                    return by_stem[_chapter_stem(candidate)]
+    return by_stem.get(_chapter_stem(name))
 
 
 def _norm(path: Any) -> str:
@@ -221,6 +336,16 @@ class DocEngine:
         if result is None:
             raise RuntimeError("Loading the text file was cancelled")
         return _unpack_loaded(result)
+
+    def load_html(self, path: str) -> tuple:
+        """One HTML file as a one-chapter book (chapters, images, filenames); its images resolve next
+        to the file (``reader_image_resource`` looks beside the active path)."""
+        with open(path, "rb") as stream:
+            markup = text_book.decode_text_bytes(stream.read())
+        match = _TITLE_RE.search(markup)
+        title = html_lib.unescape(match.group(1)).strip() if match else ""
+        title = title or os.path.splitext(os.path.basename(path))[0]
+        return [(title, markup)], {}, [os.path.basename(path)]
 
     def merge(self, raw: list, images: Mapping, filenames: list, overlay: Mapping, extra_dirs: list,
               previous: Optional[list]) -> tuple:
@@ -480,9 +605,15 @@ def _text_plan(path: str, *, title: str = "", output_folder: str = "", raw_only:
 
 
 def plan_for_file(path: str) -> OpenPlan:
-    """A shared / picked EPUB or TXT opened directly (no Library row)."""
-    if _is_txt(path):
+    """A shared / picked EPUB, TXT / Markdown (text mode) or HTML file (one chapter) opened directly
+    (no Library row)."""
+    lower = str(path or "").lower()
+    if lower.endswith(_TEXT_EXT):
         return _text_plan(path)
+    if lower.endswith(_HTML_EXT):
+        path = os.path.abspath(path)
+        return OpenPlan(mode=MODE_PLAIN, epub_path=path, title=os.path.splitext(os.path.basename(path))[0],
+                        toc_dir=os.path.dirname(path), source_kind=SOURCE_HTML)
     return OpenPlan(mode=MODE_PLAIN, epub_path=os.path.abspath(path), title=os.path.splitext(os.path.basename(path))[0],
                     toc_dir=os.path.dirname(os.path.abspath(path)))
 
@@ -560,7 +691,7 @@ class ReaderSession:
             elif plan.mode == MODE_DUAL and self.flavor == rm.BILINGUAL:
                 self._ensure_dual_both()  # a reload in Bilingual (Show special files) needs the raw EPUB too
         with self.lock:
-            if self.is_text:  # sections in reading order; no EPUB TOC
+            if self.is_text or plan.source_kind == SOURCE_HTML:  # sections in reading order; no EPUB TOC
                 self.display_numbers = list(range(1, len(self.filenames) + 1))
                 self.native_toc = []
             else:
@@ -658,7 +789,7 @@ class ReaderSession:
 
     def adopt_output_folder(self, output_folder: str) -> set:
         """Plain EPUB translated live: overlay its new workspace (blocking)."""
-        if self.plan.mode != MODE_PLAIN or self.plan.source_kind == SOURCE_TXT or not output_folder \
+        if self.plan.mode != MODE_PLAIN or self.plan.source_kind != SOURCE_EPUB or not output_folder \
                 or not os.path.isdir(output_folder):
             return set()
         css_dirs: list = []
@@ -712,6 +843,8 @@ class ReaderSession:
         """(chapters, images, filenames) of one version of the book (TXT sections or EPUB chapters)."""
         if self.plan.source_kind == SOURCE_TXT:
             return tuple(self.engine.load_text(path))
+        if self.plan.source_kind == SOURCE_HTML:
+            return tuple(self.engine.load_html(path))
         return tuple(self.engine.load_epub(path, show_special=self.show_special, cache_dir=self.cache_dir))
 
     def prefetch(self) -> None:
@@ -916,6 +1049,8 @@ class ReaderSession:
             return "", "", "Workspace sections are translated from the Progress manager"
         if self.plan.source_kind == SOURCE_TXT:
             return "", "", TXT_TRANSLATE_REASON
+        if self.plan.source_kind == SOURCE_HTML:
+            return "", "", "A single HTML file is read as it is; translate books from the Library"
         filename = self.filenames[index] if 0 <= index < len(self.filenames) else ""
         if not filename:
             return "", "", "Could not resolve this chapter's source filename."
@@ -930,7 +1065,7 @@ class ReaderSession:
 
     def translate_visible(self, index: int) -> bool:
         """``_update_translate_btn_visibility``: hidden for completed overlay chapters and the compiled view."""
-        if self.plan.mode == MODE_WORKSPACE or self.plan.source_kind == SOURCE_TXT:
+        if self.plan.mode == MODE_WORKSPACE or self.plan.source_kind != SOURCE_EPUB:
             return False
         filename = self.filenames[index] if 0 <= index < len(self.filenames) else ""
         if self.plan.mode == MODE_OVERLAY and self.overlay:

@@ -38,7 +38,6 @@ from typing import Any, Callable, Mapping, Optional
 
 import flet as ft
 
-from glossarion_mobile.services.intents import READER_EXTENSIONS
 from glossarion_mobile.services.library import CoreMissing
 from glossarion_mobile.ui import motion
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
@@ -63,11 +62,15 @@ from glossarion_mobile.ui.reader.session import (
     MODE_OVERLAY,
     MODE_PLAIN,
     MODE_WORKSPACE,
+    READER_FILE_EXTENSIONS,
     DocEngine,
     OpenPlan,
     ReaderSession,
+    chapter_index_for_file,
     plan_for_file,
     plan_open,
+    unsupported_file_message,
+    workspace_for_chapter_file,
 )
 from glossarion_mobile.ui.reader.sheets import BookmarksSheet, GlossaryEntryStub, ImageViewer
 from glossarion_mobile.ui.reader.toc_drawer import ChaptersDrawer, TocRow, toc_rows
@@ -270,6 +273,10 @@ class ReaderScreen(Screen):
         self._jobs_unsub: Optional[Callable[[], None]] = None
         self._motion_unsub: Optional[Callable[[], None]] = None  # Reduce motion flips the page-turn slide
         self._target_book: dict = {}
+        # Files › Open with › Reader on a chapter file of a translation workspace: the workspace opens
+        # at that chapter (``chapter_index_for_file`` after the load).
+        self._chapter_file = str(self.args.get("chapter_file") or "")
+        self._file_chapter: Optional[int] = None
         self._build_controls()
 
     # ---- settings ----------------------------------------------------------------------------
@@ -675,10 +682,20 @@ class ReaderScreen(Screen):
         if book:
             return plan_open(book, raw_only=raw_only, engine=self.engine)
         path = str(target.get("path") or "")
-        # A file from Open-with, the Converter or Files: the types the Reader opens (EPUB, TXT)
-        if path and os.path.isfile(path) and path.lower().endswith(tuple(READER_EXTENSIONS)):
-            return plan_for_file(path)
-        if path and os.path.isdir(path) and os.path.isfile(os.path.join(path, "translation_progress.json")):
+        if path and os.path.isfile(path):
+            # A chapter of a translation workspace (response_*.html...): the book, at that chapter
+            workspace = workspace_for_chapter_file(path)
+            if workspace:
+                self._chapter_file = os.path.abspath(path)
+                path = workspace
+            elif path.lower().endswith(READER_FILE_EXTENSIONS):
+                # A file from Open-with, the Converter or Files: EPUB, TXT / Markdown, one HTML file
+                return plan_for_file(path)
+            else:
+                raise LookupError(unsupported_file_message(path))
+        if path and os.path.isdir(path):
+            if not os.path.isfile(os.path.join(path, "translation_progress.json")):
+                raise LookupError("The Reader opens translation output folders; this folder is not one")
             return plan_open({"path": path, "output_folder": path, "is_in_progress": True,
                               "name": os.path.basename(os.path.normpath(path))}, raw_only=raw_only, engine=self.engine)
         raise LookupError("This item is no longer available")
@@ -707,6 +724,8 @@ class ReaderScreen(Screen):
                 session.flavor = flavor = rm.TRANSLATED
                 await self._io(session.load)
                 self.notify("The original could not be opened; showing the translation")
+            if self._chapter_file:
+                session = await self._open_chapter_file(session)
         except CoreMissing as exc:
             self._show_error(f"The reader engine is not available in this build ({exc.name}).")
             return
@@ -755,7 +774,8 @@ class ReaderScreen(Screen):
                 offer = positions
         # While a resume offer is pending, the untouched start must not overwrite the saved position
         # (a chapter the caller asked for -- a Chapters row, ?ch= -- is the reader's choice and is kept).
-        explicit = bool(self.args.get("chapter_filename")) or self.route_chapter is not None
+        explicit = bool(self.args.get("chapter_filename")) or self.route_chapter is not None \
+            or self._file_chapter is not None
         self._hold_position = offer is not None and not explicit
         self.state = "ready"
         self._refresh_toc()
@@ -784,6 +804,21 @@ class ReaderScreen(Screen):
         if not self.disposed and self.state == "ready" and self.chrome.visible and not self.selection.visible:
             self.chrome.set_visible(False)
 
+    async def _open_chapter_file(self, session: ReaderSession) -> ReaderSession:
+        """The workspace opened for a chapter file: remember that file's chapter; a file that is not
+        one of the book's chapters (a notice or other special file the chapter list hides) opens on
+        its own as a one-chapter document instead."""
+        path = self._chapter_file
+        self._file_chapter = await self._io(chapter_index_for_file, session, path)
+        if self._file_chapter is not None or not os.path.isfile(path):
+            return session
+        session.close()
+        single = ReaderSession(plan_for_file(path), engine=self.engine, cache_dir=self.deps.cache_dir)
+        await self._io(single.load)
+        self._chapter_file = ""
+        self.notify(f"{os.path.basename(path)} is not one of this book's chapters; showing the file on its own")
+        return single
+
     def _saved_position(self) -> Optional[dict]:
         prefs = self.deps.prefs
         if prefs is None or not self.bid:
@@ -798,6 +833,8 @@ class ReaderScreen(Screen):
             return self.route_mode
         if self.args.get("raw_only"):
             return rm.ORIGINAL
+        if self._chapter_file:  # a translated chapter file was opened: its translation
+            return rm.TRANSLATED
         if saved and saved.get("mode") in rm.READER_MODES:
             return saved["mode"]
         return rm.ORIGINAL if self.settings.show_raw else rm.TRANSLATED
@@ -813,6 +850,8 @@ class ReaderScreen(Screen):
         chapter = index_of(self.args.get("chapter_filename"))
         if chapter is None:
             chapter = self.route_chapter
+        if chapter is None:
+            chapter = self._file_chapter
         if chapter is None:
             chapter = index_of(session.plan.initial_chapter_filename)
         return max(0, min(int(chapter or 0), session.count - 1))

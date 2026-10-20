@@ -186,7 +186,18 @@ class ReaderFeature:
         """Open the Reader on a Library row or a file (no Library row needed); returns the route id.
 
         ``resume`` (the card's ▶ Continue, the Overview's "Continue · Ch N · P%") opens at the
-        saved reading position instead of offering it."""
+        saved reading position instead of offering it.
+
+        A chapter file of a translation workspace (Files › Open with › Reader on ``response_*.html``)
+        opens that workspace -- its id, so its reading position and bookmarks are the book's -- at
+        the file's chapter."""
+        chapter_file = ""
+        if path and book is None:
+            from glossarion_mobile.ui.reader.session import workspace_for_chapter_file
+
+            workspace = workspace_for_chapter_file(path)
+            if workspace:
+                chapter_file, path = os.path.abspath(path), workspace
         bid = self._register(book=book, path=path)
         if not bid:
             notify = getattr(self.app, "notify", None)
@@ -201,6 +212,8 @@ class ReaderFeature:
         once: dict = {"raw_only": bool(raw_only)}
         if chapter_filename:
             once["chapter_filename"] = str(chapter_filename)
+        if chapter_file:
+            once["chapter_file"] = chapter_file
         if resume:
             once["resume"] = True
         self.pending.pop(bid, None)
