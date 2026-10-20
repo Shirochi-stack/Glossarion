@@ -111,6 +111,18 @@ OPENSSL_VERSION_TEXT = re.compile(rb"OpenSSL (\d+\.\d+\.\d+)(?![0-9])")
 # ELF symbol bindings / section types.
 STB_LOCAL, STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE = 0, 1, 2, 10
 SHT_DYNSYM = 11
+SHT_PROGBITS, SHF_EXECINSTR = 1, 0x4
+# Optional AArch64 extensions by their A64 encodings, (mask, value) per instruction class (Arm ARM
+# C4.1). Only the runtime-selected CPU variants of the llama.cpp engine may contain them.
+AARCH64_FEATURE_ENCODINGS = {
+    "dotprod": ((0x9FE0FC00, 0x0E809400),    # SDOT / UDOT (vector)
+                (0x9FC0F400, 0x0F80E000)),   # SDOT / UDOT (by element)
+    "i8mm": ((0xDFE0F400, 0x4E80A400),       # SMMLA / UMMLA / USMMLA
+             (0xBFE0FC00, 0x0E809C00),       # USDOT (vector)
+             (0xBF40F400, 0x0F00F000)),      # SUDOT / USDOT (by element)
+    "sve": ((0x1E000000, 0x04000000),),      # the whole SVE / SVE2 encoding space (op0 = 0010)
+    "sme": ((0x9E000000, 0x80000000),),      # the SME encoding space (op0 = 0000, bit 31 set)
+}
 # Mach-O: header flag, LC_SYMTAB, nlist types and the special library ordinals of n_desc.
 MH_TWOLEVEL = 0x80
 LC_SYMTAB = 0x2
@@ -767,6 +779,62 @@ def elf_dynsym(data: bytes) -> list:
     return out
 
 
+def elf_exec_sections(data: bytes) -> list:
+    """[(offset, size)] of the 64-bit little-endian ELF's executable SHT_PROGBITS sections (.text,
+    .plt, ...). Raises ValueError without section headers."""
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        raise ValueError("not a 64-bit little-endian ELF file")
+    (e_shoff,) = struct.unpack_from("<Q", data, 40)
+    e_shentsize, e_shnum = struct.unpack_from("<HH", data, 58)
+    if not e_shoff or not e_shnum:
+        raise ValueError("no section headers, so no code sections to read")
+    out = []
+    for i in range(e_shnum):
+        f = struct.unpack_from("<IIQQQQIIQQ", data, e_shoff + i * e_shentsize)
+        sh_type, sh_flags, sh_offset, sh_size = f[1], f[2], f[4], f[5]
+        if sh_type == SHT_PROGBITS and sh_flags & SHF_EXECINSTR:
+            if sh_offset + sh_size > len(data):
+                raise ValueError("a code section lies outside the file")
+            out.append((sh_offset, sh_size))
+    return out
+
+
+def aarch64_code_features(data: bytes) -> dict:
+    """{feature: instruction count} of the optional AArch64 extensions (AARCH64_FEATURE_ENCODINGS)
+    in the ELF's code sections: what a CPU without that extension cannot run (SIGILL)."""
+    counts = dict.fromkeys(AARCH64_FEATURE_ENCODINGS, 0)
+    for offset, size in elf_exec_sections(data):
+        for (word,) in struct.iter_unpack("<I", data[offset:offset + size - size % 4]):
+            for feature, encodings in AARCH64_FEATURE_ENCODINGS.items():
+                if any(word & mask == value for mask, value in encodings):
+                    counts[feature] += 1
+    return counts
+
+
+def _check_aarch64_features(label: str, data: bytes, variant) -> tuple:
+    """(errors, note): an arm64 library uses only the optional instructions of its runtime-selected
+    CPU variant (``variant``: the features it may and must use; None: not a variant, armv8.0 only)."""
+    try:
+        counts = aarch64_code_features(data)
+    except (ValueError, struct.error) as e:
+        return [f"{label}: cannot read the code sections ({e})"], None
+    allowed = set(variant or ())
+    used = {f for f, n in counts.items() if n}
+    errors = []
+    beyond = sorted(used - allowed)
+    if beyond:
+        errors.append(f"{label}: uses {', '.join(f'{f} ({counts[f]} instructions)' for f in beyond)} "
+                      f"outside a runtime-selected CPU variant: SIGILL on cores without "
+                      f"{'it' if len(beyond) == 1 else 'them'}")
+    missing = sorted(allowed - used)
+    if variant is not None and missing:
+        errors.append(f"{label}: CPU variant without any {', '.join(missing)} instruction (were its -march "
+                      f"flags applied?)")
+    shown = ", ".join(f"{f} {n}" for f, n in counts.items() if n) or "none"
+    kind = f"CPU variant [{', '.join(sorted(allowed)) or 'armv8.0'}]" if variant is not None else "armv8.0 only"
+    return errors, f"{label} {kind}: optional instructions {shown}"
+
+
 def default_ndk(ctx: Ctx) -> Path | None:
     """$NDK_HOME, else the manifest's NDK under $ANDROID_HOME / $ANDROID_SDK_ROOT (CI runners have it)."""
     if os.environ.get("NDK_HOME"):
@@ -1134,17 +1202,39 @@ def cmd_verify_native(ctx: Ctx, args) -> int:
 SITE_PROFILES = {
     # The built-in llama.cpp engine: pure ctypes over five shared libraries (our own build of forge's
     # recipes/llama-cpp-python with LLAVA_BUILD=ON, wheelhouse.toml build_tag 1000: the four of
-    # pypi.flet.dev's build 2 plus libmtmd for vision models). Android also needs libc++_shared.so,
+    # pypi.flet.dev's build 2 plus libmtmd for vision models; on Android arm64 four CPU-variant
+    # libraries replace libggml-cpu, see target_libs). Android also needs libc++_shared.so,
     # which flet-libcpp-shared installs (one copy only: Gradle merges jniLibs). verify-native checks
     # the wheels against the same profile (libc++_shared.so from the NDK there).
     "llama-cpp-python": {
         "lib_dir": "llama_cpp/lib",
         "libs": ("libggml-base", "libggml-cpu", "libggml", "libllama", "libmtmd"),
+        # Android arm64 is built with GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS: four CPU backends
+        # instead of libggml-cpu, one picked at run time (recipe meta.yaml and mobile.patch, 7.).
+        "target_libs": {
+            "arm64-v8a": ("libggml-base", "libggml", "libllama", "libmtmd", "libggml-cpu-android_armv8.0_1",
+                          "libggml-cpu-android_armv8.2_1", "libggml-cpu-android_armv8.2_2",
+                          "libggml-cpu-android_armv8.6_1"),
+        },
+        # The optional AArch64 instructions each arm64 library may use (aarch64_code_features); every
+        # other library must run on an armv8.0 core. A variant must also contain the instructions its
+        # feature set promises (proof that its -march flags took effect).
+        "aarch64_variants": {
+            "libggml-cpu-android_armv8.0_1": (),
+            "libggml-cpu-android_armv8.2_1": ("dotprod",),
+            "libggml-cpu-android_armv8.2_2": ("dotprod",),
+            "libggml-cpu-android_armv8.6_1": ("dotprod", "i8mm"),
+        },
         "min_build": 1000,
         "android_system": ("libc.so", "libm.so", "libdl.so", "liblog.so"),
         "android_cxx": "libc++_shared.so",
     },
 }
+
+
+def profile_libs(profile: dict, target: str) -> tuple:
+    """The library stems a SITE_PROFILES entry expects for ``target``."""
+    return tuple(profile.get("target_libs", {}).get(target, profile["libs"]))
 
 
 def _any_ndk(ctx: Ctx) -> Path | None:
@@ -1208,6 +1298,11 @@ def _check_android_site_libs(target: str, arch_dir: Path, libs: dict, profile: d
         exports |= {n for n, bind, defined in symbols if defined and bind in (STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE)}
         imports[name] = [n for n, bind, defined in symbols if not defined and bind != STB_WEAK]
         notes.append(f"{target}: {name} NEEDED {elf['needed']}; {len(imports[name])} strong imports")
+        if target == "arm64-v8a" and "aarch64_variants" in profile:
+            errs, note = _check_aarch64_features(f"{target}: {name}", data, profile["aarch64_variants"].get(stem))
+            errors += errs
+            if note:
+                notes.append(note)
     api = cmw.TARGETS[target].max_version[0]
     system, problem = stubs.exports(target, sorted(system_needed)) if stubs is not None else (None, "no NDK given")
     if system is None:
@@ -1284,10 +1379,11 @@ def verify_profile_wheel(path: Path, package: str, target: str, minos: tuple, st
                 dest.write_bytes(zf.read(name))
         lib_dir = root / profile["lib_dir"]
         libs = _shared_libs(lib_dir, platform) if lib_dir.is_dir() else {}
-        if sorted(libs) != sorted(profile["libs"]):
+        expected = profile_libs(profile, target)
+        if sorted(libs) != sorted(expected):
             errors.append(f"{path.name}: {profile['lib_dir']} holds {sorted(libs)}, expected exactly "
-                          f"{sorted(profile['libs'])}")
-            libs = {k: v for k, v in libs.items() if k in profile["libs"]}
+                          f"{sorted(expected)}")
+            libs = {k: v for k, v in libs.items() if k in expected}
         if platform == "android":
             cxx, problem = stubs.libcxx(target) if stubs is not None else (None, "no NDK given")
             if cxx is None:
@@ -1341,11 +1437,12 @@ def verify_site_packages(site_packages, platform: str, package: str, version: st
             errors.append(f"{target}: no {profile['lib_dir']}/ in {arch_dir}")
             continue
         libs = _shared_libs(lib_dir, platform)
-        if sorted(libs) != sorted(profile["libs"]):
+        expected = profile_libs(profile, target)
+        if sorted(libs) != sorted(expected):
             others = sorted(p.name for p in lib_dir.iterdir())
             errors.append(f"{target}: {profile['lib_dir']} holds {sorted(libs)}, expected exactly "
-                          f"{sorted(profile['libs'])} (directory: {others})")
-            libs = {k: v for k, v in libs.items() if k in profile["libs"]}
+                          f"{sorted(expected)} (directory: {others})")
+            libs = {k: v for k, v in libs.items() if k in expected}
         notes.append(f"{target}: {name} {installed} build {build} {', '.join(tags)}")
         if platform == "android":
             errs, ns = _check_android_site_libs(target, arch_dir, libs, profile, stubs)

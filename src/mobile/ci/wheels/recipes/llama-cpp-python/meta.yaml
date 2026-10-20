@@ -13,7 +13,13 @@
 #   - MTMD_VIDEO=OFF: video decoding spawns an ffmpeg process (sheredom/subprocess.h), which an app
 #     sandbox cannot do;
 #   - patches/mobile.patch: upstream's patch plus unversioned libmtmd (no SONAME);
-#   - IPHONEOS_DEPLOYMENT_TARGET=13.0 in the iOS branch (wheels.py checks it in every iOS recipe).
+#   - IPHONEOS_DEPLOYMENT_TARGET=13.0 in the iOS branch (wheels.py checks it in every iOS recipe);
+#   - Android arm64 only: GGML_BACKEND_DL=ON + GGML_CPU_ALL_VARIANTS=ON. Instead of one armv8.0
+#     libggml-cpu it builds four CPU backends, libggml-cpu-android_armv8.0_1 (baseline, every arm64
+#     phone), _armv8.2_1 (dotprod), _armv8.2_2 (dotprod, fp16) and _armv8.6_1 (dotprod, fp16, i8mm),
+#     installed next to the others (CMAKE_INSTALL_BINDIR: ggml installs MODULE backends there), and
+#     the patched loader registers the best one the CPU supports (patches/mobile.patch, 7.).
+#     x86_64 (emulator, Chromebooks) and iOS keep the single built-in CPU backend.
 package:
   name: llama-cpp-python
   version: "0.3.32"
@@ -43,7 +49,7 @@ build:
       -DGGML_HIP=OFF
       -DGGML_VULKAN=OFF
       -DGGML_OPENCL=OFF
-      -DGGML_RPC=OFF
+      -DGGML_RPC=OFF{% if arch == 'arm64-v8a' %} -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_INSTALL_BINDIR=llama_cpp/lib{% endif %}
 # {% else %}
     # The `ninja` pip package crashes importing on the iOS crossenv python
     # (sysconfig.get_preferred_scheme('user') -> 'posix_user' invalid on iOS),

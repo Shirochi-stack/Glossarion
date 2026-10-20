@@ -37,8 +37,8 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 
 log = logging.getLogger("glossarion.local_llm")
 
-__all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "LlamaEngine", "default_threads",
-           "engine_status", "system_info", "vision_status"]
+__all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine", "LlamaEngine", "cpu_variant",
+           "default_threads", "engine_status", "system_info", "vision_status"]
 
 #: The llama-cpp-python pin of ``src/mobile/pyproject.toml`` (``[tool.flet.android/ios].dependencies``).
 ENGINE_VERSION = "0.3.32"
@@ -63,17 +63,34 @@ def engine_status() -> tuple:
     return (True, None) if found else (False, UNAVAILABLE)
 
 
+def cpu_variant() -> Optional[str]:
+    """The CPU backend our llama-cpp-python build registered at import: a runtime-selected variant on
+    Android arm64 (``android_armv8.6_1`` = dotprod + fp16 + i8mm ... ``android_armv8.0_1`` = baseline),
+    ``builtin`` where libggml links the backend (x86_64, iOS), ``none``; None without that loader."""
+    try:
+        ext = importlib.import_module("llama_cpp._ctypes_extensions")
+    except Exception:
+        return None
+    value = getattr(ext, "CPU_BACKEND_VARIANT", None)
+    return str(value) if value else None
+
+
 def system_info() -> Optional[str]:
-    """``llama_print_system_info()`` (loads all four libraries), or None without llama_cpp."""
+    """``llama_print_system_info()`` (loads all the libraries; the CPU line lists the features the
+    registered backend was built with) plus the CPU variant, or None without llama_cpp."""
     try:
         llama_cpp = importlib.import_module("llama_cpp")
     except Exception:
         return None
     try:
         raw = llama_cpp.llama_print_system_info()
-        return raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
+        text = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
     except Exception as exc:  # pragma: no cover - device only
         return f"unavailable ({exc})"
+    variant = cpu_variant()
+    if variant and variant != "builtin":
+        text = f"{text} (CPU variant {variant})".strip()
+    return text
 
 
 def vision_status() -> tuple:

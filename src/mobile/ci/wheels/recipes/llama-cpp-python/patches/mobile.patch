@@ -1,8 +1,22 @@
 Glossarion overlay of flet-dev/mobile-forge recipes/llama-cpp-python/patches/mobile.patch
 (0fadbfab0d63d11164030dfddc955ed980e32e2c, BSD-3-Clause, see ../../LICENSE.mobile-forge):
-upstream's five changes below, unchanged, plus a sixth one for the vision build (LLAVA_BUILD=ON):
+upstream's five changes below, unchanged, plus a sixth one for the vision build (LLAVA_BUILD=ON)
+and a seventh one for the runtime CPU variants of the Android arm64 build:
 
 6. Drops SONAME versioning from libmtmd too (single unversioned libmtmd, like the others).
+
+7. Runtime CPU-variant selection (meta.yaml builds Android arm64 with GGML_BACKEND_DL=ON and
+   GGML_CPU_ALL_VARIANTS=ON):
+   - ggml/src/CMakeLists.txt: the Android variant list is cut to the four NEON feature sets
+     android_armv8.0_1 (baseline), android_armv8.2_1 (dotprod), android_armv8.2_2 (dotprod, fp16)
+     and android_armv8.6_1 (dotprod, fp16, i8mm); no SVE / SVE2 / SME variants. The option
+     GLOSSARION_ANDROID_CPU_VARIANTS builds the same set on Linux arm64 (the CI check).
+   - _ctypes_extensions.py: after preloading libggml, register_cpu_backend() asks every variant
+     library for its ggml_backend_score() (the feature probe; 0 = the CPU lacks a feature) and
+     registers the best with ggml_backend_load(), loading by bare soname from the APK's jniLibs
+     where no file exists (ggml's own ggml_backend_load_all() only scans the executable's
+     directory and the cwd). CPU_BACKEND_VARIANT names the registered variant ("builtin" when
+     libggml links the CPU backend itself: x86_64, iOS).
 
 Upstream's description:
 
@@ -66,7 +80,124 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 --- a/llama_cpp/_ctypes_extensions.py
 +++ b/llama_cpp/_ctypes_extensions.py
-@@ -25,35 +25,54 @@ _EMSCRIPTEN_SIDE_MODULE_SUFFIX = ".cpython-00-wasm32-emscripten.so"
+@@ -21,39 +21,171 @@
+ 
+ _EMSCRIPTEN_SIDE_MODULE_SUFFIX = ".cpython-00-wasm32-emscripten.so"
+ 
++# Glossarion: runtime CPU-variant selection (GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS).
++# The Android arm64 wheel ships one libggml-cpu-<variant>.so per feature set instead of
++# a single armv8.0 libggml-cpu.so. ggml's own ggml_backend_load_all() would scan the
++# executable's directory and the cwd, which on Android are /system/bin and / (the libs
++# live in the APK's jniLibs, usually not even extracted to disk), so the loader picks
++# the variant itself, by bare soname where no file exists:
++#   1. ask every variant for its ggml_backend_score() (the feature probe, compiled
++#      without the variant's -march flags; 0 = this CPU lacks a required feature),
++#   2. register the best one with ggml_backend_load(), which checks the score again.
++# A variant that needs dotprod / i8mm is never registered on a CPU without them, so
++# its code never runs there.
++#: Variants of the Android arm64 build, best first (vendor/llama.cpp/ggml/src/CMakeLists.txt).
++ANDROID_CPU_VARIANTS = (
++    "android_armv8.6_1",  # dotprod + fp16 + i8mm (Cortex-A510/A710/X2 and later)
++    "android_armv8.2_2",  # dotprod + fp16 (Cortex-A55/A75/A76/A77/A78/X1)
++    "android_armv8.2_1",  # dotprod
++    "android_armv8.0_1",  # baseline armv8.0 + NEON (Cortex-A53/A73): every arm64 device
++)
++#: The CPU backend this process registered: a variant name, "builtin" (libggml links the
++#: CPU backend itself: x86_64, iOS, desktop builds) or "none"; None before the first load.
++CPU_BACKEND_VARIANT: Optional[str] = None
++
++
++def _variant_of(name: str) -> str:
++    stem = os.path.basename(name)
++    for suffix in (".so", ".dylib", ".dll"):
++        if stem.endswith(suffix):
++            stem = stem[: -len(suffix)]
++    for prefix in ("libggml-cpu-", "ggml-cpu-"):
++        if stem.startswith(prefix):
++            return stem[len(prefix):]
++    return stem
++
++
++def _cpu_variant_candidates(base_path: pathlib.Path) -> List[str]:
++    """The variant libraries to probe: the files next to libggml (desktop, legacy-extracted
++    jniLibs) and, by bare soname, the Android arm64 build's list."""
++    out: List[str] = []
++    try:
++        if base_path.is_dir():
++            out += [str(p) for p in sorted(base_path.glob("libggml-cpu-*.so"))]
++    except OSError:
++        pass
++    on_disk = {_variant_of(p) for p in out}
++    out += [f"libggml-cpu-{v}.so" for v in ANDROID_CPU_VARIANTS if v not in on_disk]
++    return out
++
++
++def _probe_score(name: str) -> int:
++    """ggml_backend_score() of one variant library (0 when it does not load or lacks it)."""
++    try:
++        lib = ctypes.CDLL(name, mode=getattr(ctypes, "RTLD_LOCAL", 0))
++    except OSError:
++        return 0
++    try:
++        fn = lib.ggml_backend_score
++        fn.restype = ctypes.c_int
++        fn.argtypes = []
++        return int(fn())
++    except AttributeError:
++        return 0
++    finally:
++        # unmap the probed copy again; ggml_backend_load() reopens the chosen one
++        try:
++            import _ctypes
++
++            _ctypes.dlclose(lib._handle)  # type: ignore[attr-defined]
++        except Exception:
++            pass
++
++
++def register_cpu_backend(libggml, base_path: pathlib.Path) -> Optional[str]:
++    """Register the best CPU backend variant with ggml (once per process); returns its name.
++
++    Environment: LLAMA_CPP_CPU_VARIANT=<variant> tries that variant first (ggml still
++    refuses it when the CPU lacks one of its features)."""
++    global CPU_BACKEND_VARIANT
++    if CPU_BACKEND_VARIANT is not None:
++        return CPU_BACKEND_VARIANT
++    try:
++        reg_count = libggml.ggml_backend_reg_count
++        load = libggml.ggml_backend_load
++    except AttributeError:
++        return None
++    reg_count.restype = ctypes.c_size_t
++    reg_count.argtypes = []
++    load.restype = ctypes.c_void_p
++    load.argtypes = [ctypes.c_char_p]
++    if reg_count() > 0:
++        CPU_BACKEND_VARIANT = "builtin"  # no GGML_BACKEND_DL: the CPU backend is linked in
++        return CPU_BACKEND_VARIANT
++    candidates = _cpu_variant_candidates(base_path)
++    scored = []
++    for order, name in enumerate(candidates):
++        score = _probe_score(name)
++        if score > 0:
++            scored.append((-score, order, name))
++    ranked = [name for _s, _o, name in sorted(scored)]
++    forced = os.environ.get("LLAMA_CPP_CPU_VARIANT", "").strip()
++    if forced:
++        ranked = [n for n in ranked if _variant_of(n) == forced] + [n for n in ranked if _variant_of(n) != forced]
++    for name in ranked:
++        if load(name.encode("utf-8")):
++            CPU_BACKEND_VARIANT = _variant_of(name)
++            return CPU_BACKEND_VARIANT
++    # A GGML_BACKEND_DL build without variants ships a plain libggml-cpu.so.
++    for name in ([str(base_path / "libggml-cpu.so")] if (base_path / "libggml-cpu.so").exists() else []) + ["libggml-cpu.so"]:
++        if load(name.encode("utf-8")):
++            CPU_BACKEND_VARIANT = "default"
++            return CPU_BACKEND_VARIANT
++    CPU_BACKEND_VARIANT = "none"  # llama_backend_init() falls back to ggml_backend_load_all()
++    return CPU_BACKEND_VARIANT
++
+ 
  # Load the library
  def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
      """Platform independent shared library loader"""
@@ -147,7 +278,7 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
      if sys.platform == "win32":
          os.add_dll_directory(str(base_path))
          os.environ["PATH"] = str(base_path) + os.pathsep + os.environ["PATH"]
-@@ -67,9 +86,14 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
+@@ -67,9 +199,14 @@
              os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "bin"))
              os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "lib"))
          cdll_args["winmode"] = ctypes.RTLD_GLOBAL
@@ -163,7 +294,7 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
          lib_dir = str(base_path)
          ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
          if lib_dir not in ld_library_path.split(os.pathsep):
-@@ -79,43 +103,56 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
+@@ -79,42 +216,62 @@
                  else f"{lib_dir}{os.pathsep}{ld_library_path}"
              )
  
@@ -176,16 +307,6 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 -                base_path / f"lib{dependency}{_EMSCRIPTEN_SIDE_MODULE_SUFFIX}"
 -            )
 -            if dependency_path.exists():
--                try:
--                    ctypes.CDLL(str(dependency_path), **cdll_args)  # type: ignore
--                except Exception as e:
--                    raise RuntimeError(
--                        f"Failed to load shared library '{dependency_path}': {e}"
--                    )
--
--    # Try to load the shared library, handling potential errors
--    for lib_path in lib_paths:
--        if lib_path.exists():
 +    # Preload dependencies in dependency order so the main library resolves them
 +    # from the already-loaded set: ggml-base before ggml-cpu/ggml, all before
 +    # llama/mtmd. On iOS the libs are framework-relocated with sibling @rpath refs
@@ -197,28 +318,45 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 +        "mtmd": ("ggml-base", "ggml-cpu", "ggml", "llama"),
 +        "llava": ("ggml-base", "ggml-cpu", "ggml", "llama"),
 +    }
++    libggml = None
 +    for dependency in dependencies.get(lib_base_name, ()):
-+        loaded = False
++        loaded = None
 +        for dependency_path in _candidate_paths(dependency):
-             try:
--                return ctypes.CDLL(str(lib_path), **cdll_args)  # type: ignore
--            except Exception as e:
--                raise RuntimeError(f"Failed to load shared library '{lib_path}': {e}")
-+                ctypes.CDLL(str(dependency_path), **cdll_args)  # type: ignore
-+                loaded = True
++            try:
++                loaded = ctypes.CDLL(str(dependency_path), **cdll_args)  # type: ignore
 +                break
 +            except Exception:
 +                continue
-+        if not loaded:
++        if loaded is None:
 +            # Android: the bundled lib is not a file on disk (Flet 0.86 ships
 +            # site-packages as a zip and serious-python relocated it into the APK's
 +            # jniLibs); load it by bare soname so the linker resolves it there.
 +            for _n in (f"lib{dependency}.so", f"lib{dependency}.dylib"):
-+                try:
-+                    ctypes.CDLL(_n, **cdll_args)  # type: ignore
+                 try:
+-                    ctypes.CDLL(str(dependency_path), **cdll_args)  # type: ignore
+-                except Exception as e:
+-                    raise RuntimeError(
+-                        f"Failed to load shared library '{dependency_path}': {e}"
+-                    )
+-
+-    # Try to load the shared library, handling potential errors
+-    for lib_path in lib_paths:
+-        if lib_path.exists():
+-            try:
+-                return ctypes.CDLL(str(lib_path), **cdll_args)  # type: ignore
+-            except Exception as e:
+-                raise RuntimeError(f"Failed to load shared library '{lib_path}': {e}")
++                    loaded = ctypes.CDLL(_n, **cdll_args)  # type: ignore
 +                    break
 +                except OSError:
 +                    continue
++        if dependency == "ggml":
++            libggml = loaded
++
++    # Glossarion: with GGML_BACKEND_DL (the Android arm64 wheel) libggml links no CPU
++    # backend; register the best CPU variant before libllama runs.
++    if libggml is not None:
++        register_cpu_backend(libggml, base_path)
 +
 +    # Load the main library.
 +    for lib_path in _candidate_paths(lib_base_name):
@@ -238,7 +376,7 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
      raise FileNotFoundError(
          f"Shared library with base name '{lib_base_name}' not found"
      )
- 
+-
 -
 -# ctypes sane type hint helpers
 -#
@@ -247,11 +385,9 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
 -#
 -# NOTE: Only use these for static type checking not for runtime checks
 -# no good will come of that
--
+ 
  if TYPE_CHECKING:
      CtypesCData = TypeVar("CtypesCData", bound=ctypes._CData)  # type: ignore
- 
-
 diff --git a/vendor/llama.cpp/ggml/src/CMakeLists.txt b/vendor/llama.cpp/ggml/src/CMakeLists.txt
 --- a/vendor/llama.cpp/ggml/src/CMakeLists.txt
 +++ b/vendor/llama.cpp/ggml/src/CMakeLists.txt
@@ -304,6 +440,40 @@ diff --git a/vendor/llama.cpp/ggml/src/CMakeLists.txt b/vendor/llama.cpp/ggml/sr
      endif()
  
      if(NOT GGML_AVAILABLE_BACKENDS)
+@@ -401,7 +405,16 @@
+             ggml_add_cpu_backend_variant(sapphirerapids SSE42 AVX F16C FMA AVX2 BMI2 AVX512 AVX512_VBMI AVX512_VNNI AVX512_BF16 AMX_TILE AMX_INT8)
+         endif()
+     elseif(GGML_SYSTEM_ARCH STREQUAL "ARM")
+-        if (CMAKE_SYSTEM_NAME MATCHES "Linux")
++        # Glossarion: the Android arm64 engine ships four NEON variants, no SVE/SVE2/SME
++        # ones: every SVE2/SME phone core also has i8mm, which armv8.6_1 uses, and ggml's
++        # SVE repack kernels need 256-bit vectors (phone cores have 128-bit SVE).
++        # GLOSSARION_ANDROID_CPU_VARIANTS builds the same set on Linux arm64 (CI check).
++        if (CMAKE_SYSTEM_NAME MATCHES "Android" OR GLOSSARION_ANDROID_CPU_VARIANTS)
++            ggml_add_cpu_backend_variant(android_armv8.0_1)
++            ggml_add_cpu_backend_variant(android_armv8.2_1    DOTPROD)
++            ggml_add_cpu_backend_variant(android_armv8.2_2    DOTPROD FP16_VECTOR_ARITHMETIC)
++            ggml_add_cpu_backend_variant(android_armv8.6_1    DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8)
++        elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
+             # Many of these features are optional so we build versions with popular
+             # combinations and name the backends based on the version they were
+             # first released with
+@@ -413,15 +426,6 @@
+             ggml_add_cpu_backend_variant(armv8.6_2    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2)
+             ggml_add_cpu_backend_variant(armv9.2_1    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SME)
+             ggml_add_cpu_backend_variant(armv9.2_2    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2 SME)
+-        elseif (CMAKE_SYSTEM_NAME MATCHES "Android")
+-            # Android-specific backends with SoC-compatible feature sets
+-            ggml_add_cpu_backend_variant(android_armv8.0_1)
+-            ggml_add_cpu_backend_variant(android_armv8.2_1    DOTPROD)
+-            ggml_add_cpu_backend_variant(android_armv8.2_2    DOTPROD FP16_VECTOR_ARITHMETIC)
+-            ggml_add_cpu_backend_variant(android_armv8.6_1    DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8)
+-            ggml_add_cpu_backend_variant(android_armv9.0_1    DOTPROD MATMUL_INT8 FP16_VECTOR_ARITHMETIC SVE2)
+-            ggml_add_cpu_backend_variant(android_armv9.2_1    DOTPROD MATMUL_INT8 FP16_VECTOR_ARITHMETIC SVE SME)
+-            ggml_add_cpu_backend_variant(android_armv9.2_2    DOTPROD MATMUL_INT8 FP16_VECTOR_ARITHMETIC SVE SVE2 SME)
+         elseif (APPLE)
+             ggml_add_cpu_backend_variant(apple_m1             DOTPROD)
+             ggml_add_cpu_backend_variant(apple_m2_m3          DOTPROD MATMUL_INT8)
 diff --git a/vendor/llama.cpp/src/CMakeLists.txt b/vendor/llama.cpp/src/CMakeLists.txt
 --- a/vendor/llama.cpp/src/CMakeLists.txt
 +++ b/vendor/llama.cpp/src/CMakeLists.txt
@@ -322,7 +492,8 @@ diff --git a/vendor/llama.cpp/src/CMakeLists.txt b/vendor/llama.cpp/src/CMakeLis
 diff --git a/vendor/llama.cpp/tools/mtmd/CMakeLists.txt b/vendor/llama.cpp/tools/mtmd/CMakeLists.txt
 --- a/vendor/llama.cpp/tools/mtmd/CMakeLists.txt
 +++ b/vendor/llama.cpp/tools/mtmd/CMakeLists.txt
-@@ -55,7 +55,8 @@
+@@ -54,8 +54,9 @@
+             )
  
  set_target_properties(mtmd PROPERTIES
 -    VERSION ${LLAMA_INSTALL_VERSION}
