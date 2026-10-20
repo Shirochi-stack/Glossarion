@@ -587,7 +587,7 @@ def test_sign_in_event_opens_the_providers_login_sheet():
         _notify=lambda message, action=None, on_action=None: notes.append((message, action, on_action)),
         open_login_sheet=lambda provider, account: opened.append((provider, account)))
     JobsFeature._on_job_event(fake, "j1", "sign_in_required", {"provider": "authgem", "account_id": 3})
-    assert notes[0][0] == "Sign-in required for Gemini #3" and notes[0][1] == "Sign in"
+    assert notes[0][0] == "Sign-in required for Vertex (Pay as you go) #3" and notes[0][1] == "Sign in"
     notes[0][2]()
     assert opened == [("authgem", 3)] and spawned
 

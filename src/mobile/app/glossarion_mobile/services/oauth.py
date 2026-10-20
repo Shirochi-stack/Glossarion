@@ -134,7 +134,7 @@ PROVIDER_INFO: dict[str, ProviderInfo] = {
         "Paste the redirect URL, or the code#state the page shows",
     ),
     "authgem": ProviderInfo(
-        "authgem", "Gemini", "authgem_auth", "loopback", "authgem-vertex0/",
+        "authgem", "Vertex (Pay as you go)", "authgem_auth", "loopback", "authgem-vertex0/",
         "authgem-vertex0/ uses every Gemini slot (Vertex AI); authgemN/ and authgem-vertexN/ use slot #N.",
         "Log in with your Google account in the browser. No API key is needed.",
         "http://127.0.0.1:<port>/…?code=…&state=…",
