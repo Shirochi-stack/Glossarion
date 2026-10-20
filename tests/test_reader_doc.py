@@ -116,6 +116,18 @@ METHOD_EDITS = {
         ("QUrl.fromLocalFile(img_path).toString()", "self._reader_file_url(img_path)"),
         _QURL_SCHEME,
     ],
+    # Reader load speed (2026-10-20, DISCREPANCIES "Reader load speed and page turns"): a plain
+    # <title> / first h1-h3 is read without a BeautifulSoup parse; the soup decides everything else.
+    ("EpubLoaderMixin", "run"): [(
+        "try:\n                soup = BeautifulSoup(content, 'html.parser')",
+        "try:\n                if authoritative:\n"
+        "                    title = _fast_chapter_title(content) or _fast_heading_title(content)\n"
+        "                    if title:\n"
+        "                        if len(title) > 50:\n"
+        "                            title = title[:47] + '…'\n"
+        "                        return (title, content, item_name)\n"
+        "                soup = BeautifulSoup(content, 'html.parser')",
+    )],
 }
 
 #: EpubReaderDialog methods that changed in place (Phase 1: they now call shared code).

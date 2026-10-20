@@ -40,6 +40,7 @@ import flet as ft
 
 from glossarion_mobile.services.intents import READER_EXTENSIONS
 from glossarion_mobile.services.library import CoreMissing
+from glossarion_mobile.ui import motion
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog
 from glossarion_mobile.ui.foreground import poll_sleep
@@ -61,6 +62,7 @@ from glossarion_mobile.ui.reader.search_sheet import ReaderSearchSheet
 from glossarion_mobile.ui.reader.session import (
     MODE_OVERLAY,
     MODE_PLAIN,
+    MODE_WORKSPACE,
     DocEngine,
     OpenPlan,
     ReaderSession,
@@ -84,6 +86,9 @@ LIVE_FINAL_DRAIN = 0.3  # seconds for the dispatcher to deliver a finished job's
 CHROME_AUTO_HIDE = 2.5  # seconds the chrome stays up after the first chapter appears
 TOC_PANEL_WIDTH = 320  # UI_SPEC §3.11: the chapters list as a side panel on tablet
 TOC_PANEL_MIN_WIDTH = 900  # the shell's tablet class (persistent sidebar)
+SLIDE_SHIFT = 0.24  # a native chapter turn: the new page starts this share of its width to the side
+SLIDE_SETTLE = 0.034  # seconds between placing the page off to the side and sliding it in (two frames)
+PREFETCH_DELAY = 0.4  # seconds after a page is up before the neighbour chapter is prepared
 TEXT_SIZE_HINT = "Text size in Aa: the page follows the Reader's own size, not the system text size"
 BOOK_SETTINGS_PREF = "reader_book_settings"
 MOBILE_PREFS_KEY = "reader_prefs"
@@ -244,6 +249,7 @@ class ReaderScreen(Screen):
         self.webview_serial = 0  # per-build WebView keys (``_make_webview``)
         self.fallback_chapter: Optional[int] = None  # the chapter the native page shows
         self.fallback_generation = -1  # the render whose chapter the native page shows
+        self._native_prefetch: dict = {}  # (chapter, session generation, flavour) -> (blocks, images)
         self.live: Optional[LiveRun] = None
         self.disposed = False
         self.aa_sheet: Optional[AaSheet] = None
@@ -262,6 +268,7 @@ class ReaderScreen(Screen):
         self.resume_offer: Optional[rm.Position] = None
         self._hold_position = False  # a resume offer is pending and the reader has not moved yet
         self._jobs_unsub: Optional[Callable[[], None]] = None
+        self._motion_unsub: Optional[Callable[[], None]] = None  # Reduce motion flips the page-turn slide
         self._target_book: dict = {}
         self._build_controls()
 
@@ -381,8 +388,8 @@ class ReaderScreen(Screen):
             on_mode=self._on_mode,
             on_search=lambda e=None: self.open_search(),
             on_more=lambda e=None: self.open_more(),
-            on_prev=lambda e=None: self._spawn(self.go_chapter(self.index - 1)),
-            on_next=lambda e=None: self._spawn(self.go_chapter(self.index + 1)),
+            on_prev=lambda e=None: self._spawn(self.go_chapter(self.index - 1, enter=-1)),
+            on_next=lambda e=None: self._spawn(self.go_chapter(self.index + 1, enter=1)),
             on_chapters=lambda e=None: self._spawn(self.open_chapters()),
             on_aa=lambda e=None: self.open_aa(),
             on_translate=lambda e=None: self._spawn(self.translate_chapter()),
@@ -499,6 +506,8 @@ class ReaderScreen(Screen):
         self._adopt_view()
         if self.session is None and self.state == "loading":
             self._spawn(self.open())
+        if self._motion_unsub is None:
+            self._motion_unsub = motion.subscribe(lambda _reduced: self._apply_turn())
         signal = self.deps.width_signal
         if signal is not None and not self._unsubs:
             try:
@@ -519,6 +528,9 @@ class ReaderScreen(Screen):
                 pass
         self.save_position(flush=True)
         self._flush_style()
+        motion_unsub, self._motion_unsub = self._motion_unsub, None
+        if motion_unsub is not None:
+            motion_unsub()
         for unsub in self._unsubs:
             try:
                 unsub()
@@ -855,6 +867,7 @@ class ReaderScreen(Screen):
         self.webview = self._make_webview(url)
         self.page_slot.content = self.webview
         self.page_slot.bgcolor = self.theme.get("bg")
+        self._set_slot_motion(False)
         self._update(self.page_slot)
 
     async def _show_webview_page(self, url: str, generation: int) -> bool:
@@ -877,7 +890,10 @@ class ReaderScreen(Screen):
         return generation == self.render_generation and not self.disposed
 
     async def render(self, index: int, *, hint: Optional[Mapping[str, Any]] = None,
-                     find: Optional[Mapping[str, Any]] = None, anchor: Optional[str] = None) -> None:
+                     find: Optional[Mapping[str, Any]] = None, anchor: Optional[str] = None,
+                     enter: int = 0) -> None:
+        """Show chapter ``index``. ``enter`` is the side a page turn came from (1: the next chapter, its
+        page slides in from the right; -1: the previous one, from the left; 0: no turn animation)."""
         session = self.session
         if session is None or not session.count or self.disposed:
             return
@@ -899,10 +915,11 @@ class ReaderScreen(Screen):
             builder = self.builder
             builder.font_faces = dict(self.font_faces)
             settings, layout, theme = self.settings, self.layout, self.theme
+            turn = self._turn_config(index, enter)
             try:
                 built = await self._io(lambda: builder.build(
                     index, settings=settings, layout=layout, theme=theme, doc_id=doc_id,
-                    event_url=server.event_path, hint=hint, find=find, anchor=anchor))
+                    event_url=server.event_path, hint=hint, find=find, anchor=anchor, turn=turn))
             except (LookupError, CoreMissing) as exc:
                 log.info("WebView document unavailable (%s); using the native reader", exc)
                 self.renderer = "native"
@@ -924,8 +941,12 @@ class ReaderScreen(Screen):
                 return
         else:
             try:
-                blocks = await self._io(build_native_blocks, session, index)
-                images = await self._io(self._block_images, session, blocks)
+                cached = self._native_prefetch.pop((index, session.generation, session.flavor), None)
+                if cached is not None:  # drawn ahead by _prefetch_neighbour
+                    blocks, images = cached
+                else:
+                    blocks = await self._io(build_native_blocks, session, index)
+                    images = await self._io(self._block_images, session, blocks)
             except Exception:
                 log.exception("rendering the chapter natively failed")
                 blocks, images = [], {}
@@ -939,6 +960,7 @@ class ReaderScreen(Screen):
                 self.page_slot.content = EmptyState(icon="AUTO_STORIES", title=EMPTY_CHAPTER_TEXT,
                                                     body="Use ◀ ▶ or Chapters to move on.", key=f"reader-empty-{index}")
                 self.page_slot.bgcolor = self.theme.get("bg")
+                self._set_slot_motion(True)  # shown in place (an interrupted turn may have hidden the slot)
                 self._update(self.page_slot)
                 self.toc.set_current(index)
                 self.schedule_position_save()
@@ -954,6 +976,8 @@ class ReaderScreen(Screen):
                                  keep_offset=not fresh)
             self.fallback_generation = generation
             self.page_slot.bgcolor = self.theme.get("bg")
+            # a chapter turn: the new chapter starts off to the side it comes from, hidden ...
+            sliding = self._set_slot_motion(True, enter=enter if fresh else 0)
             self._update(self.page_slot)
             if self.last_page:
                 await self.fallback.scroll_to_fraction(1.0)
@@ -961,8 +985,44 @@ class ReaderScreen(Screen):
                 await self.fallback.scroll_to_fraction(0.0)
             if generation != self.render_generation or self.disposed:
                 return
+            if sliding:  # ... and slides in once it is laid out at its start (end)
+                await asyncio.sleep(SLIDE_SETTLE)
+                if generation != self.render_generation or self.disposed:
+                    return
+                self._set_slot_motion(True)
+                self._update(self.page_slot)
         self.toc.set_current(index)
         self.schedule_position_save()
+        self._spawn(self._prefetch_neighbour(index, -1 if enter < 0 else 1, generation))
+
+    async def _prefetch_neighbour(self, index: int, direction: int, generation: int) -> None:
+        """Once the page is up, prepare the chapter a turn in ``direction`` opens: the WebView's processed
+        body (``DocumentBuilder.prefetch``) or the native page's blocks and images. Never in the way of
+        the page on screen: it waits ``PREFETCH_DELAY`` and gives up when the reader moved on."""
+        session = self.session
+        target = index + direction
+        if session is None or not 0 <= target < session.count or self.layout == rm.LAYOUT_ALL:
+            return
+        await asyncio.sleep(PREFETCH_DELAY)
+        if generation != self.render_generation or self.disposed or self.session is not session:
+            return
+        try:
+            if self.renderer == "webview":
+                builder = self.builder
+                if builder is not None and builder.session is session:
+                    await self._io(builder.prefetch, target, self.layout)
+                return
+            key = (target, session.generation, session.flavor)
+            if key in self._native_prefetch:
+                return
+            if session.plan.mode == MODE_WORKSPACE and session.flavor in (rm.ORIGINAL, rm.BILINGUAL):
+                return  # raw workspace pages are produced on demand
+            blocks = await self._io(build_native_blocks, session, target)
+            images = await self._io(self._block_images, session, blocks)
+            if generation == self.render_generation and not self.disposed:
+                self._native_prefetch = {key: (blocks, images)}  # one chapter ahead (images can be large)
+        except Exception:
+            log.debug("prefetching chapter %s failed", target, exc_info=True)
 
     @staticmethod
     def _block_images(session: ReaderSession, blocks: list) -> dict:
@@ -1016,14 +1076,59 @@ class ReaderScreen(Screen):
     # ---- navigation ---------------------------------------------------------------------------------
 
     async def go_chapter(self, index: int, *, hint: Optional[Mapping[str, Any]] = None, last: bool = False,
-                         find: Optional[Mapping[str, Any]] = None, anchor: Optional[str] = None) -> None:
+                         find: Optional[Mapping[str, Any]] = None, anchor: Optional[str] = None,
+                         enter: int = 0) -> None:
         session = self.session
         if session is None or not 0 <= index < session.count:
             return
         self._release_position_hold()
         if last:
             hint = {"last": True}
-        await self.render(index, hint=hint, find=find, anchor=anchor)
+        await self.render(index, hint=hint, find=find, anchor=anchor, enter=enter)
+
+    # ---- page-turn motion ---------------------------------------------------------------------------
+
+    def turn_ms(self) -> int:
+        """One page turn's slide in ms: 0 with Aa > Layout "Page turn animation" off or Reduce motion on."""
+        return rm.PAGE_TURN_MS if self.settings.page_turn and not motion.reduced() else 0
+
+    def _turn_config(self, index: int, enter: int = 0) -> Optional[dict]:
+        """The page's ``GLRDR.setTurn`` motion (paged layouts only: Scroll / Scroll all never turn)."""
+        if not rm.is_paged(self.layout):
+            return None
+        count = self.session.count if self.session is not None else 0
+        return bridge.turn_config(self.turn_ms(), enter=enter, has_next=index + 1 < count, has_prev=index > 0)
+
+    def _apply_turn(self) -> None:
+        """The switch or Reduce motion changed: the page on screen follows (no reload)."""
+        if self.disposed or self.renderer != "webview" or not rm.is_paged(self.layout):
+            return
+        self._spawn(self._js(bridge.js_call("setTurn", {"ms": self.turn_ms()})))
+
+    def _set_slot_motion(self, native: bool, *, enter: int = 0) -> bool:
+        """The native page's chapter-turn slide on ``page_slot`` (``offset`` / ``opacity`` animations).
+
+        The WebView page animates itself (the shell's ``setTurn``): its slot carries no animation, so
+        the platform view is never wrapped in a Flutter transform. The native page always keeps the same
+        animated wrappers (a changed wrapper would rebuild the list). ``enter`` != 0 puts the page off to
+        that side and hidden at once (a 1 ms animation); the next call slides it in. True when it moved."""
+        slot = self.page_slot
+        if not native:
+            slot.offset = slot.animate_offset = slot.animate_opacity = None
+            slot.opacity = 1.0
+            return False
+        ms = self.turn_ms()
+        if enter and ms:
+            slot.animate_offset = ft.Animation(1, ft.AnimationCurve.LINEAR)
+            slot.animate_opacity = ft.Animation(1, ft.AnimationCurve.LINEAR)
+            slot.offset = ft.Offset(SLIDE_SHIFT if enter > 0 else -SLIDE_SHIFT, 0)
+            slot.opacity = 0.0
+            return True
+        slot.animate_offset = ft.Animation(max(1, ms), ft.AnimationCurve.EASE_OUT_CUBIC)
+        slot.animate_opacity = ft.Animation(max(1, ms), ft.AnimationCurve.EASE_OUT)
+        slot.offset = ft.Offset(0, 0)
+        slot.opacity = 1.0
+        return False
 
     async def open_chapters(self) -> None:
         self._refresh_toc()
@@ -1321,9 +1426,9 @@ class ReaderScreen(Screen):
         (the page's ``edge`` event and the native reader's edge taps; desktop
         ``_advance_paginated_next`` / ``_prev_chapter``)."""
         if direction > 0 and self.session is not None and self.index + 1 < self.session.count:
-            self._spawn(self.go_chapter(self.index + 1))
+            self._spawn(self.go_chapter(self.index + 1, enter=1))
         elif direction < 0 and self.index > 0:
-            self._spawn(self.go_chapter(self.index - 1, last=True))
+            self._spawn(self.go_chapter(self.index - 1, last=True, enter=-1))
 
     # ---- fallback events ---------------------------------------------------------------------------
 
@@ -1474,6 +1579,10 @@ class ReaderScreen(Screen):
         self.settings = new
         if save:
             self._schedule_style_save(cleaned, scope)
+        if "page_turn" in cleaned:
+            self._apply_turn()
+            if set(cleaned) == {"page_turn"}:
+                return  # nothing to restyle or re-render
         relayout = (old.layout != new.layout or old.embedded_css != new.embedded_css
                     or old.lightweight != new.lightweight)
         if "keep_screen_on" in cleaned:

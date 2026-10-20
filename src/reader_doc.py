@@ -1218,6 +1218,83 @@ class EpubSearchMixin:
         _flush_batch(True)
 
 
+# Opening an EPUB used to run BeautifulSoup over every chapter only to read its
+# <title> (and to see that the page is not empty). That parse dominated the
+# first open of a book (seconds on a desktop, far longer on a phone, and it holds
+# the GIL the UI loop needs). ``_fast_chapter_title`` reads a plain <title> with
+# a regex and answers None whenever the markup before or inside it could make
+# html.parser + BeautifulSoup see something else; the caller then parses as before.
+_FAST_TITLE_OPEN_RE = re.compile(r"<title(?:\s+[^>\"'/]*)?>", re.I)
+_FAST_TITLE_CLOSE_RE = re.compile(r"</title\s*>", re.I)
+_FAST_TITLE_UNSAFE_BEFORE = (
+    "<!--", "<![", "<script", "<style", "<textarea", "<xmp", "<plaintext",
+    "<iframe", "<noembed", "<noframes", "<noscript", "<template",
+)
+
+
+def _fast_chapter_title(content: str):
+    """The stripped text of the document's first ``<title>`` when it is plain text
+    (what ``soup.find("title").string.strip()`` returns), else None (parse instead)."""
+    if not content:
+        return None
+    at = content.lower().find("<title")
+    if at < 0:
+        return None
+    before = content[:at].lower()
+    if any(marker in before for marker in _FAST_TITLE_UNSAFE_BEFORE):
+        return None
+    opened = _FAST_TITLE_OPEN_RE.match(content, at)
+    if opened is None:
+        return None
+    closed = _FAST_TITLE_CLOSE_RE.search(content, opened.end())
+    if closed is None:
+        return None
+    raw = content[opened.end():closed.start()]
+    if "<" in raw:
+        return None
+    import html as _html
+    title = _html.unescape(raw).strip()
+    return title or None
+
+
+_FAST_ATTRS = r"""(?:[^<>"'/]|"[^"<>]*"|'[^'<>]*')*"""
+_FAST_HEADING_OPEN_RE = re.compile(r"<h([123])(?:\s" + _FAST_ATTRS + r")?>", re.I)
+_FAST_HEADING_ANY_RE = re.compile(r"<h[1-6][\s/>]", re.I)
+_FAST_TAG_RE = re.compile(r"</?[a-z][a-z0-9]*(?:\s" + _FAST_ATTRS + r")?/?>", re.I)
+_FAST_HEADING_UNSAFE = _FAST_TITLE_UNSAFE_BEFORE + ("<rt", "<rp", "<?", "<svg", "<math")
+
+
+def _fast_heading_title(content: str):
+    """For a page without ``<title>`` (ebooklib re-serialises chapters with an empty
+    ``<head/>``): the first h1-h3's text as ``get_text(strip=True)`` gives it, when
+    that heading is plain markup and not empty; else None (parse instead)."""
+    if not content:
+        return None
+    lower = content.lower()
+    if "<title" in lower:
+        return None
+    opened = _FAST_HEADING_OPEN_RE.search(content)
+    if opened is None:
+        return None
+    if any(marker in lower[:opened.start()] for marker in _FAST_TITLE_UNSAFE_BEFORE):
+        return None
+    closed = re.compile(r"</h%s\s*>" % opened.group(1), re.I).search(content, opened.end())
+    if closed is None:
+        return None
+    inner = content[opened.end():closed.start()]
+    low_inner = inner.lower()
+    if any(marker in low_inner for marker in _FAST_HEADING_UNSAFE):
+        return None
+    if _FAST_HEADING_ANY_RE.search(inner):
+        return None
+    pieces = _FAST_TAG_RE.split(inner)
+    if any("<" in piece or ">" in piece for piece in pieces):
+        return None  # a tag the plain pattern does not cover (quoted attribute, stray bracket)
+    import html as _html
+    title = "".join(_html.unescape(piece).strip() for piece in pieces)
+    return title or None
+
+
 class EpubLoaderMixin:
     """``_EpubLoaderThread``: parse an EPUB (spine first, lazy images) into the cache.
     """
@@ -1436,6 +1513,16 @@ class EpubLoaderMixin:
                 if self._should_stop():
                     return None
                 try:
+                    if authoritative:
+                        # A plain <title> (or, without one, a plain first
+                        # h1-h3): the soup below would keep the page (its
+                        # text includes that text) under this same title.
+                        title = (_fast_chapter_title(content)
+                                 or _fast_heading_title(content))
+                        if title:
+                            if len(title) > 50:
+                                title = title[:47] + "…"
+                            return title, content, item_name
                     soup = BeautifulSoup(content, "html.parser")
                     text = soup.get_text(strip=True)
                     # Non-authoritative items (pass 3) must clear a minimum
@@ -2795,7 +2882,64 @@ _MOBILE_BRIDGE_JS = r"""
   var PREFIX = %(prefix)s, EVENT_URL = %(event_url)s, CHAPTER = %(chapter)s;
   var INITIAL_PAGE = %(initial_page)s;
   var transport = 'both', seq = 0, page = 0, count = 1, ready = false;
+  // Page-turn motion (setTurn): next / prev pages slide (#columns scrolls to the page over
+  // turn.ms); a chapter page enters from the side it was turned from (turn.enter) and
+  // leaves to the other side at an edge when a neighbour chapter exists (turn.next/prev).
+  var turn = {ms: 0, enter: 0, next: false, prev: false}, slide = null, leaveTimer = null;
   function cols() { return document.getElementById('columns'); }
+  function turnMs() {
+    if (!(turn.ms > 0) || !window.requestAnimationFrame) { return 0; }
+    try {
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) { return 0; }
+    } catch (e) {}
+    return turn.ms;
+  }
+  function stopSlide() {
+    if (slide) { try { window.cancelAnimationFrame(slide.id); } catch (e) {} slide = null; }
+  }
+  function slideTo(c, from, to, ms) {
+    stopSlide();
+    if (from === to) { c.scrollLeft = to; return; }
+    var t0 = null, run = {to: to};
+    slide = run;
+    c.scrollLeft = from;
+    function step(ts) {
+      if (slide !== run) { return; }
+      if (t0 === null) { t0 = ts; }
+      var k = Math.min(1, Math.max(0, (ts - t0) / ms)), e = 1 - Math.pow(1 - k, 3);
+      c.scrollLeft = Math.round(from + (to - from) * e);
+      if (k < 1) { run.id = window.requestAnimationFrame(step); } else { slide = null; }
+    }
+    run.id = window.requestAnimationFrame(step);
+  }
+  function bodyMotion(transform, opacity, transition) {
+    var b = document.body;
+    if (!b || !b.style) { return null; }
+    b.style.transition = transition;
+    b.style.transform = transform;
+    b.style.opacity = opacity;
+    return b;
+  }
+  function enterPage(dir) {
+    var ms = turnMs();
+    if (!ms || !dir) { return; }
+    var b = bodyMotion('translateX(' + (dir > 0 ? 24 : -24) + '%%)', '0', 'none');
+    if (!b) { return; }
+    void b.offsetWidth;
+    bodyMotion('translateX(0)', '1', 'transform ' + ms + 'ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity '
+               + ms + 'ms ease-out');
+    setTimeout(function () { bodyMotion('', '', ''); }, ms + 80);
+  }
+  function leavePage(dir) {
+    var ms = turnMs();
+    if (!ms || !(dir > 0 ? turn.next : turn.prev)) { return; }
+    var out = Math.max(1, Math.round(ms * 0.6));
+    bodyMotion('translateX(' + (dir > 0 ? -24 : 24) + '%%)', '0',
+               'transform ' + out + 'ms ease-in, opacity ' + out + 'ms ease-in');
+    if (leaveTimer) { clearTimeout(leaveTimer); }
+    // the app replaces this page with the neighbour chapter; if it does not, come back
+    leaveTimer = setTimeout(function () { leaveTimer = null; bodyMotion('', '', 'none'); }, 2500);
+  }
   function post(evt) {
     evt = evt || {};
     evt.seq = ++seq;
@@ -2813,6 +2957,7 @@ _MOBILE_BRIDGE_JS = r"""
   function measure() {
     var c = cols();
     if (!c) { count = 1; return count; }
+    stopSlide();
     if (typeof _setupColumns === 'function') { _setupColumns(); }
     count = (typeof _pageCountFor === 'function') ? _pageCountFor(c) : 1;
     return count;
@@ -2820,6 +2965,7 @@ _MOBILE_BRIDGE_JS = r"""
   function goTo(target, reason) {
     var c = cols();
     if (!c) { return; }
+    var from = c.scrollLeft || 0;  // where the page is on screen (mid-slide on a quick second turn)
     measure();
     var p = Math.max(0, Math.min(parseInt(target, 10) || 0, count - 1));
     var gap = (typeof _PAGE_GAP !== 'undefined') ? _PAGE_GAP : 0;
@@ -2829,19 +2975,21 @@ _MOBILE_BRIDGE_JS = r"""
     _CURRENT_PAGE = p;
     c.style.transition = 'none';
     c.style.transform = 'none';
-    c.scrollLeft = Math.round(p * span);
+    var to = Math.round(p * span), ms = (reason === 'next' || reason === 'prev') && ready ? turnMs() : 0;
+    if (ms && Math.abs(to - from) <= 2 * span) { slideTo(c, from, to, ms); }
+    else { c.scrollLeft = to; }
     page = p;
     post({type: 'page', page: page, count: count, reason: reason || 'goto'});
   }
   function next() {
     if (!cols()) { post({type: 'tap', zone: 'right'}); return; }
     if (page < count - 1) { goTo(page + 1, 'next'); }
-    else { post({type: 'edge', edge: 'end', page: page, count: count}); }
+    else { leavePage(1); post({type: 'edge', edge: 'end', page: page, count: count}); }
   }
   function prev() {
     if (!cols()) { post({type: 'tap', zone: 'left'}); return; }
     if (page > 0) { goTo(page - 1, 'prev'); }
-    else { post({type: 'edge', edge: 'start', page: page, count: count}); }
+    else { leavePage(-1); post({type: 'edge', edge: 'start', page: page, count: count}); }
   }
   function goToFraction(fraction) {
     if (cols()) { measure(); goTo(Math.round((count - 1) * (+fraction || 0)), 'fraction'); return; }
@@ -2940,16 +3088,33 @@ _MOBILE_BRIDGE_JS = r"""
       if ((m = /[#&]f=([0-9.]+)/.exec(hash))) { first = Math.round((count - 1) * parseFloat(m[1])); }
       goTo(first || 0, 'initial');
       c.style.opacity = '1';
+      enterPage(turn.enter);
     } else if ((m = /[#&]f=([0-9.]+)/.exec(hash))) {
       goToFraction(parseFloat(m[1]));
     }
     post({type: 'ready', page: page, count: count, paginated: !!c});
   }
+  // a hardware keyboard turns pages like the tap zones
+  document.addEventListener('keydown', function (e) {
+    if (!cols() || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) { return; }
+    var k = e.key;
+    if (k === 'ArrowRight' || k === 'PageDown' || (k === ' ' && !e.shiftKey)) { e.preventDefault(); next(); }
+    else if (k === 'ArrowLeft' || k === 'PageUp' || (k === ' ' && e.shiftKey)) { e.preventDefault(); prev(); }
+  });
   window.GLRDR = {
     goTo: function (p) { goTo(p, 'api'); }, next: next, prev: prev,
     goToFraction: goToFraction, measure: measure,
     page: function () { return page; }, count: function () { return count; },
-    setTransport: function (mode) { transport = mode || 'both'; }, post: post
+    setTransport: function (mode) { transport = mode || 'both'; }, post: post,
+    setTurn: function (o) {
+      o = o || {};
+      if (o.ms !== undefined) { turn.ms = Math.max(0, Math.min(1000, +o.ms || 0)); }
+      if (o.enter !== undefined) { turn.enter = +o.enter > 0 ? 1 : (+o.enter < 0 ? -1 : 0); }
+      if (o.next !== undefined) { turn.next = !!o.next; }
+      if (o.prev !== undefined) { turn.prev = !!o.prev; }
+      if (!turn.ms) { stopSlide(); }
+    },
+    turn: function () { return {ms: turn.ms, enter: turn.enter, next: turn.next, prev: turn.prev}; }
   };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () { setTimeout(start, 0); });
