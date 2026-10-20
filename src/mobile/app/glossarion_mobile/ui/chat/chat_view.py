@@ -2230,7 +2230,7 @@ class ChatView:
             storage["bid"] = bid
         append_tool_message(self.env.chats, cid, body, "", LIBRARY_LABEL, storage)
         self.render_transcript(follow=True)  # the turn's own card (its Plan card's slot) shows where it went
-        self.notify(f"Translating · {name}", action_label="Jobs", on_action=lambda: self.navigate("jobs"))
+        # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
         return job_id
 
     def _library_job_control(self, item: Any, messages: list, record: Optional[dict]) -> Any:
@@ -2367,8 +2367,7 @@ class ChatView:
         append_tool_message(self.env.chats, cid, body, folder, QA_LABEL,
                             {"qa_job": str(job_id), "folder": folder, "source": source, "summary": summary})
         self.show_newest()
-        self.notify(f"QA scan · {name}", action_label="Jobs",
-                    on_action=lambda j=str(job_id): self.navigate("jobs.detail", {"jid": j}))
+        # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
         return str(job_id)
 
     def _qa_summary_line(self) -> str:
@@ -2756,7 +2755,7 @@ class ChatView:
             self.notify("No translated output folder for this chat yet")
         else:
             label = "PDF" if kind == "compile_pdf" else "EPUB"
-            self.notify(f"Compiling {label} · see Jobs", action_label="Jobs", on_action=lambda: self.navigate("jobs"))
+            # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
 
     def _resume_last(self, run_config: Optional[dict] = None, run_key: Optional[str] = None) -> None:
         """Resume / Retry failed: resubmit the chat's last run (same run root -> resumes from progress);
@@ -3144,7 +3143,7 @@ class ChatView:
                                                  "the output folder (Library shelf). Follow it in Jobs.", "",
                             LIBRARY_LABEL, {"library_job": str(job_id)})
         self.show_newest()
-        self.notify(f"Translating · {title}", action_label="Jobs", on_action=lambda: self.navigate("jobs"))
+        # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
         return job_id
 
     def _on_pill(self, pill_id: str) -> None:
@@ -3761,8 +3760,9 @@ class ChatView:
                 self.env.chats.set_meta(self.cid, LIBRARY_ATTACHMENT_META, previous)
             return False
         if note:
-            title = str(getattr(target, "title", "") or os.path.basename(source))
-            self.notify(f"{note}: {title}", action_label="Remove", on_action=self.composer._remove_attachment)
+            # an attached file that is a Library book continues it silently (owner 2026-10-20: no
+            # "Continues the Library book" snackbar; the attachment chip's ✕ removes it)
+            pass
         else:
             self.notify(f"Attached {os.path.basename(source)} from the Library", action_label="Remove",
                         on_action=self.composer._remove_attachment)

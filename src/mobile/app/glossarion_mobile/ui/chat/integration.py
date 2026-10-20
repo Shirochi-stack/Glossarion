@@ -978,8 +978,7 @@ class ChatFeature:
         except Exception as exc:
             notify(f"Could not start: {exc}")
             return None
-        navigate = getattr(app, "navigate_to", None)
-        notify(f"Translating · {book['name']}", "Jobs", (lambda: navigate("jobs")) if navigate else None)
+        # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
         return job_id
 
     async def open_progress(self, folder: str, source: str = "", select: Optional[tuple] = None) -> Optional[str]:
@@ -1455,15 +1454,9 @@ class ChatFeature:
                                 **({"raw_source_path": str(source)} if source else {})})
 
     def _announce_many(self, count: int) -> None:
-        notify = getattr(self.app, "notify", None)
-        navigate = getattr(self.app, "navigate_to", None)
-        if notify is None:
-            return
-        text = f"Added {count} books to the Library"
-        if navigate is not None:
-            notify(text, "Library", lambda: navigate("library"))
-        else:
-            notify(text)
+        """Silent (owner 2026-10-20): the startup sweep's books join the Library without an
+        "Added N books to the Library · Library" snackbar."""
+        return None
 
     def _announce_moved(self, target: str, source: str = "", cid: Any = None, *, quiet: bool = False) -> None:
         app = self.app
@@ -1492,11 +1485,9 @@ class ChatFeature:
                     chat_view.header.set_attachments(chat_view._attachment_count(chat_view.cid))
             except Exception:
                 log.debug("refreshing the chat after a move failed", exc_info=True)
-        if notify is not None and not quiet:
-            if bid and navigate is not None:
-                notify(ADDED_TO_LIBRARY, "Open book", lambda: navigate("library.book", {"bid": bid}))
-            else:
-                notify(ADDED_TO_LIBRARY)
+        # silent (owner 2026-10-20): no "Added to the Library · Open book" snackbar — the Result card
+        # opens the book; ``notify`` / ``navigate`` / ``bid`` stay for the callers that pass them
+        del notify, navigate, bid
 
     def open_merge_dialog(self, cid: Any, folder: str) -> Any:
         """The name-clash snackbar's action: the desktop "Attachment folder already exists" dialog."""
