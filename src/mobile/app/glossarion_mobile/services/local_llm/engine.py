@@ -54,6 +54,9 @@ __all__ = ["ENGINE_VERSION", "ContextOverflow", "EngineUnavailable", "FakeEngine
 ENGINE_VERSION = "0.3.32"
 #: Qwen3.5 non-thinking sampling defaults (used when a request leaves them out).
 DEFAULT_SAMPLING = {"top_k": 20, "top_p": 0.8, "min_p": 0.0}
+#: llama.cpp's default DRY sequence breakers: a repeat never counts across a line break, a colon, a
+#: quote or an asterisk, so a chapter's paragraph tags and dialogue lines stay free
+DRY_SEQUENCE_BREAKERS = ("\n", ":", '"', "*")
 STOP_CHECK_EVERY = 8  # tokens between two "is the client still there?" checks
 UNAVAILABLE = "The on-device engine is not available in this build (llama-cpp-python is not installed)"
 NO_MTMD = "This build's on-device engine cannot read images (llama-cpp-python without libmtmd)"
@@ -474,6 +477,12 @@ class LlamaEngine(_Base):
         }
         if params.get("seed") is not None:
             kwargs["seed"] = int(params["seed"])
+        # create_chat_completion takes no DRY settings: the build's patched _init_sampler reads them from
+        # the model (patches/mobile.patch 9.; an unpatched build ignores the attribute)
+        llm.dry_sampling = {"multiplier": float(params.get("dry_multiplier") or 0.0),
+                            "base": float(params.get("dry_base") or 1.75),
+                            "allowed_length": int(params.get("dry_allowed_length") or 2),
+                            "penalty_last_n": -1, "seq_breakers": list(DRY_SEQUENCE_BREAKERS)}
         if params.get("ban_cjk"):
             try:
                 processors = importlib.import_module("llama_cpp").LogitsProcessorList

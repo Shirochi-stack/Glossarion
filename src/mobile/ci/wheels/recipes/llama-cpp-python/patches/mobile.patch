@@ -1,8 +1,8 @@
 Glossarion overlay of flet-dev/mobile-forge recipes/llama-cpp-python/patches/mobile.patch
 (0fadbfab0d63d11164030dfddc955ed980e32e2c, BSD-3-Clause, see ../../LICENSE.mobile-forge):
 upstream's five changes below, unchanged, plus a sixth one for the vision build (LLAVA_BUILD=ON),
-a seventh one for the runtime CPU variants of the Android arm64 build and an eighth one for the
-optional GPU backends:
+a seventh one for the runtime CPU variants of the Android arm64 build, an eighth one for the
+optional GPU backends and a ninth one for the DRY sampler:
 
 6. Drops SONAME versioning from libmtmd too (single unversioned libmtmd, like the others).
 
@@ -31,6 +31,11 @@ optional GPU backends:
    - ggml/src/ggml-backend-reg.cpp: the registry no longer registers Metal when it starts, so
      Metal's device setup and runtime shader compilation never run while the GPU is off
      (GLOSSARION_GGML_EAGER_METAL=1 restores upstream's behaviour).
+
+9. DRY sampler: llama.py's _init_sampler adds llama.cpp's DRY sampler (LlamaSampler.add_dry,
+   already bound) after the penalties when the Llama instance carries a dry_sampling dict
+   (multiplier, base, allowed_length, penalty_last_n, seq_breakers) with a multiplier above 0;
+   create_chat_completion has no DRY parameters, so the app sets the attribute per request.
 
 Upstream's description:
 
@@ -524,6 +529,30 @@ diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
  if TYPE_CHECKING:
      CtypesCData = TypeVar("CtypesCData", bound=ctypes._CData)  # type: ignore
  
+diff --git a/llama_cpp/llama.py b/llama_cpp/llama.py
+--- a/llama_cpp/llama.py
++++ b/llama_cpp/llama.py
+@@ -747,6 +747,20 @@
+             # penalize_nl=penalize_nl,
+             # ignore_eos=False,
+         )
++
++        # Glossarion: llama.cpp's DRY sampler, from the instance's dry_sampling dict (multiplier,
++        # base, allowed_length, penalty_last_n, seq_breakers); unset or multiplier 0 adds nothing
++        dry = getattr(self, "dry_sampling", None) or {}
++        if float(dry.get("multiplier") or 0.0) > 0.0:
++            sampler.add_dry(
++                self._model,
++                self._model.n_ctx_train(),
++                float(dry["multiplier"]),
++                float(dry.get("base", 1.75)),
++                int(dry.get("allowed_length", 2)),
++                int(dry.get("penalty_last_n", -1)),
++                [str(s) for s in (dry.get("seq_breakers") or ["\n", ":", '"', "*"])],
++            )
+ 
+         if grammar is not None:
+             sampler.add_grammar(self._model, grammar)
 diff --git a/vendor/llama.cpp/ggml/src/CMakeLists.txt b/vendor/llama.cpp/ggml/src/CMakeLists.txt
 --- a/vendor/llama.cpp/ggml/src/CMakeLists.txt
 +++ b/vendor/llama.cpp/ggml/src/CMakeLists.txt

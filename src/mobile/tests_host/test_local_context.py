@@ -223,7 +223,9 @@ def test_on_device_sampling_follows_qwen_and_replaces_the_request(tmp_path):
                               "max_tokens": 100}, 4096)
     assert params["temperature"] == 0.7 and params["presence_penalty"] == 1.5 and params["repeat_penalty"] == 1.0
     assert params["top_p"] == 0.8 and params["top_k"] == 20 and params["min_p"] == 0.0
-    assert "frequency_penalty" not in params and params["seed"] == 7 and params["max_tokens"] == 100
+    assert params["frequency_penalty"] == 0.0 and params["seed"] == 7 and params["max_tokens"] == 100
+    # owner 2026-10-21: the DRY sampler is on by default (llama.cpp's usual values)
+    assert (params["dry_multiplier"], params["dry_base"], params["dry_allowed_length"]) == (0.8, 1.75, 2)
 
     saved, error = service.save_sampling({"top_k": "40", "presence_penalty": "", "repeat_penalty": "1.1"})
     assert error is None and saved["top_k"] == 40
@@ -233,6 +235,12 @@ def test_on_device_sampling_follows_qwen_and_replaces_the_request(tmp_path):
     assert service.save_sampling({"top_k": "2.5"})[1] == "Top K must be a whole number"
     assert service.save_sampling({"top_p": "abc"})[1] == "Top P must be a number"
     assert service.sampling()["top_k"] == 40  # a rejected save changes nothing
+    saved, error = service.save_sampling({"frequency_penalty": "0.3", "dry_multiplier": "0", "dry_allowed_length": "4"})
+    assert error is None and saved["frequency_penalty"] == 0.3 and saved["dry_multiplier"] == 0.0
+    assert saved["dry_allowed_length"] == 4 and saved["dry_base"] == 1.75
+    assert service._params({}, 512)["dry_multiplier"] == 0.0
+    assert service.save_sampling({"dry_allowed_length": "1.5"})[1] == "DRY allowed length must be a whole number"
+    assert service.save_sampling({"dry_base": "0.5"})[1] == "DRY base must be between 1 and 4"
 
 
 def test_on_device_engine_card_saves_and_resets_sampling(tmp_path):
@@ -242,6 +250,9 @@ def test_on_device_engine_card_saves_and_resets_sampling(tmp_path):
     panel = LocalModelsPanel(service=service, prefs=service.prefs, current_model=lambda: f"local/{LIGHT}")
     panel.build()
     assert "temperature" not in panel.sampling_fields and panel.sampling_fields["presence_penalty"].value == "1.5"
+    assert panel.sampling_fields["frequency_penalty"].value == "0"
+    assert panel.sampling_fields["dry_multiplier"].value == "0.8"
+    assert panel.sampling_fields["dry_multiplier"].label == "DRY multiplier"
     panel.sampling_fields["presence_penalty"].value = "1.2"
     assert panel.save_sampling() is None and service.sampling()["presence_penalty"] == 1.2
     panel.sampling_fields["min_p"].value = "9"

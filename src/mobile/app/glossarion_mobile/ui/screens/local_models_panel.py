@@ -746,8 +746,10 @@ class LocalModelsPanel(OnDeviceFlow):
                                           key="local-block-cjk", on_change=lambda e: self.save_block_cjk())
         return [
             ft.Text("Sampling (on-device models only)", weight=ft.FontWeight.W_600, key="local-sampling-title"),
-            _small("Qwen's recommended values reduce repetition loops. These replace the anti-duplicate "
-                   "settings for on-device models; cloud models keep using those."),
+            _small("Qwen's recommended values and the DRY sampler reduce repetition loops. DRY stops the "
+                   "model repeating a stretch of text, more strongly the longer the repeat; DRY multiplier 0 "
+                   "turns it off. These replace the anti-duplicate settings for on-device models; cloud "
+                   "models keep using those."),
             ft.Row(list(self.sampling_fields.values()), wrap=True, spacing=8, run_spacing=8, key="local-sampling"),
             ft.Row([ft.TextButton(content="Save", key="local-sampling-save", on_click=lambda e: self.save_sampling()),
                     ft.TextButton(content="Qwen defaults", key="local-sampling-reset",

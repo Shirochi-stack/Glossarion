@@ -187,6 +187,26 @@ def test_llama_engine_passes_the_processor_and_computes_the_ids_once():
     assert engine._ban is None
 
 
+def test_llama_engine_hands_the_dry_settings_to_the_model():
+    """create_chat_completion has no DRY parameters: the engine sets ``dry_sampling`` on the model for the
+    patched _init_sampler (patches/mobile.patch 9.); the frequency penalty goes as a keyword."""
+    engine = eng.LlamaEngine()
+    engine.llm, engine.path, engine.n_ctx = _FakeLlama(), "x.gguf", 4096
+    messages = [{"role": "user", "content": "hi"}]
+    params = {"max_tokens": 16, "frequency_penalty": 0.3, "dry_multiplier": 0.8, "dry_base": 1.75,
+              "dry_allowed_length": 2}
+    "".join(engine.chat(messages, params, lambda: False))
+    assert engine.llm.kwargs[-1]["frequency_penalty"] == 0.3
+    assert engine.llm.dry_sampling == {"multiplier": 0.8, "base": 1.75, "allowed_length": 2,
+                                       "penalty_last_n": -1, "seq_breakers": ["\n", ":", '"', "*"]}
+    "".join(engine.chat(messages, {"max_tokens": 16, "dry_multiplier": 0}, lambda: False))
+    assert engine.llm.dry_sampling["multiplier"] == 0.0  # off
+    patch = (MOBILE_DIR / "ci" / "wheels" / "recipes" / "llama-cpp-python" / "patches" / "mobile.patch").read_text(
+        encoding="utf-8")
+    assert "diff --git a/llama_cpp/llama.py b/llama_cpp/llama.py" in patch
+    assert '+        dry = getattr(self, "dry_sampling", None) or {}' in patch and "+            sampler.add_dry(" in patch
+
+
 def test_engine_card_switch_turns_the_ban_off_and_on(tmp_path):
     pytest.importorskip("flet")
     from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel

@@ -76,15 +76,23 @@ SAMPLING_KEY = "local_llm_sampling"
 #: Qwen's recommended non-thinking sampling for its small models (owner 2026-10-18: no penalty let a 0.8B
 #: model loop on "<p><br/>"); presence_penalty 1.5 counters endless repetition. The
 #: temperature is the global one (an on-device model sets 0.4: setting_writes.ON_DEVICE_TEMPERATURE).
+#: The DRY sampler (owner 2026-10-21: a 2B model looped on backticks through the presence penalty)
+#: penalizes continuing a repeated sequence, more the longer it gets; 0.8 / 1.75 / 2 are llama.cpp's
+#: usual values and DRY multiplier 0 switches it off (engine.DRY_SEQUENCE_BREAKERS reset a match).
 DEFAULT_ONDEVICE_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5,
-                             "repeat_penalty": 1.0}
+                             "frequency_penalty": 0.0, "repeat_penalty": 1.0, "dry_multiplier": 0.8,
+                             "dry_base": 1.75, "dry_allowed_length": 2}
 #: (low, high, type) of each sampling setting
 SAMPLING_LIMITS = {"top_p": (0.0, 1.0, float), "top_k": (0, 200, int),
                    "min_p": (0.0, 1.0, float), "presence_penalty": (-2.0, 2.0, float),
-                   "repeat_penalty": (0.5, 2.0, float)}
+                   "frequency_penalty": (-2.0, 2.0, float), "repeat_penalty": (0.5, 2.0, float),
+                   "dry_multiplier": (0.0, 5.0, float), "dry_base": (1.0, 4.0, float),
+                   "dry_allowed_length": (1, 20, int)}
 #: field labels (Model manager) and error messages
 SAMPLING_LABELS = {"top_p": "Top P", "top_k": "Top K", "min_p": "Min P",
-                   "presence_penalty": "Presence penalty", "repeat_penalty": "Repeat penalty"}
+                   "presence_penalty": "Presence penalty", "frequency_penalty": "Frequency penalty",
+                   "repeat_penalty": "Repeat penalty", "dry_multiplier": "DRY multiplier",
+                   "dry_base": "DRY base", "dry_allowed_length": "DRY allowed length"}
 #: Prefs key of "Block CJK in translations (adaptive)" (Model manager > On-device > engine card; a bool,
 #: on when unset): see ``script_ban``
 BLOCK_CJK_KEY = "local_llm_block_cjk"
