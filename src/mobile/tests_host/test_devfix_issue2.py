@@ -171,7 +171,9 @@ def chinese_novel() -> str:
 
 
 def _plain(markup: str) -> str:
-    """Page markup as text (tags dropped, entities left alone: the fixtures need none)."""
+    """Page markup as text (script / style blocks and tags dropped, entities left alone: the fixtures need
+    none). The page script holds "<" comparisons, so it goes before the tag pattern runs."""
+    markup = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", markup)
     return re.sub(r"<[^>]+>", " ", markup)
 
 
@@ -547,6 +549,9 @@ def test_open_with_a_txt_file_offers_and_opens_the_reader(app_env, tmp_path):
                 screen.dispose()
                 assert run.app.prefs.reader_position(bid)["href"] == "section_0002.txt"
                 await run.back()
+                # the next pass opens the same book again: a plain open now goes straight to the saved
+                # section (owner 2026-10-20), so start that pass from the beginning
+                run.app.prefs.clear_reader_position(bid)
         finally:
             await stop_app(run)
 
@@ -694,6 +699,8 @@ def test_txt_translation_workspace_reads_translated_original_and_bilingual(app_e
                 _plain(session.chapter_html(i)) for i in range(session.count))
             await run.turn(screen, lambda: screen.set_mode(rm.ORIGINAL), screen.index)
             assert "기사의 귀환" in await run.shown_text(screen)
+            # back to Translated: the next open continues in the last view (owner 2026-10-20)
+            await run.turn(screen, lambda: screen.set_mode(rm.TRANSLATED), screen.index)
             screen.dispose()
             await run.back()
             await run.back()

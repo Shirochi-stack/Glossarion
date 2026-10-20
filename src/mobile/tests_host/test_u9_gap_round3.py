@@ -638,7 +638,8 @@ def test_text_size_hint_at_large_text(monkeypatch):
                                                             notify=lambda *a: said.append(a[0])))
     assert ReaderScreen.text_size_hint(fake) is False
     monkeypatch.setitem(text_scale._state, "os", 2.0)
-    assert ReaderScreen.text_size_hint(fake) is True and said == [TEXT_SIZE_HINT]
+    # still decided once at large text, but no snackbar (owner 2026-10-20: informational pop-ups removed)
+    assert ReaderScreen.text_size_hint(fake) is True and said == [] and TEXT_SIZE_HINT
     assert ReaderScreen.text_size_hint(fake) is False  # once
 
 
