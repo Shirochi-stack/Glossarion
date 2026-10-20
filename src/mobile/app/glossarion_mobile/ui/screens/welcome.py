@@ -81,8 +81,6 @@ BATCH_SLIDER = (1, 50)
 #: desktop defaults when nothing is saved (``delay`` 5.0 s, ``translation_temperature`` 0.3)
 DEFAULT_DELAY = 5.0
 DEFAULT_TEMPERATURE = 0.3
-#: the temperature for an on-device model (``setting_writes.ON_DEVICE_TEMPERATURE``)
-from glossarion_mobile.state.setting_writes import ON_DEVICE_TEMPERATURE as ONDEVICE_TEMPERATURE  # noqa: E402
 RATE_LIMIT_WARNING = ("Higher batch sizes send more requests at once and lower delays send them faster: respect your "
                       "provider's rate limits. authds/ (DeepSeek) and authchatgpt/ (ChatGPT) run on the sites' "
                       "own web chat; keep them at batch size 1 with a delay, or the site may limit or block you.")
@@ -625,13 +623,10 @@ class WelcomeScreen(Screen):
         return default_batch_size(model)
 
     def shown_temperature(self) -> float:
-        """The temperature Request size shows: the one set here, else 0.7 for an on-device model, else the
-        saved one, else the desktop default 0.3."""
+        """The temperature Request size shows: the one set here, else the saved one, else the desktop default
+        0.3 (every model, on-device too: owner 2026-10-20)."""
         if self.flow.temperature is not None:
             return float(self.flow.temperature)
-        model = str(self.current_model() if self.current_model is not None else "") or ""
-        if model.lower().startswith("local/"):
-            return ONDEVICE_TEMPERATURE
         try:
             return float(self._saved("translation_temperature", DEFAULT_TEMPERATURE))
         except (TypeError, ValueError):

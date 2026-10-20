@@ -336,7 +336,7 @@ class LlamaEngine(_Base):
             "messages": chat_messages,
             "stream": True,
             "max_tokens": int(params.get("max_tokens") or 0) or None,
-            "temperature": float(params.get("temperature", 0.7)),
+            "temperature": float(params.get("temperature", 0.3)),
             "top_p": float(params.get("top_p", DEFAULT_SAMPLING["top_p"])),
             "top_k": int(params.get("top_k", DEFAULT_SAMPLING["top_k"])),
             "min_p": float(params.get("min_p", DEFAULT_SAMPLING["min_p"])),

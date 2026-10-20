@@ -30,7 +30,7 @@ profile of the text extraction method (``ON_DEVICE_TRANSLATION_PROFILES``: "On-d
 other) and the "On-device" glossary and review generator prompt profiles (the review profile holds very short review and final
 prompts: ``review_generator.ON_DEVICE_REVIEW_PROMPT`` / ``ON_DEVICE_FINAL_REVIEW_PROMPT``), drops the
 glossary's extra columns (the "description" field; owner 2026-10-19: a small model only writes name,
-translated name and gender) and sets its Request size (``ON_DEVICE_SETTINGS``: temperature 0.7, batch
+translated name and gender) and sets its Request size (``ON_DEVICE_SETTINGS``: batch
 size 1, output limit half the context, input token limit the whole context); choosing a model
 that is not ``local/`` again restores everything that was there before, where it still holds the
 On-device value (a value or profile the user changed meanwhile stays) and the defaults where nothing was
@@ -138,14 +138,12 @@ EXTRACTION_KEY = "text_extraction_method"
 #: the glossary's extra columns (desktop Glossary Manager › Custom Fields) and its "description was
 #: removed on purpose" flag (owner_state adds "description" back to an empty list without it)
 CUSTOM_FIELDS_KEY = "custom_glossary_fields"
-#: the temperature for an on-device model (Qwen's recommendation for its small models; owner 2026-10-18:
-#: only on-device models get it, cloud models keep the saved / desktop default)
-ON_DEVICE_TEMPERATURE = 0.7
 #: Request size settings an on-device model sets and a cloud model gets back (owner 2026-10-19: "choosing
 #: a non on device model should restore all the original defaults and vice versa"); the output limit is
 #: half the model's context (``local_output_limit``). The review generator's short prompts are the built-in
 #: "On-device" review prompt profile (``review_generator``), selected like the other On-device profiles.
-ON_DEVICE_SETTINGS = {"translation_temperature": ON_DEVICE_TEMPERATURE, "batch_size": 1}
+#: Owner 2026-10-20: no temperature of its own — on-device models use the global one (0.3 by default).
+ON_DEVICE_SETTINGS = {"batch_size": 1}
 OUTPUT_LIMIT_KEY = "max_output_tokens"
 #: Auto glossary on an on-device model (owner 2026-10-19): NO GLOSSARY (the Welcome card's writes,
 #: ``welcome_flow.welcome_glossary_updates("no_glossary")``), except the 9B model, which can extract one
