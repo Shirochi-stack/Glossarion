@@ -2,8 +2,10 @@
 
 The manga pipeline runs three kinds of local ONNX models: the RT-DETR comic
 bubble/text detector (bubble_detector.BubbleDetector), and the AOT / LaMa
-inpainters (local_inpainter.LocalInpainter). None of them is bundled with the
-app; they are downloaded from Hugging Face the first time they are needed.
+inpainters (local_inpainter.LocalInpainter), plus the PP-OCR models RapidOCR reads
+manga / Korean text with (ocr_manager.RapidOCRProvider, ``rapidocr_language``). None
+of them is bundled with the app; they are downloaded from Hugging Face the first time
+they are needed.
 
 This module is the registry and download manager for those files:
 
@@ -60,6 +62,10 @@ import mobile_runtime
 __all__ = [
     "KIND_DETECTOR",
     "KIND_INPAINTER",
+    "KIND_OCR",
+    "RAPIDOCR_MODELS",
+    "rapidocr_model_sets",
+    "rapidocr_model_keys",
     "ModelSpec",
     "ModelStatus",
     "DownloadProgress",
@@ -116,6 +122,7 @@ __all__ = [
 
 KIND_DETECTOR = "detector"
 KIND_INPAINTER = "inpaint"
+KIND_OCR = "ocr"
 
 HF_ENDPOINT_DEFAULT = "https://huggingface.co"
 USER_AGENT = "Glossarion"
@@ -147,7 +154,13 @@ class ModelSpec:
 
     ``selector`` is the settings value that picks the model: the RT-DETR ONNX file
     name (``manga_settings.ocr.rtdetr_onnx_variant``) for detectors, the local
-    inpainting method (``manga_local_inpaint_model``) for inpainters.
+    inpainting method (``manga_local_inpaint_model``) for inpainters, the provider
+    (``rapidocr``) for OCR models.
+
+    ``local_name``: the path under the cache dir when it is not ``filename`` (two repos
+    both name their file ``inference.onnx``). ``companions``: registry keys of small
+    files the model needs (a recognizer's character dict); they download with it, count
+    for ``is_installed`` and are deleted with it, and ``specs()`` does not list them.
     """
 
     key: str
@@ -162,6 +175,8 @@ class ModelSpec:
     selector: str
     description: str = ""
     phone_default: bool = False
+    local_name: str = ""
+    companions: tuple = ()
 
     @property
     def size_mb(self) -> float:
@@ -183,9 +198,14 @@ class ModelSpec:
 
 _RTDETR_REPO = "ogkalu/comic-text-and-bubble-detector"
 _RTDETR_REVISION = "16e8a622f91fabc6b5b65c96d32d1183f8843546"
+_PPOCR_MANGA_REPO = "Kellenok/PP-OCRv6_manga"
+_PPOCR_MANGA_REVISION = "b3b65cbd29cd0240a6b471e49373eb5a80abacee"
+_PPOCR_KOREAN_REPO = "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx"
+_PPOCR_KOREAN_REVISION = "5c6f574b8e2230adf4287b33e736d71b9fabd28e"
 
 # Sizes and sha256 are the Hugging Face LFS metadata (api/models/<repo>/tree/<revision>)
-# of the pinned revisions; the repo ids and file names match
+# of the pinned revisions (the small non-LFS dict / yml files: sha256 of the file at that
+# revision); the repo ids and file names match
 # BubbleDetector.RTDETR_ONNX_FILENAMES / rtdetr_onnx_repo and local_inpainter.LAMA_JIT_MODELS.
 _SPECS = (
     ModelSpec(
@@ -268,9 +288,90 @@ _SPECS = (
         selector="lama_onnx",
         description="General LaMa inpainting model. Large; needs much more memory than AOT.",
     ),
+    # RapidOCR models it does not ship (ocr_manager.RapidOCRProvider; rapidocr_language picks
+    # them). They live under <ONNX_CACHE_DIR>/rapidocr/<repo>/...
+    ModelSpec(
+        key="ppocr_manga_det",
+        kind=KIND_OCR,
+        title="Manga text detector (PP-OCRv6)",
+        repo_id=_PPOCR_MANGA_REPO,
+        filename="det/manga_det_v0.2.onnx",
+        revision=_PPOCR_MANGA_REVISION,
+        sha256="d132078c46e292b226fb5a2ca52a7612ad319262dfdf493e7d8e3be435295978",
+        size=1816954,
+        cache_env="ONNX_CACHE_DIR",
+        selector="rapidocr",
+        description="Finds the text lines for RapidOCR's Japanese, Chinese and Korean readers.",
+        local_name="rapidocr/PP-OCRv6_manga/det/manga_det_v0.2.onnx",
+    ),
+    ModelSpec(
+        key="ppocr_manga_rec",
+        kind=KIND_OCR,
+        title="Japanese / Chinese manga reader (PP-OCRv6)",
+        repo_id=_PPOCR_MANGA_REPO,
+        filename="rec/manga_rec_v0.2.onnx",
+        revision=_PPOCR_MANGA_REVISION,
+        sha256="de12c84c63e62c80339e882e675983d886670dcb6f0147e1ed041afd6fa81888",
+        size=21167540,
+        cache_env="ONNX_CACHE_DIR",
+        selector="rapidocr",
+        description="RapidOCR text recognition tuned on manga: Japanese (vertical and horizontal) and Chinese.",
+        local_name="rapidocr/PP-OCRv6_manga/rec/manga_rec_v0.2.onnx",
+        companions=("ppocr_manga_dict",),
+    ),
+    ModelSpec(
+        key="ppocr_manga_dict",
+        kind=KIND_OCR,
+        title="Japanese / Chinese reader characters",
+        repo_id=_PPOCR_MANGA_REPO,
+        filename="ppocrv6_dict.txt",
+        revision=_PPOCR_MANGA_REVISION,
+        sha256="b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
+        size=74947,
+        cache_env="ONNX_CACHE_DIR",
+        selector="rapidocr",
+        local_name="rapidocr/PP-OCRv6_manga/ppocrv6_dict.txt",
+    ),
+    ModelSpec(
+        key="ppocr_korean_rec",
+        kind=KIND_OCR,
+        title="Korean reader (PP-OCRv5)",
+        repo_id=_PPOCR_KOREAN_REPO,
+        filename="inference.onnx",
+        revision=_PPOCR_KOREAN_REVISION,
+        sha256="92f0b7785e64fc9090106a241cf4c1eb97472824558272751b88a2a4476d3a08",
+        size=13418787,
+        cache_env="ONNX_CACHE_DIR",
+        selector="rapidocr",
+        description="RapidOCR text recognition for Korean (Hangul).",
+        local_name="rapidocr/korean_PP-OCRv5_mobile_rec/inference.onnx",
+        companions=("ppocr_korean_dict",),
+    ),
+    ModelSpec(
+        key="ppocr_korean_dict",
+        kind=KIND_OCR,
+        title="Korean reader characters",
+        repo_id=_PPOCR_KOREAN_REPO,
+        filename="inference.yml",
+        revision=_PPOCR_KOREAN_REVISION,
+        sha256="f757fa1c40e99edcf27e9cce879b93eb2a51fa46f5ef39095689b8c37dd75998",
+        size=96039,
+        cache_env="ONNX_CACHE_DIR",
+        selector="rapidocr",
+        local_name="rapidocr/korean_PP-OCRv5_mobile_rec/inference.yml",
+    ),
 )
 
 REGISTRY: Dict[str, ModelSpec] = {spec.key: spec for spec in _SPECS}
+_COMPANION_KEYS = frozenset(key for spec in _SPECS for key in spec.companions)
+
+#: rapidocr_language value -> the registered models RapidOCR loads for it (detector, recognizer).
+#: "builtin" (and detection-only runs) use the models the rapidocr_onnxruntime package ships.
+RAPIDOCR_MODELS: Dict[str, tuple] = {
+    "manga": ("ppocr_manga_det", "ppocr_manga_rec"),
+    "korean": ("ppocr_manga_det", "ppocr_korean_rec"),
+}
+RAPIDOCR_BUILTIN = "builtin"
 
 MOBILE_DETECTOR_KEY = "rtdetr_v4_s_int8"
 MOBILE_INPAINTER_KEY = "aot_onnx"
@@ -365,8 +466,9 @@ def get_spec(model: ModelRef) -> ModelSpec:
 
 
 def specs(kind: Optional[str] = None) -> List[ModelSpec]:
-    """Registered models in display order, optionally only one kind."""
-    return [spec for spec in _SPECS if kind is None or spec.kind == kind]
+    """Registered models in display order, optionally only one kind (companion files are
+    part of the model that lists them)."""
+    return [spec for spec in _SPECS if (kind is None or spec.kind == kind) and spec.key not in _COMPANION_KEYS]
 
 
 def find_spec(repo_id: str, filename: str) -> Optional[ModelSpec]:
@@ -386,6 +488,39 @@ def spec_for_detector_variant(onnx_filename: str) -> Optional[ModelSpec]:
         if spec.selector == name:
             return spec
     return None
+
+
+def rapidocr_model_sets(language: Any = "auto", language_hints: Optional[Iterable[str]] = None) -> List[str]:
+    """The RAPIDOCR_MODELS sets a RapidOCR run uses for ``rapidocr_language``: "manga" /
+    "korean" as picked, none for "builtin", and for "auto" (or any other value) the sets
+    the OCR language hints (``manga_settings.ocr.language_hints``, default ja / ko / zh) ask
+    for: Korean only -> korean; ja/zh only -> manga; both -> manga, with the Korean reader
+    for the lines it reads better (ocr_manager.RapidOCRProvider)."""
+    value = str(language or "auto").strip().lower()
+    if value == RAPIDOCR_BUILTIN:
+        return []
+    if value in RAPIDOCR_MODELS:
+        return [value]
+    hints = {str(h or "").strip().lower()[:2] for h in (language_hints if language_hints is not None
+                                                         else ("ja", "ko", "zh"))}
+    korean = "ko" in hints
+    other = bool(hints - {"ko"}) or not korean
+    return (["manga"] if other else []) + (["korean"] if korean else [])
+
+
+def rapidocr_model_keys(config: Optional[Dict[str, Any]]) -> List[str]:
+    """Registry keys (no companions) of the models a RapidOCR run with ``config`` loads (none
+    when the OCR provider is not RapidOCR)."""
+    config = config if isinstance(config, dict) else {}
+    provider = config.get("manga_ocr_provider") or config.get("ocr_provider")
+    if str(provider or "") != "rapidocr":
+        return []
+    manga = config.get("manga_settings") if isinstance(config.get("manga_settings"), dict) else {}
+    ocr = manga.get("ocr") if isinstance(manga.get("ocr"), dict) else {}
+    keys: List[str] = []
+    for name in rapidocr_model_sets(config.get("rapidocr_language", "auto"), ocr.get("language_hints")):
+        keys += [key for key in RAPIDOCR_MODELS[name] if key not in keys]
+    return keys
 
 
 def spec_for_inpaint_method(method: str) -> Optional[ModelSpec]:
@@ -639,8 +774,9 @@ def required_models(config: Optional[Dict[str, Any]]) -> List[ModelSpec]:
     Mirrors the lookups of the run path: the RT-DETR ONNX detector when bubble
     detection is on with ``detector_type`` 'rtdetr_onnx'; the local ONNX inpainter
     when inpainting is not skipped, the method is 'local' and no model file of the
-    user's own is configured (``manga_<method>_model_path``). Missing values take the
-    desktop GUI's defaults, or the phone defaults on mobile.
+    user's own is configured (``manga_<method>_model_path``); the RapidOCR models of
+    ``rapidocr_language`` when RapidOCR is the OCR provider (``rapidocr_model_keys``).
+    Missing values take the desktop GUI's defaults, or the phone defaults on mobile.
     """
     config = config if isinstance(config, dict) else {}
     if mobile_runtime.is_mobile():  # what a phone run loads (apply_mobile_run_defaults' guard)
@@ -669,6 +805,8 @@ def required_models(config: Optional[Dict[str, Any]]) -> List[ModelSpec]:
             custom = str(config.get(f"manga_{local}_model_path") or config.get(f"{local}_model_path") or "")
             if spec is not None and not (custom and os.path.isfile(custom)):
                 out.append(spec)
+
+    out += [REGISTRY[key] for key in rapidocr_model_keys(config)]
     return out
 
 
@@ -718,7 +856,7 @@ def model_path(model: ModelRef, dest_dir: Optional[str] = None) -> str:
     """Where the model file lives (and where the backend module looks for it)."""
     spec = get_spec(model)
     base = dest_dir if dest_dir else cache_dir(spec.cache_env)
-    return os.path.join(base, *spec.filename.split("/"))
+    return os.path.join(base, *(spec.local_name or spec.filename).split("/"))
 
 
 def partial_path(model: ModelRef, dest_dir: Optional[str] = None) -> str:
@@ -734,12 +872,17 @@ def _size(path: str) -> int:
 
 
 def is_installed(model: ModelRef, dest_dir: Optional[str] = None, *, verify_hash: bool = False) -> bool:
-    """True when the model file exists with the expected size (and sha256 when ``verify_hash``)."""
+    """True when the model file (and its companions) exists with the expected size (and sha256
+    when ``verify_hash``)."""
     spec = get_spec(model)
-    path = model_path(spec, dest_dir)
-    if not os.path.isfile(path) or _size(path) != spec.size:
+    if not _file_installed(spec, dest_dir) or (verify_hash and not verify(spec, dest_dir)):
         return False
-    return verify(spec, dest_dir) if verify_hash else True
+    return all(is_installed(key, dest_dir, verify_hash=verify_hash) for key in spec.companions)
+
+
+def _file_installed(spec: ModelSpec, dest_dir: Optional[str] = None) -> bool:
+    path = model_path(spec, dest_dir)
+    return os.path.isfile(path) and _size(path) == spec.size
 
 
 def _sha256_file(path: str, cancel: Any = None, chunk_size: int = 1024 * 1024) -> str:
@@ -1073,8 +1216,11 @@ def download(
     with _STATE_LOCK:
         _CANCELS.setdefault(spec.key, []).append(own_cancel)
     try:
+        for key in spec.companions:  # small files the model needs (a dict): fetched first
+            download(key, dest_dir=dest_dir, cancel=stop_requested, timeout=timeout, retries=retries,
+                     chunk_size=chunk_size, backoff=backoff)
         with _path_lock(target):
-            if is_installed(spec, dest_dir):
+            if _file_installed(spec, dest_dir):
                 _report(progress, DownloadProgress(spec.key, spec.size, spec.size, 0.0, spec.size, "done"))
                 return target
             return _download_locked(spec, target, partial, source, progress, stop_requested, timeout,
@@ -1191,6 +1337,8 @@ def delete(model: ModelRef, dest_dir: Optional[str] = None, *, include_partial: 
                 except OSError as exc:
                     raise ModelDownloadError(f"Could not delete {os.path.basename(path)}: {exc}") from exc
                 freed += size
+    for key in spec.companions:
+        freed += delete(key, dest_dir, include_partial=include_partial)
     return freed
 
 

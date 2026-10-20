@@ -1829,6 +1829,25 @@ class ModelManager:
             out.append((str(spec.selector), str(spec.title), str(getattr(spec, "description", "") or ""), size))
         return out
 
+    def rapidocr_ids(self, config: Mapping[str, Any]) -> list:
+        """Registry keys of the models RapidOCR reads with for ``config`` (``rapidocr_language``;
+        none for the package's built-in models)."""
+        finder = getattr(self.module, "rapidocr_model_keys", None) if self.module is not None else None
+        try:
+            return list(finder({**dict(config or {}), "manga_ocr_provider": "rapidocr"})) if callable(finder) else []
+        except Exception:
+            return []
+
+    def combined_status(self, model_ids: Sequence[str]) -> Optional[ModelEntry]:
+        """One status for several models (an OCR provider's): a download running, else one not on the
+        device, else the first ready one. None without models."""
+        entries = [self.status(model_id) for model_id in model_ids]
+        for states in (("downloading",), ("missing", "error")):
+            for entry in entries:
+                if entry.status in states:
+                    return entry
+        return entries[0] if entries else None
+
     def required(self, config: Mapping[str, Any]) -> list:
         """The models a run with ``config`` needs that are not downloaded yet (``missing_models``)."""
         module = self.module
@@ -2143,7 +2162,7 @@ def ensure_run_models(config: Mapping[str, Any], *, kinds: Optional[Sequence[str
                       log_fn: Optional[Callable[[str], Any]] = None) -> list:
     """Blocking (job thread): download the registered models a run with ``config`` loads that are
     not on the device yet (``manga_models.missing_models``, limited to ``kinds``: "detector",
-    "inpaint") through the download manager: pinned revision, resumable ``.partial``, size + sha256
+    "inpaint", "ocr") through the download manager: pinned revision, resumable ``.partial``, size + sha256
     verified, into the cache folders the backend reads. ``cancel`` (the job's stop check) raises
     ``manga_models.DownloadCancelled`` and keeps the partial file for the next run;
     ``on_progress(title, percent)``. Returns the model paths."""

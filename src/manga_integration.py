@@ -2796,6 +2796,8 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             self.azure_doc_intel_frame.setVisible(False)
         if hasattr(self, 'custom_api_ocr_batch_frame'):
             self.custom_api_ocr_batch_frame.setVisible(provider == 'custom-api')
+        if hasattr(self, 'rapidocr_frame'):
+            self.rapidocr_frame.setVisible(provider == 'rapidocr')
         
         # Show only the relevant settings frame for the selected provider
         if provider == 'google':
@@ -3722,6 +3724,35 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
         custom_api_batch_layout.addStretch()
         settings_frame_layout.addWidget(self.custom_api_ocr_batch_frame)
         self.custom_api_ocr_batch_frame.setVisible(self.ocr_provider_value == 'custom-api')
+
+        # RapidOCR reading model (rapidocr_language; the choices and help are the settings schema's,
+        # which the mobile Settings show too)
+        from settings_schema import CHOICES_OVERRIDES, TOOLTIP_OVERRIDES
+        self.rapidocr_frame = QWidget()
+        rapidocr_layout = QHBoxLayout(self.rapidocr_frame)
+        rapidocr_layout.setContentsMargins(0, 0, 0, 14)
+        rapidocr_layout.setSpacing(10)
+        rapidocr_label = QLabel("Reading model:")
+        rapidocr_label.setFixedWidth(ocr_label_column_width)
+        rapidocr_label.setAlignment(Qt.AlignLeft)
+        rapidocr_layout.addWidget(rapidocr_label)
+        self.rapidocr_language_combo = QComboBox()
+        for value, label in CHOICES_OVERRIDES['rapidocr_language']:
+            self.rapidocr_language_combo.addItem(label, value)
+        current = self.rapidocr_language_combo.findData(getattr(self, 'rapidocr_language_value', 'auto'))
+        self.rapidocr_language_combo.setCurrentIndex(max(0, current))
+        self.rapidocr_language_combo.setToolTip(TOOLTIP_OVERRIDES['rapidocr_language'])
+        self.rapidocr_language_combo.currentIndexChanged.connect(
+            lambda _index: (
+                setattr(self, 'rapidocr_language_value', self.rapidocr_language_combo.currentData()),
+                self._save_rendering_settings()
+            )
+        )
+        self._disable_combobox_mousewheel(self.rapidocr_language_combo)
+        rapidocr_layout.addWidget(self.rapidocr_language_combo)
+        rapidocr_layout.addStretch()
+        settings_frame_layout.addWidget(self.rapidocr_frame)
+        self.rapidocr_frame.setVisible(self.ocr_provider_value == 'rapidocr')
 
         # Initialize OCR manager
         from ocr_manager import OCRManager

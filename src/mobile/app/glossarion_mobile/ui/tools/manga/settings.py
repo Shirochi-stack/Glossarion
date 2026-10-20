@@ -335,7 +335,7 @@ class SettingsTab(MangaTab):
             return
 
         def run() -> None:
-            if key.startswith("manga_") or key in ("model", "active_profile", "output_language"):
+            if key.startswith("manga_") or key in ("model", "active_profile", "output_language", "rapidocr_language"):
                 self.refresh()
 
         dispatcher = getattr(self.ctx, "dispatcher", None)
@@ -384,16 +384,18 @@ class SettingsTab(MangaTab):
 
     # ---- OCR provider ------------------------------------------------------------------------------
 
-    def _model_status(self, model_id: str) -> Any:
+    def _model_status(self, model_id: str, cfg: Optional[dict] = None) -> Any:
         manager = self.session.models
         if not manager.available:
             return None
+        if model_id == "rapidocr":  # the reading models of rapidocr_language (none: the built-in ones)
+            return manager.combined_status(manager.rapidocr_ids(cfg if cfg is not None else self.config()))
         entry = manager.status(model_id)
         return None if entry.status == "unavailable" else entry
 
     def _ocr_controls(self, cfg: dict) -> list:
         current = str(cfg.get(svc.K_PROVIDER) or cfg.get("ocr_provider") or "custom-api")
-        rows = svc.ocr_provider_rows(cfg, model_status=self._model_status)
+        rows = svc.ocr_provider_rows(cfg, model_status=lambda model_id: self._model_status(model_id, cfg))
         controls: list = []
         self.provider_tiles = {}
         for row in rows:
@@ -482,8 +484,8 @@ class SettingsTab(MangaTab):
                                                       "rapidocr_language"))
             self.tiles.update(tiles)
             out += controls
-            if "rapidocr" in {e.id for e in self.session.models.entries()}:
-                row = self._download_row("rapidocr", "rapidocr", key_prefix=self.k("ms-rapidocr-model"),
+            for model_id in self.session.models.rapidocr_ids(cfg):  # the reading model's downloads
+                row = self._download_row(f"rapidocr-{model_id}", model_id, key_prefix=self.k(f"ms-rapidocr-{model_id}"),
                                          allow_load=False, on_change=lambda entry: self.refresh())
                 out.append(row.control)
         return out

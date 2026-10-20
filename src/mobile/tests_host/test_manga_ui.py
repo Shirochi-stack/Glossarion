@@ -523,9 +523,19 @@ def test_model_manager_maps_the_registry_states(monkeypatch):
 def test_real_registry_statuses_stay_in_the_tmp_caches(iso):
     manager = svc.ModelManager()
     entries = manager.entries()
-    assert {e.kind for e in entries} == {"detector", "inpaint"}
+    assert {e.kind for e in entries} == {"detector", "inpaint", "ocr"}
     assert all(e.status == "missing" for e in entries)  # nothing downloaded in the tmp caches
     assert all(str(iso["models"]) in e.path for e in entries)
+    # RapidOCR's reading models (rapidocr_language auto: both readers) and the provider chip's status
+    config = {"manga_ocr_provider": "rapidocr"}
+    assert manager.rapidocr_ids(config) == ["ppocr_manga_det", "ppocr_manga_rec", "ppocr_korean_rec"]
+    assert manager.rapidocr_ids({"rapidocr_language": "builtin"}) == []
+    status = manager.combined_status(manager.rapidocr_ids(config))
+    assert status.id == "ppocr_manga_det" and status.status == "missing"
+    assert manager.combined_status([]) is None
+    if svc.rapidocr_reason() is None:  # RapidOCR importable here (a device-only dependency)
+        rows = svc.ocr_provider_rows(config, mobile=False, model_status=lambda _id: status)
+        assert next(r for r in rows if r.value == "rapidocr").status == "not_downloaded"
     # the desktop dialog's three RT-DETR "ONNX Export" values
     assert {v[0] for v in manager.detector_variants()} == {"detector.onnx", "detector_int8.onnx",
                                                            "detector-v4-s_int8.onnx"}
@@ -1549,11 +1559,12 @@ def test_runs_ask_to_download_missing_models_first(tmp_path, monkeypatch):
     asyncio.run(scenario())
     tab = me.EditorTab.__new__(me.EditorTab)
     tab.boxes = []
-    assert tab.step_model_kinds("translate") == ("detector", "inpaint") and tab.step_model_kinds("recognize") == (
-        "detector",)
+    assert tab.step_model_kinds("translate") == ("detector", "inpaint", "ocr")
+    assert tab.step_model_kinds("recognize") == ("detector", "ocr")
     tab.boxes = [{"x": 0}]
-    assert tab.step_model_kinds("recognize") == () and tab.step_model_kinds("clean") == ("inpaint",)
-    assert tab.step_model_kinds("translate_all") == ("detector", "inpaint") and tab.step_model_kinds("render") == ()
+    assert tab.step_model_kinds("recognize") == ("ocr",) and tab.step_model_kinds("clean") == ("inpaint",)
+    assert tab.step_model_kinds("ocr_box") == ("ocr",)
+    assert tab.step_model_kinds("translate_all") == ("detector", "inpaint", "ocr") and tab.step_model_kinds("render") == ()
 
 
 @needs_flet
@@ -1756,7 +1767,10 @@ def test_settings_tab_builds_every_provider_inpainting_and_rendering_branch(iso,
     from glossarion_mobile.ui.tools.manga.screen import MangaScreen
 
     monkeypatch.setenv("GLOSSARION_MOBILE", "1")
-    monkeypatch.setitem(sys.modules, "manga_models", FakeModels())
+    fake = FakeModels()
+    # RapidOCR's reading models for the config (manga_models.rapidocr_model_keys); "det" stands in
+    fake.rapidocr_model_keys = lambda cfg: ["det"] if cfg.get("rapidocr_language") != "builtin" else []
+    monkeypatch.setitem(sys.modules, "manga_models", fake)
     store, schema = _settings_store(tmp_path)
 
     async def scenario():
@@ -1780,6 +1794,14 @@ def test_settings_tab_builds_every_provider_inpainting_and_rendering_branch(iso,
         assert tab.select_provider("azure-document-intelligence")
         assert {"ms-docintel-key", "ms-docintel-endpoint"} <= set(_by_key(tab.ocr_card))
         assert tab.select_provider("rapidocr")
+        # the reading model (choices from the schema) with the download rows of its models
+        ocr = _by_key(tab.ocr_card)
+        assert "ms-rapidocr-det" in ocr and tab.model_rows["rapidocr-det"].model_id == "det"
+        assert "rapidocr_language" in tab.tiles
+        assert tab._model_status("rapidocr").id == "det"  # the provider chip: "det" is not downloaded
+        store.set("rapidocr_language", "builtin")
+        tab.refresh()
+        assert "ms-rapidocr-det" not in _by_key(tab.ocr_card) and tab._model_status("rapidocr") is None
         assert tab.select_inpaint("cloud")
         assert {"ms-replicate-key", "ms-inpaint-quality"} <= set(_by_key(tab.inpaint_card))
         assert tab.select_inpaint("local", "custom-image-edit")

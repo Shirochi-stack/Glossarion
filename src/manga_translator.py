@@ -5689,6 +5689,7 @@ class MangaTranslator:
                                     confidence=confidence_threshold,
                                     use_recognition=use_recognition,
                                     language=language,
+                                    language_hints=ocr_settings.get('language_hints'),
                                     detection_mode=detection_mode
                                 )
                                 
@@ -5750,6 +5751,7 @@ class MangaTranslator:
                             confidence=confidence_threshold,
                             use_recognition=use_recognition,
                             language=language,
+                            language_hints=ocr_settings.get('language_hints'),
                             detection_mode=detection_mode
                         )
 
