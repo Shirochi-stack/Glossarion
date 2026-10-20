@@ -275,7 +275,7 @@ def test_add_from_hugging_face_saves_a_preset_and_asks_for_big_files(tmp_path, f
             return answer["value"]
 
         panel = LocalModelsPanel(service=service, prefs=prefs, use_model=used.append, confirm=confirm,
-                                 choose=lambda repo, files: files[0])
+                                 choose=lambda repo, files, selected: selected or files[0])
         panel.build()
         panel.hf_field.value = "not a ref"
         assert await panel.download_typed() is None and "is not a Hugging Face repo id" in panel.hf_field.error
@@ -305,6 +305,102 @@ def test_add_from_hugging_face_saves_a_preset_and_asks_for_big_files(tmp_path, f
         # a gated / missing repo says why
         panel.hf_field.value = "nobody/Missing-GGUF"
         assert await panel.download_typed() is None and "gated or private" in panel.hf_status.value
+
+    asyncio.run(scenario())
+
+
+def test_add_from_hugging_face_lists_every_quant(tmp_path, fake_hf):
+    """Owner 2026-10-21: a repo id offered one auto-picked file. Now Add from Hugging Face lists every
+    runnable GGUF file (no mmproj, no split sets), smallest first, the automatic pick preselected; the
+    chosen file is downloaded (with the projector); a quant or file reference skips the list."""
+    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
+
+    async def scenario():
+        prefs = fakes.FakePrefs({presets.PREF_KEY: []})
+        service, _engine = _engine_service(tmp_path, prefs)
+        offered, asked = [], []
+
+        def choose(repo, files, selected):
+            offered.append((repo, [f.name for f in files], selected and selected.name))
+            return next(f for f in files if f.name == "Tiny-BF16.gguf")
+
+        panel = LocalModelsPanel(service=service, prefs=prefs, choose=choose,
+                                 confirm=lambda title, body, label: asked.append(body) or True)
+        panel.build()
+        panel.save_as_preset.value = False
+        fake_hf.trees[REPO] = [(FILE, len(PAYLOAD), hashlib.sha256(PAYLOAD).hexdigest()),
+                               ("Tiny-BF16.gguf", 5000, hashlib.sha256(PAYLOAD[:5000]).hexdigest()),
+                               ("Tiny-Q8_0.gguf", 3_000_000, None), ("mmproj-F16.gguf", 1, None),
+                               ("Big-Q4_K_M-00001-of-00002.gguf", 9_000_000, None),
+                               ("Big-Q4_K_M-00002-of-00002.gguf", 9_000_000, None)]
+        panel.hf_field.value = REPO
+        assert await panel.download_typed() == "Tiny-BF16"
+        assert offered == [(REPO, ["Tiny-BF16.gguf", FILE, "Tiny-Q8_0.gguf"], FILE)]
+        assert "Tiny-BF16.gguf + mmproj-F16.gguf (image support)" in asked[-1]
+        assert service.is_vision("Tiny-BF16")
+        # a quant or a file reference goes straight to the download question
+        for text in (f"{REPO}:Q4_K_M", f"https://huggingface.co/{REPO}/blob/main/{FILE}"):
+            panel.hf_field.value = text
+            assert await panel.download_typed() == "Tiny-Q4_K_M"
+        assert len(offered) == 1
+        # presets keep the one-tap automatic pick
+        assert await panel.fetch(hf.HfRef(REPO)) == "Tiny-Q4_K_M" and len(offered) == 1
+        panel.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_file_chooser_radio_list(tmp_path):
+    """The chooser: one radio row per file with its size, the preselected one marked Recommended, Next
+    disabled until a file is chosen; long lists scroll under pinned buttons, short ones stay compact."""
+    import flet as ft
+
+    from glossarion_mobile.ui.screens.local_models_panel import FileChooser
+
+    files = [hf.HfFile("m-Q2_K.gguf", 1_000_000_000), hf.HfFile("m-Q4_K_M.gguf", 2_000_000_000),
+             hf.HfFile("m-Q8_0.gguf", 4_000_000_000)]
+
+    class Page:
+        width, height = 320, 640
+
+        def __init__(self):
+            self.shown = []
+
+        def show_dialog(self, dialog):
+            self.shown.append(dialog)
+
+        def pop_dialog(self):
+            return None
+
+    async def scenario():
+        chooser = FileChooser("u/m-GGUF", files, files[1])
+        assert chooser.group.value == "m-Q4_K_M.gguf" and not chooser.next_button.disabled
+        rows = chooser.group.content.controls
+        assert [r.key for r in rows] == ["local-file-0", "local-file-1", "local-file-2"]
+        assert all(isinstance(r.leading, ft.Radio) and r.title.max_lines == 2 for r in rows)
+        assert rows[1].subtitle.value == f"{dl.format_bytes(files[1].size)} · Recommended"
+        assert rows[0].subtitle.value == dl.format_bytes(files[0].size)
+        rows[2].on_click(None)
+        assert chooser.chosen() is files[2]
+        page = Page()
+        chooser.show(page)
+        assert page.shown == [chooser.dialog]
+        chooser.next_button.on_click(None)
+        assert await chooser.future is files[2]
+
+        none = FileChooser("u/m-GGUF", files)
+        assert none.group.value is None and none.next_button.disabled
+        # 30 files on a 640 dp phone: the list scrolls, Cancel / Next stay pinned below it
+        many = [hf.HfFile(f"m-{i:02d}-Q4_K_M.gguf", i) for i in range(30)]
+        long = FileChooser("u/m-GGUF", many, many[0])
+        long.show(Page())
+        body = long.dialog.content.content.content
+        assert body.controls[-1] is long.actions and body.controls[0].scroll == ft.ScrollMode.AUTO
+        short = FileChooser("u/m-GGUF", files[:2], files[0])
+        short.show(Page())
+        assert short.actions in short.dialog.content.content.content.controls
+        short.pick(None)
+        assert await short.future is None
 
     asyncio.run(scenario())
 
