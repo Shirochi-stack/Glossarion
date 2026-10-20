@@ -2885,13 +2885,17 @@ _MOBILE_BRIDGE_JS = r"""
   // Page-turn motion (setTurn): next / prev pages slide (#columns scrolls to the page over
   // turn.ms); a chapter page enters from the side it was turned from (turn.enter) and
   // leaves to the other side at an edge when a neighbour chapter exists (turn.next/prev).
+  // A horizontal swipe drags the page with the finger (the neighbour page shows beside it;
+  // at a chapter edge the whole page follows) and settles on release: the next / previous
+  // page past DRAG_TURN of the width or on a flick, else back where it was.
+  // turn.ms is the app's switch (Aa > Layout "Page turn animation", off under the app's
+  // Reduce motion); the WebView's prefers-reduced-motion is not consulted: Android maps the
+  // system "Remove animations" (animator scale 0) to it, which made every turn a jump.
   var turn = {ms: 0, enter: 0, next: false, prev: false}, slide = null, leaveTimer = null;
+  var DRAG_TURN = 0.3, FLICK_V = 0.3, DRAG_SLOP = 10;
   function cols() { return document.getElementById('columns'); }
   function turnMs() {
     if (!(turn.ms > 0) || !window.requestAnimationFrame) { return 0; }
-    try {
-      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) { return 0; }
-    } catch (e) {}
     return turn.ms;
   }
   function stopSlide() {
@@ -2923,18 +2927,41 @@ _MOBILE_BRIDGE_JS = r"""
   function enterPage(dir) {
     var ms = turnMs();
     if (!ms || !dir) { return; }
-    var b = bodyMotion('translateX(' + (dir > 0 ? 24 : -24) + '%%)', '0', 'none');
+    // not fully transparent: Chromium keeps the previous document on screen until the new one's first
+    // contentful paint, and opacity 0 text is not contentful, so an entrance from 0 (a compositor
+    // animation, no further paints) stayed invisible until it had ended (device recording)
+    var b = bodyMotion('translateX(' + (dir > 0 ? 24 : -24) + '%%)', '0.2', 'none');
     if (!b) { return; }
     void b.offsetWidth;
-    bodyMotion('translateX(0)', '1', 'transform ' + ms + 'ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity '
-               + ms + 'ms ease-out');
-    setTimeout(function () { bodyMotion('', '', ''); }, ms + 80);
+    // slide in once the page is really on screen: start() runs at DOMContentLoaded, and a freshly
+    // loaded page paints later (web fonts), so a slide begun at once could end before it showed
+    afterPaint(function () {
+      if (drag && drag.mode === 'h') { return; }
+      bodyMotion('translateX(0)', '1', 'transform ' + ms + 'ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity '
+                 + ms + 'ms ease-out');
+      setTimeout(function () { if (!drag || drag.mode !== 'h') { bodyMotion('', '', ''); } }, ms + 80);
+    });
   }
-  function leavePage(dir) {
+  function afterPaint(fn) {
+    var done = false, raf = window.requestAnimationFrame;
+    function once() { if (!done) { done = true; fn(); } }
+    function frames() { raf(function () { raf(once); }); }  // the second frame: the first one was drawn
+    var fonts = document.fonts;
+    if (fonts && fonts.ready && fonts.status !== 'loaded') {
+      fonts.ready.then(frames, frames);
+      setTimeout(once, 600);  // never keep the page hidden on a slow font
+    } else { frames(); }
+  }
+  function leavePage(dir, dragged) {
+    // dragged: the page's offset (px) when a swipe dragged it past the edge; it leaves from there
     var ms = turnMs();
     if (!ms || !(dir > 0 ? turn.next : turn.prev)) { return; }
-    var out = Math.max(1, Math.round(ms * 0.6));
-    bodyMotion('translateX(' + (dir > 0 ? -24 : 24) + '%%)', '0',
+    var out = Math.max(1, Math.round(ms * 0.6)), to = (dir > 0 ? -24 : 24) + '%%';
+    if (dragged) {
+      var w = window.innerWidth || 1;
+      to = Math.round(-dir * Math.min(w, Math.abs(dragged) + 0.24 * w)) + 'px';
+    }
+    bodyMotion('translateX(' + to + ')', '0',
                'transform ' + out + 'ms ease-in, opacity ' + out + 'ms ease-in');
     if (leaveTimer) { clearTimeout(leaveTimer); }
     // the app replaces this page with the neighbour chapter; if it does not, come back
@@ -2962,21 +2989,28 @@ _MOBILE_BRIDGE_JS = r"""
     count = (typeof _pageCountFor === 'function') ? _pageCountFor(c) : 1;
     return count;
   }
-  function goTo(target, reason) {
-    var c = cols();
-    if (!c) { return; }
-    var from = c.scrollLeft || 0;  // where the page is on screen (mid-slide on a quick second turn)
-    measure();
-    var p = Math.max(0, Math.min(parseInt(target, 10) || 0, count - 1));
+  function pageSpan(c) {
     var gap = (typeof _PAGE_GAP !== 'undefined') ? _PAGE_GAP : 0;
     var w = (typeof _pageWidthFor === 'function') ? _pageWidthFor(c)
       : Math.max(1, Math.floor(c.clientWidth || window.innerWidth || 1));
-    var span = Math.max(1, w + gap);
+    return Math.max(1, w + gap);
+  }
+  function settleMs(ms, distance, span) {
+    // the rest of a slide: a page dragged most of the way settles faster than a full turn
+    return Math.max(Math.round(ms * 0.45), Math.round(ms * Math.min(1, Math.abs(distance) / span)));
+  }
+  function goTo(target, reason) {
+    var c = cols();
+    if (!c) { return; }
+    var from = c.scrollLeft || 0;  // where the page is on screen (mid-slide, or where a drag let go)
+    measure();
+    var p = Math.max(0, Math.min(parseInt(target, 10) || 0, count - 1));
+    var span = pageSpan(c);
     _CURRENT_PAGE = p;
     c.style.transition = 'none';
     c.style.transform = 'none';
     var to = Math.round(p * span), ms = (reason === 'next' || reason === 'prev') && ready ? turnMs() : 0;
-    if (ms && Math.abs(to - from) <= 2 * span) { slideTo(c, from, to, ms); }
+    if (ms && Math.abs(to - from) <= 2 * span) { slideTo(c, from, to, settleMs(ms, to - from, span)); }
     else { c.scrollLeft = to; }
     page = p;
     post({type: 'page', page: page, count: count, reason: reason || 'goto'});
@@ -3000,22 +3034,112 @@ _MOBILE_BRIDGE_JS = r"""
     try { return String(window.getSelection ? window.getSelection() : '').trim(); }
     catch (e) { return ''; }
   }
-  var touch = null, swiped = false, pinch = null;
+  var touch = null, swiped = false, pinch = null, drag = null;
   function dist(t) {
     var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
     return Math.sqrt(dx * dx + dy * dy);
   }
+  // ---- the page follows the finger (drag), then settles ----
+  function now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+  function dragStart(x, y) {
+    var c = cols();
+    drag = (c && ready && turnMs() && !selectionText())
+      ? {x: x, y: y, t: now(), lastX: x, lastT: now(), v: 0, mode: '', base: 0, dx: 0, over: 0, tx: 0}
+      : null;
+  }
+  function dragApply(dx) {
+    // columns scroll with the finger inside the chapter; past its first / last page the whole page
+    // follows (a neighbour chapter waits there) or gives a little (the book's first / last page)
+    var c = cols();
+    if (!c) { return; }
+    var span = pageSpan(c), max = Math.max(0, (count - 1) * span);
+    var want = drag.base - dx, inside = Math.max(0, Math.min(max, want)), over = want - inside;
+    c.scrollLeft = Math.round(inside);
+    var w = window.innerWidth || span, tx = 0, opacity = '';
+    if (over) {
+      if (over > 0 ? turn.next : turn.prev) { tx = -over; opacity = String(1 - 0.5 * Math.min(1, Math.abs(tx) / w)); }
+      else { tx = -Math.max(-0.12 * w, Math.min(0.12 * w, over * 0.3)); }
+    }
+    drag.dx = dx; drag.over = over; drag.tx = tx;
+    bodyMotion(tx ? 'translateX(' + Math.round(tx) + 'px)' : '', opacity, 'none');
+  }
+  function springBody(ms) {
+    var b = bodyMotion('translateX(0)', '1', 'transform ' + ms + 'ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity '
+                       + ms + 'ms ease-out');
+    if (b) { setTimeout(function () { if (!drag) { bodyMotion('', '', ''); } }, ms + 60); }
+  }
+  function dragEnd(cancelled) {
+    var d = drag, c = cols();
+    drag = null;
+    if (!d || d.mode !== 'h' || !c) { return false; }
+    swiped = true;
+    var ms = turnMs() || 1, span = pageSpan(c), dir = d.dx < 0 ? 1 : -1;
+    var flick = Math.abs(d.v) > FLICK_V && (d.v < 0) === (d.dx < 0) && Math.abs(d.dx) > DRAG_SLOP * 2;
+    var go = !cancelled && (Math.abs(d.dx) > DRAG_TURN * span || flick);
+    if (d.over) {  // dragged past the chapter's first / last page
+      var edge = d.over > 0 ? 1 : -1;
+      var turned = go && edge === dir && Math.abs(d.over) > DRAG_SLOP;
+      if (turned && (edge > 0 ? turn.next : turn.prev)) {
+        leavePage(edge, d.tx);
+        post({type: 'edge', edge: edge > 0 ? 'end' : 'start', page: page, count: count});
+        return true;
+      }
+      springBody(Math.max(1, Math.round(ms * 0.6)));
+      if (turned) { post({type: 'edge', edge: edge > 0 ? 'end' : 'start', page: page, count: count}); }
+      var home = Math.round(page * span);
+      if (Math.abs((c.scrollLeft || 0) - home) > 1) { slideTo(c, c.scrollLeft || 0, home, settleMs(ms, home - c.scrollLeft, span)); }
+      return true;
+    }
+    bodyMotion('', '', '');
+    if (go && dir > 0 && page < count - 1) { goTo(page + 1, 'next'); return true; }
+    if (go && dir < 0 && page > 0) { goTo(page - 1, 'prev'); return true; }
+    var back = Math.round(page * span), from = c.scrollLeft || 0;  // not far enough: back to this page
+    if (from !== back) { slideTo(c, from, back, settleMs(ms, back - from, span)); }
+    return true;
+  }
   document.addEventListener('touchstart', function (e) {
     swiped = false;
-    if (e.touches.length === 2) { pinch = {start: dist(e.touches), scale: 1}; touch = null; return; }
+    if (e.touches.length === 2) {
+      if (drag) { dragEnd(true); swiped = false; }
+      pinch = {start: dist(e.touches), scale: 1}; touch = null; drag = null; return;
+    }
     if (e.touches.length === 1) {
       touch = {x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now()};
+      dragStart(touch.x, touch.y);
     }
   }, {passive: true});
   document.addEventListener('touchmove', function (e) {
     if (pinch && e.touches.length === 2 && pinch.start > 0) {
       pinch.scale = dist(e.touches) / pinch.start;
+      return;
     }
+    if (!drag || e.touches.length !== 1) { return; }
+    var x = e.touches[0].clientX, y = e.touches[0].clientY, dx = x - drag.x, dy = y - drag.y, t = now();
+    if (!drag.mode) {
+      if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) { return; }
+      // a held press is a text selection, a mostly vertical move is not a page turn
+      if (t - drag.t > 450 || Math.abs(dx) <= Math.abs(dy) || selectionText()) {
+        drag = null; touch = null;  // and no swipe at the end either
+        return;
+      }
+      drag.mode = 'h';
+      stopSlide();
+      if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+      var c = cols();
+      drag.base = c ? (c.scrollLeft || 0) : 0;
+      drag.x = x - (dx > 0 ? DRAG_SLOP : -DRAG_SLOP);  // no jump by the slop when the page starts to move
+      dx = x - drag.x;
+    }
+    if (t > drag.lastT) {
+      var v = (x - drag.lastX) / (t - drag.lastT);
+      drag.v = t - drag.lastT > 100 ? v : drag.v * 0.4 + v * 0.6;
+      drag.lastX = x; drag.lastT = t;
+    }
+    dragApply(dx);
+  }, {passive: true});
+  document.addEventListener('touchcancel', function () {
+    touch = null;
+    if (drag) { dragEnd(true); }
   }, {passive: true});
   document.addEventListener('touchend', function (e) {
     if (pinch) {
@@ -3025,6 +3149,11 @@ _MOBILE_BRIDGE_JS = r"""
       }
       return;
     }
+    if (drag && e.changedTouches.length) {
+      var t = now();
+      if (t - drag.lastT > 100) { drag.v = 0; }  // the finger rested before it let go: no flick
+    }
+    if (dragEnd(false)) { touch = null; return; }
     if (!touch || !e.changedTouches.length) { return; }
     var dx = e.changedTouches[0].clientX - touch.x;
     var dy = e.changedTouches[0].clientY - touch.y;
