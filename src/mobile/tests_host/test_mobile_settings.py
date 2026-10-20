@@ -1548,3 +1548,23 @@ def test_route_and_import_hygiene():
     for path in sorted((APP_DIR / "glossarion_mobile").rglob("*.py")):
         if "settings" in path.parts or path.name in ("config_store.py", "prefs.py", "env_preview.py"):
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 10))
+
+
+@pytest.mark.parametrize("key,start,expected", [("max_output_tokens", 4096, (4352, 3840)),
+                                                ("token_limit", 200000, (200256, 199744)),
+                                                ("batch_size", 5, (6, 4))])
+def test_token_budgets_step_by_256(key, start, expected):
+    """Owner 2026-10-20: the −/+ steppers of token budgets move by 256; other whole numbers by 1."""
+    from glossarion_mobile.ui.settings.tiles import TOKEN_STEP, NumberTile
+
+    assert TOKEN_STEP == 256
+    tile = object.__new__(NumberTile)
+    stored = {"value": start}
+    tile.key, tile.number_kind = key, "int"
+    tile.value = lambda: stored["value"]
+    tile.bounds = lambda: (1, None)
+    tile.apply = lambda value: stored.update(value=value) or True
+    assert tile.step(1) and stored["value"] == expected[0]
+    stored["value"] = start
+    assert tile.step(-1) and stored["value"] == expected[1]
+

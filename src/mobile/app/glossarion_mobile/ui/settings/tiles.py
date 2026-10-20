@@ -107,6 +107,16 @@ log = logging.getLogger("glossarion.settings")
 HIGHLIGHT = ft.Colors.with_opacity(0.14, ft.Colors.PRIMARY)
 
 
+
+#: The −/+ step of token budgets (owner 2026-10-20: steps of 1 were useless for output limits); other
+#: whole numbers step by 1, decimals by 0.1.
+TOKEN_STEP = 256
+TOKEN_STEP_KEYS = frozenset({
+    "max_output_tokens", "token_limit", "max_retry_tokens", "gpt_reasoning_tokens", "rolling_summary_max_tokens",
+    "target_image_tokens", "qa_scanner_settings.ai_truncation_max_tokens",
+    "manga_settings.manual_edit.manga_output_token_limit", "manga_settings.manual_edit.translate_this_text_tokens",
+})
+
 class EffectiveConfig(Mapping):
     """Read-only mapping of effective values (stored, else display default) for rule evaluation."""
 
@@ -585,7 +595,7 @@ class NumberTile(SettingTile):
             base = _parse_number(current, self.number_kind) if current not in (None, "") else 0
         except ValueError:
             base = 0
-        delta = 1 if self.number_kind == "int" else 0.1
+        delta = (TOKEN_STEP if self.key in TOKEN_STEP_KEYS else 1) if self.number_kind == "int" else 0.1
         value = base + direction * delta
         if self.number_kind == "float":
             value = round(value, 6)
