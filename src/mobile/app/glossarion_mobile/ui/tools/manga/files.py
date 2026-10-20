@@ -628,9 +628,9 @@ class FilesTab(MangaTab):
         except ValueError as exc:
             self.ctx.say(str(exc))
             return None
-        # models are downloaded on first use (the glossary pass detects bubbles, it does not inpaint)
+        # models are downloaded on first use (the glossary pass detects and reads bubbles, it does not inpaint)
         if not await ensure_models(self.ctx, self.session.models, self.ctx.config_snapshot(),
-                                   kinds=("detector",) if glossary_only else None,
+                                   kinds=("detector", "ocr") if glossary_only else None,
                                    action="Generating the glossary" if glossary_only else "Translating"):
             return None
         job_id = await self.ctx.submit(spec)

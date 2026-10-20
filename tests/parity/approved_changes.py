@@ -175,6 +175,45 @@ _QUEUE_ENV_PAIR = _after(
     "                ('GEMINI_SAFETY_CATEGORY_THRESHOLDS', json.dumps(self.config.get('gemini_safety_category_thresholds') or {})),",
     "                ('REQUEST_QUEUE_SCHEDULE', json.dumps(self.config.get('request_queue_schedule') or {})),")
 
+# 2026-10-21 RapidOCR reading model (rapidocr_language) on the desktop Manga tab: a combo under the
+# OCR provider row, shown while RapidOCR is the provider (MangaTranslationTab._build_pyside6_interface /
+# _on_ocr_provider_change)
+_RAPIDOCR_FRAME = _after(
+    "        self.custom_api_ocr_batch_frame.setVisible(self.ocr_provider_value == 'custom-api')",
+    "",
+    "        # RapidOCR reading model (rapidocr_language; the choices and help are the settings schema's,",
+    "        # which the mobile Settings show too)",
+    "        from settings_schema import CHOICES_OVERRIDES, TOOLTIP_OVERRIDES",
+    "        self.rapidocr_frame = QWidget()",
+    "        rapidocr_layout = QHBoxLayout(self.rapidocr_frame)",
+    "        rapidocr_layout.setContentsMargins(0, 0, 0, 14)",
+    "        rapidocr_layout.setSpacing(10)",
+    "        rapidocr_label = QLabel(\"Reading model:\")",
+    "        rapidocr_label.setFixedWidth(ocr_label_column_width)",
+    "        rapidocr_label.setAlignment(Qt.AlignLeft)",
+    "        rapidocr_layout.addWidget(rapidocr_label)",
+    "        self.rapidocr_language_combo = QComboBox()",
+    "        for value, label in CHOICES_OVERRIDES['rapidocr_language']:",
+    "            self.rapidocr_language_combo.addItem(label, value)",
+    "        current = self.rapidocr_language_combo.findData(getattr(self, 'rapidocr_language_value', 'auto'))",
+    "        self.rapidocr_language_combo.setCurrentIndex(max(0, current))",
+    "        self.rapidocr_language_combo.setToolTip(TOOLTIP_OVERRIDES['rapidocr_language'])",
+    "        self.rapidocr_language_combo.currentIndexChanged.connect(",
+    "            lambda _index: (",
+    "                setattr(self, 'rapidocr_language_value', self.rapidocr_language_combo.currentData()),",
+    "                self._save_rendering_settings()",
+    "            )",
+    "        )",
+    "        self._disable_combobox_mousewheel(self.rapidocr_language_combo)",
+    "        rapidocr_layout.addWidget(self.rapidocr_language_combo)",
+    "        rapidocr_layout.addStretch()",
+    "        settings_frame_layout.addWidget(self.rapidocr_frame)",
+    "        self.rapidocr_frame.setVisible(self.ocr_provider_value == 'rapidocr')")
+_RAPIDOCR_FRAME_VISIBILITY = _after(
+    "            self.custom_api_ocr_batch_frame.setVisible(provider == 'custom-api')",
+    "        if hasattr(self, 'rapidocr_frame'):",
+    "            self.rapidocr_frame.setVisible(provider == 'rapidocr')")
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -358,6 +397,16 @@ APPROVED = (
             "src/run_env.py": [_QUEUE_ENV_DICT, _QUEUE_ENV_PAIR],
         },
         # a new key: nothing recorded before it existed changes value
+        "values": {},
+    },
+    {
+        "date": "2026-10-21",
+        "what": "RapidOCR reading model on the desktop Manga tab (rapidocr_language: Auto / Japanese-Chinese manga "
+                "PP-OCRv6 / Korean PP-OCRv5 / Built-in), shown while RapidOCR is the OCR provider",
+        "source": {
+            "src/manga_integration.py": [_RAPIDOCR_FRAME, _RAPIDOCR_FRAME_VISIBILITY],
+        },
+        # an existing key without a desktop control before: nothing recorded changes value
         "values": {},
     },
 )

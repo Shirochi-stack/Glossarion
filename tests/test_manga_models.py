@@ -88,16 +88,20 @@ def _tree(name):
 
 
 def test_registry_shape():
-    assert [s.key for s in mm.specs()] == list(mm.REGISTRY)
-    assert {s.kind for s in mm.specs()} == {mm.KIND_DETECTOR, mm.KIND_INPAINTER}
-    for spec in mm.specs():
+    companions = {key for spec in mm.REGISTRY.values() for key in spec.companions}
+    assert companions and [s.key for s in mm.specs()] == [k for k in mm.REGISTRY if k not in companions]
+    assert {s.kind for s in mm.specs()} == {mm.KIND_DETECTOR, mm.KIND_INPAINTER, mm.KIND_OCR}
+    cache_envs = {mm.KIND_DETECTOR: "BUBBLE_CACHE_DIR", mm.KIND_INPAINTER: "MODEL_CACHE_DIR", mm.KIND_OCR: "ONNX_CACHE_DIR"}
+    for spec in mm.REGISTRY.values():
         assert re.fullmatch(r"[0-9a-f]{64}", spec.sha256), spec.key
         assert re.fullmatch(r"[0-9a-f]{40}", spec.revision), spec.key  # pinned commit, never 'main'
+        assert spec.cache_env == cache_envs[spec.kind]
+    for spec in mm.specs():
         assert spec.size > 1024 * 1024 and spec.title and spec.description
-        assert spec.cache_env == ("BUBBLE_CACHE_DIR" if spec.kind == mm.KIND_DETECTOR else "MODEL_CACHE_DIR")
     # exactly one phone default per kind, and it is the one the overrides select
     for kind, key in ((mm.KIND_DETECTOR, mm.MOBILE_DETECTOR_KEY), (mm.KIND_INPAINTER, mm.MOBILE_INPAINTER_KEY)):
         assert [s.key for s in mm.specs(kind) if s.phone_default] == [key]
+    assert not [s for s in mm.specs(mm.KIND_OCR) if s.phone_default]
     assert mm.get_spec(mm.MOBILE_DETECTOR_KEY).filename == "detector-v4-s_int8.onnx"
     assert mm.get_spec(mm.MOBILE_DETECTOR_KEY).size < 12 * 1024 * 1024  # ~11 MB INT8 export
     assert mm.get_spec(mm.MOBILE_INPAINTER_KEY).selector == "aot_onnx"
@@ -748,6 +752,71 @@ def test_required_models(env, monkeypatch):
     assert [s.key for s in missing] == ["rtdetr_v4_s_int8", "aot_onnx"]
 
 
+# =========================================================================== RapidOCR models
+def test_rapidocr_models_registry():
+    ocr = mm.specs(mm.KIND_OCR)
+    assert [s.key for s in ocr] == ["ppocr_manga_det", "ppocr_manga_rec", "ppocr_korean_rec"]
+    paths = [s.local_name for s in mm.REGISTRY.values() if s.kind == mm.KIND_OCR]
+    assert len(set(paths)) == len(paths) and all(p.startswith("rapidocr/") for p in paths)  # two inference.onnx
+    for key in ("ppocr_manga_rec", "ppocr_korean_rec"):
+        (dict_key,) = mm.get_spec(key).companions
+        companion = mm.get_spec(dict_key)
+        assert companion.kind == mm.KIND_OCR and companion.size < 200 * 1024
+        assert companion.repo_id == mm.get_spec(key).repo_id and companion.revision == mm.get_spec(key).revision
+    for name, keys in mm.RAPIDOCR_MODELS.items():
+        assert [mm.get_spec(k).kind for k in keys] == [mm.KIND_OCR] * 2 and not mm.get_spec(keys[0]).companions
+    # the settings choices (desktop combo, mobile tile) are the model sets + auto + builtin
+    assert [v for v, _label in ss.CHOICES_OVERRIDES["rapidocr_language"]] == ["auto", *mm.RAPIDOCR_MODELS, "builtin"]
+
+
+def test_rapidocr_model_sets_follow_the_language_and_hints():
+    sets = mm.rapidocr_model_sets
+    assert sets() == sets("auto") == sets("auto", None) == ["manga", "korean"]  # default hints ja / ko / zh
+    assert sets("auto", ["ja", "zh"]) == sets("auto", ["zh-Hant"]) == ["manga"]
+    assert sets("auto", ["ko"]) == ["korean"]
+    assert sets("auto", []) == ["manga"]
+    assert sets("korean", ["ja"]) == ["korean"] and sets("MANGA") == ["manga"]
+    assert sets("builtin") == [] and sets("") == sets("whatever") == ["manga", "korean"]
+    keys = mm.rapidocr_model_keys
+    assert keys({}) == keys({"manga_ocr_provider": "google", "rapidocr_language": "korean"}) == []
+    assert keys({"manga_ocr_provider": "rapidocr"}) == ["ppocr_manga_det", "ppocr_manga_rec", "ppocr_korean_rec"]
+    assert keys({"ocr_provider": "rapidocr", "rapidocr_language": "builtin"}) == []
+    assert keys({"manga_ocr_provider": "rapidocr",
+                 "manga_settings": {"ocr": {"language_hints": ["ko"]}}}) == ["ppocr_manga_det", "ppocr_korean_rec"]
+
+
+def test_required_models_include_the_rapidocr_reader(env, monkeypatch):
+    keys = lambda cfg: [s.key for s in mm.required_models(cfg)]  # noqa: E731
+    cfg = {"manga_ocr_provider": "rapidocr", "rapidocr_language": "manga", "manga_skip_inpainting": True}
+    assert keys(cfg) == ["rtdetr", "ppocr_manga_det", "ppocr_manga_rec"]
+    _mobile(monkeypatch)
+    assert keys(cfg) == ["rtdetr_v4_s_int8", "ppocr_manga_det", "ppocr_manga_rec"]
+    assert keys({**cfg, "rapidocr_language": "builtin"}) == ["rtdetr_v4_s_int8"]
+    assert mm.model_path("ppocr_korean_rec") == str(env / "onnx" / "rapidocr" / "korean_PP-OCRv5_mobile_rec"
+                                                    / "inference.onnx")
+
+
+def test_companion_downloads_installs_and_deletes_with_its_model(env, server, monkeypatch):
+    dict_spec, dict_payload = _fake(server, monkeypatch, size=3000, key="fake_dict")
+    dict_spec = mm.ModelSpec(**{**dict_spec.__dict__, "filename": "dict.txt", "local_name": "ocr/dict.txt"})
+    server.files[f"/owner/fake-repo/resolve/{dict_spec.revision}/dict.txt"] = dict_payload
+    spec, payload = _fake(server, monkeypatch, key="fake_rec")
+    spec = mm.ModelSpec(**{**spec.__dict__, "local_name": "ocr/rec.onnx", "companions": ("fake_dict",)})
+    monkeypatch.setitem(mm.REGISTRY, "fake_dict", dict_spec)
+    monkeypatch.setitem(mm.REGISTRY, "fake_rec", spec)
+    assert not mm.is_installed(spec)
+    path = mm.download(spec)
+    assert path == str(env / "inpaint" / "ocr" / "rec.onnx") and Path(path).read_bytes() == payload
+    assert Path(mm.model_path(dict_spec)).read_bytes() == dict_payload
+    assert mm.is_installed(spec, verify_hash=True) and mm.status(spec).installed
+    os.remove(mm.model_path(dict_spec))  # the dict alone missing: the model is not installed, and
+    assert not mm.is_installed(spec)  # downloading it again fetches only the dict
+    requests = len(server.requests)
+    assert mm.download(spec) == path and [r[0].rsplit("/", 1)[-1] for r in server.requests[requests:]] == ["dict.txt"]
+    assert mm.delete(spec) == spec.size + dict_spec.size
+    assert not Path(path).exists() and not Path(mm.model_path(dict_spec)).exists()
+
+
 def test_mobile_model_guard_never_runs_an_imported_heavy_model(env, monkeypatch):
     """Owner 2026-10-16: a phone run defaulted to the 161 MB detector: a config imported from the
     desktop stores its defaults (detector.onnx / anime_onnx), and a stored value used to win."""
@@ -1007,10 +1076,12 @@ def test_azure_provider_desktop_without_sdk_unchanged(azure, ocr_provider, monke
 
 
 @pytest.mark.skipif(importlib.util.find_spec("rapidocr_onnxruntime") is None, reason="rapidocr_onnxruntime not installed")
-def test_rapidocr_provider_reads_text(ocr_provider):
+def test_rapidocr_provider_reads_text(ocr_provider, monkeypatch):
     """The provider the device build ships (rapidocr-onnxruntime 1.2.3 there; whatever is
-    installed here): load + detect on a synthetic page through OCRManager."""
+    installed here): load + detect on a synthetic page through OCRManager (the package's own
+    models: no download)."""
     ocr_manager, _provider = ocr_provider
+    monkeypatch.setenv("MANGA_RAPIDOCR_LANGUAGE", "builtin")
     import numpy as np
     from PIL import Image, ImageDraw, ImageFont
 
@@ -1030,6 +1101,120 @@ def test_rapidocr_provider_reads_text(ocr_provider):
     text = " ".join(r.text for r in results).upper()
     assert "HELLO" in text.replace(" ", "") or "123" in text, text
     assert all(len(r.bbox) == 4 and 0.0 <= r.confidence <= 1.0 for r in results)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("rapidocr_onnxruntime") is None, reason="rapidocr_onnxruntime not installed")
+def test_ppocr_engine_swaps_the_recognizer_of_the_installed_rapidocr(ocr_provider):
+    """build_ppocr_engine on the installed rapidocr_onnxruntime (1.2.x or 1.4.x): a detector path
+    through the kwargs and the recognizer pointed at another model + character list. The package's
+    own models stand in for the downloaded ones (no network)."""
+    ocr_manager, _provider = ocr_provider
+    import numpy as np
+    import onnxruntime
+    import rapidocr_onnxruntime
+    from PIL import Image, ImageDraw, ImageFont
+
+    models = Path(rapidocr_onnxruntime.__file__).parent / "models"
+    det = next(models.glob("ch_PP-OCRv*_det_infer.onnx"))
+    rec = next(models.glob("ch_PP-OCRv*_rec_infer.onnx"))
+    meta = onnxruntime.InferenceSession(str(rec), providers=["CPUExecutionProvider"]).get_modelmeta()
+    characters = meta.custom_metadata_map.get("character", "").splitlines()
+    if not characters:
+        pytest.skip("this rapidocr's recognizer has no embedded character list")
+    engine = ocr_manager.build_ppocr_engine(str(det), str(rec), characters)
+    recognizer = ocr_manager._rapidocr_recognizer(engine)
+    assert list(recognizer.postprocess_op.character)[:2] == ["blank", characters[0]]
+    assert list(recognizer.postprocess_op.character)[-1] == " "
+    try:
+        font = ImageFont.truetype("arial.ttf", 56)
+    except Exception:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 56)
+        except Exception:
+            pytest.skip("no TrueType font for the synthetic page")
+    image = Image.new("RGB", (640, 160), "white")
+    ImageDraw.Draw(image).text((30, 40), "HELLO 123", fill="black", font=font)
+    lines = [list(line) for line in (engine(np.array(image)[:, :, ::-1].copy())[0] or [])]
+    ocr_manager._rapidocr_scores(engine, lines)
+    assert "HELLO" in "".join(line[1] for line in lines).upper().replace(" ", ""), lines
+    assert all(0.5 < float(line[2]) <= 1.0001 for line in lines)
+
+
+class _FakeRecognizer:
+    def __init__(self, readings, legacy=False):
+        self.readings, self.calls = readings, []
+        self.postprocess_op = types.SimpleNamespace(**({"character_str": []} if legacy else {}))
+
+    def __call__(self, crops):
+        self.calls.append(len(crops))
+        return [self.readings[int(crop[0][0])] for crop in crops], 0.0
+
+
+class _FakeEngine:
+    """RapidOCR stand-in: a page is a list of (first reading, score); line i's box/crop encodes i."""
+
+    def __init__(self, page, readings=None, legacy=False):
+        self.page = page
+        self.text_rec = _FakeRecognizer(readings or {}, legacy)
+
+    def __call__(self, image):
+        return [[[[i, 0], [i + 1, 0], [i + 1, 1], [i, 1]], text, score] for i, (text, score) in enumerate(self.page)], 0
+
+    def get_crop_img_list(self, image, boxes):
+        return [[[int(box[0][0])]] for box in boxes]
+
+
+def _rapidocr_with(ocr_manager, monkeypatch, page, korean_readings, legacy=False):
+    provider = ocr_manager.RapidOCRProvider(log_callback=lambda m, level="info": None)
+    engines = {"manga": _FakeEngine(page, legacy=legacy), "korean": _FakeEngine([], korean_readings, legacy=legacy)}
+    built = []
+
+    def engine(name):
+        built.append(name)
+        return engines[name]
+
+    monkeypatch.setattr(provider, "_engine", engine)
+    provider.is_loaded = True
+    return provider, engines, built
+
+
+def test_rapidocr_auto_reads_korean_lines_with_the_korean_reader(ocr_provider, monkeypatch):
+    ocr_manager, _provider = ocr_provider
+    import numpy as np
+    image = np.zeros((10, 10, 3), np.uint8)
+    # a Japanese page: every line read with confidence, the Korean reader is never built
+    provider, engines, built = _rapidocr_with(ocr_manager, monkeypatch, [("どうして", 0.99), ("約束", 0.97)], {})
+    assert [r.text for r in provider.detect_text(image, language="auto")] == ["どうして", "約束"]
+    assert built == ["manga"]
+    # a Japanese line read poorly: the Korean reader's lone "?" (high score, no Hangul) never replaces it
+    provider, engines, built = _rapidocr_with(ocr_manager, monkeypatch, [("先輩、明日", 0.8), ("約束", 0.97)],
+                                              {0: ("?", 0.99), 1: ("가", 0.2)})
+    assert [r.text for r in provider.detect_text(image, language="auto")] == ["先輩、明日", "約束"]
+    assert engines["korean"].text_rec.calls == [1]  # only the low line was read again
+    # a Korean page: the low lines show it is Korean, so the confident ones ("一一") are read again too
+    provider, engines, built = _rapidocr_with(
+        ocr_manager, monkeypatch, [("ユ?", 0.62), ("一一", 0.95), ("!", 0.3)],
+        {0: ("그날의 일을 기억하니?", 0.95), 1: ("이 검에 맹세한다", 0.99), 2: ("!", 0.4)})
+    results = provider.detect_text(image, language="auto")
+    assert [r.text for r in results] == ["그날의 일을 기억하니?", "이 검에 맹세한다"]  # "!" stays below 0.5
+    assert engines["korean"].text_rec.calls == [2, 1] and results[0].confidence == 0.95
+    # the language hints without Korean: one reader; "korean" alone: the Korean engine only
+    provider, engines, built = _rapidocr_with(ocr_manager, monkeypatch, [("ユ?", 0.62)], {0: ("그", 0.99)})
+    assert [r.text for r in provider.detect_text(image, language="auto", language_hints=["ja", "zh"])] == ["ユ?"]
+    assert built == ["manga"]
+    provider.detect_text(image, language="korean")
+    assert built == ["manga", "korean"]
+
+
+def test_rapidocr_scores_undo_the_extra_term_of_rapidocr_1_2(ocr_provider, monkeypatch):
+    """rapidocr_onnxruntime 1.2.x averages a 1e-50 into every line's score: a one-character line
+    at 0.98 comes out at 0.49 and would be dropped (and every short line would be read again)."""
+    ocr_manager, _provider = ocr_provider
+    import numpy as np
+    provider, _engines, _built = _rapidocr_with(ocr_manager, monkeypatch, [("!", 0.49), ("約束です", 0.792)], {},
+                                                legacy=True)
+    results = provider.detect_text(np.zeros((10, 10, 3), np.uint8), language="manga")
+    assert [(r.text, round(r.confidence, 2)) for r in results] == [("!", 0.98), ("約束です", 0.99)]
 
 
 # =========================================================================== settings availability

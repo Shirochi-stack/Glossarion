@@ -689,6 +689,9 @@ CHOICES_OVERRIDES = {
     "epub_reader_layout": (("single_page", "Single page"), ("scroll", "Scroll"), ("all_scroll", "Scroll all"),
                            ("double_page", "Double page")),
     "epub_reader_theme": ((0, "Dark"), (1, "Light"), (2, "Sepia"), (3, "Midnight"), (4, "Forest"), (5, "Rose")),
+    # no desktop control; manga_models.rapidocr_model_sets reads it (other values count as auto)
+    "rapidocr_language": (("auto", "Auto (from the OCR language hints)"), ("manga", "Japanese / Chinese (manga)"),
+                          ("korean", "Korean"), ("builtin", "Built-in (RapidOCR's own Chinese models)")),
 }
 
 # U9: types the generator inferred from a text widget although the stored value is structured
@@ -789,6 +792,7 @@ LABEL_FIXES = {
     "glossary_refinement_chunking_mode": "Request mode",
     "openai_tts_endpoint": "TTS endpoint override (/audio/speech)",
     "vision_ocr_source_prepass": "Vision OCR source prepass",
+    "rapidocr_language": "RapidOCR reading model",
     # U9 gap audit: Settings › Reader & Library / Progress Manager / Direct Text (humanized keys before)
     "epub_details_show_special_files": "Show special files in book details",
     "epub_library_card_size": "Card size",
@@ -830,6 +834,11 @@ TOOLTIP_OVERRIDES = {
     "remove_excessive_empty_tags_on_device": (
         "Chapter text sent to the on-device model keeps at most 2 line breaks for each run of\n"
         "empty paragraphs / <br> tags (empty <p> tags are removed). Source files are unchanged."),
+    "rapidocr_language": (
+        "Japanese / Chinese: PP-OCRv6 manga models (vertical and horizontal text, 23 MB download).\n"
+        "Korean: PP-OCRv5 Korean reader (13 MB more). Auto uses the OCR language hints: both readers\n"
+        "when they include Korean and Japanese/Chinese, the Korean one for the lines it reads better.\n"
+        "Built-in: the Chinese models that come with RapidOCR (no download, weak on Japanese and Korean)."),
 }
 
 # Rule ids evaluated by settings_rules.evaluate (U4). locked_if: the keys a registered

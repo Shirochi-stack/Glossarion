@@ -173,7 +173,8 @@ def _cached_legacy(relpath):
 
 def _legacy_mi():
     try:
-        return _cached_legacy("src/manga_integration.py")
+        from parity.approved_changes import apply_to_source  # owner-approved changes since the pin
+        return apply_to_source("src/manga_integration.py", _cached_legacy("src/manga_integration.py"))
     except rp.Unavailable as exc:  # pragma: no cover - shallow clone
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
             pytest.fail(str(exc))

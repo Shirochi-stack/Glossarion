@@ -2064,8 +2064,80 @@ class DocTROCRProvider(OCRProvider):
         return results
 
 
+# RapidOCR with PP-OCR models it does not ship (manga_models.RAPIDOCR_MODELS, picked by
+# rapidocr_language): the PP-OCRv6_manga detector with its Japanese/Chinese reader or the
+# PP-OCRv5 Korean reader. rapidocr_onnxruntime 1.2.x (the phone build) takes a detector path
+# through its kwargs but no character dict for the recognizer (only 1.4.x reads
+# rec_keys_path), so the engine is built with the new detector and its own recognizer is then
+# pointed at the new model and dict: the package's detection, cropping, batching and CTC
+# decoding stay in use. Detection settings are the PP-OCRv6_manga model card's.
+_PPOCR_ENGINE_KWARGS = {
+    'det_limit_side_len': 960, 'det_limit_type': 'max',
+    'det_thresh': 0.15, 'det_box_thresh': 0.25, 'det_unclip_ratio': 1.4, 'det_use_dilation': False,
+    # ImageNet normalisation: 1.4.x reads these (its own v4 detector uses 0.5); 1.2.x always uses them
+    'det_mean': [0.485, 0.456, 0.406], 'det_std': [0.229, 0.224, 0.225],
+    'text_score': 0.0,  # the provider keeps or drops lines itself (_RAPIDOCR_MIN_SCORE)
+    'use_angle_cls': False, 'use_cls': False,  # 1.2.x / 1.4.x: no 180° classifier (rotated columns are read as is)
+}
+_RAPIDOCR_MIN_SCORE = 0.5  # rapidocr's own text_score default
+# "auto" with both readers: a line the first reader reads below this score is read again
+# with the other one, and the higher score wins.
+_RAPIDOCR_REREAD_SCORE = 0.9
+
+
+def _rapidocr_characters(path: str) -> List[str]:
+    """A recognizer's characters: a dict file (one per line) or PaddleX's inference.yml
+    (PostProcess.character_dict)."""
+    if path.lower().endswith(('.yml', '.yaml')):
+        import yaml  # a rapidocr_onnxruntime dependency
+        with open(path, 'r', encoding='utf-8') as fh:
+            data = yaml.safe_load(fh)
+        return [str(c) for c in data['PostProcess']['character_dict']]
+    with open(path, 'r', encoding='utf-8') as fh:
+        return [line.rstrip('\r\n') for line in fh]
+
+
+def _rapidocr_recognizer(engine):
+    """The engine's TextRecognizer (``text_rec`` in rapidocr_onnxruntime 1.4.x, ``text_recognizer`` in 1.2.x)."""
+    rec = getattr(engine, 'text_rec', None)
+    return rec if rec is not None else getattr(engine, 'text_recognizer')
+
+
+def _rapidocr_scores(engine, lines) -> None:
+    """``[box, text, score]`` / ``[text, score]`` lines with the mean character probability as
+    the score, in place: rapidocr_onnxruntime 1.2.x averages one extra 1e-50 into it (a 1-character
+    line scores below 0.5, a 9-character one at most 0.9); 1.4.x does not."""
+    if not hasattr(_rapidocr_recognizer(engine).postprocess_op, 'character_str'):  # 1.4.x
+        return
+    for line in lines:
+        n = len(str(line[-2]))
+        if n:
+            line[-1] = float(line[-1]) * (n + 1) / n
+
+
+def build_ppocr_engine(det_path: str, rec_path: str, characters: List[str]):
+    """A rapidocr_onnxruntime RapidOCR engine reading with a PP-OCR detector / recognizer pair
+    (ONNX, input ``x`` [N,3,48,W], softmax CTC output over blank + ``characters`` + space)."""
+    import copy
+    from rapidocr_onnxruntime import RapidOCR
+
+    engine = RapidOCR(det_model_path=det_path, **_PPOCR_ENGINE_KWARGS)
+    rec = _rapidocr_recognizer(engine)
+    swapped = copy.copy(rec)
+    swapped.session = type(rec.session)({'model_path': rec_path, 'use_cuda': False, 'use_dml': False,
+                                         'intra_op_num_threads': -1, 'inter_op_num_threads': -1})
+    swapped.postprocess_op = type(rec.postprocess_op)(list(characters))  # adds blank + space like Paddle
+    setattr(engine, 'text_rec' if getattr(engine, 'text_rec', None) is not None else 'text_recognizer', swapped)
+    return engine
+
+
 class RapidOCRProvider(OCRProvider):
     """RapidOCR provider for fast local OCR"""
+
+    def __init__(self, log_callback=None):
+        super().__init__(log_callback)
+        self._engines = {}  # 'builtin' / 'manga' / 'korean' -> RapidOCR engine
+        self._engine_lock = threading.RLock()
 
     @staticmethod
     def _expected_package_model_files() -> List[str]:
@@ -2120,54 +2192,126 @@ class RapidOCRProvider(OCRProvider):
         self._log("Run: pip install rapidocr-onnxruntime", "info")
         return False  # Always return False since we can't auto-install
     
+    @staticmethod
+    def _model_sets(kwargs) -> List[str]:
+        """The manga_models.RAPIDOCR_MODELS sets for ``language`` (rapidocr_language; the
+        run's MANGA_RAPIDOCR_LANGUAGE when not passed) and ``language_hints``; [] = the
+        package's own models."""
+        import manga_models
+        language = kwargs.get('language') or os.environ.get('MANGA_RAPIDOCR_LANGUAGE') or 'auto'
+        return manga_models.rapidocr_model_sets(language, kwargs.get('language_hints'))
+
+    def _engine(self, name: str):
+        """The RapidOCR engine of a model set ('builtin': the package's models), built once;
+        a set's models are downloaded first when missing (manga_models: pinned, verified)."""
+        with self._engine_lock:
+            engine = self._engines.get(name)
+            if engine is not None:
+                return engine
+            if name == 'builtin':
+                from rapidocr_onnxruntime import RapidOCR
+                engine = RapidOCR()
+            else:
+                import manga_models
+                det_key, rec_key = manga_models.RAPIDOCR_MODELS[name]
+                for key in (det_key, rec_key):
+                    if not manga_models.is_installed(key):
+                        spec = manga_models.get_spec(key)
+                        self._log(f"📥 Downloading {spec.title} ({manga_models.format_size(spec.size)}) for RapidOCR")
+                        manga_models.download(key, cancel=self._check_stop)
+                rec_spec = manga_models.get_spec(rec_key)
+                characters = _rapidocr_characters(manga_models.model_path(rec_spec.companions[0]))
+                engine = build_ppocr_engine(manga_models.model_path(det_key), manga_models.model_path(rec_key),
+                                            characters)
+                self._log(f"RapidOCR reads with {rec_spec.title}")
+            self._engines[name] = engine
+            return engine
+
     def load_model(self, **kwargs) -> bool:
-        """Load RapidOCR model"""
+        """Load RapidOCR model (the models of ``language`` / ``language_hints``, see _model_sets)"""
         try:
             self.last_error = None
             if not self.is_installed and not self.check_installation():
                 self.last_error = "RapidOCR not installed"
                 self._log(self.last_error, "error")
                 return False
-            
+
             self._log("Loading RapidOCR...")
-            from rapidocr_onnxruntime import RapidOCR
             import rapidocr_onnxruntime
 
             package_dir = os.path.dirname(getattr(rapidocr_onnxruntime, '__file__', '') or '')
             if package_dir and not self._prepare_packaged_runtime(package_dir):
                 return False
-            
-            self.model = RapidOCR()
+
+            if self.model is None:  # OCRManager.shutdown() released the provider
+                self._engines.clear()
+            # the first set's engine; detect_text builds a second one (auto) when it needs it
+            self.model = self._engine((self._model_sets(kwargs) or ['builtin'])[0])
             self.is_loaded = True
-            
+
             self._log("RapidOCR model loaded successfully")
             return True
-            
+
         except Exception as e:
             self.last_error = str(e)
             self._log(f"Failed to load RapidOCR: {str(e)}", "error")
             self._log(traceback.format_exc(), "debug")
             return False
-    
+
+    def _read(self, image: np.ndarray, kwargs) -> list:
+        """RapidOCR's ``[box, text, score]`` lines for the image with the configured models."""
+        names = self._model_sets(kwargs)
+        if not names:  # the package's own models, read as before
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if len(image.shape) == 3 else image
+            ocr_results, _ = self._engine('builtin')(image_rgb)
+            return list(ocr_results or [])
+        # PP-OCR models take the BGR image (the PaddleOCR convention they were trained with)
+        engine = self._engine(names[0])
+        lines = [list(line) for line in (engine(image)[0] or [])]
+        _rapidocr_scores(engine, lines)
+        if len(names) > 1:  # auto: Japanese/Chinese reader first, Korean for the lines it reads better
+            low = [line for line in lines if float(line[2]) < _RAPIDOCR_REREAD_SCORE]
+            rest = [line for line in lines if float(line[2]) >= _RAPIDOCR_REREAD_SCORE]
+            # a Korean page: the first reader is sure of some Korean lines too ("一一" at 0.95)
+            if low and self._reread(image, low, engine, self._engine(names[1])) and rest:
+                self._reread(image, rest, engine, self._engine(names[1]))
+        return [line for line in lines if float(line[2]) >= _RAPIDOCR_MIN_SCORE]
+
+    @staticmethod
+    def _reread(image: np.ndarray, lines: list, engine, korean) -> int:
+        """Read ``lines`` again with the ``korean`` engine's recognizer; a reading in Hangul with a
+        higher score replaces the first one (in place). Returns how many were replaced. (The
+        Korean reader reads Japanese/Chinese lines as a lone "?" with a high score, so the score
+        alone does not decide.)"""
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        crops = engine.get_crop_img_list(image, [np.array(line[0], dtype=np.float32) for line in lines])
+        reread = [list(result) for result in _rapidocr_recognizer(korean)(crops)[0]]
+        _rapidocr_scores(korean, reread)
+        replaced = 0
+        for line, result in zip(lines, reread):
+            text = str(result[0])
+            hangul = sum(1 for c in text if '가' <= c <= '힣' or 'ᄀ' <= c <= 'ᇿ'
+                         or '㄰' <= c <= '㆏')
+            letters = sum(1 for c in text if c.isalnum())
+            if hangul and hangul * 2 >= letters and float(result[1]) > float(line[2]):
+                line[1], line[2] = text, result[1]
+                replaced += 1
+        return replaced
+
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """Detect text using RapidOCR"""
-        if not self.is_loaded:
+        if not self.is_loaded and not self.load_model(**kwargs):
             self._log("RapidOCR model not loaded", "error")
             return []
-        
+
         results = []
-        
+
         try:
-            # Convert numpy array to PIL Image for RapidOCR
-            if len(image.shape) == 3:
-                # BGR to RGB
-                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            else:
-                image_rgb = image
-            
-            # RapidOCR expects PIL Image or numpy array
-            ocr_results, _ = self.model(image_rgb)
-            
+            ocr_results = self._read(image, kwargs)
+
             if ocr_results:
                 for result in ocr_results:
                     # RapidOCR returns [bbox, text, confidence]
