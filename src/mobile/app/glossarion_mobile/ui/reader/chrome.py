@@ -8,6 +8,12 @@ Raw pill) · search · ⋯. Bottom bar: the chapter ``Slider`` with
 ☰ Chapters · Aa · 🌐 Translate (or "🛰️ Live view" while a live run is open) ·
 ▶ next chapter. A centre tap toggles both bars with a 150 ms fade.
 
+The action row keeps ◀ and ▶ pinned to the bar's two edges (the middle group takes the flexible
+space between them), so they stay on screen and under the thumbs at any width. Where the labelled
+Translate / Live view button would not fit (``compact_actions``: a 320-344 dp phone, a folded Fold
+cover screen, a large text scale) it shows only its icon, with the label as its tooltip. The compact
+row (five 48 dp targets) fits a 280 dp bar.
+
 ``SelectionChipRow`` floats above (or below) the page selection: Copy ·
 Google Translate → {language} (Original mode) or Define on web · Add to
 glossary · Ask in chat.
@@ -23,11 +29,47 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.reader import model as rm
+from glossarion_mobile.ui.responsive import _text_width
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["ReaderChrome", "SelectionChipRow"]
+__all__ = ["ReaderChrome", "SelectionChipRow", "action_row_width", "compact_actions"]
 
 FADE_MS = tokens.MOTION["state_ms"]  # 150 ms
+
+# The bottom action row (◀ · ☰ · Aa · Translate · ▶). Widths in dp.
+BAR_PADDING = 8  # the bottom bar's left / right padding
+FIT_MARGIN = 24  # slack for the label estimate (emoji and font metrics differ between devices)
+NARROW_WIDTH = 400  # under this the mode segments use their short labels
+TRANSLATE_LABELS = ("🌐 Translate", "🛰️ Live view")
+TEXT_BUTTON_PADDING = 12  # Material 3 TextButton: horizontal padding on each side
+TEXT_BUTTON_MIN = 64  # Material 3 TextButton: minimum width (also the icon-only form)
+_LABEL_LARGE = (tokens.TYPE_SCALE["label_large"].size, 0.1)  # a TextButton's label: size, letter spacing
+
+
+def action_row_width(compact: bool, text_scale: float = 1.0) -> float:
+    """Estimated width of the action row's children: four 48 dp icon buttons and the Translate
+    button, labelled (its wider label, so the row does not flip between Translate and Live view)
+    or icon-only (``compact``). The row has no spacing; the free room goes between the buttons."""
+    hit = float(tokens.SIZES["hit_target"])
+    if compact:
+        translate = float(TEXT_BUTTON_MIN)
+    else:
+        size, spacing = _LABEL_LARGE
+        label = max(_text_width(text, size, float(text_scale or 1.0), spacing) for text in TRANSLATE_LABELS)
+        translate = max(float(TEXT_BUTTON_MIN), label + 2 * TEXT_BUTTON_PADDING)
+    return 4 * hit + translate
+
+
+def compact_actions(bar_width: Optional[float], text_scale: float = 1.0) -> bool:
+    """True when the labelled Translate button would not fit a bar ``bar_width`` dp wide (the
+    screen less the side insets and, on a tablet, the open chapters panel)."""
+    try:
+        width = float(bar_width or 0)
+    except (TypeError, ValueError):
+        width = 0.0
+    if width <= 0:
+        return False
+    return action_row_width(False, text_scale) + 2 * BAR_PADDING + FIT_MARGIN > width
 
 
 def _icon_button(icon: Any, tooltip: str, handler: Callable[..., Any], key: str) -> ft.IconButton:
@@ -101,27 +143,36 @@ class ReaderChrome:
         )
         self.slider = ft.Slider(min=0, max=1, value=0, divisions=1, expand=True, label="{value}",
                                 on_change_end=self._on_slider, key="reader-slider")
-        self.progress_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, key="reader-progress")
+        self.progress_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, max_lines=1,
+                                     overflow=ft.TextOverflow.ELLIPSIS, expand=True, key="reader-progress")
         self.page_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, color=ft.Colors.ON_SURFACE_VARIANT,
-                                 key="reader-page")
+                                 max_lines=1, key="reader-page")
         self.prev_button = _icon_button(ft.Icons.CHEVRON_LEFT, "Previous chapter", on_prev, "reader-prev")
         self.next_button = _icon_button(ft.Icons.CHEVRON_RIGHT, "Next chapter", on_next, "reader-next")
         self.chapters_button = _icon_button(ft.Icons.TOC, "Chapters", on_chapters, "reader-chapters")
         self.aa_button = _icon_button(ft.Icons.TEXT_FIELDS, "Aa", on_aa, "reader-aa")
-        self.translate_button = ft.TextButton(content="🌐 Translate", on_click=on_translate, key="reader-translate",
-                                              tooltip="Translate this chapter")
+        self.compact = False
+        self.live = False
+        self.translate_button = ft.TextButton(content=TRANSLATE_LABELS[0], on_click=on_translate,
+                                              key="reader-translate", tooltip="Translate this chapter")
+        # ◀ and ▶ are fixed at the edges; the middle group takes (and shares out) the room between them
+        self.middle_actions = ft.Row([self.chapters_button, self.aa_button, self.translate_button], spacing=0,
+                                     expand=True, alignment=ft.MainAxisAlignment.SPACE_EVENLY,
+                                     vertical_alignment=ft.CrossAxisAlignment.CENTER, key="reader-actions-middle")
+        self.action_row = ft.Row([self.prev_button, self.middle_actions, self.next_button], spacing=0,
+                                 vertical_alignment=ft.CrossAxisAlignment.CENTER, key="reader-actions")
         self.bottom = ft.Container(
             bgcolor=ft.Colors.with_opacity(0.92, ft.Colors.SURFACE),
-            padding=ft.Padding.only(left=8, right=8, top=2, bottom=2),
+            padding=ft.Padding.only(left=BAR_PADDING, right=BAR_PADDING, top=2, bottom=2),
             animate_opacity=FADE_MS,
             opacity=1.0,
             content=ft.SafeArea(
                 content=ft.Column(
                     [
                         ft.Row([self.slider]),
-                        ft.Row([self.progress_text, self.page_text], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                        ft.Row([self.prev_button, self.chapters_button, self.aa_button, self.translate_button,
-                                self.next_button], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                        ft.Row([self.progress_text, self.page_text], spacing=8,
+                               alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                        self.action_row,
                     ],
                     spacing=0,
                     tight=True,
@@ -161,10 +212,40 @@ class ReaderChrome:
         self._push(self.slider, self.progress_text, self.page_text, self.prev_button, self.next_button)
 
     def set_translate(self, *, visible: bool, live: bool, reason: str = "") -> None:
+        self.live = bool(live)
         self.translate_button.visible = bool(visible or live)
-        self.translate_button.content = "🛰️ Live view" if live else "🌐 Translate"
         self.translate_button.tooltip = reason or ("Show the live translation" if live else "Translate this chapter")
+        self._apply_translate_content()
         self._push(self.translate_button)
+
+    def _apply_translate_content(self) -> None:
+        if self.compact:
+            self.translate_button.content = ft.Icon(ft.Icons.SATELLITE_ALT if self.live else ft.Icons.TRANSLATE)
+        else:
+            self.translate_button.content = TRANSLATE_LABELS[1] if self.live else TRANSLATE_LABELS[0]
+
+    def fit(self, bar_width: Optional[float], text_scale: float = 1.0) -> bool:
+        """Lay the bars out for a bar ``bar_width`` dp wide: the icon-only Translate button where the
+        labelled one would not fit (``compact_actions``) and the short mode labels under 400 dp.
+        Returns whether the action row is compact."""
+        compact = compact_actions(bar_width, text_scale)
+        try:
+            narrow = 0 < float(bar_width or 0) < NARROW_WIDTH
+        except (TypeError, ValueError):
+            narrow = self.narrow
+        changed = []
+        if compact != self.compact:
+            self.compact = compact
+            self._apply_translate_content()
+            changed.append(self.translate_button)
+        if narrow != self.narrow:
+            self.narrow = narrow
+            labels = rm.MODE_SHORT_LABELS if narrow else rm.MODE_LABELS
+            for mode, segment in self.segments.items():
+                segment.label = ft.Text(labels[mode])
+            changed.append(self.mode_buttons)
+        self._push(*changed)
+        return self.compact
 
     # ---- visibility --------------------------------------------------------------------------
 

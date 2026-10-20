@@ -403,6 +403,7 @@ class ReaderScreen(Screen):
             on_slider=lambda index: self._spawn(self.go_chapter(index)),
             narrow=width < 400,
         )
+        self._fit_chrome()
         self.selection = SelectionChipRow(
             on_copy=self._copy, on_translate=self._google_translate, on_define=self._define,
             on_glossary=self._add_to_glossary, on_chat=self._ask_in_chat,
@@ -459,6 +460,18 @@ class ReaderScreen(Screen):
         self._apply_side_panel()
         return self.panel_open
 
+    def _fit_chrome(self) -> None:
+        """The chrome bars span the Stack; their own SafeAreas keep the side insets clear, so the room
+        inside them is the page area's width: the action row goes icon-only where its labels would not
+        fit (``ReaderChrome.fit``)."""
+        from glossarion_mobile.ui.text_scale import effective
+
+        try:
+            scale = effective((self.deps.extras or {}).get("state"))
+        except Exception:
+            scale = 1.0
+        self.chrome.fit(self._page_size()[0], scale)
+
     def _apply_side_panel(self) -> None:
         box = self.toc.box
         if self.panel_open:
@@ -472,6 +485,7 @@ class ReaderScreen(Screen):
             if box not in (self.toc.drawer.controls or []):
                 self.toc.drawer.controls = [box]
         self.fallback.set_size(*self._page_size())
+        self._fit_chrome()
         for control in (self.body_row, self.toc.drawer):
             try:
                 control.update()
@@ -486,6 +500,7 @@ class ReaderScreen(Screen):
         self.view = view
         self.edge_to_edge = True
         self._painted_bg = self.theme.get("bg")
+        self._fit_chrome()  # the side insets now apply
         return view
 
     def _adopt_view(self) -> None:
@@ -1079,6 +1094,7 @@ class ReaderScreen(Screen):
             return
         index = self.index
         info = session.chapter_info(index)
+        self._fit_chrome()  # the text scale may have changed since the last chapter
         self.chrome.set_titles(session.chapter_title(index), session.plan.title)
         modes = session.available_modes(index)
         reason = "" if modes.get(rm.BILINGUAL) else (
@@ -1747,6 +1763,7 @@ class ReaderScreen(Screen):
             log.debug("wakelock unavailable", exc_info=True)
 
     def _on_width(self, _value: Any = None) -> None:
+        self._fit_chrome()
         if self.session is None or self.state != "ready":
             return
         layout = self._effective_layout()
