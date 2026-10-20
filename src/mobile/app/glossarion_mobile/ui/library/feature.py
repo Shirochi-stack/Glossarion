@@ -423,28 +423,14 @@ class LibraryFeature:
         return self.context().open_reader(path=path)
 
     async def add_shared_to_library(self, imp: Any) -> Any:
-        """IntentRouter "Add to Library": copy into Library/Raw + ``import_paths``, then offer "Open"."""
+        """IntentRouter "Add to Library": copy into Library/Raw + ``import_paths`` (silently: the book shows
+        on the shelf)."""
         imported = getattr(imp, "imported", None)
         files = getattr(self.app, "files", None)
         if imported is None or files is None:
             return None
         added = await self.run_io(files.add_to_library, imported.path)
         await self.service.refresh(reason="add to library")
-        book = None
-        for row in self.service.snapshot.all_books():
-            raw = row.get("raw_source_path")
-            if raw and os.path.normcase(os.path.abspath(str(raw))) == os.path.normcase(os.path.abspath(added.path)):
-                book = row
-                break
-        notify = getattr(self.app, "notify", None)
-        navigate = getattr(self.app, "navigate_to", None)
-        if notify is not None:
-            if book is not None and navigate is not None:
-                bid = self.service.bid_for(book)
-                notify(f"Added to Library: {added.name}", "Open", lambda: navigate("library.book", {"bid": bid}))
-            else:
-                notify(f"Added to Library: {added.name}", "Library",
-                       (lambda: navigate("library")) if navigate is not None else None)
         return added
 
     # ---- jobs / lifecycle ------------------------------------------------------------------------

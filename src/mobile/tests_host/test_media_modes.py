@@ -1641,7 +1641,7 @@ def test_finished_attachment_run_moves_into_the_library(desktop_store_cls, tmp_p
     assert run.output_folder == str(target)  # Compile / Reader from the card follow the move
     assert raw.is_file() and not any(p.name.startswith("Novel (") for p in iso_env.out.iterdir())
     assert not (iso_env.library / "Raw").exists() or not any((iso_env.library / "Raw").iterdir())
-    assert notes[-1] == ("Added to the Library",)  # no Library installed in this bare app: no "Open book"
+    assert not [n for n in notes if n and n[0] == "Added to the Library"], notes  # silent (owner 2026-10-20)
 
     from glossarion_mobile.services.library import LibraryService
 
@@ -1713,7 +1713,7 @@ def test_auto_migrate_waits_while_a_job_holds_the_lock(desktop_store_cls, tmp_pa
     outcomes = asyncio.run(idle())
     assert [o["status"] for o in outcomes] == ["moved"]
     assert not workspace.exists() and (iso_env.out / "book" / "book.epub").is_file()
-    assert notes[-1] == ("Added to the Library",)
+    assert not [n for n in notes if n and n[0] == "Added to the Library"], notes  # silent (owner 2026-10-20)
     adapter.close()
 
 
@@ -1748,7 +1748,7 @@ def test_auto_migrate_reuses_a_same_named_library_book_quietly(desktop_store_cls
     assert before is not None
     feature._announce(outcome)
     assert not [n for n in notes if n and str(n[0]).startswith("A Library book named")], notes
-    assert notes[-1] == ("Added to the Library",)
+    assert not [n for n in notes if n and n[0] == "Added to the Library"], notes  # silent (owner 2026-10-20)
     adapter.close()
 
 
@@ -1826,17 +1826,15 @@ def test_startup_sweep_moves_earlier_chat_books_once(desktop_store_cls, tmp_path
     assert not workspace.exists() and (iso_env.out / "book" / "book.epub").is_file()
     assert asyncio.run(feature.sweep("again")) == []
     assert sorted(p.name for p in iso_env.out.iterdir()) == ["book"]
-    assert notes == [("Added to the Library",)]
-    # several books in one sweep: one summary snackbar instead of one per book
+    assert notes == []  # silent (owner 2026-10-20): no "Added to the Library" snackbar
+    # several books in one sweep: no summary snackbar either
     for name in ("alpha", "beta"):
         raw = tmp_path / f"{name}.epub"
         raw.write_bytes(f"PK\x03\x04{name}".encode())
         _write_workspace(Path(adapter.output_folder("2")) / "Attachments" / name, raw)
     moved = asyncio.run(feature.sweep("idle"))
     assert sorted(Path(o["target"]).name for o in moved if o["status"] == "moved") == ["alpha", "beta"]
-    assert notes[1:] and len(notes) == 2 and notes[-1][:2] == ("Added 2 books to the Library", "Library")
-    notes[-1][2]()
-    assert _routes[-1] == ("library",)
+    assert notes == [] and _routes == []
     adapter.close()
 
 
@@ -1844,7 +1842,7 @@ def test_finished_listeners_run_after_the_commit_and_the_library_hooks(desktop_s
                                                                        monkeypatch):
     """``subscribe_finished`` runs once the chat is saved and idle; the chat env's Library hooks (C2):
     ``library_book`` finds the moved book's id, ``library_translate`` opens the Library translate sheet
-    for it (Resume / Retry failed of a moved workspace), and "Open book" opens it."""
+    for it (Resume / Retry failed of a moved workspace); the move itself shows no snackbar."""
     from glossarion_mobile.ui.chat.run_controller import ChatRun, ChatRuns
     from glossarion_mobile.ui.chat.run_request import DirectTextRun
     from glossarion_mobile.ui.chat.stream_bridge import RunStream
@@ -1902,7 +1900,7 @@ def test_finished_listeners_run_after_the_commit_and_the_library_hooks(desktop_s
         outcome = feature.auto_migrate_blocking("2", str(workspace))
         feature._announce(outcome)
         target = str(iso_env.out / "book")
-        assert service.dirty and notes[-1][:2] == ("Added to the Library", "Open book")
+        assert service.dirty and not [n for n in notes if n and n[0] == "Added to the Library"], notes
 
         async def hooks():
             bid = await env.library_book(target)
@@ -1915,8 +1913,6 @@ def test_finished_listeners_run_after_the_commit_and_the_library_hooks(desktop_s
         assert Path(service.book_for_bid(bid)["output_folder"]) == Path(target)
         assert sheet == "sheet" and sheets[0][0] == "library-ctx"
         assert Path(sheets[0][1][0]["output_folder"]) == Path(target)
-        notes[-1][2]()  # Open book
-        assert routes[-1] == ("library.book", {"bid": bid})
     finally:
         library_core.uninstall_library_env()
         adapter.close()

@@ -519,7 +519,6 @@ class GlossaryFeature:
         except Exception as exc:
             ctx.say(f"Could not start the extraction: {exc}")
             return None
-        ctx.say("Extracting the glossary…", "Jobs", lambda: ctx.go("jobs"))
         return job_id
 
     # ---- manual glossary ------------------------------------------------------------------------------
@@ -565,9 +564,6 @@ class GlossaryFeature:
         except Exception as exc:
             ctx.say(f"Failed to load glossary: {exc}")
             return None
-        copied = result.get("copied_to")
-        ctx.say(f"\U0001F4D1 Loaded manual glossary: {os.path.basename(path)}" +
-                (f" · copied to {os.path.basename(os.path.dirname(copied))}/glossary.csv" if copied else ""))
         return result
 
     def use_for_chat(self, path: str) -> Optional[str]:
@@ -589,7 +585,6 @@ class GlossaryFeature:
         except Exception:
             log.exception("using the glossary for the chat failed")
             return None
-        self.context().say(f"This chat now uses {os.path.basename(path)} (Force Manual Glossary)")
         return str(cid)
 
     async def clear_manual_glossary(self) -> bool:
@@ -605,7 +600,6 @@ class GlossaryFeature:
             return False
         self.service.set_cfg("manual_glossary_path", "")
         self.service.log(f"📑 Cleared glossary: {os.path.basename(previous)}")
-        ctx.say(f"Cleared glossary: {os.path.basename(previous)}")
         return True
 
     # ---- glossary files of inputs (Book page / Library selection bar) ----------------------------------
@@ -642,7 +636,8 @@ class GlossaryFeature:
         except Exception as exc:
             ctx.say(f"⚠️ Error deleting glossary: {exc}")
             return None
-        ctx.say(f"🗑️ Deleted ({len(deleted)} files backed up)" if deleted else "Nothing was deleted")
+        if not deleted:
+            ctx.say("Nothing was deleted")
         library = getattr(self.app, "library", None)
         if library is not None and hasattr(library, "mark_dirty"):
             library.mark_dirty()
@@ -672,7 +667,6 @@ class GlossaryFeature:
         except Exception as exc:
             ctx.say(f"⚠️ Error restoring glossary: {exc}")
             return None
-        ctx.say(f"↩️ Restored from {os.path.basename(backup_dir)}: {len(restored)} file(s)")
         return restored
 
     # ---- editor / progress navigation ----------------------------------------------------------------------
@@ -769,7 +763,8 @@ class GlossaryFeature:
             ctx.say(f"Could not add the entry: {exc}")
             return None
         name = os.path.basename(str(getattr(doc, "path", "") or ""))
-        ctx.say(f"Added to {name}" if report.get("saved") else f"The entry was not saved to {name}")
+        if not report.get("saved"):
+            ctx.say(f"The entry was not saved to {name}")
         return report
 
     async def _new_entry_when_ready(self, gid: Any, term: str, attempts: int = 100) -> Any:
@@ -887,7 +882,6 @@ class GlossaryFeature:
             except Exception as exc:
                 ctx.say(f"Could not start the refinement: {exc}")
                 return None
-            ctx.say("✨ Refining the glossary…", "Jobs", lambda: ctx.go("jobs"))
             return job_id
 
         sheet = RefineSheet(ctx, glossary_path=glossary_path, types=types, selected=info.get("selected") or (),

@@ -171,7 +171,7 @@ def test_on_device_tab_one_tap_download_load_and_use(tmp_path, fake_hf):
         assert engine_service.is_vision("Tiny-Q4_K_M") and engine.mmproj.endswith("Tiny-Q4_K_M.mmproj.gguf")
         assert _find(panel.preset_column, "local-preset-vision-0") is not None
         assert panel.engine_state.value == "Ready · Tiny-Q4_K_M · reads images" and not panel.unload_button.disabled
-        assert any(n.startswith("Model: local/Tiny-Q4_K_M (Tiny)") for n in notes)
+        assert not any(n.startswith("Model: local/") for n in notes)  # silent (owner 2026-10-20)
 
         # the file-less preset of the same repo auto-picks Q4_K_M: already there, so it is just used
         assert panel.stem_of_preset(panel.presets()[1]) == "Tiny-Q4_K_M"
@@ -393,7 +393,7 @@ def test_a_text_only_download_gets_image_support_from_the_menu(tmp_path, fake_hf
         assert "Add image support" in [i.content for i in menu.items]
         assert _find(panel.preset_column, "local-preset-vision-0") is None
         assert await panel.add_vision(0)
-        assert service.is_vision("Tiny-Q4_K_M") and notes[-1] == "local/Tiny-Q4_K_M reads images now"
+        assert service.is_vision("Tiny-Q4_K_M") and "local/Tiny-Q4_K_M reads images now" not in notes
         assert _find(panel.preset_column, "local-preset-vision-0") is not None
         menu = _find(panel.preset_column, "local-preset-menu-0")
         assert "Add image support" not in [i.content for i in menu.items]

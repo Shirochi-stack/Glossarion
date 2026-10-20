@@ -222,7 +222,6 @@ class ProfileBar:
         name = self.selected
         self._persist()
         self.render()
-        self.ctx.say(f"Created profile “{name}” — edit the prompt below")
         return name
 
     def current_content(self) -> Any:
@@ -248,7 +247,6 @@ class ProfileBar:
             return self._box(box)
         self._persist()
         self.render()
-        self.ctx.say(f"Saved profile “{self.selected}”")
         return None
 
     async def delete(self, *, confirm: bool = True) -> Any:
@@ -265,7 +263,6 @@ class ProfileBar:
                 return self._box(box)
             self._persist()
             self.render()
-            self.ctx.say(f"Reset profile “{name}”")
             return None
         asked: list = []
 

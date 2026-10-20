@@ -933,7 +933,6 @@ class ProfilesScreen(_ProfilesBase):
         except Exception as exc:
             self.say(str(exc))
             return None
-        self.say(f"✅ Created new profile: '{name}'")
         self.refresh()
         self.open_profile(name)
         return name
@@ -972,7 +971,6 @@ class ProfilesScreen(_ProfilesBase):
             self.say(str(exc))
             return None
         self.refresh()
-        self.say(f"✅ Profile '{new}' saved")
         return new
 
     def confirm_delete(self, name: str) -> ConfirmDialog:
@@ -998,7 +996,6 @@ class ProfilesScreen(_ProfilesBase):
             self.say(str(exc))
             return None
         self.refresh()
-        self.say(f"Profile '{name}' reset to its default" if kind == "reset" else f"Profile '{name}' deleted")
         return kind
 
     def overflow(self) -> ActionSheet:
@@ -1036,7 +1033,6 @@ class ProfilesScreen(_ProfilesBase):
             self.say(str(exc) if str(exc).startswith("Failed") else f"Failed to import profiles: {exc}")
             return 0
         self.refresh()
-        self.say(f"Imported {count} profiles.")
         return count
 
     def export_path(self) -> str:
@@ -1148,7 +1144,6 @@ class ProfileDetailScreen(_ProfilesBase):
         self.title = saved
         self.pid = profile_id(saved)
         self.listing = self.service.listing()
-        self.say(f"✅ Profile '{saved}' saved")
         if renamed:
             self.ctx.go("settings.profiles.detail", {"pid": self.pid})
         return saved
@@ -1172,7 +1167,6 @@ class ProfileDetailScreen(_ProfilesBase):
             self._error(str(exc))
             return None
         self._error(None)
-        self.say(f"✅ Profile '{saved}' saved")
         self.ctx.go("settings.profiles.detail", {"pid": profile_id(saved)})
         return saved
 
@@ -1185,7 +1179,6 @@ class ProfileDetailScreen(_ProfilesBase):
         self.listing = self.service.listing()
         self.use_button.disabled = True
         self.push(self.use_button)
-        self.say(f"Using profile '{self.name}'")
         return True
 
     def confirm_delete(self) -> ConfirmDialog:
@@ -1213,9 +1206,7 @@ class ProfileDetailScreen(_ProfilesBase):
         if kind == "reset":
             self.listing = self.service.listing()
             self.editor.set_value(self.listing.texts.get(self.name, ""))
-            self.say(f"Profile '{self.name}' reset to its default")
         else:
-            self.say(f"Profile '{self.name}' deleted")
             if self.on_close is not None:
                 self.on_close()
         return kind

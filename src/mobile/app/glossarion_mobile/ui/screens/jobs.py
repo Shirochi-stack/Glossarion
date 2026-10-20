@@ -335,9 +335,7 @@ class JobsScreen(Screen):
             self.navigate("jobs.detail", {"jid": snap.id})
 
     def _stop(self, snap: JobSnapshot) -> None:
-        mode = self.service.request_stop(snap.id)
-        if mode == "graceful":
-            self._say("Stopping after the current request · tap again to force stop")
+        self.service.request_stop(snap.id)
 
     def _cancel(self, snap: JobSnapshot) -> ConfirmDialog:
         dialog = ConfirmDialog(title="Cancel job?", body=snap.title, confirm_label="Cancel job",
@@ -349,7 +347,8 @@ class JobsScreen(Screen):
 
     def _resume(self, snap: JobSnapshot) -> Optional[str]:
         new_id = self.service.resume(snap.id)
-        self._say("Resumed · continues from the saved progress" if new_id else "This job can no longer be resumed")
+        if not new_id:
+            self._say("This job can no longer be resumed")
         return new_id
 
     def _discard(self, snap: JobSnapshot) -> None:
@@ -371,8 +370,7 @@ class JobsScreen(Screen):
             self.service.pause_queue()
 
     def _cancel_all(self, e: Any = None) -> None:
-        count = self.service.cancel_all_queued()
-        self._say(f"Cancelled {count} queued job{'s' if count != 1 else ''}")
+        self.service.cancel_all_queued()
 
     def _clear_finished(self, e: Any = None) -> None:
         self.service.clear_finished()
@@ -689,11 +687,7 @@ class JobsFeature:
             await self.background.prepare_for_run(spec, long_job=long_job)
         except Exception:
             log.exception("background preparation failed; the job still runs in the foreground")
-        job_id = self.service.submit(spec)
-        active = self.service.snapshot()
-        if active is not None and active.id != job_id:
-            self._notify(f"Queued · runs after {active.title}", "Undo", lambda: self.undo_queue(job_id))
-        return job_id
+        return self.service.submit(spec)  # a queued job shows in the strip and the Jobs list (no snackbar)
 
     def undo_queue(self, job_id: str) -> bool:
         """The Queue snackbar's Undo (UI_SPEC §2.4): take the job out of the queue again."""
@@ -703,12 +697,7 @@ class JobsFeature:
         return cancelled
 
     def stop_from_strip(self) -> Optional[str]:
-        mode = self.service.request_stop()
-        if mode == "graceful":
-            self._notify("Stopping after the current request · tap again to force stop")
-        elif mode in ("force", "immediate"):
-            self._notify("Force stopping…")
-        return mode
+        return self.service.request_stop()
 
     def open_strip_job(self) -> None:
         snap = self.service.snapshot()
@@ -967,11 +956,10 @@ class JobsFeature:
                 return
         if tap.action == ACTION_RESUME and tap.job_id:
             if self.service.resume(tap.job_id):
-                self._notify("Resumed · continues from the saved progress")
                 self._navigate("jobs")
                 return
-        if tap.action == ACTION_ACCEPT and self.accept_glossary_from_notification(tap):
-            self._notify("Glossary accepted · translating")
+        if tap.action == ACTION_ACCEPT:
+            self.accept_glossary_from_notification(tap)
         if tap.route:
             navigate = getattr(self.app, "navigate", None)
             if navigate is not None:
@@ -1042,8 +1030,6 @@ class JobsFeature:
             compose = getattr(self.app, "prefill_composer", None)
             if compose is not None:
                 compose(texts[0].text)
-            else:
-                self._notify("Shared text received")
             return None
         if self.page is None or not files:
             return None
@@ -1137,8 +1123,7 @@ class JobsFeature:
 
         def resume(e: Any = None) -> None:
             close()
-            if self.service.resume(newest.id):
-                self._notify(f"Resumed · {newest.title}")
+            self.service.resume(newest.id)
 
         def review(e: Any = None) -> None:
             close()

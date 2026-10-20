@@ -431,8 +431,6 @@ class BookPageScreen(Screen):
             finally:
                 self._loading_progress = False
         self.progress = view
-        if view.created:
-            self.ctx.say(f"📁 Created: {os.path.basename(str(view.created))}")
         self._render_strip()
         self.chapters.apply(view)
         self.overview.render()
@@ -552,8 +550,8 @@ class BookPageScreen(Screen):
             self.review_sheet = None
             if jobs is not None:
                 jobs.answer(question_id, bool(accepted))
-            self.ctx.say("Translating with the reviewed glossary" if accepted else
-                         "Translation stopped: the glossary was not accepted")
+            if not accepted:
+                self.ctx.say("Translation stopped: the glossary was not accepted")
 
         def edit(file_path: str) -> None:
             # ✏️ Edit: the Glossary editor on the generated file; the job keeps waiting and the sheet
@@ -585,11 +583,9 @@ class BookPageScreen(Screen):
         if jobs is None or job is None:
             return
         try:
-            mode = jobs.request_stop(job.id)
+            jobs.request_stop(job.id)
         except TypeError:
-            mode = jobs.request_stop()
-        if mode == "graceful":
-            self.ctx.say("Stopping after the current request · tap again to force stop")
+            jobs.request_stop()
 
     def _on_library(self, snap: Any) -> None:
         """Keep the book row current (state, counts, compiled output) from the Library scans; the scan
@@ -641,8 +637,6 @@ class BookPageScreen(Screen):
             self.ctx.say(f"Could not start: {exc}")
             return None
         self.ctx.haptic("medium_impact")
-        self.ctx.say(f"Compiling {'EPUB' if kind == 'compile_epub' else 'PDF'}…", "Jobs",
-                     lambda: self.ctx.go("jobs"))
         return job_id
 
     def compile_menu(self) -> ActionSheet:

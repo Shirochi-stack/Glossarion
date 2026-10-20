@@ -456,7 +456,6 @@ class FilesTab(MangaTab):
         self.refresh()
         if added:
             self.ctx.remember_source("tools.manga", f"{len(files.files)} images")
-            self.ctx.say(f"Added {added} image{'s' if added != 1 else ''}")
         elif paths:
             self.ctx.say("No new images found")
         return int(added or 0)
@@ -554,8 +553,6 @@ class FilesTab(MangaTab):
         self.selected = set()
         self.selection_mode = False
         removed = int(await self._mutate(self.session.files.remove, paths) or 0)
-        if removed:
-            self.ctx.say(f"Removed {removed} image{'s' if removed != 1 else ''}")
         return removed
 
     async def clear_all(self) -> bool:
@@ -793,8 +790,6 @@ class FilesTab(MangaTab):
             return None
         self.session.last_cbz = paths + [p for p in self.session.last_cbz if p not in paths]
         self.refresh()
-        if len(paths) > 1:
-            self.ctx.say(f"Created {len(paths)} CBZ files (listed under Output)")
         export_sheet(self.ctx, paths[0])
         return paths[0]
 

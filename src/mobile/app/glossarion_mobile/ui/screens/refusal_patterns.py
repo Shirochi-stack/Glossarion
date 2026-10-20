@@ -355,5 +355,4 @@ class RefusalPatternsScreen(Screen):  # type: ignore[misc,valid-type]
             return None
         added, skipped = self.model.merge_lines(lines)
         self._refresh()
-        self.say(f"✅ Loaded {added} new, {skipped} skipped")
         return added, skipped

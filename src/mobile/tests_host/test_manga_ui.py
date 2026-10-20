@@ -1501,7 +1501,7 @@ def test_model_rows_download_load_delete(tmp_path, monkeypatch):
         assert row.download_button.visible and not row.delete_button.visible
         entry = await row.download()
         assert entry.status == "ready" and row.delete_button.visible and row.load_button.visible
-        assert ctx.notes[-1][0] == "Downloaded Detector"
+        assert not [n for n in ctx.notes if n[0] == "Downloaded Detector"]  # silent (owner 2026-10-20)
         assert (await row.toggle_load()).status == "loaded" and row.load_button.icon is not None
         assert (await row.toggle_load()).status == "ready"
         ctx.extras["answers"] = ["yes"]

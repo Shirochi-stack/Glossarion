@@ -288,7 +288,6 @@ class RpgMakerScreen(Screen):
             self.ctx.say("Translate the game first")
             return None
         cache = os.path.join(getattr(self.ctx, "data_dir", "") or os.path.dirname(game_dir), "exports")
-        self.ctx.say("Packing the game…")
         try:
             archive = await self.ctx.io(zip_game, game_dir, cache)
         except OSError as exc:

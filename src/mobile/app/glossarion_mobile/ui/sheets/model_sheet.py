@@ -535,7 +535,6 @@ class ModelSheet:
             return "Settings are not available"
         store.set(REQUEST_QUEUE_KEY, dict(config or {}))
         self._sync_request_queue()
-        self._say("⏳ Request Queue saved for the main key" if config else "⏳ Request Queue removed for the main key")
         return None
 
     # ---- state helpers -----------------------------------------------------------------------------
@@ -1868,7 +1867,8 @@ class ModelSheet:
         message = refresh_outcome_text(provider, outcome)
         if self.closed:
             self.search_border.stop()
-            self._say(message)
+            if not getattr(outcome, "ok", False):  # a found-N-models line is no snackbar
+                self._say(message)
             return
         self.refresh_note = message
         try:
@@ -1985,9 +1985,7 @@ class ModelSheet:
                     log.debug("key classification failed", exc_info=True)
             if catalog is not None and model:
                 try:
-                    outcome = await catalog.maybe_auto_poll(model)
-                    if outcome is not None and outcome.message and outcome.provider:
-                        self._say(outcome.message)  # model_catalog_core.auto_poll_message
+                    await catalog.maybe_auto_poll(model)  # its "found N models" line is no snackbar
                 except Exception:
                     log.debug("auto-poll failed", exc_info=True)
 

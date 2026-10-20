@@ -344,8 +344,7 @@ class DiagnosticsScreen(Screen):
 
     def set_http_logging(self, enabled: bool) -> None:
         self._set_pref(dl.PREF_HTTP_LOG, bool(enabled))
-        folder = dl.apply_http_logging(bool(enabled), self.logs_dir)
-        self._say(f"HTTP logging on · {folder}" if enabled else "HTTP logging off")
+        dl.apply_http_logging(bool(enabled), self.logs_dir)
 
     def set_save_payload(self, enabled: bool) -> None:
         self._set_pref(dl.PREF_SAVE_PAYLOAD, bool(enabled))
@@ -428,7 +427,6 @@ class DiagnosticsScreen(Screen):
         except Exception as exc:
             self._say(f"Could not clear {label}: {exc}")
             return 0
-        self._say(f"Cleared {label} ({removed} item{'s' if removed != 1 else ''})")
         await self.measure()
         return removed
 

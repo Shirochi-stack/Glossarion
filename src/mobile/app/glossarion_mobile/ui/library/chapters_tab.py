@@ -43,7 +43,6 @@ import asyncio
 import copy
 import logging
 import os
-import time
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 import flet as ft
@@ -76,7 +75,6 @@ UNTRACKED_STATUSES = ("", "not_translated")  # rows with no progress entry to re
 # Desktop _start_single_progress_qa_resolution / prepare_single_qa_resolution "Process Running"
 PROCESS_RUNNING_TITLE = "Process Running"
 PROCESS_RUNNING = "Wait for the current translation or glossary process to finish first."
-RETRANSLATE_QUEUED = "Queued: resetting {count} row(s) for retranslation · runs after the current job"
 RETRANSLATE_FAILED = "Retranslation Reset Failed"
 #: Desktop row menu: "🔍 Edit Translation" is offered when Manual editing is on for an HTML
 #: row, or when the source exists and the row has a translated output.
@@ -595,7 +593,6 @@ class ChaptersTab:
         self.selected = keys
         self._render_list(self.visible, window_start=self.window_start)
         self._sync_selection()
-        self.ctx.say(f"Chapters {label}: {len(keys)} selected · Retranslate is in the bar below")
         return len(keys)
 
     def _filtered(self) -> list:
@@ -1204,38 +1201,20 @@ class ChaptersTab:
         await self.ctx.io(pm.set_manual_editing, self.page.service, self.view, enabled)
         self.more_menu.items = self._more_items()
         self.ctx.push(self.more_menu)
-        self.ctx.say("Manual editing on: the SDLXLIFF reviewer edits the outputs" if enabled
-                     else "Manual editing off")
         if enabled:
             self.ctx.spawn(self._create_manual_sidecars())
         return enabled
 
     async def _create_manual_sidecars(self) -> dict:
-        """The desktop toggle's "Creating sidecars… i/N" step on the io pool (progress in the snackbar)."""
-        last = {"t": 0.0}
-        dispatcher = getattr(self.ctx, "dispatcher", None)
-
-        def progress(payload: dict) -> None:
-            total = int((payload or {}).get("total") or 0)
-            index = int((payload or {}).get("index") or 0)
-            now = time.monotonic()
-            if not total or now - last["t"] < 1.0:
-                return
-            last["t"] = now
-            text = f"Creating sidecars… {min(index, total)}/{total}"
-            if dispatcher is not None and getattr(dispatcher, "bound", False):
-                dispatcher.post(self.ctx.say, text)
-
+        """The desktop toggle's "Creating sidecars… i/N" step on the io pool (no progress snackbars:
+        owner 2026-10-20)."""
         try:
-            stats = await self.ctx.io(self.generate_manual_sidecars, progress)
+            stats = await self.ctx.io(self.generate_manual_sidecars)
         except Exception as exc:
             self.ctx.say(f"Manual sidecar creation failed: {exc}")
             return {}
         created = int(stats.get("created") or 0)
-        if created:
-            self.ctx.say(f"Created {created} source-only manual sidecar{'s' if created != 1 else ''}. "
-                         "No HTML output is created until a target row is edited.")
-        elif stats.get("missing_source"):
+        if not created and stats.get("missing_source"):
             missing = int(stats.get("missing_source") or 0)
             self.ctx.say(f"Could not locate source HTML for {missing} Not Translated entr{'ies' if missing != 1 else 'y'}.")
         return stats
@@ -1457,7 +1436,6 @@ class ChaptersTab:
                        inputs=(source,), params={"chapter_file": row.filename},
                        origin=service.origin_for(self.page.book))
         job_id = await service.submit(spec)
-        self.ctx.say(f"Translating {row.filename}…", "Jobs", lambda: self.ctx.go("jobs"))
         return job_id
 
     async def run_translation(self) -> Any:
@@ -1510,7 +1488,6 @@ class ChaptersTab:
             self.ctx.say("Retranslate jobs are not available in this build")
             return None
         spec = pm.retranslate_spec(service, self.page.book, vm, linked_choice)
-        busy = self._jobs_busy()
         job_id = await service.submit(spec)
         if not job_id:
             from glossarion_mobile.job_kinds import retranslate as retranslate_kind
@@ -1520,8 +1497,6 @@ class ChaptersTab:
             return None
         self.exit_selection()
         self.watch_job(job_id, self._on_retranslate_end)
-        if busy:
-            self.ctx.say(RETRANSLATE_QUEUED.format(count=vm.count), "Jobs", lambda: self.ctx.go("jobs"))
         return job_id
 
     def _jobs_busy(self) -> bool:
@@ -1603,8 +1578,6 @@ class ChaptersTab:
         message = str(result.get("retranslate_message") or "")
         if message:
             self.show_message(str(result.get("retranslate_title") or "Retranslate"), message)
-        self.ctx.say("Chapters reset to pending · Run translation to translate them", "Run translation",
-                     lambda: self.ctx.spawn(self.run_translation()))
         return message or None
 
     async def _on_resolve_qa_end(self, snap: Any) -> Optional[str]:
@@ -1635,8 +1608,6 @@ class ChaptersTab:
             return None
         self.exit_selection()
         self.watch_job(job_id, self._on_resolve_qa_end)
-        self.ctx.say(f"⚠️ Queued Partial.b QA resolution for {spec.params.get('label')} only", "Jobs",
-                     lambda: self.ctx.go("jobs"))
         return job_id
 
     async def _confirm(self, title: str, body: str, *, destructive: bool = False) -> bool:
@@ -1689,8 +1660,6 @@ class ChaptersTab:
         repairs = getattr(message, "repairs", None)
         if repairs and int(getattr(message, "repaired", 0) or 0) > 0:
             self.show_repair_comparison(str(message), repairs, int(message.repaired))
-        else:
-            self.ctx.say(message)
         self.exit_selection()
         await self.page.reload_progress(force=True)
         return message

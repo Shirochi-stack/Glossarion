@@ -428,7 +428,6 @@ class StorageScreen(PageScreen):
         for folder in self.folders:
             if folder.clearable:
                 removed += await self.io(clear_folder, folder.path)
-        self.say(f"Cleared caches ({removed} item{'s' if removed != 1 else ''})")
         await self.measure()
         return removed
 

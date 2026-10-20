@@ -1953,7 +1953,7 @@ def test_result_card_qa_scans_the_turn_workspace(desktop_store_cls, isolated_env
             assert adapter.meta("2")[cv.TOOL_JOBS_META][last[6]["created_at"]]["qa_job"] == "job1"
             assert "duplicate check off (sample size 0)" in stored["summary"]  # the mobile default
             assert chat.store.get(("qa_scanner_settings", "quick_scan_sample_size")) is None  # never written
-            assert calls.notes[-1][0] == "QA scan · book"
+            assert not [n for n in calls.notes if n[0] == "QA scan · book"]  # no "started · Jobs" snackbar
             # its own card: Job · Report · Chapters
             card = next(c for c in _cards(view, JobCard) if c.title_text.value == "QA scan · book")
             buttons = {b.key: b for b in card.buttons.controls}
@@ -2139,7 +2139,7 @@ def test_approval_card_always_accept_sets_pref_and_answers_yes(desktop_store_cls
             approval.always()
             assert jobs.answers == [("q1", True)] and not run.awaiting_glossary
             assert prefs.values == {AUTO_ACCEPT_GLOSSARY_PREF: True}
-            assert calls.notes[-1][0] == "Generated glossaries are accepted automatically from now on"
+            assert not [n for n in calls.notes if n[0].startswith("Generated glossaries are accepted")]  # silent (owner 2026-10-20)
             assert "chat_auto_accept_glossary" not in json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
             assert view.settings().auto_accept_glossary is True
             adapter.set_meta("5", "auto_accept_glossary", False)  # this chat asks (Chat settings › This chat)
@@ -2252,7 +2252,7 @@ def test_library_attachment_plan_defaults_to_library_destination(desktop_store_c
             target = ToolTarget(title="Novel", source=str(raw), origin="library", kind="epub", bid="b1")
             assert view.attach_library_book(target)
             assert adapter.meta("5")[LIBRARY_ATTACHMENT_META] == {"bid": "b1", "path": str(raw)}
-            assert calls.notes[-1][0] == "Attached Novel.epub from the Library"
+            assert not [n for n in calls.notes if "from the Library" in n[0]]  # silent: the chip shows it
             view.begin_send()
             plan = adapter.meta("5")["pending_plan"]
             assert plan["destination"] == "library" and plan["library_bid"] == "b1"

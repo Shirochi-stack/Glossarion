@@ -555,7 +555,7 @@ def test_library_book_is_copied_to_the_picked_folder_and_updated_in_place(iso, c
             await _chat_book(app, driver, epub_a.name)
             book_a = out_root / BOOK_A
             assert (book_a / "translation_progress.json").is_file(), sorted(p.name for p in out_root.iterdir())
-            assert "Added to the Library" in notes, notes
+            assert "Added to the Library" not in notes, notes  # silent (owner 2026-10-20)
             library = app.library
             await library.refresh(quiet=True, reason="test")  # what opening the Library does
             row_a = next((b for b in library.snapshot.all_books() if _same(b.get("output_folder"), book_a)), None)

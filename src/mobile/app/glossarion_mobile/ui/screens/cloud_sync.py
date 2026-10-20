@@ -1342,10 +1342,8 @@ class U10Actions:
             self.explain(reason)
             return {"ok": False, "message": reason}
         result = await self.cloud.call("send_now", identity)
-        dest = destination_text(state.get("destination"))
-        if result.get("ok"):
-            self.say(str(result.get("message") or f"Copying to {dest}…"))
-        else:
+        if not result.get("ok"):
+            dest = destination_text(state.get("destination"))
             self.say(str(result.get("message") or f"Could not copy to {dest}"))
         return result
 
@@ -1372,7 +1370,6 @@ class U10Actions:
         if not result.get("ok"):
             self.say(str(result.get("message") or "The destination was not changed"))
             return False
-        self.say(f"Destination: {destination_text(result.get('destination'))}")
         return True
 
     def override_sheet(self, identity: str, current: str = "default",
@@ -1646,13 +1643,9 @@ class U10Actions:
         if still_open:
             hide()
         if result.get("ok") and result.get("url"):
-            if still_open:
+            if still_open:  # a hidden progress sheet ends silently: the link is on the book (owner 2026-10-20)
                 self.link_sheet(result)
-            else:  # the user hid the progress sheet: a snackbar, not a sheet over whatever they do now
-                self.say(f"Link ready: {label}", "Copy", lambda: self.spawn(self.copy_link(result)))
-        elif result.get("code") == "cancelled":
-            self.say("Upload cancelled")
-        else:
+        elif result.get("code") != "cancelled":
             self.say(f"{label}: {result.get('message') or 'Upload failed'}")
         return result
 
@@ -1737,7 +1730,6 @@ class U10Actions:
                 self._push(error)
                 return result
             self._close(holder.get("dialog"))
-            self.say(f"{label} link saved on the book")
             return result
 
         steps: list = [
@@ -1854,10 +1846,6 @@ class U10Actions:
                 self.say(str(result.get("message") or ("Could not delete the upload" if can_delete else
                                                        "Could not remove the link")))
                 return
-            if can_delete and result.get("remote") == "gone":
-                self.say("The upload was already gone; the link is removed")
-            else:
-                self.say("Upload deleted" if can_delete else "Link removed")
             if on_changed is not None:
                 outcome = on_changed()
                 if inspect.isawaitable(outcome):
@@ -2325,13 +2313,10 @@ class CloudSyncScreen(PageScreen):
             message = str(result.get("message") or "")
             if not result.get("ok"):
                 self.say(message or "The destination was not changed")
-            else:
-                self.say(message or f"Destination: {destination_text(result.get('destination'))}")
         await self.refresh()
         return result
 
     async def test_destination(self) -> dict:
-        self.say("Testing the folder…")
         result = await self.facade.call("test_destination")
         self.say(str(result.get("message") or ("The folder accepts files" if result.get("ok") else
                                                "The folder refused the test file")))
@@ -2343,8 +2328,8 @@ class CloudSyncScreen(PageScreen):
 
         async def run() -> None:
             result = await self.facade.call("forget_destination")
-            self.say("Destination forgotten" if result.get("ok") else str(result.get("message") or
-                                                                         "Could not forget the destination"))
+            if not result.get("ok"):
+                self.say(str(result.get("message") or "Could not forget the destination"))
             await self.refresh()
 
         return self.show(ConfirmDialog(
@@ -2367,8 +2352,6 @@ class CloudSyncScreen(PageScreen):
         result = await self.facade.call("set_enabled", bool(value))
         if not result.get("ok"):
             self.say(str(result.get("message") or "Could not change the setting"))
-        elif value:
-            self.say("Finished books are copied automatically from now on")
         await self.refresh()
         return result
 
@@ -2386,7 +2369,8 @@ class CloudSyncScreen(PageScreen):
 
     async def retry_now(self) -> dict:
         result = await self.facade.retry_now(spawn=self.spawn)
-        self.say(str(result.get("message") or ("Retrying" if result.get("ok") else "Nothing could be retried")))
+        if not result.get("ok"):
+            self.say(str(result.get("message") or "Nothing could be retried"))
         await self.refresh()
         return result
 
@@ -2429,12 +2413,12 @@ class CloudSyncScreen(PageScreen):
         if field is not None:
             field.value = ""  # never left on screen
             self.push(field)
-        self.say("Key saved (encrypted)" if result.get("ok") else str(result.get("message") or "Could not save the key"))
+        if not result.get("ok"):
+            self.say(str(result.get("message") or "Could not save the key"))
         await self.refresh()
         return bool(result.get("ok"))
 
     async def check_key(self, pid: str) -> bool:
-        self.say("Checking the key…")
         result = await self.share_facade.check_key(pid)
         works = bool(result.get("ok")) and result.get("value", True) is not False
         self.say("The key works" if works else str(result.get("message") or "The service did not accept the key"))
@@ -2442,14 +2426,15 @@ class CloudSyncScreen(PageScreen):
 
     async def remove_key(self, pid: str) -> bool:
         result = await self.share_facade.clear_key(pid)
-        self.say("Key removed" if result.get("ok") else str(result.get("message") or "Could not remove the key"))
+        if not result.get("ok"):
+            self.say(str(result.get("message") or "Could not remove the key"))
         await self.refresh()
         return bool(result.get("ok"))
 
     async def forget_gofile(self) -> bool:
         result = await self.share_facade.call("forget_gofile_account")
-        self.say("Gofile guest account forgotten: the next upload starts a new one" if result.get("ok") else
-                 str(result.get("message") or "Could not forget the account"))
+        if not result.get("ok"):
+            self.say(str(result.get("message") or "Could not forget the account"))
         return bool(result.get("ok"))
 
     async def set_send_options(self, *, expire: Optional[int] = None, downloads: Optional[int] = None) -> dict:

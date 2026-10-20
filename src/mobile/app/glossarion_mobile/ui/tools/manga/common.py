@@ -131,11 +131,7 @@ def export_sheet(ctx: Any, path: str, *, title: Optional[str] = None) -> Optiona
             if answer == "yes":
                 result = await files.save_as(path, confirmed=True)
                 location = getattr(result, "location", None)
-        if location:
-            ctx.say(f"Saved {os.path.basename(path)}")
-        elif option_id == "downloads" and isinstance(result, str):
-            ctx.say(f"Saved to Downloads/Glossarion: {os.path.basename(path)}")
-        elif getattr(result, "error", None):
+        if not location and getattr(result, "error", None):
             ctx.say(f"Saving failed: {result.error}")
         return result
 

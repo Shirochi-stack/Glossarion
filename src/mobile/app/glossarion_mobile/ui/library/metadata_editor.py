@@ -204,7 +204,6 @@ class MetadataEditorScreen(Screen):
         self.saved = result
         self.save_button.disabled = True
         self.ctx.push(self.save_button)
-        self.ctx.say("Saved metadata.json")
         await self.service.refresh(reason="metadata")
         return result
 

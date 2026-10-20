@@ -1269,8 +1269,6 @@ class AccountsScreen(Screen):
         self._render_slots(provider)
         if self.on_signed_in_changed is not None:
             self.on_signed_in_changed(False)
-        suffix = f" #{account_id}" if account_id else ""
-        self._say(f"🔓 {PROVIDER_INFO[provider].label}{suffix}: Logged out")
         return True
 
     def _signed_in(self, provider: str, status: dict) -> None:

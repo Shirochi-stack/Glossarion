@@ -1492,7 +1492,6 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
 
     def bulk_enable(self, value: bool) -> int:
         changed = self.controller.set_keys_enabled(self.pool, sorted(self.selected), value)
-        self.say(f"{'Enabled' if value else 'Disabled'} {changed} key(s)")
         self.render()
         _push(self.list_view)
         return changed
@@ -1558,16 +1557,12 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         changed, errors = self.controller.set_key_fields(self.pool, indices, values)
         if errors and not changed:
             return "; ".join(errors[:3])
-        note = f" ({len(errors)} skipped: {errors[0]})" if errors else ""
-        self.say(f"Updated {changed} key(s){note}")
         self.render()
         _push(self.list_view)
         return None
 
     def copy_selected(self, target: str, *, move: bool) -> int:
         count = self.controller.copy_to(self.pool, sorted(self.selected), target, move=move)
-        verb = "Moved" if move else "Copied"
-        self.say(f"{verb} {count} key(s) to {self.controller.spec(target).title}")
         if move:
             self.selected.clear()
         self.render()
@@ -1618,12 +1613,6 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         changed, errors = self.controller.set_key_fields(self.pool, indices, values)
         if errors and not changed:
             return "; ".join(errors[:3])
-        label = "Disable schedule" if kind == "disable" else "Request Queue"
-        if not config:
-            self.say(f"Schedule removed for {len(indices)} key(s)")
-        else:
-            off = config.get("enabled", True) is False
-            self.say(f"{label} saved{' (off until enabled)' if off else ''} for {len(indices)} key(s)")
         self.render()
         _push(self.list_view)
         return None
@@ -1641,7 +1630,6 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
 
     def _apply_contexts(self, indices: list, changes: Mapping[str, bool]) -> int:
         changed = self.controller.set_disabled_contexts(self.pool, indices, changes)
-        self.say(f"Updated request contexts on {changed} key(s)")
         self.render()
         _push(self.list_view)
         return changed
@@ -1683,17 +1671,12 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
                 _push(self.list_view)
             return error
 
-        def saved(value: dict) -> None:
-            # After the editor has closed: a snackbar shown inside save() would be the dialog the
-            # close pops, leaving the sheet open with no feedback (owner report).
-            self.say(self.controller.saved_message(pool, value, added=new))
-
         async def test(value: dict) -> dict:
             return await self.io(lambda: self.controller.test_entry(value, self.pool))
 
         self.editor = KeyEditor(
             self.ctx, entry=entry, pool_id=spec.id, pool_title=spec.title, contexts=spec.contexts,
-            context_labels=context_labels(), on_save=save, on_saved=saved, on_test=test, sheet_env=self.sheet_env,
+            context_labels=context_labels(), on_save=save, on_test=test, sheet_env=self.sheet_env,
             azure_versions=azure_versions, read_clipboard=self.read_clipboard, copy_text=self.copy_text, new=new,
             test_reason=None if self.controller.backend.available else SERVICE_MISSING,
         ).show()
@@ -1755,9 +1738,9 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         untestable = sum(1 for _i, r in results if r.get("status") == "untestable")
         busy = sum(1 for _i, r in results if r.get("status") == "busy")
         note = f" · {untestable} not testable" if untestable else ""
-        if busy:
+        if busy:  # the per-key results show on the rows; a snackbar only for keys that were not tested
             note += f" · {busy} skipped (a running job is using the key pools)"
-        self.say(f"Test complete: {passed}/{len(results)} passed{note}")
+            self.say(f"Test complete: {passed}/{len(results)} passed{note}")
         self.render()
         _push(self.list_view)
         return results
@@ -1841,7 +1824,6 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
 
         if self.files is None:
             await self.io(write)
-            self.say(f"Exported {total} API key(s) to {os.path.basename(path)}")
             return path
         options = self.files.export_options(path)
 
@@ -1850,10 +1832,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             # sheet leaves nothing behind.
             try:
                 await self.io(write)
-                result = await self.files.export(option_id, path)
-                ok = bool(getattr(result, "ok", result))
-                if ok:
-                    self.say(f"Exported {total} API key(s)")
+                await self.files.export(option_id, path)
             finally:
                 await self.io(lambda: os.path.exists(path) and os.remove(path))
 
@@ -1908,8 +1887,7 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
             body = "This will REPLACE the contents of these pools:"
 
         def apply() -> None:
-            count = self.controller.apply_import(plan)
-            self.say(self.controller.import_result_message(plan, count).replace("\n", " · "))
+            self.controller.apply_import(plan)
             self.render()
             _push(self.list_view)
 

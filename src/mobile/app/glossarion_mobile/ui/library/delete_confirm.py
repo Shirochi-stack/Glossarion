@@ -326,8 +326,8 @@ class DeleteFlow:
         return self.report
 
     async def _finish(self, *, say: bool) -> None:
-        if say and self.report is not None:
-            self.ctx.say(self.report.summary)
+        if say and self.report is not None and (self.report.errors or self.report.links_note):
+            self.ctx.say(self.report.summary)  # only when something was not deleted (or links remain)
         if self.on_done is not None:
             result = self.on_done(self.report)
             if hasattr(result, "__await__"):

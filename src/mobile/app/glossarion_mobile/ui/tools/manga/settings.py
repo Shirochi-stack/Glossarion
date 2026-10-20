@@ -768,7 +768,6 @@ class SettingsTab(MangaTab):
         self.set("manga_custom_glossary_path", path)
         self.set("manga_glossary_auto_load_suppressed", False)
         self.refresh()
-        self.ctx.say(f"Loaded glossary {os.path.basename(path)}")
         return path
 
     def clear_glossary(self) -> None:
@@ -895,7 +894,6 @@ class SettingsTab(MangaTab):
         path = await self.ctx.io(self._keep_private_copy, chosen.path, "models", inbox_copy)
         self.set(f"manga_{model_type}_model_path", path)
         self.refresh()
-        self.ctx.say(f"Using {os.path.basename(path)} for {model_type}")
         return path
 
     def clear_model_file(self, model_type: str) -> None:
@@ -925,7 +923,6 @@ class SettingsTab(MangaTab):
         for key, value in updates.items():
             self.set(key, value)
         self.refresh()
-        self.ctx.say(f"Applied the {dict(svc.mask_preset_rows()).get(preset, preset)} mask preset")
         return True
 
     def _local_model_status(self, method: str) -> Any:
@@ -1313,7 +1310,6 @@ class SettingsTab(MangaTab):
         for key, value in updates.items():
             self.set(key, value)
         self.refresh()
-        self.ctx.say(f"Applied the {dict(PRESETS).get(preset, preset)} preset")
         return True
 
     async def apply_preset_async(self, preset: str) -> bool:

@@ -958,7 +958,7 @@ def test_settings_destination_switch_formats_queue_and_forget():
         result = await screen.choose("folder")
         assert result["ok"] and cloud.calls[-1] == ("pick_folder",)
         assert screen.destination_text.value == "Drive › Glossarion" and not screen.auto_switch.disabled
-        assert "Drive › Glossarion" in " ".join(ctx.said)
+        assert "Drive › Glossarion" not in " ".join(ctx.said)  # the destination line shows it (no snackbar)
         assert find_key(screen.dest_actions, "cloud-test") is not None
         # changing an existing destination asks first
         dialog = await screen.choose("phone")
@@ -981,7 +981,7 @@ def test_settings_destination_switch_formats_queue_and_forget():
         assert not screen.retry_button.disabled
         await screen.retry_now()
         await settle()
-        assert ("retry_now",) in cloud.calls and ctx.said[-1] == "Retrying 1 book"
+        assert ("retry_now",) in cloud.calls and "Retrying 1 book" not in ctx.said  # silent (owner 2026-10-20)
         # lost access: the banner and Choose again (no confirmation for the same destination)
         cloud.dest = Dest("folder-abc", "folder", label="Drive › Glossarion", needs_relink="revoked")
         await screen.refresh()
@@ -1173,7 +1173,7 @@ def test_output_tab_cloud_lines_send_now_and_override(tmp_path):
         assert find_key(tab.cloud_column, "out-cloud-send") is not None
         assert chips(tab.cloud_column) == [u10.SHARE_OFF_REASON]  # sharing services are all off
         assert (await tab.send_now())["ok"]
-        assert ("send_now", identity) in cloud.calls and env.said[-1] == "Saving to Drive › Glossarion…"
+        assert ("send_now", identity) in cloud.calls and "Saving to Drive › Glossarion…" not in env.said
         line = find_key(rows[2], "out-cloud-line-2")
         line.on_click(None)
         await settle()
@@ -1295,7 +1295,7 @@ def test_transfer_it_handoff_keeps_the_pasted_link(tmp_path):
         assert not (await parts["save"]())["ok"] and parts["error"].visible
         parts["field"].value = "https://transfer.it/t/abcdef12"
         assert (await parts["save"]())["ok"]
-        assert env.said[-1] == "transfer.it link saved on the book"
+        assert "transfer.it link saved on the book" not in env.said  # silent (owner 2026-10-20)
         await tab.refresh_cloud()
         assert any(t == "Remove" for t in texts(tab.cloud_column))  # transfer.it links cannot be deleted from the app
         await parts["open"]()
@@ -1383,7 +1383,7 @@ def test_chat_feature_binds_result_cards_to_the_turn_workspace(tmp_path):
         assert feature.bind_u10_card(card, resolve) is None  # bound a moment ago: not again
         card.action_buttons["cloud"].on_click(None)
         assert await until(lambda: ("send_now", str(workspace)) in cloud.calls)
-        assert await until(lambda: said and said[-1] == "Saving to Drive › Glossarion…")
+        assert "Saving to Drive › Glossarion…" not in said  # silent (owner 2026-10-20)
         card.action_buttons["share_link"].on_click(None)
         assert await until(lambda: bool(page.dialogs))
         assert page.dialogs and getattr(feature.u10_actions().last_sheet, "title", "") == u10.SHARE_LABEL

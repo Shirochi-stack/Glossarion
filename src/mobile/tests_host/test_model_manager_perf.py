@@ -631,7 +631,7 @@ def test_row_actions_move_a_model_anywhere_in_the_list(tmp_path):
             order = [target] + order[:503] + order[504:]
             assert list(service.snapshot.models) == order and store.get("custom_model_list")[:2] == order[:2]
             assert screen.rows.window_start == 500 and _keys(screen)[:4] == ["mm-" + m for m in order[500:504]]
-            assert len(screen.list_view.controls) == 100 and env.notes[-1][0] == f"Moved {target} to the top"
+            assert len(screen.list_view.controls) == 100 and not [n for n in env.notes if n[0].startswith("Moved ")]
             # one row joins the window (the one pushed down from row 500), the moved one leaves it
             assert stats["rows"] == 1 and stats["bytes"] < SMALL_PATCH_BYTES, stats
             # Move up across the window boundary: row 501 becomes row 500 of the first window
@@ -639,7 +639,7 @@ def test_row_actions_move_a_model_anywhere_in_the_list(tmp_path):
             stats = await act(0, "Move up")
             order[499], order[500] = order[500], order[499]
             assert list(service.snapshot.models) == order and _keys(screen)[0] == "mm-" + order[500]
-            assert env.notes[-1][0] == f"Moved {first} to row 500"
+            assert not [n for n in env.notes if n[0].startswith("Moved ")]  # silent (owner 2026-10-20)
             assert stats["rows"] == 1 and stats["bytes"] < SMALL_PATCH_BYTES, stats
             # Move down inside the mounted rows (no message), Move to bottom (the last row of the list)
             notes = len(env.notes)
@@ -651,7 +651,7 @@ def test_row_actions_move_a_model_anywhere_in_the_list(tmp_path):
             await act(2, "Move to bottom")
             order = order[:502] + order[503:] + [second]
             assert list(service.snapshot.models) == order and store.get("custom_model_list")[-1] == second
-            assert env.notes[-1][0] == f"Moved {second} to row 3,776"
+            assert not [n for n in env.notes if n[0].startswith("Moved ")]  # silent (owner 2026-10-20)
             # at the top of the list: up / top are listed but unavailable, with the reason
             screen.rows.set_window(0)
             await session.dispatch_event(screen.list_view.controls[0].content._i, "long_press", None)

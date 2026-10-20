@@ -355,7 +355,7 @@ def test_intent_router_imports_shared_files_and_offers_actions(tmp_path):
         assert translated == [book]
         added = await router.perform(ACTION_ADD_TO_LIBRARY, book)
         assert added.path == str(tmp_path / "Library" / "Raw" / "Book.epub") and recorded == [added.path]
-        assert notes == ["Added to Library: Book.epub"]
+        assert notes == []  # silent (owner 2026-10-20)
         await router.perform(ACTION_OPEN_IN_READER, book)
         assert notes[-1] == "Not available yet"
 

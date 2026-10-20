@@ -326,8 +326,6 @@ class AttachmentsScreen(Screen):
             target = migrated_target(result) or self.chats.migration_target(self.cid, folder) or ""
             if self.on_migrated is not None:
                 self.on_migrated(target, source)
-            else:
-                self.notify("Added to the Library")
         elif notices:
             last = notices[-1]
             self.notify(f"{last.get('title')}: {last.get('text')}")
@@ -366,7 +364,8 @@ class AttachmentsScreen(Screen):
                 self.notify(BUSY_REASON)
                 return
             ok, error = await self.run_io(self.chats.delete_attachment_workspace, self.cid, folder)
-            self.notify("Attachment workspace deleted" if ok else error)
+            if not ok:
+                self.notify(error)
             await self.reload()
 
         dialog = ConfirmDialog(

@@ -366,9 +366,7 @@ class SeriesFeature:
         return self.show(self.sheet)
 
     def _move(self, cid: Any, sid: Optional[str]) -> None:
-        if move_chat(self.chats, cid, sid, self.store):
-            item = self.store.get(sid) if sid else None
-            self.say(f"Moved to {item.name}" if item is not None else "Removed from the series")
+        move_chat(self.chats, cid, sid, self.store)
         self._refresh_drawer()
         self._refresh_chat()
 
@@ -437,8 +435,6 @@ class SeriesFeature:
                                             cover_bid=values["cover_bid"])
                 if on_created is not None:
                     on_created(created)
-                else:
-                    self.say(f"Created {created.name}")
             else:
                 self.store.update(item.id, name=values["name"], color=values["color"], cover_bid=values["cover_bid"])
 
@@ -463,7 +459,6 @@ class SeriesFeature:
         for chat in member_chats(chats, sid, self.store):
             move_chat(chats, chat.cid, None)
         self.store.delete(sid)
-        self.say(f"Deleted {item.name}")
         shell = getattr(self.app, "shell", None)
         top = getattr(shell, "top_screen", None) if shell is not None else None
         if getattr(top, "sid", None) == sid:  # leave the deleted series' page
@@ -566,7 +561,6 @@ class SeriesFeature:
                 path = str(rows[0].path)
                 self.store.set_default(sid, "glossary_override_mode", "manual")
                 self.store.set_default(sid, "manual_glossary_path", path)
-                self.say(f"{item.name} uses {os.path.basename(path)} (Force Manual Glossary)")
                 return path
         self.say("No linked book has a glossary file yet — extract one first")
         return None
@@ -681,9 +675,7 @@ class SeriesFeature:
         return added
 
     def _linked_message(self, item: Any, added: int, already: int = 0) -> None:
-        if added:
-            self.say(f"Added {added} book{'s' if added != 1 else ''} to {item.name}")
-        elif already:
+        if not added and already:
             self.say(f"Already in {item.name}")
 
     def book_ids(self, sid: Optional[str]) -> Optional[frozenset]:

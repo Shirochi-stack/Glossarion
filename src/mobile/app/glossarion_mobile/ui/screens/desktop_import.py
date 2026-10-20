@@ -315,7 +315,6 @@ class DesktopImportScreen(PageScreen):
             message += f"; re-enter: {', '.join(preview.undecryptable)}"
         self.result_text.value = message
         self.push(self.result_text)
-        self.say(message)
         return changed
 
     async def _on_pick_config(self, e: Any = None) -> None:
@@ -341,7 +340,6 @@ class DesktopImportScreen(PageScreen):
         except Exception as exc:
             self.say(str(exc) if str(exc).startswith("Failed") else f"Failed to import profiles: {exc}")
             return 0
-        self.say(f"Imported {count} profiles.")
         return count
 
     async def _on_profiles(self, e: Any = None) -> None:
@@ -355,7 +353,6 @@ class DesktopImportScreen(PageScreen):
         except Exception as exc:
             self.say(f"Glossary import failed: {exc}")
             return []
-        self.say(f"Imported {len(copied)} glossary file{'s' if len(copied) != 1 else ''}")
         return copied
 
     async def _on_glossaries(self, e: Any = None) -> None:

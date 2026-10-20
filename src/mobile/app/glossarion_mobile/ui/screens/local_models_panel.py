@@ -452,8 +452,6 @@ class OnDeviceFlow:
                 self.use_model(model)
             except Exception as exc:
                 raise _Failed(f"Could not switch the model: {exc}") from exc
-        suffix = "" if available else " (the engine is not available in this build)"
-        self.say(f"Model: {model}{f' ({label})' if label else ''}{suffix}")
         self.render()
         return True
 
@@ -476,7 +474,6 @@ class OnDeviceFlow:
             if not self.service.is_vision(stem):
                 self.say(f"{preset['repo']} has no vision projector: this model reads text only")
                 return False
-            self.say(f"local/{stem} reads images now")
             return True
         except _Failed as exc:
             self.say(str(exc))
@@ -753,8 +750,6 @@ class LocalModelsPanel(OnDeviceFlow):
 
     def save_block_cjk(self) -> bool:
         value = self.service.save_block_cjk(self.block_cjk_switch.value)
-        self.say("CJK characters are blocked in on-device translations." if value
-                 else "On-device translations may contain CJK characters again.")
         return value
 
     def save_sampling(self) -> Optional[str]:
@@ -766,7 +761,6 @@ class LocalModelsPanel(OnDeviceFlow):
             for key, field in self.sampling_fields.items():
                 field.value = f"{values[key]:g}"
             _push(*self.sampling_fields.values())
-            self.say("Saved. On-device requests use these from now on.")
         return error
 
     def reset_sampling(self) -> Optional[str]:
@@ -779,8 +773,6 @@ class LocalModelsPanel(OnDeviceFlow):
         self.settings_error.value = error or ""
         self.settings_error.visible = bool(error)
         _push(self.settings_error)
-        if not error:
-            self.say("Saved. The next model load uses these settings.")
         return error
 
     async def unload(self) -> bool:
@@ -845,9 +837,7 @@ class LocalModelsPanel(OnDeviceFlow):
     def delete_file(self, stem: str) -> bool:
         busy = self.service.busy_with(stem)
         removed = self.service.delete(stem)
-        if removed:
-            self.say(f"Deleted local/{stem}")
-        elif busy:
+        if not removed and busy:
             self.say("The model is busy; delete it when the current answer is done")
         self.render()
         return removed

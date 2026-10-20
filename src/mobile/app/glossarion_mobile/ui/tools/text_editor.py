@@ -381,7 +381,6 @@ class TextEditorScreen(Screen):
             return False
         self.saved_text = text
         self._sync_save()
-        self._say(f"Saved {os.path.basename(self.path)}")
         return True
 
     def _on_save(self, e: Any = None) -> None:

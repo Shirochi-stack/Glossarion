@@ -196,8 +196,6 @@ class ModelDownloadRow:
         self.update(entry)
         if entry.status == "error":
             self.ctx.say(f"Download failed: {entry.error}")
-        elif entry.status in ("ready", "loaded"):
-            self.ctx.say(f"Downloaded {entry.label}")
         return entry
 
     def cancel(self) -> bool:

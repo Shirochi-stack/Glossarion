@@ -563,13 +563,8 @@ class GlossaryTab:
             return None
         self.last_result = result
         changed = bool(first_value(result, "changed", default=True))
-        if action == "mark_completed":
-            message = (f"✅ Marked {len(rows)} row{'s' if len(rows) != 1 else ''} as completed" if changed
-                       else "Nothing to mark as completed")
-        else:
-            message = (f"🗑️ Removed {len(rows)} row{'s' if len(rows) != 1 else ''} from progress"
-                       if changed else "Nothing was removed")
-        self.ctx.say(message)
+        if not changed:
+            self.ctx.say("Nothing to mark as completed" if action == "mark_completed" else "Nothing was removed")
         self.exit_selection()
         await self.page.reload_glossary()
         return result
@@ -608,7 +603,6 @@ class GlossaryTab:
             return None
         path = result[0] if isinstance(result, (tuple, list)) and result else first_value(result, "path")
         if path and os.path.isfile(str(path)) and self.ctx.files is not None:
-            self.ctx.say(f"📄 Wrote {os.path.basename(str(path))}")
             await self.ctx.files.share([str(path)])
             return str(path)
         self.ctx.say("The summary was not written")
@@ -618,7 +612,6 @@ class GlossaryTab:
         service = self.page.service
         value = not bool(service.cfg("glossary_progress_skip_unmatched_entries", True))
         service.set_cfg("glossary_progress_skip_unmatched_entries", value)
-        self.ctx.say(("✅" if value else "❌") + " Skip unmatched entries")
         self._sync_selection()
         return value
 

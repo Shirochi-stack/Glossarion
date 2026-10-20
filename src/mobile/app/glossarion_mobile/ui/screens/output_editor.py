@@ -137,8 +137,6 @@ class OutputEditorScreen(Screen):
         self.dirty = False
         if self.on_saved is not None:
             self.on_saved()
-        if self.notify is not None:
-            self.notify("Output saved")
         self.close()
         return True
 

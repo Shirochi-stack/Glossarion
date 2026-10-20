@@ -207,8 +207,6 @@ class ModelManagerScreen(Screen):
                 self.say(error if isinstance(error, str) else error[1])
             return False
         self.snapshot = self.catalog.snapshot
-        if success:
-            self.say(success)
         self._user_change = True
         self._request_render()
         return True
@@ -1091,7 +1089,6 @@ class ModelManagerScreen(Screen):
         except Exception as exc:
             self._toast(f"Could not switch the model: {exc}")
             return
-        self._toast(f"Model: {model}")
 
     def _toast(self, text: str) -> None:
         if self.notify is not None:

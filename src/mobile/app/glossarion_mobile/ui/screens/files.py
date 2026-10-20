@@ -497,7 +497,6 @@ class FileBrowserScreen(Screen):
         except (OSError, ValueError) as exc:
             self._say(str(exc))
             return None
-        self._say(f"Renamed to {os.path.basename(target)}")
         await self.reload()
         return target
 
@@ -519,7 +518,6 @@ class FileBrowserScreen(Screen):
         except (OSError, ValueError) as exc:
             self._say(f"Could not delete: {exc}")
             return False
-        self._say(f"Deleted {entry.name}")
         await self.reload()
         return True
 

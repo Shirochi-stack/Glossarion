@@ -1307,7 +1307,7 @@ def test_chapters_tab_resolve_qa_runs_a_partial_b_job_unless_busy(tmp_path, u7_k
         job_id = await tab.run_action("resolve_qa", [row])
         spec = service.submitted[-1]
         assert job_id == "job1" and spec.kind == "resolve_qa" and spec.params["request"] == request
-        assert ctx.notes[-1] == "⚠️ Queued Partial.b QA resolution for response_ch002.html only"
+        assert not [n for n in ctx.notes if str(n).startswith("⚠️ Queued Partial.b")]  # silent (owner 2026-10-20)
         assert job_id in tab.job_watch
 
     asyncio.run(scenario())
@@ -1654,7 +1654,7 @@ def test_text_editor_screen_finds_edits_saves_and_guards_the_roots(tmp_path):
         assert screen.dirty and not screen.save_action.disabled
         assert await screen.save() is True
         assert path.read_text(encoding="utf-8") == "<p>원문 one</p>\n<p>원문 2</p>\n" and not screen.dirty
-        assert notes[-1] == "Saved ch.html"
+        assert "Saved ch.html" not in notes  # silent (owner 2026-10-20)
         screen.read_only_switch.value = True
         screen._on_read_only()
         assert screen.editor.read_only and await screen.save() is False
@@ -1795,11 +1795,11 @@ def test_file_browser_open_with_rename_and_delete(tmp_path):
         open_sheet.items[1].on_select()  # Reader: a .txt book opens in the Reader
         assert opened == [{"path": str(note)}]
         new = await screen.rename(entry, "renamed.txt")
-        assert new == str(root / "Book" / "renamed.txt") and notes[-1] == "Renamed to renamed.txt"
+        assert new == str(root / "Book" / "renamed.txt") and "Renamed to renamed.txt" not in notes
         assert await screen.rename(FileEntry("renamed.txt", new, False, 1, 0.0), "") is None
         assert notes[-1] == "Enter a file name"
         assert await screen.delete(FileEntry("renamed.txt", new, False, 1, 0.0)) is True
-        assert not Path(new).exists() and notes[-1] == "Deleted renamed.txt"
+        assert not Path(new).exists() and "Deleted renamed.txt" not in notes  # silent (owner 2026-10-20)
 
     asyncio.run(scenario())
 

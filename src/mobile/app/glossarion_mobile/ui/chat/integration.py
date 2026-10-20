@@ -59,7 +59,7 @@ from glossarion_mobile.ui.chat.job_binding import TERMINAL_STATES, JobsAdapter, 
 from glossarion_mobile.ui.chat.run_controller import RESUMABLE_ENDINGS, ChatRuns
 from glossarion_mobile.ui.router import RouteMatch
 
-__all__ = ["ADDED_TO_LIBRARY", "COLLISION_TEXT", "ChatFeature", "FLUSH_LIFECYCLE_STATES", "MIGRATE_COLLISION",
+__all__ = ["COLLISION_TEXT", "ChatFeature", "FLUSH_LIFECYCLE_STATES", "MIGRATE_COLLISION",
            "MIGRATE_DEFERRED", "MIGRATE_FAILED", "MIGRATE_MOVED", "MIGRATE_SKIPPED", "SCREEN_ROUTES"]
 
 log = logging.getLogger("glossarion.chat")
@@ -73,7 +73,6 @@ WELCOME_PREF = "welcome_completed"
 #: because a different Library book has its name (the merge dialog); the shared Migrate refused.
 MIGRATE_MOVED, MIGRATE_SKIPPED, MIGRATE_DEFERRED, MIGRATE_COLLISION, MIGRATE_FAILED = (
     "moved", "skipped", "deferred", "collision", "failed")
-ADDED_TO_LIBRARY = "Added to the Library"
 COLLISION_TEXT = "A Library book named {name} already exists"
 #: How long the startup sweep waits for the Library feature (installed after the chat).
 STARTUP_LIBRARY_WAIT = 30.0
@@ -978,8 +977,7 @@ class ChatFeature:
         except Exception as exc:
             notify(f"Could not start: {exc}")
             return None
-        navigate = getattr(app, "navigate_to", None)
-        notify(f"Translating · {book['name']}", "Jobs", (lambda: navigate("jobs")) if navigate else None)
+        # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
         return job_id
 
     async def open_progress(self, folder: str, source: str = "", select: Optional[tuple] = None) -> Optional[str]:
@@ -1130,12 +1128,8 @@ class ChatFeature:
             while True:
                 self._sweep_again = False
                 batch = await self._run_io(self.sweep_blocking)
-                moved = [o for o in batch if o.get("status") == MIGRATE_MOVED]
                 for outcome in batch:
-                    # several books at once (the first launch after an update): one summary snackbar
-                    self._announce(outcome, quiet=len(moved) > 1)
-                if len(moved) > 1:
-                    self._announce_many(len(moved))
+                    self._announce(outcome)
                 outcomes.extend(batch)
                 if not self._sweep_again:
                     break
@@ -1420,10 +1414,10 @@ class ChatFeature:
         self._announce(outcome)
         return outcome
 
-    def _announce(self, outcome: dict, *, quiet: bool = False) -> None:
-        """UI loop: a moved book's snackbar ("Added to the Library" · Open book; ``quiet``: the chat and
-        the Library are refreshed but the caller shows one summary), a name clash's (its action opens
-        the merge dialog; once per workspace and session)."""
+    def _announce(self, outcome: dict) -> None:
+        """UI loop: a moved book refreshes the chat and the Library silently (owner 2026-10-20: no "Added to
+        the Library · Open book" snackbar); a name clash's snackbar (its action opens the merge dialog; once
+        per workspace and session)."""
         status = outcome.get("status")
         cloud = getattr(self.app, "cloud_sync", None)
         if cloud is not None and status in (MIGRATE_DEFERRED, MIGRATE_COLLISION):
@@ -1432,8 +1426,7 @@ class ChatFeature:
             except Exception:
                 log.debug("cloud sync migrate outcome failed", exc_info=True)
         if status == MIGRATE_MOVED:
-            self._announce_moved(outcome.get("target", ""), outcome.get("source", ""), outcome.get("cid"),
-                                 quiet=quiet)
+            self._announce_moved(outcome.get("target", ""), outcome.get("source", ""), outcome.get("cid"))
         elif status == MIGRATE_COLLISION:
             key = _norm(outcome.get("folder", ""))
             if key in self._collisions_shown:
@@ -1445,41 +1438,16 @@ class ChatFeature:
                 cid, folder = outcome.get("cid"), outcome.get("folder")
                 notify(COLLISION_TEXT.format(name=name), "Merge…", lambda: self.open_merge_dialog(cid, folder))
 
-    def _workspace_bid(self, target: str, source: str = "") -> Optional[str]:
-        library = self.library_service()
-        if library is None or not target or not hasattr(library, "bid_for"):
-            return None
-        name = os.path.basename(os.path.normpath(target))
-        return library.bid_for({"name": name, "folder_name": name, "path": target, "output_folder": target,
-                                "type": "in_progress", "is_in_progress": True, "in_library": True,
-                                **({"raw_source_path": str(source)} if source else {})})
-
-    def _announce_many(self, count: int) -> None:
-        notify = getattr(self.app, "notify", None)
-        navigate = getattr(self.app, "navigate_to", None)
-        if notify is None:
-            return
-        text = f"Added {count} books to the Library"
-        if navigate is not None:
-            notify(text, "Library", lambda: navigate("library"))
-        else:
-            notify(text)
-
-    def _announce_moved(self, target: str, source: str = "", cid: Any = None, *, quiet: bool = False) -> None:
+    def _announce_moved(self, target: str, source: str = "", cid: Any = None) -> None:
+        """A book moved into the Library: the Library rescans and the chat shows the new paths (silently:
+        the Result card opens the book)."""
         app = self.app
         library = self.library_service()
-        notify = getattr(app, "notify", None)
-        navigate = getattr(app, "navigate_to", None)
         if library is not None:
             try:
                 library.mark_dirty()
             except Exception:
                 pass
-        try:
-            bid = self._workspace_bid(target, source)
-        except Exception:
-            log.debug("the Library id of %s failed", target, exc_info=True)
-            bid = None
         chat_view = getattr(app, "chat_view", None)
         if chat_view is not None:
             hook = getattr(chat_view, "on_workspace_migrated", None) if cid is not None else None
@@ -1492,11 +1460,6 @@ class ChatFeature:
                     chat_view.header.set_attachments(chat_view._attachment_count(chat_view.cid))
             except Exception:
                 log.debug("refreshing the chat after a move failed", exc_info=True)
-        if notify is not None and not quiet:
-            if bid and navigate is not None:
-                notify(ADDED_TO_LIBRARY, "Open book", lambda: navigate("library.book", {"bid": bid}))
-            else:
-                notify(ADDED_TO_LIBRARY)
 
     def open_merge_dialog(self, cid: Any, folder: str) -> Any:
         """The name-clash snackbar's action: the desktop "Attachment folder already exists" dialog."""

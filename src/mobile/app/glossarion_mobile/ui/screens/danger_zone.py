@@ -175,7 +175,6 @@ class DangerZoneScreen(PageScreen):
             return None
         if self.on_reset is not None:
             self.on_reset()
-        self.say("Settings reset to defaults (a backup was made first)")
         return kept
 
     # ---- sign out ------------------------------------------------------------------------
@@ -197,8 +196,8 @@ class DangerZoneScreen(PageScreen):
         except Exception as exc:
             self.say(f"Sign-out failed: {exc}")
             return []
-        self.say(f"Signed out of {len(cleared)} account{'s' if len(cleared) != 1 else ''}" if cleared
-                 else "No account was signed in")
+        if not cleared:
+            self.say("No account was signed in")
         return cleared
 
     # ---- wipe ------------------------------------------------------------------------------

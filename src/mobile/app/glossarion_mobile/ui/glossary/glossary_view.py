@@ -216,8 +216,8 @@ class GlossaryScreen(Screen):
             self.ctx.say("Open a settings tab (General, Balanced/Full, Minimal, Refinement) first")
             return []
         changed = page.discard_changes()
-        self.ctx.say(f"Discarded {len(changed)} change{'s' if len(changed) != 1 else ''}" if changed
-                     else "Nothing changed since this tab opened")
+        if not changed:
+            self.ctx.say("Nothing changed since this tab opened")
         return changed
 
     # ---- body ---------------------------------------------------------------------------------------------

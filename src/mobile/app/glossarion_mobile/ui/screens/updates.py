@@ -227,7 +227,6 @@ class UpdatesScreen(PageScreen):
     async def skip(self) -> Optional[str]:
         tag = await self.io(self.service.skip)
         if tag:
-            self.say(f"{tag} will be skipped by the startup check. Check now still shows it.")
             if self.result is not None:
                 self.result.status = "skipped"
                 self.result.message = f"{tag} is skipped. Check now to see it anyway."

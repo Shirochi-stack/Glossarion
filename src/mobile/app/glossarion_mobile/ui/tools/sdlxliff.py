@@ -1064,7 +1064,8 @@ class SdlxliffScreen(Screen):
         if values is None:
             return False
         ok = await self.ctx.io(self.binding.set_credentials, provider, values)
-        self.ctx.say(self.binding.status or ("Saved" if ok else "Not saved"))
+        if not ok:
+            self.ctx.say(self.binding.status or "Not saved")
         return bool(ok)
 
     def open_threshold_sheet(self) -> Any:
