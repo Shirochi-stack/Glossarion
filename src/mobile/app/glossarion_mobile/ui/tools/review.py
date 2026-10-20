@@ -30,6 +30,7 @@ from typing import Any, Optional, Sequence
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.sheet import fits_compact, scroll_column, sheet_frame
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
@@ -533,11 +534,12 @@ class ReviewScreen(Screen):
         fields = {}
 
         def field(key: str, label: str, numeric: bool = True) -> ft.TextField:
-            control = ft.TextField(label=label, value=str(self.ctx.cfg(key, DISPLAY_DEFAULTS[key])), dense=True,
-                                   keyboard_type=number_keyboard() if numeric else ft.KeyboardType.TEXT,
-                                   on_blur=lambda e, k=key, n=numeric: self.set_display(k, e.control.value, n),
-                                   on_submit=lambda e, k=key, n=numeric: self.set_display(k, e.control.value, n),
-                                   key=f"review-display-{key}")
+            control = commit_on_blur(
+                ft.TextField(label=label, value=str(self.ctx.cfg(key, DISPLAY_DEFAULTS[key])), dense=True,
+                             keyboard_type=number_keyboard() if numeric else ft.KeyboardType.TEXT,
+                             key=f"review-display-{key}"),
+                lambda text, k=key, n=numeric: self.set_display(k, text, n),
+                current=lambda k=key: self.ctx.cfg(k, DISPLAY_DEFAULTS[k]))
             fields[key] = control
             return control
 

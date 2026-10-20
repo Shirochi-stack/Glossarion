@@ -954,6 +954,60 @@ def test_tiles_edit_validate_reset_and_show_reasons(tmp_path):
 
 
 @needs_flet
+def test_number_and_text_tiles_commit_on_tap_away(tmp_path):
+    """Owner: "why do all input fields require me to click done" — a touch outside the field (Android /
+    iOS keep the focus) and the blur commit like Done: once, with the same validation."""
+    from glossarion_mobile.ui.settings.section_page import SectionPage
+
+    async def scenario():
+        conn, session = _fake_session("android")
+        page = session.page
+        schema = _fake_schema()
+        store = _memory_store(tmp_path, {"batch_size": 25}, schema)
+        ctx = _ctx(store, schema, page)
+        context = SectionPage(_match("/settings/s/context"), ctx)
+        glossary = SectionPage(_match("/settings/s/glossary"), ctx)
+        page.views[0].controls.extend([context.get_body(), glossary.get_body()])
+        page.update()
+        batch, name = context.tiles["batch_size"], glossary.tiles["glossary_name"]
+        applied: list = []
+        for tile in (batch, name):
+            tile.apply = (lambda original: lambda value: (applied.append(value), original(value))[1])(tile.apply)
+
+        # a settings number tile: tapping away commits; Done + its blur commit once
+        batch.field.on_focus(None)
+        batch.field.on_tap_outside(None)  # unchanged: nothing written
+        assert applied == []
+        batch.field.value = "40"
+        batch.field.on_tap_outside(None)
+        batch.field.on_submit(None)
+        batch.field.on_blur(None)
+        assert store.get("batch_size") == 40 and applied == ["40"]
+        # invalid: the same error as Done, the stored value stays
+        batch.field.on_focus(None)
+        batch.field.value = "abc"
+        batch.field.on_blur(None)
+        assert batch.error == "Enter a whole number" and store.get("batch_size") == 40 and applied == ["40", "abc"]
+        # the stored value typed back clears the error
+        batch.field.on_focus(None)
+        batch.field.value = "40"
+        batch.field.on_tap_outside(None)
+        assert batch.error is None and store.get("batch_size") == 40
+
+        # a Glossary settings text tile
+        name.field.on_focus(None)
+        name.field.value = "Tapped away"
+        name.field.on_tap_outside(None)
+        name.field.on_blur(None)
+        assert store.get("glossary_name") == "Tapped away" and applied[-1] == "Tapped away"
+        assert applied.count("Tapped away") == 1
+        page.update()
+        store._saver.close()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
 def test_nested_lazy_default_and_key_pool_tiles(tmp_path):
     from glossarion_mobile.ui.components.reason_chip import ReasonChip
     from glossarion_mobile.ui.settings.section_page import SectionPage

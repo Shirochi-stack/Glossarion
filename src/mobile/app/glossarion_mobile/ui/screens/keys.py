@@ -998,6 +998,7 @@ try:  # the pure part above must stay importable without Flet (host tests, servi
     from glossarion_mobile.ui.components._handlers import call_handler
     from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
     from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
+    from glossarion_mobile.ui.components.field_commit import commit_on_blur
     from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip, unavailable_tile
     from glossarion_mobile.ui.components.section_card import SectionCard
     from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
@@ -1121,10 +1122,11 @@ class KeysScreen(Screen):  # type: ignore[misc,valid-type]
         rotation_switch = ft.Switch(label="Force key rotation", value=bool(self.controller.setting("force_key_rotation", True)),
                                     on_change=lambda e: self.controller.set_setting("force_key_rotation", bool(e.control.value)))
         self.rotation_switch = rotation_switch
-        self.frequency_field = ft.TextField(value=str(self.controller.setting("rotation_frequency", 1)), label="Every",
-                                            suffix=ft.Text("requests"), width=150, dense=True,
-                                            keyboard_type=number_keyboard(), on_blur=self._on_frequency,
-                                            on_submit=self._on_frequency, border_radius=tokens.RADII["field"])
+        self.frequency_field = commit_on_blur(
+            ft.TextField(value=str(self.controller.setting("rotation_frequency", 1)), label="Every",
+                         suffix=ft.Text("requests"), width=150, dense=True, keyboard_type=number_keyboard(),
+                         border_radius=tokens.RADII["field"]),
+            lambda _text: self._on_frequency(), current=lambda: self.controller.setting("rotation_frequency", 1))
         rotation = SectionCard(title="Rotation", icon="AUTORENEW", children=[
             ft.Row([rotation_switch, self.frequency_field], wrap=True, spacing=12,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER)])

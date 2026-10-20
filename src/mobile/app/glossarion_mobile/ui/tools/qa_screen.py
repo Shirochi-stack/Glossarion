@@ -33,6 +33,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
+from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
@@ -127,9 +128,10 @@ class QaScannerScreen(Screen):
         sample = self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None)
         if sample is None:
             sample = qm.MOBILE_QUICK_SAMPLE_SIZE
-        self.sample_field = ft.TextField(label=qm.QUICK_SAMPLE_LABEL, value=str(sample), dense=True,
-                                         keyboard_type=number_keyboard(), helper=qm.QUICK_SAMPLE_HINT,
-                                         on_blur=self._on_sample, on_submit=self._on_sample, key="qa-sample")
+        self.sample_field = commit_on_blur(
+            ft.TextField(label=qm.QUICK_SAMPLE_LABEL, value=str(sample), dense=True, keyboard_type=number_keyboard(),
+                         helper=qm.QUICK_SAMPLE_HINT, key="qa-sample"),
+            lambda _text: self._on_sample(), current=lambda: self.ctx.cfg(qm.QUICK_SAMPLE_KEY, None))
         self.auto_search = ft.Switch(label="Auto-search output", value=bool(self.ctx.cfg("qa_auto_search_output", True)),
                                      on_change=self._on_auto_search, key="qa-auto-search")
         fields = card("Scan options", [self.sample_field, self.auto_search], icon="TUNE", key="qa-fields")

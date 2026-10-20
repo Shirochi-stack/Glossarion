@@ -1327,6 +1327,25 @@ def test_keys_screen_pools_cards_bulk_actions_and_import_export(tmp_path):
         screen.frequency_field.value = "4"
         screen._on_frequency()
         assert store.get("rotation_frequency") == 4
+        # tapping away commits like Done: once, the same error for an invalid value, nothing when unchanged
+        writes: list = []
+        set_setting = keys.set_setting
+        keys.set_setting = lambda key, value: (writes.append(value), set_setting(key, value))[1]
+        screen.frequency_field.on_focus(None)
+        screen.frequency_field.on_tap_outside(None)
+        assert writes == []
+        screen.frequency_field.value = "6"
+        screen.frequency_field.on_submit(None)
+        screen.frequency_field.on_blur(None)
+        assert store.get("rotation_frequency") == 6 and writes == [6]
+        screen.frequency_field.on_focus(None)
+        screen.frequency_field.value = "x"
+        screen.frequency_field.on_tap_outside(None)
+        assert screen.frequency_field.error and store.get("rotation_frequency") == 6
+        screen.frequency_field.value = "6"
+        screen.frequency_field.on_tap_outside(None)
+        assert screen.frequency_field.error is None and store.get("rotation_frequency") == 6 and writes == [6, 6]
+        keys.set_setting = set_setting
         # add a key through the editor
         editor = screen.open_editor(None)
         editor.key_field.set_value("sk-new-key-99999999", notify=False)
@@ -1573,6 +1592,14 @@ def test_local_ai_and_refusal_screens(tmp_path):
         assert notes[-1][0] == "✅ Loaded 1 new, 1 skipped"
         refusal.limit_field.value = "-5"
         assert refusal._on_limit() == 1000
+        # tapping away commits the length limit like Done; the add-a-pattern field (an action) does not
+        refusal.limit_field.on_focus(None)
+        refusal.limit_field.value = "1500"
+        refusal.limit_field.on_tap_outside(None)
+        assert model.length_limit() == 1500
+        refusal.new_field.value = "half typed"
+        assert refusal.new_field.on_tap_outside is None and refusal.new_field.on_blur is None
+        assert "half typed" not in model.patterns()
         refusal.disable_switch.on_change(types.SimpleNamespace(control=types.SimpleNamespace(value=False)))
         assert store.get("disable_refusal_checks") is False
         page.update()

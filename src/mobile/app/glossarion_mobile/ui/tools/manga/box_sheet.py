@@ -30,6 +30,7 @@ from typing import Any, Callable, Mapping, Optional
 import flet as ft
 
 from glossarion_mobile.ui import tokens
+from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools.manga.common import push
 
@@ -134,11 +135,15 @@ class BoxPanel:
                                               on_click=lambda e: self.act("translate"))
         # ---- Move tab
         geometry = box_geometry(box)
+        # Done or tapping away places the box (as Apply does); a field still showing the box's place
+        # moves nothing.
         self.geometry_fields = {
-            key: ft.TextField(value=_number(geometry[key]), label=label, dense=True, width=64, key=f"box-geo-{key}",
-                              keyboard_type=ft.KeyboardType.NUMBER, text_style=BODY_TEXT, label_style=LABEL_TEXT,
-                              content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
-                              border_radius=tokens.RADII["field"], on_submit=lambda e: self.apply_geometry())
+            key: commit_on_blur(
+                ft.TextField(value=_number(geometry[key]), label=label, dense=True, width=64, key=f"box-geo-{key}",
+                             keyboard_type=ft.KeyboardType.NUMBER, text_style=BODY_TEXT, label_style=LABEL_TEXT,
+                             content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
+                             border_radius=tokens.RADII["field"]),
+                lambda _text: self.apply_geometry(), current=lambda k=key: _number(box_geometry(self.box)[k]))
             for key, label in GEOMETRY_KEYS}
         self.apply_button = ft.TextButton(content="Apply", icon=ft.Icons.CHECK, key="box-geo-apply",
                                           disabled=busy_reason is not None, style=COMPACT_BUTTON,
