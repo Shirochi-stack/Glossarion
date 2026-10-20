@@ -39,6 +39,13 @@ __all__ = ["ChooseChaptersSheet", "DESTINATIONS", "RunOptionsPanel", "destinatio
 
 log = logging.getLogger("glossarion.chat.plan")
 
+
+def _edited(tile: Any) -> bool:
+    """``SettingTile.edited`` (False for a tile without a text field)."""
+    edited = getattr(tile, "edited", None)
+    return bool(edited()) if callable(edited) else False
+
+
 #: Plan destinations: (id, chip label, sheet subtitle)
 DESTINATIONS = (
     ("chat", "Save to: This chat", "Direct Text: the run's files stay in this chat's workspace"),
@@ -209,15 +216,24 @@ class RunOptionsPanel:
         self.refresh_summary()
 
     def _store_changed(self) -> None:
-        """A config key the summary reads changed (a tile with the switch off, Settings, another panel)."""
+        """A config key the summary reads changed (a tile with the switch off, Settings, another panel): the
+        summary and the tiles show it (a field holding a number typed and not submitted yet keeps it), so a
+        card built before a Settings change shows, and its Start / Resume runs with, the settings now."""
         self.summary_text.value = self.summary()
-        self._push(self.summary_text)
+        for tile in list(self.tiles.values()):
+            if not _edited(tile):
+                try:
+                    tile.refresh(push=False)
+                except Exception:
+                    log.debug("refreshing the %s run option failed", getattr(tile, "key", "?"), exc_info=True)
+        self._push(self.control)
 
     def commit(self) -> None:
         """Save what a number / text field holds when it was typed but not submitted (no blur yet): Start
-        and Resume run with what the panel shows."""
+        and Resume run with what the panel shows. A field the user did not type into is not written back
+        (``SettingTile.edited``): the settings it showed may have changed since (owner 2026-10-20)."""
         for tile in list(self.tiles.values()):
-            if getattr(tile, "field", None) is None or not callable(getattr(tile, "_on_submit", None)):
+            if not _edited(tile) or not callable(getattr(tile, "_on_submit", None)):
                 continue
             try:
                 tile._on_submit()

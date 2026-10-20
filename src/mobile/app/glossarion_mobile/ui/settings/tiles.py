@@ -382,6 +382,14 @@ class SettingTile:
     def refresh_value(self) -> None:
         """Kind-specific: copy the effective value into the inline control."""
 
+    def edited(self) -> bool:
+        """The tile's text field holds something the user typed and has not submitted yet: its text is not
+        what ``refresh_value`` last showed. A field nobody touched is never written back, so a value it
+        showed before the setting changed elsewhere (Settings, another card) cannot undo that change
+        (owner 2026-10-20: Resume put the old temperature back)."""
+        field = getattr(self, "field", None)
+        return field is not None and (field.value or "") != getattr(self, "shown_text", None)
+
     def refresh(self, push: bool = True) -> None:
         self._evaluate_rules()
         editable = self.editable
@@ -579,7 +587,7 @@ class NumberTile(SettingTile):
 
     def refresh_value(self) -> None:
         value = self.value()
-        self.field.value = "" if value is None else summarize(value, "number")
+        self.field.value = self.shown_text = "" if value is None else summarize(value, "number")
 
     def parse(self, raw: Any) -> Any:
         value = _parse_number(raw, self.number_kind)
@@ -611,7 +619,7 @@ class NumberTile(SettingTile):
 
     def _on_submit(self, e: Any = None) -> None:
         text = self.field.value or ""
-        if text.strip() == summarize(self.value(), "number") and not self.error:
+        if (not self.edited() or text.strip() == summarize(self.value(), "number")) and not self.error:
             return
         self.apply(text)
 
@@ -989,12 +997,12 @@ class TextTile(SettingTile):
 
     def refresh_value(self) -> None:
         value = self.value()
-        self.field.value = "" if value is None else str(value)
+        self.field.value = self.shown_text = "" if value is None else str(value)
 
     def _on_submit(self, e: Any = None) -> None:
         text = self.field.value or ""
         current = self.value()
-        if text == ("" if current is None else str(current)) and not self.error:
+        if (not self.edited() or text == ("" if current is None else str(current))) and not self.error:
             return
         self.apply(text)
 
