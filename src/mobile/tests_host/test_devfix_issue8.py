@@ -201,11 +201,12 @@ async def _start_with_library(tf, server, picks: Path, files: dict):
     await flows.open_drawer(driver)
     await driver.tap(key="dest-library")
     await driver.wait(key="lib-search", timeout=60)
-    for stem, _chapters, _rgb in BOOKS:
+    service = app.library
+    for index, (stem, _chapters, _rgb) in enumerate(BOOKS):
         name = f"{stem}.epub"
         await driver.pick_file(name, lambda: driver.tap(key="lib-fab"))  # the In progress shelf's Import EPUB
-        await driver.wait(contains=f"Added to Library: {name}", timeout=60)
-    service = app.library
+        # silent import (owner 2026-10-20: no "Added to Library" snackbar): the shelf gains the book
+        assert await _until(lambda: len(service.snapshot.all_books()) > index, 60), name
     assert await _until(lambda: len(service.snapshot.all_books()) >= 3, 60), _rows(service).keys()
     rows = _rows(service)
     assert set(rows) == {stem for stem, _c, _r in BOOKS}, rows.keys()
@@ -330,7 +331,7 @@ def test_owner_issue8_library_book_attached_and_translated_from_the_chat(isolate
             assert _norm(attached.get("path")) == _norm(gamma["raw"]) and attached.get("name") == "Gamma Tales.epub"
             await driver.wait(text="Gamma Tales.epub", timeout=5)  # the composer FileChip
             await driver.wait(tooltip="Remove attachment", timeout=5)
-            await driver.wait(text="Attached Gamma Tales.epub from the Library", timeout=5)
+            assert not await driver.exists(text="Attached Gamma Tales.epub from the Library", timeout=0.5)  # no snackbar
             meta = chats.meta(cid).get(LIBRARY_ATTACHMENT_META)
             assert meta == {"bid": gamma["bid"], "path": gamma["raw"]}
             assert js.snapshot() is None and not js.view().queue  # attaching never starts anything

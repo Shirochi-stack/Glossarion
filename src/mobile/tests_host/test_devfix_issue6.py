@@ -694,7 +694,7 @@ async def _scenario(h: Harness) -> None:
     assert await _until(lambda: run2.question() is None, 30), "Accept did not answer the glossary gate"
     assert (run2.cid, True, True) in h.chat_answers, h.chat_answers
     assert await _until(lambda: nid2 in device.cancelled, 15), "the app did not cancel the glossary notification"
-    assert await _until(lambda: "Glossary accepted · translating" in run2.notes(), 10), run2.notes()
+    assert "Glossary accepted · translating" not in run2.notes(), run2.notes()  # no snackbar (owner 2026-10-20)
     assert await _until(lambda: app.shell.current_route.startswith(f"/chat/{run2.cid}"), 10), app.shell.current_route
     snap = await run2.wait_done()
     assert snap.state.name == "DONE", run2._state()

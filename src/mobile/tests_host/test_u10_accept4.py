@@ -680,7 +680,7 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             field_key = await _until(lambda: _key(cloud.key_fields.get("pixeldrain")), 15)
             await d.enter(PD_KEY, key=field_key, timeout=15)
             await d.tap(key=_visible(tester, r"^share-key-save-pixeldrain-\d+$")[0][0])
-            assert await note("Key saved (encrypted)"), notes[-5:]
+            assert not any("Key saved" in n for n in notes), notes[-5:]  # no snackbar (owner 2026-10-20)
             assert await _until(lambda: shares.provider_state("pixeldrain").ready, 15)
             assert all(not (f.value or "") for f in cloud.key_fields.values()), "the key stayed on screen"
             check = await _until(lambda: _visible(tester, r"^share-key-check-pixeldrain-\d+$"), 15)
@@ -807,8 +807,9 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.tap(key=_row_button(tester, "out-link", gofile_url, "delete"))
             await d.wait(text="Delete the upload?", timeout=15)
             await d.tap(text="Delete")
-            assert await note("Upload deleted"), notes[-5:]
-            assert not [f for f in gofile.folders.values() if f["content"] == Path(epub).read_bytes()]
+            assert await _until(lambda: not [f for f in gofile.folders.values()
+                                             if f["content"] == Path(epub).read_bytes()], 15), "not deleted"
+            assert not any("Upload deleted" in n for n in notes)  # no snackbar (owner 2026-10-20)
             method, route, auth, body = gofile.requests[-1]
             assert (method, route, auth) == ("DELETE", "/contents", f"Bearer {first_token}") and set(body) == {
                 "contentsId"}, gofile.requests[-1]
@@ -862,7 +863,8 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.tap(key="link-again")
             assert await _until(pixeldrain.started.is_set, 30)
             await session.dispatch_event(app.native.native._i, "foreground", {"type": "button", "button_id": "stop"})
-            assert await note("Upload cancelled", 30), notes[-5:]
+            assert await _until(lambda: phone.fgs is None, 30), "the upload did not stop"
+            assert not any("Upload cancelled" in n for n in notes)  # no snackbar (owner 2026-10-20)
             pixeldrain.gate.set()
             assert pixeldrain.files == files_before and phone.fgs is None
             assert not any((Path(shares.snapshot_root)).glob("*")), "an upload snapshot was left behind"
@@ -892,8 +894,8 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.tap(key="handoff-paste")
             assert await _until(lambda: getattr(_control(tester, "handoff-link"), "value", None) == phone.clipboard, 10)
             await d.tap(key="handoff-save")
-            assert await note("transfer.it link saved on the book"), notes[-5:]
             assert await _until(lambda: _row_button(tester, "out-link", TRANSFER_LINK, "copy") is not None, 20)
+            assert not any("link saved on the book" in n for n in notes)  # no snackbar (owner 2026-10-20)
             assert _row_labels(tester, "out-link", TRANSFER_LINK) == ["Copy", "Share", "Remove"]
             # a recompiled book handed off again: the file the hint names must be the new one
             fixtures.build_tiny_epub(Path(epub), chapters=4)
@@ -954,8 +956,7 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.tap(key=_row_button(tester, "job-link", pd_url, "delete"))
             await d.wait(text="Delete the upload?", timeout=15)
             await d.tap(text="Delete")
-            assert await note("Upload deleted"), notes[-5:]
-            assert file_id not in pixeldrain.files
+            assert await _until(lambda: file_id not in pixeldrain.files, 15), "the pixeldrain upload was not deleted"
             await d.tap(key=_row_button(tester, "job-link", send_url, "delete"))
             await d.wait(text="Delete the upload?", timeout=15)
             await d.tap(text="Delete")
@@ -963,7 +964,6 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.tap(key=_row_button(tester, "job-link", TRANSFER_LINK, "delete"))
             await d.wait(text="Remove the link?", timeout=15)
             await d.tap(text="Remove")
-            assert await note("Link removed"), notes[-5:]
             assert await _until(lambda: {u for _b, _i, t in _link_rows(tester, "job-link") for u in _urls_in(t)}
                                 == {gofile_url}, 20), _link_rows(tester, "job-link")
             remaining = [link.url for link in shares.links_blocking()]
