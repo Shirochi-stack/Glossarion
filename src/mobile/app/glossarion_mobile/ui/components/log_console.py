@@ -60,6 +60,10 @@ class LogConsole(ft.Column):
     list_height: Optional[float] = field(default=320, metadata={"skip": True})
     copy_handler: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
     header_follow: bool = field(default=False, metadata={"skip": True})
+    #: called after each change the console painted (new lines, a filter, follow on/off); the host uses it to
+    #: keep its own page pinned to the end while following (owner 2026-10-21: the job page crept up a few dp
+    #: off its bottom as lines arrived)
+    on_after_change: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
 
     def init(self) -> None:
         super().init()
@@ -212,6 +216,11 @@ class LogConsole(ft.Column):
         if self.following:
             try:
                 asyncio.ensure_future(self.list_view.scroll_to(offset=-1, duration=0))
+            except Exception:
+                pass
+        if self.on_after_change is not None:
+            try:
+                self.on_after_change()
             except Exception:
                 pass
 

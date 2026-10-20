@@ -151,6 +151,18 @@ def _live(console: LogConsole, monkeypatch) -> list:
     return scrolls
 
 
+def test_the_host_hears_every_painted_change_to_keep_its_page_at_the_end(monkeypatch):
+    """Owner 2026-10-21: the job page crept up off its bottom as lines arrived; the host re-pins it after each change."""
+    heard = []
+    console = LogConsole(dispatcher=_Dispatcher(), on_after_change=lambda: heard.append(console.following))
+    scrolls = _live(console, monkeypatch)
+    console.on_lines([line("one")], 0)
+    assert heard == [True] and len(scrolls) == 1
+    console.set_following(False)
+    console.on_lines([line("two")], 0)
+    assert heard == [True, False, False] and len(scrolls) == 1     # paused: no inner scroll, the host still hears
+
+
 def test_autoscroll_toggle_pauses_and_resumes_following(monkeypatch):
     console = LogConsole(dispatcher=_Dispatcher(), header_follow=True)
     button = console.follow_button

@@ -288,8 +288,34 @@ def test_density_presets_cover_every_desktop_size():
         for key, card_w in spec.items():
             assert density_preset(key, lc._SIZE_PRESETS) == (card_w, lc._SIZE_PRESETS[key]["cover_h"])
     assert effective_density("normal", 1.6) == "large" and effective_density("6xl", 2.0) == "6xl"
-    assert effective_density("bogus") == "compact"
+    # Owner 2026-10-21: the phone opens at L (at S the ▶ Continue button sat under the thumb); a bogus key reads as it.
+    assert models.DEFAULT_DENSITY == "large" and effective_density("bogus") == "large"
     assert page_size_value("all") == 0 and page_size_value(50) == 50 and page_size_value(None) == 20
+
+
+def test_continue_button_only_from_m_up_and_the_title_shrinks_to_fit_two_lines():
+    # ▶ Continue stays from M up (owner 2026-10-21: "M seems fine"); below it the card has no room for a second target.
+    assert [models.shows_continue(k) for k in ("2xs", "xs", "compact", "normal", "large", "6xl")] == [
+        False, False, False, True, True, True]
+    assert models.shows_continue("bogus") is True       # the default density, L
+    width = 180 - 12                                     # an L card inside its padding
+    assert models.fit_title_size("Short", width) == 12.0 and models.fit_title_size("", width) == 12.0
+    assert models.fit_title_size("[TS]Naraka Monarch, Mechanical Genius Girl", width) == 12.0
+    long = "A very very long title that would certainly take many lines at a readable size on a card"
+    size = models.fit_title_size(long, width)
+    assert 7.0 <= size < 12.0 and models._title_lines(long, width, size) <= 2 < models._title_lines(long, width, 12)
+    assert models.fit_title_size("x" * 400, width) == 7.0            # never a third line: the floor, then an ellipsis
+    assert models.fit_title_size("나 혼자 메카닉 천재 소녀", width) == 12.0
+    assert models.fit_title_size("[TS]Naraka Monarch, Mechanical Genius Girl", 110 - 12) < 12.0   # an S card
+    from glossarion_mobile.ui.library.book_card import BookCard
+    model = build_card(_book("in_progress"), key="k", bid="b", has_continue=True)
+    small = BookCard(model, card_w=110, cover_h=162, show_continue=False)
+    large = BookCard(model, card_w=180, cover_h=260)
+    stacks = {card: card.control.content.content.controls[0] for card in (small, large)}
+    assert not [c for c in stacks[small].controls if c.key == "continue"]
+    assert [c for c in stacks[large].controls if c.key == "continue"]
+    title = large.control.content.content.controls[1]
+    assert title.key == "title" and title.size == large.title_size() and title.max_lines == 2
 
 
 def test_filters_sort_and_tristate_states():

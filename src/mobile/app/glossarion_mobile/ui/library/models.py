@@ -28,9 +28,14 @@ from glossarion_mobile.ui.library.colors import type_badge
 __all__ = [
     "CardModel",
     "CardWarning",
+    "CONTINUE_MIN_DENSITY",
     "DENSITY_ORDER",
     "DENSITY_LABELS",
     "DEFAULT_DENSITY",
+    "TITLE_MIN_SIZE",
+    "TITLE_SIZE",
+    "fit_title_size",
+    "shows_continue",
     "DEFAULT_PAGE_SIZE",
     "FORMATS",
     "FilterState",
@@ -59,7 +64,14 @@ DENSITY_LABELS = {
     "2xs": "2XS", "xs": "XS", "compact": "S", "normal": "M", "large": "L", "xl": "XL",
     "2xl": "2XL", "3xl": "3XL", "4xl": "4XL", "5xl": "5XL", "6xl": "6XL",
 }
-DEFAULT_DENSITY = "compact"  # desktop default (S)
+#: The phone's default is L (owner 2026-10-21: at S the card's ▶ Continue button sat under the thumb, and a tap
+#: meant for the card opened the reader). The desktop keeps S; a stored ``epub_library_card_size`` wins here too.
+DEFAULT_DENSITY = "large"
+#: ▶ Continue is shown on grid cards from this density (M) up; below it the card is too small for a second target.
+CONTINUE_MIN_DENSITY = "normal"
+#: Grid card title: this size at most, shrunk as far as ``TITLE_MIN_SIZE`` so the title fits its lines (fit_title_size).
+TITLE_SIZE = 12
+TITLE_MIN_SIZE = 7
 
 # UI_SPEC §3.1 density table (card_w dp; cover_h keeps the desktop ``_SIZE_PRESETS`` ratio). Used only
 # when library_core does not expose ``SIZE_PRESETS`` / ``_SIZE_PRESETS``.
@@ -69,8 +81,8 @@ _SPEC_PRESETS = {
     "6xl": (630, 912),
 }
 
-#: Card text block below the cover: title (2 lines) + info row + warnings row + pill + padding.
-CARD_TEXT_HEIGHT = 112
+#: Card text block below the cover: title (2 lines at TITLE_SIZE) + info row + warnings row + pill + padding.
+CARD_TEXT_HEIGHT = 104
 
 SORTS = (("date", "Date"), ("name", "A-Z"), ("size", "Size"))  # SORT_DATE / SORT_NAME / SORT_SIZE
 FORMATS = (("all", "All"), ("epub", "EPUB"), ("txt", "TXT"), ("pdf", "PDF"), ("html", "HTML"), ("image", "IMG"))
@@ -100,6 +112,71 @@ def density_preset(key: str, presets: Optional[Mapping[str, Any]] = None) -> tup
         except (KeyError, TypeError, ValueError):
             pass
     return _SPEC_PRESETS[key]
+
+
+def shows_continue(key: str) -> bool:
+    """Whether a grid card of this density carries the ▶ Continue button (M and up; owner 2026-10-21)."""
+    key = key if key in DENSITY_ORDER else DEFAULT_DENSITY
+    return DENSITY_ORDER.index(key) >= DENSITY_ORDER.index(CONTINUE_MIN_DENSITY)
+
+
+def _char_em(char: str) -> float:
+    """A character's width in em, roughly: CJK and emoji are square, Latin about half an em."""
+    code = ord(char)
+    if char == " ":
+        return 0.3
+    if char in "ijl.,:;'!|":
+        return 0.3
+    if char in "mwMW@":
+        return 0.85
+    if (0x1100 <= code <= 0x11FF or 0x2E80 <= code <= 0xA4CF or 0xAC00 <= code <= 0xD7AF or 0xF900 <= code <= 0xFAFF
+            or 0xFE30 <= code <= 0xFE4F or 0xFF00 <= code <= 0xFF60 or 0xFFE0 <= code <= 0xFFE6 or code >= 0x1F000):
+        return 1.0
+    if char.isupper() or char.isdigit():
+        return 0.65
+    return 0.55
+
+
+def _title_lines(title: str, width: float, size: float) -> int:
+    """How many lines ``title`` takes at ``size`` in ``width`` dp, wrapping at spaces (CJK anywhere), roughly."""
+    if size <= 0 or width <= 0:
+        return 1
+    lines, used = 1, 0.0
+    for word in title.replace("\n", " ").split(" "):
+        if not word:
+            continue
+        need = sum(_char_em(c) for c in word) * size
+        space = 0.3 * size if used else 0.0
+        if used + space + need <= width:
+            used += space + need
+            continue
+        # a word that does not fit the rest of the line: break it (CJK) or wrap it whole
+        if used and need <= width:
+            lines, used = lines + 1, need
+            continue
+        for char in word:
+            em = _char_em(char) * size
+            if used + em > width and used:
+                lines, used = lines + 1, 0.0
+            used += em
+    return lines
+
+
+def fit_title_size(title: str, width: float, *, max_lines: int = 2, size: float = TITLE_SIZE,
+                   minimum: float = TITLE_MIN_SIZE) -> float:
+    """The largest text size from ``size`` down to ``minimum`` (whole points) at which ``title`` fits
+    ``max_lines`` lines of ``width`` dp, by the rough width model above; ``minimum`` when none does
+    (the Text then clips with an ellipsis). Owner 2026-10-21: as much of the title as possible, never a
+    third line."""
+    text = " ".join(str(title or "").split())
+    if not text:
+        return size
+    current = float(size)
+    while current > minimum:
+        if _title_lines(text, width, current) <= max_lines:
+            return current
+        current -= 1
+    return float(minimum)
 
 
 def effective_density(key: str, text_scale: float = 1.0) -> str:

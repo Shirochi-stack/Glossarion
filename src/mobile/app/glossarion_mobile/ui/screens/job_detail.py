@@ -23,6 +23,7 @@ The screen only binds to ``JobService`` snapshots; it never derives a status.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -253,6 +254,7 @@ class JobDetailScreen(Screen):
             list_height=360,
             backlog=2000,
             header_follow=True,
+            on_after_change=self._keep_page_at_end,
         )
         log_card = SectionCard(
             title="Log",
@@ -267,14 +269,41 @@ class JobDetailScreen(Screen):
         )
         self._apply(self.snap)
         self._refresh_requests(force=True)
-        return ft.ListView(
+        self.page_list = ft.ListView(
             controls=[header, self.outputs_card, ft.Container(content=self.requests_tile,
                                                                bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
                                                                border_radius=tokens.RADII["card"]), log_card],
             spacing=tokens.SPACING["md"],
             padding=ft.Padding.all(tokens.SPACING["md"]),
             expand=True,
+            on_scroll=self._on_page_scroll,
         )
+        return self.page_list
+
+    #: how close to the page's end (dp) still counts as "at the end" for _keep_page_at_end
+    PAGE_END_SLACK = 40.0
+
+    def _on_page_scroll(self, e: Any) -> None:
+        """Remember whether the reader is at the page's end (the log card is the last thing on it)."""
+        pixels, maximum = getattr(e, "pixels", None), getattr(e, "max_scroll_extent", None)
+        if pixels is None or maximum is None:
+            return
+        try:
+            self._page_at_end = float(pixels) >= float(maximum) - self.PAGE_END_SLACK
+        except (TypeError, ValueError):
+            pass
+
+    def _keep_page_at_end(self) -> None:
+        """A reader at the page's end stays there as log lines arrive (owner 2026-10-21: the page crept a
+        few dp up off its bottom with each batch of lines). Only while the console follows new lines and the
+        reader had scrolled to the end themselves; anywhere else on the page nothing moves."""
+        page_list = getattr(self, "page_list", None)
+        if page_list is None or not getattr(self, "_page_at_end", False) or not self.console.following:
+            return
+        try:
+            asyncio.ensure_future(page_list.scroll_to(offset=-1, duration=0))
+        except Exception:
+            pass
 
     def _buffer(self) -> LogBuffer:
         buffer = self.service.log_buffer(self.job_id)

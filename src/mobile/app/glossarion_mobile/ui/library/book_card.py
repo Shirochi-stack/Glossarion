@@ -27,7 +27,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import HALGAKOS_ASSET
 from glossarion_mobile.ui.library.colors import pill_colors, ribbon_colors, type_badge, warning_colors
 from glossarion_mobile.ui.library.common import tinted
-from glossarion_mobile.ui.library.models import CardModel
+from glossarion_mobile.ui.library.models import CardModel, fit_title_size
 from glossarion_mobile.ui.theme import HIT_TARGET, resolve_color
 
 __all__ = ["BookCard", "BookListRow", "CoverQueue", "LIST_ROW_HEIGHT"]
@@ -36,6 +36,12 @@ log = logging.getLogger("glossarion.library.ui")
 
 LIST_ROW_HEIGHT = 72
 _LIST_COVER = (48, 72)
+#: Card detail text (owner 2026-10-21: smaller than the title, which is 12 at most, models.TITLE_SIZE)
+_INFO_SIZE = 10
+_CHIP_SIZE = 9
+_LANG_SIZE = 8
+#: Grid card padding each side: the title fits the width inside it (fit_title_size)
+_CARD_PADDING = 6
 
 
 def _ribbon(model: CardModel) -> Optional[ft.Control]:
@@ -60,7 +66,7 @@ def _warning_chip(text: str, role: str, tooltip: str, dark: bool) -> ft.Control:
     if background.startswith("role:") or background == color:
         background = tinted(color, 0.12)
     return ft.Container(
-        content=ft.Text(text, size=10, weight=ft.FontWeight.W_700, color=color, no_wrap=True),
+        content=ft.Text(text, size=_CHIP_SIZE, weight=ft.FontWeight.W_700, color=color, no_wrap=True),
         bgcolor=background,
         border=ft.Border.all(1, color),
         border_radius=3,
@@ -76,7 +82,7 @@ def _pill_row(model: CardModel, dark: bool) -> Optional[ft.Control]:
     colors = pill_colors(model.state if model.state in ("outdated_progress", "not_started", "ready_to_compile")
                          else "in_progress", dark)
     pill_box = ft.Container(
-        content=ft.Text(model.pill_text, size=10, weight=ft.FontWeight.W_700, color=colors.text, no_wrap=True,
+        content=ft.Text(model.pill_text, size=_CHIP_SIZE, weight=ft.FontWeight.W_700, color=colors.text, no_wrap=True,
                         overflow=ft.TextOverflow.ELLIPSIS),
         bgcolor=colors.background,
         border=ft.Border.all(1, colors.border),
@@ -86,19 +92,19 @@ def _pill_row(model: CardModel, dark: bool) -> Optional[ft.Control]:
     )
     parts: list[ft.Control] = [ft.Container(content=pill_box, expand=True if not model.pct_text else False)]
     if model.pct_text:
-        parts.append(ft.Text(model.pct_text, size=10, weight=ft.FontWeight.W_700, color=colors.pct, key="pct"))
+        parts.append(ft.Text(model.pct_text, size=_CHIP_SIZE, weight=ft.FontWeight.W_700, color=colors.pct, key="pct"))
     return ft.Row(parts, spacing=4, tight=True)
 
 
 def _info_row(model: CardModel, dark: bool, *, show_language: bool) -> ft.Control:
     emoji, label, color = type_badge(model.type_kind, dark)
     parts: list[ft.Control] = [
-        ft.Text(model.size_text, size=11, color=ft.Colors.ON_SURFACE_VARIANT, no_wrap=True, key="size"),
-        ft.Text(f"{emoji}{label}", size=11, weight=ft.FontWeight.W_700, color=color, no_wrap=True, key="type"),
+        ft.Text(model.size_text, size=_INFO_SIZE, color=ft.Colors.ON_SURFACE_VARIANT, no_wrap=True, key="size"),
+        ft.Text(f"{emoji}{label}", size=_INFO_SIZE, weight=ft.FontWeight.W_700, color=color, no_wrap=True, key="type"),
     ]
     if show_language and model.language:
         parts.append(ft.Container(
-            content=ft.Text(model.language, size=9, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE_VARIANT),
+            content=ft.Text(model.language, size=_LANG_SIZE, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE_VARIANT),
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
             border_radius=4,
             padding=ft.Padding.symmetric(horizontal=3),
@@ -164,22 +170,31 @@ class _CardBase:
 
 
 class BookCard(_CardBase):
-    """Grid card of fixed width ``card_w`` (the GridView sizes cells by ``max_extent``)."""
+    """Grid card of fixed width ``card_w`` (the GridView sizes cells by ``max_extent``).
 
-    def __init__(self, model: CardModel, *, card_w: int, cover_h: int, title_lines: int = 2, **kwargs: Any) -> None:
+    ``show_continue=False`` leaves the ▶ Continue button off the cover (the densities below M,
+    models.shows_continue: the card is too small for a second tap target)."""
+
+    def __init__(self, model: CardModel, *, card_w: int, cover_h: int, title_lines: int = 2,
+                 show_continue: bool = True, **kwargs: Any) -> None:
         super().__init__(model, **kwargs)
         self.card_w = card_w
         self.cover_h = cover_h
         self.title_lines = title_lines
+        self.show_continue = show_continue
         self.control = ft.Container(
             on_click=self._tap,
             on_long_press=self._long,
             border_radius=tokens.RADII["card"],
-            padding=6,
+            padding=_CARD_PADDING,
             ink=True,
             key=f"book-{model.bid}",
         )
         self.rebuild()
+
+    def title_size(self) -> float:
+        """The title's text size: 12 at most, shrunk as far as 7 so it fits its lines without a third one."""
+        return fit_title_size(self.model.title, self.card_w - 2 * _CARD_PADDING, max_lines=self.title_lines)
 
     def rebuild(self) -> None:
         model = self.model
@@ -193,7 +208,7 @@ class BookCard(_CardBase):
             stack.append(ft.ProgressBar(value=max(0.0, min(1.0, model.progress)), bar_height=3, left=0, right=0,
                                         bottom=0, color=resolve_color("#6c63ff"), bgcolor=tinted("#000000", 0.25),
                                         semantics_label="Translation progress", key="bar"))
-        if model.has_continue:
+        if model.has_continue and self.show_continue:
             stack.append(ft.Container(
                 content=ft.FilledIconButton(icon=ft.Icons.PLAY_ARROW, icon_size=16, tooltip="Continue reading",
                                             on_click=self._continue, width=28, height=28,
@@ -207,7 +222,7 @@ class BookCard(_CardBase):
         rows: list[ft.Control] = [
             ft.Stack(stack, expand=True, key="cover-stack"),
             ft.Text(model.title, max_lines=self.title_lines, overflow=ft.TextOverflow.ELLIPSIS,
-                    theme_style=ft.TextThemeStyle.LABEL_LARGE, tooltip=model.tooltip or model.full_title,
+                    size=self.title_size(), weight=ft.FontWeight.W_600, tooltip=model.tooltip or model.full_title,
                     key="title"),
             _info_row(model, self.dark, show_language=self.show_language),
         ]
@@ -252,7 +267,7 @@ class BookListRow(_CardBase):
                                                             size=18), right=2, top=2, key="check"))
         lines: list[ft.Control] = [
             ft.Text(model.title, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
-                    theme_style=ft.TextThemeStyle.BODY_MEDIUM, weight=ft.FontWeight.W_600, key="title"),
+                    size=12, weight=ft.FontWeight.W_600, key="title"),
             _info_row(model, self.dark, show_language=self.show_language),
         ]
         extras: list[ft.Control] = []

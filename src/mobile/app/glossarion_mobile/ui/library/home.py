@@ -55,6 +55,7 @@ from glossarion_mobile.ui.library.models import (
     effective_density,
     next_page_end,
     page_size_value,
+    shows_continue,
     visible_books,
     wants_next_page,
 )
@@ -430,7 +431,8 @@ class LibraryScreen(Screen):
         density = effective_density(self.density, self.ctx.text_scale)
         card_w, cover_h = density_preset(density, self.service.size_presets())
         return BookCard(model, card_w=card_w, cover_h=cover_h,
-                        title_lines=3 if self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE else 2, **common)
+                        title_lines=3 if self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE else 2,
+                        show_continue=shows_continue(density), **common)
 
     def _update_card(self, key: str) -> None:
         card = self.cards.get(key)
