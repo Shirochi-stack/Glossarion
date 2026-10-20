@@ -14,7 +14,8 @@ Outputs (all from the chibi src/Halgakos.png unless noted):
 and, for the native extension's Android notifications (owner #22; the drawables replace the old page icon):
 - res/drawable-{mdpi..xxxhdpi}/glossarion_native_ic_notification.png  the small (status-bar) icon: the
   chibi as a white-on-transparent silhouette, its dark line art cut out (Android tints it; only alpha counts)
-- res/drawable-nodpi/glossarion_native_ic_large.png  the large icon: the colour avatar
+- res/drawable-nodpi/glossarion_native_ic_large.png  the large icon: the whole colour chibi (as in
+  src/Halgakos.ico) on a transparent square
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ ANDROID_RES = (MOBILE / "extensions" / "flet_glossarion_native" / "src" / "flutt
                / "android" / "src" / "main" / "res")
 NOTIFICATION_ICON = "glossarion_native_ic_notification.png"
 NOTIFICATION_LARGE = "glossarion_native_ic_large.png"
+#: the large icon: a transparent square (px) with the whole chibi at this fraction of its height
+NOTIFICATION_LARGE_SIZE, NOTIFICATION_LARGE_HEIGHT = 256, 0.96
 #: the small icon is 24 dp; px per density bucket
 NOTIFICATION_SIZES = {"mdpi": 24, "hdpi": 36, "xhdpi": 48, "xxhdpi": 72, "xxxhdpi": 96}
 #: of the small icon's square: the figure's height, and the luminance below which the line art is cut out
@@ -108,7 +111,9 @@ def build_android(assets: dict) -> dict:
     chibi = _trimmed(CHIBI)
     out = {f"drawable-{bucket}/{NOTIFICATION_ICON}": _notification_icon(chibi, size)
            for bucket, size in NOTIFICATION_SIZES.items()}
-    out[f"drawable-nodpi/{NOTIFICATION_LARGE}"] = assets["halgakos_avatar.png"]
+    # the whole chibi, like the desktop's Halgakos.ico (owner 2026-10-21: the head crop looked cut off)
+    out[f"drawable-nodpi/{NOTIFICATION_LARGE}"] = _on_square(chibi, NOTIFICATION_LARGE_SIZE, NOTIFICATION_LARGE_HEIGHT,
+                                                             (0, 0, 0, 0))
     return out
 
 

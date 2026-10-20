@@ -57,6 +57,16 @@ def test_in_app_mascot_assets_are_transparent_and_exist():
     assert 0 < es.PLACEHOLDER_OPACITY < 0.5
 
 
+def test_notification_large_icon_is_the_whole_chibi():
+    """owner 2026-10-21: the notification's colour icon is the whole chibi (like src/Halgakos.ico), not
+    the head crop."""
+    large = PIL.open(MOBILE / "extensions" / "flet_glossarion_native" / "src" / "flutter" / "flet_glossarion_native"
+                     / "android" / "src" / "main" / "res" / "drawable-nodpi" / "glossarion_native_ic_large.png")
+    assert large.size == (256, 256) and large.convert("RGBA").getpixel((0, 0))[3] == 0
+    aspect = _figure_aspect(large)
+    assert abs(aspect - _figure_aspect(PIL.open(SRC / "Halgakos.png"))) < 0.03, aspect
+
+
 def test_no_ui_code_uses_the_launcher_icon_as_art():
     ui = MOBILE / "app" / "glossarion_mobile" / "ui"
     offenders = [str(p.relative_to(MOBILE)) for p in ui.rglob("*.py")
