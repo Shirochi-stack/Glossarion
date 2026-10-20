@@ -82,13 +82,25 @@ def gpu_offer(platform: Optional[str] = None, machine: Optional[str] = None) -> 
     elsewhere (x86_64 Android, desktop)."""
     name = (platform or os.environ.get("GLOSSARION_PLATFORM") or "").strip().lower()
     if name == "ios":
-        return "Metal"
+        # ggml-metal calls an iOS 15 API without an availability check: no GPU option on iOS 13 / 14
+        return "Metal" if ios_major() >= 15 else None
     if name == "android":
         import platform as _platform
 
         arch = (machine if machine is not None else _platform.machine()).strip().lower()
         return "OpenCL" if arch in ("aarch64", "arm64", "arm64-v8a") else None
     return None
+
+
+def ios_major() -> int:
+    """The running iOS major version (``platform.ios_ver``, Python 3.13+); 99 when unknown (off iOS)."""
+    import platform as _platform
+
+    try:
+        release = _platform.ios_ver().release  # type: ignore[attr-defined]
+        return int(str(release).split(".")[0])
+    except Exception:
+        return 99
 
 
 def gpu_state() -> dict:

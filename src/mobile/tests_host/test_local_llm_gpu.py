@@ -34,8 +34,11 @@ def _gpu_service(tmp_path, engine=None, gpu_on=True, backend="OpenCL", **kwargs)
 
 # ---- which devices get the option -----------------------------------------------------------------------
 
-def test_gpu_is_offered_on_ios_and_android_arm64_only():
+def test_gpu_is_offered_on_ios_and_android_arm64_only(monkeypatch):
+    monkeypatch.setattr(eng, "ios_major", lambda: 17)
     assert eng.gpu_offer("ios") == "Metal"
+    monkeypatch.setattr(eng, "ios_major", lambda: 14)       # ggml-metal needs an iOS 15 API
+    assert eng.gpu_offer("ios") is None
     assert eng.gpu_offer("android", "aarch64") == "OpenCL"
     assert eng.gpu_offer("android", "x86_64") is None        # the emulator / Chromebooks: no GPU backend
     assert eng.gpu_offer("desktop", "AMD64") is None and eng.gpu_offer("", "aarch64") is None

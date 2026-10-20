@@ -183,13 +183,17 @@ libmtmd (the image encoder of vision models).
     slower than the CPU), so with the GPU on, "Add GPU-friendly presets (Q4_0)" appends
     `presets.GPU_PRESETS` (unsloth's `Qwen3.5-{0.8B,2B,4B,9B}-Q4_0.gguf`: 507 MB / 1215 MB / 2583 MB /
     5379 MB). Those files keep a few tensors (e.g. the output) in higher quants, which run unoptimized.
-    Vulkan is not built (often slower than the CPU on Adreno). x86_64 has no GPU backend.
+    Vulkan is not built (often slower than the CPU on Adreno). x86_64 has no GPU backend. Size:
+    `libggml-opencl.so` is 2.0 MB (stripped, kernels embedded), so the arm64 APK grows by about 2 MB.
   - iOS: `GGML_METAL=ON` + `GGML_METAL_EMBED_LIBRARY=ON` (the shader source is embedded and compiled on
     the device, so the iOS cross build needs no Metal toolchain); `libggml-metal.dylib` is linked into
     libggml, but the patched registry no longer registers Metal at start, so with the GPU off no Metal
     code runs (no device setup, no shader compilation); the loader registers it on demand. iOS keeps
     the default quants (UD-Q4_K_XL / Q4_K_M): Metal runs K-quants well. The simulator may have no usable
-    Metal device: the GPU then falls back like any other failure.
+    Metal device: the GPU then falls back like any other failure. Size: `libggml-metal.dylib` is
+    0.85 MB per slice (links Metal, MetalKit, Foundation; newer Metal APIs are weak-linked, so the iOS 13
+    floor still loads it). One method (`waitUntilSignaledValue:timeoutMS:`, iOS 15) is called without an
+    availability check, so the option is hidden on iOS 13 / 14 (`engine.gpu_offer`).
   - Checks: `wheels.py verify-native` / `verify-site-packages` expect `libggml-opencl` in the arm64 set
     (NEEDED `libOpenCL.so` allowed for it alone, its `cl*` imports exempt from the NDK stub check, no
     library may need it) and `libggml-metal` in every iOS slice (it alone may link Metal, MetalKit,

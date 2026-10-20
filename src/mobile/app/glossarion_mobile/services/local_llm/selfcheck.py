@@ -94,7 +94,7 @@ def gpu_backend_check() -> dict:
         raise AssertionError("this llama-cpp-python build has no GPU loader (mobile.patch 8.)")
     backend = name_of()
     offered = eng.gpu_offer()
-    if offered != backend:
+    if offered is not None and offered != backend:  # (iOS 13 / 14: Metal shipped, not offered)
         raise AssertionError(f"the app offers GPU backend {offered!r}, the engine build ships {backend!r}")
     requested = bool(getattr(ext, "GPU_STATE", {}))
     registered = []
