@@ -1558,9 +1558,12 @@ def test_token_budgets_step_by_256(key, start, expected):
     from glossarion_mobile.ui.settings.tiles import TOKEN_STEP, NumberTile
 
     assert TOKEN_STEP == 256
-    tile = object.__new__(NumberTile)
+    class IntTile(NumberTile):
+        number_kind = "int"
+
+    tile = object.__new__(IntTile)
     stored = {"value": start}
-    tile.key, tile.number_kind = key, "int"
+    tile.key = key
     tile.value = lambda: stored["value"]
     tile.bounds = lambda: (1, None)
     tile.apply = lambda value: stored.update(value=value) or True
