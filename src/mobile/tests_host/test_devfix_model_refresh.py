@@ -266,7 +266,9 @@ def test_closing_the_sheet_mid_poll_stops_the_border_and_reports_by_snackbar(pol
             assert not sheet.search_border.active
             assert await uf._wait(lambda: not sheet.search_border.spinning, 5), "the border task outlived the sheet"
             polls.gate.set()
-            assert await uf._wait(lambda: any("2 models found" in n for n in notes), 10), notes
+            assert await uf._wait(lambda: not sheet.search_border.spinning and polls.gate.is_set(), 10)
+            await asyncio.sleep(0.2)
+            assert not any("2 models found" in n for n in notes), notes  # a found-N line is no snackbar
             assert not sheet.search_border.active
         finally:
             polls.gate.set()

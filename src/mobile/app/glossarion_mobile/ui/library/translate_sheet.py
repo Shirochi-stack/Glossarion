@@ -66,9 +66,6 @@ async def confirm_output_root(ctx: Any, books: Sequence[Mapping[str, Any]]) -> b
         try:
             adopted = await ctx.io(adopt, rows)
             rows = list(adopted.get("books") or rows)
-            if adopted.get("moved"):
-                count = len(adopted["moved"])
-                ctx.say(f"Moved {count} book folder{'s' if count != 1 else ''} into the Library's output folder")
         except Exception:
             log.debug("moving the workspaces into the output folder failed", exc_info=True)
     try:
@@ -278,7 +275,6 @@ class TranslateSheet:
         self.started_job = job_id
         self.close()
         self.ctx.haptic("medium_impact")
-        self.ctx.say(f"Translating · {spec.title}", "Jobs", lambda: self.ctx.go("jobs"))
         return job_id
 
     async def _on_start(self, e: Any = None) -> Optional[str]:

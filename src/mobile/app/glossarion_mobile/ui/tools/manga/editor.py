@@ -1890,7 +1890,6 @@ class EditorTab(MangaTab):
         if not path:
             self.ctx.say("Nothing to export yet: recognize or translate a page first")
             return None
-        self.ctx.say(f"Exported OCR for {result.get('pages', 0)} pages")
         export_sheet(self.ctx, path)
         return path
 

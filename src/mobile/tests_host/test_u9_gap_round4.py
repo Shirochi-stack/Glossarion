@@ -218,7 +218,7 @@ def test_chapters_tab_selects_a_requested_range():
                                  _render_list=lambda rows, window_start=0: None, _sync_selection=lambda: None,
                                  ctx=types.SimpleNamespace(say=said.append))
     assert ChaptersTab.select_range(fake, 2, 3) == 2
-    assert fake.selecting and fake.selected == {"b", "c"} and said[-1].startswith("Chapters 2–3: 2 selected")
+    assert fake.selecting and fake.selected == {"b", "c"} and said == []  # the selection bar shows it
     assert ChaptersTab.select_range(fake, 40, 50) == 0 and said[-1] == "No chapter 40–50 in this book's progress"
 
 

@@ -1299,7 +1299,6 @@ class ChatView:
             await self.env.run_io(lambda: jobs.refine_at_gate(job_id, path))
             info = await self.env.run_io(lambda: glossary_preview(path))
             ok = True
-            self.notify("✨ Glossary refined: review it, then choose Edit, Yes or No")
         except Exception as exc:
             log.info("glossary refinement at the gate failed: %s", exc)
             self.notify(f"Could not refine the glossary: {exc}")
@@ -1316,8 +1315,6 @@ class ChatView:
         if self.bound and self.env.chats.meta(self.cid).get("auto_accept_glossary") is False:
             self.env.chats.set_meta(self.cid, "auto_accept_glossary", None)  # this chat's "ask" gives way too
         self._answer_glossary(True)
-        self.notify("Generated glossaries are accepted automatically from now on", action_label="Chat settings",
-                    on_action=lambda: self.open_chat_settings("global"))
 
     # ---- live updates ----------------------------------------------------------------------
 
@@ -2753,9 +2750,7 @@ class ChatView:
             return
         if job_id is None:
             self.notify("No translated output folder for this chat yet")
-        else:
-            label = "PDF" if kind == "compile_pdf" else "EPUB"
-            # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
+        # no "Compiling … · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
 
     def _resume_last(self, run_config: Optional[dict] = None, run_key: Optional[str] = None) -> None:
         """Resume / Retry failed: resubmit the chat's last run (same run root -> resumes from progress);
@@ -2807,7 +2802,6 @@ class ChatView:
                 return
             editor = GlossaryEditorView(path, info.get("text") or "", has_bom=bool(info.get("bom")), mono=self.env.mono,
                                         on_close=lambda: self._close_overlay(editor.view),
-                                        on_saved=lambda p: self.notify(f"Saved edited glossary: {os.path.basename(p)}"),
                                         on_table=(lambda: table(path)) if table is not None else None)
             if self.env.push_overlay is not None:
                 self.env.push_overlay(editor.view)
@@ -2951,7 +2945,7 @@ class ChatView:
         record = self.composer.attachment
         if target is None or self.cid != cid or not record or not _same_path(record.get("path"), path):
             return None
-        self.attach_library_book(target, note="Continues the Library book")
+        self.attach_library_book(target)
         return target
 
     def _pending_library_lookup(self, record: Optional[dict]) -> Any:
@@ -3021,7 +3015,6 @@ class ChatView:
             self.notify(NO_FILES_TEXT.format(folder=os.path.basename(str(folder))))
             return None
         self.set_batch(files, folder=str(folder))
-        self.notify(f"📁 Found {len(files)} supported files in: {os.path.basename(str(folder))}")
         return str(folder)
 
     # ---- BatchPlanCard (UI_SPEC §2.12.5) ------------------------------------------------------------
@@ -3626,8 +3619,6 @@ class ChatView:
 
         text = await self.env.run_io(build)
         self._spawn_copy(text)
-        label = dict((f, l) for f, l, _k in COPY_FORMATS).get(fmt, fmt)
-        self.notify(f"Copied as {label}")
         return text
 
     def _user_actions(self, bubble: UserBubble) -> ActionSheet:
@@ -3743,11 +3734,10 @@ class ChatView:
         picker.show(self.page)
         return picker
 
-    def attach_library_book(self, target: Any, note: str = "") -> bool:
+    def attach_library_book(self, target: Any) -> bool:
         """Attach a Library book's raw file to this chat and remember it as the chat's Library book
         (sidecar meta ``library_attachment`` ``{bid, path}``: the next Send defaults to "Save to:
-        Library"); a snackbar with Remove (``note``: its text before the book's title, for an attached
-        file that turned out to be a Library book)."""
+        Library"). Silent (owner 2026-10-20): the attachment chip shows it and its ✕ removes it."""
         source = str(getattr(target, "source", "") or "")
         if not source:
             return False
@@ -3759,13 +3749,6 @@ class ChatView:
             if self.bound:
                 self.env.chats.set_meta(self.cid, LIBRARY_ATTACHMENT_META, previous)
             return False
-        if note:
-            # an attached file that is a Library book continues it silently (owner 2026-10-20: no
-            # "Continues the Library book" snackbar; the attachment chip's ✕ removes it)
-            pass
-        else:
-            self.notify(f"Attached {os.path.basename(source)} from the Library", action_label="Remove",
-                        on_action=self.composer._remove_attachment)
         return True
 
     async def attach_library_query(self, query: str) -> Optional[str]:
@@ -3865,13 +3848,11 @@ class ChatView:
             match = next((p for p in self._profiles() if str(p).casefold() == arg.casefold()), None) if arg else None
             if match is not None and self.env is not None:
                 self._on_model_sheet_select("profile", match, False)
-                self.notify(f"Prompt profile: {match}")
             else:
                 self.open_model_sheet("profile")
         elif name == "lang":
             if arg and self.env is not None:
                 self._on_model_sheet_select("language", arg, False)
-                self.notify(f"Target language: {arg}")
             else:
                 self.open_model_sheet("language")
         elif name == "policy":
@@ -3881,7 +3862,6 @@ class ChatView:
             else:
                 self.env.chats.set_override(self.cid, "glossary_override_mode", mode)
                 self.apply_settings_changed()
-                self.notify(f"Glossary policy: {arg.strip().lower()}")
         elif name == "scratch":
             self._on_new_scratch()
         elif name == "export":
@@ -4443,7 +4423,6 @@ class ChatView:
                 if self.state.current_chat.value != new_cid:
                     self.state.current_chat.set(new_cid)
                 self.load_chat(new_cid)
-            self.notify("Scratch chat saved")
 
         return self._spawn(go())
 
@@ -4562,11 +4541,10 @@ class ChatView:
             try:
                 result = hook(target, source)
                 if asyncio.iscoroutine(result):
-                    self._spawn(result)  # the hook's snackbar offers "Open book"
+                    self._spawn(result)
                     return
             except Exception:
                 log.exception("after-migrate hook failed")
-        self.notify("Added to the Library")
 
     async def _share_workspace(self, folder: str) -> None:
         def pick() -> list:

@@ -168,8 +168,6 @@ class MapGlossariesSheet:
             return result
         self.result = dict(result or {})
         self.close()
-        count = len(self.result.get("mapping") or {})
-        self.ctx.say(f"📑 Saved glossary mapping for {count} EPUB(s)")
         if self.on_saved is not None:
             call_handler(self.on_saved, self.result)
         return self.result

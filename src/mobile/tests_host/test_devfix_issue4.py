@@ -384,9 +384,8 @@ def test_chat_book_joins_the_library_without_a_tap(iso, migrate_calls):
             assert registry.is_file() and any(_same(line.strip(), inbox_raw)
                                               for line in registry.read_text(encoding="utf-8").splitlines())
 
-            # ---- the snackbar said so, with "Open book" -----------------------------------------
-            added = [n for n in notes if n[0] == "Added to the Library"]
-            assert added and added[-1][1] == "Open book", notes
+            # ---- silently (owner 2026-10-20): no "Added to the Library · Open book" snackbar ---------
+            assert not [n for n in notes if n[0] == "Added to the Library"], notes
             library = app.library
             await library.refresh(quiet=True, reason="test")
             snap = library.snapshot
@@ -412,11 +411,6 @@ def test_chat_book_joins_the_library_without_a_tap(iso, migrate_calls):
             book_route = f"/library/book/{bid}"
             assert await _until(lambda: app.shell.current_route == book_route, 15), app.shell.current_route
             assert getattr(app.shell.top_screen, "bid", None) == bid
-            # the snackbar's "Open book" goes to the same Book page
-            await driver.back()
-            await _until(lambda: app.shell.current_route != book_route, 5)
-            await tester._dispatch(added[-1][3], "action")  # the snackbar's "Open book" tap
-            assert await _until(lambda: app.shell.current_route == book_route, 15), app.shell.current_route
 
             # ---- Library: the Completed shelf -> the book -> Chapters 12/12 -------------------------
             await flows.library_book_chapters(driver)
@@ -595,8 +589,7 @@ def test_name_clash_reuses_the_library_book(iso, migrate_calls):
             assert run3.state == "done", run3.state
             assert await _until(lambda: chats.attachment_folders(cid3) == [], 30), chats.attachment_folders(cid3)
             assert not [n for n in notes if n[0].startswith("A Library book named")], [n[:2] for n in notes]
-            assert await _until(lambda: len([n for n in notes if n[0] == "Added to the Library"]) >= 3, 10), \
-                [n[:2] for n in notes]
+            assert not [n for n in notes if n[0] == "Added to the Library"], [n[:2] for n in notes]  # silent
             assert (target / "source_epub.txt").is_file()
             assert _same((target / "source_epub.txt").read_text(encoding="utf-8").strip(), stranger)
             last = migrate_calls[-1]
@@ -824,7 +817,6 @@ def test_books_left_by_the_previous_version_join_on_the_next_launch(iso, migrate
             assert _same(mine[0]["output_directory"], out_root) and mine[0]["active_job"] is None, mine
             folders = {m[4] for m in chats.messages(seen["cid"]) if m[0] == "assistant" and len(m) > 4 and m[4]}
             assert any(_same(f, target) for f in folders) and not any("Attachments" in Path(f).parts for f in folders)
-            await driver.wait(contains="Added to the Library", timeout=15)
             library = app.library
             await library.refresh(quiet=True, reason="test")
             assert [b for b in library.snapshot.completed if _same(b.get("output_folder"), target)], \

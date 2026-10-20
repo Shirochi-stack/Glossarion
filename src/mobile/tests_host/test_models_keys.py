@@ -1357,10 +1357,10 @@ def test_keys_screen_pools_cards_bulk_actions_and_import_export(tmp_path):
         assert await screen.test_all() == [] and notes[-1][0] == "No enabled keys to test"
         keys.set_keys_enabled("main", [0], True)
         results = await screen.test_all()
-        assert notes[-1][0].startswith("Test complete:") and [i for i, _r in results] == [0]
+        assert not [n for n in notes if n[0].startswith("Test complete:")] and [i for i, _r in results] == [0]
         keys.set_keys_enabled("main", range(len(main_keys)), True)
         results = await screen.test_all()
-        assert notes[-1][0].startswith("Test complete:") and len(results) == 2
+        assert not [n for n in notes if n[0].startswith("Test complete:")] and len(results) == 2
         # export: plain-text warning, then the FileBridge option; the temp file is removed
         confirm = screen.confirm_export()
         assert "plain text" in confirm.dialog.content.content.controls[0].value
@@ -1570,7 +1570,7 @@ def test_local_ai_and_refusal_screens(tmp_path):
         txt = tmp_path / "patterns.txt"
         txt.write_text("New One\n# skip\nas an ai\n", encoding="utf-8")
         assert await refusal.load_from_file(str(txt)) == (1, 1)
-        assert notes[-1][0] == "✅ Loaded 1 new, 1 skipped"
+        assert not [n for n in notes if n[0].startswith("✅ Loaded")]  # silent (owner 2026-10-20)
         refusal.limit_field.value = "-5"
         assert refusal._on_limit() == 1000
         refusal.disable_switch.on_change(types.SimpleNamespace(control=types.SimpleNamespace(value=False)))

@@ -612,15 +612,14 @@ def test_add_key_closes_confirms_once_and_refuses_a_duplicate(tmp_path, size):
         editor.key_field.set_value("sk-dup-key-1234567890", notify=False)
         editor.model_picker.set_value("gpt-6")
         _tap(editor.save_button)
-        # one key, the sheet closed, the confirmation names the key and the pool and stays on screen
+        # one key, the sheet closed; no confirmation snackbar (owner 2026-10-20): the pool row shows the key
         assert keys.count("main") == 1
         assert not editor.sheet.open and editor.closed
-        assert [_text(b) for b in bars] == ["Added key sk-…7890 · gpt-6 to Translation Keys"]
-        assert _open_dialogs(page) == [bars[0]]
+        assert bars == [] and _open_dialogs(page) == []  # silent (owner 2026-10-20): the row shows the key
         assert editor.save_button.disabled and editor.close_button.disabled
         for _ in range(19):  # the owner's repeated taps while the sheet animates away
             _tap(editor.save_button)
-        assert keys.count("main") == 1 and len(bars) == 1
+        assert keys.count("main") == 1 and bars == []
         # the same key again: refused with a message, the editor stays open and usable
         again = screen.open_editor(None)
         again.key_field.set_value("sk-dup-key-1234567890", notify=False)
@@ -628,15 +627,15 @@ def test_add_key_closes_confirms_once_and_refuses_a_duplicate(tmp_path, size):
         _tap(again.save_button)
         assert keys.count("main") == 1 and again.sheet.open and not again.closed
         assert again.error_text.visible and "already in Translation Keys (#1: sk-…7890 · gpt-6)" in again.error_text.value
-        assert not again.save_button.disabled and bars[0].open
+        assert not again.save_button.disabled and bars == []
         # another model is another key
         again.model_picker.set_value("gpt-6-mini")
         _tap(again.save_button)
         assert keys.count("main") == 2 and not again.sheet.open
-        # Edit key saves and says so after closing
+        # Edit key saves and closes, silently
         edit = screen.open_editor(0)
         _tap(edit.save_button)
-        assert not edit.sheet.open and _text(bars[-1]) == "Saved key sk-…7890 · gpt-6" and bars[-1].open
+        assert not edit.sheet.open and bars == []
         screen.dispose()
         store._saver.close()
 
@@ -769,6 +768,6 @@ def test_qa_custom_sheet_save_closes_and_keeps_its_snackbar(tmp_path):
                                     say=lambda m, *a: notify(m), push=lambda *c: None)
         sheet = CustomModeSheet(ctx).show(page)
         sheet.save()
-        assert not sheet.sheet.open and bars and bars[0].open
+        assert not sheet.sheet.open and not bars  # silent (owner 2026-10-20)
 
     asyncio.run(scenario())

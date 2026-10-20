@@ -290,7 +290,6 @@ class ConverterScreen(Screen):
         self.active_job = snapshot(job_id) if callable(snapshot) else None
         self.ctx.remember_source("tools.convert", spec.title)
         self.ctx.haptic("medium_impact")
-        self.ctx.say(f"{label} · {spec.title}", "Jobs", lambda: self.ctx.go("jobs.detail", {"jid": job_id}))
         self._render_actions()
         return job_id
 
@@ -468,7 +467,6 @@ class ConverterScreen(Screen):
         service = self.ctx.service
         if service is not None and hasattr(service, "mark_dirty"):
             service.mark_dirty()
-        self.ctx.say(f"Added to Library: {added.name}", "Library", lambda: self.ctx.go("library"))
         return added
 
     # ---- options ----------------------------------------------------------------------------------------
@@ -540,7 +538,6 @@ class ConverterScreen(Screen):
             return None
         self.ctx.set_cfg("epub_css_override_path", stored)
         self._refresh_css_fonts()
-        self.ctx.say(f"CSS override: {os.path.basename(stored)}")
         return stored
 
     async def _on_load_css(self, e: Any = None) -> Optional[str]:
@@ -572,7 +569,8 @@ class ConverterScreen(Screen):
         folder, copied, total = await self.ctx.io(run)
         self.state["fonts_dir"], self.state["font_count"] = folder, total
         self._refresh_css_fonts()
-        self.ctx.say(f"✅ {copied} loaded" if copied else "No font files found")
+        if not copied:
+            self.ctx.say("No font files found")
         return copied
 
     async def _on_load_fonts(self, e: Any = None) -> int:

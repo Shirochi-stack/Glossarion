@@ -314,7 +314,6 @@ async def open_library(run: Run) -> None:
 async def import_txt(run: Run, name: str) -> dict:
     """Library › Import EPUB (the FAB) with ``name`` picked: the Library's own row for it."""
     await run.driver.pick_file(name, lambda: run.driver.tap(key="lib-fab"))
-    await run.driver.wait(contains=f"Added to Library: {name}", timeout=60)
     stem = os.path.splitext(name)[0]
     books = await run.until(lambda: run.books() if stem in run.books() else None, 60)
     assert books, f"{name} did not reach the Library: {list(run.books())}"

@@ -441,13 +441,8 @@ class JobDetailScreen(Screen):
             return
         if snap.state is JobState.QUEUED:
             self.service.cancel_queued(snap.id)
-            self._notify("Job cancelled")
             return
-        mode = self.service.request_stop(snap.id)
-        if mode == "graceful":
-            self._notify("Stopping after the current request · tap again to force stop")
-        elif mode in ("force", "immediate"):
-            self._notify("Force stopping…")
+        self.service.request_stop(snap.id)
 
     def open_review(self) -> Any:
         """Review glossary: the approval sheet (✏️ Edit · ✓ Yes · ■ No) for the job's pending question."""
@@ -463,8 +458,8 @@ class JobDetailScreen(Screen):
 
         def answer(accepted: bool) -> None:
             self.service.answer(question_id, bool(accepted))
-            self._notify("Translating with the reviewed glossary" if accepted else
-                         "Translation stopped: the glossary was not accepted")
+            if not accepted:
+                self._notify("Translation stopped: the glossary was not accepted")
 
         def edit(file_path: str) -> None:
             if self.review_sheet is not None:
@@ -493,7 +488,6 @@ class JobDetailScreen(Screen):
         if new_id is None:
             self._notify("This job can no longer be resumed")
             return
-        self._notify("Resumed · continues from the saved progress")
         if self.navigate is not None:
             self.navigate("jobs.detail", {"jid": new_id})
 
@@ -609,10 +603,8 @@ def export_sheet(files: Any, path: str, *, page: Any, notify: Optional[Callable[
                 return
             if getattr(result, "error", None):
                 say(f"Save failed: {result.error}")
-            elif getattr(result, "ok", False):
-                say("Saved")
-        elif option_id == "downloads":
-            say("Saved to Downloads/Glossarion" if result else "Saving to Downloads failed")
+        elif option_id == "downloads" and not result:
+            say("Saving to Downloads failed")
         elif option_id == "files" and not result:
             say("Could not open the Files app")
 

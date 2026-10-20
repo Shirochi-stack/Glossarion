@@ -157,7 +157,7 @@ async def import_desktop_config(d: Any, name: str = CONFIG_NAME) -> None:
 
 async def chat_translate_and_migrate(d: Any, epub: str = EPUB_NAME, timeout: float = 900.0) -> None:
     """A new chat, ＋ › Files with the EPUB, Send; the job card reaches Done; the book moves into the
-    Library by itself ("Added to the Library"; there is no Migrate step)."""
+    Library by itself (silently: the job card's "Open in Library"; there is no Migrate step)."""
     await go_home(d)
     await d.tap(tooltip="New chat")
     await d.tap(tooltip=ATTACH_TOOLTIP)
@@ -172,7 +172,7 @@ async def chat_translate_and_migrate(d: Any, epub: str = EPUB_NAME, timeout: flo
         await d.tap(text="Not now")
     index = await d.wait_any({"text": "Done"}, {"text": "Failed"}, {"text": "Stopped"}, timeout=timeout)
     assert index == 0, "the translation job did not finish"
-    await d.wait(contains="Added to the Library", timeout=60)
+    await d.wait(text="Open in Library", timeout=60)  # no "Added to the Library" snackbar (owner 2026-10-20)
 
 
 async def library_book_chapters(d: Any, title: str = EPUB_TITLE) -> None:

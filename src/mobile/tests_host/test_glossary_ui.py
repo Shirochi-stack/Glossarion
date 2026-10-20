@@ -479,7 +479,7 @@ def test_entry_sheet_save_updates_outputs_byte_identical_to_the_shared_document(
         ctx.extras["answers"] = [True]
         report = await editor.save()
         assert report == {"saved": True, "files_updated": 1, "replacements": 1}
-        assert ctx.notes[-1] == "Glossary saved successfully · 1 output file(s) updated"
+        assert not [n for n in ctx.notes if str(n).startswith("Glossary saved")]  # silent (owner 2026-10-20)
         assert (iso.output / "Book" / "response_001_ch1.html").read_text(encoding="utf-8") == "<p>Lunaria met Kai.</p>"
         assert not editor.doc.dirty and editor.save_button.badge is None
         # ＋ Entry: a new row (undoable), saved like an edit
@@ -556,7 +556,7 @@ def test_delete_backups_restore_filter_and_trim_tools(iso):
         report = await editor.delete_rows([editor.specs[3]])
         assert ctx.extras["asked"][-1] == ("ask", "Confirm Delete", "Delete 1 selected entries?")
         assert report.message == "Deleted 1 entries" and doc_count(editor.doc) == 3 and len(editor.specs) == 3
-        assert ctx.notes[-1] == "Deleted 1 entries"
+        assert "Deleted 1 entries" not in ctx.notes  # silent (owner 2026-10-20)
         backups = await editor.open_backups()
         assert backups.backups and backups.backups[0]["name"].startswith("Book_glossary_before_delete_1_")
         ctx.extras["answers"] = [True]
@@ -617,7 +617,7 @@ def test_swipe_undo_reload_rederives_the_view_and_info_boxes_keep_edits_unsaved(
         assert (message, label) == ("Deleted 1 entries", "Undo") and len(editor.doc._undo_stack) == 0
         assert await undo() is True
         assert doc_count(editor.doc) == 4 and "루나" in Path(path).read_text(encoding="utf-8")
-        assert names(editor.visible) == ["Luna", "Kai"] and said[-1][0] == "Entry restored" and not editor.dirty
+        assert names(editor.visible) == ["Luna", "Kai"] and said[-1][0] == "Deleted 1 entries" and not editor.dirty
         # the Undo of a stale snapshot is refused: the glossary was edited after that delete
         await editor.swipe_delete(editor.visible[1])
         undo = said[-1][2]
@@ -893,7 +893,7 @@ def test_profile_bar_drives_the_shared_row(iso):
         config["manual_glossary_prompt3"] = "Edited prompt"
         bar.on_prompt_changed()
         assert config["glossary_prompt_profiles"]["balanced_full"][name] == "Edited prompt"
-        assert await bar.save("Mine") is None and ctx.notes[-1] == "Saved profile “Mine”"
+        assert await bar.save("Mine") is None and "Saved profile “Mine”" not in ctx.notes  # silent (owner 2026-10-20)
         assert config["glossary_prompt_profiles"]["balanced_full"] == {ON_DEVICE: on_device, "Mine": "Edited prompt"}
         bar.select("Default")
         assert config["manual_glossary_prompt3"] == "Base prompt" and config["active_glossary_prompt_profiles"] == {}
@@ -992,7 +992,8 @@ def test_unified_rebuild_warns_while_a_run_is_busy_and_is_disabled_until_it_ends
         await asyncio.sleep(0.05)
         assert not screen.rebuild_button.disabled and "finished" in screen.status.value
         jobs._busy = False
-        assert await screen.rebuild() == "job2" and ctx.notes[-1].startswith("📚 Unified glossary: Rebuild Now")
+        assert await screen.rebuild() == "job2"
+        assert not [n for n in ctx.notes if n.startswith("📚 Unified glossary: Rebuild Now")]  # silent (owner 2026-10-20)
         assert BUSY_WARNING not in ctx.notes[1:]
         screen.dispose()
 
@@ -1321,7 +1322,7 @@ def test_feature_routes_hooks_continue_bridge_and_glossary_files(iso):
         assert await feature.delete_glossary_files([epub]) == ["Book/Book_glossary.csv"]
         assert feature.extras["asked"][-1] == ("ask", "Delete Glossary",
                                                "Delete the following files?\n\n[Book]\n  Book_glossary.csv")
-        assert notes[-1] == "🗑️ Deleted (1 files backed up)"
+        assert not [n for n in notes if str(n).startswith("🗑️ Deleted")]  # silent (owner 2026-10-20)
         service.fake_files.plan = []
         feature.extras["answers"] = [True]
         assert await feature.delete_glossary_files([epub]) == []
@@ -1530,10 +1531,10 @@ def test_add_to_glossary_over_a_tablet_full_screen_view_uses_the_entry_sheet(iso
         sheet.inputs["translated_name"].value = "New Word"
         sheet.save()
         for _ in range(250):
-            if notes:
+            if "New Word" in Path(glossary).read_text(encoding="utf-8-sig"):
                 break
             await asyncio.sleep(0.02)
-        assert notes == ["Added to Book_glossary.csv"]
+        assert notes == []  # silent (owner 2026-10-20)
         saved = service.open_document(glossary)
         names = [e.get("translated_name") for e in saved.current_glossary_data]
         assert sorted(names) == ["Kai", "Luna", "Mana", "New Word", "Sword"]  # its section keeps the type order

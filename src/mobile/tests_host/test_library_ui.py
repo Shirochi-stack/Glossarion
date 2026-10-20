@@ -752,7 +752,7 @@ def test_library_home_shelves_selection_and_delete_levels(tmp_path):
         view.field.value = "delete"
         await view._on_delete()
         assert FakeShelf.calls[-1] == ("execute_delete", [beta["output_folder"]]) and ctx.overlays == []
-        assert ctx.notes[-1] == "Deleted 1 of 1 items."
+        assert "Deleted 1 of 1 items." not in ctx.notes  # only a partial delete is reported
         # Completed shelf, list view, filters persisted in config (sparse desktop keys)
         screen.set_shelf("completed")
         assert config["epub_library_tab"] == 1 and screen.fab.content == "Add translation"

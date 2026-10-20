@@ -199,5 +199,4 @@ class UnifiedGlossaryScreen(Screen):
         self.status.value = ("(Queued — the rebuild starts when the current run finishes)" if running else
                              "(Running in the background — progress appears in the job log)")
         self.ctx.push(self.status)
-        self.ctx.say("📚 Unified glossary: Rebuild Now started", "Jobs", lambda: self.ctx.go("jobs"))
         return self.job_id

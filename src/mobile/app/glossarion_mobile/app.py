@@ -975,7 +975,6 @@ class GlossarionApp:
         try:
             await self.clipboard.set(text)
             self.haptics.fire("light_impact")
-            self.notify("Copied")
         except Exception as exc:
             self.notify(f"Copy failed: {exc}")
 

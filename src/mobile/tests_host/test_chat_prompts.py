@@ -662,7 +662,7 @@ def test_chat_view_pickers_on_a_fresh_config(tmp_path, desktop_store_cls):
             assert model_sheet._profile_preview("Manga_JP") and model_sheet._profile_preview("Universal")
             assert len(model_sheet._profile_texts()) == 20
             view.run_slash("/profile manga_jp")
-            assert notes[-1] == "Prompt profile: Manga_JP"
+            assert not [n for n in notes if str(n).startswith("Prompt profile:")]  # silent (owner 2026-10-20)
         finally:
             feature.runs.detach()
             adapter.close()

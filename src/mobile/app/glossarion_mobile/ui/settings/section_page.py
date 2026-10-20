@@ -402,8 +402,8 @@ class SectionPage(Screen):
         wrote = await self.ctx.run_io(self.ctx.store.flush)
         if self.ctx.store.save_error:
             self.ctx.say(self.ctx.store.save_error)
-        else:
-            self.ctx.say("Settings saved" if wrote else "No unsaved changes")
+        elif not wrote:
+            self.ctx.say("No unsaved changes")
         return bool(wrote)
 
     def discard_changes(self) -> list[str]:
@@ -413,8 +413,8 @@ class SectionPage(Screen):
 
     def _on_discard(self, e: Any = None) -> None:
         changed = self.discard_changes()
-        self.ctx.say(f"Discarded {len(changed)} change{'s' if len(changed) != 1 else ''}" if changed
-                     else "Nothing changed since this page opened")
+        if not changed:
+            self.ctx.say("Nothing changed since this page opened")
 
     def reset_section(self) -> list[str]:
         removed = []
@@ -448,7 +448,7 @@ class SectionPage(Screen):
                   "mobile are kept. Use ⋯ Discard changes since opening to undo."),
             confirm_label="Reset",
             destructive=True,
-            on_confirm=lambda: self.ctx.say(f"Reset {len(self.reset_section())} settings"),
+            on_confirm=self.reset_section,
         )
         dialog.show(self.ctx.page)
         return dialog

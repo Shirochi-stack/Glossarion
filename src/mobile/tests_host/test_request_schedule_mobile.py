@@ -264,13 +264,13 @@ def test_keys_screen_schedule_entry_status_and_clear(tmp_path):
         off = rs.to_config(rs.DEEPSEEK_PEAK_SCHEDULE, enabled=False)
         assert [k.get("queue_schedule") for k in keys.keys("main")] == [off, off]
         assert not any(rs.key_queued_now(k, now) for k in keys.keys("main"))
-        assert notes[-1] == "Request Queue saved (off until enabled) for 2 key(s)"
+        assert not [n for n in notes if "Request Queue saved" in str(n)]  # silent (owner 2026-10-20)
         # switched on: ⏳ queue for both keys
         sheet = screen.open_schedule_sheet()
         assert sheet.kind == "queue" and not sheet.enabled and not sheet.suggested
         assert sheet.set_enabled(True) and sheet.save() is None
         assert [k.get("queue_schedule") for k in keys.keys("main")] == [DEEPSEEK, DEEPSEEK]
-        assert notes[-1] == "Request Queue saved for 2 key(s)"
+        assert not [n for n in notes if "Request Queue saved" in str(n)]  # silent (owner 2026-10-20)
         queued = rs.key_schedule_summary({"queue_schedule": DEEPSEEK}, now=now)[0]
         for card in screen.cards:  # "Passed" / "Active" give way to the schedule state, windows listed
             assert _find_text(card, lambda v: v == queued)
@@ -291,7 +291,7 @@ def test_keys_screen_schedule_entry_status_and_clear(tmp_path):
         assert sheet.kind == "disable" and sheet.schedule()[0] == rs.DEEPSEEK_PEAK_SCHEDULE
         assert sheet.clear() is None and not keys.keys("main")[0].get("disable_schedule")
         assert "queue_schedule" not in keys.keys("main")[0]
-        assert notes[-1] == "Schedule removed for 1 key(s)"
+        assert not [n for n in notes if "Schedule removed" in str(n)]  # silent (owner 2026-10-20)
         # Fallback keys: the same entry, without the queue behaviour (tried one by one)
         screen.clear_selection()
         screen.select_pool("fallback")
@@ -391,7 +391,7 @@ def test_model_sheet_request_queue_entry_saves_the_main_key_schedule(tmp_path):
         assert sheet.queue_row.visible and sheet.queue_item.checked
         assert sheet.queue_text.value == queue_summary(DEEPSEEK)  # windows in local time, like the desktop
         assert sheet.queue_text.value.startswith("⏳ Request Queue · ") and "Mon–Fri" in sheet.queue_text.value
-        assert notes[-1] == "⏳ Request Queue saved for the main key"
+        assert not [n for n in notes if "Request Queue saved" in str(n)]  # silent (owner 2026-10-20)
         # opened again on the saved schedule; 🧹 Clear turns it off ({} like the desktop)
         queue = sheet.open_request_queue()
         assert not queue.suggested and queue.clear() is None

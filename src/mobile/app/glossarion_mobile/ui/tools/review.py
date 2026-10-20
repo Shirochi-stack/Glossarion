@@ -674,7 +674,6 @@ class ReviewScreen(Screen):
             self.watch.watch(job_id)
             self._show_error(None)
             self._set_running(True, "Queued…")
-            self.ctx.say("Reviewing…", "Jobs", lambda: self.ctx.go("jobs.detail", {"jid": job_id}))
         return job_id
 
     async def retry(self, snap: Any) -> Optional[str]:
@@ -745,7 +744,6 @@ class ReviewScreen(Screen):
         except OSError as exc:
             self.ctx.say(f"❌ Failed to save review: {exc}")
             return False
-        self.ctx.say("✅ Saved!")
         return True
 
     async def delete(self) -> bool:
@@ -762,7 +760,6 @@ class ReviewScreen(Screen):
         except Exception as exc:
             self.ctx.say(f"❌ Failed to delete review: {exc}")
             return False
-        self.ctx.say("✅ Copies moved to backups" if len(paths) > 1 else "✅ Moved to backups")
         await self.load_current()
         return True
 
@@ -792,7 +789,6 @@ class ReviewScreen(Screen):
         if restored is False:
             self.ctx.say("No backup to restore")
             return False
-        self.ctx.say("✅ Restored!")
         await self.load_current()
         return True
 

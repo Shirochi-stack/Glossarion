@@ -224,10 +224,7 @@ class IntentRouter:
         if action_id == ACTION_ADD_TO_LIBRARY and ACTION_ADD_TO_LIBRARY not in self.handlers:
             if imp.imported is None:
                 return None
-            added = await self.files.run_io(self.files.add_to_library, imp.imported.path)
-            if self.notify is not None:
-                self.notify(f"Added to Library: {added.name}")
-            return added
+            return await self.files.run_io(self.files.add_to_library, imp.imported.path)
         handler = self.handlers.get(action_id)
         if handler is None:
             if self.notify is not None:

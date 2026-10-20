@@ -443,13 +443,11 @@ class QaScannerScreen(Screen):
                                       "Do you want to continue the scan without word count analysis?",
                                       [("no", "No", "text"), ("yes", "Yes", "filled")], key="qa-no-file")
                     if retry != "yes":
-                        self.ctx.say("⚠️ QA scan canceled.")
                         return None
                     disable_word_count = True
             elif answer == "continue" or (answer == "pick" and len(self.targets) > 1):
                 disable_word_count = True
             else:
-                self.ctx.say("⚠️ QA scan canceled.")
                 return None
         if (len(self.targets) == 1 and not disable_word_count and word_count
                 and settings.get("warn_name_mismatch", True)):
@@ -470,7 +468,6 @@ class QaScannerScreen(Screen):
                                             "Continue scan without word count analysis?",
                                             [("no", "No", "text"), ("yes", "Yes", "filled")], key="qa-no-file")
                         if proceed != "yes":
-                            self.ctx.say("⚠️ QA scan canceled.")
                             return None
                         disable_word_count = True
                 elif answer != "continue":
@@ -487,7 +484,6 @@ class QaScannerScreen(Screen):
         self.active_job = snapshot(job_id) if callable(snapshot) else None
         self.ctx.remember_source("tools.qa", spec.title)
         self.ctx.haptic("medium_impact")
-        self.ctx.say(f"QA scan · {spec.title}", "Jobs", lambda: self.ctx.go("jobs.detail", {"jid": job_id}))
         self._render_run()
         return job_id
 
@@ -509,11 +505,6 @@ class QaScannerScreen(Screen):
         except Exception as exc:
             self.ctx.say(f"Could not stop: {exc}")
             return None
-        if mode == "graceful":
-            self.ctx.say("⏳ Graceful stop — waiting for in-flight QA scan API calls to complete... "
-                         "tap Stop again to force")
-        else:
-            self.ctx.say("⛔ QA scan stop requested.")
         return mode
 
     def _on_view_log(self, e: Any = None) -> None:
@@ -527,10 +518,7 @@ class QaScannerScreen(Screen):
     def _on_job_end(self, snap: Any) -> None:
         self.active_job = snap
         self._render_run()
-        reports = list((getattr(snap, "result", {}) or {}).get("qa_reports") or ())
-        self.ctx.spawn(self.load_reports())
-        if reports and str(getattr(getattr(snap, "state", None), "value", "")) == "DONE":
-            self.ctx.say("✅ QA scan completed", "Open report", lambda: self.open_report(reports[0]))
+        self.ctx.spawn(self.load_reports())  # the finished scan's report shows in the list (no snackbar)
 
     # ---- reports ------------------------------------------------------------------------------------
 

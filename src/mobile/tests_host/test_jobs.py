@@ -2191,7 +2191,7 @@ def test_notification_accept_answers_through_the_chat_controller(tmp_path):
         feature, app, backend, notes, routes = _jobs_feature(tmp_path, dispatcher=dispatcher, runs=runs)
         runs.service = feature.service
         service = feature.service
-        accepted = ("Glossary accepted · translating", None, None)
+        accepted = ("Glossary accepted · translating", None, None)  # never shown (owner 2026-10-20)
         try:
             # a chat job: answered through the chat's run controller, then its chat opens
             asker = Asker()
@@ -2203,12 +2203,12 @@ def test_notification_accept_answers_through_the_chat_controller(tmp_path):
             event = {"payload": "glossarion://app/chat/7", "action_id": "accept",
                      "notification_id": action_notification_id(chat_job), "launched_app": False}
             await feature._on_notification(event)
-            assert runs.calls == [("7", True)] and notes.count(accepted) == 1 and routes == ["/chat/7"]
+            assert runs.calls == [("7", True)] and notes.count(accepted) == 0 and routes == ["/chat/7"]
             assert await _until(lambda: asker.answers == [True])
             assert await asyncio.to_thread(service.wait_idle, TIMEOUT)
             # the same tap again: the job is gone, it only opens the chat
             await feature._on_notification(event)
-            assert runs.calls == [("7", True)] and notes.count(accepted) == 1 and routes == ["/chat/7", "/chat/7"]
+            assert runs.calls == [("7", True)] and notes.count(accepted) == 0 and routes == ["/chat/7", "/chat/7"]
 
             # a Library job's review gate: answered through JobService
             library = Asker(kind="glossary_approval")
@@ -2223,7 +2223,7 @@ def test_notification_accept_answers_through_the_chat_controller(tmp_path):
             assert service.pending_question(lib_job) is not None and routes[-1] == "/library/book/b1"
             await feature._on_notification(dict(stale, notification_id=action_notification_id(lib_job)))
             assert await _until(lambda: library.answers == [True])
-            assert runs.calls == [("7", True)] and notes.count(accepted) == 2
+            assert runs.calls == [("7", True)] and notes.count(accepted) == 0
             assert await asyncio.to_thread(service.wait_idle, TIMEOUT)
 
             # not a glossary question: Accept answers nothing, it only opens the route
@@ -2236,7 +2236,7 @@ def test_notification_accept_answers_through_the_chat_controller(tmp_path):
             await feature._on_notification({"payload": "glossarion://app/tools/async", "action_id": "accept",
                                             "notification_id": action_notification_id(tools_job)})
             assert service.pending_question(tools_job) is not None and routes[-1] == "/tools/async"
-            assert notes.count(accepted) == 2
+            assert notes.count(accepted) == 0
             service.answer(service.pending_question(tools_job)["id"], False)
             assert await asyncio.to_thread(service.wait_idle, TIMEOUT)
         finally:

@@ -405,7 +405,8 @@ class SettingsHome(HubScreen):
     async def _on_save_now(self, e: Any = None) -> bool:
         wrote = await self.ctx.run_io(self.ctx.store.flush)
         error = self.ctx.store.save_error
-        self.ctx.say(error if error else ("Settings saved" if wrote else "No unsaved changes"))
+        if error or not wrote:
+            self.ctx.say(error or "No unsaved changes")
         self._on_saved()
         return bool(wrote)
 
@@ -415,9 +416,7 @@ class SettingsHome(HubScreen):
         except Exception as exc:
             self.ctx.say(f"Backup failed: {exc}")
             return None
-        if path:
-            self.ctx.say(f"Backup created: {os.path.basename(path)}")
-        else:
+        if not path:
             self.ctx.say("Nothing to back up yet: config.json has not been written")
         return path
 

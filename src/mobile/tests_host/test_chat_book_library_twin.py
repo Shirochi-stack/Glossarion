@@ -108,8 +108,8 @@ def test_chat_book_merges_into_the_not_started_library_book(iso, migrate_calls, 
             folders = {m[4] for m in chats.messages(cid) if m[0] == "assistant" and len(m) > 4 and m[4]}
             assert any(D._same(f, library_folder) for f in folders), folders
             assert not any("Attachments" in Path(f).parts for f in folders), folders
-            added = [n for n in notes if n[0] == "Added to the Library"]
-            assert added and added[-1][1] == "Open book", [n[:2] for n in notes]
+            # silent (owner 2026-10-20): no "Added to the Library · Open book" snackbar
+            assert not [n for n in notes if n[0] == "Added to the Library"], [n[:2] for n in notes]
         finally:
             await D._stop_app(tf, app)
 

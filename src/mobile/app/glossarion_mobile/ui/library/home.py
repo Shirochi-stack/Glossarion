@@ -925,8 +925,6 @@ class LibraryScreen(Screen):
                 self.ctx.say(f"{book.get('name') or ''}: {exc}")
         if started:
             self.ctx.haptic("medium_impact")
-            self.ctx.say(f"{'Compiling' if len(started) == 1 else f'Compiling {len(started)} books'}"
-                         f" · {'EPUB' if kind == 'compile_epub' else 'PDF'}", "Jobs", lambda: self.ctx.go("jobs"))
             for book in books:
                 self._update_card(book_key(book))
         return started
@@ -966,8 +964,6 @@ class LibraryScreen(Screen):
             return []
         if not imported:
             return []
-        names = ", ".join(f.name for f in imported[:3]) + (f" +{len(imported) - 3}" if len(imported) > 3 else "")
-        self.ctx.say(f"Added to Library: {names}")
         self.service.mark_dirty()
         await self.service.refresh(reason="import")
         return imported

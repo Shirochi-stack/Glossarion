@@ -739,7 +739,6 @@ class EditorPane:
         key = next((s.key for s in self.specs if s.ref == ref), None)
         if key is not None:
             self.ctx.spawn(self.jump_to(key))
-        self.ctx.say("Entry added — Save to keep it")
         return ref
 
     def open_gender(self, spec: RowSpec) -> Optional[GenderSheet]:
@@ -784,7 +783,6 @@ class EditorPane:
         self.selected = set()
         self._recompute()
         self.render(keep_window=True)
-        self.ctx.say(f"Changed the type of {count} entries — Save to keep it")
         return count
 
     # ---- find / replace -------------------------------------------------------------------------------
@@ -856,18 +854,12 @@ class EditorPane:
             self.ctx.say(_error_text(exc))
             return None
         if kind == "html":
-            if result:
-                files_updated, total = result
-                verb = "↷ Redo: re-applied" if redo else "↶ Undo: reverted"
-                self.ctx.say(f"{verb} {total} replacement(s) across {files_updated} output file(s).")
-            else:
+            if not result:
                 self.ctx.say(f"⚠️ {'Redo' if redo else 'Undo'} (output files) failed")
             self._sync_history()
             if self.root is not None:
                 self.ctx.push(self.root)
         elif kind == "glossary":
-            if result:
-                self.ctx.say(str(result))
             await self._after_reload()  # restored, saved and re-read
         return kind
 
@@ -895,11 +887,8 @@ class EditorPane:
                 self.ctx.say(_error_text(exc))
                 return None
             self.reports.append(report)
-            if report.get("saved"):
-                files = int(report.get("files_updated") or 0)
-                self.ctx.say("Glossary saved successfully" + (f" · {files} output file(s) updated" if files else ""))
-                if self.hide_unused:
-                    await self.refresh_hide_unused()
+            if report.get("saved") and self.hide_unused:
+                await self.refresh_hide_unused()
             self._recompute()
             self.render(keep_window=True)
             return report
@@ -916,8 +905,6 @@ class EditorPane:
                 doc, generation = self.doc, self.generation
                 self.ctx.say(report.message, "Undo",
                              lambda: self.ctx.spawn(self.undo_swipe_delete(doc, generation, snapshot)))
-            else:
-                self.ctx.say(report.message)
         return report
 
     async def undo_swipe_delete(self, doc: Any, generation: int, snapshot: Any) -> bool:
@@ -933,8 +920,6 @@ class EditorPane:
             self.ctx.say(_error_text(exc))
             ok = False
         await self._after_reload()
-        if ok:
-            self.ctx.say("Entry restored")
         return ok
 
     async def delete_selected(self) -> Optional[OpReport]:
@@ -966,7 +951,7 @@ class EditorPane:
             self.render(keep_window=True)
         if report is not None:
             self.reports.append(report)
-            if confirm:
+            if confirm and not report.ok:
                 self.ctx.say(report.message)
         return report
 
@@ -1036,7 +1021,7 @@ class EditorPane:
             info = InfoSheet(title=report.title or "Glossary", body=report.message)
             info.show(self.ctx.page)
             self.sheets.append(info)
-        else:
+        elif not report.ok:
             self.ctx.say(report.message)
 
     def open_trim(self) -> Any:
@@ -1085,11 +1070,7 @@ class EditorPane:
         return sheet.show()
 
     async def convert(self, dest: str) -> Optional[OpReport]:
-        report = await self.run_tool("convert", dest)
-        if report is not None and report.ok and self.ctx.files is not None and os.path.isfile(dest) and \
-                os.path.normcase(dest) != os.path.normcase(self.path or ""):
-            self.ctx.say(report.message.splitlines()[0], "Share", lambda: self.ctx.spawn(self.ctx.files.share([dest])))
-        return report
+        return await self.run_tool("convert", dest)
 
     def open_about_format(self) -> InfoSheet:
         from glossarion_mobile.ui.glossary.tools import about_format
@@ -1106,7 +1087,7 @@ class EditorPane:
 
         enabled, max_backups = self.service.backup_settings()
         sheet = BackupSettingsSheet(self.ctx, enabled=enabled, max_backups=max_backups, glossary_path=self.path or "",
-                                    on_save=lambda on, n: self.ctx.say(self.service.set_backup_settings(on, n)),
+                                    on_save=self.service.set_backup_settings,
                                     on_backup_now=lambda: self.ctx.spawn(self.backup_now()))
         self.sheets.append(sheet)
         return sheet.show()
@@ -1120,8 +1101,6 @@ class EditorPane:
         except Exception as exc:
             self.ctx.say(_error_text(exc))
             return False
-        if ok:
-            self.ctx.say("Manual backup created successfully!")
         return bool(ok)
 
     async def open_backups(self) -> Any:
@@ -1161,7 +1140,7 @@ class EditorPane:
         else:
             self._recompute()
             self.render()
-        if report is not None:
+        if report is not None and not report.ok:
             self.ctx.say(report.message)
         return report
 
@@ -1192,7 +1171,8 @@ class EditorPane:
         except Exception as exc:
             self.ctx.say(_error_text(exc))
             return None
-        self.ctx.say(report.message)
+        if not report.ok:
+            self.ctx.say(report.message)
         self.path = self.doc.path
         self.screen.note_switched(self.path)
         self.render(keep_window=True)
@@ -1224,7 +1204,8 @@ class EditorPane:
         except Exception as exc:
             self.ctx.say(_error_text(exc))
             return None
-        self.ctx.say(report.message)
+        if not report.ok:
+            self.ctx.say(report.message)
         if self.ctx.files is not None and os.path.isfile(dest):
             await self.ctx.files.share([dest])
         return report
@@ -1254,7 +1235,6 @@ class EditorPane:
         self.service.set_cfg("update_html_on_save", value)
         self._refresh_menu()
         self.ctx.push(self.menu)
-        self.ctx.say(("✅" if value else "❌") + " Update output files on save")
         return value
 
     def open_text_size(self) -> Any:

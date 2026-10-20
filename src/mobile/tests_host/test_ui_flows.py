@@ -10,7 +10,7 @@ overflows, which fails the Flutter test and clips the text for users).
 
 The chat flow is the full one: Settings › Import from desktop (a config.json pointing at the
 fake OpenAI server), a new chat, ＋ › Files with the 12-chapter self-test EPUB, Send, the job card
-reaches Done, the book moves into the Library by itself ("Added to the Library", no Migrate tap),
+reaches Done, the book moves into the Library by itself (silently, no Migrate tap),
 Library › the book › Chapters (12 completed chapters).
 
 The device side of the first Android UI test run (Build Mobile run 37800059580, both tests

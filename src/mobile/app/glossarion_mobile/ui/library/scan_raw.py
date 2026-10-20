@@ -328,8 +328,8 @@ class ScanRawScreen(Screen):
             self.ctx.say(f"Could not link the raw files: {exc}")
             return 0
         self.applied = written
-        self.ctx.say(f"Linked {written} workspace{'s' if written != 1 else ''} to a raw source file. The library will "
-                     "refresh in a moment." if written else "No pairings were applied.")
+        if not written:
+            self.ctx.say("No pairings were applied.")
         self.service.mark_dirty()
         await self.service.refresh(reason="scan for raw")
         return written

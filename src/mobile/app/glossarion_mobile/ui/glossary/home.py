@@ -334,8 +334,6 @@ class GlossariesScreen(Screen):
         path = picked[0].path
         self.service.record_import(path)
         await self.refresh()
-        self.ctx.say(f"Imported {os.path.basename(path)}", "Open",
-                     lambda: self.ctx.go("glossary.detail", {"gid": self.service.gid_for(path)}))
         return path
 
     def open_mode_sheet(self) -> Any:

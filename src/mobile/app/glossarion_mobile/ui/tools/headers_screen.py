@@ -147,9 +147,6 @@ class PromptsSheet:
                 tile.refresh()
             except Exception:
                 pass
-        say = getattr(self.ctx, "say", None)
-        if callable(say):
-            say("All prompts reset to their defaults")
         return True
 
 
@@ -285,7 +282,6 @@ class MetadataFieldsSheet:
         self.ctx.set_cfg("translate_metadata_fields", value)
         self.saved = value
         self.close()
-        self.ctx.say("Metadata fields saved")
         return value
 
     def _on_save(self, e: Any = None) -> dict:
@@ -557,8 +553,6 @@ class HeadersScreen(Screen):
         snapshot = getattr(self.ctx.jobs, "snapshot", None)
         self.active_job = snapshot(job_id) if callable(snapshot) else None
         self.ctx.remember_source("tools.headers", spec.title)
-        self.ctx.say("🌐 Starting standalone header translation in background...", "Jobs",
-                     lambda: self.ctx.go("jobs.detail", {"jid": job_id}))
         self._render_actions()
         return job_id
 
@@ -648,8 +642,6 @@ class HeadersScreen(Screen):
             return None
         self.watch.watch(job_id)
         self.ctx.remember_source("tools.headers", spec.title)
-        self.ctx.say(f"🌐 Translating metadata · {spec.title}", "Jobs",
-                     lambda: self.ctx.go("jobs.detail", {"jid": job_id}))
         return job_id
 
     def open_settings(self, section: str) -> None:

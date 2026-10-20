@@ -452,10 +452,7 @@ def test_library_book_attaches_with_its_meta_and_forgets_it(tmp_path):
     target = ToolTarget(title="Book", source=str(raw), origin="library", kind="epub", bid="b1")
     assert ChatView.attach_library_book(view, target)
     assert attached == [str(raw)] and meta[LIBRARY_ATTACHMENT_META] == {"bid": "b1", "path": str(raw)}
-    message, kwargs = notes[-1]
-    assert message == "Attached Book.epub from the Library" and kwargs["action_label"] == "Remove"
-    kwargs["on_action"]()
-    assert removed == [True]
+    assert notes == []  # silent (owner 2026-10-20): the attachment chip shows it, its ✕ removes it
     assert not ChatView.attach_library_book(view, ToolTarget(title="Shelf", origin="library", bid="b2"))
     # another file (or the same one again) on the real view helpers
     view._forget_library_attachment = lambda keep_path="": ChatView._forget_library_attachment(view, keep_path)

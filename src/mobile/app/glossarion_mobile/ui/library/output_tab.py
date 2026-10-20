@@ -456,7 +456,6 @@ class OutputTab:
             except OSError as exc:
                 self.ctx.say(f"Delete failed: {exc}")
                 return
-            self.ctx.say(f"Deleted {os.path.basename(path)}")
             self.page.service.mark_dirty()
             await self.reload()
             await self.page.service.refresh(reason="output deleted")
@@ -474,9 +473,8 @@ class OutputTab:
         if needs_confirm:
             result = await files.export(option_id, path, confirmed=True)
         if option_id == "downloads":
-            self.ctx.say("Saved to Downloads/Glossarion" if result else "Could not save to Downloads")
-        elif option_id == "save" and getattr(result, "ok", False):
-            self.ctx.say("Saved")
+            if not result:
+                self.ctx.say("Could not save to Downloads")
         return result
 
     async def _share(self, paths: list) -> bool:

@@ -74,7 +74,6 @@ class RawGlossaryEditor:
             self.ctx.push(self.error_text)
             return False
         self.saved = True
-        self.ctx.say(f"Saved {os.path.basename(self.path)}")
         self.close()
         if self.on_saved is not None:
             self.on_saved(self.path)

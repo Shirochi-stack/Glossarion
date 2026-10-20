@@ -634,7 +634,6 @@ class ParallelPairScreen(Screen):
         name = self.profile or DEFAULT_PROFILE
         self.profiles[name] = self.system_prompt.value or ""
         self._persist_prompts()
-        self.ctx.say(f"Saved profile “{name}”")
         return name
 
     async def delete_or_reset_profile(self) -> Optional[str]:
@@ -715,7 +714,6 @@ class ParallelPairScreen(Screen):
         except Exception as exc:
             self.ctx.say(f"Could not start the pair extraction: {exc}")
             return None
-        self.ctx.say("Extracting the pair glossary…", "Jobs", lambda: self.ctx.go("jobs"))
         return self.job_id
 
     def progress_context(self) -> Optional[dict]:

@@ -131,7 +131,6 @@ class CustomModeSheet:
         self.ctx.set_cfg(CONFIG_PATH, saved)
         self.saved_value = saved
         self.close()  # first: the snackbar must outlive the sheet (MetadataFieldsSheet.save does the same)
-        self.ctx.say("✅ Custom detection settings saved")
         call_handler(self.on_saved, saved)
         return saved
 
@@ -150,7 +149,6 @@ class CustomModeSheet:
         self.check_all.value = bool(self.defaults.get("check_all_pairs", False))
         self.ctx.push(*self.sliders.values(), *self.slider_labels.values(), self.consecutive, self.sample,
                       self.min_length, self.check_all)
-        self.ctx.say("ℹ️ Settings reset to defaults")
 
     def _on_reset(self, e: Any = None) -> None:
         dialog = ConfirmDialog(title="Reset to Defaults", body="Reset all values to default settings?",

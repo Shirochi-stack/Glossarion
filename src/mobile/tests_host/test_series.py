@@ -628,7 +628,7 @@ def test_series_feature_end_to_end(tmp_path):
     feature.dialog._save()
     (saga,) = feature.store.all()
     assert saga.name == "Saga" and saga.color == "violet"
-    assert S.chat_series_id(chats, "2", feature.store) == saga.id and app.notes[-1] == "Moved to Saga"
+    assert S.chat_series_id(chats, "2", feature.store) == saga.id and "Moved to Saga" not in app.notes
     # series defaults flow into the chat's effective overrides (Global -> Series -> chat)
     feature.store.set_default(saga.id, "model", "series-model")
     assert chats.overrides("2") == {"model": "series-model"} and app.chat_view.applied
@@ -659,7 +659,7 @@ def test_series_feature_end_to_end(tmp_path):
     sheet = feature.add_books_sheet(["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
     sheet._pick(saga.id)
     assert feature.store.get(saga.id).book_ids == ("aaaaaaaaaaaa", "bbbbbbbbbbbb")
-    assert app.notes[-1] == "Added 2 books to Saga"
+    assert "Added 2 books to Saga" not in app.notes  # silent (owner 2026-10-20)
     assert feature.book_ids(saga.id) == frozenset({"aaaaaaaaaaaa", "bbbbbbbbbbbb"}) and feature.book_ids(None) is None
     assert feature.choices() == [(saga.id, "Saga", S.color_hex("violet"))]
     # the series page

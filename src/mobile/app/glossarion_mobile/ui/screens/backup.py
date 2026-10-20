@@ -164,9 +164,7 @@ class BackupScreen(PageScreen):
         except Exception as exc:
             self.say(f"Failed to create backup: {exc}")
             return None
-        if path:
-            self.say("New configuration backup created successfully!")
-        else:
+        if not path:
             self.say("Nothing to back up yet: config.json has not been written")
         await self.refresh()
         return path
@@ -187,11 +185,10 @@ class BackupScreen(PageScreen):
 
     async def restore(self, entry: dict) -> bool:
         try:
-            name = await self.io(restore_backup, self.store, entry.get("path", ""))
+            await self.io(restore_backup, self.store, entry.get("path", ""))
         except Exception as exc:
             self.say(f"Failed to restore backup: {exc}")
             return False
-        self.say(f"Configuration restored from: {name}")
         await self.refresh()
         return True
 
@@ -210,7 +207,6 @@ class BackupScreen(PageScreen):
         except Exception as exc:
             self.say(f"Failed to delete backup: {exc}")
             return False
-        self.say("Backup deleted successfully.")
         await self.refresh()
         return True
 
@@ -336,14 +332,12 @@ class BackupScreen(PageScreen):
             return len(changed)
 
         try:
-            changed = await self.io(run)
+            await self.io(run)
         except ce.WrongPassphrase:
             self.say("Wrong passphrase")
             return False
         except Exception as exc:
             self.say(f"Import failed: {exc}")
             return False
-        self.say(f"Config imported ({changed} setting{'s' if changed != 1 else ''} changed); "
-                 "the previous config is in the backups")
         await self.refresh()
         return True

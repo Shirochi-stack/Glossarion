@@ -311,7 +311,6 @@ class PrefillScreen(Screen):
             return None
         self._error(None)
         self._reload()
-        self.say(f"✅ Saved assistant prompt profile: '{saved or DEFAULT_LABEL}'")
         return saved
 
     def new(self) -> Optional[str]:
@@ -321,7 +320,6 @@ class PrefillScreen(Screen):
             self._error(str(exc))
             return None
         self._reload()
-        self.say(f"✅ Created assistant prompt profile: '{name}'")
         return name
 
     def confirm_delete(self) -> ConfirmDialog:
@@ -341,5 +339,4 @@ class PrefillScreen(Screen):
             self._error(str(exc))
             return None
         self._reload()
-        self.say(f"🗑️ Deleted assistant prompt profile: '{name}'")
         return name

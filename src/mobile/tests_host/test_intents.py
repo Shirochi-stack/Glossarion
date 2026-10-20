@@ -260,7 +260,7 @@ def test_library_feature_registers_reader_and_library_handlers(tmp_path, lib):
         added = await intents.perform(ACTION_ADD_TO_LIBRARY, imp)
         assert added.path == str(tmp_path / "Library" / "Raw" / "Book.epub")
         assert ("import_paths", [imp.imported.path], "raw", True, True) in lib.calls
-        assert notes[-1][0] == "Added to Library: Book.epub"
+        assert not [n for n in notes if str(n[0]).startswith("Added to Library")]  # silent (owner 2026-10-20)
 
     asyncio.run(scenario())
 

@@ -108,9 +108,7 @@ async def clear_raw_link_flow(ctx: Any, books: Sequence[Any]) -> Optional[Any]:
                           ).choose(ctx.page) != "yes":
         return None
     cleared = await ctx.io(service.execute_clear_raw_link_blocking, plan)
-    if cleared:
-        ctx.say(f"Cleared the saved raw link of {cleared} workspace{'s' if cleared != 1 else ''}.")
-    else:
+    if not cleared:
         ctx.say("None of the selected workspaces could be updated. Check that the folders still exist on disk.")
     await service.refresh(reason="clear raw link")
     return cleared
