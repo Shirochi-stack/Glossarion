@@ -310,3 +310,26 @@ def test_shared_txt_opens_in_the_reader(tmp_path, lib):
 
     plan = plan_for_file(imp.imported.path)  # what the Reader opens for a path-only target
     assert plan.source_kind == SOURCE_TXT and plan.mode == "plain" and plan.title == "Story"
+
+
+def test_a_share_the_platform_could_not_copy_is_a_notice_not_a_crash(tmp_path, lib):
+    """Share crash report: a URI the app may not read (no grant) arrives as an item with ``error`` and no
+    path; it becomes a "Could not open the shared file" error next to the files that did copy."""
+    files, cache = bridge(tmp_path)
+    intents = IntentRouter(files=files, handlers={ACTION_TRANSLATE_NEW_CHAT: lambda imp: None})
+    good = write(cache / "shared" / "Book.epub")
+
+    async def scenario():
+        return await intents.handle([
+            {"id": "e1", "kind": "file", "path": None, "uri": "content://media/external/downloads/35",
+             "source": "send", "error": "the sending app did not grant access to it"},
+            {"id": "e2", "kind": "file", "path": str(cache / "shared" / "gone.txt"), "name": "gone.txt",
+             "source": "send_multiple"},
+            {"id": "ok", "kind": "file", "path": good, "name": "Book.epub", "source": "send_multiple"},
+        ])
+
+    denied, gone, ok = asyncio.run(scenario())
+    assert denied.error == "Could not open the shared file: the sending app did not grant access to it"
+    assert gone.error == "Could not open the shared file 'gone.txt': it could not be read"
+    assert denied.actions == [] and gone.actions == []
+    assert ok.error is None and ok.imported is not None and ok.imported.name == "Book.epub"

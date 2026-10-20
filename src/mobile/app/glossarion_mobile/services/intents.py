@@ -99,6 +99,14 @@ class IntentImport:
 Handler = Callable[[IntentImport], Any]
 
 
+def _copy_error(item: Mapping[str, Any]) -> str:
+    """The notice for a shared file the platform could not copy (``item["error"]`` is its short reason,
+    e.g. the sending app granted no read access) or that never reached the Inbox."""
+    name = str(item.get("name") or "").strip()
+    reason = str(item.get("error") or "").strip() or "it could not be read"
+    return f"Could not open the shared file{f' {name!r}' if name else ''}: {reason}"
+
+
 class IntentRouter:
     def __init__(
         self,
@@ -136,7 +144,9 @@ class IntentRouter:
         if kind == "text":
             text = str(item.get("text") or "").strip()
             return bool(text) and not text.lower().startswith(_BLOCKED_SCHEMES)
-        return kind == "file" and bool(item.get("path"))
+        # A file the platform could not copy (no path, ``error`` set) is still ours: it becomes a
+        # "Could not open the shared file" notice instead of vanishing.
+        return kind == "file" and bool(item.get("path") or item.get("error"))
 
     def actions_for(self, imp: IntentImport) -> list[IntentAction]:
         if imp.imported is None:
@@ -203,7 +213,7 @@ class IntentRouter:
                 if found is not None:
                     imports.append(IntentImport(item=item, imported=found))
                 elif not any(i.item is item for i in imports):
-                    imports.append(IntentImport(item=item, error=item.get("error") or "The file could not be read"))
+                    imports.append(IntentImport(item=item, error=_copy_error(item)))
         for imp in imports:
             imp.actions = self.actions_for(imp) if imp.error is None else []
         self.history.extend(imports)

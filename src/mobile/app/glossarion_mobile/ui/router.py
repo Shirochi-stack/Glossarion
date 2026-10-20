@@ -459,8 +459,8 @@ def build_route(
 def launch_links(items: Any) -> list[tuple[str, str]]:
     """(id, ``glossarion://`` URI) of cold-start deep links delivered as shared items.
 
-    On iOS receive_sharing_intent claims every UIScene connection, so Flutter
-    skips a cold-start ``glossarion://app/...`` link; the native extension
+    On iOS a plugin that claims every UIScene connection (receive_sharing_intent did) makes Flutter
+    skip a cold-start ``glossarion://app/...`` link; the native extension
     re-delivers it as ``SharedItem(kind="url", source="launch")``.
     """
     links = []

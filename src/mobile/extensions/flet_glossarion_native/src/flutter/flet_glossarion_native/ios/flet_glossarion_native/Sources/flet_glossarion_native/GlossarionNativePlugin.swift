@@ -238,10 +238,10 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
     ensureNotificationDelegate()
     guard let contexts = connectionOptions?.urlContexts, !contexts.isEmpty else { return false }
     let urls = contexts.map { $0.url }
-    // Plugins registered later (receive_sharing_intent 1.9.0) claim every
-    // cold-start connection, which makes Flutter skip deep-link handling.
+    // A plugin that claims every cold-start connection (receive_sharing_intent
+    // 1.9.0 did, until it was dropped) makes Flutter skip deep-link handling.
     // Keep the app's own deep links as shared "url" items so Python can route
-    // them (de-duplicate against page.route).
+    // them (de-duplicated against page.route).
     for link in urls where !link.isFileURL {
       recordLaunchLink(link)
     }

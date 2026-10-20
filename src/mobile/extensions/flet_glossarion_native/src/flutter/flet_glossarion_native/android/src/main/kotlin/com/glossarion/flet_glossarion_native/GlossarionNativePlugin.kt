@@ -145,7 +145,17 @@ class GlossarionNativePlugin :
 
     // ----------------------------------------------------------------- intents
 
-    private fun handleIntent(intent: Intent?, initial: Boolean): Boolean {
+    // Runs on the main thread from onAttachedToActivity / onNewIntent: an
+    // exception here would kill the app, so a malformed intent is only logged.
+    private fun handleIntent(intent: Intent?, initial: Boolean): Boolean =
+        try {
+            handleIntentUnsafe(intent, initial)
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not handle intent ${intent?.action}", e)
+            false
+        }
+
+    private fun handleIntentUnsafe(intent: Intent?, initial: Boolean): Boolean {
         if (intent == null || intent.getBooleanExtra(EXTRA_HANDLED, false)) return false
         return when (intent.action) {
             ShareReceiverActivity.ACTION_SHARED -> {
@@ -167,14 +177,35 @@ class GlossarionNativePlugin :
                 if (data != null &&
                     (scheme == ContentResolver.SCHEME_CONTENT || scheme == ContentResolver.SCHEME_FILE)
                 ) {
-                    intent.putExtra(EXTRA_HANDLED, true)
+                    markHandled(intent)
                     importUris(listOf(data), intent.type, ShareReceiverActivity.ORIGIN_VIEW, null, null)
                     true
                 } else {
                     false
                 }
             }
+            Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE -> {
+                // Fallback: a share sent straight to MainActivity (an explicit
+                // component, e.g. `am start -n`) instead of through the chooser and
+                // ShareReceiverActivity. Copied on the executor like a forwarded
+                // share; an unreadable URI (no grant, gone) becomes a per-item error.
+                val share = ShareReceiverActivity.readShare(intent) ?: return false
+                if (share.uris.isEmpty() && share.text.isNullOrEmpty()) return false
+                markHandled(intent)
+                importUris(share.uris, intent.type, share.origin, share.text, share.subject)
+                true
+            }
             else -> false
+        }
+    }
+
+    /** Marks [intent] so a recreated activity (same getIntent()) does not import it again. */
+    private fun markHandled(intent: Intent) {
+        try {
+            intent.putExtra(EXTRA_HANDLED, true)
+        } catch (e: Exception) {
+            // A foreign extras Bundle that cannot be unparcelled.
+            Log.w(TAG, "Could not mark intent handled", e)
         }
     }
 
@@ -290,9 +321,16 @@ class GlossarionNativePlugin :
             item["size"] = dest.length()
         } catch (e: Exception) {
             Log.w(TAG, "Could not copy $uri", e)
-            item["error"] = e.toString()
+            item["error"] = copyErrorReason(e)
         }
         return item
+    }
+
+    /** A short reason for the "Could not open the shared file" notice. */
+    private fun copyErrorReason(e: Exception): String = when (e) {
+        is SecurityException -> "the sending app did not grant access to it"
+        is java.io.FileNotFoundException -> "it is no longer available"
+        else -> e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
     }
 
     private fun deliverShared(items: List<Map<String, Any?>>) {

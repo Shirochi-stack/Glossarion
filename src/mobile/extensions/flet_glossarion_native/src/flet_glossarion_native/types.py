@@ -139,7 +139,7 @@ class SharedItem:
     """Original content:// / file:// URI (diagnostics only; never route on it)."""
     source: Optional[str] = None
     """``view``, ``send``, ``send_multiple`` (Android trampoline), ``open_url`` /
-    ``launch`` (iOS Open in, cold-start deep link) or ``share`` (receive_sharing_intent)."""
+    ``launch`` (iOS Open in, cold-start deep link)."""
     error: Optional[str] = None
     """Set when the platform could not copy the item; ``path`` is then None."""
 
