@@ -9,8 +9,8 @@ Settings
   (epub_library ``EpubReaderDialog.__init__``). The Aa sheet's scope switch
   writes those keys for **All books** (sparse ``MobileConfigStore.set_many``) and
   a per-book override for **This book** (Prefs ``reader_book_settings``).
-  Mobile-only switches (follow app theme, tap-zone paging, keep screen on, show
-  progress %, lightweight reader) live in Prefs ``reader_prefs`` and never reach
+  Mobile-only switches (follow app theme, tap-zone paging, page-turn animation,
+  keep screen on, show progress %, lightweight reader) live in Prefs ``reader_prefs`` and never reach
   ``config.json``. Clamps are the desktop ones: size 8-32 pt
   (``_change_font_size``), spacing 1.0-3.0 (``_on_spacing_changed``).
 
@@ -72,6 +72,7 @@ __all__ = [
     "double_page_allowed",
     "EMBEDDED_CSS",
     "MARGIN_RANGE",
+    "PAGE_TURN_MS",
     "MODE_LABELS",
     "MODE_SHORT_LABELS",
     "effective_layout",
@@ -182,12 +183,15 @@ DEFAULTS = {
 MOBILE_DEFAULTS = {
     "follow_app_theme": False,
     "tap_zones": True,
+    "page_turn": True,  # slide the page on a turn (UI "Page turn animation"; off under Reduce motion too)
     "keep_screen_on": False,
     "show_progress": True,
     "lightweight": False,
     "margins": 16,  # dp of horizontal page padding (UI_SPEC: 16-20 dp)
 }
 MARGIN_RANGE = (8, 40)
+#: One page turn's slide (the paged page, and a chapter page entering from the side it was turned from).
+PAGE_TURN_MS = 260
 
 
 def clamp_font_size(value: Any) -> int:
@@ -237,6 +241,7 @@ class ReaderSettings:
     native_toc: bool = DEFAULTS["native_toc"]
     follow_app_theme: bool = MOBILE_DEFAULTS["follow_app_theme"]
     tap_zones: bool = MOBILE_DEFAULTS["tap_zones"]
+    page_turn: bool = MOBILE_DEFAULTS["page_turn"]
     keep_screen_on: bool = MOBILE_DEFAULTS["keep_screen_on"]
     show_progress: bool = MOBILE_DEFAULTS["show_progress"]
     lightweight: bool = MOBILE_DEFAULTS["lightweight"]

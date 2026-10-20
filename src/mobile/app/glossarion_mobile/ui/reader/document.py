@@ -27,6 +27,9 @@ titles are escaped. The page's own scripts (the shared shell, the desktop pager 
 the extras) then carry a fresh nonce (``BuiltDocument.nonce``) that the
 ``ReaderServer`` CSP allows exclusively (``publish(html, script_nonce=)``).
 
+``DocumentBuilder.prefetch`` runs step 2 for a neighbour chapter in the background
+(the Reader calls it after a page is up), so the turn to it only wraps the cached body.
+
 ``build_native_blocks`` gives the chapter as blocks for the native fallback
 (``reader_doc.html_to_blocks``).
 """
@@ -250,6 +253,9 @@ class DocumentBuilder:
         self.font_faces: dict = {}  # imported Aa families -> served URL (ReaderScreen sets it)
         self._docs: dict = {}
         self._lock = threading.Lock()
+        # one page at a time per builder: a background prefetch and a turn share the documents
+        self._build_lock = threading.RLock()
+        self.prefetched: list = []  # chapters warmed by ``prefetch`` (diagnostics / tests)
 
     def _module(self) -> Any:
         module = self.session.engine.core.module("reader_doc")
@@ -315,7 +321,31 @@ class DocumentBuilder:
         hint: Optional[Mapping[str, Any]] = None,
         find: Optional[Mapping[str, Any]] = None,
         anchor: Optional[str] = None,
+        turn: Optional[Mapping[str, Any]] = None,
     ) -> BuiltDocument:
+        """The page for chapter ``index``. ``turn`` is the page-turn motion (``bridge.turn_config``)."""
+        with self._build_lock:
+            return self._build(index, settings=settings, layout=layout, theme=theme, doc_id=doc_id,
+                               event_url=event_url, hint=hint, find=find, anchor=anchor, turn=turn)
+
+    def prefetch(self, index: int, layout: str) -> bool:
+        """Process chapter ``index`` ahead of a turn to it (blocking; on the io pool): its images are
+        materialised and its body lands in the shared processed-HTML cache. True when it was warmed."""
+        session = self.session
+        if layout == rm.LAYOUT_ALL or not 0 <= index < session.count:
+            return False
+        if session.plan.mode == MODE_WORKSPACE and session.flavor in (rm.ORIGINAL, rm.BILINGUAL):
+            return False  # raw workspace pages are produced on demand (ensure_workspace_raw), not ahead
+        with self._build_lock:
+            doc = self.document(session.flavor)
+            doc.process_html(sanitize_book_html(session.chapter_html(index)))
+        self.prefetched.append(index)
+        del self.prefetched[:-16]
+        return True
+
+    def _build(self, index: int, *, settings: rm.ReaderSettings, layout: str, theme: Mapping[str, Any],
+               doc_id: str, event_url: str, hint: Optional[Mapping[str, Any]], find: Optional[Mapping[str, Any]],
+               anchor: Optional[str], turn: Optional[Mapping[str, Any]]) -> BuiltDocument:
         session = self.session
         flavor = session.flavor
         if session.plan.mode == MODE_WORKSPACE and flavor in (rm.ORIGINAL, rm.BILINGUAL):
@@ -345,7 +375,8 @@ class DocumentBuilder:
                         chapter=None if layout == rm.LAYOUT_ALL else index, initial_page=initial_page)
         cfg = bridge.bridge_config(doc=doc_id, layout=layout, tap_zones=settings.tap_zones,
                                    chapter=index if layout == rm.LAYOUT_ALL else None,
-                                   scroll_all=layout == rm.LAYOUT_ALL, hint=hint, find=find, anchor=anchor)
+                                   scroll_all=layout == rm.LAYOUT_ALL, hint=hint, find=find, anchor=anchor,
+                                   turn=turn if paged else None)
         has_shell = bridge.has_shell_bridge(page)
         html = bridge.inject_extras(page, cfg, live_css=rm.override_css(theme, settings, layout=layout,
                                                                        font_faces=self.font_faces))

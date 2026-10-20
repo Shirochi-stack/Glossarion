@@ -18,6 +18,9 @@ the shell's own ``GLRDR.post`` (so sequence numbers and transport stay shared):
 * a ``selection`` event with empty text when the selection is cleared (the shell only
   reports non-empty selections) and a ``selrect`` event with the selection's rect, so
   the chip row can sit next to it;
+* the page-turn motion: the config's ``turn`` (:func:`turn_config`) goes to the shell's
+  ``GLRDR.setTurn`` before the page starts (next / prev pages slide, a chapter page
+  enters from the side it was turned from and leaves at its edge);
 * "tap edges to turn pages" off: side taps become centre taps (capture phase, before
   the shell's handler);
 * Scroll all: ``scroll`` events with the chapter on screen (``ch``/``chf``, from the
@@ -53,6 +56,7 @@ __all__ = [
     "parse_console_message",
     "position_fragment",
     "scale_steps",
+    "turn_config",
 ]
 
 CONSOLE_PREFIX = "GLRDR:"  # reader_doc.MOBILE_EVENT_PREFIX
@@ -90,6 +94,7 @@ READER_EXTRAS_JS = r"""
     if (cols()) { G.goTo(1e9); } else { window.scrollTo(0, docHeight()); }
   };
   G.httpOff = function () { G.setTransport('console'); };
+  if (C.turn && G.setTurn) { G.setTurn(C.turn); }  // page-turn motion, before the shell's start()
 
   function reveal(el) {
     var c = cols();
@@ -274,9 +279,14 @@ def bridge_config(
     hint: Optional[Mapping[str, Any]] = None,
     find: Optional[Mapping[str, Any]] = None,
     anchor: Optional[str] = None,
+    turn: Optional[Mapping[str, Any]] = None,
 ) -> dict:
-    """``window.__GLRDR_CFG`` for one page (read by ``READER_EXTRAS_JS``)."""
+    """``window.__GLRDR_CFG`` for one page (read by ``READER_EXTRAS_JS``).
+
+    ``turn`` is the page-turn motion handed to the shell's ``GLRDR.setTurn`` (:func:`turn_config`)."""
     cfg: dict[str, Any] = {"doc": str(doc), "layout": str(layout), "zones": bool(tap_zones)}
+    if turn:
+        cfg["turn"] = dict(turn)
     if chapter is not None:
         cfg["ch"] = int(chapter)
     if scroll_all:
@@ -287,6 +297,15 @@ def bridge_config(
     if anchor:
         cfg["anchor"] = str(anchor)[:200]
     return cfg
+
+
+def turn_config(ms: int, *, enter: int = 0, has_next: bool = False, has_prev: bool = False) -> dict:
+    """The shell's page-turn motion (``GLRDR.setTurn``): ``ms`` per turn (0: pages change at once),
+    ``enter`` the side this page was turned from (1: the next chapter, it slides in from the right;
+    -1: the previous one, from the left; 0: no entrance), and whether a neighbour chapter exists
+    (the page slides out at its edge only then)."""
+    return {"ms": max(0, int(ms or 0)), "enter": 1 if enter > 0 else (-1 if enter < 0 else 0),
+            "next": bool(has_next), "prev": bool(has_prev)}
 
 
 def position_fragment(hint: Optional[Mapping[str, Any]]) -> tuple:

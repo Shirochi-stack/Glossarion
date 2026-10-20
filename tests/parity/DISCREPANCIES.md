@@ -4255,3 +4255,33 @@ Owner decisions 2026-10-09. The desktop has no counterpart: no `src/*.py` deskto
   upload.
 - **Self-test**: the smoke suite gains `share_link_crypto` (RFC 8188 aes128gcm example vector with the bundled
   cryptography + the websockets sync client import; no network), so the device build proves Send can work.
+
+## Reader load speed and page turns (2026-10-20, owner report "epub reader is very slow to load ... I want the page turn transition")
+
+Two desktop-shared changes in `src/reader_doc.py`; the rest is mobile only.
+
+- **`EpubLoaderMixin.run` (desktop `_EpubLoaderThread` too)**: opening a book ran BeautifulSoup over every
+  chapter only to read its title and see that it is not empty (3-12 s for a 300-chapter novel on the desktop,
+  far longer on a phone, holding the GIL). For authoritative (spine / ITEM_DOCUMENT) items the parse is now
+  skipped when `_fast_chapter_title` (a plain `<title>`) or `_fast_heading_title` (no `<title>` at all, the
+  first plain h1-h3: ebooklib re-serialises chapters with an empty `<head/>`) answers; both return None
+  whenever a comment, CDATA, script/style/template/textarea/noscript, ruby text, nested heading, quoted `>` or
+  an empty title/heading could make html.parser + BeautifulSoup see something else, and the soup pass then runs
+  unchanged. Non-authoritative items (the extension sweep) always take the soup (its 10-character text bar).
+  The chapter list, titles, kept pages and cache are identical: checked on 641 local EPUBs (127,363 spine
+  documents as ebooklib hands them, 99.3% fast, 0 differences; the soup on those documents took 637 s, the fast
+  path 11.6 s). Pinned by tests/test_reader_doc.py `METHOD_EDITS[("EpubLoaderMixin", "run")]` (the only edit
+  to the verbatim move) and tests_host/test_reader_turns.py (tricky-markup table against the soup; the loader
+  makes no soup for plain chapters and returns the soup pass's chapter list).
+- **Mobile page shell (`_MOBILE_BRIDGE_JS`, mobile only; the desktop page is unchanged)**: page-turn motion.
+  `GLRDR.setTurn({ms, enter, next, prev})`; `next` / `prev` turns (tap zones, swipe, keyboard) scroll `#columns`
+  to the page over `ms` with an ease-out (rAF; a second turn continues from the current offset; any other
+  `goTo` / `measure` stops the slide and jumps); a chapter page enters from the side it was turned from
+  (body transform + opacity) and at the edge leaves to the other side when a neighbour chapter exists (restored
+  after 2.5 s if the app does not replace the page). `ms` 0, no `requestAnimationFrame` or
+  `prefers-reduced-motion: reduce`: pages change at once as before. A hardware keyboard turns pages
+  (ArrowRight / PageDown / Space, ArrowLeft / PageUp / Shift+Space).
+- Mobile: Aa > Layout "Page turn animation" (Prefs `reader_prefs.page_turn`, default on) and Reduce motion set
+  `ms` (`rm.PAGE_TURN_MS` 260, else 0; live via `setTurn`, no reload); the native reader slides `page_slot` on
+  chapter turns; `DocumentBuilder.prefetch` / the native blocks prepare the neighbour chapter 0.4 s after a page
+  is up.

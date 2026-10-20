@@ -194,6 +194,9 @@ class AaSheet:
         self.zones_switch = ft.Switch(label="Tap edges to turn pages", value=self.settings.tap_zones,
                                       on_change=lambda e: self._emit({"tap_zones": bool(e.control.value)}),
                                       key="aa-zones")
+        self.turn_switch = ft.Switch(label="Page turn animation", value=self.settings.page_turn,
+                                     on_change=lambda e: self._emit({"page_turn": bool(e.control.value)}),
+                                     key="aa-page-turn")
         self.awake_switch = ft.Switch(label="Keep screen on", value=self.settings.keep_screen_on,
                                       on_change=lambda e: self._emit({"keep_screen_on": bool(e.control.value)}),
                                       key="aa-awake")
@@ -204,7 +207,7 @@ class AaSheet:
         if not self.double_allowed:
             controls.append(ft.Text("Double page is available on tablets in landscape.",
                                     theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
-        controls += [self.zones_switch, self.awake_switch, self.progress_switch]
+        controls += [self.zones_switch, self.turn_switch, self.awake_switch, self.progress_switch]
         return ft.ListView(controls=controls, spacing=6)
 
     # ---- events --------------------------------------------------------------------------------
