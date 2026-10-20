@@ -142,7 +142,13 @@ def test_on_device_tab_one_tap_download_load_and_use(tmp_path, fake_hf):
         assert screen.local is None  # built when first shown
         screen.set_tab("local")
         panel = screen.local
-        assert isinstance(panel, LocalModelsPanel) and screen.local_box.visible and screen.add_fab.content == "Add preset"
+        assert isinstance(panel, LocalModelsPanel) and screen.local_box.visible
+        # "Add preset" is the Models card's header action (no FAB pinned to the bottom of the page)
+        presets_card = _find(panel.control, "local-presets-card")
+        assert presets_card.trailing is panel.add_preset_button and panel.add_preset_button.key == "local-add-preset"
+        header_row = presets_card.content.controls[0]
+        assert header_row.controls[-1] is panel.add_preset_button
+        assert not hasattr(screen, "add_fab")
         assert not screen.rows.control.visible and not screen.prefix_list.visible
         texts = _texts(panel.preset_column)
         assert "Tiny" in texts and f"Not downloaded · {dl.format_bytes(len(PAYLOAD))}" in texts
@@ -175,14 +181,16 @@ def test_on_device_tab_one_tap_download_load_and_use(tmp_path, fake_hf):
         assert panel.engine_state.value == "Not loaded"
         assert _find(panel.preset_column, "local-preset-status-0").value == "In use · loads on the first request"
 
-        # editor: rename keeps the verified file; a bad repo is refused; the FAB opens a new preset
+        # editor: rename keeps the verified file; a bad repo is refused; Add preset opens a new one
         editor = panel.open_editor(0)
         assert isinstance(editor, LocalPresetEditor) and editor.repo.value == REPO and editor.file.value == FILE
         editor.name.value = "Renamed"
         assert editor.save() is None and presets.load_presets(prefs)[0]["name"] == "Renamed"
         assert presets.load_presets(prefs)[0]["sha256"] == hashlib.sha256(PAYLOAD).hexdigest()
-        new = screen.open_add()
-        assert isinstance(new, LocalPresetEditor)
+        panel.add_preset_button.on_click(None)
+        new = panel.editor
+        assert isinstance(new, LocalPresetEditor) and new is not editor and new.name.value == ""
+        assert isinstance(screen.open_add(), LocalPresetEditor)  # the tab's add action is the same editor
         new.name.value, new.repo.value = "Bad", "not a repo"
         assert new.save() and new.error.visible
         new.repo.value = "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF"

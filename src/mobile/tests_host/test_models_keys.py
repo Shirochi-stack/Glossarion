@@ -1157,6 +1157,8 @@ def test_poe_setup_stores_the_cookie_as_the_api_key(tmp_path):
 
 @needs_flet
 def test_model_manager_screen_remove_undo_restore_add_and_prefixes(tmp_path):
+    import flet as ft
+
     from glossarion_mobile.ui.screens.model_manager import ModelManagerScreen, PrefixEditor
 
     async def scenario():
@@ -1197,8 +1199,27 @@ def test_model_manager_screen_remove_undo_restore_add_and_prefixes(tmp_path):
         # reorder event (Flet already adjusted new_index)
         screen._on_reorder(types.SimpleNamespace(old_index=2, new_index=0))
         assert service.snapshot.models[0] == "claude-opus-5-5"
-        # Add model dialog
-        screen.open_add()
+        # No FAB pinned to the bottom: "＋ Add" (Add model) sits in the search field's row
+        def walk(control):
+            stack = [control]
+            while stack:
+                c = stack.pop()
+                yield c
+                for attr in ("content", "controls"):
+                    child = getattr(c, attr, None)
+                    if isinstance(child, list):
+                        stack.extend(child)
+                    elif child is not None and not isinstance(child, str) and hasattr(child, "__dict__"):
+                        stack.append(child)
+
+        assert not any(isinstance(c, ft.FloatingActionButton) for c in walk(screen.body_column))
+        assert not hasattr(screen, "add_fab")
+        search_row = next(c for c in walk(screen.models_header)
+                          if isinstance(c, ft.Row) and screen.search in c.controls)
+        assert search_row.controls == [screen.search, screen.add_button] and screen.add_button.key == "mm-add"
+        assert screen.add_button.tooltip == "Add model" and screen.search.expand
+        # Add model dialog (the button's tap)
+        screen.add_button.on_click(None)
         screen.add_field.value = "my-model"
         screen.add_submit()
         assert service.snapshot.models[0] == "my-model"
@@ -1211,8 +1232,14 @@ def test_model_manager_screen_remove_undo_restore_add_and_prefixes(tmp_path):
         assert screen.poll_text.value.startswith("✓ 2 online · openai")
         # Custom prefixes tab
         screen.set_tab("prefixes")
-        editor = screen.open_prefix_editor(None)
-        assert isinstance(editor, PrefixEditor)
+        # "＋ Add prefix" under the intro text, above the empty state; its tap opens the add sheet
+        prefix_rows = screen.prefix_list.controls
+        assert getattr(prefix_rows[2], "key", None) == "prefix-empty"
+        assert prefix_rows[1].controls == [screen.add_prefix_button] and screen.add_prefix_button.key == "mm-add-prefix"
+        screen.add_prefix_button.on_click(None)
+        editor = screen.prefix_editor
+        assert isinstance(editor, PrefixEditor) and editor.prefix.value in ("", None)
+        assert not any(isinstance(c, ft.FloatingActionButton) for c in walk(screen.body_column))
         editor.prefix.value, editor.routing.value = "", ""
         assert editor.save() == "Row 1 needs both a prefix and Base URL."
         page.update()

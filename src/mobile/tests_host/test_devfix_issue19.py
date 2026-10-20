@@ -652,8 +652,8 @@ async def _scenario(kind: str, prep: dict) -> Harness:
                  until=lambda: _hint(screen).endswith("swipe to remove"), settle=0.8, screen=screen)
     h.budget("removed_view_off", bytes_max=STEP_PATCH_BYTES, renders_max=1, mounted_max=STEP_ROWS)
 
-    # 5c. FAB "Add model": the dialog, then ➕ Add puts it at the top
-    await session.dispatch_event(screen.add_fab._i, "click", None)
+    # 5c. "＋ Add" beside the search field (Add model): the dialog, then ➕ Add puts it at the top
+    await session.dispatch_event(screen.add_button._i, "click", None)
     dialog, field = getattr(screen, "last_dialog", None), getattr(screen, "add_field", None)
     if h.check(dialog is not None and field is not None and dialog in page._dialogs.controls, "add: no Add dialog"):
         add_button = dialog.actions[-1]

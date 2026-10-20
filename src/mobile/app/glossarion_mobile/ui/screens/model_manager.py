@@ -6,7 +6,9 @@ not in the built-in / polled catalog) and Removed (the tombstones in
 ``model_manager_removed_models``); "🌐 Poll providers" with the desktop status text and a
 per-provider status chip row; the list in saved order (``ReorderableListView``: drag to reorder;
 long-press a row for Move to top / up / down / bottom, the desktop ⇈ ↑ ↓ ⇊ buttons; swipe to
-remove with Undo; in Removed, swipe to restore); FAB "Add model"; ⋯ Reset to defaults.
+remove with Undo; in Removed, swipe to restore); "＋ Add" (Add model) beside the search field; ⋯ Reset to defaults. Nothing is
+pinned to the bottom: Prefixes has "＋ Add prefix" under its intro text, On-device "Add preset" in the
+Models card's header.
 The list is a ``WindowedList`` (100-row steps, 500-row windows, "Show 100 more"): a desktop config
 brings thousands of models, and every mounted row is about 1 KB on the Flet wire (issue 19). A drag
 stays inside the mounted rows; the long-press moves reach any position of the whole list.
@@ -233,9 +235,12 @@ class ModelManagerScreen(Screen):
             segments=[ft.Segment(value=value, label=label) for value, label in TABS],
             selected=[self.tab], on_change=self._on_tab, show_selected_icon=False,
         )
-        self.search = ft.TextField(hint_text="Search models", prefix_icon=ft.Icons.SEARCH, dense=True,
+        self.search = ft.TextField(hint_text="Search models", prefix_icon=ft.Icons.SEARCH, dense=True, expand=True,
                                    on_change=lambda e: self._on_search_change(e.control.value or ""),
                                    border_radius=tokens.RADII["field"], key="mm-search")
+        # Add model sits beside the search field (no FAB: a pinned button covered the list's last rows).
+        self.add_button = ft.FilledTonalButton(content="Add", icon=ft.Icons.ADD, tooltip="Add model",
+                                               on_click=lambda e: self.open_add(), key="mm-add")
         self.polled_chip = ft.Chip(label=ft.Text("Polled only"), show_checkmark=True,
                                    selected=self.snapshot.hide_unpolled, on_click=lambda e: self.toggle_polled_only(),
                                    key="mm-polled-only")
@@ -252,7 +257,7 @@ class ModelManagerScreen(Screen):
         self.auth_panel = ft.Column([], spacing=6, tight=True, visible=False, key="mm-auths")
         self.models_header = ft.Column([
             self.auth_panel,
-            self.search,
+            ft.Row([self.search, self.add_button], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([self.polled_chip, self.custom_chip, self.removed_chip], wrap=True, spacing=6),
             ft.Row([self.poll_button], wrap=True),
             self.poll_text,
@@ -271,8 +276,8 @@ class ModelManagerScreen(Screen):
         self.state_box = ft.Container(visible=False, padding=ft.Padding.symmetric(horizontal=12), key="mm-state")
         self.prefix_list = ft.ListView(controls=[], expand=True, spacing=6,
                                        padding=ft.Padding.symmetric(horizontal=tokens.SPACING["md"]))
-        self.add_fab = ft.FloatingActionButton(icon=ft.Icons.ADD, content="Add model", on_click=lambda e: self.open_add(),
-                                               key="mm-add")
+        self.add_prefix_button = ft.FilledTonalButton(content="Add prefix", icon=ft.Icons.ADD, key="mm-add-prefix",
+                                                      on_click=lambda e: self.open_prefix_editor(None))
         self.core_notice = ft.Container(visible=not self.catalog.core.available, content=ReasonChip(
             reason="Editing needs the model catalog core", detail=mc.CORE_MISSING), padding=ft.Padding.only(left=12))
         self.local_box = ft.Container(visible=False, expand=True, key="mm-local")
@@ -285,8 +290,6 @@ class ModelManagerScreen(Screen):
             self.rows.control,
             self.prefix_list,
             self.local_box,
-            ft.Container(content=ft.Row([self.add_fab], alignment=ft.MainAxisAlignment.END),
-                         padding=ft.Padding.only(right=16, bottom=16)),
         ], expand=True, spacing=4)
         self.render(push=False)
         return self.body_column
@@ -526,7 +529,6 @@ class ModelManagerScreen(Screen):
         self.rows.control.visible = models_tab
         self.prefix_list.visible = self.tab == "prefixes"
         self.local_box.visible = local_tab
-        self.add_fab.content = "Add model" if models_tab else ("Add preset" if local_tab else "Add prefix")
         self._sync_header(snap)
         list_changed = False
         if models_tab and sync_list:
@@ -1108,7 +1110,8 @@ class ModelManagerScreen(Screen):
         routes = self.routes()
         rows: list = [ft.Text("Use models like myprefix/model-name. Base URL is the provider root; Endpoint Type is "
                               "the path shape.", theme_style=ft.TextThemeStyle.BODY_SMALL,
-                              color=ft.Colors.ON_SURFACE_VARIANT)]
+                              color=ft.Colors.ON_SURFACE_VARIANT),
+                      ft.Row([self.add_prefix_button])]
         if not routes:
             rows.append(ft.Container(content=ft.Text("No custom prefixes yet.", color=ft.Colors.ON_SURFACE_VARIANT),
                                      padding=ft.Padding.all(12), key="prefix-empty"))

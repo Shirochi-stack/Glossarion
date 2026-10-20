@@ -13,7 +13,7 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
   Cancel / Resume / Use / In use / Retry. Rows of models that read images say so ("Reads images").
   The ⋮ menu edits, removes the preset, adds the image support to a text-only download or deletes the
-  file; Add preset and Restore defaults close the card.
+  file; Add preset sits in the card's header, Restore defaults closes the card.
 * **Add from Hugging Face**: any repo, repo:quant or huggingface.co link; the usual quant is picked
   (else a file chooser), optionally saved as a preset.
 * **Downloaded models**: files no preset covers, and paused downloads (Resume / Cancel).
@@ -627,12 +627,12 @@ class LocalModelsPanel(OnDeviceFlow):
             *self._sampling_section(),
         ])
         self.preset_column = ft.Column([], spacing=6, tight=True, key="local-presets")
-        presets_card = SectionCard(title="Models", key="local-presets-card",
+        self.add_preset_button = ft.TextButton(content="Add preset", icon=ft.Icons.ADD, key="local-add-preset",
+                                               on_click=lambda e: self.open_editor(None))
+        presets_card = SectionCard(title="Models", key="local-presets-card", trailing=self.add_preset_button,
                                    subtitle="One tap downloads a model from Hugging Face and uses it.", children=[
             self.preset_column,
-            ft.Row([ft.TextButton(content="Add preset", icon=ft.Icons.ADD, key="local-add-preset",
-                                  on_click=lambda e: self.open_editor(None)),
-                    ft.TextButton(content="Restore defaults", icon=ft.Icons.RESTART_ALT, key="local-restore",
+            ft.Row([ft.TextButton(content="Restore defaults", icon=ft.Icons.RESTART_ALT, key="local-restore",
                                   on_click=lambda e: self.confirm_restore())], wrap=True, spacing=6),
         ])
         self.hf_field = ft.TextField(label="Hugging Face model or link", hint_text=HF_HINT, dense=True,
