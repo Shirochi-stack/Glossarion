@@ -39,6 +39,7 @@ from decimal import Decimal, InvalidOperation
 from app_paths import _get_app_dir
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 from key_pools import apply_key_pools_to_runtime
+from settings_rules import delay_env
 from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 
 # ---- module helpers (moved verbatim from translator_gui module level) ----
@@ -1268,7 +1269,8 @@ class RunEnvMixin:
             'GLOSSARY_SOURCE_PATH': glossary_source_path,
             'MODEL': self.model_var,
             'CONTEXTUAL': '1' if self.contextual_var else '0',
-            'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
+            'SEND_INTERVAL_SECONDS': delay_env(self.delay_entry.text())[0],
+            'SEND_INTERVAL_MAX_SECONDS': delay_env(self.delay_entry.text())[1],
             'API_QUEUE_SIZE': self.api_queue_entry.text().strip() or '4',
             'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
             'MAX_OUTPUT_TOKENS': str(current_max_tokens),
@@ -3026,7 +3028,8 @@ class RunEnvMixin:
             'REQUEST_QUEUE_SCHEDULE': json.dumps(self.config.get('request_queue_schedule') or {}),
             'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
             'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
-            'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
+            'SEND_INTERVAL_SECONDS': delay_env(self.delay_entry.text())[0],
+            'SEND_INTERVAL_MAX_SECONDS': delay_env(self.delay_entry.text())[1],
             'API_QUEUE_SIZE': self.api_queue_entry.text().strip() or '4',
             'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
             'CONTEXTUAL': self._glossary_contextual_env_value(),

@@ -56,6 +56,7 @@ from input_preparation import InputPreparationMixin
 from owner_state import ConfigStateMixin, initialize_extraction_variables
 from run_env import RunEnvMixin
 from settings_persistence import SettingsPersistenceMixin
+from settings_rules import delay_range_text
 from text_jobs import TextJobsMixin
 from translation_pipeline import TranslationPipelineMixin
 
@@ -288,7 +289,7 @@ AUTO_GLOSSARY_SHORTCUT_ITEMS = (
 #: desktop expressions still read like this.
 STARTUP_WIDGET_SOURCES = {
     "thread_delay_entry": "self.thread_delay_entry.setText(str(self.thread_delay_var))",
-    "delay_entry": "self.delay_entry.setText(str(self.config.get('delay', 5)))",
+    "delay_entry": "self.delay_entry.setText(delay_range_text(self.config))",
     "api_queue_entry": "self.api_queue_entry.setText(str(self.api_queue_var))",
     "chapter_range_entry": "self.chapter_range_entry.setText(self.config.get('chapter_range', ''))",
     "use_spine_order_checkbox": "self.use_spine_order_checkbox.setChecked(self.config.get('use_spine_order', False))",
@@ -536,7 +537,7 @@ class HeadlessOwner(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         # _create_settings_section (translator_gui.py)
         self.thread_delay_entry = TextShim(str(self.thread_delay_var))
         self.chunk_size_entry = TextShim("")
-        self.delay_entry = TextShim(str(cfg.get('delay', 5)))
+        self.delay_entry = TextShim(delay_range_text(cfg))
         self.api_queue_entry = TextShim(str(self.api_queue_var))
         self.chapter_range_entry = TextShim(cfg.get('chapter_range', ''))
         self.use_spine_order_checkbox = CheckShim(bool(cfg.get('use_spine_order', False)), "Spine Order")

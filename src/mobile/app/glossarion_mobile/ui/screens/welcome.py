@@ -79,8 +79,8 @@ WELCOME_LOGO = 56
 TOKEN_SLIDER = (1024, 131072)
 #: batch-size slider range; the field takes any larger value
 BATCH_SLIDER = (1, 50)
-#: desktop defaults when nothing is saved (``delay`` 5.0 s, ``translation_temperature`` 0.3)
-DEFAULT_DELAY = 5.0
+#: desktop defaults when nothing is saved (``translation_temperature`` 0.3; the API call delay of a config
+#: without ``delay`` is the range 3-7 s: ``settings_rules.delay_range_text``)
 DEFAULT_TEMPERATURE = 0.3
 #: the temperature for an on-device model (``setting_writes.ON_DEVICE_TEMPERATURE``)
 from glossarion_mobile.state.setting_writes import ON_DEVICE_TEMPERATURE as ONDEVICE_TEMPERATURE  # noqa: E402
@@ -643,31 +643,25 @@ class WelcomeScreen(Screen):
 
     def _request_pacing(self) -> ft.Control:
         """The API call delay, the temperature and Disable temperature (one row, above the batch size)."""
-        def number(value: Any, default: float) -> float:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return default
+        from settings_rules import delay_range_text, format_delay_range, parse_delay_range
 
-        delay = self.flow.delay if self.flow.delay is not None else number(self._saved("delay", DEFAULT_DELAY),
-                                                                           DEFAULT_DELAY)
+        saved = {key: value for key in ("delay", "delay_max")
+                 if (value := self._saved(key, None)) is not None}
+        delay = self.flow.delay if self.flow.delay is not None else delay_range_text(saved)
         temperature = self.shown_temperature()
         disabled = (self.flow.disable_temperature if self.flow.disable_temperature is not None
                     else bool(self._saved("disable_temperature", False)))
-        delay_field = ft.TextField(label="API call delay (s)", value=f"{delay:g}", dense=True, width=150,
+        delay_field = ft.TextField(label="API call delay (s, or 5-7)", value=delay, dense=True, width=150,
                                    keyboard_type=number_keyboard(), key="welcome-delay")
         temperature_field = ft.TextField(label="Temperature", value=f"{temperature:g}", dense=True, width=120,
                                          keyboard_type=number_keyboard(), disabled=disabled,
                                          key="welcome-temperature")
         disable = ft.Checkbox(label="Disable temperature", value=disabled, key="welcome-disable-temperature")
 
-        def on_delay(e: Any) -> None:
-            try:
-                value = float(str(e.control.value or "").strip())
-            except ValueError:
-                return
-            if value >= 0:
-                self.flow.delay = value
+        def on_delay(e: Any) -> None:  # "5" or a range "5-7"
+            parsed = parse_delay_range(str(e.control.value or ""))
+            if parsed is not None:
+                self.flow.delay = format_delay_range(*parsed)
 
         def on_temperature(e: Any) -> None:
             try:

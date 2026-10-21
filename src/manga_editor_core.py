@@ -55,6 +55,7 @@ from queue import Queue, Empty
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import mobile_runtime
+from settings_rules import delay_env  # the API call delay field's min and range max
 import manga_ocr_io
 # ImageStateManager's debug print (manga_integration's helper; manga_files_core holds it since U8)
 from manga_files_core import _manga_cmd_debug_print
@@ -4436,7 +4437,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
                     delay = self.main_gui.delay_entry.get()
                 else:
                     delay = '1.0'
-                os.environ['SEND_INTERVAL_SECONDS'] = str(delay)
+                os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_env(delay)
                 print(f"[DEBUG] Set SEND_INTERVAL_SECONDS: {delay}")
             
             # Max output tokens
@@ -6075,7 +6076,7 @@ def _translate_this_text_background(self, message: str, region_index: int):
                     delay = self.main_gui.delay_entry.get()
                 else:
                     delay = '1.0'
-                os.environ['SEND_INTERVAL_SECONDS'] = str(delay)
+                os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_env(delay)
             except Exception:
                 os.environ['SEND_INTERVAL_SECONDS'] = '1.0'
 
@@ -8894,7 +8895,8 @@ EDITED_FUNCTIONS = ('_run_ocr_on_regions', '_update_rectangles_with_recognition'
 #: Split helpers (bodies lifted verbatim out of ImageRenderer / manga_image_preview handlers).
 SPLIT_HELPERS = ('_manual_translate_prompt', '_apply_ocr_text_edit', '_apply_translation_text_edit', '_persist_translation_text_edit', '_apply_inpaint_iterations', '_request_force_stop', '_request_graceful_stop',)
 #: Plain names the desktop namespace receives as well (constants / helpers without a Qt twin).
-SHARED_NAMES = ('_REGION_METADATA_KEYS', '_import_google_vision')
+SHARED_NAMES = ('_REGION_METADATA_KEYS', '_import_google_vision',
+                'delay_env')  # 2026-10-21: the API call delay field's min and range max
 
 
 # ===========================================================================

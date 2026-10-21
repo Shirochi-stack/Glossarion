@@ -118,6 +118,9 @@ def _lambda_namespace():
                 found.setdefault(node.name, _function_source(source, node))
     for name, text in found.items():
         exec(compile(text, f"<desktop {name}>", "exec"), ns)
+    import settings_rules  # the API call delay range converters (settings_schema._CALL_CONVERTERS)
+    ns.setdefault("delay_range_min", settings_rules.delay_range_min)
+    ns.setdefault("delay_range_max", settings_rules.delay_range_max)
     return ns
 
 
@@ -309,7 +312,7 @@ def test_discrepancies_recorded_not_fixed():
 
 def test_effective_defaults():
     assert ss.effective_default("model") == "authgpt/gpt-6-luna"
-    assert ss.effective_default("delay") == 5.0
+    assert ss.effective_default("delay") == 3.0     # 2026-10-21: a new user's API call delay is 3-7
     assert ss.effective_default("api_queue") == 4
     assert ss.effective_default("vertex_ai_location") == "global"
     import prompt_defaults
@@ -400,7 +403,7 @@ def test_spec_and_section_contract():
     item = ss.spec("delay")
     with pytest.raises(Exception):
         item.default = 1                                     # frozen
-    assert item.label == "API call delay (s)"
+    assert item.label == "API call delay (s, or range 5-7)"
     assert {s.type for s in ss.all_specs()} <= {"bool", "int", "float", "str", "choice", "list", "dict", "json", "path", "secret"}
     assert ss.spec("api_key").type == "secret"
 

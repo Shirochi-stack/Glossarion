@@ -88,6 +88,8 @@ To use OpenRouter, prefix your model name with 'or/' or 'openrouter/':
 
 Environment Variables:
 - SEND_INTERVAL_SECONDS: Delay between API calls (respects GUI settings)
+- SEND_INTERVAL_MAX_SECONDS: Optional maximum of that delay (each call waits a random time
+  between the two; blank = fixed). Per-key and QA truncation delays have their own ranges.
 - YI_API_BASE_URL: Custom endpoint for Yi models (optional)
 - ELECTRONHUB_API_URL: Custom ElectronHub endpoint (default: https://api.electronhub.ai/v1)
 - AZURE_OPENAI_ENDPOINT: Azure OpenAI endpoint (for azure* models)
@@ -2016,6 +2018,27 @@ def defer_batch_log(msg: str) -> None:
     if not hasattr(_deferred_batch_logs, 'messages'):
         _deferred_batch_logs.messages = []
     _deferred_batch_logs.messages.append(msg)
+
+def _send_interval_max_from_env():
+    """SEND_INTERVAL_MAX_SECONDS (the API call delay's optional maximum) as a float, else None:
+    unset, blank or invalid = no maximum (a fixed SEND_INTERVAL_SECONDS)."""
+    raw = os.getenv("SEND_INTERVAL_MAX_SECONDS")
+    try:
+        value = float(str(raw).strip()) if raw not in (None, "") and str(raw).strip() else None
+    except (TypeError, ValueError):
+        return None
+    return value if value is not None and value >= 0 else None
+
+
+def draw_api_delay(min_delay, max_delay=None, rng=random):
+    """The wait before one API call: *min_delay*, or a uniform random draw in [min, max] when a
+    maximum above the minimum is set (a maximum at or below the minimum = the fixed minimum)."""
+    low = float(min_delay)
+    if max_delay is None:
+        return low
+    high = float(max_delay)
+    return rng.uniform(low, high) if high > low else low
+
 
 def flush_deferred_batch_logs() -> None:
     """Print and clear all deferred batch log messages for the current thread."""
@@ -5346,6 +5369,7 @@ class UnifiedClient:
         output_limit = self._positive_int_or_none(self._key_setting(key_entry, key_data, 'individual_output_token_limit'))
         key_temperature = self._float_or_none(self._key_setting(key_entry, key_data, 'individual_key_temperature'))
         api_delay = self._float_or_none(self._key_setting(key_entry, key_data, 'api_call_delay', 0.0)) or 0.0
+        api_delay_max = self._float_or_none(self._key_setting(key_entry, key_data, 'api_call_delay_max', None))
         request_parameters = normalize_request_parameters(
             self._key_setting(key_entry, key_data, 'request_parameters', {})
         )
@@ -5376,6 +5400,8 @@ class UnifiedClient:
         tls.individual_key_temperature = key_temperature
         tls.api_call_delay = active_delay
         tls.active_api_delay_override = active_delay if active_delay > 0 else None
+        # a per-key range ('5-7'): each call draws in [delay, max]; None = a fixed per-key delay
+        tls.active_api_delay_max = api_delay_max if active_delay > 0 and api_delay_max and api_delay_max > active_delay else None
         return {
             'output_token_limit': output_limit,
             'individual_key_temperature': key_temperature,
@@ -7743,6 +7769,7 @@ class UnifiedClient:
             # instance attribute is the only reliable way the QA dialog's
             # API Call Delay reaches _apply_api_call_stagger on this route.
             temp._qa_truncation_delay_override = getattr(self, '_qa_truncation_delay_override', None)
+            temp._qa_truncation_delay_max_override = getattr(self, '_qa_truncation_delay_max_override', None)
             temp.context = context or getattr(self, 'context', None)
             temp.key_identifier = f"{key_prefix}#{key_idx + 1} ({getattr(key_entry, 'model', '')})"
             temp.current_key_index = key_idx
@@ -7777,6 +7804,8 @@ class UnifiedClient:
                         tls.active_api_delay_override = None
                 else:
                     tls.active_api_delay_override = None
+                # ... and its optional maximum (the global delay's random range)
+                tls.active_api_delay_max = _send_interval_max_from_env()
                 tls.api_call_delay = 0.0
                 temp._per_key_api_delay = None
             tls.api_key = temp.api_key
@@ -12411,6 +12440,7 @@ class UnifiedClient:
                             'individual_output_token_limit': fb.get('individual_output_token_limit'),
                             'individual_key_temperature': fb.get('individual_key_temperature'),
                             'api_call_delay': fb.get('api_call_delay', 0.0),
+                            'api_call_delay_max': fb.get('api_call_delay_max'),
                             'label': 'FALLBACK KEY'
                         })
                 except Exception as e:
@@ -12449,6 +12479,8 @@ class UnifiedClient:
                 try:
                     raw_delay = fallback_data.get('api_call_delay', 0.0)
                     _api_call_delay = float(raw_delay) if raw_delay not in (None, '') else 0.0
+                    # a per-key range ('5-7'): this call's spacing is a random draw in it
+                    _api_call_delay = draw_api_delay(_api_call_delay, self._float_or_none(fallback_data.get('api_call_delay_max')))
                 except Exception:
                     _api_call_delay = 0.0
                 
@@ -12848,6 +12880,8 @@ class UnifiedClient:
                 try:
                     raw_delay = fb.get('api_call_delay', 0.0)
                     _api_call_delay = float(raw_delay) if raw_delay not in (None, '') else 0.0
+                    # a per-key range ('5-7'): this call's spacing is a random draw in it
+                    _api_call_delay = draw_api_delay(_api_call_delay, self._float_or_none(fb.get('api_call_delay_max')))
                 except Exception:
                     _api_call_delay = 0.0
                 
@@ -17539,6 +17573,9 @@ class UnifiedClient:
         # IMPORTANT: Read from thread-local storage first (set during key rotation in
         # _ensure_thread_client) to avoid a race condition where self._per_key_api_delay
         # on the shared instance gets overwritten by concurrent threads.
+        # A delay may be a range (the global SEND_INTERVAL_MAX_SECONDS, a key's api_call_delay_max, the QA
+        # dialog's max): each call then waits a random time between its min and max.
+        api_delay_max = None
         try:
             per_key = None
             try:
@@ -17546,6 +17583,8 @@ class UnifiedClient:
                 _tls_override = getattr(tls, 'active_api_delay_override', None)
                 if _tls_override is not None:
                     per_key = float(_tls_override)
+                    # the global delay snapshotted for this request keeps its maximum (None for a per-key delay)
+                    api_delay_max = getattr(tls, 'active_api_delay_max', None)
                 _tls_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
                 if per_key is None and _tls_delay > 0:
                     per_key = _tls_delay
@@ -17553,9 +17592,14 @@ class UnifiedClient:
                 pass
             if per_key is None:
                 per_key = getattr(self, '_per_key_api_delay', None)
-            api_delay = float(per_key) if per_key is not None else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+            if per_key is not None:
+                api_delay = float(per_key)
+            else:
+                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                api_delay_max = _send_interval_max_from_env()
         except Exception:
             api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+            api_delay_max = _send_interval_max_from_env()
 
         thread_name = threading.current_thread().name
         stagger_scope = self._get_api_stagger_scope()
@@ -17570,12 +17614,22 @@ class UnifiedClient:
             if _qa_delay is not None:
                 try:
                     api_delay = float(_qa_delay)
+                    # the QA dialog's range max (None = a fixed delay)
+                    api_delay_max = getattr(self, '_qa_truncation_delay_max_override', None)
                 except (TypeError, ValueError):
                     pass
 
+        # A min-max range draws this call's delay (uniform, per call); the waits below then count it
+        # from when the previous call finished exactly like a fixed delay.
+        ranged = api_delay_max is not None and api_delay_max > api_delay
+        try:
+            api_delay = draw_api_delay(api_delay, api_delay_max)
+        except Exception:
+            ranged = False
         if api_delay <= 0:
             return
-        no_snap_scope = stagger_scope in ('context:qa_truncation', 'pool:AITruncationDetectionKey')
+        # a drawn delay is not snapped to its multiples (the log shows the drawn wait)
+        no_snap_scope = ranged or stagger_scope in ('context:qa_truncation', 'pool:AITruncationDetectionKey')
         
         # Initialize class-level tracking if needed
         if not hasattr(self.__class__, '_api_stagger_lock'):

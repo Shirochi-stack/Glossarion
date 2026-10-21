@@ -94,7 +94,9 @@ log = logging.getLogger("glossarion.settings")
 RULE_KEYS = frozenset({"output_mode", "auto_glossary_mode", "stream_thinking_logs", "output_language",
                        # U9: the output token limits and Auto boxes recompute the compression factors
                        "max_output_tokens", "auto_compression_factor", "glossary_auto_compression",
-                       "glossary_max_output_tokens"})
+                       "glossary_max_output_tokens",
+                       # the API call delay maximum is never below the minimum (blank = a fixed delay)
+                       "delay", "delay_max"})
 #: The main prompt profile (``prompt_profiles.select_profile``).
 PROFILE_KEY = "active_profile"
 #: U9: the desktop main-window Context Mode combo - not a config key: it writes ``contextual`` /

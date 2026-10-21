@@ -1444,7 +1444,9 @@ async def translate(
         os.environ['GLOSSARY_TARGET_LANGUAGE'] = target_language
         os.environ['OUTPUT_LANGUAGE'] = target_language
         # Align throttling/timeouts with config defaults (matches GUI behavior)
-        os.environ['SEND_INTERVAL_SECONDS'] = str(config.get('delay', 2.0))
+        from settings_rules import delay_range_for, delay_env
+        os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_env(
+            '%s-%s' % delay_range_for(config))
         os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = str(config.get('thread_submission_delay', 0.5))
         os.environ['RETRY_TRUNCATED'] = '1'  # Enable auto-retry truncated responses by default
         os.environ['MAX_RETRY_TOKENS'] = str(max_output_tokens)  # Align retry token limit to output token limit
@@ -2430,7 +2432,9 @@ async def extract(
         os.environ['GLOSSARY_TARGET_LANGUAGE'] = target_language
         os.environ['OUTPUT_LANGUAGE'] = target_language
         # Align throttling/timeouts with config defaults (matches GUI behavior)
-        os.environ['SEND_INTERVAL_SECONDS'] = str(config.get('delay', 2.0))
+        from settings_rules import delay_range_for, delay_env
+        os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_env(
+            '%s-%s' % delay_range_for(config))
         os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = str(config.get('thread_submission_delay', 0.5))
         os.environ['RETRY_TIMEOUT'] = '1' if config.get('retry_timeout', False) else '0'
         os.environ['CHUNK_TIMEOUT'] = str(config.get('chunk_timeout', 1800))

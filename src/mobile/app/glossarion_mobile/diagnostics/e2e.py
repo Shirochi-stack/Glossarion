@@ -818,7 +818,7 @@ class E2ESession:
             "use_custom_openai_endpoint": True,
             "openai_base_url": self.server.url,
             "output_language": "English",
-            "delay": 0,  # API call spacing (desktop default 5 s); timing only
+            "delay": 0,  # API call spacing (a new config's default is the range 3-7 s); timing only
         }
         values.update(welcome_glossary_updates(glossary_mode))
         values.update(extra)

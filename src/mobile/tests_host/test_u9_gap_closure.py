@@ -533,8 +533,9 @@ def test_bulk_field_sheet_values():
                            on_apply=lambda values: applied.append(values))
     sheet.page = types.SimpleNamespace(show_dialog=lambda d: None, pop_dialog=lambda: None)
     sheet.input.value = "4"
-    assert sheet.apply() is None and applied[-1] == {"api_call_delay": 4.0}
-    assert sheet.can_clear and sheet.values(clear=True) == ({"api_call_delay": 0.0}, None)
+    # 2026-10-21: the per-key delay takes a range ("2-5"); a single number / Clear also clears its max
+    assert sheet.apply() is None and applied[-1] == {"api_call_delay": 4.0, "api_call_delay_max": ""}
+    assert sheet.can_clear and sheet.values(clear=True) == ({"api_call_delay": 0.0, "api_call_delay_max": ""}, None)
     params = BulkFieldSheet("request_parameters", {}, count=1, on_apply=applied.append)
     params.input.value = "[1]"
     assert params.values() == (None, "Enter a JSON object")

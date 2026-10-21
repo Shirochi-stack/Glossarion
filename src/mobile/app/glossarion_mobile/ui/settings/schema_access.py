@@ -594,6 +594,8 @@ class SchemaAccess:
             folded = FOLDED_KEYS.get(str(spec_attr(spec, "key", "") or ""))
             if folded in VIRTUAL_SPECS:  # one hit for the control that shows it (the Streaming switch)
                 spec = VIRTUAL_SPECS[folded]
+            elif folded:  # a field of another tile (the API call delay maximum)
+                spec = self.spec(folded) or spec
             hit = self._hit(spec)
             if hit is None or hit.key in seen:
                 continue

@@ -78,6 +78,7 @@ from glossarion_mobile.ui.settings.model import (
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard, semantic
 
 __all__ = [
+    "DelayRangeTile",
     "DropdownTile",
     "EffectiveConfig",
     "IMPLIED_WRITES",
@@ -622,6 +623,135 @@ class NumberTile(SettingTile):
         if (not self.edited() or text.strip() == summarize(self.value(), "number")) and not self.error:
             return
         self.apply(text)
+
+
+#: API call delay tiles: the field takes a delay ("5") or a range ("5-7": each call waits a random time
+#: between the two), like the desktop field. The min stays the numeric setting; the max is stored under
+#: ``<key>_max`` ('' = a fixed delay). Parse / format / storage rules: ``settings_rules`` (shared with the
+#: desktop). config key -> the value a blank or negative entry means (None = no inherit: the main delay;
+#: -1 = the QA dialog's "use the global delay").
+DELAY_KEY = "delay"
+DELAY_RANGE_KEYS: dict = {DELAY_KEY: None, "qa_scanner_settings.ai_truncation_api_call_delay": -1.0}
+
+
+def _delay_rules() -> Any:
+    try:
+        import settings_rules
+    except Exception:
+        log.debug("settings_rules unavailable", exc_info=True)
+        return None
+    return settings_rules
+
+
+class DelayRangeTile(NumberTile):
+    """A delay setting whose field takes '5' or a range '5-7' (no steppers: a range has two ends)."""
+
+    @property
+    def inherit(self) -> Optional[float]:
+        return DELAY_RANGE_KEYS.get(self.key)
+
+    @property
+    def max_path(self) -> tuple:
+        return self.path[:-1] + (self.path[-1] + "_max",)
+
+    def _parent_config(self) -> dict:
+        """The dict holding the delay and its max (the config, or its qa_scanner_settings object)."""
+        if len(self.path) == 1:
+            snapshot = getattr(self.store, "snapshot", None)
+            config = snapshot() if callable(snapshot) else {}
+            return dict(config) if isinstance(config, dict) else {}
+        parent = self.store.get(self.path[:-1])
+        return dict(parent) if isinstance(parent, dict) else {}
+
+    def build_editor_row(self) -> Optional[ft.Control]:
+        hint = "-1 = global · or 5-7" if self.inherit is not None else "or a range like 5-7"
+        self.field = commit_on_blur(ft.TextField(
+            color=ft.Colors.ON_SURFACE,
+            value="", dense=True, width=150, keyboard_type=number_keyboard(),
+            border_radius=tokens.RADII["field"],
+        ), lambda _text: self._on_submit())
+        return ft.Row([self.field, ft.Text(hint, theme_style=ft.TextThemeStyle.LABEL_SMALL,
+                                           color=ft.Colors.ON_SURFACE_VARIANT)],
+                      spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True)
+
+    def field_text(self) -> str:
+        rules = _delay_rules()
+        leaf = self.path[-1]
+        if rules is None:
+            value = self.value()
+            return "" if value is None else summarize(value, "number")
+        config = self._parent_config()
+        if len(self.path) == 1 and leaf not in config:
+            return rules.delay_range_text(config)  # a new user: the 3-7 default range
+        if leaf not in config and self.inherit is not None:
+            config[leaf] = self.value()  # the schema default (-1 = the global delay)
+        return rules.delay_field_text(config, leaf, inherit=self.inherit)
+
+    def summary(self) -> str:
+        text = self.field_text()
+        if self.inherit is not None and text == summarize(self.inherit, "number"):
+            return f"{text} (the global API call delay)"
+        return f"{text} s (random in the range)" if "-" in text[1:] else f"{text} s"
+
+    def refresh_value(self) -> None:
+        self.field.value = self.shown_text = self.field_text()
+
+    def parse(self, raw: Any) -> Any:
+        rules = _delay_rules()
+        if rules is None:
+            return super().parse(raw)
+        values = rules.delay_field_values(raw, self.path[-1], inherit=self.inherit)
+        if values is None:
+            raise ValueError("Enter seconds (5) or a range (5-7)")
+        return values
+
+    def _on_submit(self, e: Any = None) -> None:
+        text = self.field.value or ""
+        if (not self.edited() or text.strip() == self.field_text()) and not self.error:
+            return
+        self.apply(text)
+
+    def apply(self, raw: Any) -> bool:
+        """Store the min and its range max ('' = fixed) in one write."""
+        if not self.editable:
+            return False
+        try:
+            values = self.parse(raw)
+        except ValueError as exc:
+            self.set_error(str(exc) or "Invalid value")
+            self.refresh_value()
+            self.ctx.push(self.control)
+            return False
+        if not isinstance(values, dict):
+            return super().apply(raw)
+        if self.error:
+            self.set_error(None)
+        leaf = self.path[-1]
+        try:
+            self.store.set_many({self.path: values[leaf], self.max_path: values[leaf + "_max"]})
+        except ValueError as exc:
+            self.set_error(str(exc))
+            return False
+        self.refresh()
+        return True
+
+    def reset(self) -> bool:
+        """Long-press: the delay and its range max back to their defaults, with Undo."""
+        if not self.editable or not (self.stored or self.store.has(self.max_path)):
+            return False
+        old = {path: self.store.get(path, MISSING) for path in (self.path, self.max_path)}
+        for path in old:
+            self.store.unset(path)
+        self.refresh()
+
+        def undo() -> None:
+            for path, value in old.items():
+                if value is not MISSING:
+                    self.store.set(path, value)
+            self.refresh()
+
+        self.ctx.say(f"{self.label} reset to default", "Undo", undo)
+        return True
 
 
 class SliderTile(NumberTile):
@@ -1275,6 +1405,8 @@ def make_tile(spec: Any, ctx: Any, *, config: Optional[Mapping] = None) -> Setti
         cls = StreamingTile
     elif key == PROFILE_KEY and len(config_path(spec)) == 1:
         cls = ProfileTile
+    elif key in DELAY_RANGE_KEYS:  # '5' or a range '5-7'
+        cls = DelayRangeTile
     else:
         cls = TILE_CLASSES.get(tile_kind(spec, ctx.store.get(config_path(spec))), TextTile)
     return cls(spec, ctx, config=config)

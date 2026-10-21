@@ -1583,6 +1583,264 @@ def apply_streaming(config, on, unset=False):
 
 
 # =============================================================================================
+# 9b2. API call delay ranges: one field takes a delay ("5") or a range ("5-7"; any dash, a dangling
+#      dash ignored, a max below the min = the min). Storage stays numeric: the min under the delay key
+#      (``delay``, the QA dialog's ``ai_truncation_api_call_delay``, a key's ``api_call_delay``) and the
+#      max under ``<key>_max`` ('' or unset = the min, a fixed delay). Each call waits a random time in
+#      [min, max] (unified_api_client.draw_api_delay). Shared by the desktop and Glossarion Mobile.
+# =============================================================================================
+
+#: A config without ``delay`` (a new user) gets this range; a saved ``delay`` without a max is fixed.
+DEFAULT_DELAY = 3.0
+DEFAULT_DELAY_MAX = 7.0
+#: The key holding the maximum of a delay key.
+DELAY_MAX_SUFFIX = '_max'
+
+_PLAIN_NUMBER_RE = re.compile(r'^(\d+(?:\.\d*)?|\.\d+)$')
+_DELAY_RANGE_RE = re.compile(r'^\s*(\d+(?:\.\d*)?|\.\d+)\s*(?:[-–—]\s*(\d+(?:\.\d*)?|\.\d+)?\s*)?$')
+
+
+def parse_delay_range(value):
+    """``(min, max)`` from a delay field's text: "5" -> (5, 5), "5-7" / "5 – 7" / "5—7" -> (5, 7),
+    "5-" -> (5, 5), "7-5" -> (7, 7) (the max never below the min). A number is (n, n). None for
+    blank or anything else (negative numbers included)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return (number, number) if number >= 0 and math.isfinite(number) else None
+    match = _DELAY_RANGE_RE.match(str(value))
+    if not match:
+        return None
+    low = float(match.group(1))
+    high = float(match.group(2)) if match.group(2) is not None else low
+    if not (math.isfinite(low) and math.isfinite(high)):
+        return None
+    return low, max(low, high)
+
+
+def format_delay_number(value):
+    """5.0 -> '5', 0.5 -> '0.5'."""
+    number = float(value)
+    return str(int(number)) if number.is_integer() else repr(number)
+
+
+def format_delay_range(low, high=None):
+    """What a delay field shows: 'min' (fixed) or 'min-max'."""
+    if high in (None, '') or _delay_number(high) is None or float(high) <= float(low):
+        return format_delay_number(low)
+    return f"{format_delay_number(low)}-{format_delay_number(high)}"
+
+
+def _delay_number(value):
+    """A non-negative finite float from *value*, else None (blank, text, negative)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value) if isinstance(value, (int, float)) else float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 and math.isfinite(number) else None
+
+
+def clamp_delay_max(low, high):
+    """The stored max of a delay whose min is *low*: '' when it adds nothing (unset, blank, invalid
+    or not above the min), else the float."""
+    number = _delay_number(high)
+    low = _delay_number(low)
+    if number is None or (low is not None and number <= low):
+        return ''
+    return number
+
+
+def delay_range_for(config, key='delay', default=DEFAULT_DELAY, default_max=DEFAULT_DELAY_MAX):
+    """``(min, max)`` of the delay *key* in *config* (a dict, a key entry dict, qa_scanner_settings):
+    without the key (a new user) ``(default, default_max)`` (default_max None = fixed); with it, the
+    max stored under ``key + '_max'`` raised to the min ('' or unset = the min)."""
+    max_key = key + DELAY_MAX_SUFFIX
+    if key not in config:
+        low = float(default)
+        high = config.get(max_key, default_max) if default_max is not None else config.get(max_key)
+    else:
+        low = _delay_number(config.get(key))
+        if low is None:
+            low = float(default)
+        high = config.get(max_key)
+    number = _delay_number(high)
+    return low, (number if number is not None and number > low else low)
+
+
+def delay_range_text(config, key='delay', default=DEFAULT_DELAY, default_max=DEFAULT_DELAY_MAX):
+    """The delay field's text for *config* ('5' or '3-7')."""
+    return format_delay_range(*delay_range_for(config, key, default, default_max))
+
+
+def delay_range_min(value):
+    """settings_map converter of ``delay`` (the main delay field): the range's min; text that is no
+    delay keeps the old ``safe_float(v, default)`` answer."""
+    parsed = parse_delay_range(value)
+    if parsed is not None:
+        return parsed[0]
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_DELAY
+
+
+def delay_range_max(value):
+    """settings_map converter of ``delay_max`` (the same field): the range's max, '' when fixed."""
+    parsed = parse_delay_range(value)
+    return clamp_delay_max(*parsed) if parsed is not None else ''
+
+
+def delay_range_values(value, key='delay'):
+    """``{key: min, key_max: max or ''}`` for a field's text / number, or None when it is no delay."""
+    parsed = parse_delay_range(value)
+    if parsed is None:
+        return None
+    return {key: parsed[0], key + DELAY_MAX_SUFFIX: clamp_delay_max(*parsed)}
+
+
+def delay_env(text):
+    """``(SEND_INTERVAL_SECONDS, SEND_INTERVAL_MAX_SECONDS)`` for a delay field's text: the min and the
+    max ('' = fixed). Text that is no delay passes through unchanged as before, with no max."""
+    parsed = parse_delay_range(text)
+    if parsed is None:
+        return str(text), ''
+    low, high = parsed
+    if high <= low and _PLAIN_NUMBER_RE.match(str(text)):
+        return str(text), ''  # a plain number exports as typed, exactly as before ranges
+    return str(low), (str(high) if high > low else '')
+
+
+def delay_field_values(text, key, inherit=None):
+    """``{key: min, key_max: max or ''}`` for a delay field whose blank / negative text means *inherit*
+    (the QA dialog's -1 = the global delay), else :func:`delay_range_values`; None when invalid."""
+    if inherit is not None:
+        raw = str(text if text is not None else '').strip()
+        try:
+            inherits = raw == '' or float(raw) < 0
+        except ValueError:
+            inherits = False
+        if inherits:
+            return {key: float(inherit), key + DELAY_MAX_SUFFIX: ''}
+    return delay_range_values(text, key)
+
+
+def delay_field_text(config, key, inherit=None):
+    """A delay field's text for *config*: '-1' (*inherit*) when the stored min is negative or unset,
+    else '5' / '5-7' (an unset max = the min)."""
+    if inherit is not None:
+        return format_delay_field(config.get(key, inherit), config.get(key + DELAY_MAX_SUFFIX), inherit)
+    return delay_range_text(config, key, default_max=None)
+
+
+def format_delay_field(low, high=None, inherit=None):
+    """A delay field's text for a stored min / max: '5' or '5-7'; with *inherit*, a negative or unset
+    min shows as the inherit value ('-1' = the global delay)."""
+    number = _delay_number(low)
+    if number is None:
+        if inherit is not None:
+            return format_delay_number(inherit)
+        number = DEFAULT_DELAY
+    return format_delay_range(number, high)
+
+
+class DelayRange(float):
+    """A delay's min carrying its range max (``maximum``): what a per-key delay dialog answers. It
+    compares and computes as the min and prints as '5' or '5-7'."""
+
+    def __new__(cls, low, high=None):
+        obj = super().__new__(cls, low)
+        number = _delay_number(high)
+        obj.maximum = number if number is not None and number > float(low) else float(low)
+        return obj
+
+    def __str__(self):
+        return format_delay_range(float(self), self.maximum)
+
+    __repr__ = __str__
+
+    def __format__(self, spec):
+        return str(self) if not spec else format(float(self), spec)
+
+
+def key_delay(entry):
+    """A key's per-key delay (an APIKeyEntry or key dict) as a :class:`DelayRange`; 0 = the global delay."""
+    def get(name):
+        return entry.get(name) if isinstance(entry, dict) else getattr(entry, name, None)
+    low = _delay_number(get('api_call_delay')) or 0.0
+    return DelayRange(low, get('api_call_delay' + DELAY_MAX_SUFFIX) if low > 0 else None)
+
+
+def store_key_delay(entry, value):
+    """Write a per-key delay into a key dict / APIKeyEntry: *value* is a number or a DelayRange (a
+    range); 0 or less = the global delay (no max)."""
+    low = _delay_number(value) or 0.0
+    high = clamp_delay_max(low, getattr(value, 'maximum', None)) if low > 0 else ''
+    if isinstance(entry, dict):
+        entry['api_call_delay'] = low
+        if high != '' or 'api_call_delay' + DELAY_MAX_SUFFIX in entry:
+            entry['api_call_delay' + DELAY_MAX_SUFFIX] = high
+    else:
+        entry.api_call_delay = low
+        entry.api_call_delay_max = high
+
+
+def delay_log_value(text):
+    """The API delay a log line shows for a delay field's text: the number ``float(text)`` gave before
+    ranges, or 'min-max' for a range. Text that is no delay raises ValueError like float() did."""
+    parsed = parse_delay_range(text)
+    if parsed is None or parsed[1] <= parsed[0]:
+        return float(text) if parsed is None or _PLAIN_NUMBER_RE.match(str(text).strip()) else parsed[0]
+    return format_delay_range(*parsed)
+
+
+def delay_max_env(low, high):
+    """SEND_INTERVAL_MAX_SECONDS for a stored min / max pair ('' = fixed)."""
+    value = clamp_delay_max(low, high)
+    return '' if value == '' else str(value)
+
+
+def _widget_text(widget):
+    getter = getattr(widget, 'text', None) or getattr(widget, 'get', None)
+    try:
+        return str(getter()) if callable(getter) else ''
+    except Exception:
+        return ''
+
+
+def owner_delay_env(owner, fallback='2'):
+    """``(SEND_INTERVAL_SECONDS, SEND_INTERVAL_MAX_SECONDS)`` from *owner*'s API call delay field
+    (TranslatorGUI / HeadlessOwner, or a tool reading the main window); *fallback* without one."""
+    widget = getattr(owner, 'delay_entry', None)
+    if widget is None:
+        return str(fallback), ''
+    return delay_env(_widget_text(widget) or fallback)
+
+
+def _change_delay(key):
+    # the delay fields: a range text / number sets the min and the max ('' = fixed); the max key
+    # alone is never below the min
+    max_key = key + DELAY_MAX_SUFFIX
+
+    def change(config, value):
+        values = delay_range_values(value, key)
+        if values is None:
+            config[key] = value
+        else:
+            config.update(values)
+        return {}
+
+    def change_max(config, value):
+        low = delay_range_for(config, key)[0]
+        config[max_key] = clamp_delay_max(low, value)
+        return {}
+
+    return change, change_max
+
+
+# =============================================================================================
 # 9c. Retry-After policy (other_settings "Respect provider wait time (Retry-After)" below Indefinite
 #     Rate Limit Retry, "Ignore provider wait time (Retry-After)" under HTTP Timeouts; the same respect
 #     toggle in the Multi API Key Manager)
@@ -2092,6 +2350,9 @@ _CHANGE_RULES.update({
     # turning one Retry-After toggle on turns the other off (both dialogs, Glossarion Mobile)
     'respect_retry_after': lambda config, value: apply_retry_after_choice(config, 'respect_retry_after', value),
     'ignore_retry_after': lambda config, value: apply_retry_after_choice(config, 'ignore_retry_after', value),
+    # the API call delay field takes a range ('3-7'); its max is never below the min
+    'delay': _change_delay('delay')[0],
+    'delay_max': _change_delay('delay')[1],
 })
 
 

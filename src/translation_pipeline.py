@@ -84,6 +84,7 @@ from image_job import ImageJobMixin
 from job_runner import JobHooksMixin
 from rpgmaker_job import RPGMAKER_GAME_INPUTS_ATTR, RpgMakerJobMixin
 from run_env import RunEnvMixin
+from settings_rules import delay_log_value
 from stop_control import clear_client_cancellation, make_run_id, prepare_glossary_stop_file, reset_stop_env
 from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 
@@ -1187,7 +1188,7 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
                 max_tokens = int(self.max_output_tokens) if hasattr(self, 'max_output_tokens') else 8192
             else:
                 max_tokens = int(glossary_token_cfg)
-            api_delay = float(self.delay_entry.text()) if hasattr(self, 'delay_entry') else 2.0
+            api_delay = delay_log_value(self.delay_entry.text()) if hasattr(self, 'delay_entry') else 2.0
             
             self.append_log(f"🔧 Glossary extraction settings:")
             self.append_log(f"   Temperature: {temperature}")

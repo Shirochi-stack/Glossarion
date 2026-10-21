@@ -157,7 +157,8 @@ def test_streaming_keys_match_the_desktop_group_and_the_shared_rules():
                        if any("STREAM" in name for name in env_names(s))}
     assert streaming_specs == set(FOUR)
     assert {settings_schema.spec(k).section for k in FOUR} == {"other.response"}
-    assert FOLDED_KEYS == {key: "streaming" for key in WRITES}
+    # the other folded keys: the API call delay range maxima (2026-10-21)
+    assert {k: v for k, v in FOLDED_KEYS.items() if v == "streaming"} == {key: "streaming" for key in WRITES}
     assert virtual_writes("streaming") == WRITES and virtual_writes("max_retries") == ("max_retries",)
     assert VIRTUAL_SPECS["streaming"].default is sw.MOBILE_STREAMING_DEFAULT is True
     schema = SchemaAccess()

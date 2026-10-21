@@ -76,6 +76,12 @@ def _target_language_items():
         return (("English", None),)
 
 
+def _delay_range_text(cfg):
+    from settings_rules import delay_range_text
+
+    return delay_range_text(cfg)
+
+
 def startup_widgets(owner, scenario: dict) -> dict:
     """Fake widgets filled exactly as desktop ``_setup_gui`` fills them at startup."""
     cfg = owner.config
@@ -85,7 +91,8 @@ def startup_widgets(owner, scenario: dict) -> dict:
         # 25239-25240
         "thread_delay_entry": FakeLineEdit(str(owner.thread_delay_var)),
         # 25270-25271
-        "delay_entry": FakeLineEdit(str(cfg.get("delay", 5))),
+        # 2026-10-21: '5' or a range '5-7' (a config without delay: '3-7'; approved_changes.py)
+        "delay_entry": FakeLineEdit(_delay_range_text(cfg)),
         # 25276-25277
         "api_queue_entry": FakeLineEdit(str(owner.api_queue_var)),
         # 25322-25324

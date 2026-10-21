@@ -6973,7 +6973,7 @@ from contextlib import contextmanager
 import os
 
 @contextmanager
-def _qa_api_overrides_env(disable_thinking=False, delay_override=-1.0):
+def _qa_api_overrides_env(disable_thinking=False, delay_override=-1.0, delay_max_override=None):
     """Temporarily overrides API config environment variables for QA scans."""
     orig_anthropic = os.environ.get('ENABLE_ANTHROPIC_THINKING')
     orig_gemini = os.environ.get('ENABLE_GEMINI_THINKING')
@@ -6981,6 +6981,7 @@ def _qa_api_overrides_env(disable_thinking=False, delay_override=-1.0):
     orig_budget = os.environ.get('THINKING_BUDGET')
     orig_ds = os.environ.get('ENABLE_DEEPSEEK_THINKING')
     orig_delay = os.environ.get('SEND_INTERVAL_SECONDS')
+    orig_delay_max = os.environ.get('SEND_INTERVAL_MAX_SECONDS')
     
     if disable_thinking:
         os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
@@ -6995,6 +6996,8 @@ def _qa_api_overrides_env(disable_thinking=False, delay_override=-1.0):
             
     if delay_override >= 0:
         os.environ['SEND_INTERVAL_SECONDS'] = str(delay_override)
+        # the QA delay's range max ('' = a fixed delay)
+        os.environ['SEND_INTERVAL_MAX_SECONDS'] = str(delay_max_override) if delay_max_override else ''
         
     try:
         yield
@@ -7015,10 +7018,13 @@ def _qa_api_overrides_env(disable_thinking=False, delay_override=-1.0):
         
         if orig_delay is not None: os.environ['SEND_INTERVAL_SECONDS'] = orig_delay
         elif delay_override >= 0: os.environ.pop('SEND_INTERVAL_SECONDS', None)
+        if orig_delay_max is not None: os.environ['SEND_INTERVAL_MAX_SECONDS'] = orig_delay_max
+        elif delay_override >= 0: os.environ.pop('SEND_INTERVAL_MAX_SECONDS', None)
 
 def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log=print,
                             custom_system_prompt=None, temperature=None, max_tokens=None,
-                            prompt_role='system', disable_thinking=False, api_call_delay=-1.0):
+                            prompt_role='system', disable_thinking=False, api_call_delay=-1.0,
+                            api_call_delay_max=None):
     """Check if translated content appears truncated by asking an AI model.
 
     Sends the last `tail_chars` characters of both the source and translated
@@ -7178,7 +7184,9 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
         _temp = float(temperature) if temperature is not None else 0.0
         _max_tokens = int(max_tokens) if max_tokens is not None and int(max_tokens) > 0 else 50
         
-        with _qa_api_overrides_env(disable_thinking=disable_thinking, delay_override=api_call_delay):
+        _delay_max = api_call_delay_max if api_call_delay >= 0 and api_call_delay_max and float(api_call_delay_max) > api_call_delay else None
+        with _qa_api_overrides_env(disable_thinking=disable_thinking, delay_override=api_call_delay,
+                                   delay_max_override=_delay_max):
             # Snapshot the QA-specific delay into the client's thread-local
             # storage so _apply_api_call_stagger uses it directly instead of
             # re-reading the process-wide SEND_INTERVAL_SECONDS env var
@@ -7187,6 +7195,7 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
                 try:
                     _tls = client._get_thread_local_client()
                     _tls.active_api_delay_override = float(api_call_delay)
+                    _tls.active_api_delay_max = float(_delay_max) if _delay_max else None
                 except Exception:
                     pass
                 # Also pin the delay on the client instance. The TLS override
@@ -7199,6 +7208,7 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
                 # (main key, single key, and dedicated QA Scan Keys pool).
                 try:
                     client._qa_truncation_delay_override = float(api_call_delay)
+                    client._qa_truncation_delay_max_override = float(_delay_max) if _delay_max else None
                 except Exception:
                     pass
             response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
@@ -12066,15 +12076,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         _ai_max_tokens = _dedicated_tokens if _dedicated_tokens > 0 else 2000
 
                     # Read delay: dedicated setting (-1 = global, else use value)
+                    # a range (min, max): the dedicated one, or -1 = the global delay and its range
+                    from settings_rules import delay_range_for
                     _dedicated_delay = float(qa_settings.get('ai_truncation_api_call_delay', -1.0))
                     if _dedicated_delay < 0:
                         # -1 means use global API call delay from translator config
-                        try:
-                            _ai_delay = float(_ai_config.get('delay', 2))
-                        except (ValueError, TypeError):
-                            _ai_delay = 2.0
+                        _ai_delay, _ai_delay_max = delay_range_for(_ai_config)
                     else:
-                        _ai_delay = _dedicated_delay
+                        _ai_delay, _ai_delay_max = delay_range_for(
+                            qa_settings, 'ai_truncation_api_call_delay', default_max=None)
 
                     ai_result = run_ai_truncation_check(
                         matched_source_html, trans_html_content,
@@ -12087,6 +12097,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         prompt_role=qa_settings.get('ai_truncation_prompt_role', 'system'),
                         disable_thinking=qa_settings.get('ai_truncation_disable_thinking', False),
                         api_call_delay=_ai_delay,
+                        api_call_delay_max=_ai_delay_max,
                     )
 
                     # Route any deferred batch logs (key assignment, stagger

@@ -611,10 +611,14 @@ def validate_entry(entry, pool='main'):
         return None, str(exc)
     if pool == 'main':
         data.update(normalized)
+        if 'api_call_delay_max' not in normalized:  # a fixed per-key delay keeps no range max
+            data.pop('api_call_delay_max', None)
         return data, None
     for name in _NORMALIZED_FIELDS:
         if name in data:
             data[name] = normalized[name]
+    if 'api_call_delay_max' in data:  # a per-key delay range's max ('' = a fixed delay)
+        data['api_call_delay_max'] = normalized.get('api_call_delay_max', '')
     return data, None
 
 

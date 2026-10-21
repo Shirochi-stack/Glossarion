@@ -1440,10 +1440,10 @@ class MangaTranslator:
         # API delay
         try:
             if hasattr(main_gui, 'delay_entry'):
-                if hasattr(main_gui.delay_entry, 'get'):
-                    self.api_delay = float(main_gui.delay_entry.get())
-                elif hasattr(main_gui.delay_entry, 'text'):
-                    self.api_delay = float(main_gui.delay_entry.text())
+                if hasattr(main_gui.delay_entry, 'get') or hasattr(main_gui.delay_entry, 'text'):
+                    # the min of a range like 3-7 (its max goes to SEND_INTERVAL_MAX_SECONDS below)
+                    from settings_rules import owner_delay_env
+                    self.api_delay = float(owner_delay_env(main_gui)[0])
                 else:
                     self.api_delay = 2.0
             else:
@@ -1454,6 +1454,8 @@ class MangaTranslator:
         # Propagate API delay to unified_api_client via env var so its internal pacing/logging matches GUI
         try:
             os.environ["SEND_INTERVAL_SECONDS"] = str(self.api_delay)
+            from settings_rules import owner_delay_env
+            os.environ["SEND_INTERVAL_MAX_SECONDS"] = owner_delay_env(main_gui)[1] if hasattr(main_gui, 'delay_entry') else ''
         except Exception:
             pass
         

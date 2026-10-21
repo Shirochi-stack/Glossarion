@@ -480,12 +480,11 @@ def key_overrides_text(entry: Mapping[str, Any]) -> str:
     temperature = entry.get("individual_key_temperature")
     if temperature not in (None, ""):
         parts.append(f"T {temperature}")
-    try:
-        delay = float(entry.get("api_call_delay") or 0)
-    except (TypeError, ValueError):
-        delay = 0.0
+    from settings_rules import key_delay
+
+    delay = key_delay(entry)  # "5" or a range "5-7"
     if delay > 0:
-        parts.append(f"delay {delay:g}s")
+        parts.append(f"delay {delay}s")
     return " · ".join(parts)
 
 
@@ -1905,17 +1904,28 @@ BULK_NUMBER_FIELDS = {
     "cooldown": ("Cooldown (seconds)", "int", 10, 3600, None),
     "individual_output_token_limit": ("Output token limit", "int", 0, 2_000_000, "clear"),
     "individual_key_temperature": ("Temperature", "float", 0.0, 2.0, "clear"),
-    "api_call_delay": ("API call delay (seconds)", "float", 0.0, 3600.0, "clear"),
+    "api_call_delay": ("API call delay (s, or 5-7)", "float", 0.0, 3600.0, "clear"),
 }
 #: What "Clear" writes (the KeyEditor's empty values: the global limit / temperature / delay).
 BULK_CLEAR_VALUES = {"individual_output_token_limit": None, "individual_key_temperature": None,
                      "api_call_delay": 0.0, "request_parameters": {}}
+#: Bulk fields written with another key: the per-key delay clears its range max too.
+BULK_CLEAR_EXTRA = {"api_call_delay": {"api_call_delay_max": ""}}
 
 
 def parse_bulk_value(field: str, text: str) -> tuple:
     """``(values, error)`` for one bulk numeric field typed as text."""
     label, kind, low, high, _clear = BULK_NUMBER_FIELDS[field]
     raw = str(text or "").strip()
+    if field == "api_call_delay":  # "5" or a range "5-7" (settings_rules: the min and its range max)
+        from settings_rules import delay_range_values
+
+        values = delay_range_values(raw, field)
+        if values is None:
+            return None, "Enter seconds (5) or a range (5-7)"
+        if not low <= max(values[field], values[field + "_max"] or 0) <= high:
+            return None, f"{label}: {low}–{high}"
+        return values, None
     try:
         value: Any = int(raw) if kind == "int" else float(raw)
     except ValueError:
@@ -1966,6 +1976,10 @@ class BulkFieldSheet:
         else:
             label, kind, low, high, _clear = BULK_NUMBER_FIELDS[field]
             value = sample.get(field)
+            if field == "api_call_delay":  # shown as "5" or "5-7"
+                from settings_rules import key_delay
+
+                value = str(key_delay(sample)) if key_delay(sample) > 0 else value
             self.input = ft.TextField(value="" if value in (None, "") else str(value), label=label, dense=True,
                                       keyboard_type=number_keyboard(),
                                       helper=f"{low}–{high:,}" if kind == "int" else f"{low}–{high}",
@@ -1988,7 +2002,7 @@ class BulkFieldSheet:
         if clear:
             if field == "endpoint":
                 return {"use_individual_endpoint": False}, None
-            return {field: copy.deepcopy(BULK_CLEAR_VALUES[field])}, None
+            return {field: copy.deepcopy(BULK_CLEAR_VALUES[field]), **BULK_CLEAR_EXTRA.get(field, {})}, None
         if field == "model":
             model = str(getattr(self.input, "value", "") or "").strip()
             return ({"model": model}, None) if model else (None, "Choose a model")
