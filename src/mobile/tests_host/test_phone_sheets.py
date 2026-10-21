@@ -103,7 +103,10 @@ def assert_phone_sheet(sheet, *targets) -> None:
     assert sheet.scrollable, "the sheet keeps Flutter's 9/16 height cap"
     for target in targets:
         assert reachable(sheet.content, target), f"{type(target).__name__} cannot be scrolled into view"
-    assert type(sheet.content).__name__ == "SafeArea" and sheet.content.avoid_intrusions_bottom, \
+    from glossarion_mobile.ui.components.sheet import sheet_body
+
+    content = sheet_body(sheet)  # under the "Close Menu" strip
+    assert type(content).__name__ == "SafeArea" and content.avoid_intrusions_bottom, \
         "the last row would sit under the navigation bar (no bottom inset)"
 
 
@@ -771,3 +774,40 @@ def test_qa_custom_sheet_save_closes_and_keeps_its_snackbar(tmp_path):
         assert not sheet.sheet.open and not bars  # silent (owner 2026-10-20)
 
     asyncio.run(scenario())
+
+
+def test_every_sheet_gets_close_menu(monkeypatch):
+    """owner 2026-10-21: sliding a sheet down can pull Android's notification shade instead, so every
+    BottomSheet shows "Close Menu ✕" at its top right, in a strip where the drag handle was (the pill
+    moves into it), over any content the sheet is given later; the button closes the sheet."""
+    import flet as ft
+
+    from glossarion_mobile.ui.components import sheet as s
+
+    monkeypatch.setattr(ft.BottomSheet, "before_update", ft.BottomSheet.before_update)  # restored after the test
+    s.install_close_buttons()
+    s.install_close_buttons()  # once per process
+    first = ft.Column([ft.Text("Models")], tight=True)
+    sheet = ft.BottomSheet(content=first, show_drag_handle=True, open=True)
+    sheet.before_update()
+    sheet.before_update()  # idempotent
+    stack = sheet.content
+    assert isinstance(stack, ft.Stack) and not sheet.show_drag_handle
+    body, strip = stack.controls
+    assert body.content is first and body.padding.top == s.CLOSE_STRIP  # the content starts under the strip
+    pill, close = strip.content.controls  # the drag-handle pill, then the button
+    button = close.content
+    assert button.key == "sheet-close" and button.tooltip == s.CLOSE_LABEL == "Close Menu"
+    assert [type(c) for c in button.content.controls] == [ft.Text, ft.Icon]
+    assert button.content.controls[0].value == "Close Menu" and button.content.controls[1].icon == ft.Icons.CLOSE
+    # new content later (a sheet that rebuilds itself) gets the strip again
+    second = ft.Text("other")
+    sheet.content = second
+    sheet.before_update()
+    assert sheet.content.controls[0].content is second
+    # a sheet without a drag handle: the button only
+    plain = s.with_close_button(ft.BottomSheet(content=ft.Text("x")))
+    assert len(plain.content.controls[1].content.controls) == 1
+    # Close Menu closes it like page.pop_dialog
+    button.on_click(None)
+    assert sheet.open is False

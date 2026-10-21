@@ -29,11 +29,16 @@ __all__ = [
     "SHEET_CHROME",
     "SHEET_PADDING",
     "WORST_TEXT_SCALE",
+    "CLOSE_LABEL",
     "bottom_sheet",
+    "close_sheet",
+    "install_close_buttons",
+    "with_close_button",
     "fits_compact",
     "page_width",
     "scroll_column",
     "scroll_sheet",
+    "sheet_body",
     "sheet_frame",
     "text_height",
 ]
@@ -70,6 +75,79 @@ def scroll_column(
     column.expand = True
     column.tight = False
     return ft.Column([column, *footer], spacing=spacing)
+
+
+# ---- "Close Menu ✕" on every sheet -------------------------------------------------------------
+# owner 2026-10-21: sliding a sheet down to close it can pull Android's notification shade down instead,
+# so every BottomSheet gets a "Close Menu ✕" button at its top right. It sits in a strip that takes the
+# place of Flutter's drag-handle area (the same pill in the middle when the sheet had one), so it never
+# covers the sheet's own first row and the sheet keeps its height. ``install_close_buttons`` hooks
+# ``BottomSheet.before_update``, which Flet runs for every sheet shown and on every update, so sheets that
+# swap their content later keep the button.
+
+CLOSE_LABEL = "Close Menu"
+#: height of the top strip (Flutter's drag-handle area is 48 dp)
+CLOSE_STRIP = 40.0
+_CLOSE_MARK = "_glossarion_close_strip"
+
+
+def close_sheet(sheet: ft.BottomSheet) -> None:
+    """Close ``sheet`` as ``page.pop_dialog`` does (its on_dismiss runs as for a swipe)."""
+    sheet.open = False
+    try:
+        sheet.update()
+    except Exception:
+        pass
+
+
+def close_strip(sheet: ft.BottomSheet, *, handle: bool) -> ft.Control:
+    """The strip on top of a sheet: the drag-handle pill (``handle``) and "Close Menu ✕" at the right."""
+    button = ft.TextButton(
+        content=ft.Row([ft.Text(CLOSE_LABEL), ft.Icon(ft.Icons.CLOSE, size=18)], spacing=4, tight=True),
+        tooltip=CLOSE_LABEL, on_click=lambda e: close_sheet(sheet), key="sheet-close",
+        style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=10, vertical=0)))
+    controls: list = [ft.Container(content=button, right=4, top=0, bottom=0, alignment=ft.Alignment.CENTER_RIGHT)]
+    if handle:
+        pill = ft.Container(width=32, height=4, border_radius=2, bgcolor=ft.Colors.ON_SURFACE_VARIANT, opacity=0.4)
+        controls.insert(0, ft.Container(content=pill, left=0, right=0, top=0, bottom=0, alignment=ft.Alignment.CENTER))
+    return ft.Container(content=ft.Stack(controls), height=CLOSE_STRIP, left=0, right=0, top=0)
+
+
+def with_close_button(sheet: ft.BottomSheet) -> ft.BottomSheet:
+    """``sheet`` with the "Close Menu ✕" strip over its content (idempotent; a new content gets it too)."""
+    content = getattr(sheet, "content", None)
+    if content is None or getattr(content, _CLOSE_MARK, False):
+        return sheet
+    handle = bool(getattr(sheet, "show_drag_handle", False))
+    body = ft.Container(content=content, padding=ft.Padding.only(top=CLOSE_STRIP),
+                        expand=getattr(content, "expand", None))
+    stack = ft.Stack([body, close_strip(sheet, handle=handle)], expand=getattr(content, "expand", None))
+    object.__setattr__(stack, _CLOSE_MARK, True)
+    sheet.show_drag_handle = False  # the strip draws the pill instead
+    sheet.content = stack
+    return sheet
+
+
+def sheet_body(sheet: ft.BottomSheet) -> Any:
+    """The sheet's own content, under the "Close Menu" strip once the sheet was shown."""
+    content = getattr(sheet, "content", None)
+    if getattr(content, _CLOSE_MARK, False):
+        return content.controls[0].content
+    return content
+
+
+def install_close_buttons() -> None:
+    """Give every ``ft.BottomSheet`` the "Close Menu ✕" strip (once per process, at app start)."""
+    original = ft.BottomSheet.before_update
+    if getattr(original, _CLOSE_MARK, False):
+        return
+
+    def before_update(self: ft.BottomSheet) -> None:
+        with_close_button(self)
+        original(self)
+
+    setattr(before_update, _CLOSE_MARK, True)
+    ft.BottomSheet.before_update = before_update
 
 
 def bottom_sheet(content: ft.Control, *, key: Optional[str] = None, draggable: bool = False) -> ft.BottomSheet:

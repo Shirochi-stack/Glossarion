@@ -105,7 +105,9 @@ class LivePanel:
         self._page = page
         if height:
             try:
-                self.sheet.content.height = max(280.0, float(height) * 0.55)
+                from glossarion_mobile.ui.components.sheet import sheet_body
+
+                sheet_body(self.sheet).height = max(280.0, float(height) * 0.55)
             except Exception:
                 pass
         self.render(force=True)

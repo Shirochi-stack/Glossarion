@@ -330,7 +330,10 @@ def _dialog(tester: Any, key: str) -> Any:
     """The open dialog ``key`` names: the U10 sheets keep ``key`` on their frame and give the dialog itself a
     per-build key (``U10Actions._sheet``: ``<key>-<n>``), so a sheet shown again never reuses a closing one's."""
     for dialog in reversed(list(getattr(getattr(tester.page, "_dialogs", None), "controls", None) or [])):
-        if getattr(dialog, "open", False) and key in (_key(dialog), _key(getattr(dialog, "content", None))):
+        from glossarion_mobile.ui.components.sheet import sheet_body
+
+        body = sheet_body(dialog) if type(dialog).__name__ == "BottomSheet" else getattr(dialog, "content", None)
+        if getattr(dialog, "open", False) and key in (_key(dialog), _key(body)):
             return dialog
     return None
 

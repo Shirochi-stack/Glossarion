@@ -191,6 +191,9 @@ class GlossarionApp:
     async def start(self) -> None:
         page = self.page
         page.title = "Glossarion"
+        from glossarion_mobile.ui.components.sheet import install_close_buttons
+
+        install_close_buttons()  # "Close Menu ✕" on every bottom sheet (owner 2026-10-21)
         apply_theme(page, Appearance.SYSTEM)
         page.padding = 0
         if not self.is_mobile and not getattr(page, "web", False) and page.platform is not None:
