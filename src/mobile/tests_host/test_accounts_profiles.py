@@ -959,7 +959,7 @@ def test_welcome_step_two_sign_ins_and_local_ai(fake_auth):
     keys = [getattr(c, "key", None) for c in _welcome_controls(screen.page_area.content)]
     assert [f"welcome-signin-{p}" for p, _label in SIGN_INS] == [k for k in keys if str(k).startswith("welcome-signin")]
     # owner 2026-10-16: the former step 2 (API key, another model, local AI) is on the same page
-    assert {"welcome-local", "welcome-api-key", "welcome-choose-model"} <= set(keys)
+    assert {"welcome-local", "welcome-api-key", "welcome-model"} <= set(keys)
     sheet = screen.open_sign_in("authgem")
     assert isinstance(sheet, LoginSheet) and sheet.panel.provider == "authgem" and sheet.panel.account_id == 0
     screen._go("settings.endpoints")

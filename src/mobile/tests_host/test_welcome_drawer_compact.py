@@ -106,7 +106,7 @@ def test_steps_have_no_separate_providers_page():
 def test_page_one_has_every_former_page_two_action(monkeypatch):
     chosen, keys_saved, routes = [], [], []
     s = WelcomeScreen(parse_route("/welcome"), oauth=object(), navigate=routes.append,
-                      on_choose_model=lambda: chosen.append(True), on_api_key=keys_saved.append)
+                      on_set_model=chosen.append, on_api_key=keys_saved.append)
     s.get_body()
     rows = by_key(s.page_area.content)
     for provider, _label in SIGN_INS:
@@ -117,9 +117,14 @@ def test_page_one_has_every_former_page_two_action(monkeypatch):
     assert s.api_key_field in list(walk(s.page_area.content))
     s.api_key_field.value = "sk-test"
     rows["welcome-save-key"].on_click(None)
-    rows["welcome-choose-model"].on_click(None)
+    # owner 2026-10-21: a Model field (the desktop's model dropdown) above the API key; a pick sets the model
+    keys = [getattr(c, "key", None) for c in walk(s.page_area.content)]
+    assert keys.index("welcome-model") < keys.index("welcome-api-key")
+    assert rows["welcome-model"].label == "Model" and rows["welcome-model"] is s.model_picker
+    s.model_picker.set_value("openai/gpt-5.5")
     rows["welcome-local"].on_click(None)
-    assert keys_saved == ["sk-test"] and chosen == [True] and routes == ["settings.endpoints"]
+    assert keys_saved == ["sk-test"] and chosen == ["openai/gpt-5.5"] and routes == ["settings.endpoints"]
+    assert s.model_notes.get("openai") == "✓ Using openai/gpt-5.5"
     # smaller type: no headline on page 1 (it was HEADLINE_SMALL 22 sp over a 96 dp logo)
     texts = [c for c in walk(s.page_area.content) if isinstance(c, ft.Text)]
     assert not any(getattr(t, "theme_style", None) == ft.TextThemeStyle.HEADLINE_SMALL for t in texts)

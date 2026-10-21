@@ -10,8 +10,9 @@
    keyless routes; "Run on this phone (no account needed)": the on-device presets as one-tap buttons
    (size and a RAM hint for this phone from the engine's RAM gate, Light suggested, inline download
    progress; one tap downloads, loads and selects the model through the Model manager's
-   ``OnDeviceFlow``); then your own API key (the desktop main key field, ``api_key``), "Choose another
-   model" (ModelSheet) and a local Ollama / LM Studio host on your PC (Settings › Endpoints). Next
+   ``OnDeviceFlow``); then the Model field (ModelPicker, like the desktop's model dropdown) above your
+   own API key (the desktop main key field, ``api_key``) and a local Ollama / LM Studio host on your PC
+   (Settings › Endpoints). Next
    moves on (without a sign-in or a model it counts as skipped).
 2. **Target language and glossary mode** - the desktop first-run "Choose Your
    Glossary Mode" cards (same eight modes, copy and ``balanced`` preselected), the
@@ -194,6 +195,7 @@ class WelcomeScreen(Screen):
         self.skip_button = ft.TextButton(content="Skip", on_click=lambda e: self.skip())
         self.mode_cards: dict = {}
         self.api_key_field = ft.TextField(label="API key", password=True, can_reveal_password=True, dense=True)
+        self.model_picker: Any = None  # the Model field above the API key (ModelPicker), made per render
 
     # ---- pages ----------------------------------------------------------------------------
 
@@ -234,13 +236,14 @@ class WelcomeScreen(Screen):
                 self._section("Run on this phone (no account needed)"),
                 self._ondevice_section(),
                 self._section("Your own API key or a model on your PC"),
+                # the Model field above the key, with the PC's local host beside it (one row: page 1 still
+                # fits a 360 x 800 dp phone)
+                ft.Row([ft.Container(content=self._model_field(), expand=True), self._local_control()],
+                       spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="welcome-model-row"),
                 ft.Row([ft.Container(content=self.api_key_field, expand=True),
                         ft.TextButton(content="Save", tooltip="Save API key", on_click=lambda e: self._save_key(),
                                       key="welcome-save-key")],
                        spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="welcome-api-key"),
-                ft.Row([ft.TextButton(content="Choose another model", on_click=lambda e: self._choose_model(),
-                                      key="welcome-choose-model"),
-                        self._local_control()], wrap=True, spacing=4, run_spacing=0),
             ],
             spacing=6,
             scroll=ft.ScrollMode.AUTO,
@@ -1114,6 +1117,26 @@ class WelcomeScreen(Screen):
         if provider in dict(KEYLESS):
             self.keyless_chosen.add(provider)  # its row keeps "Change model"
         self.render()
+
+    def _model_field(self) -> ft.Control:
+        """The model the API key is for, above the key (owner 2026-10-21: like the desktop's model dropdown):
+        the ModelPicker field (the ModelSheet in field mode, any model or a typed one); a pick sets the
+        global model like "Choose another model" did."""
+        from glossarion_mobile.ui.sheets.model_sheet import ModelPicker, sheet_env
+
+        current = str(self.current_model() if self.current_model is not None else "") or ""
+        self.model_picker = ModelPicker(value=current, label="Model", env=sheet_env(), on_change=self._pick_model,
+                                        key="welcome-model")
+        return self.model_picker
+
+    def _pick_model(self, model: str) -> None:
+        model = str(model or "").strip()
+        if not model:
+            return
+        self.changing_provider = None
+        if self.on_set_model is not None:
+            call_handler(self.on_set_model, model)
+        self.model_chosen(model)
 
     def _save_key(self) -> None:
         value = (self.api_key_field.value or "").strip()
