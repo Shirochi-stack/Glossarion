@@ -3050,6 +3050,12 @@ def test_editor_keeps_the_box_selected_with_handles_a_move_tab_and_live_text(iso
         tab.selected = 0
         tab.refresh()
         assert not [s for s in tab.canvas.shapes if isinstance(s, (cv.Text, cv.Circle))]
+        # owner 2026-10-21: the desktop's box colours (yellow selected, green detected), each with a see-through fill
+        strokes = [s.paint.color for s in tab.canvas.shapes
+                   if isinstance(s, cv.Rect) and s.paint.style == me.ft.PaintingStyle.STROKE]
+        assert strokes == [me.SELECTED_COLOR, me.DETECTED_COLOR]
+        assert len([s for s in tab.canvas.shapes
+                    if isinstance(s, cv.Rect) and s.paint.style == me.ft.PaintingStyle.FILL]) == 2
         tab.set_tool("select")
         tab.refresh()
         handles = [s for s in tab.canvas.shapes if isinstance(s, cv.Circle)]
@@ -3128,3 +3134,21 @@ def test_editor_keeps_the_box_selected_with_handles_a_move_tab_and_live_text(iso
         screen.dispose()
 
     asyncio.run(scenario())
+
+
+def test_editor_box_colours_follow_the_desktop_states():
+    """owner 2026-10-21: the editor's boxes use the desktop colours (ImageRenderer
+    _apply_rectangle_clean_style): green detected, blue recognized, teal free text, orange excluded,
+    yellow selected; the editor no longer draws every box pink."""
+    from glossarion_mobile.ui.tools.manga import editor as me
+
+    assert me.box_state({}) == "detected"
+    assert me.box_state({"is_recognized": True}) == "recognized"
+    assert me.box_state({"free_text": True}) == "free_text"
+    assert me.box_state({"free_text": True, "is_recognized": True}) == "recognized"
+    assert me.box_state({"exclude_from_clean": True, "is_recognized": True}) == "excluded"
+    assert me.box_state({"exclude_from_clean": True}, selected=True) == "selected"
+    colours = {state: style[0] for state, style in me.BOX_STYLES.items()}
+    assert colours == {"detected": "#00FF00", "recognized": "#0096FF", "free_text": "#00DCB4",
+                       "excluded": "#FF8C00", "selected": "#FFFF00"}
+    assert me.BOX_STYLES["excluded"][2] == me.BOX_STYLES["selected"][2] == 3

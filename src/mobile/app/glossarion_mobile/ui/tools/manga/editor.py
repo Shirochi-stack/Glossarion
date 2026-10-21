@@ -85,9 +85,17 @@ RENDER_DELAY = 1.2  # s after the last move / resize before the page is re-rende
 THUMB_W, THUMB_H = 40, 52  # dp: a page strip thumbnail
 MIN_BOX = 8.0  # image px
 DRAG_INTERVAL = 24
-BOX_COLOR = "#E18F98"
-SELECTED_COLOR = "#5A9FD4"
-EXCLUDED_COLOR = "#9E9E9E"
+#: The desktop editor's box colours (ImageRenderer._apply_rectangle_clean_style / manga_image_preview):
+#: (border, fill opacity, border width) per state; the fill is the border colour, see-through.
+DETECTED_COLOR = "#00FF00"  # green: detected, no text recognized yet
+RECOGNIZED_COLOR = "#0096FF"  # blue: OCR text recognized
+FREE_TEXT_COLOR = "#00DCB4"  # teal: free text outside a bubble, not recognized yet
+EXCLUDED_COLOR = "#FF8C00"  # orange: excluded from cleaning
+SELECTED_COLOR = "#FFFF00"  # yellow: the selected box (thicker)
+DRAW_COLOR = "#FF0000"  # red: a box being drawn
+BOX_STYLES = {"detected": (DETECTED_COLOR, 50 / 255, 2), "recognized": (RECOGNIZED_COLOR, 50 / 255, 2),
+              "free_text": (FREE_TEXT_COLOR, 45 / 255, 2), "excluded": (EXCLUDED_COLOR, 30 / 255, 3),
+              "selected": (SELECTED_COLOR, 50 / 255, 3)}
 SHAPES = {"box": "rect", "circle": "ellipse", "lasso": "polygon"}
 #: The page view's display mode, in the order the desktop button cycles it
 #: (``MangaImagePreviewWidget._cycle_source_display_mode``: translated -> cleaned -> original):
@@ -168,6 +176,20 @@ def normalize_rect(x1: float, y1: float, x2: float, y2: float) -> tuple:
 def _contains(box: dict, x: float, y: float) -> bool:
     return (float(box.get("x", 0)) <= x <= float(box.get("x", 0)) + float(box.get("width", 0))
             and float(box.get("y", 0)) <= y <= float(box.get("y", 0)) + float(box.get("height", 0)))
+
+
+def box_state(box: dict, *, selected: bool = False) -> str:
+    """The desktop editor's colour state of a box (``BOX_STYLES``): selected, excluded from cleaning,
+    recognized (OCR text), free text, else detected. Recognized wins over free text, as on desktop."""
+    if selected:
+        return "selected"
+    if box.get("exclude_from_clean"):
+        return "excluded"
+    if box.get("is_recognized"):
+        return "recognized"
+    if box.get("free_text"):
+        return "free_text"
+    return "detected"
 
 
 def hit_test(boxes: Sequence[dict], x: float, y: float) -> Optional[int]:
@@ -1016,26 +1038,25 @@ class EditorTab(MangaTab):
                 text.width, text.height = float(box.get("width", 0)) * scale, float(box.get("height", 0)) * scale
                 shapes.extend((hole, text))
         for index, box in enumerate(self.boxes):
-            excluded = bool(box.get("exclude_from_clean"))
-            color = SELECTED_COLOR if index == self.selected else (EXCLUDED_COLOR if excluded else BOX_COLOR)
-            paint = ft.Paint(color=color, stroke_width=3 if index == self.selected else 2,
-                             style=ft.PaintingStyle.STROKE)
+            color, opacity, width = BOX_STYLES[box_state(box, selected=index == self.selected)]
             x, y = float(box.get("x", 0)) * scale, float(box.get("y", 0)) * scale
             w, h = float(box.get("width", 0)) * scale, float(box.get("height", 0)) * scale
             polygon = box.get("polygon") or []
-            if box.get("shape") == "polygon" and len(polygon) >= 3:
-                points = [(float(p[0]) * scale, float(p[1]) * scale) for p in polygon]
-                elements = [cv.Path.MoveTo(*points[0])] + [cv.Path.LineTo(px, py) for px, py in points[1:]]
-                elements.append(cv.Path.Close())
-                shapes.append(cv.Path(elements=elements, paint=paint))
-            elif box.get("shape") == "ellipse":
-                shapes.append(cv.Oval(x, y, w, h, paint=paint))
-            else:
-                shapes.append(cv.Rect(x, y, w, h, paint=paint))
+            for paint in (ft.Paint(color=ft.Colors.with_opacity(opacity, color), style=ft.PaintingStyle.FILL),
+                          ft.Paint(color=color, stroke_width=width, style=ft.PaintingStyle.STROKE)):
+                if box.get("shape") == "polygon" and len(polygon) >= 3:
+                    points = [(float(p[0]) * scale, float(p[1]) * scale) for p in polygon]
+                    elements = [cv.Path.MoveTo(*points[0])] + [cv.Path.LineTo(px, py) for px, py in points[1:]]
+                    elements.append(cv.Path.Close())
+                    shapes.append(cv.Path(elements=elements, paint=paint))
+                elif box.get("shape") == "ellipse":
+                    shapes.append(cv.Oval(x, y, w, h, paint=paint))
+                else:
+                    shapes.append(cv.Rect(x, y, w, h, paint=paint))
             if index == self.selected and self.tool == "select":
                 shapes.extend(self._handle_shapes(x, y, x + w, y + h))
         drag = self.drag or {}
-        paint = ft.Paint(color=SELECTED_COLOR, stroke_width=2, style=ft.PaintingStyle.STROKE)
+        paint = ft.Paint(color=DRAW_COLOR, stroke_width=2, style=ft.PaintingStyle.STROKE)
         if drag.get("mode") == "draw" and drag.get("current"):
             (sx, sy), (cx, cy) = drag["start"], drag["current"]
             x, y, w, h = normalize_rect(sx, sy, cx, cy)
@@ -1052,7 +1073,7 @@ class EditorTab(MangaTab):
         size on screen at every zoom."""
         r = HANDLE / 2 / max(self.view_transform.scale, 1e-6)
         fill = ft.Paint(color=SELECTED_COLOR, style=ft.PaintingStyle.FILL)
-        ink = ft.Paint(color="#FFFFFF", stroke_width=max(r / 6, 0.5), style=ft.PaintingStyle.STROKE,
+        ink = ft.Paint(color="#000000", stroke_width=max(r / 6, 0.5), style=ft.PaintingStyle.STROKE,
                        stroke_cap=ft.StrokeCap.ROUND)
         a, head = r * 0.62, r * 0.26  # arrow half-length, arrowhead size
         shapes: list = [cv.Circle(left, top, r, paint=fill), cv.Circle(right, bottom, r, paint=fill)]
