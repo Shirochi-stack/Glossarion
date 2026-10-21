@@ -70,7 +70,7 @@ dependencies = [
 
   # PDF
   "pymupdf==1.27.2.3",
-  "pypdf==6.19.0",
+  "pypdf==6.20.1",
 
   # Images / on-device ONNX
   "pillow==12.3.0",  # patched iOS wheels available; Android needs compatible patched wheels
