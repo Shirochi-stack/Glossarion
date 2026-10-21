@@ -1506,9 +1506,37 @@ def test_latest_antigravity_client_version_uses_google_public_bundle(monkeypatch
         raise AssertionError(url)
 
     monkeypatch.delenv("ANTIGRAVITY_CLIENT_VERSION", raising=False)
+    monkeypatch.setattr(antigravity_proxy, "_installed_antigravity_app_version", lambda: None)
     monkeypatch.setattr(antigravity_proxy.requests, "get", fake_get)
 
     assert antigravity_proxy._latest_antigravity_client_version() == "2.2.1"
+
+
+def test_latest_antigravity_client_version_prefers_newer_installed_app(monkeypatch):
+    monkeypatch.delenv("ANTIGRAVITY_CLIENT_VERSION", raising=False)
+    monkeypatch.setattr(antigravity_proxy, "_installed_antigravity_app_version", lambda: "2.23.1")
+    monkeypatch.setattr(
+        antigravity_proxy.requests,
+        "get",
+        lambda url, timeout=15: FakeHTTPResponse(text="antigravity-hub/2.2.1-5287492581195776/"),
+    )
+
+    assert antigravity_proxy._latest_antigravity_client_version() == "2.23.1"
+
+
+def test_latest_antigravity_client_version_falls_back_when_nothing_found(monkeypatch):
+    monkeypatch.delenv("ANTIGRAVITY_CLIENT_VERSION", raising=False)
+    monkeypatch.setattr(antigravity_proxy, "_installed_antigravity_app_version", lambda: None)
+    monkeypatch.setattr(
+        antigravity_proxy.requests,
+        "get",
+        lambda url, timeout=15: FakeHTTPResponse(text="<html><script src='x'></script></html>"),
+    )
+
+    assert (
+        antigravity_proxy._latest_antigravity_client_version()
+        == antigravity_proxy.ANTIGRAVITY_CLIENT_VERSION_FALLBACK
+    )
 
 
 def test_patch_runtime_antigravity_client_version(tmp_path):
@@ -1523,6 +1551,19 @@ def test_patch_runtime_antigravity_client_version(tmp_path):
 
     assert antigravity_proxy._patch_runtime_antigravity_client_version(str(tmp_path), "2.2.1")
     assert 'const ANTIGRAVITY_VERSION = "2.2.1";' in headers_file.read_text(encoding="utf-8")
+
+
+def test_patch_runtime_antigravity_client_version_never_downgrades(tmp_path):
+    headers_dir = tmp_path / "src" / "utils"
+    headers_dir.mkdir(parents=True)
+    headers_file = headers_dir / "headers.ts"
+    headers_file.write_text('const ANTIGRAVITY_VERSION = "2.23.1";\n', encoding="utf-8")
+
+    assert antigravity_proxy._patch_runtime_antigravity_client_version(str(tmp_path), "2.2.1")
+    assert 'const ANTIGRAVITY_VERSION = "2.23.1";' in headers_file.read_text(encoding="utf-8")
+
+    assert antigravity_proxy._patch_runtime_antigravity_client_version(str(tmp_path), "2.24.0")
+    assert 'const ANTIGRAVITY_VERSION = "2.24.0";' in headers_file.read_text(encoding="utf-8")
 
 
 def test_runtime_fork_feature_check_rejects_relabelled_upstream_cache(tmp_path):

@@ -116,7 +116,9 @@ BUN_INSTALL_TIMEOUT_SECONDS = 300
 RUNTIME_PATCH_VERSION = "2026-09-13-serialized-account-storage-v2"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
-ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
+# Oldest app version Google still lists Gemini 4 Argon for (2026-10-21). The proxy floors
+# its own version at this too; the fallback only matters when nothing better is found.
+ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.23.1"
 
 CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
 MODELS_ENDPOINT = "/v1/models"
@@ -356,12 +358,47 @@ def _extract_antigravity_versions(text: str) -> List[str]:
     return versions
 
 
+def _installed_antigravity_app_version() -> Optional[str]:
+    """Return the file version of the locally installed Antigravity app, if any (Windows)."""
+    if sys.platform != "win32":
+        return None
+    exe = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "antigravity", "Antigravity.exe")
+    if not os.path.isfile(exe):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        version_dll = ctypes.WinDLL("version")
+        size = version_dll.GetFileVersionInfoSizeW(exe, None)
+        if not size:
+            return None
+        data = ctypes.create_string_buffer(size)
+        if not version_dll.GetFileVersionInfoW(exe, 0, size, data):
+            return None
+        info = ctypes.c_void_p()
+        length = wintypes.UINT()
+        if not version_dll.VerQueryValueW(data, "\\", ctypes.byref(info), ctypes.byref(length)):
+            return None
+        # VS_FIXEDFILEINFO: dwFileVersionMS / dwFileVersionLS follow two DWORD header fields.
+        fixed = ctypes.cast(info, ctypes.POINTER(wintypes.DWORD * 4)).contents
+        major, minor, patch = fixed[2] >> 16, fixed[2] & 0xFFFF, fixed[3] >> 16
+        return f"{major}.{minor}.{patch}"
+    except Exception as exc:
+        logger.debug("Could not read installed Antigravity app version: %s", exc)
+        return None
+
+
 def _latest_antigravity_client_version() -> str:
     """Resolve the current official Antigravity app version for request headers."""
     override = os.environ.get("ANTIGRAVITY_CLIENT_VERSION", "").strip()
     if override:
         return override.lstrip("v")
 
+    # The changelog page is now rendered by JavaScript, so scraping often finds nothing;
+    # the installed app's version is what Google currently accepts from this machine.
+    installed = _installed_antigravity_app_version()
+    candidates_found = [installed] if installed else []
     try:
         resp = requests.get(ANTIGRAVITY_SITE_URL, timeout=15)
         resp.raise_for_status()
@@ -376,11 +413,12 @@ def _latest_antigravity_client_version() -> str:
             except Exception:
                 continue
 
-        if candidates:
-            return max(candidates, key=_parse_semver)
+        candidates_found.extend(candidates)
     except Exception as exc:
         logger.debug("Could not resolve official Antigravity client version: %s", exc)
 
+    if candidates_found:
+        return max(candidates_found, key=_parse_semver)
     return ANTIGRAVITY_CLIENT_VERSION_FALLBACK
 
 
@@ -430,8 +468,17 @@ def _patch_runtime_antigravity_client_version(runtime_dir: str, version: str) ->
     with open(headers_path, "r", encoding="utf-8") as f:
         content = f.read()
 
+    pattern = r'const\s+ANTIGRAVITY_VERSION\s*=\s*["\']([^"\']+)["\'];'
+    match = re.search(pattern, content)
+    if not match:
+        return False
+    # Never downgrade: the proxy repo ships the version Google currently accepts, and a
+    # stale value here hides newer models (Gemini 4 Argon needs 2.23.1+).
+    if _parse_semver(match.group(1)) >= _parse_semver(version):
+        return True
+
     updated, count = re.subn(
-        r'const\s+ANTIGRAVITY_VERSION\s*=\s*["\'][^"\']+["\'];',
+        pattern,
         f'const ANTIGRAVITY_VERSION = "{version}";',
         content,
         count=1,
