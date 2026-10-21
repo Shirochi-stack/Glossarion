@@ -366,6 +366,35 @@ class _DriverPage:
         except Exception as exc:
             raise AuthChatGPTError("AuthChatGPT browser script failed. Try again.", "browser_error") from exc
 
+    def hook_lost(self):
+        """True when the hooked chat window is gone (a new document in the page or the frame).
+
+        A None from ``evaluate`` does not say so here: the in-app browser also gives None when
+        the page's answer did not arrive in time or the call could not be posted. This asks the
+        top page itself (never through the frame, which may be the thing that is gone);
+        None means no answer again, which is not proof either."""
+        script = (f"(() => {{const f = {_FRAME};"
+                  f" if (!f) return {'true' if self.framed else '!window.__glossarionGPT'};"
+                  " try { return !f.contentWindow.__glossarionGPT; } catch (e) { return true; }})()")
+        try:
+            return self.page.run_js(script, 10000)
+        except browser_driver.BrowserCancelled as exc:
+            raise AuthChatGPTError("AuthChatGPT: translation stopped by user", "cancelled") from exc
+        except Exception:
+            return None
+
+
+class _PageLost(AuthChatGPTError):
+    """The hooked chatgpt.com document went away while a reply was on its way.
+
+    On Glossarion Mobile this is the app changing screens: Flet 1.0.3 draws ``page.overlay``
+    (where the hidden WebViews live) only in the top View, so pushing or popping a View moves
+    every hidden WebView into another widget tree. Flutter then builds a new WebView, which
+    loads its ``url`` again without the hook. The reply on the old page is lost."""
+
+    def __init__(self):
+        super().__init__("AuthChatGPT page was reloaded during translation.", "browser_error")
+
 
 def _frame_script(config):
     """Adds the chat iframe to the host page and hooks its window in the same task.
@@ -1061,7 +1090,13 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
         _check(cancel_check)
         state = page.evaluate(_POLL)
         if not state:
-            raise AuthChatGPTError("AuthChatGPT page was reloaded during translation.", "browser_error")
+            # Desktop: no hook state means a new document. The in-app browser also answers
+            # None when an answer was late, so there the page is asked whether the hook is gone.
+            probe = getattr(page, "hook_lost", None)
+            if probe is None or probe() is True:
+                raise _PageLost()
+            time.sleep(.3)
+            continue
         resolved = state.get("resolved") or resolved
         if state.get("error"):
             # Server detail text only: tokens and browser state never reach the log.
@@ -1142,6 +1177,16 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
     prompt = build_prompt(messages, images=images)
     token = _access_token(log_fn)
     refreshed = False
+    resent = False
+    sent = []
+
+    def before_send():
+        # once per request: a resend on a new page is the same request
+        if not sent:
+            sent.append(True)
+            if before_send_callback:
+                before_send_callback()
+
     while True:
         if images and not token:
             raise AuthChatGPTError(IMAGES_NEED_LOGIN, "config_error")
@@ -1151,15 +1196,26 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
                   "temporary": bool(token) and not image_output, "imageOutput": bool(image_output)}
         with _open_tab(config, cancel_check) as page:
             try:
-                result = _complete(page, float(timeout), cancel_check, on_delta, before_send_callback, on_thinking,
+                result = _complete(page, float(timeout), cancel_check, on_delta, before_send, on_thinking,
                                    images=images, image_output=image_output)
                 if token:
                     _announce_logged_in(token, log_fn)
                 return result
+            except _PageLost:
+                # In the app the hidden page is rebuilt when the screen changes (see _PageLost):
+                # the message goes once more on a new page instead of failing the request.
+                if resent or not getattr(page, "driver", False):
+                    raise
+                resent = True
+                kind = None
             except AuthChatGPTError as exc:
                 if not token or not _login_rejected(exc):
                     raise
                 kind, reason = exc.error_type, str(exc).replace("AuthChatGPT: ", "")
+        if kind is None:
+            log_fn("🔄 AuthChatGPT: the in-app ChatGPT page was rebuilt while it was answering "
+                   "(a screen change); sending the message again.")
+            continue
         # The login failed this request: one refresh, then the chat runs logged out.
         replacement = None if refreshed or kind != "auth_error" else _refreshed_token(token)
         refreshed = True
