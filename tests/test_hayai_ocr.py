@@ -231,6 +231,11 @@ def provider_env(monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("ONNX_CACHE_DIR", str(tmp_path / "onnx"))
     monkeypatch.setenv("GLOSSARION_HTTP_LOG", "0")
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:  # the desktop CI installs no onnxruntime; the engine below is a fake anyway
+        import types
+        monkeypatch.setitem(sys.modules, "onnxruntime", types.ModuleType("onnxruntime"))
     import manga_models
     import ocr_manager
 
