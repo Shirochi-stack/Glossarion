@@ -246,6 +246,7 @@ tests/**
 # text move; the constants, an AST pin and an offscreen render of Response Handling).
 !tests/test_other_settings_streaming_texts.py
 !tests/test_respect_retry_after.py
+!tests/test_api_delay_range.py
 !tests/test_empty_tag_cleanup.py
 !tests/test_request_schedule.py
 !tests/test_review_prompt_profiles.py

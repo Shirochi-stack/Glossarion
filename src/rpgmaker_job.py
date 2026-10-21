@@ -41,6 +41,8 @@ import shutil
 import threading
 import zipfile
 
+from settings_rules import owner_delay_env  # the API call delay field's min and range max
+
 __all__ = [
     "COPY_SUBFOLDER",
     "RPGMAKER_GAME_INPUTS_ATTR",
@@ -424,7 +426,7 @@ class RpgMakerJobMixin:
                 self.append_log("🖼️ Output mode: Image — translating game image assets only")
 
                 # Set API call delay from GUI
-                os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')
+                os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = owner_delay_env(self, '2.0')
                 os.environ['API_QUEUE_SIZE'] = self.api_queue_entry.text().strip() or '4'
 
                 # Determine parallelism from batch settings
@@ -545,7 +547,7 @@ class RpgMakerJobMixin:
             os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
 
             # Set API call delay from GUI (same as image mode + main pipeline)
-            os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')
+            os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = owner_delay_env(self, '2.0')
             os.environ['API_QUEUE_SIZE'] = self.api_queue_entry.text().strip() or '4'
             os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = self.thread_delay_entry.text().strip() or '0.0001'
 

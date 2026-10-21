@@ -11,6 +11,8 @@ from key_contexts import (CONTEXT_LABELS, POOL_CONTEXTS, context_presets, key_en
                           normalize_disabled_contexts)
 import key_pool_service
 import request_schedule
+# per-key API call delay ranges ('5-7'), shared with Glossarion Mobile's key editor
+from settings_rules import DelayRange, clamp_delay_max, parse_delay_range, store_key_delay
 
 # GUI imports - optional for Discord bot
 _HEADLESS_IMPORT = (
@@ -556,6 +558,7 @@ class APIKeyEntry:
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
                  azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None,
                  individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0,
+                 api_call_delay_max=None,
                  request_parameters: Optional[dict] = None, disabled_contexts=None,
                  disable_schedule=None, queue_schedule=None):
         self.api_key = api_key
@@ -600,6 +603,8 @@ class APIKeyEntry:
             self.api_call_delay = v if v >= 0 else 0.0
         except (ValueError, TypeError):
             self.api_call_delay = 0.0
+        # ... and its range max ('' = a fixed per-key delay; each call draws in [delay, max])
+        self.api_call_delay_max = clamp_delay_max(self.api_call_delay, api_call_delay_max) if self.api_call_delay > 0 else ''
         self.last_error_time = None
         self.error_count = 0
         self.success_count = 0
@@ -681,6 +686,7 @@ class APIKeyEntry:
             'individual_output_token_limit': self.individual_output_token_limit,
             'individual_key_temperature': self.individual_key_temperature,
             'api_call_delay': getattr(self, 'api_call_delay', 0.0),
+            **({'api_call_delay_max': self.api_call_delay_max} if getattr(self, 'api_call_delay_max', '') not in ('', None) else {}),
             # Persist times used and test results
             'times_used': getattr(self, 'times_used', 0),
             'last_test_result': getattr(self, 'last_test_result', None),
@@ -716,6 +722,7 @@ class APIKeyEntry:
             individual_output_token_limit=data.get('individual_output_token_limit'),
             individual_key_temperature=data.get('individual_key_temperature'),
             api_call_delay=data.get('api_call_delay', 0.0),
+            api_call_delay_max=data.get('api_call_delay_max'),
             disable_schedule=data.get('disable_schedule'),
             queue_schedule=data.get('queue_schedule'),
         )
@@ -809,6 +816,7 @@ class APIKeyPool:
                     individual_output_token_limit=key_data.get('individual_output_token_limit'),
                     individual_key_temperature=key_data.get('individual_key_temperature'),
                     api_call_delay=key_data.get('api_call_delay', 0.0),
+                    api_call_delay_max=key_data.get('api_call_delay_max'),
                     disable_schedule=key_data.get('disable_schedule'),
                     queue_schedule=key_data.get('queue_schedule'),
                 )
@@ -5609,7 +5617,7 @@ class MultiAPIKeyDialog(QDialog):
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(fallback_keys):
-                    fallback_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+                    store_key_delay(fallback_keys[idx], value)
             self.translator_gui.config['fallback_keys'] = fallback_keys
             self.translator_gui.save_config(show_message=False)
             self._load_fallback_keys()
@@ -5624,7 +5632,7 @@ class MultiAPIKeyDialog(QDialog):
         selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
             if 0 <= idx < len(fallback_keys):
-                fallback_keys[idx]['api_call_delay'] = 0.0
+                store_key_delay(fallback_keys[idx], 0.0)
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
@@ -6243,7 +6251,7 @@ class MultiAPIKeyDialog(QDialog):
                 "Edit API Call Delay",
             )
             if ok:
-                fallback_keys[index]['api_call_delay'] = value if value > 0 else 0.0
+                store_key_delay(fallback_keys[index], value)
                 self.translator_gui.config['fallback_keys'] = fallback_keys
                 self.translator_gui.save_config(show_message=False)
                 self._load_fallback_keys()
@@ -6434,7 +6442,7 @@ class MultiAPIKeyDialog(QDialog):
                 "Edit API Call Delay",
             )
             if ok:
-                key.api_call_delay = value if value > 0 else 0.0
+                store_key_delay(key, value)
                 self._refresh_key_list()
                 self._show_status(f"Updated API delay to: {value if value > 0 else 'global'}")
 
@@ -6560,7 +6568,7 @@ class MultiAPIKeyDialog(QDialog):
                 raw = self._key_setting_value(entry, 'api_call_delay', 0.0)
                 value = float(raw if raw not in (None, "") else 0.0)
                 if value > 0:
-                    return value
+                    return DelayRange(value, self._key_setting_value(entry, 'api_call_delay_max', None))
             except Exception:
                 pass
         return 0.0
@@ -6596,19 +6604,28 @@ class MultiAPIKeyDialog(QDialog):
                 2,
             )
         if setting == 'api_call_delay':
-            try:
-                current_value = float(current_value if current_value not in (None, "") else 0.0)
-            except (TypeError, ValueError):
-                current_value = 0.0
-            return QInputDialog.getDouble(
+            # a delay ('5') or a range ('5-7': each call waits a random time between the two)
+            if isinstance(current_value, DelayRange):
+                current = current_value
+            else:
+                try:
+                    current = DelayRange(float(current_value if current_value not in (None, "") else 0.0))
+                except (TypeError, ValueError):
+                    current = DelayRange(0.0)
+            text, ok = QInputDialog.getText(
                 self,
                 title or "Set API Call Delay",
-                label or "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-                current_value,
-                0.0,
-                3600.0,
-                2,
+                label or "API call delay in seconds, or a range like 5-7 (0 = use global):",
+                text=str(current),
             )
+            if not ok:
+                return current, False
+            parsed = parse_delay_range(text.strip() or 0)
+            if parsed is None:
+                QMessageBox.warning(self, title or "Set API Call Delay",
+                                    f"'{text}' is not a delay: enter seconds (5) or a range (5-7).")
+                return current, False
+            return DelayRange(*parsed), True
         raise ValueError(f"Unsupported per-key setting: {setting}")
 
     def _show_output_token_limit_dialog(self, current_value, title="Set Output Token Limit", label="Max output tokens:", allow_global=False):
@@ -6635,7 +6652,7 @@ class MultiAPIKeyDialog(QDialog):
             'api_call_delay',
             current_value,
             title=title,
-            label="API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            label="API call delay in seconds, or a range like 5-7 (0 = use global):",
             allow_global=True,
         )
 
@@ -6877,7 +6894,7 @@ class MultiAPIKeyDialog(QDialog):
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(self.key_pool.keys):
-                    self.key_pool.keys[idx].api_call_delay = value if value > 0 else 0.0
+                    store_key_delay(self.key_pool.keys[idx], value)
             self._refresh_key_list()
             self._show_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
 
@@ -6889,7 +6906,7 @@ class MultiAPIKeyDialog(QDialog):
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
             if 0 <= idx < len(self.key_pool.keys):
-                self.key_pool.keys[idx].api_call_delay = 0.0
+                store_key_delay(self.key_pool.keys[idx], 0.0)
         self._refresh_key_list()
         self._show_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
 
@@ -8037,7 +8054,7 @@ class MultiAPIKeyDialog(QDialog):
                 "Edit API Call Delay",
             )
             if ok:
-                glossary_keys[index]['api_call_delay'] = value if value > 0 else 0.0
+                store_key_delay(glossary_keys[index], value)
                 self.translator_gui.config['glossary_keys'] = glossary_keys
                 self.translator_gui.save_config(show_message=False)
                 self._load_glossary_keys()
@@ -8218,7 +8235,7 @@ class MultiAPIKeyDialog(QDialog):
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(glossary_keys):
-                    glossary_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+                    store_key_delay(glossary_keys[idx], value)
             self.translator_gui.config['glossary_keys'] = glossary_keys
             self.translator_gui.save_config(show_message=False)
             self._load_glossary_keys()
@@ -8233,7 +8250,7 @@ class MultiAPIKeyDialog(QDialog):
         selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
             if 0 <= idx < len(glossary_keys):
-                glossary_keys[idx]['api_call_delay'] = 0.0
+                store_key_delay(glossary_keys[idx], 0.0)
         self.translator_gui.config['glossary_keys'] = glossary_keys
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
@@ -10216,6 +10233,9 @@ class MultiAPIKeyDialog(QDialog):
                 return None
         limit = number('individual_output_token_limit', int)
         delay = number('api_call_delay', float) or 0.0
+        if delay > 0:  # a range shows as '2-5'; a fixed delay as before ('2.0')
+            ranged = DelayRange(delay, cls._schedule_key_value(key, 'api_call_delay_max', None))
+            delay = ranged if ranged.maximum > delay else delay
         return (limit if limit and limit > 0 else None,
                 number('individual_key_temperature', float),
                 delay if delay > 0 else 0.0)
@@ -12328,7 +12348,7 @@ class MultiAPIKeyDialog(QDialog):
         if ok:
             for idx in indices:
                 if 0 <= idx < len(keys):
-                    keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+                    store_key_delay(keys[idx], value)
             self._dedicated_set_keys(pool_name, keys)
             self._dedicated_load_keys(pool_name)
 
@@ -12336,7 +12356,7 @@ class MultiAPIKeyDialog(QDialog):
         keys = self._dedicated_keys(pool_name)
         for idx in self._dedicated_selected_indices(pool_name):
             if 0 <= idx < len(keys):
-                keys[idx]['api_call_delay'] = 0.0
+                store_key_delay(keys[idx], 0.0)
         self._dedicated_set_keys(pool_name, keys)
         self._dedicated_load_keys(pool_name)
 

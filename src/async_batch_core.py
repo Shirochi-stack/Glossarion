@@ -2778,10 +2778,9 @@ class AsyncBatchJobMixin:
         env_vars['ENABLE_THOUGHTS'] = '0'
         
         # API settings - handle both PySide6 and tkinter
-        if hasattr(self.gui.delay_entry, 'get'):
-            env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.get())
-        else:
-            env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.text() if hasattr(self.gui.delay_entry, 'text') else '2')
+        # a range like 3-7 exports its min and max (settings_rules.owner_delay_env)
+        from settings_rules import owner_delay_env
+        env_vars['SEND_INTERVAL_SECONDS'], env_vars['SEND_INTERVAL_MAX_SECONDS'] = owner_delay_env(self.gui, '2')
             
         # Token limit resolution order:
         # 0) if token_limit_disabled -> unlimited (0)

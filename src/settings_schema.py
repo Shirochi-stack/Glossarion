@@ -161,6 +161,8 @@ def _safe_float(value, default):
 # GUI-free modules that own them (never from translator_gui).
 _CALL_CONVERTERS = {
     "_format_plain_decimal_setting": ("run_env",),
+    "delay_range_min": ("settings_rules",),
+    "delay_range_max": ("settings_rules",),
 }
 
 
@@ -366,6 +368,7 @@ SECTION_OVERRIDES = {
     "chapter_range": "main.run",
     "use_spine_order": "main.run",
     "delay": "main.run",
+    "delay_max": "main.run",
     "api_queue": "main.run",
     "thread_submission_delay": "main.run",
     "translation_temperature": "main.run",
@@ -604,6 +607,7 @@ COMPUTED_DEFAULTS = {
     "prompt_profiles": "the built-in prompt profiles (prompt defaults + translator_gui default_prompts)",
     "extraction_workers": "min(8, max(2, cpu_count // 2))",
     "ai_hunter_config.ai_hunter_max_workers": "max(1, cpu_count // 2)",
+    "delay_max": "the API call delay field's range max: 7 for a config without delay (3-7), else unset or '' = delay (fixed)",
 }
 
 # Allowed values the desktop code checks without a settings_map choice converter or a

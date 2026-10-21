@@ -19,6 +19,7 @@ import threading
 import traceback
 
 from language_options import TARGET_LANGUAGES
+from settings_rules import delay_field_text, delay_field_values, format_delay_field
 from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS
 from qa_scan_runtime import is_html_like_path
 # Pure helpers, the latest-report lookup and the dialog defaults live in qa_scan_runtime
@@ -4663,34 +4664,30 @@ class QAScannerMixin:
             ai_delay_label.setFixedWidth(100)
             ai_delay_h.addWidget(ai_delay_label)
 
-            ai_delay_spin = QDoubleSpinBox()
-            ai_delay_spin.setMinimum(-1.0)
-            ai_delay_spin.setMaximum(60.0)
-            ai_delay_spin.setSingleStep(0.5)
-            ai_delay_spin.setValue(float(qa_settings.get('ai_truncation_api_call_delay', -1.0)))
+            # seconds, or a range like 5-7 (each call waits a random time between the two); -1 = global
+            from PySide6.QtWidgets import QLineEdit
+            ai_delay_spin = QLineEdit()
+            _qa_delay_max = qa_settings.get('ai_truncation_api_call_delay_max', '')
+            ai_delay_spin.setText(format_delay_field(
+                qa_settings.get('ai_truncation_api_call_delay', -1.0), _qa_delay_max, inherit=-1.0))
             ai_delay_spin.setFixedWidth(100)
-            ai_delay_spin.setToolTip("-1 = use global API call delay")
-            disable_wheel_event(ai_delay_spin)
+            ai_delay_spin.setToolTip("-1 = use global API call delay (and its range)\n"
+                                     "A range like 5-7 waits a random time between the two before each call")
             ai_delay_h.addWidget(ai_delay_spin)
 
-            # Snap negative values in-between 0 and -1 directly
-            ai_delay_spin.setProperty("last_val", ai_delay_spin.value())
-            def enforce_delay_snap(val):
-                last_val = ai_delay_spin.property("last_val")
-                ai_delay_spin.blockSignals(True)
-                if -1.0 < val < 0.0:
-                    if last_val >= 0.0:
-                        val = -1.0
-                    elif last_val <= -1.0:
-                        val = 0.0
-                    else:
-                        val = -1.0
-                    ai_delay_spin.setValue(val)
-                ai_delay_spin.setProperty("last_val", val)
-                ai_delay_spin.blockSignals(False)
-            ai_delay_spin.valueChanged.connect(enforce_delay_snap)
+            def _qa_delay_values(widget):
+                values = delay_field_values(widget.text(), 'ai_truncation_api_call_delay', inherit=-1.0)
+                if values is None:
+                    raise ValueError(f"not a delay: {widget.text()!r}")
+                return values
 
-            ai_delay_hint = QLabel("sec  (-1 = global)")
+            def normalize_delay_text():
+                values = delay_field_values(ai_delay_spin.text(), 'ai_truncation_api_call_delay', inherit=-1.0)
+                if values is not None:
+                    ai_delay_spin.setText(delay_field_text(values, 'ai_truncation_api_call_delay', inherit=-1.0))
+            ai_delay_spin.editingFinished.connect(normalize_delay_text)
+
+            ai_delay_hint = QLabel("sec or 5-7  (-1 = global)")
             ai_delay_hint.setFont(QFont('Arial', 8))
             ai_delay_hint.setStyleSheet("color: #707070;")
             ai_delay_h.addWidget(ai_delay_hint)
@@ -5230,7 +5227,8 @@ class QAScannerMixin:
                         'ai_truncation_model': (ai_model_combo, lambda x: x.currentText().strip()),
                         'ai_truncation_temperature': (ai_temp_spin, lambda x: x.value()),
                         'ai_truncation_max_tokens': (ai_tokens_spin, lambda x: x.value()),
-                        'ai_truncation_api_call_delay': (ai_delay_spin, lambda x: x.value()),
+                        'ai_truncation_api_call_delay': (ai_delay_spin, lambda x: _qa_delay_values(x)['ai_truncation_api_call_delay']),
+                        'ai_truncation_api_call_delay_max': (ai_delay_spin, lambda x: _qa_delay_values(x)['ai_truncation_api_call_delay_max']),
                         'ai_truncation_endpoint_url': (ai_url_entry, lambda x: x.text().strip()),
                         'ai_truncation_disable_thinking': (ai_disable_thinking_check, lambda x: x.isChecked()),
                         'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
@@ -5624,7 +5622,6 @@ class QAScannerMixin:
                     ('ai_truncation_model', ai_model_combo, ''),
                     ('ai_truncation_temperature', ai_temp_spin, 0.0),
                     ('ai_truncation_max_tokens', ai_tokens_spin, 0),
-                    ('ai_truncation_api_call_delay', ai_delay_spin, 0),
                     ('ai_truncation_endpoint_url', ai_url_entry, ''),
                     ('ai_truncation_disable_thinking', ai_disable_thinking_check, False),
                     ('word_count_min_ratio', ratio_min_spin, 'Auto'),
@@ -5637,6 +5634,11 @@ class QAScannerMixin:
                 )
                 for key, widget, default in simple:
                     _apply(lambda k=key, w=widget, d=default: _set_value(w, s.get(k, d)))
+                # the AI truncation API call delay field: '5', a range '5-7', or -1 (global)
+                _apply(lambda: ai_delay_spin.setText(delay_field_text(
+                    {'ai_truncation_api_call_delay': s.get('ai_truncation_api_call_delay', 0),
+                     'ai_truncation_api_call_delay_max': s.get('ai_truncation_api_call_delay_max', '')},
+                    'ai_truncation_api_call_delay', inherit=-1.0)))
 
                 ai_artifact_patterns_holder[0] = list(
                     s.get(

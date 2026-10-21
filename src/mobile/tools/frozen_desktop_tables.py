@@ -28,6 +28,7 @@ Never imported by the desktop or the mobile app (tests and the generator only). 
 """
 # The converter lambdas reference these names exactly as settings_persistence.py did.
 from run_env import MULTIPASS_REFINEMENT_MODES, REFINEMENT_RAW_PROMPT_ROLES, _format_plain_decimal_setting
+from settings_rules import delay_range_max, delay_range_min
 from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 
 FROZEN_SHA = "1cd681786382abed23069f4c06cb583948371d1a"
@@ -62,7 +63,8 @@ class FrozenDesktopTables:
             ('use_spine_order', ['use_spine_order_checkbox'], False, bool),
 
             # Numeric settings
-            ('delay', ['delay_entry'], 5.0, lambda v: safe_float(v, 5.0)),
+            ('delay', ['delay_entry'], 3.0, delay_range_min),
+            ('delay_max', ['delay_entry'], 7.0, delay_range_max),
             ('api_queue', ['api_queue_entry', 'api_queue_var'], 4, lambda v: max(-1, safe_int(v, 4))),
             ('thread_submission_delay', ['thread_delay_entry'], '0.0001', _format_plain_decimal_setting),
             ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),

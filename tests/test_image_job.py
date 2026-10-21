@@ -214,7 +214,10 @@ def test_translator_gui_changed_only_in_the_u7_spans():
 
     try:
         legacy = rp.legacy_translator_gui().split("\n")
-        pinned = rp.git_show(TG_MOBILE_SHA, "src/translator_gui.py").split("\n")
+        # owner-approved changes since apply to the pinned text as to the legacy one (approved_changes.py)
+        from parity.approved_changes import apply_to_source
+
+        pinned = apply_to_source("src/translator_gui.py", rp.git_show(TG_MOBILE_SHA, "src/translator_gui.py")).split("\n")
     except rp.Unavailable as exc:  # pragma: no cover - shallow clone
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
             pytest.fail(str(exc))

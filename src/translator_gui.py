@@ -1138,6 +1138,7 @@ from run_env import (
 )
 from owner_state import ConfigStateMixin
 from settings_persistence import SettingsPersistenceMixin, safe_float, safe_int
+from settings_rules import delay_range_text, format_delay_range, parse_delay_range
 from headless_owner import DirectTextRunOptions
 # Shared GUI-free core (U3): per-file job runners, input preparation and the stop protocol.
 # TranslatorGUI inherits the moved runners; is_traditional_translation_api stays importable here.
@@ -10523,6 +10524,13 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             setattr(self, attr, None)
             return None
 
+    def _normalize_delay_entry(self):
+        """API call delay edited: a range shows as 'min-max' with the max never below the min
+        ('7-5' -> '7', '5-5' / '5-' -> '5'); text that is no delay is left for the save check."""
+        parsed = parse_delay_range(self.delay_entry.text())
+        if parsed is not None and self.delay_entry.text() != format_delay_range(*parsed):
+            self.delay_entry.setText(format_delay_range(*parsed))
+
     def _on_chunk_size_edited(self):
         """Chunk Size edited: "Auto"/blank enables auto compression, a number sets the factor to match."""
         from settings_rules import parse_chunk_size_text
@@ -18398,12 +18406,17 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self._sync_chunk_size_entry()
 
         # API delay (left side)
-        api_delay_label = QLabel("API call delay (s):")
+        api_delay_label = QLabel("API call delay (s, or range 5-7):")
         self.frame.addWidget(api_delay_label, 4, 0, Qt.AlignLeft)
-        
+
         self.delay_entry = QLineEdit()
-        self.delay_entry.setText(str(self.config.get('delay', 5)))
+        self.delay_entry.setText(delay_range_text(self.config))
         self.delay_entry.setMaximumWidth(80)
+        self.delay_entry.setToolTip(
+            "Seconds between API calls, counted from when the previous call finished.\n"
+            "A range like 5-7 waits a random time between the two before each call."
+        )
+        self.delay_entry.editingFinished.connect(self._normalize_delay_entry)
 
         api_queue_label = QLabel("API Preflight:")
 
@@ -29827,7 +29840,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Validate numeric fields before saving (skip if called silently)
             if show_message:
                 validation_map = [
-                    (self.delay_entry, "API call delay", lambda v: v.replace('.', '', 1).isdigit() or v == ""),
+                    (self.delay_entry, "API call delay", lambda v: v == "" or parse_delay_range(v) is not None),
                     (self.api_queue_entry, "API Preflight", lambda v: v.lstrip('-').isdigit() and int(v) >= -1),
                     (self.thread_delay_entry, "Threading Delay", lambda v: v.replace('.', '', 1).isdigit()),
                     (self.trans_temp, "Temperature", lambda v: v == "" or v.replace('.', '', 1).replace('-', '', 1).isdigit()),

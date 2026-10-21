@@ -24,6 +24,7 @@ from title_tag_translation import DEFAULT_IMAGE_ONLY_TITLE_TAG_SYSTEM_PROMPT
 if 'SEND_INTERVAL_SECONDS' not in os.environ:
     os.environ['SEND_INTERVAL_SECONDS'] = '0.5'
 print(f"🔧 Module-level API delay initialized: {os.environ['SEND_INTERVAL_SECONDS']}s")
+from settings_rules import delay_max_env
 
 # Import API key encryption/decryption
 try:
@@ -203,6 +204,7 @@ class GlossarionWeb:
             self.config['api_call_delay'] = 0.5
             self.decrypted_config['api_call_delay'] = 0.5
         os.environ['SEND_INTERVAL_SECONDS'] = str(api_call_delay)
+        os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_max_env(api_call_delay, self.decrypted_config.get('api_call_delay_max', ''))  # the web app has no max field: a fixed delay unless config sets one
         print(f"🔧 Initialized API call delay: {api_call_delay}s")
 
         # Always disable thought streaming for the web app
@@ -633,6 +635,7 @@ class GlossarionWeb:
         
         # API Rate Limiting
         os.environ['SEND_INTERVAL_SECONDS'] = str(config('api_call_delay', 0.5))
+        os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_max_env(config('api_call_delay', 0.5), config('api_call_delay_max', ''))
         
         # Chapter Processing Options
         os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if config('batch_translate_headers', False) else '0'
@@ -2609,6 +2612,7 @@ class GlossarionWeb:
             # CRITICAL: Explicitly set environment variables before creating UnifiedClient
             api_call_delay = merged_config.get('api_call_delay', 0.5)
             os.environ['SEND_INTERVAL_SECONDS'] = str(api_call_delay)
+            os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_max_env(api_call_delay, merged_config.get('api_call_delay_max', ''))  # the web app has no max field: a fixed delay unless config sets one
             print(f"🔧 Manga translation: Set SEND_INTERVAL_SECONDS = {api_call_delay}s")
             
             # Set batch translation and batch size from MockGUI variables (after MockGUI is created)
@@ -6082,6 +6086,7 @@ CRITICAL EXTRACTION RULES:
                             
                             # CRITICAL: Update environment variables immediately
                             os.environ['SEND_INTERVAL_SECONDS'] = str(api_delay_val)
+                            os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_max_env(api_delay_val, current_config.get('api_call_delay_max', ''))
                             os.environ['THREAD_SUBMISSION_DELAY'] = str(thread_delay_val)
                             print(f"✅ Updated SEND_INTERVAL_SECONDS = {api_delay_val}s")
                             print(f"✅ Updated THREAD_SUBMISSION_DELAY = {thread_delay_val}s")

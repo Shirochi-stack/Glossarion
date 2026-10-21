@@ -241,7 +241,8 @@ _NUMBER_FIELDS = (
     ("cooldown", "Cooldown (seconds)", "int", 10, 3600, None),
     ("individual_output_token_limit", "Output token limit", "int", 0, 2_000_000, "global limit"),
     ("individual_key_temperature", "Temperature", "float", 0.0, 2.0, "global temperature"),
-    ("api_call_delay", "API delay (seconds)", "float", 0.0, 3600.0, "global delay"),
+    # takes a range too ("5-7": each call waits a random time between the two; settings_rules)
+    ("api_call_delay", "API delay (s, or 5-7)", "float", 0.0, 3600.0, "global delay"),
 )
 
 
@@ -344,8 +345,10 @@ class KeyEditor(FullScreenEditor):
             value = entry.get(name)
             if name == "cooldown" and value is None:
                 value = 60
-            if name == "api_call_delay" and not value:
-                value = None
+            if name == "api_call_delay":  # the per-key delay and its range max: "5" or "5-7"
+                from settings_rules import key_delay
+
+                value = str(key_delay(entry)) if key_delay(entry) > 0 else None
             field = ft.TextField(
                 value=_fmt(value), label=label, dense=True,
                 hint_text=f"Empty = {empty}" if empty else None,
@@ -499,6 +502,15 @@ class KeyEditor(FullScreenEditor):
             if empty is None:
                 raise ValueError(f"{label}: enter a number")
             return None
+        if name == "api_call_delay":  # "5" or a range "5-7" (a DelayRange: the min with its max)
+            from settings_rules import DelayRange, parse_delay_range
+
+            parsed = parse_delay_range(text)
+            if parsed is None:
+                raise ValueError(f"{label}: enter seconds (5) or a range (5-7)")
+            if parsed[1] > high:
+                raise ValueError(f"{label}: must be between {_fmt(low)} and {_fmt(high)}")
+            return DelayRange(*parsed)
         try:
             number: Any = int(text) if kind == "int" else float(text)
         except ValueError:
@@ -541,13 +553,15 @@ class KeyEditor(FullScreenEditor):
             "enabled": bool(self.enabled_switch.value),
             "individual_output_token_limit": self._number("individual_output_token_limit"),
             "individual_key_temperature": self._number("individual_key_temperature"),
-            "api_call_delay": self._number("api_call_delay") or 0.0,
             "use_individual_endpoint": use_endpoint,
             "azure_endpoint": endpoint or None,
             "azure_api_version": version,
             "google_credentials": creds or None,
             "google_region": (self.region_field.value or "").strip() or None,
         })
+        from settings_rules import store_key_delay
+
+        store_key_delay(entry, self._number("api_call_delay") or 0.0)  # api_call_delay (+ its range max)
         # The Translation pool stores APIKeyEntry.to_dict(); the other pools keep the dict shape
         # of their "Add key" buttons, so optional fields are only written when used.
         if self.pool_id == "main" or "cooldown" in self.entry or cooldown != 60:

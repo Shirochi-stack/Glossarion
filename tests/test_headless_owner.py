@@ -674,7 +674,9 @@ def test_fresh_install_headless_owner_runs_like_the_desktop(tmp_path, monkeypatc
     # the startup glossary-mode shortcut handler overrides the _init_variables default 'balanced'
     assert owner.auto_glossary_mode_var == "off" and env["AUTO_GLOSSARY_MODE"] == "off"
     assert startup_glossary == "off"
-    assert env["SEND_INTERVAL_SECONDS"] == "5" and env["CONNECT_TIMEOUT"] == "10.0"
+    # 2026-10-21: a config without delay gets the API call delay range 3-7 (approved_changes.py)
+    assert env["SEND_INTERVAL_SECONDS"] == "3.0" and env["SEND_INTERVAL_MAX_SECONDS"] == "7.0"
+    assert env["CONNECT_TIMEOUT"] == "10.0"
     assert "PRESERVE_ORIGINAL_FORMATOPTIMIZE_FOR_OCR" in env  # desktop quirk preserved
     assert len(owner.config) > 400  # the startup save_config populated the settings map (in memory)
 

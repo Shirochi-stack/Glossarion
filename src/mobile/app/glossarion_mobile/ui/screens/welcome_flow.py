@@ -99,7 +99,7 @@ class WelcomeFlow:
     max_output_tokens: Optional[int] = None
     chunk_size: Optional[str] = None  # "" = auto (manual_chunk_size cleared)
     # the request pacing and batch size set here (None: leave the saved / model default alone)
-    delay: Optional[float] = None  # API call delay, seconds (``delay``)
+    delay: Optional[str] = None  # API call delay, seconds or a range "3-7" (``delay`` / ``delay_max``)
     temperature: Optional[float] = None  # ``translation_temperature``
     disable_temperature: Optional[bool] = None  # ``disable_temperature`` (send no temperature)
     batch_size: Optional[int] = None  # ``batch_size``
@@ -170,8 +170,10 @@ class WelcomeFlow:
             updates["max_output_tokens"] = int(self.max_output_tokens)
         if self.chunk_size is not None:
             updates["manual_chunk_size"] = str(self.chunk_size)
-        if self.delay is not None:
-            updates["delay"] = float(self.delay)
+        if self.delay is not None:  # the min and its range max ('' = a fixed delay)
+            from settings_rules import delay_range_values
+
+            updates.update(delay_range_values(self.delay) or {})
         if self.temperature is not None:
             updates["translation_temperature"] = float(self.temperature)
         if self.disable_temperature is not None:

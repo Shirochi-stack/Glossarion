@@ -130,7 +130,8 @@ CURATED_SECTIONS: tuple = (
         ("Language & output mode", ("output_language", "output_mode")),
         ("Sampling & limits", ("translation_temperature", "disable_temperature", "max_output_tokens", "token_limit",
                                "token_limit_disabled", "manual_chunk_size")),
-        ("Pacing", ("delay", "thread_submission_delay", "api_queue")),
+        # delay_max: the range max the API call delay field takes ("3-7"; FOLDED_KEYS)
+        ("Pacing", ("delay", "delay_max", "thread_submission_delay", "api_queue")),
         ("Batch translation", ("batch_translation", "batch_size")),
         ("Glossary", ("auto_glossary_mode", "enable_auto_glossary", "append_glossary", "append_glossary_auto_load",
                       "fuzzy_auto_mapping", "manual_glossary_path", "manual_glossary_map", "title_trim_count",
@@ -274,11 +275,14 @@ VIRTUAL_SPECS: dict = {"context_mode": _context_mode_spec(), "streaming": _strea
 def _folded_keys() -> dict:
     from glossarion_mobile.state.setting_writes import STREAMING_KEY, STREAMING_WRITES
 
-    return {key: STREAMING_KEY for key in STREAMING_WRITES}
+    # an API call delay tile's field takes a range ("5-7"): its max key has no tile of its own
+    return {**{key: STREAMING_KEY for key in STREAMING_WRITES}, "delay_max": "delay",
+            "qa_scanner_settings.ai_truncation_api_call_delay_max": "qa_scanner_settings.ai_truncation_api_call_delay"}
 
 
 #: Config keys a virtual control represents on mobile and that get no tile of their own (key -> virtual
-#: key): the Streaming switch stands for the four desktop streaming toggles and Enable thoughts. They stay
+#: key): the Streaming switch stands for the four desktop streaming toggles and Enable thoughts; the API
+#: call delay tiles stand for their range max keys. They stay
 #: in their section's keys (counts, ``section_for_key``); ``SchemaAccess.specs_for`` leaves them out.
 FOLDED_KEYS: dict = _folded_keys()
 

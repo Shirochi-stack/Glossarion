@@ -121,6 +121,10 @@ def legacy_functions(src_file: str, names=RUNNERS) -> dict:
         _LEGACY_CACHE[key] = compile(source, f"<translator_gui@{LEGACY_SHA[:12]}>", "exec")
     ns = {"os": os, "json": json, "__file__": src_file, "__name__": "translator_gui",
           "__builtins__": __builtins__}
+    # the names approved_changes._DELAY_IMPORT adds to translator_gui (2026-10-21 API call delay ranges)
+    import settings_rules
+
+    ns.update(owner_delay_env=settings_rules.owner_delay_env, delay_log_value=settings_rules.delay_log_value)
     exec(_LEGACY_CACHE[key], ns)
     cls = ns.pop("_LegacyTranslatorGUI")
     return {n: vars(cls)[n] for n in names}

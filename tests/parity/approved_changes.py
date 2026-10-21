@@ -252,6 +252,206 @@ _HAYAI_IMAGERENDERER = [
 ]
 
 
+# 2026-10-21 API call delay ranges: the main window's API call delay field takes a delay ("5") or a range
+# ("5-7"; settings_rules.parse_delay_range); delay keeps the min and the new delay_max the max ('' =
+# fixed); a config without delay (a new user) gets 3-7 (the default delay was 5). Exported as
+# SEND_INTERVAL_SECONDS (the min) and SEND_INTERVAL_MAX_SECONDS (the max, '' = fixed).
+_DELAY_ROW = (
+    "            ('delay', ['delay_entry'], 5.0, lambda v: safe_float(v, 5.0)),\n",
+    "            ('delay', ['delay_entry'], 3.0, delay_range_min),\n"
+    "            ('delay_max', ['delay_entry'], 7.0, delay_range_max),\n")
+_DELAY_ROW_GUI = (
+    "                ('delay', ['delay_entry'], 5.0, lambda v: safe_float(v, 5.0)),\n",
+    "                ('delay', ['delay_entry'], 3.0, delay_range_min),\n"
+    "                ('delay_max', ['delay_entry'], 7.0, delay_range_max),\n")
+_DELAY_ENV_DICT = (
+    "            'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),\n",
+    "            'SEND_INTERVAL_SECONDS': delay_env(self.delay_entry.text())[0],\n"
+    "            'SEND_INTERVAL_MAX_SECONDS': delay_env(self.delay_entry.text())[1],\n")
+# the field shows '5' / '5-7' (a config without delay: '3-7')
+_DELAY_FIELD = ("        self.delay_entry.setText(str(self.config.get('delay', 5)))\n",
+                "        self.delay_entry.setText(delay_range_text(self.config))\n")
+# the names the rows above use (settings_rules)
+# (on the `import os` line itself: the legacy line numbers the U7 span pins count stay as they were)
+_DELAY_IMPORT = ("\nimport os\n", "\nimport os; from settings_rules import delay_env, delay_log_value, delay_range_max, "
+                                  "delay_range_min, delay_range_text, owner_delay_env\n")
+# the moved runners / dialogs that export or read the delay (one line each, so the U7 spans keep
+# their line counts); the names come from _DELAY_IMPORT
+_DELAY_RPGMAKER = [
+    ("                os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')\n",
+     "                os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = owner_delay_env(self, '2.0')\n"),
+    ("\n            os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')\n",
+     "\n            os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = owner_delay_env(self, '2.0')\n"),
+]
+_DELAY_GLOSSARY_LOG = (
+    "            api_delay = float(self.delay_entry.text()) if hasattr(self, 'delay_entry') else 2.0\n",
+    "            api_delay = delay_log_value(self.delay_entry.text()) if hasattr(self, 'delay_entry') else 2.0\n")
+_DELAY_MANGA = (
+    "                os.environ['SEND_INTERVAL_SECONDS'] = str(delay)\n",
+    "                os.environ['SEND_INTERVAL_SECONDS'], os.environ['SEND_INTERVAL_MAX_SECONDS'] = delay_env(delay)\n")
+_DELAY_ASYNC = (
+    "        if hasattr(self.gui.delay_entry, 'get'):\n"
+    "            env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.get())\n"
+    "        else:\n"
+    "            env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.text() if hasattr(self.gui.delay_entry, 'text') else '2')\n",
+    "        # a range like 3-7 exports its min and max (settings_rules.owner_delay_env)\n"
+    "        from settings_rules import owner_delay_env\n"
+    "        env_vars['SEND_INTERVAL_SECONDS'], env_vars['SEND_INTERVAL_MAX_SECONDS'] = owner_delay_env(self.gui, '2')\n")
+# the QA dialog's AI-truncation delay field takes '5' / '5-7' / -1 (QLineEdit; was a spin box) and the
+# scanner passes the range (inherit: -1 = the global delay and its range)
+_DELAY_QA_GUI = [('from language_options import TARGET_LANGUAGES\nfrom emoticon_patterns import DEFAULT_EMOTICON_PATTERNS\n',
+  'from language_options import TARGET_LANGUAGES\n'
+  'from settings_rules import delay_field_text, delay_field_values, format_delay_field\n'
+  'from emoticon_patterns import DEFAULT_EMOTICON_PATTERNS\n'),
+ ('\n'
+  '            ai_delay_spin = QDoubleSpinBox()\n'
+  '            ai_delay_spin.setMinimum(-1.0)\n'
+  '            ai_delay_spin.setMaximum(60.0)\n'
+  '            ai_delay_spin.setSingleStep(0.5)\n'
+  "            ai_delay_spin.setValue(float(qa_settings.get('ai_truncation_api_call_delay', -1.0)))\n"
+  '            ai_delay_spin.setFixedWidth(100)\n'
+  '            ai_delay_spin.setToolTip("-1 = use global API call delay")\n'
+  '            disable_wheel_event(ai_delay_spin)\n'
+  '            ai_delay_h.addWidget(ai_delay_spin)\n'
+  '\n'
+  '            # Snap negative values in-between 0 and -1 directly\n'
+  '            ai_delay_spin.setProperty("last_val", ai_delay_spin.value())\n'
+  '            def enforce_delay_snap(val):\n'
+  '                last_val = ai_delay_spin.property("last_val")\n'
+  '                ai_delay_spin.blockSignals(True)\n'
+  '                if -1.0 < val < 0.0:\n'
+  '                    if last_val >= 0.0:\n'
+  '                        val = -1.0\n'
+  '                    elif last_val <= -1.0:\n'
+  '                        val = 0.0\n'
+  '                    else:\n'
+  '                        val = -1.0\n'
+  '                    ai_delay_spin.setValue(val)\n'
+  '                ai_delay_spin.setProperty("last_val", val)\n'
+  '                ai_delay_spin.blockSignals(False)\n'
+  '            ai_delay_spin.valueChanged.connect(enforce_delay_snap)\n'
+  '\n'
+  '            ai_delay_hint = QLabel("sec  (-1 = global)")\n'
+  "            ai_delay_hint.setFont(QFont('Arial', 8))\n",
+  '\n'
+  '            # seconds, or a range like 5-7 (each call waits a random time between the two); -1 = global\n'
+  '            from PySide6.QtWidgets import QLineEdit\n'
+  '            ai_delay_spin = QLineEdit()\n'
+  "            _qa_delay_max = qa_settings.get('ai_truncation_api_call_delay_max', '')\n"
+  '            ai_delay_spin.setText(format_delay_field(\n'
+  "                qa_settings.get('ai_truncation_api_call_delay', -1.0), _qa_delay_max, inherit=-1.0))\n"
+  '            ai_delay_spin.setFixedWidth(100)\n'
+  '            ai_delay_spin.setToolTip("-1 = use global API call delay (and its range)\\n"\n'
+  '                                     "A range like 5-7 waits a random time between the two before each call")\n'
+  '            ai_delay_h.addWidget(ai_delay_spin)\n'
+  '\n'
+  '            def _qa_delay_values(widget):\n'
+  "                values = delay_field_values(widget.text(), 'ai_truncation_api_call_delay', inherit=-1.0)\n"
+  '                if values is None:\n'
+  '                    raise ValueError(f"not a delay: {widget.text()!r}")\n'
+  '                return values\n'
+  '\n'
+  '            def normalize_delay_text():\n'
+  "                values = delay_field_values(ai_delay_spin.text(), 'ai_truncation_api_call_delay', inherit=-1.0)\n"
+  '                if values is not None:\n'
+  "                    ai_delay_spin.setText(delay_field_text(values, 'ai_truncation_api_call_delay', "
+  'inherit=-1.0))\n'
+  '            ai_delay_spin.editingFinished.connect(normalize_delay_text)\n'
+  '\n'
+  '            ai_delay_hint = QLabel("sec or 5-7  (-1 = global)")\n'
+  "            ai_delay_hint.setFont(QFont('Arial', 8))\n"),
+ ("                        'ai_truncation_max_tokens': (ai_tokens_spin, lambda x: x.value()),\n"
+  "                        'ai_truncation_api_call_delay': (ai_delay_spin, lambda x: x.value()),\n"
+  "                        'ai_truncation_endpoint_url': (ai_url_entry, lambda x: x.text().strip()),\n",
+  "                        'ai_truncation_max_tokens': (ai_tokens_spin, lambda x: x.value()),\n"
+  "                        'ai_truncation_api_call_delay': (ai_delay_spin, lambda x: "
+  "_qa_delay_values(x)['ai_truncation_api_call_delay']),\n"
+  "                        'ai_truncation_api_call_delay_max': (ai_delay_spin, lambda x: "
+  "_qa_delay_values(x)['ai_truncation_api_call_delay_max']),\n"
+  "                        'ai_truncation_endpoint_url': (ai_url_entry, lambda x: x.text().strip()),\n"),
+ ("                    ('ai_truncation_max_tokens', ai_tokens_spin, 0),\n"
+  "                    ('ai_truncation_api_call_delay', ai_delay_spin, 0),\n"
+  "                    ('ai_truncation_endpoint_url', ai_url_entry, ''),\n",
+  "                    ('ai_truncation_max_tokens', ai_tokens_spin, 0),\n"
+  "                    ('ai_truncation_endpoint_url', ai_url_entry, ''),\n"),
+ _after("                for key, widget, default in simple:\n"
+        "                    _apply(lambda k=key, w=widget, d=default: _set_value(w, s.get(k, d)))",
+        "                # the AI truncation API call delay field: '5', a range '5-7', or -1 (global)",
+        "                _apply(lambda: ai_delay_spin.setText(delay_field_text(",
+        "                    {'ai_truncation_api_call_delay': s.get('ai_truncation_api_call_delay', 0),",
+        "                     'ai_truncation_api_call_delay_max': s.get('ai_truncation_api_call_delay_max', '')},",
+        "                    'ai_truncation_api_call_delay', inherit=-1.0)))")]
+_DELAY_SCANNER = [('@contextmanager\n'
+  'def _qa_api_overrides_env(disable_thinking=False, delay_override=-1.0):\n'
+  '    """Temporarily overrides API config environment variables for QA scans."""\n',
+  '@contextmanager\n'
+  'def _qa_api_overrides_env(disable_thinking=False, delay_override=-1.0, delay_max_override=None):\n'
+  '    """Temporarily overrides API config environment variables for QA scans."""\n'),
+ ("    orig_delay = os.environ.get('SEND_INTERVAL_SECONDS')\n    \n",
+  "    orig_delay = os.environ.get('SEND_INTERVAL_SECONDS')\n"
+  "    orig_delay_max = os.environ.get('SEND_INTERVAL_MAX_SECONDS')\n"
+  '    \n'),
+ ("        os.environ['SEND_INTERVAL_SECONDS'] = str(delay_override)\n        \n",
+  "        os.environ['SEND_INTERVAL_SECONDS'] = str(delay_override)\n"
+  "        # the QA delay's range max ('' = a fixed delay)\n"
+  "        os.environ['SEND_INTERVAL_MAX_SECONDS'] = str(delay_max_override) if delay_max_override else ''\n"
+  '        \n'),
+ ("        elif delay_override >= 0: os.environ.pop('SEND_INTERVAL_SECONDS', None)\n\n",
+  "        elif delay_override >= 0: os.environ.pop('SEND_INTERVAL_SECONDS', None)\n"
+  "        if orig_delay_max is not None: os.environ['SEND_INTERVAL_MAX_SECONDS'] = orig_delay_max\n"
+  "        elif delay_override >= 0: os.environ.pop('SEND_INTERVAL_MAX_SECONDS', None)\n"
+  '\n'),
+ ('                            custom_system_prompt=None, temperature=None, max_tokens=None,\n'
+  "                            prompt_role='system', disable_thinking=False, api_call_delay=-1.0):\n"
+  '    """Check if translated content appears truncated by asking an AI model.\n',
+  '                            custom_system_prompt=None, temperature=None, max_tokens=None,\n'
+  "                            prompt_role='system', disable_thinking=False, api_call_delay=-1.0,\n"
+  '                            api_call_delay_max=None):\n'
+  '    """Check if translated content appears truncated by asking an AI model.\n'),
+ ('        \n'
+  '        with _qa_api_overrides_env(disable_thinking=disable_thinking, delay_override=api_call_delay):\n'
+  "            # Snapshot the QA-specific delay into the client's thread-local\n",
+  '        \n'
+  '        _delay_max = api_call_delay_max if api_call_delay >= 0 and api_call_delay_max and '
+  'float(api_call_delay_max) > api_call_delay else None\n'
+  '        with _qa_api_overrides_env(disable_thinking=disable_thinking, delay_override=api_call_delay,\n'
+  '                                   delay_max_override=_delay_max):\n'
+  "            # Snapshot the QA-specific delay into the client's thread-local\n"),
+ ('                    _tls.active_api_delay_override = float(api_call_delay)\n                except Exception:\n',
+  '                    _tls.active_api_delay_override = float(api_call_delay)\n'
+  '                    _tls.active_api_delay_max = float(_delay_max) if _delay_max else None\n'
+  '                except Exception:\n'),
+ ('                    client._qa_truncation_delay_override = float(api_call_delay)\n'
+  '                except Exception:\n',
+  '                    client._qa_truncation_delay_override = float(api_call_delay)\n'
+  '                    client._qa_truncation_delay_max_override = float(_delay_max) if _delay_max else None\n'
+  '                except Exception:\n'),
+ ('                    # Read delay: dedicated setting (-1 = global, else use value)\n'
+  "                    _dedicated_delay = float(qa_settings.get('ai_truncation_api_call_delay', -1.0))\n",
+  '                    # Read delay: dedicated setting (-1 = global, else use value)\n'
+  '                    # a range (min, max): the dedicated one, or -1 = the global delay and its range\n'
+  '                    from settings_rules import delay_range_for\n'
+  "                    _dedicated_delay = float(qa_settings.get('ai_truncation_api_call_delay', -1.0))\n"),
+ ('                        # -1 means use global API call delay from translator config\n'
+  '                        try:\n'
+  "                            _ai_delay = float(_ai_config.get('delay', 2))\n"
+  '                        except (ValueError, TypeError):\n'
+  '                            _ai_delay = 2.0\n'
+  '                    else:\n'
+  '                        _ai_delay = _dedicated_delay\n'
+  '\n',
+  '                        # -1 means use global API call delay from translator config\n'
+  '                        _ai_delay, _ai_delay_max = delay_range_for(_ai_config)\n'
+  '                    else:\n'
+  '                        _ai_delay, _ai_delay_max = delay_range_for(\n'
+  "                            qa_settings, 'ai_truncation_api_call_delay', default_max=None)\n"
+  '\n'),
+ ('                        api_call_delay=_ai_delay,\n                    )\n\n',
+  '                        api_call_delay=_ai_delay,\n'
+  '                        api_call_delay_max=_ai_delay_max,\n'
+  '                    )\n'
+  '\n')]
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -456,6 +656,26 @@ APPROVED = (
             "src/ImageRenderer.py": _HAYAI_IMAGERENDERER,
         },
         # a new provider value: nothing recorded before it existed changes value
+        "values": {},
+    },
+    {
+        "date": "2026-10-21",
+        "what": "API call delay ranges: the API call delay field takes '5' or a range '5-7' (each call waits a "
+                "random time between the two); delay_max / SEND_INTERVAL_MAX_SECONDS hold the max; a config "
+                "without delay gets 3-7 (was 5)",
+        "source": {
+            "src/settings_persistence.py": [_DELAY_IMPORT, _DELAY_ROW],
+            "src/translator_gui.py": [_DELAY_IMPORT, _DELAY_ROW_GUI, _DELAY_ENV_DICT, _DELAY_FIELD, *_DELAY_RPGMAKER,
+                                      _DELAY_GLOSSARY_LOG],
+            "src/run_env.py": [_DELAY_IMPORT, _DELAY_ENV_DICT],
+            "src/rpgmaker_job.py": [_DELAY_IMPORT, *_DELAY_RPGMAKER],
+            "src/translation_pipeline.py": [_DELAY_IMPORT, _DELAY_GLOSSARY_LOG],
+            "src/ImageRenderer.py": [_DELAY_IMPORT, _DELAY_MANGA],
+            "src/manga_editor_core.py": [_DELAY_IMPORT, _DELAY_MANGA],
+            "src/async_api_processor.py": [_DELAY_ASYNC],
+            "src/QA_Scanner_GUI.py": _DELAY_QA_GUI,
+            "src/scan_html_folder.py": _DELAY_SCANNER,
+        },
         "values": {},
     },
 )
