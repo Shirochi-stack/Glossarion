@@ -3189,31 +3189,31 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                 self._log(f"❌ Azure OCR failed: {str(e)}", "error")
                 return []
                 
-        elif provider == 'manga-ocr':
-            # For manga-ocr, process each region individually (cropped) for better accuracy
-            print(f"[OCR_REGIONS] Running manga-ocr OCR on cropped regions")
+        elif provider in ('manga-ocr', 'hayai-ocr'):
+            # For manga-ocr / hayai-ocr (crop recognizers), process each region individually (cropped) for better accuracy
+            print(f"[OCR_REGIONS] Running {provider} OCR on cropped regions")
             try:
                 # Check if provider exists in OCRManager
                 provider_obj = self.ocr_manager.get_provider(provider)
                 if provider_obj is None:
-                    self._log(f"❌ OCR provider 'manga-ocr' not available in OCRManager", "error")
-                    print(f"[OCR_REGIONS] Provider 'manga-ocr' not found in OCRManager")
+                    self._log(f"❌ OCR provider '{provider}' not available in OCRManager", "error")
+                    print(f"[OCR_REGIONS] Provider '{provider}' not found in OCRManager")
                     return []
                 
                 # Load provider if not already loaded
                 if not provider_obj.is_loaded:
-                    print(f"[OCR_REGIONS] Loading OCR provider: manga-ocr")
+                    print(f"[OCR_REGIONS] Loading OCR provider: {provider}")
                     load_success = self.ocr_manager.load_provider(provider, **ocr_config)
                     print(f"[OCR_REGIONS] Provider load result: {load_success}")
                     if not load_success:
-                        self._log(f"❌ Failed to load manga-ocr", "error")
+                        self._log(f"❌ Failed to load {provider}", "error")
                         return []
                 
                 # Process each region individually (cropped) - same approach as custom-api
                 for i, region in enumerate(regions):
                     # ===== CANCELLATION CHECK: In manga-ocr loop =====
                     if _is_translation_cancelled(self):
-                        print(f"[OCR_REGIONS] Cancelled at manga-ocr region {i+1}/{len(regions)}")
+                        print(f"[OCR_REGIONS] Cancelled at {provider} region {i+1}/{len(regions)}")
                         return []
                     
                     bbox = region.get('bbox', [])
@@ -3245,14 +3245,14 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                                 })
                                 print(f"[OCR_REGIONS] Region {i+1}: '{region_text.strip()}'")
                 
-                print(f"[OCR_REGIONS] manga-ocr recognized text in {len(recognized_texts)}/{len(regions)} regions")
+                print(f"[OCR_REGIONS] {provider} recognized text in {len(recognized_texts)}/{len(regions)} regions")
                 return recognized_texts
                 
             except Exception as e:
-                print(f"[OCR_REGIONS] manga-ocr OCR error: {str(e)}")
+                print(f"[OCR_REGIONS] {provider} OCR error: {str(e)}")
                 import traceback
-                print(f"[OCR_REGIONS] manga-ocr OCR traceback: {traceback.format_exc()}")
-                self._log(f"❌ manga-ocr OCR failed: {str(e)}", "error")
+                print(f"[OCR_REGIONS] {provider} OCR traceback: {traceback.format_exc()}")
+                self._log(f"❌ {provider} OCR failed: {str(e)}", "error")
                 return []
                 
         else:

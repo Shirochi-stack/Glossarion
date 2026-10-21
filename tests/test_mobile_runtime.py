@@ -369,6 +369,8 @@ U7_IMPORTERS = {
 U8_MANGA_MODULES = (
     "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
     "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
+    # the Hayai OCR provider's onnxruntime recognizer (ocr_manager imports it lazily)
+    "hayai_ocr",
 )
 # U9: authnd_auth and gemini_free import the browser-driver seam (the mobile WebViewBridge registers
 # a driver; the desktop keeps its QtWebEngine helpers) and update_manager.UpdateManager inherits the

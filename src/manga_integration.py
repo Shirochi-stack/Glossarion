@@ -1961,7 +1961,65 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                         add_log("Run: pip install huggingface_hub")
                     except Exception as e:
                         raise  # Re-raise to be caught by outer exception handler
-                        
+
+                elif provider == 'hayai-ocr':
+                    # Hayai OCR: the manga_models registry files (pinned revision, resumable,
+                    # sha256-verified) on a worker thread; Cancel / closing the dialog stops it
+                    # and keeps the partial file for the next attempt.
+                    import manga_models
+                    hayai_specs = manga_models.specs_for_ocr_provider('hayai-ocr')
+                    grand_total = max(1, sum(spec.size for spec in hayai_specs))
+                    mb = 1024 * 1024
+                    hayai_cancel = threading.Event()
+                    cancel_btn.clicked.connect(hayai_cancel.set)
+                    download_dialog.finished.connect(lambda *_: hayai_cancel.set())
+                    cancel_btn.setText("Cancel")
+                    progress_label.setText("Downloading Hayai OCR model...")
+                    add_log(f"Downloading Hayai OCR v2.5 Nova ({manga_models.format_size(grand_total)}) "
+                            f"from Hugging Face ({hayai_specs[0].repo_id})")
+
+                    def download_hayai():
+                        done = 0
+                        try:
+                            for index, spec in enumerate(hayai_specs, 1):
+                                post_dialog_update(lambda i=index, s=spec: add_log(
+                                    f"[{i}/{len(hayai_specs)}] {s.filename} ({manga_models.format_size(s.size)})"))
+
+                                def report(p, base=done, title=spec.title):
+                                    def apply():
+                                        pct = int(min(99, (base + p.downloaded) * 100 / grand_total))
+                                        progress_bar.setValue(pct)
+                                        progress_label.setText(f"Downloading: {pct}%")
+                                        status_label.setText(f"{title}: {p.downloaded / mb:.1f}/{p.total / mb:.1f} MB")
+                                        size_label.setText(f"{(base + p.downloaded) / mb:.1f} MB / {grand_total / mb:.1f} MB")
+                                        if p.bytes_per_sec:
+                                            speed_label.setText(f"Speed: {p.bytes_per_sec / mb:.1f} MB/s")
+                                    post_dialog_update(apply)
+
+                                manga_models.download(spec, progress=report, cancel=hayai_cancel.is_set)
+                                done += spec.size
+
+                            def finished():
+                                progress_bar.setValue(100)
+                                progress_label.setText("✅ Hayai OCR downloaded")
+                                status_label.setText("Click 'Load Model' (or start a run) to use it")
+                                speed_label.setText("")
+                                add_log("✅ Model files downloaded and verified")
+                                cancel_btn.setText("Close")
+                            post_dialog_update(finished)
+                        except Exception as hayai_error:
+                            def failed(err=hayai_error):
+                                progress_label.setText("⏹️ Download stopped" if hayai_cancel.is_set() else "❌ Download failed")
+                                add_log(f"{type(err).__name__}: {err}")
+                                cancel_btn.setText("Close")
+                            post_dialog_update(failed)
+                        try:
+                            self.update_queue.put(('call_method', self._check_provider_status, ()))
+                        except Exception:
+                            pass
+
+                    threading.Thread(target=download_hayai, name="HayaiOCRDownload", daemon=True).start()
+
                 elif provider == 'Qwen2-VL':
                     try:
                         from transformers import AutoProcessor, AutoTokenizer, AutoModelForVision2Seq
@@ -2370,9 +2428,11 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                 # Dependencies installed but model not loaded
                 self.provider_status_label.setText("📦 Dependencies ready")
                 self.provider_status_label.setStyleSheet("color: orange;")
+                if provider == 'hayai-ocr' and provider_instance is not None and not provider_instance.models_downloaded():
+                    self.provider_status_label.setText("📥 Model not downloaded (downloads on load)")
                 self.provider_setup_btn.setText("Load Model")
                 self.provider_setup_btn.setVisible(True)
-                if provider in ['Qwen2-VL', 'manga-ocr']:
+                if provider in ['Qwen2-VL', 'manga-ocr', 'hayai-ocr']:
                     self.ocr_download_model_btn.setText("Download Model")
                     self.ocr_download_model_btn.setVisible(True)
             else:
@@ -2380,7 +2440,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                 self.provider_status_label.setText("❌ Not installed")
                 self.provider_status_label.setStyleSheet("color: red;")
                 # Categorize providers
-                huggingface_providers = ['manga-ocr', 'Qwen2-VL', 'rapidocr']  # Move rapidocr here
+                huggingface_providers = ['manga-ocr', 'hayai-ocr', 'Qwen2-VL', 'rapidocr']  # Move rapidocr here
                 pip_providers = ['easyocr', 'paddleocr', 'doctr']  # Remove rapidocr from here
 
                 if provider in huggingface_providers:
@@ -2715,6 +2775,10 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
                         except Exception as load_error:
                             self._log(f"Exception during default load_provider: {str(load_error)}", "error")
                             success = False
+                elif provider == 'hayai-ocr':
+                    # downloads the missing model files first (manga_models), with progress here
+                    success = ocr_manager.load_provider(provider, progress_callback=lambda pct, done_mb, total_mb, _speed: (
+                        update_progress(f"Downloading Hayai OCR: {done_mb:.0f}/{total_mb:.0f} MB", pct)))
                 else:
                     print(f"Loading {provider} without model_size parameter")
                     self._log(f"DEBUG: Loading {provider} without model_size parameter")
@@ -2831,6 +2895,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             'azure': "Azure Computer Vision (requires API key)",
             'azure-document-intelligence': "Azure Document Intelligence - successor to Azure AI Vision (requires API key)",
             'manga-ocr': "Manga OCR - optimized for Japanese manga",
+            'hayai-ocr': "Hayai OCR - local Japanese / Chinese / Korean / English bubble OCR (ONNX, no PyTorch)",
             'rapidocr': "RapidOCR - fast local OCR with region detection",
             'Qwen2-VL': "Qwen2-VL - a big model", 
             'easyocr': "EasyOCR - multi-language support",
@@ -3617,6 +3682,7 @@ class MangaTranslationTab(MangaRunMixin, MangaOcrSessionMixin, MangaEnvMixin, Ma
             ('azure-document-intelligence', '📋 Azure Document Intelligence (successor to Azure AI Vision)'),
             ('rapidocr', '⚡ RapidOCR (Fast & Local)'),
             ('manga-ocr', '🇯🇵 Manga OCR (Japanese)'),
+            ('hayai-ocr', '🌏 Hayai OCR (CJK, Local)'),
             ('Qwen2-VL', '🇰🇷 Qwen2-VL (Korean)'),
             ('easyocr', '🌏 EasyOCR (Multi-lang)'),
             #('paddleocr', '🐼 PaddleOCR'),

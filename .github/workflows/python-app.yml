@@ -110,6 +110,7 @@ jobs:
           tests/test_manga_env.py \
           tests/test_manga_editor_core.py \
           tests/test_manga_models.py \
+          tests/test_hayai_ocr.py \
           tests/test_google_vision_rest.py \
           tests/test_update_core.py \
           tests/test_browser_driver.py \
@@ -157,7 +158,7 @@ jobs:
             # U8: manga settings defaults, run env, Files-tab logic, batch runner, editor core, ONNX
             # model registry, Google Vision / Azure Document Intelligence REST clients
             "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
-            "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
+            "manga_models", "google_vision_rest", "azure_document_intelligence_rest", "hayai_ocr",
             # U9: the release check the desktop UpdateManager and the mobile About > Updates share,
             # and the browser-driver seam (authnd/ + search/gemini keep their Qt helpers lazy)
             "update_core", "browser_driver", "authnd_auth", "gemini_free",

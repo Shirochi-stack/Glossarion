@@ -1777,7 +1777,7 @@ class EditorTab(MangaTab):
     def step_model_kinds(self, step: str) -> tuple:
         """The downloadable models a step loads: the detector when it detects (Detect; Recognize /
         Clean / Translate on a page without boxes; Translate all), the inpainter when it cleans, the
-        OCR models (RapidOCR's) when it reads text."""
+        OCR models (RapidOCR's, an on-device OCR provider's) when it reads text."""
         detect = () if self.boxes and step in ("recognize", "clean", "translate") else ("detector",)
         return {"detect": ("detector",), "recognize": detect + ("ocr",), "clean": detect + ("inpaint",),
                 "clean_box": ("inpaint",), "ocr_box": ("ocr",), "translate": detect + ("inpaint", "ocr"),

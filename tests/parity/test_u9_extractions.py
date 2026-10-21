@@ -52,7 +52,8 @@ NL = chr(10)
 def frozen(relpath: str) -> str:
     raw = subprocess.check_output(["git", "show", f"{U9_BASE_SHA}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT))
     text = raw.decode("utf-8")
-    return text.lstrip("﻿").replace("\r\n", "\n")
+    from parity.approved_changes import apply_to_source  # owner-approved changes since the pin
+    return apply_to_source(relpath, text.lstrip("﻿").replace("\r\n", "\n"))
 
 
 def current(name: str) -> str:
@@ -373,13 +374,8 @@ def _replace_once(text, old, new):
 def test_manga_desktop_rewires_are_exact():
     """The four desktop methods U9 rewired equal their frozen text with exactly the listed
     replacements (tests/test_manga_env.py exempts them from its unchanged-method check); the
-    owner-approved changes since (approved_changes.py) are applied to the frozen text first."""
-    try:
-        from parity.approved_changes import apply_to_source
-    except ImportError:  # pragma: no cover - run from tests/parity
-        from approved_changes import apply_to_source
-    old = methods(apply_to_source("src/manga_integration.py", frozen("src/manga_integration.py")),
-                  "MangaTranslationTab")
+    owner-approved changes since (approved_changes.py) are applied to the frozen text first (``frozen``)."""
+    old = methods(frozen("src/manga_integration.py"), "MangaTranslationTab")
     new = methods(current("manga_integration.py"), "MangaTranslationTab")
     # _show_model_info: the info literal -> manga_models.MODEL_INFO
     text = old["_show_model_info"]

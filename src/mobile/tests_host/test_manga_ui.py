@@ -211,7 +211,7 @@ def test_value_rules_come_from_the_schema_and_never_apply_on_desktop():
         assert svc.chip_text(svc.value_reason("manga_ocr_provider", value, mobile=True)) == "Needs PyTorch"
         assert svc.value_reason("manga_ocr_provider", value, mobile=False) is None
     assert svc.value_reason("manga_ocr_provider", "paddleocr", mobile=True).startswith("Needs PaddlePaddle")
-    for value in ("custom-api", "google", "azure", "azure-document-intelligence", "rapidocr"):
+    for value in ("custom-api", "google", "azure", "azure-document-intelligence", "rapidocr", "hayai-ocr"):
         assert svc.value_reason("manga_ocr_provider", value, mobile=True) is None
     assert svc.value_reason("manga_local_inpaint_model", "aot", mobile=True)
     assert svc.value_reason("manga_local_inpaint_model", "ollama", mobile=True).startswith("Not functional")
@@ -238,7 +238,7 @@ def test_ocr_provider_rows_follow_the_desktop_status_rules(tmp_path, monkeypatch
     monkeypatch.setitem(sys.modules, "pyclipper", None)  # RapidOCR without its geometry wheels
     rows = {r.value: r for r in svc.ocr_provider_rows({}, mobile=True)}
     # U12 item 1: PyTorch-only providers and those not in this build are not listed on mobile
-    assert list(rows) == ["custom-api", "google", "azure", "azure-document-intelligence"]
+    assert list(rows) == ["custom-api", "google", "azure", "azure-document-intelligence", "hayai-ocr"]
     assert rows["custom-api"].status == "ready"
     assert rows["google"].status == "needs_key" and "REST" in rows["google"].detail
     assert rows["azure"].status == "needs_key"
@@ -1565,6 +1565,7 @@ def test_runs_ask_to_download_missing_models_first(tmp_path, monkeypatch):
     assert tab.step_model_kinds("recognize") == ("ocr",) and tab.step_model_kinds("clean") == ("inpaint",)
     assert tab.step_model_kinds("ocr_box") == ("ocr",)
     assert tab.step_model_kinds("translate_all") == ("detector", "inpaint", "ocr") and tab.step_model_kinds("render") == ()
+    assert tab.step_model_kinds("translate_box") == ()
 
 
 @needs_flet

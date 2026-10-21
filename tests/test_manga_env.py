@@ -168,13 +168,13 @@ def _module_text(module):
 
 @functools.lru_cache(maxsize=None)
 def _cached_legacy(relpath):
-    return rp.git_show(LEGACY_SHA, relpath)
+    from parity.approved_changes import apply_to_source  # owner-approved changes since the pin
+    return apply_to_source(relpath, rp.git_show(LEGACY_SHA, relpath))
 
 
 def _legacy_mi():
     try:
-        from parity.approved_changes import apply_to_source  # owner-approved changes since the pin
-        return apply_to_source("src/manga_integration.py", _cached_legacy("src/manga_integration.py"))
+        return _cached_legacy("src/manga_integration.py")  # the approved changes are applied there
     except rp.Unavailable as exc:  # pragma: no cover - shallow clone
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
             pytest.fail(str(exc))
