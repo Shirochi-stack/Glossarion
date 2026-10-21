@@ -347,6 +347,7 @@ app_files = [
     ('manga_runner.py', '.'),
     ('manga_editor_core.py', '.'),
     ('manga_models.py', '.'),
+    ('hayai_ocr.py', '.'),
     ('google_vision_rest.py', '.'),
     ('azure_document_intelligence_rest.py', '.'),
     # Mobile rewrite U9: the browser-driver seam (authnd_auth / gemini_free; the mobile WebViewBridge
@@ -598,6 +599,7 @@ app_modules = [
     'manga_runner',
     'manga_editor_core',
     'manga_models',
+    'hayai_ocr',
     'google_vision_rest',
     'azure_document_intelligence_rest',
     # Mobile rewrite U9: the browser-driver seam (authnd_auth / gemini_free; the mobile WebViewBridge

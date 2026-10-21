@@ -143,6 +143,7 @@ __all__ = [
     "natural_sort_key",
     "new_editor_session",
     "now_stamp",
+    "ocr_model_ids",
     "ocr_provider_rows",
     "prepare_run",
     "presets_available",
@@ -378,6 +379,7 @@ OCR_PROVIDERS = (
     ("azure-document-intelligence", "📋 Azure Document Intelligence (successor to Azure AI Vision)"),
     ("rapidocr", "⚡ RapidOCR (Fast & Local)"),
     ("manga-ocr", "🇯🇵 Manga OCR (Japanese)"),
+    ("hayai-ocr", "🌏 Hayai OCR (CJK, Local)"),
     ("Qwen2-VL", "🇰🇷 Qwen2-VL (Korean)"),
     ("easyocr", "🌏 EasyOCR (Multi-lang)"),
     ("paddleocr", "🐼 PaddleOCR"),
@@ -571,9 +573,50 @@ def ocr_provider_rows(config: Mapping[str, Any], *, mobile: Optional[bool] = Non
                 continue  # not in this build: not listed (U12 item 1)
             status = model_status("rapidocr") if model_status is not None else None
             rows.append(_model_backed_row(value, label, status, "RapidOCR ONNX models"))
+        elif value == "hayai-ocr":
+            if not importable("onnxruntime") or not ocr_model_ids(value):
+                continue  # not in this build: not listed (U12 item 1)
+            status = (_combined_model_status([model_status(i) for i in ocr_model_ids(value)])
+                      if model_status is not None else None)
+            what = ("Reads each detected bubble on this device · Japanese, Chinese, Korean, English"
+                    if effective_setting(cfg, P_BUBBLE_DETECTION, True)
+                    else "Enable AI bubble detection: Hayai OCR reads bubble crops")
+            rows.append(_model_backed_row(value, label, status, what))
         else:
             rows.append(OptionRow(value, label, "ready", "Ready"))
     return rows
+
+
+def ocr_model_ids(provider: str) -> list:
+    """The registry keys of the model files an OCR provider loads (``manga_models.specs_for_ocr_provider``;
+    Hayai OCR: vision encoder, decoder, tokenizer), [] for the others."""
+    finder = core_attr("manga_models", "specs_for_ocr_provider")
+    try:
+        return [spec.key for spec in finder(provider)] if callable(finder) else []
+    except Exception:
+        return []
+
+
+def _combined_model_status(entries: Sequence[Any]) -> Any:
+    """One status for a provider's model files: downloading (byte-weighted progress) > missing /
+    error > ready; None when a file has no status (no model manager)."""
+    if not entries or any(e is None for e in entries):
+        return None
+    states = [getattr(e, "status", "ready") for e in entries]
+    for e in entries:
+        if getattr(e, "status", "") == "unavailable":
+            return e
+    if "downloading" in states:
+        sizes = [float(getattr(e, "size", 0) or 0) for e in entries]
+        total = sum(sizes) or 1.0
+        done = sum(size * (1.0 if getattr(e, "status", "") in ("ready", "loaded")
+                           else float(getattr(e, "progress", 0.0) or 0.0) if getattr(e, "status", "") == "downloading"
+                           else 0.0) for e, size in zip(entries, sizes))
+        return ModelEntry("ocr", "ocr", kind="ocr", status="downloading", progress=min(1.0, done / total))
+    for e in entries:
+        if getattr(e, "status", "") in ("missing", "error"):
+            return e
+    return entries[0]
 
 
 def _model_backed_row(value: str, label: str, status: Any, what: str) -> "OptionRow":

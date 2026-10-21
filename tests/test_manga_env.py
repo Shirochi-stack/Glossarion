@@ -168,7 +168,8 @@ def _module_text(module):
 
 @functools.lru_cache(maxsize=None)
 def _cached_legacy(relpath):
-    return rp.git_show(LEGACY_SHA, relpath)
+    from parity.approved_changes import apply_to_source  # owner-approved changes since the pin
+    return apply_to_source(relpath, rp.git_show(LEGACY_SHA, relpath))
 
 
 def _legacy_mi():

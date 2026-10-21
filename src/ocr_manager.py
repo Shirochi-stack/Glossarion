@@ -1194,7 +1194,102 @@ class MangaOCRProvider(OCRProvider):
             
         except Exception as e:
             self._log(f"❌ Error in manga-ocr: {str(e)}", "error")
-            
+
+        return results
+
+class HayaiOCRProvider(OCRProvider):
+    """Hayai OCR v2.5 Nova: reads one bubble / text-region crop (Japanese horizontal and vertical,
+    Chinese, Korean, English) on onnxruntime only (hayai_ocr; no PyTorch, so it also runs on
+    Glossarion Mobile). Crop-based like manga-ocr: the pipeline feeds it RT-DETR regions.
+    The model files come from the manga_models registry and are downloaded on first load."""
+
+    PROVIDER = 'hayai-ocr'
+
+    def __init__(self, log_callback=None):
+        super().__init__(log_callback)
+        self.model = None
+
+    def check_installation(self) -> bool:
+        """onnxruntime + the hayai_ocr module (the model files download on load)."""
+        try:
+            import onnxruntime  # noqa: F401
+            import hayai_ocr  # noqa: F401
+            import manga_models  # noqa: F401
+        except ImportError:
+            return False
+        self.is_installed = True
+        return True
+
+    def install(self, progress_callback=None) -> bool:
+        return self.check_installation()
+
+    def model_specs(self):
+        import manga_models
+        return manga_models.specs_for_ocr_provider(self.PROVIDER)
+
+    def models_downloaded(self) -> bool:
+        try:
+            import manga_models
+            specs = self.model_specs()
+            return bool(specs) and all(manga_models.is_installed(spec) for spec in specs)
+        except Exception:
+            return False
+
+    def load_model(self, **kwargs) -> bool:
+        """Download the missing model files (pinned, resumable, sha256-verified), then open the
+        onnxruntime sessions. ``progress_callback(percent, downloaded_mb, total_mb, speed_mb)``."""
+        if self.is_loaded and self.model is not None:
+            return True
+        try:
+            import hayai_ocr
+            import manga_models
+
+            paths = {}
+            for spec in self.model_specs():
+                if not manga_models.is_installed(spec):
+                    self._log(f"📥 Downloading {spec.title} ({manga_models.format_size(spec.size)})...")
+                paths[spec.key] = manga_models.download(
+                    spec, cancel=self._check_stop,
+                    progress=manga_models.legacy_progress(kwargs.get('progress_callback')))
+            self._log("🔄 Loading Hayai OCR (onnxruntime)...")
+            self.model = hayai_ocr.shared(paths['hayai_ocr_vision'], paths['hayai_ocr_decoder'],
+                                          paths['hayai_ocr_tokenizer'])
+            self.is_loaded = True
+            self._log("✅ Hayai OCR loaded")
+            return True
+        except Exception as e:
+            self.last_error = str(e)
+            self._log(f"❌ Failed to load Hayai OCR: {str(e)}", "error")
+            return False
+
+    def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
+        """The text of the region passed in (a bubble crop, or the whole image), one result."""
+        results = []
+        if self._check_stop():
+            self._log("⏹️ Hayai OCR processing stopped by user", "warning")
+            return results
+        try:
+            if not self.is_loaded or self.model is None:
+                if not self.load_model():
+                    return results
+            if image is None or image.size == 0:
+                return results
+            if image.ndim == 2:
+                rgb = np.stack([image] * 3, axis=-1)
+            else:
+                rgb = image[:, :, 2::-1] if image.shape[2] >= 3 else np.repeat(image[:, :, :1], 3, axis=2)
+            h, w = image.shape[:2]
+            text = self.model.recognize(np.ascontiguousarray(rgb), stop=self._check_stop)
+            if text:
+                results.append(OCRResult(
+                    text=text,
+                    bbox=(0, 0, w, h),
+                    confidence=kwargs.get('confidence', 0.7),
+                    vertices=[(0, 0), (w, 0), (w, h), (0, h)]
+                ))
+                self._log(f"✅ Detected text: {text[:50]}...")
+        except Exception as e:
+            self._log(f"❌ Error in Hayai OCR: {str(e)}", "error")
         return results
 
 class Qwen2VL(OCRProvider):
@@ -2570,6 +2665,7 @@ class OCRManager:
         self.providers = {
             'custom-api': CustomAPIProvider(log_callback) ,
             'manga-ocr': MangaOCRProvider(log_callback),
+            'hayai-ocr': HayaiOCRProvider(log_callback),
             'easyocr': EasyOCRProvider(log_callback),
             'paddleocr': PaddleOCRProvider(log_callback),
             'doctr': DocTROCRProvider(log_callback),
@@ -2651,6 +2747,9 @@ class OCRManager:
                         provider.is_loaded = False
                 except Exception:
                     pass
+            hayai = sys.modules.get('hayai_ocr')  # its sessions are cached per process
+            if hayai is not None:
+                hayai.release()
             gc.collect()
             try:
                 import torch

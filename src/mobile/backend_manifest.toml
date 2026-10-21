@@ -80,6 +80,8 @@ modules = [
   # Intelligence REST clients the cloud OCR providers use when their SDKs are not installed.
   "manga_settings_defaults", "manga_env", "manga_files_core", "manga_runner", "manga_editor_core",
   "manga_models", "google_vision_rest", "azure_document_intelligence_rest",
+  # The Hayai OCR provider's onnxruntime recognizer (ocr_manager imports it on load).
+  "hayai_ocr",
 ]
 # New shared modules from the plan that do not exist yet. They become entries automatically
 # once the file exists (the report then asks to move them into `modules`).

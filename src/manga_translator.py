@@ -4954,14 +4954,14 @@ class MangaTranslator:
                 # Initialize ocr_results here before any provider-specific code
                 ocr_results = []
                 
-                # Special handling for manga-ocr (needs region detection first)
-                if self.ocr_provider == 'manga-ocr':
+                # Special handling for manga-ocr / hayai-ocr (crop recognizers: need region detection first)
+                if self.ocr_provider in ('manga-ocr', 'hayai-ocr'):
                     # IMPORTANT: Initialize fresh results list
                     ocr_results = []
                     
                     # Check if we should use bubble detection for regions
                     if ocr_settings.get('bubble_detection_enabled', True):
-                        self._log("📝 Using bubble detection regions for manga-ocr...")
+                        self._log(f"📝 Using bubble detection regions for {self.ocr_provider}...")
                         
                         # Run bubble detection to get regions
                         if self.bubble_detector is None:
@@ -5001,15 +5001,15 @@ class MangaTranslator:
                             
                             # Check if parallel processing is enabled
                             if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
-                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with manga-ocr")
-                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'manga-ocr', confidence_threshold)
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with {self.ocr_provider}")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, self.ocr_provider, confidence_threshold)
                             else:
                                 # Process each region with manga-ocr
                                 for i, (x, y, w, h) in enumerate(all_regions):
                                     cropped = self._safe_crop_region(image, x, y, w, h)
                                     if cropped is None:
                                         continue 
-                                    result = self.ocr_manager.detect_text(cropped, 'manga-ocr', confidence=confidence_threshold)
+                                    result = self.ocr_manager.detect_text(cropped, self.ocr_provider, confidence=confidence_threshold)
                                     if result and len(result) > 0 and result[0].text.strip():
                                         result[0].bbox = (x, y, w, h)
                                         result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
@@ -5017,14 +5017,14 @@ class MangaTranslator:
                                         # The bbox/vertices are the small OCR polygon, but bubble_bounds is the full RT-DETR bubble
                                         result[0].bubble_bounds = (x, y, w, h)
                                         ocr_results.append(result[0])
-                                        self._log(f"🔍 Processing region {i+1}/{len(all_regions)} with manga-ocr...")
+                                        self._log(f"🔍 Processing region {i+1}/{len(all_regions)} with {self.ocr_provider}...")
                                         self._log(f"✅ Detected text: {result[0].text[:50]}...")
 
                             # Clear regions list after processing
                             all_regions = None
                     else:
                         # NO bubble detection - just process full image
-                        self._log("📝 Processing full image with manga-ocr (no bubble detection)")
+                        self._log(f"📝 Processing full image with {self.ocr_provider} (no bubble detection)")
                         ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider, confidence=confidence_threshold)  
                     
                 elif self.ocr_provider == 'Qwen2-VL':
@@ -5830,7 +5830,7 @@ class MangaTranslator:
             # Check if bubble detection is enabled
             if ocr_settings.get('bubble_detection_enabled', True):
                 # Build list of providers that should skip merging
-                skip_merge_providers = ['rapidocr', 'manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']
+                skip_merge_providers = ['rapidocr', 'manga-ocr', 'hayai-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']
                 
                 # If RT-DETR guidance is enabled for cloud providers, they also skip merging
                 # (they use full-image OCR + RT-DETR matching, so results are already aligned to bubbles)

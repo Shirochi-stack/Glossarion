@@ -89,12 +89,13 @@ def _tree(name):
 
 def test_registry_shape():
     assert [s.key for s in mm.specs()] == list(mm.REGISTRY)
-    assert {s.kind for s in mm.specs()} == {mm.KIND_DETECTOR, mm.KIND_INPAINTER}
+    assert {s.kind for s in mm.specs()} == {mm.KIND_DETECTOR, mm.KIND_INPAINTER, mm.KIND_OCR}
+    cache_envs = {mm.KIND_DETECTOR: "BUBBLE_CACHE_DIR", mm.KIND_INPAINTER: "MODEL_CACHE_DIR", mm.KIND_OCR: "ONNX_CACHE_DIR"}
     for spec in mm.specs():
         assert re.fullmatch(r"[0-9a-f]{64}", spec.sha256), spec.key
         assert re.fullmatch(r"[0-9a-f]{40}", spec.revision), spec.key  # pinned commit, never 'main'
         assert spec.size > 1024 * 1024 and spec.title and spec.description
-        assert spec.cache_env == ("BUBBLE_CACHE_DIR" if spec.kind == mm.KIND_DETECTOR else "MODEL_CACHE_DIR")
+        assert spec.cache_env == cache_envs[spec.kind]
     # exactly one phone default per kind, and it is the one the overrides select
     for kind, key in ((mm.KIND_DETECTOR, mm.MOBILE_DETECTOR_KEY), (mm.KIND_INPAINTER, mm.MOBILE_INPAINTER_KEY)):
         assert [s.key for s in mm.specs(kind) if s.phone_default] == [key]
@@ -103,6 +104,17 @@ def test_registry_shape():
     assert mm.get_spec(mm.MOBILE_INPAINTER_KEY).selector == "aot_onnx"
     with pytest.raises(KeyError):
         mm.get_spec("nope")
+    # Hayai OCR: three files of one pinned export, all selected by the provider value
+    hayai = mm.specs_for_ocr_provider("hayai-ocr")
+    assert [s.key for s in hayai] == ["hayai_ocr_vision", "hayai_ocr_decoder", "hayai_ocr_tokenizer"]
+    assert [s.filename for s in hayai] == ["hayai-ocr-vision.onnx", "hayai-ocr-decoder.onnx", "hayai-ocr-tokenizer.json"]
+    assert {(s.repo_id, s.revision) for s in hayai} == {("bixii/hayai-ocr-v2.5-nova-onnx",
+                                                         "23653e3c09c6e07b9172668cf7fa238f6411ab14")}
+    assert mm.specs_for_ocr_provider("HAYAI-OCR") == hayai and mm.specs(mm.KIND_OCR) == hayai
+    assert sum(s.size for s in hayai) < 620 * 1024 * 1024
+    for provider in ("manga-ocr", "rapidocr", "custom-api", "", None):
+        assert mm.specs_for_ocr_provider(provider) == []
+    assert mm.find_spec("bixii/hayai-ocr-v2.5-nova-onnx", "hayai-ocr-decoder.onnx").key == "hayai_ocr_decoder"
 
 
 def test_registry_agrees_with_the_backend_modules():
@@ -746,6 +758,13 @@ def test_required_models(env, monkeypatch):
     assert keys({"manga_aot_onnx_model_path": str(own)}) == ["rtdetr_v4_s_int8"]  # the user's own file
     missing = mm.missing_models({})
     assert [s.key for s in missing] == ["rtdetr_v4_s_int8", "aot_onnx"]
+    # an on-device OCR provider's model files (Hayai OCR), on the phone and on desktop
+    hayai = ["hayai_ocr_vision", "hayai_ocr_decoder", "hayai_ocr_tokenizer"]
+    assert keys({"manga_ocr_provider": "hayai-ocr"}) == ["rtdetr_v4_s_int8", "aot_onnx"] + hayai
+    assert keys({"ocr_provider": "hayai-ocr", "manga_skip_inpainting": True}) == ["rtdetr_v4_s_int8"] + hayai
+    assert keys({"manga_ocr_provider": "rapidocr"}) == ["rtdetr_v4_s_int8", "aot_onnx"]
+    _mobile(monkeypatch, on=False)
+    assert keys({"manga_ocr_provider": "hayai-ocr"}) == ["rtdetr", "anime_onnx"] + hayai
 
 
 def test_mobile_model_guard_never_runs_an_imported_heavy_model(env, monkeypatch):
@@ -1042,7 +1061,7 @@ _MOBILE_OFF_VALUES = {
     "manga_settings.inpainting.method": ("hybrid",),
 }
 _MOBILE_ON_VALUES = {
-    "manga_ocr_provider": ("custom-api", "google", "azure", "azure-document-intelligence", "rapidocr"),
+    "manga_ocr_provider": ("custom-api", "google", "azure", "azure-document-intelligence", "rapidocr", "hayai-ocr"),
     "manga_settings.ocr.detector_type": ("rtdetr_onnx",),
     "manga_local_inpaint_model": ("aot_onnx", "anime_onnx", "lama_onnx", "custom-image-edit"),
     "manga_inpaint_method": ("local", "cloud"),
@@ -1096,7 +1115,7 @@ def test_every_desktop_combo_option_is_covered():
     block = re.search(r"ocr_providers = \[(.+?)\n\s*\]", text, re.S).group(1)
     providers = re.findall(r"^\s*#?\s*\('([^']+)',", block, re.M)
     assert {"custom-api", "rapidocr", "manga-ocr", "paddleocr"} <= set(providers)
-    cloud_or_onnx = {"custom-api", "google", "azure", "azure-document-intelligence", "rapidocr"}
+    cloud_or_onnx = {"custom-api", "google", "azure", "azure-document-intelligence", "rapidocr", "hayai-ocr"}
     for provider in providers:
         assert ss.is_value_available("manga_ocr_provider", provider)[0] is (provider in cloud_or_onnx), provider
 

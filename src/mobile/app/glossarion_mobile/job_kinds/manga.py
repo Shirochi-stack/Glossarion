@@ -239,7 +239,7 @@ def run_batch(ctx: Any) -> dict:
     progress(0, len(run_files))
     hidden = _prepare(ctx)
     glossary_only = bool(params.get("glossary_only"))
-    if not _download_models(ctx, hidden, _model_kinds(params, ("detector",) if glossary_only else None),
+    if not _download_models(ctx, hidden, _model_kinds(params, ("detector", "ocr") if glossary_only else None),
                             lambda title, pct: progress(0, len(run_files), label=f"Downloading {title} · {pct}%")):
         return {"ok": None, "outputs": []}
     if ctx.stop_requested():

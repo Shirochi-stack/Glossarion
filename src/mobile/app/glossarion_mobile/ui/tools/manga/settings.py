@@ -486,6 +486,15 @@ class SettingsTab(MangaTab):
                 row = self._download_row("rapidocr", "rapidocr", key_prefix=self.k("ms-rapidocr-model"),
                                          allow_load=False, on_change=lambda entry: self.refresh())
                 out.append(row.control)
+        elif provider == "hayai-ocr":
+            known = {e.id for e in self.session.models.entries()}
+            for model_id in svc.ocr_model_ids(provider):
+                if model_id in known:
+                    row = self._download_row(f"ocr-{model_id}", model_id, key_prefix=self.k(f"ms-{model_id}"),
+                                             allow_load=False, on_change=lambda entry: self.refresh())
+                    out.append(row.control)
+            out.append(hint_text("Reads each bubble the detector finds, on this device (Japanese horizontal and "
+                                 "vertical, Chinese, Korean, English). The three files download once."))
         return out
 
     def _secret_row(self, title: str, key: str, ui_key: str, cfg: dict) -> ft.Control:

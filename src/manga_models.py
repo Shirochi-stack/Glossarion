@@ -1,9 +1,11 @@
 """On-demand ONNX model manager for manga translation (desktop and Glossarion Mobile).
 
-The manga pipeline runs three kinds of local ONNX models: the RT-DETR comic
-bubble/text detector (bubble_detector.BubbleDetector), and the AOT / LaMa
-inpainters (local_inpainter.LocalInpainter). None of them is bundled with the
-app; they are downloaded from Hugging Face the first time they are needed.
+The manga pipeline runs local ONNX models: the RT-DETR comic bubble/text
+detector (bubble_detector.BubbleDetector), the AOT / LaMa inpainters
+(local_inpainter.LocalInpainter) and the Hayai OCR recognizer (hayai_ocr, the
+'hayai-ocr' OCR provider; kind "ocr", files under ONNX_CACHE_DIR). None of them
+is bundled with the app; they are downloaded from Hugging Face the first time
+they are needed.
 
 This module is the registry and download manager for those files:
 
@@ -60,6 +62,7 @@ import mobile_runtime
 __all__ = [
     "KIND_DETECTOR",
     "KIND_INPAINTER",
+    "KIND_OCR",
     "ModelSpec",
     "ModelStatus",
     "DownloadProgress",
@@ -80,6 +83,7 @@ __all__ = [
     "find_spec",
     "spec_for_detector_variant",
     "spec_for_inpaint_method",
+    "specs_for_ocr_provider",
     "required_models",
     "missing_models",
     "mobile_models_root",
@@ -116,6 +120,7 @@ __all__ = [
 
 KIND_DETECTOR = "detector"
 KIND_INPAINTER = "inpaint"
+KIND_OCR = "ocr"
 
 HF_ENDPOINT_DEFAULT = "https://huggingface.co"
 USER_AGENT = "Glossarion"
@@ -147,7 +152,8 @@ class ModelSpec:
 
     ``selector`` is the settings value that picks the model: the RT-DETR ONNX file
     name (``manga_settings.ocr.rtdetr_onnx_variant``) for detectors, the local
-    inpainting method (``manga_local_inpaint_model``) for inpainters.
+    inpainting method (``manga_local_inpaint_model``) for inpainters, the OCR provider
+    (``manga_ocr_provider``) for OCR models (a provider may need several files).
     """
 
     key: str
@@ -183,6 +189,10 @@ class ModelSpec:
 
 _RTDETR_REPO = "ogkalu/comic-text-and-bubble-detector"
 _RTDETR_REVISION = "16e8a622f91fabc6b5b65c96d32d1183f8843546"
+_HAYAI_REPO = "bixii/hayai-ocr-v2.5-nova-onnx"
+_HAYAI_REVISION = "23653e3c09c6e07b9172668cf7fa238f6411ab14"
+#: The OCR provider value (``manga_ocr_provider``) whose models are the KIND_OCR specs below.
+HAYAI_OCR_PROVIDER = "hayai-ocr"
 
 # Sizes and sha256 are the Hugging Face LFS metadata (api/models/<repo>/tree/<revision>)
 # of the pinned revisions; the repo ids and file names match
@@ -267,6 +277,49 @@ _SPECS = (
         cache_env="MODEL_CACHE_DIR",
         selector="lama_onnx",
         description="General LaMa inpainting model. Large; needs much more memory than AOT.",
+    ),
+    # Hayai OCR v2.5 Nova (the 'hayai-ocr' OCR provider, hayai_ocr.py): the fp32 ONNX export of
+    # JustANormalTinkerer/hayai-ocr-v2.5-nova by bixii (vision encoder + KV-cache decoder) and its
+    # byte-level BPE tokenizer. Three files, all needed; the sha256 of the tokenizer (a plain git
+    # file, no LFS id) is the one the export's model card lists.
+    ModelSpec(
+        key="hayai_ocr_vision",
+        kind=KIND_OCR,
+        title="Hayai OCR · vision encoder",
+        repo_id=_HAYAI_REPO,
+        filename="hayai-ocr-vision.onnx",
+        revision=_HAYAI_REVISION,
+        sha256="379ec20e7d5b134e6bd0e7c5cf0a4e705318129bfb710e25e69c6ca027b84021",
+        size=343538300,
+        cache_env="ONNX_CACHE_DIR",
+        selector=HAYAI_OCR_PROVIDER,
+        description="Hayai OCR (Japanese, Chinese, Korean, English bubble text): SigLIP2 vision encoder.",
+    ),
+    ModelSpec(
+        key="hayai_ocr_decoder",
+        kind=KIND_OCR,
+        title="Hayai OCR · text decoder",
+        repo_id=_HAYAI_REPO,
+        filename="hayai-ocr-decoder.onnx",
+        revision=_HAYAI_REVISION,
+        sha256="23342ad16efee65486347b7ac15c98d5f78412eb4c4bee3236d03d8478cb0e20",
+        size=255717567,
+        cache_env="ONNX_CACHE_DIR",
+        selector=HAYAI_OCR_PROVIDER,
+        description="Hayai OCR (Japanese, Chinese, Korean, English bubble text): 12-layer text decoder.",
+    ),
+    ModelSpec(
+        key="hayai_ocr_tokenizer",
+        kind=KIND_OCR,
+        title="Hayai OCR · tokenizer",
+        repo_id=_HAYAI_REPO,
+        filename="hayai-ocr-tokenizer.json",
+        revision=_HAYAI_REVISION,
+        sha256="f8a0a909c628a684fe463094614e236a8b1d3609e7770f77e7beafaf1056bf13",
+        size=1247253,
+        cache_env="ONNX_CACHE_DIR",
+        selector=HAYAI_OCR_PROVIDER,
+        description="Hayai OCR (Japanese, Chinese, Korean, English bubble text): tokenizer.",
     ),
 )
 
@@ -396,6 +449,13 @@ def spec_for_inpaint_method(method: str) -> Optional[ModelSpec]:
         if spec.selector == name:
             return spec
     return None
+
+
+def specs_for_ocr_provider(provider: str) -> List[ModelSpec]:
+    """Every model file an OCR provider (``manga_ocr_provider`` value) loads; [] for providers
+    with no registered model (cloud providers, RapidOCR's bundled models, PyTorch providers)."""
+    name = str(provider or "").strip().lower()
+    return [spec for spec in specs(KIND_OCR) if spec.selector == name]
 
 
 # =========================================================================== phone defaults
@@ -639,8 +699,9 @@ def required_models(config: Optional[Dict[str, Any]]) -> List[ModelSpec]:
     Mirrors the lookups of the run path: the RT-DETR ONNX detector when bubble
     detection is on with ``detector_type`` 'rtdetr_onnx'; the local ONNX inpainter
     when inpainting is not skipped, the method is 'local' and no model file of the
-    user's own is configured (``manga_<method>_model_path``). Missing values take the
-    desktop GUI's defaults, or the phone defaults on mobile.
+    user's own is configured (``manga_<method>_model_path``); the OCR provider's model files
+    (``specs_for_ocr_provider``, e.g. Hayai OCR). Missing values take the desktop GUI's
+    defaults, or the phone defaults on mobile.
     """
     config = config if isinstance(config, dict) else {}
     if mobile_runtime.is_mobile():  # what a phone run loads (apply_mobile_run_defaults' guard)
@@ -669,6 +730,9 @@ def required_models(config: Optional[Dict[str, Any]]) -> List[ModelSpec]:
             custom = str(config.get(f"manga_{local}_model_path") or config.get(f"{local}_model_path") or "")
             if spec is not None and not (custom and os.path.isfile(custom)):
                 out.append(spec)
+
+    provider = config.get("manga_ocr_provider") or config.get("ocr_provider") or ""
+    out.extend(specs_for_ocr_provider(provider))
     return out
 
 

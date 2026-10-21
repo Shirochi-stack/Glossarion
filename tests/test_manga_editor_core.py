@@ -82,7 +82,8 @@ FONT_PATH = TESTS_DIR / "fixtures" / "manga_editor" / "DejaVuSans-Latin.ttf"
 @functools.lru_cache(maxsize=None)
 def frozen_source(relpath):
     raw = subprocess.check_output(["git", "show", f"{U8_BASE_SHA}:{relpath}"], env=oracle_git_environment(), cwd=str(REPO_ROOT))
-    return raw.decode("utf-8").replace("\r\n", "\n")
+    from parity.approved_changes import apply_to_source  # owner-approved changes since the pin
+    return apply_to_source(relpath, raw.decode("utf-8").replace("\r\n", "\n"))
 
 
 def current_source(name):
