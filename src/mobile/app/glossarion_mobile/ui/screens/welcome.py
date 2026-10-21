@@ -94,7 +94,8 @@ PROVIDER_MODEL_QUERY = {"authgpt": "authgpt/", "authcd": "authcd/", "authgem": "
 
 #: the on-device preset Welcome suggests (Qwen3.5 2B: quick drafts on most phones)
 SUGGESTED_ONDEVICE = "Light"
-#: at most this many on-device presets on page 1 (one row)
+#: on-device preset cells per row on page 1; every preset is shown, the user's own (Add from Hugging Face
+#: › Save as a preset) wrap onto the next rows (owner 2026-10-21: they were cut off after the fourth)
 ONDEVICE_CELLS = 4
 #: a cell's second line by ``OnDeviceFlow.row_state`` (short: a quarter of a 360 dp row)
 ONDEVICE_LABELS = {"checking": "Checking…", "paused": "Resume", "busy": "Starting…", "error": "Retry",
@@ -274,7 +275,7 @@ class WelcomeScreen(Screen):
         if flow is None:
             return ft.Row([ft.Text("On-device models", theme_style=ft.TextThemeStyle.BODY_SMALL),
                            ReasonChip(reason="Model manager › On-device")], wrap=True, key="welcome-ondevice")
-        rows = flow.presets()[:ONDEVICE_CELLS]
+        rows = flow.presets()
         suggested = self.suggested_ondevice(rows)
         cells = [self._ondevice_cell(flow, index, preset, preset.get("name") == suggested)
                  for index, preset in enumerate(rows)]
@@ -340,7 +341,7 @@ class WelcomeScreen(Screen):
             tooltip=tooltip or None,
             on_click=lambda e, i=index: call_handler(self.use_ondevice, i),
             key=self.ondevice_key(preset),
-            col={"xs": 3},
+            col={"xs": 12 // ONDEVICE_CELLS},
         )
 
     async def use_ondevice(self, index: int) -> Optional[str]:

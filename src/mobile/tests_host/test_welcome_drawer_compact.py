@@ -269,6 +269,27 @@ def _engine_kwargs(tmp_path, total=8 * 1024 ** 3, available=6 * 1024 ** 3, platf
     return {"local_engine": lambda: service, "prefs": prefs}, service, engine
 
 
+def test_page_one_lists_the_users_own_on_device_presets(tmp_path):
+    """owner 2026-10-21: a preset added in the Model manager (Add from Hugging Face › Save as a preset)
+    shows on the Welcome too: every preset gets a cell, four per row, and a tap picks that preset."""
+    from glossarion_mobile.services.local_llm import presets as lp
+
+    kwargs, _service, _engine = _engine_kwargs(tmp_path)
+    custom = {"name": "Gemma E2B", "repo": "unsloth/gemma-4-E2B-it-GGUF", "file": "gemma-4-E2B-it-Q4_K_M.gguf",
+              "size": 3_000_000_000}
+    lp.save_presets(kwargs["prefs"], lp.load_presets(kwargs["prefs"]) + [custom])
+    s = screen(**kwargs)
+    rows = by_key(s.page_area.content)
+    cells = rows["welcome-ondevice"].controls
+    assert len(cells) == 5 and all(c.col == {"xs": 3} for c in cells)  # the fifth wraps onto a second row
+    assert cells[-1] is rows["welcome-ondevice-gemma-e2b"]
+    assert cells[-1].content.controls[0].value == "Gemma E2B"
+    picked = []
+    s.use_ondevice = lambda index: picked.append(index)
+    cells[-1].on_click(None)
+    assert picked == [4] and lp.load_presets(kwargs["prefs"])[4]["name"] == "Gemma E2B"
+
+
 def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path):
     kwargs, _service, _engine = _engine_kwargs(tmp_path, total=6 * 1024 ** 3, available=3 * 1024 ** 3)
     s = screen(**kwargs)
