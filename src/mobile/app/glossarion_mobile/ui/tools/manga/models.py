@@ -28,12 +28,13 @@ _SHEETS = itertools.count(1)  # a new key per sheet (never a reused id())
 
 
 async def ensure_models(ctx: Any, manager: svc.ModelManager, config: dict, *, kinds: Optional[Sequence[str]] = None,
-                        action: str = "This run") -> bool:
+                        action: str = "This run", in_run: bool = False) -> bool:
     """Before a run or an editor step: the models it loads (``manga_models.missing_models`` for the
     config, limited to ``kinds``) that are not on the device yet. The first use asks — Download
     (now, with progress in the model sheet), Download in the run (the job downloads them first,
     verified and resumable, with its progress and Stop: ``services.manga.ensure_run_models``) or
-    Cancel. True: go on."""
+    Cancel. ``in_run`` (Files › Run, owner 2026-10-21): the run downloads them all; the question only
+    says how much data that is (Start / Cancel). True: go on."""
     if not manager.available:
         return True
     try:
@@ -49,6 +50,12 @@ async def ensure_models(ctx: Any, manager: svc.ModelManager, config: dict, *, ki
 
     size = svc.ModelEntry("total", "total", size=sum(int(e.size or 0) for e in entries)).size_label
     names = ", ".join(e.label for e in entries)
+    if in_run:
+        answer = await ask(ctx, "Download models",
+                           f"{action} downloads {size or 'the models'} first: {names}. They are kept for later "
+                           "runs; Stop keeps a partial download for the next run.",
+                           (("cancel", "Cancel", "text"), ("run", "Start", "filled")), key="manga-models-confirm")
+        return answer == "run"
     answer = await ask(ctx, "Download models",
                        f"{action} needs {names}{f' ({size})' if size else ''}, not downloaded on this device yet. "
                        "Download now? Models are kept for later runs.",

@@ -241,6 +241,13 @@ class TranslationModel:
             svc.save_translation_model(self.prefs, value)
         except Exception as exc:
             self.ctx.say(f"Could not save the model: {exc}")
+        # an on-device model for the manga translator reads with Hayai OCR, unless an OCR provider other
+        # than the default "Your Own key" was chosen (owner 2026-10-21; setting_writes.ON_DEVICE_OCR_PROVIDER)
+        from glossarion_mobile.state.setting_writes import ON_DEVICE_OCR_PROVIDER
+
+        if str(value or "").startswith("local/") and svc.run_ocr_provider(
+                {svc.K_PROVIDER: self.ctx.cfg(svc.K_PROVIDER, None)}) == "custom-api":
+            self.ctx.set_cfg(svc.K_PROVIDER, ON_DEVICE_OCR_PROVIDER)
         self._render_note()
         push(self.note, self.reset_button)
 

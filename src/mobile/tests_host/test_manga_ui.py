@@ -1237,7 +1237,10 @@ def test_files_tab_adds_sorts_skips_and_starts_a_batch(iso, tmp_path):
         ctx.extras["answers"] = ["run"]  # the models are not downloaded in the tmp caches: Start anyway
         job_id = await tab.start()
         if manga.models.available:
-            assert ctx.extras["asked"][-1][0] == "Download models"
+            # owner 2026-10-21: Run downloads every missing model in the run; the question only says how much
+            title, body = ctx.extras["asked"][-1]
+            assert title == "Download models" and body.startswith("Translating downloads ")
+            assert "Download now" not in body
         spec = jobs.specs[-1]
         assert spec.kind == "manga" and spec.params["files"] == manga.files.files  # all groups run
         assert len(spec.inputs) == 8 and manga.batch_job_id == job_id

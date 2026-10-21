@@ -145,7 +145,11 @@ ON_DEVICE_TEMPERATURE = 0.4
 #: a non on device model should restore all the original defaults and vice versa"); the output limit is
 #: half the model's context (``local_output_limit``). The review generator's short prompts are the built-in
 #: "On-device" review prompt profile (``review_generator``), selected like the other On-device profiles.
-ON_DEVICE_SETTINGS = {"translation_temperature": ON_DEVICE_TEMPERATURE, "batch_size": 1}
+#: The Manga translator reads with Hayai OCR on the phone (owner 2026-10-21; "Your Own key" OCR sends the
+#: pages to the translation model, which a small on-device model reads poorly).
+ON_DEVICE_OCR_PROVIDER = "hayai-ocr"
+ON_DEVICE_SETTINGS = {"translation_temperature": ON_DEVICE_TEMPERATURE, "batch_size": 1,
+                      "manga_ocr_provider": ON_DEVICE_OCR_PROVIDER}
 OUTPUT_LIMIT_KEY = "max_output_tokens"
 #: Auto glossary on an on-device model (owner 2026-10-19): NO GLOSSARY (the Welcome card's writes,
 #: ``welcome_flow.welcome_glossary_updates("no_glossary")``), except the 9B model, which can extract one

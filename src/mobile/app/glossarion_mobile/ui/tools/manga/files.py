@@ -631,7 +631,8 @@ class FilesTab(MangaTab):
         # models are downloaded on first use (the glossary pass detects and reads bubbles, it does not inpaint)
         if not await ensure_models(self.ctx, self.session.models, self.ctx.config_snapshot(),
                                    kinds=("detector", "ocr") if glossary_only else None,
-                                   action="Generating the glossary" if glossary_only else "Translating"):
+                                   action="Generating the glossary" if glossary_only else "Translating",
+                                   in_run=True):
             return None
         job_id = await self.ctx.submit(spec)
         if not job_id:

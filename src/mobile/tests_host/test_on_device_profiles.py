@@ -337,6 +337,23 @@ def test_local_model_sets_request_size_and_cloud_restores_it(tmp_path, monkeypat
     store._saver.close()
 
 
+
+@pytest.mark.parametrize("config", [{}, {"manga_ocr_provider": "rapidocr"}], ids=["fresh", "saved"])
+def test_local_model_reads_manga_with_hayai_and_cloud_restores_the_ocr_provider(tmp_path, config):
+    """owner 2026-10-21: an on-device model defaults the Manga translator to Hayai OCR; a cloud model gets
+    the saved provider back (or the default when nothing was saved)."""
+    from glossarion_mobile.state import setting_writes as sw
+
+    store = _store(tmp_path, config)
+    sw.write_setting(store, "model", LOCAL)
+    assert store.get("manga_ocr_provider") == sw.ON_DEVICE_OCR_PROVIDER == "hayai-ocr"
+    sw.write_setting(store, "model", CLOUD)
+    if config:
+        assert store.get("manga_ocr_provider") == "rapidocr"
+    else:
+        assert not store.has("manga_ocr_provider")
+    store._saver.close()
+
 # ---- the review generator's On-device prompt profile --------------------------------------------------------
 
 
