@@ -832,6 +832,13 @@ LABEL_FIXES = {
 
 # U9: tooltips of desktop controls the generator saw no tooltip for (copied from the control). Display only.
 TOOLTIP_OVERRIDES = {
+    # the desktop tooltip opens with its bold title, which a one-line help would only repeat
+    "glossary_name_check": (
+        "After each chapter, finds glossary names the model spelled differently (e.g. Walter Argent for "
+        "Valter Argent).\n"
+        "Uses the Emergency Glossary Compliance entry types and minimum length; works without that toggle."),
+    "glossary_name_check_mode": (
+        "Auto-fix replaces one close spelling of a character name; Review first only logs what it finds."),
     "glossary_refinement_chunking_mode": (
         "Send all entry types combines them within the token budget. If splitting is needed, "
         "characters and surnames are grouped first, followed by enabled gendered types, then other types. "
