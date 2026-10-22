@@ -1275,6 +1275,67 @@ def test_qa_custom_sheet_saves_the_desktop_shape(monkeypatch):
     asyncio.run(scenario())
 
 
+def _name_check_book(out: Path) -> None:
+    """An output folder whose chapter 1 spells two glossary names differently (2026-10-22 name check)."""
+    (out / "chapters_full.json").write_text(json.dumps([
+        {"content_hash": f"h{n}", "original_basename": f"chapter{n:04d}.xhtml",
+         "body": "<p>발터 아르겐트 강시현 아벨란 제국</p>"} for n in (1, 2)]), encoding="utf-8")
+    (out / "translation_progress.json").write_text(json.dumps({"chapters": {
+        str(n): {"status": "completed", "output_file": f"response_chapter{n:04d}.html", "content_hash": f"h{n}",
+                 "original_basename": f"chapter{n:04d}.xhtml"} for n in (1, 2)}}), encoding="utf-8")
+    (out / "response_chapter0001.html").write_text(
+        "<p>Walter Argent drew his sword. Gang Si-hyeon watched.</p>", encoding="utf-8")
+    (out / "response_chapter0002.html").write_text(
+        "<p>The Abellan Empire sent Valter Argent and Kang Si-hyeon.</p>", encoding="utf-8")
+    (out / "glossary.csv").write_text(
+        "type,raw_name,translated_name\ncharacter,발터 아르겐트,Valter Argent\ncharacter,강시현,Kang Si-hyeon\n"
+        "location,아벨란 제국,Abelan Empire\n", encoding="utf-8")
+
+
+@needs_flet
+def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "qa_scan_runtime", fake_qa_runtime())
+    from glossarion_mobile.ui.router import parse_route
+    from glossarion_mobile.ui.tools.qa_screen import QaScannerScreen
+
+    tb = _tb()
+    target = tool_target(tmp_path, "Names")
+    out = Path(target.folder)
+    _name_check_book(out)
+
+    async def scenario():
+        _conn, off_session = tb._fake_session("android")
+        off = QaScannerScreen(parse_route("/tools/qa"), _ctx(off_session.page, store={}))
+        _mount(off_session.page, off.get_body())
+        assert off.name_fix_button.visible is False  # the QA toggle is off by default
+        _conn, session = tb._fake_session("android")
+        page = session.page
+        ctx = _ctx(page, store={"qa_scanner_settings": {"check_glossary_names": True},
+                                "emergency_glossary_compliance_mode": "all"})
+        screen = QaScannerScreen(parse_route("/tools/qa"), ctx)
+        _mount(page, screen.get_body())
+        assert screen.name_fix_button.visible is True and screen.name_fix_button.disabled is True
+        screen.set_targets([target])
+        assert screen.name_fix_button.disabled is False
+        sheet = screen.open_name_fix()
+        await sheet.scan()
+        rows = [(box.value, output_file, finding.describe()) for box, _f, output_file, finding in sheet.rows]
+        # the character spellings are pre-checked; the location (report only) is not
+        assert rows == [(True, "response_chapter0001.html", "Walter Argent → Valter Argent"),
+                        (True, "response_chapter0001.html", "Gang Si-hyeon → Kang Si-hyeon"),
+                        (False, "response_chapter0002.html", "Abellan Empire → Abelan Empire")]
+        ctx.extras["answers"] = ["yes"]
+        changed = await sheet.apply()
+        assert changed == {str(out): {"response_chapter0001.html": 2}}
+        assert (out / "response_chapter0001.html").read_text(encoding="utf-8") == \
+            "<p>Valter Argent drew his sword. Kang Si-hyeon watched.</p>"
+        assert "Abellan" in (out / "response_chapter0002.html").read_text(encoding="utf-8")
+        assert (out / "glossary_name_check_backup" / "response_chapter0001.html").is_file()
+        assert any("Replaced 2 name(s) in 1 file(s)" in note for note in ctx.notes)
+
+    asyncio.run(scenario())
+
+
 @needs_flet
 def test_qa_report_viewer_native_fallback_and_open_in_chapters(tmp_path):
     from glossarion_mobile.ui.router import parse_route

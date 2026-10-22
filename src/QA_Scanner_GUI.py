@@ -330,37 +330,21 @@ class QAScannerMixin:
     def open_glossary_name_fix_dialog(self, parent=None):
         """Review names that differ from the glossary in an output folder and fix the checked ones."""
         import glossary_name_check as name_check
-        from scan_html_folder import find_qa_glossary_file
         parent = parent or self
         title = "Fix Glossary Names"
         folder = _normalize_qa_dialog_path(QFileDialog.getExistingDirectory(
             parent, "Select Output Folder to Check Glossary Names", self._glossary_name_fix_start_folder()))
         if not folder:
             return
-        glossary_path = find_qa_glossary_file(folder)
-        if not glossary_path:
-            QMessageBox.information(parent, title, "No glossary was found for this output folder.")
-            return
-        entries = name_check.load_entries(glossary_path, **self._glossary_name_check_scope())
-        if not entries:
-            QMessageBox.information(
-                parent, title,
-                "No glossary entries match the Emergency Glossary Compliance entry types and minimum length.")
-            return
-        if not name_check.source_chapters_for_folder(folder):
-            QMessageBox.information(
-                parent, title,
-                "This folder has no translation_progress.json / chapters_full.json, so translated "
-                "chapters cannot be matched to their source chapters.")
-            return
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            chapters = name_check.scan_folder(folder, entries)
+            folder_review = name_check.review_folder(folder, self._glossary_name_check_scope())
         finally:
             QApplication.restoreOverrideCursor()
-        if not chapters:
-            QMessageBox.information(parent, title, "Every glossary name in this folder matches the glossary.")
+        if folder_review.problem or not folder_review.chapters:
+            QMessageBox.information(parent, title, folder_review.problem or name_check.ALL_MATCH)
             return
+        glossary_path, chapters = folder_review.glossary_path, folder_review.chapters
 
         from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QHeaderView
         review = QDialog(parent)

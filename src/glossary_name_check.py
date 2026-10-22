@@ -478,6 +478,54 @@ def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None
     return results
 
 
+def find_glossary_for_folder(folder_path, source_path=None):
+    """The glossary translation used for this output folder (Emergency Glossary Compliance's lookup)."""
+    try:
+        from TransateKRtoEN import find_glossary_file
+        path = find_glossary_file(folder_path, source_path=source_path)
+        if path:
+            return path
+    except Exception:
+        pass
+    fallback = os.path.join(folder_path, "glossary.csv")
+    return fallback if os.path.isfile(fallback) else None
+
+
+NO_GLOSSARY = "No glossary was found for this output folder."
+NO_ENTRIES = "No glossary entries match the Emergency Glossary Compliance entry types and minimum length."
+NO_SOURCES = ("This folder has no translation_progress.json / chapters_full.json, so translated "
+              "chapters cannot be matched to their source chapters.")
+ALL_MATCH = "Every glossary name in this folder matches the glossary."
+
+
+@dataclass
+class FolderReview:
+    """What "Fix glossary names in existing chapters" shows for one output folder."""
+    folder: str
+    glossary_path: str = ""
+    chapters: list = field(default_factory=list)  # [ChapterResult] with reportable findings
+    problem: str = ""  # why nothing could be checked (NO_GLOSSARY / NO_ENTRIES / NO_SOURCES)
+
+
+def review_folder(folder_path, scope, *, stop=None):
+    """Scan one output folder for the review dialog (desktop QA Scanner, Glossarion Mobile)."""
+    review = FolderReview(folder=folder_path)
+    glossary_path = find_glossary_for_folder(folder_path)
+    if not glossary_path:
+        review.problem = NO_GLOSSARY
+        return review
+    review.glossary_path = glossary_path
+    entries = load_entries(glossary_path, **scope)
+    if not entries:
+        review.problem = NO_ENTRIES
+        return review
+    if not source_chapters_for_folder(folder_path):
+        review.problem = NO_SOURCES
+        return review
+    review.chapters = scan_folder(folder_path, entries, stop=stop)
+    return review
+
+
 def fix_files(folder_path, plan, *, backup_dir=None):
     """Apply reviewed fixes: ``plan`` maps output file -> [Finding]. Backs up each file first."""
     import shutil

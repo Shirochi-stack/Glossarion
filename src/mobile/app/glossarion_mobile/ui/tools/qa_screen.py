@@ -42,6 +42,8 @@ from glossarion_mobile.ui.tools import qa_model as qm
 from glossarion_mobile.ui.tools import targets as tg
 from glossarion_mobile.ui.tools.common import JobWatch, action_button, ask, card, hint_text
 from glossarion_mobile.ui.tools.qa_custom import CustomModeSheet
+from glossarion_mobile.ui.tools.qa_glossary_names import GlossaryNameFixSheet
+from glossarion_mobile.ui.tools.qa_glossary_names import check_enabled as check_name_fix_enabled
 from glossarion_mobile.ui.tools.source_picker import SourcePicker
 
 __all__ = ["QaScannerScreen", "open_qa_report", "qa_eligibility"]
@@ -113,6 +115,7 @@ class QaScannerScreen(Screen):
         self.last_spec: Any = None
         self.picker: Optional[SourcePicker] = None
         self.custom_sheet: Optional[CustomModeSheet] = None
+        self.name_fix_sheet: Optional[GlossaryNameFixSheet] = None
 
     # ---- layout -----------------------------------------------------------------------------------
 
@@ -151,8 +154,12 @@ class QaScannerScreen(Screen):
         self.log_button = ft.TextButton(content="View log", icon=ft.Icons.TERMINAL, on_click=self._on_view_log,
                                         visible=False, key="qa-log")
         self.progress = ft.ProgressBar(visible=False, key="qa-progress")
+        # QA Scanner Settings › "Check glossary names (Experimental)" shows it (desktop: the same toggle)
+        self.name_fix_button = ft.OutlinedButton(content="Fix glossary names…", icon=ft.Icons.SPELLCHECK,
+                                                 on_click=lambda e: self.open_name_fix(),
+                                                 visible=check_name_fix_enabled(self.ctx), key="qa-name-fix")
         run = card("Run", [ft.Row([self.start_button, self.stop_button, self.log_button], wrap=True),
-                           self.progress, self.run_status], icon="PLAY_CIRCLE", key="qa-run")
+                           self.progress, self.run_status, self.name_fix_button], icon="PLAY_CIRCLE", key="qa-run")
         settings = card("Settings", [
             ft.Row([
                 action_button("QA Scanner Settings", "SETTINGS", lambda e: self.open_settings("qa.settings"),
@@ -245,6 +252,7 @@ class QaScannerScreen(Screen):
         self.targets_column.controls = rows
         self.clear_button.disabled = not self.targets
         self.ctx.push(self.targets_column, self.clear_button)
+        self._render_name_fix()
 
     def _render_run(self) -> None:
         snap = self.active_job
@@ -285,6 +293,7 @@ class QaScannerScreen(Screen):
         if out and not self.targets:
             self.ctx.spawn(self.preselect_book(out))
         self.ctx.spawn(self.load_reports())
+        self._render_name_fix()
 
     def dispose(self) -> None:
         self.watch.stop()
@@ -313,6 +322,22 @@ class QaScannerScreen(Screen):
         self._render_run()
         if value == "custom":
             self.open_custom()
+
+    def _render_name_fix(self) -> None:
+        self.name_fix_button.visible = check_name_fix_enabled(self.ctx)
+        self.name_fix_button.disabled = not any(t.folder for t in self.targets)
+        self.ctx.push(self.name_fix_button)
+
+    def open_name_fix(self) -> Optional[GlossaryNameFixSheet]:
+        """Review names that differ from the glossary in the chosen folders and fix the checked ones."""
+        folders = [t.folder for t in self.targets if t.folder and not t.direct_text]
+        if not folders:
+            self.ctx.say("Choose a folder first")
+            return None
+        self.name_fix_sheet = GlossaryNameFixSheet(self.ctx, folders)
+        if self.ctx.page is not None:
+            self.name_fix_sheet.show(self.ctx.page)
+        return self.name_fix_sheet
 
     def open_custom(self, on_saved: Any = None) -> Optional[CustomModeSheet]:
         if qm.custom_defaults() is None:

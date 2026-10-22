@@ -6669,24 +6669,11 @@ def _record_ai_truncation_issue(result_obj, ai_result):
     return issue_code
 
 
-def find_qa_glossary_file(folder_path, epub_path=None):
-    """The glossary translation used for this output folder (Emergency Glossary Compliance's lookup)."""
-    try:
-        from TransateKRtoEN import find_glossary_file
-        path = find_glossary_file(folder_path, source_path=epub_path)
-        if path:
-            return path
-    except Exception:
-        pass
-    fallback = os.path.join(folder_path, "glossary.csv")
-    return fallback if os.path.isfile(fallback) else None
-
-
 def run_glossary_name_check(folder_path, results, qa_settings, log=print, *, epub_path=None,
                             progress_path=None, should_stop=None):
     """Experimental: flag translated names that drifted from the glossary (glossary_name_check)."""
     import glossary_name_check as name_check
-    glossary_path = find_qa_glossary_file(folder_path, epub_path)
+    glossary_path = name_check.find_glossary_for_folder(folder_path, epub_path)
     if not glossary_path:
         log("   ⏭️ Glossary name check: no glossary found for this folder")
         return 0
