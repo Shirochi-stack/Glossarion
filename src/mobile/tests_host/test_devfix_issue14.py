@@ -878,4 +878,15 @@ def test_desktop_other_settings_streaming_texts_identical(tmp_path):
     old_dir.mkdir()
     (old_dir / "other_settings.py").write_text(old, encoding="utf-8")
     before = _render_response_section(tmp_path, "pre_move", str(old_dir))
-    assert before == rows, "Other Settings › Response Handling renders differently than before the move"
+    # Only the rows the move touched are compared: the two texts (with their style) and the four streaming
+    # checkboxes (label, default, order). Later owner-approved edits elsewhere in the section (AuthZA in the
+    # reasoning help, "Gemini 3 and later", the Retry-After rows of 2026-10-17) are not part of this move.
+    assert _streaming_rows(before) == _streaming_rows(rows), \
+        "Other Settings › Response Handling renders the streaming group differently than before the move"
+    assert len(_streaming_rows(rows)) == 6
+
+
+def _streaming_rows(rows: list) -> list:
+    """The moved texts and the streaming checkboxes of a ``_render_response_section`` render, in order."""
+    return [row for row in rows
+            if row[1] in (DESKTOP_WARNING, DESKTOP_NOTE) or (row[0] == "QCheckBox" and "stream" in row[1].lower())]
