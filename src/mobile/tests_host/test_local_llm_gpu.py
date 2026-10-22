@@ -326,6 +326,70 @@ def test_engine_card_gpu_switch_note_status_and_presets_button(tmp_path):
     assert not panel.gpu_presets_button.visible
 
 
+@needs_flet
+def test_gpu_hint_offers_the_q4_0_file_of_a_k_quant_model(tmp_path):
+    """owner 2026-10-22: a model downloaded before "Use GPU" was switched on (the defaults are K-quants)
+    still runs on the Adreno GPU, maybe slower than the CPU, and nothing failed to make it fall back: the
+    engine card (and the Welcome page) say so and one tap gets the Q4_0 file of the same model."""
+    import asyncio
+
+    from glossarion_mobile.ui.screens.local_models_panel import LocalModelsPanel
+
+    light = next(p for p in presets.DEFAULT_PRESETS if p["name"] == "Light")
+    light_gpu = presets.gpu_preset_for(light["repo"])
+    assert light_gpu["file"] == "Qwen3.5-2B-Q4_0.gguf" and presets.is_gpu_quant(light_gpu["file"])
+    assert presets.file_quant(light["file"]) == "Q4_K_XL" and not presets.is_gpu_quant(light["file"])
+
+    def downloaded(service, stem, file):
+        with open(service.registry.file_path(stem), "wb") as handle:  # the registry lists files on disk
+            handle.write(b"GGUF")
+        service.registry.add(stem, {"repo": light["repo"], "file": file, "revision": "r", "sha256": "0" * 64,
+                                    "size": 4, "downloaded_at": 1})
+
+    def panel_for(sub, backend="OpenCL", gpu_on=True, file=light["file"]):
+        prefs = fakes.FakePrefs({svc.GPU_KEY: True} if gpu_on else {})
+        service, _engine = make_service(tmp_path / sub, stems=(), prefs=prefs, gpu_backend=backend)
+        downloaded(service, "light", file)
+        current = {"model": "local/light"}
+        panel = LocalModelsPanel(service=service, prefs=prefs, current_model=lambda: current["model"])
+        panel.build()
+        return panel, prefs, service, current
+
+    panel, prefs, service, current = panel_for("android")
+    assert panel.gpu_swap_box.visible
+    assert panel.gpu_swap_text.value.startswith("Light is Q4_K_XL, which can be slow on this GPU")
+    assert panel.gpu_swap_button.content == "Get Light · GPU (Q4_0) · " + __import__(
+        "glossarion_mobile.services.local_llm.downloads", fromlist=["x"]).format_bytes(presets.download_size(light_gpu))
+    # the tap: the Q4_0 preset joins the list (once) and its one-tap flow runs (download, load, use)
+    ran = []
+
+    async def get_preset(index):
+        ran.append(presets.load_presets(prefs)[index]["file"])
+        current["model"] = "local/light-q4"
+        downloaded(service, "light-q4", light_gpu["file"])
+        return current["model"]
+
+    panel.get_preset = get_preset
+    assert asyncio.run(panel.swap_to_gpu_quant()) == "local/light-q4" and ran == [light_gpu["file"]]
+    files = [p.get("file") for p in presets.load_presets(prefs)]
+    assert files.count(light_gpu["file"]) == 1
+    assert not panel.gpu_swap_box.visible  # the Q4_0 model is in use now
+    # already downloaded: the button switches instead of downloading
+    current["model"] = "local/light"
+    panel._render_gpu_swap(push=False)
+    assert panel.gpu_swap_button.content == "Switch to Light · GPU (Q4_0)"
+    asyncio.run(panel.swap_to_gpu_quant())
+    assert [p.get("file") for p in presets.load_presets(prefs)].count(light_gpu["file"]) == 1  # not added twice
+    # no hint: GPU off, a Q4_0 model, iOS (Metal runs the K-quants), a non-local model
+    assert not panel_for("off", gpu_on=False)[0].gpu_swap_box.visible
+    assert not panel_for("q4", file=light_gpu["file"])[0].gpu_swap_box.visible
+    assert not panel_for("ios", backend="Metal")[0].gpu_swap_box.visible
+    panel, _prefs, _service, current = panel_for("remote")
+    current["model"] = "authgpt/gpt-6-luna"
+    panel._render_gpu_swap(push=False)
+    assert not panel.gpu_swap_box.visible
+
+
 # ---- the smoke check: inert while off -------------------------------------------------------------------------
 
 def test_smoke_check_fails_when_a_gpu_backend_registered_by_itself(monkeypatch):

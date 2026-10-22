@@ -308,6 +308,8 @@ def test_page_one_offers_the_gpu_switch_where_the_build_has_a_gpu_backend(tmp_pa
     assert switch.visible and switch.value is False and switch.label == "Use GPU (experimental)"
     assert "welcome-gpu-note" not in rows and "welcome-gpu-status" not in rows  # page 1 stays compact
     assert not rows["welcome-gpu-presets"].visible
+    # the K-quant hint (test_local_llm_gpu) lives here too; hidden while no local/ model is in use
+    assert not rows["welcome-gpu-swap"].visible
     switch.value = True
     switch.on_change(None)
     assert kwargs["prefs"].get(svc.GPU_KEY) is True and service.use_gpu()

@@ -653,7 +653,14 @@ class OnDeviceFlow:
         self.gpu_presets_button = ft.TextButton(content="Add GPU-friendly presets (Q4_0)", icon=ft.Icons.ADD,
                                                 key=f"{key_prefix}-gpu-presets", on_click=lambda e: self.add_gpu_presets())
         self._render_gpu_presets_button()
-        return [self.gpu_switch, self.gpu_note, self.gpu_status, self.gpu_presets_button]
+        # the current model is a K-quant the Adreno kernels run slowly: one tap gets its Q4_0 preset
+        self.gpu_swap_text = _small("", key=f"{key_prefix}-gpu-swap-text")
+        self.gpu_swap_button = ft.TextButton(content="", icon=ft.Icons.SWAP_HORIZ, key=f"{key_prefix}-gpu-swap-button",
+                                             on_click=lambda e: self.spawn(self.swap_to_gpu_quant()))
+        self.gpu_swap_box = ft.Column([self.gpu_swap_text, self.gpu_swap_button], spacing=0, tight=True,
+                                      key=f"{key_prefix}-gpu-swap")
+        self._render_gpu_swap(push=False)
+        return [self.gpu_switch, self.gpu_note, self.gpu_status, self.gpu_swap_box, self.gpu_presets_button]
 
     def _render_gpu_presets_button(self) -> None:
         missing = presets.missing_gpu_presets(self.presets())
@@ -664,8 +671,59 @@ class OnDeviceFlow:
         value = bool(self.service.save_gpu(self.gpu_switch.value))
         self.gpu_switch.value = value
         self._render_gpu_presets_button()
-        _push(self.gpu_switch, self.gpu_presets_button)
+        self._render_gpu_swap(push=False)
+        _push(self.gpu_switch, self.gpu_presets_button, self.gpu_swap_box)
         return value
+
+    def gpu_swap(self) -> Optional[tuple]:
+        """Android GPU on and the current ``local/`` model is not a Q4_0 file while its repository has a
+        Q4_0 preset (``presets.GPU_PRESETS``): ``(stem, label, quant, gpu preset)``, else None. The model
+        still runs (on the GPU, maybe slower than the CPU); only a failure falls back to the CPU."""
+        if self._gpu_backend() != "OpenCL" or not self.service.use_gpu():
+            return None
+        model = str(self.current_model() if self.current_model is not None else "") or ""
+        if not model.lower().startswith("local/"):
+            return None
+        stem = model[len("local/"):]
+        entry = self.service.registry.load().get(stem) or {}
+        file = entry.get("file")
+        if not file or presets.is_gpu_quant(file):
+            return None
+        gpu_row = presets.gpu_preset_for(entry.get("repo"))
+        if gpu_row is None:
+            return None
+        label = str((self.service.preset_for(stem) or {}).get("name") or stem)
+        return stem, label, presets.file_quant(file) or "not Q4_0", gpu_row
+
+    def _render_gpu_swap(self, push: bool = True) -> None:
+        box = getattr(self, "gpu_swap_box", None)
+        if box is None:
+            return
+        swap = self.gpu_swap()
+        box.visible = swap is not None
+        if swap is not None:
+            _stem, label, quant, row = swap
+            self.gpu_swap_text.value = (f"{label} is {quant}, which can be slow on this GPU: its fast kernels "
+                                        "are for Q4_0.")
+            if self.service.registry.find(row["repo"], row["file"]):
+                self.gpu_swap_button.content = f"Switch to {row['name']}"
+            else:
+                size = presets.download_size(row)
+                self.gpu_swap_button.content = f"Get {row['name']}" + (f" · {dl.format_bytes(size)}" if size else "")
+        if push:
+            _push(box)
+
+    async def swap_to_gpu_quant(self) -> Optional[str]:
+        """The hint's tap: add the model's Q4_0 preset to the list (when missing) and run its one-tap flow
+        (confirm the download, load, use). The current model keeps working until the new one is in use."""
+        swap = self.gpu_swap()
+        if swap is None:
+            return None
+        _rows, index = presets.add_gpu_preset(self.prefs, swap[3])
+        self.render()
+        model = await self.get_preset(index)
+        self._render_gpu_swap()
+        return model
 
     def add_gpu_presets(self) -> list:
         """Append the Q4_0 presets (``presets.GPU_PRESETS``) the list does not have yet."""
@@ -803,8 +861,10 @@ class LocalModelsPanel(OnDeviceFlow):
         note = getattr(snap, "gpu_note", None)
         self.gpu_status.value = note or ""
         self.gpu_status.visible = bool(note)
+        self._render_gpu_swap(push=False)  # a model was loaded / switched
         if push:
-            _push(self.engine_state, self.engine_detail, self.unload_button, self.unavailable_text, self.gpu_status)
+            _push(self.engine_state, self.engine_detail, self.unload_button, self.unavailable_text, self.gpu_status,
+                  self.gpu_swap_box)
 
     def context_changed(self, stem: Optional[str]) -> None:
         if getattr(self, "context", None) is not None:

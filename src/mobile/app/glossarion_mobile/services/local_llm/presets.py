@@ -22,8 +22,8 @@ from glossarion_mobile.services.local_llm import hf
 log = logging.getLogger("glossarion.local_llm")
 
 __all__ = [
-    "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "PREF_KEY", "add_gpu_presets", "download_size", "load_presets",
-    "missing_gpu_presets", "restore_defaults", "save_presets", "validate_preset",
+    "DEFAULT_PRESETS", "GPU_PRESETS", "MAX_PRESETS", "PREF_KEY", "add_gpu_preset", "add_gpu_presets", "download_size",
+    "file_quant", "gpu_preset_for", "is_gpu_quant", "load_presets", "missing_gpu_presets", "restore_defaults", "save_presets", "validate_preset",
 ]
 
 PREF_KEY = "local_model_presets"
@@ -167,20 +167,54 @@ def missing_gpu_presets(rows: Sequence[dict]) -> list:
     return [copy.deepcopy(p) for p in GPU_PRESETS if (p["repo"].casefold(), p["file"]) not in have]
 
 
+def is_gpu_quant(file: Any) -> bool:
+    """A Q4_0 GGUF: the quant llama.cpp's Adreno (OpenCL) kernels are fast for."""
+    return "q4_0" in str(file or "").lower()
+
+
+def file_quant(file: Any) -> str:
+    """The quant a GGUF file name ends with (``Qwen3.5-2B-UD-Q4_K_XL.gguf`` -> ``Q4_K_XL``), else ""."""
+    match = re.search(r"(?:^|[-_.])((?:I)?Q\d+(?:_[A-Z0-9]+)*|BF16|F16|F32)\.gguf$", str(file or ""), re.IGNORECASE)
+    return match.group(1).upper() if match else ""
+
+
+def gpu_preset_for(repo: Any) -> Optional[dict]:
+    """The ``GPU_PRESETS`` row (Q4_0) of the same repository as a downloaded model, else None."""
+    repo_cf = str(repo or "").casefold()
+    for row in GPU_PRESETS:
+        if row["repo"].casefold() == repo_cf:
+            return copy.deepcopy(row)
+    return None
+
+
+def _append_gpu_row(rows: list, row: dict) -> str:
+    """Append ``row`` to ``rows`` under a free name (a taken one gets " 2") and return that name."""
+    taken = {str(r.get("name") or "").casefold() for r in rows}
+    name, n = row["name"], 2
+    while name.casefold() in taken:
+        name, n = f"{row['name'][:56]} {n}", n + 1
+    row["name"] = name
+    rows.append(row)
+    return name
+
+
+def add_gpu_preset(prefs: Any, gpu_row: dict) -> tuple:
+    """Make sure the presets list has ``gpu_row`` (a ``GPU_PRESETS`` row; same repo and file): ``(presets,
+    index of that row)``, appending it when missing."""
+    rows = load_presets(prefs)
+    for index, row in enumerate(rows):
+        if str(row.get("repo") or "").casefold() == gpu_row["repo"].casefold() and row.get("file") == gpu_row["file"]:
+            return rows, index
+    _append_gpu_row(rows, copy.deepcopy(gpu_row))
+    rows = save_presets(prefs, rows)
+    return rows, len(rows) - 1
+
+
 def add_gpu_presets(prefs: Any) -> tuple:
     """Append the missing ``GPU_PRESETS`` to the saved presets (a name already taken gets " 2"):
     ``(presets, added names)``. The defaults and the user's rows stay as they are."""
     rows = load_presets(prefs)
-    taken = {str(r.get("name") or "").casefold() for r in rows}
-    added = []
-    for row in missing_gpu_presets(rows):
-        name, n = row["name"], 2
-        while name.casefold() in taken:
-            name, n = f"{row['name'][:56]} {n}", n + 1
-        row["name"] = name
-        taken.add(name.casefold())
-        rows.append(row)
-        added.append(name)
+    added = [_append_gpu_row(rows, row) for row in missing_gpu_presets(rows)]
     return (save_presets(prefs, rows) if added else rows), added
 
 
