@@ -569,6 +569,38 @@ _POOL_LOAD_SYNC = (
 
 
 
+# 2026-10-22 The image state manager's worker shutdown no longer waits for its queues' feeder
+# threads (cancel_join_thread): with the worker gone a feeder writing a queued state blocked
+# forever and the window hung on close. Every caller flush()es the state itself first.
+_STATE_QUEUE_CLOSE = (
+    '            # Close queues to release handles\n'
+    '            if self._mp_task_q:\n'
+    '                try:\n'
+    '                    self._mp_task_q.close()\n'
+    '                    self._mp_task_q.join_thread()\n'
+    '                except Exception:\n'
+    '                    pass\n'
+    '            \n'
+    '            if self._mp_result_q:\n'
+    '                try:\n'
+    '                    self._mp_result_q.close()\n'
+    '                    self._mp_result_q.join_thread()\n',
+    '            # Close queues to release handles. Never wait for their feeder threads: with the\n'
+    '            # worker gone nobody reads the pipe, so a feeder still writing a queued state blocks\n'
+    '            # forever (the window hung on close). Every caller flush()es the state itself first.\n'
+    '            if self._mp_task_q:\n'
+    '                try:\n'
+    '                    self._mp_task_q.cancel_join_thread()\n'
+    '                    self._mp_task_q.close()\n'
+    '                except Exception:\n'
+    '                    pass\n'
+    '\n'
+    '            if self._mp_result_q:\n'
+    '                try:\n'
+    '                    self._mp_result_q.cancel_join_thread()\n'
+    '                    self._mp_result_q.close()\n')
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -811,6 +843,15 @@ APPROVED = (
                 "OCR import does), so the editor draws the rectangles when the page is opened",
         "source": {
             "src/manga_integration.py": [_BATCH_EDITOR_STATE_NO_DOC, _BATCH_EDITOR_STATE_DOC],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-10-22",
+        "what": "Closing the window no longer hangs in the image state manager's worker shutdown: its "
+                "queues are closed without waiting for feeder threads the gone worker never drains",
+        "source": {
+            "src/manga_integration.py": [_STATE_QUEUE_CLOSE],
         },
         "values": {},
     },

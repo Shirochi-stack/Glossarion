@@ -8580,18 +8580,20 @@ class ImageStateManager:
                     except Exception:
                         pass
             
-            # Close queues to release handles
+            # Close queues to release handles. Never wait for their feeder threads: with the
+            # worker gone nobody reads the pipe, so a feeder still writing a queued state blocks
+            # forever (the window hung on close). Every caller flush()es the state itself first.
             if self._mp_task_q:
                 try:
+                    self._mp_task_q.cancel_join_thread()
                     self._mp_task_q.close()
-                    self._mp_task_q.join_thread()
                 except Exception:
                     pass
-            
+
             if self._mp_result_q:
                 try:
+                    self._mp_result_q.cancel_join_thread()
                     self._mp_result_q.close()
-                    self._mp_result_q.join_thread()
                 except Exception:
                     pass
                     

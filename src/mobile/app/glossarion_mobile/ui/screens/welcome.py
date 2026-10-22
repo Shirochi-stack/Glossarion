@@ -280,6 +280,11 @@ class WelcomeScreen(Screen):
         cells = [self._ondevice_cell(flow, index, preset, preset.get("name") == suggested)
                  for index, preset in enumerate(rows)]
         lines: list[ft.Control] = [ft.ResponsiveRow(cells, spacing=6, run_spacing=4, key="welcome-ondevice")]
+        if flow._gpu_backend():
+            # the Model manager's "Use GPU (experimental)" switch and its Q4_0 presets button; the long
+            # note stays on the engine card (page 1 must still fit a 360 x 800 phone)
+            lines.extend(control for control in flow._gpu_section(key_prefix="welcome")
+                         if control is not flow.gpu_note and control is not flow.gpu_status)
         note = self.model_notes.get("local")
         if note:
             lines.append(ft.Text(note, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,

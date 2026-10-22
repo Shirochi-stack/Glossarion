@@ -290,6 +290,36 @@ def test_page_one_lists_the_users_own_on_device_presets(tmp_path):
     assert picked == [4] and lp.load_presets(kwargs["prefs"])[4]["name"] == "Gemma E2B"
 
 
+def test_page_one_offers_the_gpu_switch_where_the_build_has_a_gpu_backend(tmp_path):
+    """owner 2026-10-22: "Use GPU (experimental)" on the Welcome page too: the Model manager's switch (same
+    setting), under the on-device cells; the Q4_0 presets button once it is on (Android). No backend: none."""
+    from glossarion_mobile.services.local_llm import presets as lp
+    from glossarion_mobile.services.local_llm import service as svc
+
+    kwargs, service, _engine = _engine_kwargs(tmp_path / "x86")
+    assert service.gpu_backend is None  # the host / emulator: no GPU backend
+    assert "welcome-gpu" not in by_key(screen(**kwargs).page_area.content)
+
+    kwargs, service, _engine = _engine_kwargs(tmp_path / "arm64")
+    service.gpu_backend = "OpenCL"
+    s = screen(**kwargs)
+    rows = by_key(s.page_area.content)
+    switch = rows["welcome-gpu"]
+    assert switch.visible and switch.value is False and switch.label == "Use GPU (experimental)"
+    assert "welcome-gpu-note" not in rows and "welcome-gpu-status" not in rows  # page 1 stays compact
+    assert not rows["welcome-gpu-presets"].visible
+    switch.value = True
+    switch.on_change(None)
+    assert kwargs["prefs"].get(svc.GPU_KEY) is True and service.use_gpu()
+    assert rows["welcome-gpu-presets"].visible
+    rows["welcome-gpu-presets"].on_click(None)
+    names = [p["name"] for p in lp.load_presets(kwargs["prefs"])]
+    assert names[-len(lp.GPU_PRESETS):] == [p["name"] for p in lp.GPU_PRESETS]
+    # the page re-rendered: the new presets have cells and the switch still shows the saved setting
+    rows = by_key(s.page_area.content)
+    assert rows["welcome-gpu"].value is True and len(rows["welcome-ondevice"].controls) == len(names)
+
+
 def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path):
     kwargs, _service, _engine = _engine_kwargs(tmp_path, total=6 * 1024 ** 3, available=3 * 1024 ** 3)
     s = screen(**kwargs)
