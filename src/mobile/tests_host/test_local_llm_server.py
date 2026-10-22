@@ -70,7 +70,8 @@ def test_token_and_host_guards(running):
     token = service.server.token
     assert _raw(service, "GET", f"/{token}/v1/models")[0] == 200
     assert _raw(service, "GET", "/v1/models")[0] == 404
-    assert _raw(service, "GET", f"/{token[:-1]}x/v1/models")[0] == 404
+    wrong = token[:-1] + ("y" if token.endswith("x") else "x")  # (a token ending in x was the token itself)
+    assert _raw(service, "GET", f"/{wrong}/v1/models")[0] == 404
     assert _raw(service, "GET", f"/{token}/v1/models", host="evil.example:80")[0] == 404
     assert _raw(service, "POST", f"/{token}/v1/embeddings", body={})[0] == 404
     assert _raw(service, "GET", f"/{token}/nothing")[0] == 404
