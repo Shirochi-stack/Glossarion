@@ -158,6 +158,7 @@ def default_qa_scan_settings():
         "flag_excess_punctuation": False,
         "excess_punctuation_threshold": 49,
         "check_glossary_leakage": True,
+        "check_glossary_names": False,
         "check_potential_truncation": False,
         "check_missing_images": True,
         "min_file_length": 0,
@@ -330,6 +331,7 @@ def apply_qa_scan_env_from_settings(qa_settings):
             settings.get("ai_thinking_preamble_sample_size", 500)
         ),
         "QA_CHECK_GLOSSARY_LEAKAGE": "1" if settings.get("check_glossary_leakage", True) else "0",
+        "QA_CHECK_GLOSSARY_NAMES": "1" if settings.get("check_glossary_names", False) else "0",
         "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",
         "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),
         "QA_MIN_DUPLICATE_WORD_COUNT": str(settings.get("min_duplicate_word_count", 500)),
@@ -617,6 +619,14 @@ def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=N
             _env_bool("SKIP_TITLE_TAG_TRANSLATION", True),
         )
     )
+
+    if settings.get("check_glossary_names"):
+        # Glossary name check shares Emergency Glossary Compliance's entry types / minimum length
+        try:
+            from glossary_name_check import settings_from_config
+            settings["_glossary_name_scope"] = settings_from_config(live_config)
+        except Exception:
+            pass
 
     output_language = live_config.get("output_language") or live_config.get("output_language_var")
     if output_language and not settings.get("target_language"):

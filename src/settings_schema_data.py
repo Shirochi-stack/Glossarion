@@ -57,6 +57,8 @@ SETTINGS_MAP_ORDER = ('model',
  'emergency_glossary_compliance_mode',
  'emergency_glossary_compliance_custom_types',
  'emergency_glossary_compliance_min_chars',
+ 'glossary_name_check',
+ 'glossary_name_check_mode',
  'retry_duplicate_bodies',
  'token_limit_disabled',
  'enable_thoughts',
@@ -480,6 +482,8 @@ DESKTOP_SETTINGS_MAP = (('model', ('model_var',), ('value', None), ('str',)),
   ('emergency_glossary_compliance_min_chars_var',),
   ('value', 3),
   ('safe_int', 3, 0, 10, 'max_min')),
+ ('glossary_name_check', ('glossary_name_check_var',), ('value', False), ('bool',)),
+ ('glossary_name_check_mode', ('glossary_name_check_mode_var',), ('value', 'auto'), ('str',)),
  ('retry_duplicate_bodies', ('retry_duplicate_var',), ('value', False), ('bool',)),
  ('token_limit_disabled', ('token_limit_disabled',), ('value', False), ('bool',)),
  ('enable_thoughts', ('enable_thoughts_var',), ('value', True), ('bool',)),
@@ -1377,6 +1381,7 @@ DESKTOP_BOOL_VARS = (('rolling_summary_var', 'use_rolling_summary', ('value', Fa
  ('emergency_restore_var', 'emergency_paragraph_restore', ('value', False)),
  ('emergency_image_restore_var', 'emergency_image_restore', ('value', False)),
  ('emergency_glossary_compliance_var', 'emergency_glossary_compliance', ('value', False)),
+ ('glossary_name_check_var', 'glossary_name_check', ('value', False)),
  ('contextual_var', 'contextual', ('value', False)),
  ('enable_watermark_removal_var', 'enable_watermark_removal', ('value', True)),
  ('save_cleaned_images_var', 'save_cleaned_images', ('value', False)),
@@ -1435,6 +1440,7 @@ DESKTOP_STR_VARS = (('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', ('value',
  ('emergency_glossary_compliance_mode_var',
   'emergency_glossary_compliance_mode',
   ('value', 'characters')),
+ ('glossary_name_check_mode_var', 'glossary_name_check_mode', ('value', 'auto')),
  ('gemini_safety_threshold_var', 'gemini_safety_threshold', ('value', 'BLOCK_NONE')))
 
 SETTINGS = {
@@ -2231,7 +2237,7 @@ SETTINGS = {
      'dialog_default': None,
      'discrepancies': ("defaults differ: init:table_str/save='balanced', "
                        "env:save:APPEND_GLOSSARY/env:save:AUTO_GLOSSARY_MODE/env:save:ENABLE_AUTO_GLOSSARY/env:save:SINGLE_PASS_GLOSSARY_MODE/init:read='off', "
-                       'env:glossary:APPEND_GLOSSARY/env:glossary:AUTO_GLOSSARY_MODE/env:glossary:ENABLE_AUTO_GLOSSARY/env:glossary:SINGLE_PASS_GLOSSARY_MODE/env:translation:APPEND_GLOSSARY/env:translation:AUTO_GLOSSARY_MODE/env:translation:EMERGENCY_GLOSSARY_COMPLIANCE/env:translation:ENABLE_AUTO_GLOSSARY/env:translation:SINGLE_PASS_GLOSSARY_MODE/init:read=None',),
+                       'env:glossary:APPEND_GLOSSARY/env:glossary:AUTO_GLOSSARY_MODE/env:glossary:ENABLE_AUTO_GLOSSARY/env:glossary:SINGLE_PASS_GLOSSARY_MODE/env:translation:APPEND_GLOSSARY/env:translation:AUTO_GLOSSARY_MODE/env:translation:EMERGENCY_GLOSSARY_COMPLIANCE/env:translation:ENABLE_AUTO_GLOSSARY/env:translation:GLOSSARY_NAME_CHECK/env:translation:SINGLE_PASS_GLOSSARY_MODE/init:read=None',),
      'env': (('APPEND_GLOSSARY', 'translation', '<none>'),
              ('APPEND_GLOSSARY', 'translation', None),
              ('AUTO_GLOSSARY_MODE', 'translation', '<none>'),
@@ -2240,6 +2246,8 @@ SETTINGS = {
              ('EMERGENCY_GLOSSARY_COMPLIANCE', 'translation', None),
              ('ENABLE_AUTO_GLOSSARY', 'translation', '<none>'),
              ('ENABLE_AUTO_GLOSSARY', 'translation', None),
+             ('GLOSSARY_NAME_CHECK', 'translation', '<none>'),
+             ('GLOSSARY_NAME_CHECK', 'translation', None),
              ('SINGLE_PASS_GLOSSARY_MODE', 'translation', '<none>'),
              ('SINGLE_PASS_GLOSSARY_MODE', 'translation', None),
              ('APPEND_GLOSSARY', 'glossary', '<none>'),
@@ -3557,12 +3565,13 @@ SETTINGS = {
      'default_source': 'init',
      'dialog_default': False,
      'discrepancies': ('defaults differ: '
-                       'env:glossary:APPEND_GLOSSARY/env:glossary:AUTO_GLOSSARY_MODE/env:glossary:ENABLE_AUTO_GLOSSARY/env:glossary:SINGLE_PASS_GLOSSARY_MODE/env:translation:APPEND_GLOSSARY/env:translation:AUTO_GLOSSARY_MODE/env:translation:EMERGENCY_GLOSSARY_COMPLIANCE/env:translation:ENABLE_AUTO_GLOSSARY/env:translation:SINGLE_PASS_GLOSSARY_MODE/init:read/save=False, '
+                       'env:glossary:APPEND_GLOSSARY/env:glossary:AUTO_GLOSSARY_MODE/env:glossary:ENABLE_AUTO_GLOSSARY/env:glossary:SINGLE_PASS_GLOSSARY_MODE/env:translation:APPEND_GLOSSARY/env:translation:AUTO_GLOSSARY_MODE/env:translation:EMERGENCY_GLOSSARY_COMPLIANCE/env:translation:ENABLE_AUTO_GLOSSARY/env:translation:GLOSSARY_NAME_CHECK/env:translation:SINGLE_PASS_GLOSSARY_MODE/init:read/save=False, '
                        'init:table_bool=True',),
      'env': (('APPEND_GLOSSARY', 'translation', False),
              ('AUTO_GLOSSARY_MODE', 'translation', False),
              ('EMERGENCY_GLOSSARY_COMPLIANCE', 'translation', False),
              ('ENABLE_AUTO_GLOSSARY', 'translation', False),
+             ('GLOSSARY_NAME_CHECK', 'translation', False),
              ('SINGLE_PASS_GLOSSARY_MODE', 'translation', False),
              ('APPEND_GLOSSARY', 'glossary', False),
              ('AUTO_GLOSSARY_MODE', 'glossary', False),
@@ -5253,6 +5262,42 @@ SETTINGS = {
      'init_default': False,
      'origins': ('init', 'read'),
      'type': 'bool'},
+    'glossary_name_check': {'converter': ('bool',),
+     'default': False,
+     'default_source': 'init',
+     'dialog_default': False,
+     'env': (('GLOSSARY_NAME_CHECK', 'translation', False),),
+     'init_default': False,
+     'label': 'Glossary Name Check After Translation (Experimental)',
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': False,
+     'tooltip': '<b>Glossary Name Check After Translation (Experimental)</b><br><br>After each '
+                'chapter is saved, every glossary name found in the source chapter is looked up in '
+                'the translation. When it is missing, the translation is searched for a close '
+                'spelling the model used instead (e.g. <i>Walter Argent</i> for glossary <i>Valter '
+                'Argent</i>, <i>Gang Si-hyeon</i> for <i>Kang '
+                'Si-hyeon</i>).<br><br><b>Auto-fix</b> replaces it when exactly one close spelling '
+                'of a <i>character</i> name was found; anything less certain is only '
+                'logged.<br><b>Review first</b> only logs what it finds; fix chapters later with '
+                'QA Scanner settings → <i>Fix glossary names in existing chapters…</i><br><br>Uses '
+                'the entry types and minimum raw entry length set here for Emergency Glossary '
+                'Compliance (it works without turning that on).',
+     'type': 'bool',
+     'ui_group': 'Processing Options',
+     'ui_sites': ('other.processing',),
+     'var_names': ('glossary_name_check_var',)},
+    'glossary_name_check_mode': {'converter': ('str',),
+     'default': 'auto',
+     'default_source': 'init',
+     'dialog_default': 'auto',
+     'env': (('GLOSSARY_NAME_CHECK_MODE', 'translation', 'auto'),),
+     'init_default': 'auto',
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': 'auto',
+     'type': 'str',
+     'ui_group': 'Processing Options',
+     'ui_sites': ('other.processing',),
+     'var_names': ('glossary_name_check_mode_var',)},
     'glossary_output_legacy_json': {'converter': ('bool',),
      'default': False,
      'default_source': 'init',
@@ -9250,6 +9295,23 @@ SETTINGS = {
      'nested_default': True,
      'origins': ('nested', 'dialog', 'env'),
      'parent': 'qa_scanner_settings',
+     'type': 'bool',
+     'ui_group': 'Detection Options',
+     'ui_sites': ('qa',)},
+    'qa_scanner_settings.check_glossary_names': {'default': False,
+     'default_source': 'nested',
+     'dialog_default': False,
+     'env': (('QA_CHECK_GLOSSARY_NAMES', 'startup', False),
+             ('QA_CHECK_GLOSSARY_NAMES', 'qa', False)),
+     'label': 'Check glossary names (Experimental)',
+     'nested_default': False,
+     'origins': ('nested', 'dialog', 'env'),
+     'parent': 'qa_scanner_settings',
+     'tooltip': 'Flags chapters where a glossary name from the source chapter was translated with '
+                'a\n'
+                "different spelling (e.g. 'Walter Argent' for glossary 'Valter Argent').\n"
+                'Uses the entry types and minimum length of Emergency Glossary Compliance\n'
+                '(Other Settings). Flagged chapters count as QA failures like other issues.',
      'type': 'bool',
      'ui_group': 'Detection Options',
      'ui_sites': ('qa',)},

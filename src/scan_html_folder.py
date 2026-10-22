@@ -6669,6 +6669,53 @@ def _record_ai_truncation_issue(result_obj, ai_result):
     return issue_code
 
 
+def find_qa_glossary_file(folder_path, epub_path=None):
+    """The glossary translation used for this output folder (Emergency Glossary Compliance's lookup)."""
+    try:
+        from TransateKRtoEN import find_glossary_file
+        path = find_glossary_file(folder_path, source_path=epub_path)
+        if path:
+            return path
+    except Exception:
+        pass
+    fallback = os.path.join(folder_path, "glossary.csv")
+    return fallback if os.path.isfile(fallback) else None
+
+
+def run_glossary_name_check(folder_path, results, qa_settings, log=print, *, epub_path=None,
+                            progress_path=None, should_stop=None):
+    """Experimental: flag translated names that drifted from the glossary (glossary_name_check)."""
+    import glossary_name_check as name_check
+    glossary_path = find_qa_glossary_file(folder_path, epub_path)
+    if not glossary_path:
+        log("   ⏭️ Glossary name check: no glossary found for this folder")
+        return 0
+    scope = qa_settings.get("_glossary_name_scope") or name_check.settings_from_env()
+    entries = name_check.load_entries(glossary_path, **scope)
+    if not entries:
+        log("   ⏭️ Glossary name check: no glossary entries match the Emergency Glossary Compliance entry types")
+        return 0
+    by_file = {r.get('filename'): r for r in results if isinstance(r, dict) and r.get('filename')}
+    log(f"\n📖 Glossary name check (experimental): {len(entries.entries)} entries from {os.path.basename(glossary_path)}")
+    chapters = name_check.scan_folder(folder_path, entries, progress_path=progress_path,
+                                      selected_files=list(by_file), stop=should_stop)
+    flagged = 0
+    for chapter in chapters:
+        result_obj = by_file.get(chapter.output_file)
+        if result_obj is None:
+            continue
+        issues = result_obj.setdefault('issues', [])
+        for finding in chapter.reportable:
+            label = "glossary_name_variant" if finding.fixable else "glossary_name_mismatch"
+            issue_code = f"{label} ({finding.describe()})"
+            if issue_code not in issues:
+                issues.append(issue_code)
+        result_obj['score'] = len(issues)
+        flagged += 1
+    log(f"   ✅ Glossary name check: {flagged} file(s) with names that differ from the glossary")
+    return flagged
+
+
 def check_potential_truncation(raw_text):
     """Check if the last sentence in the chapter ends without proper punctuation.
 
@@ -10299,6 +10346,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'ai_artifact_patterns': list(DEFAULT_AI_ARTIFACT_PATTERNS),
             'ai_artifact_patterns_are_regex': False,
             'check_glossary_leakage': True,
+            'check_glossary_names': False,
             'check_missing_images': True,
             'exclude_ruby_tags': False,
             'min_file_length': 0,
@@ -10949,6 +10997,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")
     log(f"   ✓ Glossary leakage check: {'ENABLED' if qa_settings.get('check_glossary_leakage', True) else 'DISABLED'}")
+    log(f"   ✓ Glossary name check (experimental): {'ENABLED' if qa_settings.get('check_glossary_names', False) else 'DISABLED'}")
     log(f"   ✓ Source resource preservation (images/links/tables/graphics): {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', False) else 'DISABLED'}")
@@ -12191,6 +12240,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 log(f"   ⛔ AI truncation detection stopped: {_ai_checked} checked, {_ai_flagged} flagged")
             else:
                 log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
+
+    if qa_settings.get('check_glossary_names', False) and not should_stop():
+        try:
+            run_glossary_name_check(folder_path, results, qa_settings, log, epub_path=epub_path,
+                                    progress_path=progress_path, should_stop=should_stop)
+        except Exception as e:
+            log(f"   ⚠️ Glossary name check failed: {e}")
 
     _attach_chunk_results_to_scan(
         folder_path,

@@ -96,6 +96,8 @@ class FrozenDesktopTables:
             ('emergency_glossary_compliance_mode', ['emergency_glossary_compliance_mode_var'], 'characters', str),
             ('emergency_glossary_compliance_custom_types', ['emergency_glossary_compliance_custom_types_var'], [], list),
             ('emergency_glossary_compliance_min_chars', ['emergency_glossary_compliance_min_chars_var'], 3, lambda v: max(0, min(10, safe_int(v, 3)))),
+            ('glossary_name_check', ['glossary_name_check_var'], False, bool),
+            ('glossary_name_check_mode', ['glossary_name_check_mode_var'], 'auto', str),
             ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
             ('token_limit_disabled', ['token_limit_disabled'], False, bool),
             ('enable_thoughts', ['enable_thoughts_var'], True, bool),
@@ -561,6 +563,7 @@ class FrozenDesktopTables:
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
             ('emergency_image_restore_var', 'emergency_image_restore', False),
             ('emergency_glossary_compliance_var', 'emergency_glossary_compliance', False),
+            ('glossary_name_check_var', 'glossary_name_check', False),
             ('contextual_var', 'contextual', False),
             ('enable_watermark_removal_var', 'enable_watermark_removal', True),
             ('save_cleaned_images_var', 'save_cleaned_images', False),
@@ -631,6 +634,7 @@ class FrozenDesktopTables:
             ('break_split_count_var', 'break_split_count', ''),
             ('auto_glossary_mode_var', 'auto_glossary_mode', 'balanced'),
             ('emergency_glossary_compliance_mode_var', 'emergency_glossary_compliance_mode', 'characters'),
+            ('glossary_name_check_mode_var', 'glossary_name_check_mode', 'auto'),
             ('gemini_safety_threshold_var', 'gemini_safety_threshold', 'BLOCK_NONE'),
         ]
         return str_vars

@@ -321,6 +321,7 @@ app_files = [
     # Glossary extractors
     ('extract_glossary_from_epub.py', '.'),
     ('glossary_usage.py', '.'),
+    ('glossary_name_check.py', '.'),
     ('glossary_refinement.py', '.'),
     ('glossary_translation_gate.py', '.'),
     ('extract_glossary_from_txt.py', '.'),
@@ -581,6 +582,7 @@ app_modules = [
     'extract_glossary_from_epub',
     'parallel_epub_glossary',
     'glossary_usage',
+    'glossary_name_check',
     'glossary_refinement',
     'glossary_translation_gate',
     'extract_glossary_from_txt',

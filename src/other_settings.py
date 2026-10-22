@@ -9103,9 +9103,7 @@ def _create_processing_options_section(self, parent):
     def _on_glossary_compliance_toggle(checked):
         try:
             self.emergency_glossary_compliance_var = bool(checked)
-            glossary_compliance_row.setVisible(checked)
-            glossary_min_chars_row.setVisible(checked)
-            glossary_min_chars_desc.setVisible(checked)
+            _refresh_glossary_scope_rows()
             glossary_compliance_desc.setVisible(checked)
         except Exception:
             pass
@@ -9134,19 +9132,85 @@ def _create_processing_options_section(self, parent):
 
     glossary_compliance_configure_btn.clicked.connect(_open_glossary_compliance_custom_dialog)
     
+    # Glossary Name Check (experimental): after each chapter, look for glossary names the model
+    # spelled differently. Shares the entry types / minimum length rows (shown below both toggles).
+    if not hasattr(self, 'glossary_name_check_var'):
+        self.glossary_name_check_var = bool(self.config.get('glossary_name_check', False))
+    if not hasattr(self, 'glossary_name_check_mode_var'):
+        self.glossary_name_check_mode_var = str(self.config.get('glossary_name_check_mode', 'auto'))
+    name_check_cb = self._create_styled_checkbox("Glossary Name Check After Translation (Experimental)")
+    try:
+        name_check_cb.setChecked(bool(self.glossary_name_check_var))
+    except Exception:
+        pass
+    name_check_cb.setToolTip(
+        "<b>Glossary Name Check After Translation (Experimental)</b><br><br>"
+        "After each chapter is saved, every glossary name found in the source chapter is "
+        "looked up in the translation. When it is missing, the translation is searched for "
+        "a close spelling the model used instead (e.g. <i>Walter Argent</i> for glossary "
+        "<i>Valter Argent</i>, <i>Gang Si-hyeon</i> for <i>Kang Si-hyeon</i>).<br><br>"
+        "<b>Auto-fix</b> replaces it when exactly one close spelling of a <i>character</i> name "
+        "was found; anything less certain is only logged.<br>"
+        "<b>Review first</b> only logs what it finds; fix chapters later with QA Scanner "
+        "settings → <i>Fix glossary names in existing chapters…</i><br><br>"
+        "Uses the entry types and minimum raw entry length set here for Emergency Glossary "
+        "Compliance (it works without turning that on)."
+    )
+    name_check_row = QWidget()
+    name_check_row_layout = QHBoxLayout(name_check_row)
+    name_check_row_layout.setContentsMargins(20, 0, 0, 0)
+    name_check_row_layout.setSpacing(8)
+    name_check_mode_combo = QComboBox()
+    name_check_mode_combo.addItems(["Auto-fix", "Review first"])
+    name_check_mode_combo.setFixedWidth(140)
+    name_check_mode_combo.setCurrentIndex(
+        1 if str(self.glossary_name_check_mode_var).lower() == 'review' else 0)
+    self._disable_combobox_mousewheel(name_check_mode_combo)
+    name_check_row_layout.addWidget(name_check_mode_combo)
+    name_check_row_layout.addStretch()
+    name_check_desc = QLabel("Fixes or logs glossary names the model spelled differently<br>"
+                             "in each finished chapter (uses the entry types below)")
+    name_check_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    name_check_desc.setContentsMargins(20, 0, 0, 5)
+    name_check_desc.setTextFormat(Qt.RichText)
+
+    def _refresh_glossary_scope_rows():
+        # Entry types / minimum length serve both Emergency Glossary Compliance and the name check
+        scoped = glossary_compliance_cb.isChecked() or name_check_cb.isChecked()
+        glossary_compliance_row.setVisible(scoped)
+        glossary_min_chars_row.setVisible(scoped)
+        glossary_min_chars_desc.setVisible(scoped)
+
+    def _on_name_check_toggle(checked):
+        try:
+            self.glossary_name_check_var = bool(checked)
+            name_check_row.setVisible(checked)
+            name_check_desc.setVisible(checked)
+            _refresh_glossary_scope_rows()
+        except Exception:
+            pass
+    name_check_cb.toggled.connect(_on_name_check_toggle)
+
+    def _on_name_check_mode_change(index):
+        self.glossary_name_check_mode_var = 'review' if index == 1 else 'auto'
+    name_check_mode_combo.currentIndexChanged.connect(_on_name_check_mode_change)
+
     # Initial visibility
     is_enabled = glossary_compliance_cb.isChecked()
-    glossary_compliance_row.setVisible(is_enabled)
-    glossary_min_chars_row.setVisible(is_enabled)
-    glossary_min_chars_desc.setVisible(is_enabled)
+    _refresh_glossary_scope_rows()
     glossary_compliance_desc.setVisible(is_enabled)
-    
+    name_check_row.setVisible(name_check_cb.isChecked())
+    name_check_desc.setVisible(name_check_cb.isChecked())
+
     glossary_compliance_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(glossary_compliance_cb)
+    left_v.addWidget(glossary_compliance_desc)
+    left_v.addWidget(name_check_cb)
+    left_v.addWidget(name_check_row)
+    left_v.addWidget(name_check_desc)
     left_v.addWidget(glossary_compliance_row)
     left_v.addWidget(glossary_min_chars_row)
     left_v.addWidget(glossary_min_chars_desc)
-    left_v.addWidget(glossary_compliance_desc)
     
     # Enable Decimal Chapter Detection
     decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")

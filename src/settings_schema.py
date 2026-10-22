@@ -643,6 +643,7 @@ CHOICES_OVERRIDES = {
                                  ("ai-hunter", "AI Hunter - Multi-method semantic analysis"),
                                  ("cascading", "Cascading - Basic first, then AI Hunter")),
     "emergency_glossary_compliance_mode": (("characters", "Characters"), ("all", "All"), ("custom", "Custom")),
+    "glossary_name_check_mode": (("auto", "Auto-fix"), ("review", "Review first")),  # name_check_mode_combo
     "image_compression_format": (("auto", "Auto (Best quality/size ratio)"), ("webp", "WebP (Best compression)"),
                                  ("jpeg", "JPEG (Wide compatibility)"), ("png", "PNG (Lossless)")),
     "compress_glossary_strict_matching_mode": (("all", "All"), ("gender", "Gender Entries"),   # "Whole term for"
@@ -898,6 +899,7 @@ LABEL_OVERRIDES = {
     "api_key": "API key",
     "active_profile": "Prompt profile",
     "auto_glossary_mode": "Glossary mode",
+    "glossary_name_check_mode": "Glossary name check mode",
     "output_language": "Target language",
     "contextual": "Contextual translation",
     "token_limit": "Input token limit",

@@ -298,6 +298,145 @@ class QAScannerMixin:
                 pass
             QMessageBox.warning(self, "QA Report", f"Failed to open QA report:\n{e}")
 
+    def _glossary_name_fix_start_folder(self):
+        """Output folder of the current source file, when one exists, for the folder picker."""
+        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        sources = list(getattr(self, 'selected_files', None) or [])
+        if self.config.get('last_epub_path'):
+            sources.append(self.config.get('last_epub_path'))
+        try:
+            from qa_scan_runtime import automatic_qa_output_candidates
+            for source in sources:
+                for candidate in automatic_qa_output_candidates(
+                        source, current_dir=os.getcwd(),
+                        script_dir=os.path.dirname(os.path.abspath(__file__)),
+                        output_root=override_dir):
+                    if os.path.isfile(os.path.join(candidate, 'translation_progress.json')):
+                        return candidate
+        except Exception:
+            pass
+        return override_dir or os.getcwd()
+
+    def _glossary_name_check_scope(self):
+        """Emergency Glossary Compliance's entry types / minimum length, live values first."""
+        import glossary_name_check as name_check
+        config = dict(self.config or {})
+        for key in ('emergency_glossary_compliance_mode', 'emergency_glossary_compliance_custom_types',
+                    'emergency_glossary_compliance_min_chars'):
+            if hasattr(self, key + '_var'):
+                config[key] = getattr(self, key + '_var')
+        return name_check.settings_from_config(config)
+
+    def open_glossary_name_fix_dialog(self, parent=None):
+        """Review names that differ from the glossary in an output folder and fix the checked ones."""
+        import glossary_name_check as name_check
+        from scan_html_folder import find_qa_glossary_file
+        parent = parent or self
+        title = "Fix Glossary Names"
+        folder = _normalize_qa_dialog_path(QFileDialog.getExistingDirectory(
+            parent, "Select Output Folder to Check Glossary Names", self._glossary_name_fix_start_folder()))
+        if not folder:
+            return
+        glossary_path = find_qa_glossary_file(folder)
+        if not glossary_path:
+            QMessageBox.information(parent, title, "No glossary was found for this output folder.")
+            return
+        entries = name_check.load_entries(glossary_path, **self._glossary_name_check_scope())
+        if not entries:
+            QMessageBox.information(
+                parent, title,
+                "No glossary entries match the Emergency Glossary Compliance entry types and minimum length.")
+            return
+        if not name_check.source_chapters_for_folder(folder):
+            QMessageBox.information(
+                parent, title,
+                "This folder has no translation_progress.json / chapters_full.json, so translated "
+                "chapters cannot be matched to their source chapters.")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            chapters = name_check.scan_folder(folder, entries)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not chapters:
+            QMessageBox.information(parent, title, "Every glossary name in this folder matches the glossary.")
+            return
+
+        from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QHeaderView
+        review = QDialog(parent)
+        review.setWindowTitle(title)
+        review.resize(900, 560)
+        layout = QVBoxLayout(review)
+        total = sum(len(c.reportable) for c in chapters)
+        intro = QLabel(
+            f"{total} name(s) in {len(chapters)} chapter(s) differ from <b>{_html.escape(os.path.basename(glossary_path))}</b>.<br>"
+            "Checked rows are replaced with the glossary name. Rows are pre-checked when one close "
+            "spelling of a character name was found; review the others before checking them.<br>"
+            "Each changed file is backed up to <i>glossary_name_check_backup</i> first.")
+        intro.setTextFormat(Qt.RichText)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        tree = QTreeWidget()
+        tree.setColumnCount(5)
+        tree.setHeaderLabels(["Fix", "Chapter", "Found in output", "Glossary name", "Times"])
+        tree.setRootIsDecorated(False)
+        tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
+        rows = []
+        for chapter in chapters:
+            for finding in chapter.reportable:
+                item = QTreeWidgetItem(["", chapter.output_file, " / ".join(finding.variants),
+                                        finding.expected, str(finding.occurrences)])
+                item.setCheckState(0, Qt.Checked if finding.fixable else Qt.Unchecked)
+                item.setToolTip(2, f"Source: {finding.raw} ({finding.entry_type})")
+                tree.addTopLevelItem(item)
+                rows.append((item, chapter.output_file, finding))
+        layout.addWidget(tree)
+
+        buttons = QHBoxLayout()
+        check_all = QPushButton("Check all")
+        uncheck_all = QPushButton("Uncheck all")
+        apply_btn = QPushButton("Apply checked")
+        apply_btn.setStyleSheet("background-color: #28a745; color: white; padding: 4px 12px;")
+        cancel_btn = QPushButton("Cancel")
+        for button in (check_all, uncheck_all):
+            buttons.addWidget(button)
+        buttons.addStretch()
+        buttons.addWidget(apply_btn)
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
+        check_all.clicked.connect(lambda: [r[0].setCheckState(0, Qt.Checked) for r in rows])
+        uncheck_all.clicked.connect(lambda: [r[0].setCheckState(0, Qt.Unchecked) for r in rows])
+        cancel_btn.clicked.connect(review.reject)
+
+        def _apply():
+            plan = {}
+            for item, output_file, finding in rows:
+                if item.checkState(0) == Qt.Checked:
+                    plan.setdefault(output_file, []).append(finding)
+            if not plan:
+                QMessageBox.information(review, title, "No rows are checked.")
+                return
+            confirm = QMessageBox.question(
+                review, title,
+                f"Replace the checked names in {len(plan)} chapter file(s)?\n"
+                "The original files are backed up to glossary_name_check_backup.",
+                QMessageBox.Yes | QMessageBox.No)
+            if confirm != QMessageBox.Yes:
+                return
+            changed = name_check.fix_files(folder, plan)
+            replaced = sum(changed.values())
+            if hasattr(self, 'append_log'):
+                self.append_log(f"📖 Glossary name fix: {replaced} replacement(s) in {len(changed)} file(s) "
+                                f"in {folder}")
+            QMessageBox.information(
+                review, title,
+                f"Replaced {replaced} name(s) in {len(changed)} file(s).\n"
+                "Run a QA scan again to clear these chapters' QA issues.")
+            review.accept()
+
+        apply_btn.clicked.connect(_apply)
+        review.exec()
+
     def prewarm_qa_scanner_gui(self):
         """Prebuild the QA scanner settings dialog without starting a scan."""
         try:
@@ -329,6 +468,7 @@ class QAScannerMixin:
                     'skip_stylistic_single_quotes': False,
                     'include_square_brackets_as_quotations': False,
                     'check_glossary_leakage': True,
+                    'check_glossary_names': False,
                     'min_file_length': 0,
                     'report_format': 'detailed',
                     'auto_save_report': True,
@@ -3395,6 +3535,33 @@ class QAScannerMixin:
             check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
             detection_layout.addWidget(check_glossary_checkbox)
 
+            check_glossary_names_checkbox = self._create_styled_checkbox(
+                "Check glossary names (Experimental)")
+            check_glossary_names_checkbox.setChecked(qa_settings.get('check_glossary_names', False))
+            check_glossary_names_checkbox.setToolTip(
+                "Flags chapters where a glossary name from the source chapter was translated with a\n"
+                "different spelling (e.g. 'Walter Argent' for glossary 'Valter Argent').\n"
+                "Uses the entry types and minimum length of Emergency Glossary Compliance\n"
+                "(Other Settings). Flagged chapters count as QA failures like other issues.")
+            detection_layout.addWidget(check_glossary_names_checkbox)
+
+            glossary_names_fix_row = QWidget()
+            glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)
+            glossary_names_fix_layout.setContentsMargins(20, 0, 0, 5)
+            glossary_names_fix_btn = QPushButton("Fix glossary names in existing chapters…")
+            glossary_names_fix_btn.setStyleSheet(
+                "background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;")
+            glossary_names_fix_btn.setToolTip(
+                "Scan an output folder, review every name that differs from the glossary,\n"
+                "and replace the ones you keep checked. Changed files are backed up first.")
+            glossary_names_fix_btn.clicked.connect(
+                lambda: self.open_glossary_name_fix_dialog(dialog))
+            glossary_names_fix_layout.addWidget(glossary_names_fix_btn)
+            glossary_names_fix_layout.addStretch()
+            detection_layout.addWidget(glossary_names_fix_row)
+            glossary_names_fix_row.setVisible(check_glossary_names_checkbox.isChecked())
+            check_glossary_names_checkbox.toggled.connect(glossary_names_fix_row.setVisible)
+
             check_potential_truncation_checkbox = self._create_styled_checkbox("Check for potential truncation (last sentence missing ending punctuation)")
             check_potential_truncation_checkbox.setChecked(qa_settings.get('check_potential_truncation', False))
             detection_layout.addWidget(check_potential_truncation_checkbox)
@@ -5193,6 +5360,7 @@ class QAScannerMixin:
                         'skip_stylistic_single_quotes': (skip_stylistic_single_quotes_checkbox, lambda x: x.isChecked()),
                         'include_square_brackets_as_quotations': (include_square_brackets_checkbox, lambda x: x.isChecked()),
                         'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
+                        'check_glossary_names': (check_glossary_names_checkbox, lambda x: x.isChecked()),
                         'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: x.isChecked()),
                         'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
                         'min_file_length': (min_length_spinbox, lambda x: x.value()),
@@ -5433,6 +5601,7 @@ class QAScannerMixin:
                             ('QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX', '1' if qa_settings.get('ai_thinking_preamble_patterns_are_regex', False) else '0'),
                             ('QA_AI_THINKING_PREAMBLE_SAMPLE_SIZE', str(qa_settings.get('ai_thinking_preamble_sample_size', 500))),
                             ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
+                            ('QA_CHECK_GLOSSARY_NAMES', '1' if qa_settings.get('check_glossary_names', False) else '0'),
                             ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                             ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
                             ('QA_MIN_DUPLICATE_WORD_COUNT', str(qa_settings.get('min_duplicate_word_count', 500))),
@@ -5594,6 +5763,7 @@ class QAScannerMixin:
                     ('skip_stylistic_single_quotes', skip_stylistic_single_quotes_checkbox, False),
                     ('include_square_brackets_as_quotations', include_square_brackets_checkbox, False),
                     ('check_glossary_leakage', check_glossary_checkbox, True),
+                    ('check_glossary_names', check_glossary_names_checkbox, False),
                     ('check_potential_truncation', check_potential_truncation_checkbox, False),
                     ('check_missing_images', check_missing_images_checkbox, True),
                     ('min_file_length', min_length_spinbox, 0),

@@ -601,6 +601,351 @@ _STATE_QUEUE_CLOSE = (
     '                    self._mp_result_q.close()\n')
 
 
+# 2026-10-22 "Glossary Name Check After Translation (Experimental)" (glossary_name_check /
+# GLOSSARY_NAME_CHECK, off; glossary_name_check_mode / GLOSSARY_NAME_CHECK_MODE, 'auto') and the QA
+# scanner's "Check glossary names (Experimental)" (check_glossary_names / QA_CHECK_GLOSSARY_NAMES, off)
+_NAME_CHECK_SETTINGS_ROWS = (
+    "('glossary_name_check', ['glossary_name_check_var'], False, bool),",
+    "('glossary_name_check_mode', ['glossary_name_check_mode_var'], 'auto', str),",
+)
+_NAME_CHECK_MIN_CHARS_ROW = ("('emergency_glossary_compliance_min_chars', ['emergency_glossary_compliance_min_chars_var'], "
+                             "3, lambda v: max(0, min(10, safe_int(v, 3)))),")
+_NAME_CHECK_SETTINGS_ROW = _after(
+    "            " + _NAME_CHECK_MIN_CHARS_ROW, *("            " + row for row in _NAME_CHECK_SETTINGS_ROWS))
+_NAME_CHECK_SETTINGS_ROW_GUI = _after(
+    "                " + _NAME_CHECK_MIN_CHARS_ROW, *("                " + row for row in _NAME_CHECK_SETTINGS_ROWS))
+_NAME_CHECK_BOOL_ROW = _after(
+    "            ('emergency_glossary_compliance_var', 'emergency_glossary_compliance', False),",
+    "            ('glossary_name_check_var', 'glossary_name_check', False),")
+_NAME_CHECK_STR_ROW = _after(
+    "            ('emergency_glossary_compliance_mode_var', 'emergency_glossary_compliance_mode', 'characters'),",
+    "            ('glossary_name_check_mode_var', 'glossary_name_check_mode', 'auto'),")
+_NAME_CHECK_ENV_DICT = _after(
+    "            'EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS': str(getattr(self, "
+    "'emergency_glossary_compliance_min_chars_var', 3)),",
+    "            'GLOSSARY_NAME_CHECK': \"1\" if (getattr(self, 'glossary_name_check_var', False) and "
+    "auto_glossary_mode != 'no_glossary') else \"0\",",
+    "            'GLOSSARY_NAME_CHECK_MODE': str(getattr(self, 'glossary_name_check_mode_var', 'auto')),")
+_NAME_CHECK_QA_LABEL = _after(
+    "            'QA_CHECK_GLOSSARY_LEAKAGE': 'Check for glossary leakage',",
+    "            'QA_CHECK_GLOSSARY_NAMES': 'Check glossary names (experimental)',")
+_NAME_CHECK_QA_ENV_PAIR = _after(
+    "                ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),",
+    "                ('QA_CHECK_GLOSSARY_NAMES', '1' if qa_settings.get('check_glossary_names', False) else '0'),")
+# the QA scanner pieces, as edited (dialog toggle + fix dialog, runtime default/env/scope, scanner step)
+_NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
+  '\n'
+  '    def _glossary_name_fix_start_folder(self):\n'
+  '        """Output folder of the current source file, when one exists, for the folder picker."""\n'
+  "        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')\n"
+  "        sources = list(getattr(self, 'selected_files', None) or [])\n"
+  "        if self.config.get('last_epub_path'):\n"
+  "            sources.append(self.config.get('last_epub_path'))\n"
+  '        try:\n'
+  '            from qa_scan_runtime import automatic_qa_output_candidates\n'
+  '            for source in sources:\n'
+  '                for candidate in automatic_qa_output_candidates(\n'
+  '                        source, current_dir=os.getcwd(),\n'
+  '                        script_dir=os.path.dirname(os.path.abspath(__file__)),\n'
+  '                        output_root=override_dir):\n'
+  "                    if os.path.isfile(os.path.join(candidate, 'translation_progress.json')):\n"
+  '                        return candidate\n'
+  '        except Exception:\n'
+  '            pass\n'
+  '        return override_dir or os.getcwd()\n'
+  '\n'
+  '    def _glossary_name_check_scope(self):\n'
+  '        """Emergency Glossary Compliance\'s entry types / minimum length, live values first."""\n'
+  '        import glossary_name_check as name_check\n'
+  '        config = dict(self.config or {})\n'
+  "        for key in ('emergency_glossary_compliance_mode', 'emergency_glossary_compliance_custom_types',\n"
+  "                    'emergency_glossary_compliance_min_chars'):\n"
+  "            if hasattr(self, key + '_var'):\n"
+  "                config[key] = getattr(self, key + '_var')\n"
+  '        return name_check.settings_from_config(config)\n'
+  '\n'
+  '    def open_glossary_name_fix_dialog(self, parent=None):\n'
+  '        """Review names that differ from the glossary in an output folder and fix the checked ones."""\n'
+  '        import glossary_name_check as name_check\n'
+  '        from scan_html_folder import find_qa_glossary_file\n'
+  '        parent = parent or self\n'
+  '        title = "Fix Glossary Names"\n'
+  '        folder = _normalize_qa_dialog_path(QFileDialog.getExistingDirectory(\n'
+  '            parent, "Select Output Folder to Check Glossary Names", '
+  'self._glossary_name_fix_start_folder()))\n'
+  '        if not folder:\n'
+  '            return\n'
+  '        glossary_path = find_qa_glossary_file(folder)\n'
+  '        if not glossary_path:\n'
+  '            QMessageBox.information(parent, title, "No glossary was found for this output folder.")\n'
+  '            return\n'
+  '        entries = name_check.load_entries(glossary_path, **self._glossary_name_check_scope())\n'
+  '        if not entries:\n'
+  '            QMessageBox.information(\n'
+  '                parent, title,\n'
+  '                "No glossary entries match the Emergency Glossary Compliance entry types and minimum '
+  'length.")\n'
+  '            return\n'
+  '        if not name_check.source_chapters_for_folder(folder):\n'
+  '            QMessageBox.information(\n'
+  '                parent, title,\n'
+  '                "This folder has no translation_progress.json / chapters_full.json, so translated "\n'
+  '                "chapters cannot be matched to their source chapters.")\n'
+  '            return\n'
+  '        QApplication.setOverrideCursor(Qt.WaitCursor)\n'
+  '        try:\n'
+  '            chapters = name_check.scan_folder(folder, entries)\n'
+  '        finally:\n'
+  '            QApplication.restoreOverrideCursor()\n'
+  '        if not chapters:\n'
+  '            QMessageBox.information(parent, title, "Every glossary name in this folder matches the '
+  'glossary.")\n'
+  '            return\n'
+  '\n'
+  '        from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QHeaderView\n'
+  '        review = QDialog(parent)\n'
+  '        review.setWindowTitle(title)\n'
+  '        review.resize(900, 560)\n'
+  '        layout = QVBoxLayout(review)\n'
+  '        total = sum(len(c.reportable) for c in chapters)\n'
+  '        intro = QLabel(\n'
+  '            f"{total} name(s) in {len(chapters)} chapter(s) differ from '
+  '<b>{_html.escape(os.path.basename(glossary_path))}</b>.<br>"\n'
+  '            "Checked rows are replaced with the glossary name. Rows are pre-checked when one close "\n'
+  '            "spelling of a character name was found; review the others before checking them.<br>"\n'
+  '            "Each changed file is backed up to <i>glossary_name_check_backup</i> first.")\n'
+  '        intro.setTextFormat(Qt.RichText)\n'
+  '        intro.setWordWrap(True)\n'
+  '        layout.addWidget(intro)\n'
+  '        tree = QTreeWidget()\n'
+  '        tree.setColumnCount(5)\n'
+  '        tree.setHeaderLabels(["Fix", "Chapter", "Found in output", "Glossary name", "Times"])\n'
+  '        tree.setRootIsDecorated(False)\n'
+  '        tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)\n'
+  '        rows = []\n'
+  '        for chapter in chapters:\n'
+  '            for finding in chapter.reportable:\n'
+  '                item = QTreeWidgetItem(["", chapter.output_file, " / ".join(finding.variants),\n'
+  '                                        finding.expected, str(finding.occurrences)])\n'
+  '                item.setCheckState(0, Qt.Checked if finding.fixable else Qt.Unchecked)\n'
+  '                item.setToolTip(2, f"Source: {finding.raw} ({finding.entry_type})")\n'
+  '                tree.addTopLevelItem(item)\n'
+  '                rows.append((item, chapter.output_file, finding))\n'
+  '        layout.addWidget(tree)\n'
+  '\n'
+  '        buttons = QHBoxLayout()\n'
+  '        check_all = QPushButton("Check all")\n'
+  '        uncheck_all = QPushButton("Uncheck all")\n'
+  '        apply_btn = QPushButton("Apply checked")\n'
+  '        apply_btn.setStyleSheet("background-color: #28a745; color: white; padding: 4px 12px;")\n'
+  '        cancel_btn = QPushButton("Cancel")\n'
+  '        for button in (check_all, uncheck_all):\n'
+  '            buttons.addWidget(button)\n'
+  '        buttons.addStretch()\n'
+  '        buttons.addWidget(apply_btn)\n'
+  '        buttons.addWidget(cancel_btn)\n'
+  '        layout.addLayout(buttons)\n'
+  '        check_all.clicked.connect(lambda: [r[0].setCheckState(0, Qt.Checked) for r in rows])\n'
+  '        uncheck_all.clicked.connect(lambda: [r[0].setCheckState(0, Qt.Unchecked) for r in rows])\n'
+  '        cancel_btn.clicked.connect(review.reject)\n'
+  '\n'
+  '        def _apply():\n'
+  '            plan = {}\n'
+  '            for item, output_file, finding in rows:\n'
+  '                if item.checkState(0) == Qt.Checked:\n'
+  '                    plan.setdefault(output_file, []).append(finding)\n'
+  '            if not plan:\n'
+  '                QMessageBox.information(review, title, "No rows are checked.")\n'
+  '                return\n'
+  '            confirm = QMessageBox.question(\n'
+  '                review, title,\n'
+  '                f"Replace the checked names in {len(plan)} chapter file(s)?\\n"\n'
+  '                "The original files are backed up to glossary_name_check_backup.",\n'
+  '                QMessageBox.Yes | QMessageBox.No)\n'
+  '            if confirm != QMessageBox.Yes:\n'
+  '                return\n'
+  '            changed = name_check.fix_files(folder, plan)\n'
+  '            replaced = sum(changed.values())\n'
+  "            if hasattr(self, 'append_log'):\n"
+  '                self.append_log(f"📖 Glossary name fix: {replaced} replacement(s) in {len(changed)} '
+  'file(s) "\n'
+  '                                f"in {folder}")\n'
+  '            QMessageBox.information(\n'
+  '                review, title,\n'
+  '                f"Replaced {replaced} name(s) in {len(changed)} file(s).\\n"\n'
+  '                "Run a QA scan again to clear these chapters\' QA issues.")\n'
+  '            review.accept()\n'
+  '\n'
+  '        apply_btn.clicked.connect(_apply)\n'
+  '        review.exec()\n'
+  '\n'
+  '    def prewarm_qa_scanner_gui(self):\n'),
+ ("                    'check_glossary_leakage': True,\n                    'min_file_length': 0,\n",
+  "                    'check_glossary_leakage': True,\n"
+  "                    'check_glossary_names': False,\n"
+  "                    'min_file_length': 0,\n"),
+ ('\n'
+  '            check_potential_truncation_checkbox = self._create_styled_checkbox("Check for potential '
+  'truncation (last sentence missing ending punctuation)")\n',
+  '\n'
+  '            check_glossary_names_checkbox = self._create_styled_checkbox(\n'
+  '                "Check glossary names (Experimental)")\n'
+  "            check_glossary_names_checkbox.setChecked(qa_settings.get('check_glossary_names', False))\n"
+  '            check_glossary_names_checkbox.setToolTip(\n'
+  '                "Flags chapters where a glossary name from the source chapter was translated with a\\n"\n'
+  '                "different spelling (e.g. \'Walter Argent\' for glossary \'Valter Argent\').\\n"\n'
+  '                "Uses the entry types and minimum length of Emergency Glossary Compliance\\n"\n'
+  '                "(Other Settings). Flagged chapters count as QA failures like other issues.")\n'
+  '            detection_layout.addWidget(check_glossary_names_checkbox)\n'
+  '\n'
+  '            glossary_names_fix_row = QWidget()\n'
+  '            glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)\n'
+  '            glossary_names_fix_layout.setContentsMargins(20, 0, 0, 5)\n'
+  '            glossary_names_fix_btn = QPushButton("Fix glossary names in existing chapters…")\n'
+  '            glossary_names_fix_btn.setStyleSheet(\n'
+  '                "background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;")\n'
+  '            glossary_names_fix_btn.setToolTip(\n'
+  '                "Scan an output folder, review every name that differs from the glossary,\\n"\n'
+  '                "and replace the ones you keep checked. Changed files are backed up first.")\n'
+  '            glossary_names_fix_btn.clicked.connect(\n'
+  '                lambda: self.open_glossary_name_fix_dialog(dialog))\n'
+  '            glossary_names_fix_layout.addWidget(glossary_names_fix_btn)\n'
+  '            glossary_names_fix_layout.addStretch()\n'
+  '            detection_layout.addWidget(glossary_names_fix_row)\n'
+  '            glossary_names_fix_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
+  '            check_glossary_names_checkbox.toggled.connect(glossary_names_fix_row.setVisible)\n'
+  '\n'
+  '            check_potential_truncation_checkbox = self._create_styled_checkbox("Check for potential '
+  'truncation (last sentence missing ending punctuation)")\n'),
+ ("                        'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),\n"
+  "                        'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: "
+  'x.isChecked()),\n',
+  "                        'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),\n"
+  "                        'check_glossary_names': (check_glossary_names_checkbox, lambda x: "
+  'x.isChecked()),\n'
+  "                        'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: "
+  'x.isChecked()),\n'),
+ ("                            ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if "
+  "qa_settings.get('check_glossary_leakage', True) else '0'),\n"
+  "                            ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', "
+  "True) else '0'),\n",
+  "                            ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if "
+  "qa_settings.get('check_glossary_leakage', True) else '0'),\n"
+  "                            ('QA_CHECK_GLOSSARY_NAMES', '1' if qa_settings.get('check_glossary_names', "
+  "False) else '0'),\n"
+  "                            ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', "
+  "True) else '0'),\n"),
+ ("                    ('check_glossary_leakage', check_glossary_checkbox, True),\n"
+  "                    ('check_potential_truncation', check_potential_truncation_checkbox, False),\n",
+  "                    ('check_glossary_leakage', check_glossary_checkbox, True),\n"
+  "                    ('check_glossary_names', check_glossary_names_checkbox, False),\n"
+  "                    ('check_potential_truncation', check_potential_truncation_checkbox, False),\n")]
+_NAME_CHECK_QA_RUNTIME = [('        "check_glossary_leakage": True,\n        "check_potential_truncation": False,\n',
+  '        "check_glossary_leakage": True,\n'
+  '        "check_glossary_names": False,\n'
+  '        "check_potential_truncation": False,\n'),
+ ('        "QA_CHECK_GLOSSARY_LEAKAGE": "1" if settings.get("check_glossary_leakage", True) else "0",\n'
+  '        "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",\n',
+  '        "QA_CHECK_GLOSSARY_LEAKAGE": "1" if settings.get("check_glossary_leakage", True) else "0",\n'
+  '        "QA_CHECK_GLOSSARY_NAMES": "1" if settings.get("check_glossary_names", False) else "0",\n'
+  '        "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",\n'),
+ ('        )\n'
+  '    )\n'
+  '\n'
+  '    output_language = live_config.get("output_language") or live_config.get("output_language_var")\n',
+  '        )\n'
+  '    )\n'
+  '\n'
+  '    if settings.get("check_glossary_names"):\n'
+  "        # Glossary name check shares Emergency Glossary Compliance's entry types / minimum length\n"
+  '        try:\n'
+  '            from glossary_name_check import settings_from_config\n'
+  '            settings["_glossary_name_scope"] = settings_from_config(live_config)\n'
+  '        except Exception:\n'
+  '            pass\n'
+  '\n'
+  '    output_language = live_config.get("output_language") or live_config.get("output_language_var")\n')]
+_NAME_CHECK_SCANNER = [('\ndef check_potential_truncation(raw_text):\n',
+  '\n'
+  'def find_qa_glossary_file(folder_path, epub_path=None):\n'
+  '    """The glossary translation used for this output folder (Emergency Glossary Compliance\'s '
+  'lookup)."""\n'
+  '    try:\n'
+  '        from TransateKRtoEN import find_glossary_file\n'
+  '        path = find_glossary_file(folder_path, source_path=epub_path)\n'
+  '        if path:\n'
+  '            return path\n'
+  '    except Exception:\n'
+  '        pass\n'
+  '    fallback = os.path.join(folder_path, "glossary.csv")\n'
+  '    return fallback if os.path.isfile(fallback) else None\n'
+  '\n'
+  '\n'
+  'def run_glossary_name_check(folder_path, results, qa_settings, log=print, *, epub_path=None,\n'
+  '                            progress_path=None, should_stop=None):\n'
+  '    """Experimental: flag translated names that drifted from the glossary (glossary_name_check)."""\n'
+  '    import glossary_name_check as name_check\n'
+  '    glossary_path = find_qa_glossary_file(folder_path, epub_path)\n'
+  '    if not glossary_path:\n'
+  '        log("   ⏭️ Glossary name check: no glossary found for this folder")\n'
+  '        return 0\n'
+  '    scope = qa_settings.get("_glossary_name_scope") or name_check.settings_from_env()\n'
+  '    entries = name_check.load_entries(glossary_path, **scope)\n'
+  '    if not entries:\n'
+  '        log("   ⏭️ Glossary name check: no glossary entries match the Emergency Glossary Compliance entry '
+  'types")\n'
+  '        return 0\n'
+  "    by_file = {r.get('filename'): r for r in results if isinstance(r, dict) and r.get('filename')}\n"
+  '    log(f"\\n📖 Glossary name check (experimental): {len(entries.entries)} entries from '
+  '{os.path.basename(glossary_path)}")\n'
+  '    chapters = name_check.scan_folder(folder_path, entries, progress_path=progress_path,\n'
+  '                                      selected_files=list(by_file), stop=should_stop)\n'
+  '    flagged = 0\n'
+  '    for chapter in chapters:\n'
+  '        result_obj = by_file.get(chapter.output_file)\n'
+  '        if result_obj is None:\n'
+  '            continue\n'
+  "        issues = result_obj.setdefault('issues', [])\n"
+  '        for finding in chapter.reportable:\n'
+  '            label = "glossary_name_variant" if finding.fixable else "glossary_name_mismatch"\n'
+  '            issue_code = f"{label} ({finding.describe()})"\n'
+  '            if issue_code not in issues:\n'
+  '                issues.append(issue_code)\n'
+  "        result_obj['score'] = len(issues)\n"
+  '        flagged += 1\n'
+  '    log(f"   ✅ Glossary name check: {flagged} file(s) with names that differ from the glossary")\n'
+  '    return flagged\n'
+  '\n'
+  '\n'
+  'def check_potential_truncation(raw_text):\n'),
+ ("            'check_glossary_leakage': True,\n            'check_missing_images': True,\n",
+  "            'check_glossary_leakage': True,\n"
+  "            'check_glossary_names': False,\n"
+  "            'check_missing_images': True,\n"),
+ ('    log(f"   ✓ Glossary leakage check: {\'ENABLED\' if qa_settings.get(\'check_glossary_leakage\', True) '
+  'else \'DISABLED\'}")\n'
+  '    log(f"   ✓ Source resource preservation (images/links/tables/graphics): {\'ENABLED\' if '
+  'qa_settings.get(\'check_missing_images\', True) else \'DISABLED\'}")\n',
+  '    log(f"   ✓ Glossary leakage check: {\'ENABLED\' if qa_settings.get(\'check_glossary_leakage\', True) '
+  'else \'DISABLED\'}")\n'
+  '    log(f"   ✓ Glossary name check (experimental): {\'ENABLED\' if '
+  'qa_settings.get(\'check_glossary_names\', False) else \'DISABLED\'}")\n'
+  '    log(f"   ✓ Source resource preservation (images/links/tables/graphics): {\'ENABLED\' if '
+  'qa_settings.get(\'check_missing_images\', True) else \'DISABLED\'}")\n'),
+ ('\n    _attach_chunk_results_to_scan(\n',
+  '\n'
+  "    if qa_settings.get('check_glossary_names', False) and not should_stop():\n"
+  '        try:\n'
+  '            run_glossary_name_check(folder_path, results, qa_settings, log, epub_path=epub_path,\n'
+  '                                    progress_path=progress_path, should_stop=should_stop)\n'
+  '        except Exception as e:\n'
+  '            log(f"   ⚠️ Glossary name check failed: {e}")\n'
+  '\n'
+  '    _attach_chunk_results_to_scan(\n')]
+_NAME_CHECK_WORKER_QA = _after(
+    "            \"check_glossary_leakage\": _env_bool(\"QA_CHECK_GLOSSARY_LEAKAGE\", True),",
+    "            \"check_glossary_names\": _env_bool(\"QA_CHECK_GLOSSARY_NAMES\", False),")
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -853,6 +1198,25 @@ APPROVED = (
         "source": {
             "src/manga_integration.py": [_STATE_QUEUE_CLOSE],
         },
+        "values": {},
+    },
+    {
+        "date": "2026-10-22",
+        "what": "New experimental glossary name checks, both off by default: 'Glossary Name Check After "
+                "Translation' (Other Settings; Auto-fix or Review first) and the QA scanner's 'Check glossary "
+                "names'; they flag translated names spelled differently from the glossary",
+        "source": {
+            "src/settings_persistence.py": [_NAME_CHECK_SETTINGS_ROW],
+            "src/owner_state.py": [_NAME_CHECK_BOOL_ROW, _NAME_CHECK_STR_ROW],
+            "src/translator_gui.py": [_NAME_CHECK_SETTINGS_ROW_GUI, _NAME_CHECK_BOOL_ROW, _NAME_CHECK_STR_ROW,
+                                      _NAME_CHECK_ENV_DICT, _NAME_CHECK_QA_LABEL, _NAME_CHECK_QA_ENV_PAIR],
+            "src/run_env.py": [_NAME_CHECK_ENV_DICT, _NAME_CHECK_QA_LABEL, _NAME_CHECK_QA_ENV_PAIR],
+            "src/qa_scan_runtime.py": _NAME_CHECK_QA_RUNTIME,
+            "src/QA_Scanner_GUI.py": _NAME_CHECK_QA_GUI,
+            "src/scan_html_folder.py": _NAME_CHECK_SCANNER,
+            "src/TransateKRtoEN.py": [_NAME_CHECK_WORKER_QA],
+        },
+        # new keys: nothing recorded before they existed changes value
         "values": {},
     },
 )

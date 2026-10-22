@@ -1629,6 +1629,7 @@ def _load_qa_scanner_settings_from_env():
                 "QA_AI_THINKING_PREAMBLE_SAMPLE_SIZE", 500
             ),
             "check_glossary_leakage": _env_bool("QA_CHECK_GLOSSARY_LEAKAGE", True),
+            "check_glossary_names": _env_bool("QA_CHECK_GLOSSARY_NAMES", False),
             "check_missing_images": _env_bool("QA_CHECK_MISSING_IMAGES", True),
             "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),
             "report_format": os.getenv("QA_REPORT_FORMAT", "detailed"),
@@ -5595,7 +5596,12 @@ class ProgressManager:
             chunk_entry = self.prog.get("chapter_chunks", {}).get(chunk_key)
             if chunk_entry_needs_translation(chunk_entry):
                 status = "pending"
-        
+
+        # Every pipeline reports a finished chapter here, after its file is written.
+        if (status == "completed" and output_file and isinstance(chapter_obj, dict)
+                and (existing_info or {}).get("status") != "completed"):
+            _run_glossary_name_check(self.payloads_dir, output_file, chapter_obj)
+
         # Log if we're using a composite key
         if "_" in chapter_key and chapter_key != str(actual_num):
             pass  # composite key — no need to log per-chapter
@@ -14685,6 +14691,37 @@ def apply_emergency_glossary_compliance(
         _cache=_cache,
     )
     return _apply_prepared_emergency_glossary_compliance(content, prepared)
+
+
+def _run_glossary_name_check(output_dir, output_file, chapter):
+    """Glossary Name Check After Translation (experimental, GLOSSARY_NAME_CHECK).
+
+    Auto-fix mode rewrites the saved chapter when exactly one close spelling of a
+    character name replaced the glossary name; Review first mode only logs.
+    """
+    try:
+        import glossary_name_check as name_check
+        if not name_check.enabled_from_env():
+            return
+        source_html = chapter.get("body") or ""
+        output_path = os.path.join(output_dir, os.path.basename(output_file))
+        if not source_html or not os.path.isfile(output_path):
+            return
+        glossary_path = find_glossary_file(output_dir)
+        entries = name_check.load_entries(glossary_path, **name_check.settings_from_env())
+        if not entries:
+            return
+        auto_fix = name_check.auto_fix_from_env()
+        result, replaced = name_check.check_and_fix_file(
+            output_path, name_check.html_to_text(source_html), entries, auto_fix=auto_fix)
+        name = os.path.basename(output_path)
+        for finding in result.reportable:
+            if auto_fix and finding.fixable and replaced:
+                print(f"📖 Glossary name check: {name}: {finding.describe()} (fixed)")
+            else:
+                print(f"📖 Glossary name check: {name}: {finding.describe()}")
+    except Exception as e:
+        print(f"⚠️ Glossary name check failed for {output_file}: {e}")
 
 
 def clean_memory_artifacts(text):
