@@ -1192,6 +1192,43 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
 
 @needs_flet
 @pytest.mark.skipif(not _importable("settings_schema"), reason="settings_schema is not importable yet (U2 schema agent)")
+def test_search_typing_keeps_result_keys_unique(tmp_path):
+    """Typing into Settings search one character at a time (2026-10-23 emulator crash): hits come in
+    relevance order, and a section met twice used to get a second header with the same key, which made
+    Flet's keyed list diff raise IndexError ("list index out of range") on the next page update."""
+    from glossarion_mobile.ui.settings.integration import IMPLEMENTED_ROUTES
+    from glossarion_mobile.ui.settings.settings_home import SettingsHome
+
+    async def scenario():
+        conn, session = _fake_session("android")
+        page = session.page
+        schema = SchemaAccess()
+        store = _memory_store(tmp_path, {}, schema)
+        ctx = _ctx(store, schema, page, navigated=[], notes=[])
+        home = SettingsHome(_match("/settings"), ctx, implemented_routes=IMPLEMENTED_ROUTES)
+        page.views[0].controls.append(home.get_body())
+        page.update()
+        home.did_show()
+        typed = "glossary name"
+        queries = [typed[:n] for n in range(1, len(typed) + 1)] + [typed[:n] for n in range(len(typed) - 1, -1, -1)]
+        for query in queries:
+            home.search.field.value = query
+            home.search.set_query(query)
+            keys = [c.key for c in home.content.controls if getattr(c, "key", None)]
+            assert len(keys) == len(set(keys)), query
+            headers = [k for k in keys if k.startswith("settings-hit-section-")]
+            sections = [h.section_id for h in home.search.hits]
+            assert headers == [f"settings-hit-section-{s}" for s in dict.fromkeys(sections)], query
+            page.update()  # raised IndexError before the fix
+        assert not home.search.active and home.content.controls
+        home.dispose()
+        store.close()
+
+    asyncio.run(scenario())
+
+
+@needs_flet
+@pytest.mark.skipif(not _importable("settings_schema"), reason="settings_schema is not importable yet (U2 schema agent)")
 def test_real_schema_renders_every_section(tmp_path):
     """The generated schema: a page builds for every section without exceptions (store empty = fresh install)."""
     from glossarion_mobile.ui.settings.section_page import SectionPage

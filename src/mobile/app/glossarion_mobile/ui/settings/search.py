@@ -166,18 +166,22 @@ class SettingsSearch:
             what = f"“{self.query}”" if self.query else "these filters"
             return [self._note(f"No settings match {what}.")]
         controls: list[ft.Control] = []
-        current_section = None
+        # One header per section (sections in the order of their best hit): hits arrive in relevance
+        # order, and a section met twice got a second header with the same key - duplicate keys in one
+        # list make Flet's keyed diff raise IndexError on the next update (fast typing crashed the app).
+        by_section: dict[str, list[SearchHit]] = {}
         for hit in self.hits:
-            if hit.section_id != current_section:
-                current_section = hit.section_id
-                controls.append(
-                    ft.Container(
-                        padding=ft.Padding.only(left=16, top=10, bottom=2),
-                        content=ft.Text(hit.breadcrumb, theme_style=ft.TextThemeStyle.LABEL_SMALL, color=ft.Colors.PRIMARY),
-                        key=f"settings-hit-section-{hit.section_id}",
-                    )
+            by_section.setdefault(hit.section_id, []).append(hit)
+        for section_id, hits in by_section.items():
+            controls.append(
+                ft.Container(
+                    padding=ft.Padding.only(left=16, top=10, bottom=2),
+                    content=ft.Text(hits[0].breadcrumb, theme_style=ft.TextThemeStyle.LABEL_SMALL,
+                                    color=ft.Colors.PRIMARY),
+                    key=f"settings-hit-section-{section_id}",
                 )
-            controls.append(self._row(hit))
+            )
+            controls.extend(self._row(hit) for hit in hits)
         if len(self.hits) >= SEARCH_LIMIT:
             controls.append(self._note(f"Showing the first {SEARCH_LIMIT} matches; refine the search to see more."))
         return controls
