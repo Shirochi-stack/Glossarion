@@ -1467,6 +1467,44 @@ def _extract_regions_from_preview(self) -> list:
     return regions
 
 
+def _load_inpainter_into_pool(self, local_model: str, resolved_model_path: str, key, is_custom_image_edit: bool):
+    """Load a new inpainter and add it to the shared pool under *key* as a spare (not checked out).
+    Used when no preload is filling the pool, e.g. the model was switched after startup preload."""
+    from manga_translator import MangaTranslator
+    from local_inpainter import LocalInpainter
+    new_inpainter = LocalInpainter()
+    try:
+        if is_custom_image_edit and hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
+            new_inpainter.config.update(self.main_gui.config)
+            default_endpoint = ''
+            use_custom_openai = bool(
+                getattr(self.main_gui, 'use_custom_openai_endpoint_var', False)
+                or self.main_gui.config.get('use_custom_openai_endpoint', False)
+            )
+            if use_custom_openai:
+                default_endpoint = self.main_gui.config.get('openai_base_url', '')
+                default_endpoint = default_endpoint or getattr(self.main_gui, 'openai_base_url_var', '') or ''
+            new_inpainter.config['custom_image_edit_default_endpoint'] = default_endpoint
+            new_inpainter.config['openai_base_url'] = default_endpoint
+            new_inpainter.config['use_custom_openai_endpoint'] = use_custom_openai
+    except Exception:
+        pass
+    if not new_inpainter.load_model(local_model, resolved_model_path):
+        return None
+    with MangaTranslator._inpaint_pool_lock:
+        rec = MangaTranslator._inpaint_pool.get(key)
+        if not rec:
+            rec = MangaTranslator._inpaint_pool[key] = {
+                'spares': [],
+                'checked_out': [],
+                'model_type': local_model,
+                'model_path': resolved_model_path
+            }
+        rec.setdefault('spares', []).append(new_inpainter)
+        rec.setdefault('checked_out', [])
+    return new_inpainter
+
+
 def _run_clean_background(self, image_path: str, regions: list):
     """Run the actual cleaning process in background thread with explicit memory cleanup"""
     image = None  # Initialize for cleanup in finally block
@@ -1668,9 +1706,21 @@ def _run_clean_background(self, image_path: str, regions: list):
                     uc = UnifiedClient(model=model, api_key=api_key)
                     temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=None, skip_inpainter_init=True)
                     
+                    # No pool for this model (no preload ran for it, e.g. the model was switched after
+                    # startup): load one into the pool now instead of polling a pool nothing will fill.
+                    poll_timeout = 30  # 30 seconds
+                    if not is_custom_image_edit:
+                        pool_key = (local_model, os.path.abspath(os.path.normpath(resolved_model_path)))
+                        with MangaTranslator._inpaint_pool_lock:
+                            has_pool = pool_key in MangaTranslator._inpaint_pool
+                        if not has_pool:
+                            self._log(f"📥 Loading {local_model} inpainter...", "info")
+                            if not _load_inpainter_into_pool(self, local_model, pool_key[1], pool_key, False):
+                                self._log(f"❌ Failed to load {local_model} inpainter", "error")
+                                poll_timeout = 0
+
                     # POLL for inpainter with timeout (same as translator initialization)
                     inpainter = None
-                    poll_timeout = 30  # 30 seconds
                     poll_interval = 0.5  # Check every 500ms
                     start_time = time.time()
                     
@@ -2368,37 +2418,11 @@ def _run_inpainting_sync(
                     if not inpainter:
                         print(f"[INPAINT_SYNC] Timeout waiting for pool, creating new inpainter...")
                         self._log(f"⚠️ Inpainter pool not ready, loading new instance...", "warning")
-                        new_inpainter = LocalInpainter()
-                        try:
-                            if is_custom_image_edit and hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
-                                new_inpainter.config.update(self.main_gui.config)
-                                default_endpoint = ''
-                                use_custom_openai = bool(
-                                    getattr(self.main_gui, 'use_custom_openai_endpoint_var', False)
-                                    or self.main_gui.config.get('use_custom_openai_endpoint', False)
-                                )
-                                if use_custom_openai:
-                                    default_endpoint = self.main_gui.config.get('openai_base_url', '')
-                                    default_endpoint = default_endpoint or getattr(self.main_gui, 'openai_base_url_var', '') or ''
-                                new_inpainter.config['custom_image_edit_default_endpoint'] = default_endpoint
-                                new_inpainter.config['openai_base_url'] = default_endpoint
-                                new_inpainter.config['use_custom_openai_endpoint'] = use_custom_openai
-                        except Exception:
-                            pass
-                        if new_inpainter.load_model(local_model, resolved_model_path):
+                        new_inpainter = _load_inpainter_into_pool(self, local_model, resolved_model_path, key, is_custom_image_edit)
+                        if new_inpainter:
                             with MangaTranslator._inpaint_pool_lock:
-                                rec = MangaTranslator._inpaint_pool.get(key)
-                                if not rec:
-                                    MangaTranslator._inpaint_pool[key] = {
-                                        'spares': [],
-                                        'checked_out': [],
-                                        'model_type': local_model,
-                                        'model_path': resolved_model_path
-                                    }
-                                    rec = MangaTranslator._inpaint_pool[key]
-                                rec['spares'].append(new_inpainter)
-                                rec['checked_out'].append(new_inpainter)
-                                inpainter = new_inpainter
+                                MangaTranslator._inpaint_pool[key]['checked_out'].append(new_inpainter)
+                            inpainter = new_inpainter
                             print(f"[INPAINT_SYNC] Created and checked out new inpainter")
                         else:
                             print(f"[INPAINT_SYNC] Failed to load new inpainter model")
@@ -8833,6 +8857,7 @@ EDITOR_FUNCTIONS = (
     '_process_detect_results',
     '_on_clean_image_clicked',
     '_extract_regions_from_preview',
+    '_load_inpainter_into_pool',
     '_run_clean_background',
     '_get_detection_config',
     '_get_inpaint_config',
