@@ -244,7 +244,7 @@ def test_panel_placement_math():
 
 
 @needs_flet
-def test_panel_stays_under_the_box_and_never_jumps(mobile, tmp_path, monkeypatch):
+def test_panel_pinned_at_the_bottom_and_box_kept_above_it(mobile, tmp_path, monkeypatch):
     from glossarion_mobile.ui.tools.manga import editor as me
 
     pages = [mu.write_png(tmp_path / "in" / "1.png", 100, 300)]
@@ -268,40 +268,39 @@ def test_panel_stays_under_the_box_and_never_jumps(mobile, tmp_path, monkeypatch
         assert tab.layout.extra == 0 and tab.frame.height == 600
         tab.selected = 0
         tab.refresh()
-        assert tab.panel_holder.top == 100 + me.PANEL_GAP and tab.panel_holder.bottom is None
+        assert tab.panel_holder.bottom == 0 and tab.panel_holder.top is None  # pinned to the bottom
         assert tab.view_transform.ty == 0 and pans == []
-        # the bottom box: blank room under the page, the page scrolls up, the panel stays under the box
+        # the bottom box: blank room under the page, the page scrolls up so the box clears the panel
         tab.selected = 1
         tab.refresh()
         await asyncio.sleep(0)
         assert tab.layout.extra == me.PANEL_GAP + me.PANEL_H and tab.frame.height == 600 + tab.layout.extra
         assert tab.frame.padding.top == 0  # the page did not move inside its frame
         box_bottom = 590 + tab.view_transform.ty
-        assert tab.panel_holder.top == pytest.approx(box_bottom + me.PANEL_GAP)
-        assert tab.panel_holder.top + me.PANEL_H <= 500 + 0.5
+        assert box_bottom + me.PANEL_GAP == pytest.approx(500 - me.PANEL_H)  # right above the panel
+        assert tab.panel_holder.bottom == 0 and tab.panel_holder.top is None
         assert pans and pans[-1] == pytest.approx(tab.view_transform.ty)
-        placed = (tab.panel_holder.top, tab.view_transform.ty)
+        placed = (tab.panel_holder.bottom, tab.view_transform.ty)
         # typing, a re-render and a refresh do not move it
         tab.panel.translation_field.value = "typed\nmore\nlines"
         tab.refresh()
         tab.refresh()
-        assert (tab.panel_holder.top, tab.view_transform.ty) == placed and len(pans) == 1
-        # the keyboard shrinks the viewer: box and panel scroll up together, the panel still under the box
+        assert (tab.panel_holder.bottom, tab.view_transform.ty) == placed and len(pans) == 1
+        # the keyboard shrinks the viewer: the box scrolls up, still above the bottom panel
         tab._on_viewport_size(types.SimpleNamespace(width=200.0, height=380.0))
         await asyncio.sleep(0)
-        assert tab.panel_holder.top == pytest.approx(590 + tab.view_transform.ty + me.PANEL_GAP)
-        assert tab.panel_holder.top + me.PANEL_H <= 380 + 0.5
+        assert 590 + tab.view_transform.ty + me.PANEL_GAP <= 380 - me.PANEL_H + 0.5
         # the panel grows (a taller field / 200 % text): more room, still under the box and on screen
         tab._on_panel_size(types.SimpleNamespace(width=200.0, height=260.0))
         await asyncio.sleep(0)
         assert tab.panel_h == 260 and tab.layout.extra == me.PANEL_GAP + 260
-        assert tab.panel_holder.top + 260 <= 380 + 0.5
+        assert 590 + tab.view_transform.ty + me.PANEL_GAP <= 380 - 260 + 0.5
         tab._on_panel_size(types.SimpleNamespace(width=200.0, height=180.0))  # never shrinks back
         assert tab.panel_h == 260
-        # panning by hand: the panel follows the box
+        # panning by hand: the panel stays pinned at the bottom
         tab.view_transform.ty += 40
         tab._on_view_update(types.SimpleNamespace(local_focal_point=None, scale=1.0))
-        assert tab.panel_holder.top == pytest.approx(590 + tab.view_transform.ty + me.PANEL_GAP)
+        assert tab.panel_holder.bottom == 0 and tab.panel_holder.top is None
         # done: the room goes away
         panned = len(pans)
         tab.deselect()

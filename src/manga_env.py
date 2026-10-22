@@ -2518,6 +2518,34 @@ class MangaEnvMixin:
                 os.environ[key] = value
 
 
+def _record_page_editor_state(owner, image_path: str, page) -> None:
+    """Give a batch-run page the manual editor's boxes and texts: the editor-state form of the
+    page (``manga_ocr_io.editor_state_from_page``, what the OCR import writes) merged into its
+    image state, so opening the page in the editor after Start shows the detected rectangles with
+    their OCR and translations, like a page run through Detect / Recognize / Translate. A page
+    with no detected regions keeps its state; a later OCR-only save keeps the translations of the
+    same boxes (the automatic OCR export's rule)."""
+    manager = getattr(owner, 'image_state_manager', None)
+    if manager is None or not image_path:
+        return
+    try:
+        incoming = manga_ocr_io.editor_state_from_page(page)
+        regions = incoming.get('detection_regions') or []
+        if not regions:
+            return
+        if not incoming.get('translated_texts'):
+            existing = manager.get_state(image_path) or {}
+            old_boxes = [r.get('bbox') for r in existing.get('detection_regions') or [] if isinstance(r, dict)]
+            if old_boxes != [r.get('bbox') for r in regions]:
+                incoming['translated_texts'] = []  # new boxes: the old translations no longer fit
+        # update_state merges under the runner's own writes (cleaned_image_path from another worker)
+        manager.update_state(image_path, incoming, save=True)
+    except Exception as state_error:
+        log = getattr(owner, '_log', None)
+        if callable(log):
+            log(f"Could not save the page's editor boxes: {state_error}", "debug")
+
+
 class MangaOcrSessionMixin:
     """MangaTranslationTab's automatic OCR export / imported OCR reuse for batch runs (moved verbatim, U8)."""
 
@@ -2627,6 +2655,7 @@ class MangaOcrSessionMixin:
         document = getattr(self, '_automatic_ocr_document', None)
         output_path = getattr(self, '_automatic_ocr_export_path', None)
         if not document or not output_path:
+            _record_page_editor_state(self, image_path, manga_ocr_io.make_page(image_path, regions, index=1))
             return
 
         files = list(self._current_manga_processing_files() or self.selected_files or [])
@@ -2677,6 +2706,7 @@ class MangaOcrSessionMixin:
             current_pages.sort(key=lambda item: int(item.get('index', 0) or 0))
             document['pages'] = current_pages
             manga_ocr_io.write_document(output_path, document)
+        _record_page_editor_state(self, image_path, page)
         translated_count = sum(
             1
             for region in page.get('regions') or []

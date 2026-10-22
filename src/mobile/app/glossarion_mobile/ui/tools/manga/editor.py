@@ -29,9 +29,9 @@ same code the desktop preview runs):
   the job thread. Box edits (add, move, resize, delete, texts, flags) are session calls on the
   io pool; editing waits while a step runs (the session runs one step at a time). A step that
   loads a model not on the device yet (detector / ONNX inpainter) offers its download first.
-* **The selected box** (tap in an edit mode, long-press in Pan) → ``BoxPanel`` floating over the
-  page, always right under the box (a box at the bottom of the page gets blank room under the page
-  and is scrolled up with its panel; the page keeps its size): OCR and
+* **The selected box** (tap in an edit mode, long-press in Pan) → ``BoxPanel`` pinned to the
+  bottom of the viewer, just above the step row (a box the panel would cover is scrolled up above
+  it; a box at the bottom of the page gets blank room under the page; the page keeps its size): OCR and
   Translated tabs, each text edited in place, and Move (exact position / size, nudges). The toolbar's ⋯ holds Share, Import OCR
   (renders imported translations: a job) / Export OCR (``manga_ocr_io`` JSON in the OCR Text
   folder) / the auto-saved OCR files and Files, and the trash: Delete page data (every OCR, clean
@@ -272,7 +272,8 @@ class PageLayout:
 
 def panel_placement(transform: "ViewTransform", box_bottom: float, panel_h: float,
                     gap: float = 0.0) -> tuple:
-    """Where the box panel goes: always right under the selected box. ``box_bottom`` is the box's
+    """How far to pan so the selected box clears the box panel pinned at the viewer's bottom (a panel
+    right under the box needs the same pan; ``top`` is where that would be). ``box_bottom`` is the box's
     bottom edge in content (unzoomed frame) dp. Returns ``(pan_dy, top)``: the vertical pan (view
     dp, <= 0 moves the page up, clamped to what the content allows) that makes the box's bottom
     plus the panel fit in the viewer, and the panel's top in the viewer after that pan."""
@@ -442,7 +443,7 @@ class EditorTab(MangaTab):
         self.view_transform = ViewTransform()  # the viewer's pan / zoom (from its gestures)
         self.layout: Optional[PageLayout] = None
         self._viewport: Optional[tuple] = None  # the viewer's reported (width, height)
-        self.panel_side = "below"  # the box panel always sits right under the selected box
+        self.panel_side = "bottom"  # the box panel is pinned to the bottom of the viewer
         self.panel_h = PANEL_H  # the box panel's height (dp; it reports its own, only growing)
         self._panel_for: Optional[tuple] = None  # (page, box) the panel was last placed for
         self.nudge_step: Optional[int] = None  # the Move tab's step, kept across panels
@@ -470,9 +471,10 @@ class EditorTab(MangaTab):
                                          on_click=lambda e: self.cycle_view())
         self.view_hint = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                                  visible=False, key="me-view-hint")
-        # the selected box's panel floats over the page, right under the box (``_place_panel``): the
-        # page keeps its size when a box is picked
-        self.panel_holder = ft.Container(left=0, right=0, top=0, key="me-box-panel-holder")
+        # the selected box's panel is pinned to the bottom of the viewer, just above the step row
+        # (owner 2026-10-22: a bottom panel, not one floating under the box); the page keeps its
+        # size when a box is picked and is panned so the box stays visible above the panel
+        self.panel_holder = ft.Container(left=0, right=0, bottom=0, key="me-box-panel-holder")
         self.page_label = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, key="me-page-label")
         self.prev_button = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous page", key="me-prev",
                                          size_constraints=HIT_TARGET,
@@ -862,12 +864,12 @@ class EditorTab(MangaTab):
         return PANEL_GAP + self.panel_h if self._box_selected() else 0.0
 
     def _place_panel(self, ensure: bool = False) -> str:
-        """The box panel always sits right under the selected box (never above it, never flipping).
-        ``ensure`` (a newly selected box, the viewer resized by the keyboard, the panel grew): when
-        the box's bottom plus the panel do not fit in the viewer, the page is panned up just enough
-        (the frame has ``_panel_room`` of blank space under the page for a box at its bottom). Pan
-        and zoom, re-renders and typing only move the panel along with the box."""
-        self.panel_side = "below"
+        """The box panel is pinned to the bottom of the viewer (just above the step row) and never
+        moves. ``ensure`` (a newly selected box, the viewer resized by the keyboard, the panel grew):
+        when the box's bottom would be under the panel, the page is panned up just enough (the
+        frame has ``_panel_room`` of blank space under the page for a box at its bottom). Pan and
+        zoom, re-renders and typing leave the panel where it is."""
+        self.panel_side = "bottom"
         layout = self.layout
         if layout is None or not self._box_selected():
             return self.panel_side
@@ -879,9 +881,8 @@ class EditorTab(MangaTab):
                 self.view_transform.ty += pan
                 self.view_transform.clamp()
                 self._pan_viewer(pan)
-        top = max(0.0, self.view_transform.to_view(0.0, bottom)[1] + PANEL_GAP)
-        self.panel_holder.top = round(top, 1)
-        self.panel_holder.bottom = None
+        self.panel_holder.top = None
+        self.panel_holder.bottom = 0
         return self.panel_side
 
     def _pan_viewer(self, dy: float) -> None:
@@ -1210,23 +1211,15 @@ class EditorTab(MangaTab):
     def _on_view_update(self, e: Any) -> None:
         self.view_transform.update(*self._point(getattr(e, "local_focal_point", None)),
                                    float(getattr(e, "scale", 1.0) or 1.0))
-        if self.panel is not None and self.panel_holder.visible:  # the panel follows the box
-            before = self.panel_holder.top
-            self._place_panel()
-            if before is None or abs(float(self.panel_holder.top or 0) - float(before)) > 0.5:
-                push(self.panel_holder)
 
     def _on_view_end(self, e: Any) -> None:
         self.view_transform.end(*self._point(getattr(e, "velocity", None)))
         self._after_view_change()
 
     def _after_view_change(self) -> None:
-        """Pan / zoom ended: the handles keep their size, the box panel stays under the box."""
+        """Pan / zoom ended: the handles keep their size (the box panel stays pinned at the bottom)."""
         if self.selected is not None:
             self._redraw()
-            if self.panel is not None:
-                self._place_panel()
-                push(self.panel_holder)
 
     def _set_surface(self, editing: bool) -> None:
         """The gesture surface for the Pan / Edit mode (a new one, under a new key, when the mode

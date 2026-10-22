@@ -515,6 +515,20 @@ _POOL_LOAD_CLEAN = (
     '\n'
     '                    # POLL for inpainter with timeout (same as translator initialization)\n'
     '                    inpainter = None\n')
+# 2026-10-22 a batch Start leaves the manual editor's boxes: the automatic OCR save also writes the
+# page's editor state (manga_env._record_page_editor_state)
+_BATCH_EDITOR_STATE_NO_DOC = (
+    "        if not document or not output_path:\n            return\n",
+    "        if not document or not output_path:\n"
+    "            _record_page_editor_state(self, image_path, manga_ocr_io.make_page(image_path, regions, index=1))\n"
+    "            return\n",
+)
+_BATCH_EDITOR_STATE_DOC = (
+    "            manga_ocr_io.write_document(output_path, document)\n        translated_count = sum(\n",
+    "            manga_ocr_io.write_document(output_path, document)\n"
+    "        _record_page_editor_state(self, image_path, page)\n        translated_count = sum(\n",
+)
+
 _POOL_LOAD_SYNC = (
     '                        new_inpainter = LocalInpainter()\n'
     '                        try:\n'
@@ -787,6 +801,16 @@ APPROVED = (
                 "switched after the startup preload) instead of polling 30 s and failing (Clean)",
         "source": {
             "src/ImageRenderer.py": [_POOL_LOAD_HELPER, _POOL_LOAD_CLEAN, _POOL_LOAD_SYNC],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-10-22",
+        "what": "A Files batch Start leaves the manual editor's boxes: the automatic OCR save after detection / "
+                "translation also writes the page's editor state (detection boxes, OCR and translations, as an "
+                "OCR import does), so the editor draws the rectangles when the page is opened",
+        "source": {
+            "src/manga_integration.py": [_BATCH_EDITOR_STATE_NO_DOC, _BATCH_EDITOR_STATE_DOC],
         },
         "values": {},
     },
