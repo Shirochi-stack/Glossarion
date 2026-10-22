@@ -54,6 +54,9 @@ SORT_LABELS = (("name", "Name"), ("numeric", "Number"), ("date", "Date"), ("reve
 FOLDER_FALLBACK = "Pick a .zip instead"
 RANGE_HINT = "blank = all, e.g. 3-8"
 THUMB = 48
+#: the page list grows with its rows (a row: the thumbnail + its padding) up to this, then scrolls
+LIST_MAX_HEIGHT = 360
+ROW_HEIGHT = THUMB + 16
 
 
 class FilesTab(MangaTab):
@@ -113,7 +116,7 @@ class FilesTab(MangaTab):
         ], visible=False, wrap=True, key="mf-selection-bar")
         self.clear_button = ft.TextButton(content="Clear all", icon=ft.Icons.CLEAR_ALL,
                                           on_click=lambda e: self.ctx.spawn(self.clear_all()), key="mf-clear")
-        self.list_view = ft.ReorderableListView(controls=[], on_reorder=self._on_reorder, height=360,
+        self.list_view = ft.ReorderableListView(controls=[], on_reorder=self._on_reorder, height=LIST_MAX_HEIGHT,
                                                 show_default_drag_handles=True, key="mf-list")
         # the non-chibi Halgakos, faded, where a page will appear (owner, 2026-10-09)
         self.empty = ft.Container(
@@ -326,6 +329,8 @@ class FilesTab(MangaTab):
         # drag reorder works on the full visible order; a group view only lists that group's pages
         self.list_view.show_default_drag_handles = shown is None
         self.list_view.visible = bool(paths)
+        # one or two pages: no empty box under them (owner 2026-10-22)
+        self.list_view.height = min(LIST_MAX_HEIGHT, max(1, len(self.list_view.controls)) * ROW_HEIGHT)
         self.empty.visible = not paths
         run_files, error = files.run_files()
         self.summary.value = (f"{len(paths)} image{'s' if len(paths) != 1 else ''} · {len(run_files)} will run"
@@ -620,6 +625,10 @@ class FilesTab(MangaTab):
         if not self.ctx.has_kind(svc.KIND_BATCH):
             self.ctx.say("Manga jobs are not available in this build")
             return None
+        if not self.session.editor_token:
+            # the runner saves each page's boxes / OCR / translations into the editor session's state:
+            # without one (Editor not opened yet) the Editor later showed the rendered page and no boxes
+            await self.ctx.io(self.session.ensure_editor)
         try:
             spec = svc.batch_spec(self.session.files, output_root=self.ctx.output_root, glossary_only=glossary_only,
                                   editor_session=self.session.editor_token or "",

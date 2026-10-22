@@ -1215,6 +1215,7 @@ def test_files_tab_adds_sorts_skips_and_starts_a_batch(iso, tmp_path):
         assert files.last_kwargs["allowed_extensions"] == ["cbz", "zip"]
         assert await tab.add_paths([fixture["series"]]) == 6
         assert len(tab.list_view.controls) == 9 and not tab.start_button.disabled
+        assert tab.list_view.height == 360  # 9 rows: the cap (LIST_MAX_HEIGHT), then it scrolls
         assert store["manga_selected_files"] == manga.files.files
         first = manga.files.files[0]
         await tab._mutate(manga.files.toggle_skip, first)
@@ -1234,6 +1235,10 @@ def test_files_tab_adds_sorts_skips_and_starts_a_batch(iso, tmp_path):
         tab.group_picker.value = "1"
         tab._on_group()
         assert len(tab.list_view.controls) == 3 and tab.list_view.show_default_drag_handles is False
+        # owner 2026-10-22: the list is as tall as its rows (3 here), up to LIST_MAX_HEIGHT (9 pages)
+        from glossarion_mobile.ui.tools.manga import files as files_mod
+
+        assert tab.list_view.height == 3 * files_mod.ROW_HEIGHT < files_mod.LIST_MAX_HEIGHT
         ctx.extras["answers"] = ["run"]  # the models are not downloaded in the tmp caches: Start anyway
         job_id = await tab.start()
         if manga.models.available:
@@ -1243,6 +1248,9 @@ def test_files_tab_adds_sorts_skips_and_starts_a_batch(iso, tmp_path):
             assert "Download now" not in body
         spec = jobs.specs[-1]
         assert spec.kind == "manga" and spec.params["files"] == manga.files.files  # all groups run
+        # owner 2026-10-22: Start before the Editor was opened still hands the runner the editor session,
+        # so the Editor shows the run's boxes (it saves them into that session's page state)
+        assert manga.editor_token and spec.params["editor_session"] == manga.editor_token
         assert len(spec.inputs) == 8 and manga.batch_job_id == job_id
         from glossarion_mobile.ui.components.log_console import LogConsole
 
