@@ -55,6 +55,8 @@ _SENTENCE_START = re.compile(r"(?:^|[.!?。！？…:;\"“”'‘’「」『�
 _APOSTROPHE_FORMS = "(?:'|’|&#39;|&#x27;|&apos;|&rsquo;|&#8217;)"
 
 KIND_VARIANT = "variant"
+#: Raw names shorter than this are only fixed automatically when the variant differs in spacing / hyphens
+SHORT_RAW = 3
 KIND_AMBIGUOUS = "ambiguous"
 KIND_MISSING = "missing"
 
@@ -77,7 +79,13 @@ class Finding:
 
     @property
     def fixable(self):
-        return self.kind == KIND_VARIANT and self.entry_type == "character"
+        """The automatic-fix case: one close spelling of a character name. A raw name shorter than
+        ``SHORT_RAW`` characters (surnames like 박 / 강, words like 하나) also matches unrelated source
+        text, and its fuzzy matches were wrong on the corpus ("Sparks" for Park, "Hanja" for Hana),
+        so only a spacing / hyphen respelling of it ("Soyoon" for So-yoon) is fixed automatically."""
+        if self.kind != KIND_VARIANT or self.entry_type != "character":
+            return False
+        return len(self.raw) >= SHORT_RAW or all(_norm(v) == _norm(self.expected) for v in self.variants)
 
     def describe(self):
         if self.kind == KIND_MISSING:
@@ -213,7 +221,7 @@ class GlossaryNameEntries:
         return bool(self.entries)
 
 
-def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_chars=3):
+def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_chars=0):
     """Pick the entries to check from ``glossary_usage.parse_glossary_file`` rows."""
     known = set()
     picked = {}
@@ -242,7 +250,7 @@ _load_lock = threading.Lock()
 _load_cache = {}
 
 
-def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars=3):
+def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars=0):
     """Parse a glossary file once per (file version, options)."""
     if not glossary_path or not os.path.isfile(glossary_path):
         return GlossaryNameEntries((), ())
@@ -364,7 +372,7 @@ def _write_text(path, text):
 
 
 def settings_from_env(env=None):
-    """Entry-type scope shared with Emergency Glossary Compliance."""
+    """Entry types shared with Emergency Glossary Compliance; the name check's own minimum length."""
     env = os.environ if env is None else env
     mode = str(env.get("EMERGENCY_GLOSSARY_COMPLIANCE_MODE", "characters") or "characters").lower()
     try:
@@ -372,9 +380,9 @@ def settings_from_env(env=None):
     except (TypeError, ValueError):
         custom_types = []
     try:
-        min_chars = max(0, min(10, int(env.get("EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS", 3))))
+        min_chars = max(0, min(10, int(env.get("GLOSSARY_NAME_CHECK_MIN_CHARS", 0))))
     except (TypeError, ValueError):
-        min_chars = 3
+        min_chars = 0
     return {"mode": mode, "custom_types": tuple(custom_types if mode == "custom" else ()),
             "min_chars": min_chars}
 
@@ -390,9 +398,9 @@ def settings_from_config(config, env=None):
         scope["custom_types"] = tuple(custom) if scope["mode"] == "custom" else ()
     elif scope["mode"] != "custom":
         scope["custom_types"] = ()
-    if "emergency_glossary_compliance_min_chars" in config:
+    if "glossary_name_check_min_chars" in config:
         try:
-            scope["min_chars"] = max(0, min(10, int(config["emergency_glossary_compliance_min_chars"])))
+            scope["min_chars"] = max(0, min(10, int(config["glossary_name_check_min_chars"])))
         except (TypeError, ValueError):
             pass
     return scope

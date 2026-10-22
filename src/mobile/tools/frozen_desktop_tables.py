@@ -98,6 +98,7 @@ class FrozenDesktopTables:
             ('emergency_glossary_compliance_min_chars', ['emergency_glossary_compliance_min_chars_var'], 3, lambda v: max(0, min(10, safe_int(v, 3)))),
             ('glossary_name_check', ['glossary_name_check_var'], False, bool),
             ('glossary_name_check_mode', ['glossary_name_check_mode_var'], 'auto', str),
+            ('glossary_name_check_min_chars', ['glossary_name_check_min_chars_var'], 0, lambda v: max(0, min(10, safe_int(v, 0)))),
             ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
             ('token_limit_disabled', ['token_limit_disabled'], False, bool),
             ('enable_thoughts', ['enable_thoughts_var'], True, bool),

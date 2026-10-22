@@ -31,7 +31,7 @@ log = logging.getLogger("glossarion.tools.qa")
 
 CHECK_KEY = ("qa_scanner_settings", "check_glossary_names")
 SCOPE_KEYS = ("emergency_glossary_compliance_mode", "emergency_glossary_compliance_custom_types",
-              "emergency_glossary_compliance_min_chars")
+              "glossary_name_check_min_chars")
 TITLE = "Fix Glossary Names"
 INTRO = ("Checked rows are replaced with the glossary name. Rows are pre-checked when one close spelling of a "
          "character name was found; review the others before checking them. Each changed file is backed up to "
@@ -43,7 +43,7 @@ def check_enabled(ctx: Any) -> bool:
 
 
 def name_check_scope(ctx: Any) -> dict:
-    """Emergency Glossary Compliance's entry types / minimum length from the saved config."""
+    """Emergency Glossary Compliance's entry types and the name check's minimum length (saved config)."""
     import glossary_name_check as name_check
 
     config = {}

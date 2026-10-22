@@ -607,6 +607,8 @@ _STATE_QUEUE_CLOSE = (
 _NAME_CHECK_SETTINGS_ROWS = (
     "('glossary_name_check', ['glossary_name_check_var'], False, bool),",
     "('glossary_name_check_mode', ['glossary_name_check_mode_var'], 'auto', str),",
+    "('glossary_name_check_min_chars', ['glossary_name_check_min_chars_var'], 0, lambda v: max(0, min(10, "
+    "safe_int(v, 0)))),",
 )
 _NAME_CHECK_MIN_CHARS_ROW = ("('emergency_glossary_compliance_min_chars', ['emergency_glossary_compliance_min_chars_var'], "
                              "3, lambda v: max(0, min(10, safe_int(v, 3)))),")
@@ -625,7 +627,16 @@ _NAME_CHECK_ENV_DICT = _after(
     "'emergency_glossary_compliance_min_chars_var', 3)),",
     "            'GLOSSARY_NAME_CHECK': \"1\" if (getattr(self, 'glossary_name_check_var', False) and "
     "auto_glossary_mode != 'no_glossary') else \"0\",",
-    "            'GLOSSARY_NAME_CHECK_MODE': str(getattr(self, 'glossary_name_check_mode_var', 'auto')),")
+    "            'GLOSSARY_NAME_CHECK_MODE': str(getattr(self, 'glossary_name_check_mode_var', 'auto')),",
+    "            'GLOSSARY_NAME_CHECK_MIN_CHARS': str(getattr(self, 'glossary_name_check_min_chars_var', 0)),")
+# the name check's own minimum raw entry length, read at startup like Emergency Glossary Compliance's
+_NAME_CHECK_MIN_CHARS_INIT = _after(
+    "            self.emergency_glossary_compliance_min_chars_var = 3",
+    "        try:",
+    "            self.glossary_name_check_min_chars_var = max(0, min(10, int(self.config.get("
+    "'glossary_name_check_min_chars', 0))))",
+    "        except (TypeError, ValueError):",
+    "            self.glossary_name_check_min_chars_var = 0")
 _NAME_CHECK_QA_LABEL = _after(
     "            'QA_CHECK_GLOSSARY_LEAKAGE': 'Check for glossary leakage',",
     "            'QA_CHECK_GLOSSARY_NAMES': 'Check glossary names (experimental)',")
@@ -655,11 +666,12 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '        return override_dir or os.getcwd()\n'
   '\n'
   '    def _glossary_name_check_scope(self):\n'
-  '        """Emergency Glossary Compliance\'s entry types / minimum length, live values first."""\n'
+  '        """Emergency Glossary Compliance\'s entry types and the name check\'s minimum length (live '
+  'values)."""\n'
   '        import glossary_name_check as name_check\n'
   '        config = dict(self.config or {})\n'
   "        for key in ('emergency_glossary_compliance_mode', 'emergency_glossary_compliance_custom_types',\n"
-  "                    'emergency_glossary_compliance_min_chars'):\n"
+  "                    'glossary_name_check_min_chars'):\n"
   "            if hasattr(self, key + '_var'):\n"
   "                config[key] = getattr(self, key + '_var')\n"
   '        return name_check.settings_from_config(config)\n'
@@ -1175,7 +1187,7 @@ APPROVED = (
                 "names'; they flag translated names spelled differently from the glossary",
         "source": {
             "src/settings_persistence.py": [_NAME_CHECK_SETTINGS_ROW],
-            "src/owner_state.py": [_NAME_CHECK_BOOL_ROW, _NAME_CHECK_STR_ROW],
+            "src/owner_state.py": [_NAME_CHECK_BOOL_ROW, _NAME_CHECK_STR_ROW, _NAME_CHECK_MIN_CHARS_INIT],
             "src/translator_gui.py": [_NAME_CHECK_SETTINGS_ROW_GUI, _NAME_CHECK_BOOL_ROW, _NAME_CHECK_STR_ROW,
                                       _NAME_CHECK_ENV_DICT, _NAME_CHECK_QA_LABEL, _NAME_CHECK_QA_ENV_PAIR],
             "src/run_env.py": [_NAME_CHECK_ENV_DICT, _NAME_CHECK_QA_LABEL, _NAME_CHECK_QA_ENV_PAIR],

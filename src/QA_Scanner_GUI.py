@@ -318,11 +318,11 @@ class QAScannerMixin:
         return override_dir or os.getcwd()
 
     def _glossary_name_check_scope(self):
-        """Emergency Glossary Compliance's entry types / minimum length, live values first."""
+        """Emergency Glossary Compliance's entry types and the name check's minimum length (live values)."""
         import glossary_name_check as name_check
         config = dict(self.config or {})
         for key in ('emergency_glossary_compliance_mode', 'emergency_glossary_compliance_custom_types',
-                    'emergency_glossary_compliance_min_chars'):
+                    'glossary_name_check_min_chars'):
             if hasattr(self, key + '_var'):
                 config[key] = getattr(self, key + '_var')
         return name_check.settings_from_config(config)

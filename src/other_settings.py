@@ -9133,7 +9133,7 @@ def _create_processing_options_section(self, parent):
     glossary_compliance_configure_btn.clicked.connect(_open_glossary_compliance_custom_dialog)
     
     # Glossary Name Check (experimental): after each chapter, look for glossary names the model
-    # spelled differently. Shares the entry types / minimum length rows (shown below both toggles).
+    # spelled differently. Shares the entry types row (shown below both toggles); own minimum length.
     if not hasattr(self, 'glossary_name_check_var'):
         self.glossary_name_check_var = bool(self.config.get('glossary_name_check', False))
     if not hasattr(self, 'glossary_name_check_mode_var'):
@@ -9153,8 +9153,10 @@ def _create_processing_options_section(self, parent):
         "was found; anything less certain is only logged.<br>"
         "<b>Review first</b> only logs what it finds; fix chapters later with QA Scanner "
         "settings → <i>Fix glossary names in existing chapters…</i><br><br>"
-        "Uses the entry types and minimum raw entry length set here for Emergency Glossary "
-        "Compliance (it works without turning that on)."
+        "Uses the entry types set here for Emergency Glossary Compliance (it works without turning "
+        "that on) and its own minimum raw entry length (default 0 = every length). Names shorter "
+        "than 3 characters are only reported, never fixed automatically, unless they differ just in "
+        "spacing or hyphens."
     )
     name_check_row = QWidget()
     name_check_row_layout = QHBoxLayout(name_check_row)
@@ -9168,6 +9170,38 @@ def _create_processing_options_section(self, parent):
     self._disable_combobox_mousewheel(name_check_mode_combo)
     name_check_row_layout.addWidget(name_check_mode_combo)
     name_check_row_layout.addStretch()
+    # The name check's own length floor (0 = every length; short names are only reported).
+    name_check_min_chars_row = QWidget()
+    name_check_min_chars_layout = QHBoxLayout(name_check_min_chars_row)
+    name_check_min_chars_layout.setContentsMargins(20, 0, 0, 0)
+    name_check_min_chars_layout.setSpacing(8)
+    name_check_min_chars_layout.addWidget(QLabel("Name check minimum raw entry length:"))
+    name_check_min_chars_slider = QSlider(Qt.Horizontal)
+    name_check_min_chars_slider.setRange(0, 10)
+    name_check_min_chars_slider.setSingleStep(1)
+    name_check_min_chars_slider.setPageStep(1)
+    name_check_min_chars_slider.setTickPosition(QSlider.TicksBelow)
+    name_check_min_chars_slider.setTickInterval(1)
+    name_check_min_chars_slider.setFixedWidth(180)
+    name_check_min_chars_slider.wheelEvent = lambda event: event.ignore()
+    try:
+        current_name_check_min_chars = max(0, min(10, int(getattr(self, 'glossary_name_check_min_chars_var', 0))))
+    except (TypeError, ValueError):
+        current_name_check_min_chars = 0
+    self.glossary_name_check_min_chars_var = current_name_check_min_chars
+    name_check_min_chars_slider.setValue(current_name_check_min_chars)
+    name_check_min_chars_layout.addWidget(name_check_min_chars_slider)
+    name_check_min_chars_value = QLabel()
+    name_check_min_chars_value.setMinimumWidth(110)
+    name_check_min_chars_layout.addWidget(name_check_min_chars_value)
+    name_check_min_chars_layout.addStretch()
+
+    def _on_name_check_min_chars_change(value):
+        self.glossary_name_check_min_chars_var = value
+        name_check_min_chars_value.setText("0 (no minimum)" if value == 0 else f"{value} characters")
+
+    name_check_min_chars_slider.valueChanged.connect(_on_name_check_min_chars_change)
+    _on_name_check_min_chars_change(current_name_check_min_chars)
     name_check_desc = QLabel("Fixes or logs glossary names the model spelled differently<br>"
                              "in each finished chapter (uses the entry types below)")
     name_check_desc.setStyleSheet("color: gray; font-size: 10pt;")
@@ -9175,16 +9209,16 @@ def _create_processing_options_section(self, parent):
     name_check_desc.setTextFormat(Qt.RichText)
 
     def _refresh_glossary_scope_rows():
-        # Entry types / minimum length serve both Emergency Glossary Compliance and the name check
-        scoped = glossary_compliance_cb.isChecked() or name_check_cb.isChecked()
-        glossary_compliance_row.setVisible(scoped)
-        glossary_min_chars_row.setVisible(scoped)
-        glossary_min_chars_desc.setVisible(scoped)
+        # The entry types serve both Emergency Glossary Compliance and the name check
+        glossary_compliance_row.setVisible(glossary_compliance_cb.isChecked() or name_check_cb.isChecked())
+        glossary_min_chars_row.setVisible(glossary_compliance_cb.isChecked())
+        glossary_min_chars_desc.setVisible(glossary_compliance_cb.isChecked())
 
     def _on_name_check_toggle(checked):
         try:
             self.glossary_name_check_var = bool(checked)
             name_check_row.setVisible(checked)
+            name_check_min_chars_row.setVisible(checked)
             name_check_desc.setVisible(checked)
             _refresh_glossary_scope_rows()
         except Exception:
@@ -9200,17 +9234,19 @@ def _create_processing_options_section(self, parent):
     _refresh_glossary_scope_rows()
     glossary_compliance_desc.setVisible(is_enabled)
     name_check_row.setVisible(name_check_cb.isChecked())
+    name_check_min_chars_row.setVisible(name_check_cb.isChecked())
     name_check_desc.setVisible(name_check_cb.isChecked())
 
     glossary_compliance_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(glossary_compliance_cb)
     left_v.addWidget(glossary_compliance_desc)
-    left_v.addWidget(name_check_cb)
-    left_v.addWidget(name_check_row)
-    left_v.addWidget(name_check_desc)
-    left_v.addWidget(glossary_compliance_row)
     left_v.addWidget(glossary_min_chars_row)
     left_v.addWidget(glossary_min_chars_desc)
+    left_v.addWidget(name_check_cb)
+    left_v.addWidget(name_check_row)
+    left_v.addWidget(name_check_min_chars_row)
+    left_v.addWidget(name_check_desc)
+    left_v.addWidget(glossary_compliance_row)
     
     # Enable Decimal Chapter Detection
     decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")

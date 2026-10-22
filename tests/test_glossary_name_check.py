@@ -125,13 +125,27 @@ def test_scan_folder_and_fix_files_back_up_first(tmp_path):
 
 
 def test_settings_from_env_and_config():
+    # entry types are Emergency Glossary Compliance's; the minimum length is the name check's own (default 0)
+    assert g.settings_from_env({"EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "5"})["min_chars"] == 0
     env = {"EMERGENCY_GLOSSARY_COMPLIANCE_MODE": "custom",
            "EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES": '["term"]',
-           "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "2"}
+           "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "5",
+           "GLOSSARY_NAME_CHECK_MIN_CHARS": "2"}
     assert g.settings_from_env(env) == {"mode": "custom", "custom_types": ("term",), "min_chars": 2}
     assert g.settings_from_config({"emergency_glossary_compliance_mode": "all",
-                                   "emergency_glossary_compliance_min_chars": 4}, env) == {
+                                   "emergency_glossary_compliance_min_chars": 5,
+                                   "glossary_name_check_min_chars": 4}, env) == {
         "mode": "all", "custom_types": (), "min_chars": 4}
+
+
+def test_short_raw_names_are_only_fixed_for_spacing_respellings():
+    rows = [{"type": "character", "raw_name": "박", "translated_name": "Park"},
+            {"type": "character", "raw_name": "소윤", "translated_name": "So-yoon"}]
+    ents = g.build_entries(rows, min_chars=0)
+    found = {f.expected: f for f in g.check_chapter("박 소윤", "<p>The Sparks flew and Soyoon smiled.</p>", ents).findings}
+    assert found["Park"].kind == "variant" and found["Park"].variants == ("Sparks",)
+    assert not found["Park"].fixable            # 1-character raw name, fuzzy match: report only
+    assert found["So-yoon"].fixable             # 2 characters, but only the hyphen differs
     assert not g.enabled_from_env({}) and g.enabled_from_env({"GLOSSARY_NAME_CHECK": "1"})
     assert g.auto_fix_from_env({}) and not g.auto_fix_from_env({"GLOSSARY_NAME_CHECK_MODE": "review"})
 

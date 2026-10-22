@@ -836,7 +836,11 @@ TOOLTIP_OVERRIDES = {
     "glossary_name_check": (
         "After each chapter, finds glossary names the model spelled differently (e.g. Walter Argent for "
         "Valter Argent).\n"
-        "Uses the Emergency Glossary Compliance entry types and minimum length; works without that toggle."),
+        "Uses the Emergency Glossary Compliance entry types (works without that toggle) and its own minimum "
+        "length."),
+    "glossary_name_check_min_chars": (
+        "Glossary names shorter than this are not checked (0 = every length). Names under 3 characters are "
+        "only reported, never fixed automatically, unless they differ just in spacing or hyphens."),
     "glossary_name_check_mode": (
         "Auto-fix replaces one close spelling of a character name; Review first only logs what it finds."),
     "glossary_refinement_chunking_mode": (
