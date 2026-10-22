@@ -2053,3 +2053,36 @@ def test_batch_run_leaves_the_editor_boxes(tmp_path):
     record(runner, page, [])
     boxes = session.open_page(page)['boxes']
     assert [(b['x'], b['ocr_text'], b['translation']) for b in boxes] == [(12, 'konnichiwa', '')]
+
+
+def test_no_pool_loads_an_inpainter_instead_of_waiting(monkeypatch):
+    """2026-10-23 (Glossarion Mobile Translate waited 60 s for a preload that never ran): with no pool
+    record for the model nothing is filling it, so one is loaded right away; an existing record (a preload
+    running or done) is left alone, and a failed load is reported."""
+    from manga_translator import MangaTranslator
+
+    class Owner:
+        def __init__(self):
+            self.logs = []
+
+        def _log(self, message, level="info"):
+            self.logs.append((level, message))
+
+    loads = []
+    result = {"value": object()}
+    monkeypatch.setattr(core, "_load_inpainter_into_pool",
+                        lambda owner, model, path, key, custom: loads.append((model, path, key, custom)) or result["value"])
+    pool = {}
+    monkeypatch.setattr(MangaTranslator, "_inpaint_pool", pool)
+    key = ("aot_onnx", os.path.abspath("aot.onnx"))
+    owner = Owner()
+    pool[key] = {"spares": [], "checked_out": []}
+    assert core._load_inpainter_if_no_pool(owner, "aot_onnx", key) is True and loads == []
+    pool.clear()
+    assert core._load_inpainter_if_no_pool(owner, "aot_onnx", key) is True
+    assert loads == [("aot_onnx", key[1], key, False)]
+    assert owner.logs[-1] == ("info", "📥 Loading aot_onnx inpainter...")
+    result["value"] = None
+    assert core._load_inpainter_if_no_pool(owner, "aot_onnx", key) is False
+    assert owner.logs[-1] == ("error", "❌ Failed to load aot_onnx inpainter")
+

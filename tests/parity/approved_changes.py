@@ -926,6 +926,74 @@ _NAME_CHECK_WORKER_QA = _after(
     "            \"check_glossary_leakage\": _env_bool(\"QA_CHECK_GLOSSARY_LEAKAGE\", True),",
     "            \"check_glossary_names\": _env_bool(\"QA_CHECK_GLOSSARY_NAMES\", False),")
 
+# 2026-10-23 Translate's concurrent inpainting (and Clean, through one shared helper) loads an inpainter
+# when no preload is filling the pool instead of waiting 60 s; 'Locating' replaces the misleading
+# 'Downloading' line printed when the model was already cached
+_INPAINT_NO_POOL_SYNC = [('\ndef _run_clean_background(self, image_path: str, regions: list):\n',
+  '\n'
+  'def _load_inpainter_if_no_pool(self, local_model: str, key) -> bool:\n'
+  '    """No pool record for *key* means no preload is filling it (none ran for this model: Glossarion\n'
+  '    Mobile, or the model was switched after the startup preload). Load one into the pool now instead of\n'
+  '    polling a pool nothing will fill. False when that load failed."""\n'
+  '    from manga_translator import MangaTranslator\n'
+  '    with MangaTranslator._inpaint_pool_lock:\n'
+  '        if key in MangaTranslator._inpaint_pool:\n'
+  '            return True\n'
+  '    self._log(f"📥 Loading {local_model} inpainter...", "info")\n'
+  '    if _load_inpainter_into_pool(self, local_model, key[1], key, False):\n'
+  '        return True\n'
+  '    self._log(f"❌ Failed to load {local_model} inpainter", "error")\n'
+  '    return False\n'
+  '\n'
+  '\n'
+  'def _run_clean_background(self, image_path: str, regions: list):\n'),
+ ('                    from local_inpainter import LocalInpainter\n'
+  '                    self._log(f"📥 Downloading {local_model} model...", "info")\n'
+  '                    temp_inp = LocalInpainter()\n',
+  '                    from local_inpainter import LocalInpainter\n'
+  '                    self._log(f"🔎 Locating {local_model} model (downloads it only if missing)...", '
+  '"info")\n'
+  '                    temp_inp = LocalInpainter()\n'),
+ ('                        pool_key = (local_model, os.path.abspath(os.path.normpath(resolved_model_path)))\n'
+  '                        with MangaTranslator._inpaint_pool_lock:\n'
+  '                            has_pool = pool_key in MangaTranslator._inpaint_pool\n'
+  '                        if not has_pool:\n'
+  '                            self._log(f"📥 Loading {local_model} inpainter...", "info")\n'
+  '                            if not _load_inpainter_into_pool(self, local_model, pool_key[1], pool_key, '
+  'False):\n'
+  '                                self._log(f"❌ Failed to load {local_model} inpainter", "error")\n'
+  '                                poll_timeout = 0\n'
+  '\n',
+  '                        pool_key = (local_model, os.path.abspath(os.path.normpath(resolved_model_path)))\n'
+  '                        if not _load_inpainter_if_no_pool(self, local_model, pool_key):\n'
+  '                            poll_timeout = 0\n'
+  '\n'),
+ ('                    from local_inpainter import LocalInpainter\n'
+  '                    print(f"[INPAINT_SYNC] Downloading {local_model} model...")\n'
+  '                    temp_inp = LocalInpainter()\n',
+  '                    from local_inpainter import LocalInpainter\n'
+  '                    print(f"[INPAINT_SYNC] Locating {local_model} model (downloads it only if '
+  'missing)...")\n'
+  '                    temp_inp = LocalInpainter()\n'),
+ ('                    poll_timeout = 0 if is_custom_image_edit else 60  # Endpoint-backed edit can '
+  'fake-load immediately\n'
+  '                    poll_interval = 0.5  # Check every 500ms\n',
+  '                    poll_timeout = 0 if is_custom_image_edit else 60  # Endpoint-backed edit can '
+  'fake-load immediately\n'
+  '                    # No preload filling the pool (e.g. Glossarion Mobile): load one now, do not wait 60 '
+  's\n'
+  '                    if not is_custom_image_edit and not _load_inpainter_if_no_pool(self, local_model, '
+  'key):\n'
+  '                        poll_timeout = 0\n'
+  '                    poll_interval = 0.5  # Check every 500ms\n'),
+ ('            try:\n'
+  '                print(f"[PRELOAD_INPAINTER] Downloading {local_model} model for preloading...")\n'
+  '                from local_inpainter import LocalInpainter\n',
+  '            try:\n'
+  '                print(f"[PRELOAD_INPAINTER] Locating {local_model} model for preloading (downloads it '
+  'only if missing)...")\n'
+  '                from local_inpainter import LocalInpainter\n')]
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -1197,6 +1265,17 @@ APPROVED = (
             "src/TransateKRtoEN.py": [_NAME_CHECK_WORKER_QA],
         },
         # new keys: nothing recorded before they existed changes value
+        "values": {},
+    },
+    {
+        "date": "2026-10-23",
+        "what": "Manga Translate: with no preload filling the inpainter pool (Glossarion Mobile, or a model "
+                "switched after startup) the concurrent inpainting loads one right away instead of waiting 60 s "
+                "('Waiting for preloaded inpainter...'); Clean shares the check; 'Locating <model> model' "
+                "replaces the 'Downloading <model> model' line logged when the model was already cached",
+        "source": {
+            "src/ImageRenderer.py": _INPAINT_NO_POOL_SYNC,
+        },
         "values": {},
     },
 )

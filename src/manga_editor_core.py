@@ -1505,6 +1505,21 @@ def _load_inpainter_into_pool(self, local_model: str, resolved_model_path: str, 
     return new_inpainter
 
 
+def _load_inpainter_if_no_pool(self, local_model: str, key) -> bool:
+    """No pool record for *key* means no preload is filling it (none ran for this model: Glossarion
+    Mobile, or the model was switched after the startup preload). Load one into the pool now instead of
+    polling a pool nothing will fill. False when that load failed."""
+    from manga_translator import MangaTranslator
+    with MangaTranslator._inpaint_pool_lock:
+        if key in MangaTranslator._inpaint_pool:
+            return True
+    self._log(f"📥 Loading {local_model} inpainter...", "info")
+    if _load_inpainter_into_pool(self, local_model, key[1], key, False):
+        return True
+    self._log(f"❌ Failed to load {local_model} inpainter", "error")
+    return False
+
+
 def _run_clean_background(self, image_path: str, regions: list):
     """Run the actual cleaning process in background thread with explicit memory cleanup"""
     image = None  # Initialize for cleanup in finally block
@@ -1684,7 +1699,7 @@ def _run_clean_background(self, image_path: str, regions: list):
             if (not is_custom_image_edit) and (not resolved_model_path or not os.path.exists(resolved_model_path)):
                 try:
                     from local_inpainter import LocalInpainter
-                    self._log(f"📥 Downloading {local_model} model...", "info")
+                    self._log(f"🔎 Locating {local_model} model (downloads it only if missing)...", "info")
                     temp_inp = LocalInpainter()
                     resolved_model_path = temp_inp.download_jit_model(local_model)
                 except Exception as e:
@@ -1711,13 +1726,8 @@ def _run_clean_background(self, image_path: str, regions: list):
                     poll_timeout = 30  # 30 seconds
                     if not is_custom_image_edit:
                         pool_key = (local_model, os.path.abspath(os.path.normpath(resolved_model_path)))
-                        with MangaTranslator._inpaint_pool_lock:
-                            has_pool = pool_key in MangaTranslator._inpaint_pool
-                        if not has_pool:
-                            self._log(f"📥 Loading {local_model} inpainter...", "info")
-                            if not _load_inpainter_into_pool(self, local_model, pool_key[1], pool_key, False):
-                                self._log(f"❌ Failed to load {local_model} inpainter", "error")
-                                poll_timeout = 0
+                        if not _load_inpainter_if_no_pool(self, local_model, pool_key):
+                            poll_timeout = 0
 
                     # POLL for inpainter with timeout (same as translator initialization)
                     inpainter = None
@@ -2349,7 +2359,7 @@ def _run_inpainting_sync(
             if (not is_custom_image_edit) and (not resolved_model_path or not os.path.exists(resolved_model_path)):
                 try:
                     from local_inpainter import LocalInpainter
-                    print(f"[INPAINT_SYNC] Downloading {local_model} model...")
+                    print(f"[INPAINT_SYNC] Locating {local_model} model (downloads it only if missing)...")
                     temp_inp = LocalInpainter()
                     resolved_model_path = temp_inp.download_jit_model(local_model)
                 except Exception as e:
@@ -2376,6 +2386,9 @@ def _run_inpainting_sync(
                     # This waits for preloading to complete instead of creating a new instance
                     inpainter = None
                     poll_timeout = 0 if is_custom_image_edit else 60  # Endpoint-backed edit can fake-load immediately
+                    # No preload filling the pool (e.g. Glossarion Mobile): load one now, do not wait 60 s
+                    if not is_custom_image_edit and not _load_inpainter_if_no_pool(self, local_model, key):
+                        poll_timeout = 0
                     poll_interval = 0.5  # Check every 500ms
                     start_time = time.time()
                     attempt = 0
@@ -5638,7 +5651,7 @@ def _preload_shared_inpainter(self):
         # Try to download if path not found
         if (not is_custom_image_edit) and (not model_path or not os.path.exists(model_path)):
             try:
-                print(f"[PRELOAD_INPAINTER] Downloading {local_model} model for preloading...")
+                print(f"[PRELOAD_INPAINTER] Locating {local_model} model for preloading (downloads it only if missing)...")
                 from local_inpainter import LocalInpainter
                 temp_inpainter = LocalInpainter()
                 model_path = temp_inpainter.download_jit_model(local_model)
@@ -8860,6 +8873,7 @@ EDITOR_FUNCTIONS = (
     '_on_clean_image_clicked',
     '_extract_regions_from_preview',
     '_load_inpainter_into_pool',
+    '_load_inpainter_if_no_pool',
     '_run_clean_background',
     '_get_detection_config',
     '_get_inpaint_config',
