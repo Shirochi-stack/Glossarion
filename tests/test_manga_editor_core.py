@@ -2008,3 +2008,48 @@ def test_editor_google_ocr_uses_rest_without_the_sdk(tmp_path, monkeypatch, fake
     assert [(t['region_index'], t['text']) for t in texts] == [(0, 'konnichiwa'), (1, 'sekai')]
     assert Handler.requests and Handler.requests[0][0].startswith("/v1/images:annotate")
     assert os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') == str(creds)
+
+
+def test_batch_run_leaves_the_editor_boxes(tmp_path):
+    """A Files batch Start (manga_runner) only reports regions through the translator's
+    ``ocr_export_callback`` (MangaOcrSessionMixin._record_automatic_ocr_page): it also writes the
+    page's editor state, so the editor draws the rectangles with their OCR and translations when the
+    page is opened afterwards (mobile EditorTab.after_batch), like a page run through Translate."""
+    import types
+    import manga_env
+    import manga_ocr_io
+
+    page = make_page(tmp_path / "pages" / "001.png")
+    session = core.MangaEditorSession(state_file=str(tmp_path / "state.json"), image_paths=[page])
+    session.open_page(page)  # the page is open in the editor (no boxes) while the batch runs
+    record = manga_env.MangaOcrSessionMixin._record_automatic_ocr_page
+    regions = [{'text': 'konnichiwa', 'translated_text': None, 'bounding_box': [10, 20, 60, 30]},
+               {'text': 'sekai', 'translated_text': None, 'bounding_box': [15, 80, 50, 25]}]
+    translated = [dict(r, translated_text=t) for r, t in zip(regions, ('Hello there', 'World'))]
+
+    # no automatic OCR document (its folder could not be made): the state is still written
+    runner = types.SimpleNamespace(image_state_manager=session.image_state_manager, _log=lambda *a: None)
+    record(runner, page, regions)
+    record(runner, page, translated)
+    boxes = session.open_page(page)['boxes']
+    assert [(b['x'], b['y'], b['width'], b['height']) for b in boxes] == [(10, 20, 60, 30), (15, 80, 50, 25)]
+    assert [(b['ocr_text'], b['translation']) for b in boxes] == [('konnichiwa', 'Hello there'), ('sekai', 'World')]
+
+    # with the automatic document: a late OCR-only save keeps the translations of the same boxes
+    document = manga_ocr_io.create_document([], workflow='automatic', source_root=str(tmp_path))
+    runner = types.SimpleNamespace(
+        image_state_manager=session.image_state_manager, _log=lambda *a: None,
+        _automatic_ocr_document=document, _automatic_ocr_export_path=str(tmp_path / 'ocr.json'),
+        _ocr_io_lock=threading.Lock(), selected_files=[page], _current_manga_processing_files=lambda: [page])
+    record(runner, page, translated)
+    record(runner, page, regions)
+    boxes = session.open_page(page)['boxes']
+    assert [(b['ocr_text'], b['translation']) for b in boxes] == [('konnichiwa', 'Hello there'), ('sekai', 'World')]
+    # (no document) new boxes without translations drop the old translations; a page with no regions
+    # keeps its state
+    runner = types.SimpleNamespace(image_state_manager=session.image_state_manager, _log=lambda *a: None)
+    moved = [dict(regions[0], bounding_box=[12, 22, 60, 30])]
+    record(runner, page, moved)
+    record(runner, page, [])
+    boxes = session.open_page(page)['boxes']
+    assert [(b['x'], b['ocr_text'], b['translation']) for b in boxes] == [(12, 'konnichiwa', '')]

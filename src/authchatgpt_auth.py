@@ -414,16 +414,26 @@ def _frame_script(config):
 
 #: Seconds a phone gets for each page wait (a cold WebView, a busy UI loop, a Cloudflare check).
 _DRIVER_TIMEOUT = 90
+#: Cloudflare's check page in any language: its title is translated (the phone's language),
+#: its options object is not.
+_DRIVER_CHALLENGE = "(" + _CHALLENGE + " || !!window._cf_chl_opt)"
 #: The chat iframe's app is gone for good: a finished chatgpt.com document in a window without
 #: the hook. Cloudflare's check, once passed, reloads the frame into a new window (the hook was
 #: on the first one); chatgpt.com may also reload itself (a new build). Waiting cannot fix it.
 _FRAME_LOST = ("!window.__glossarionGPT && location.href !== 'about:blank' && "
-               "document.readyState === 'complete' && " + _CHALLENGE.replace("===", "!=="))
+               "document.readyState === 'complete' && !" + _DRIVER_CHALLENGE)
+#: Mobile tabs load chatgpt.com one at a time (see ``_driver_loading``).
+_DRIVER_LOADING = threading.Lock()
 
 
-def _driver_wait(wrapped, predicate, cancel_check):
+def _not_loaded(why):
+    """``_NOT_LOADED`` naming the wait that failed, so the log says which one."""
+    return _NOT_LOADED.replace(".", f" ({why}).", 1)
+
+
+def _driver_wait(wrapped, predicate, cancel_check, why):
     cdp_browser.wait_until(wrapped, predicate, timeout=_DRIVER_TIMEOUT, check=_check, error=AuthChatGPTError,
-                           cancel_check=cancel_check, message=_NOT_LOADED,
+                           cancel_check=cancel_check, message=_not_loaded(f"{why} within {_DRIVER_TIMEOUT:g} s"),
                            tolerate=("browser_error", "timeout"), interval=.3)
 
 
@@ -435,6 +445,7 @@ def _driver_load(wrapped, url, cancel_check):
     old chatgpt.com document (the same URL reloaded, or the host page after the app) is already
     loaded, so without the mark it passed for the new one and scripts ran on a page about to go.
     """
+    what = url.replace(BASE_URL, "chatgpt.com")
     mark = uuid.uuid4().hex
     try:
         wrapped.evaluate(f"(window.__glossarionNav = '{mark}', true)")
@@ -450,25 +461,53 @@ def _driver_load(wrapped, url, cancel_check):
             raise AuthChatGPTError("AuthChatGPT: translation stopped by user", "cancelled") from exc
         except Exception as exc:  # the UI loop did not start the navigation in time
             if attempt:
-                raise AuthChatGPTError(_NOT_LOADED, "browser_error") from exc
+                raise AuthChatGPTError(_not_loaded(f"the in-app browser did not open {what}: {str(exc)[:200]}"),
+                                       "browser_error") from exc
             continue
         try:
-            _driver_wait(wrapped, loaded, cancel_check)
+            _driver_wait(wrapped, loaded, cancel_check, f"{what} did not load")
             return
         except AuthChatGPTError as exc:
             if exc.error_type == "cancelled" or attempt:
                 raise
 
 
+def _driver_insert_frame(wrapped, config):
+    wrapped.framed = False
+    wrapped.evaluate(_frame_script(config))
+    wrapped.framed = True
+
+
+def _driver_frame_gone(wrapped):
+    """True when the host page has no chat iframe (asked of the top page itself)."""
+    framed, wrapped.framed = wrapped.framed, False
+    try:
+        return wrapped.evaluate(f"!{_FRAME}") is True
+    except AuthChatGPTError as exc:
+        if exc.error_type == "cancelled":
+            raise
+        return False
+    finally:
+        wrapped.framed = framed
+
+
 def _driver_frame_ready(wrapped, config, cancel_check):
     """Waits until the chat iframe runs the hooked app. A frame whose app lost the hook, or
-    that is still not ready at the deadline, is inserted again once before failing."""
+    that is still not ready at the deadline, is inserted again once before failing.
+
+    A frame missing from the host page is not the frame's failure: the host document itself
+    was replaced (Flet builds a hidden WebView again when the app changes screens, and the new
+    one loads its ``url``, the bare host page). Probes through the frame then only answer None,
+    so the wait ran out its whole deadline and spent the frame's one recovery on it. The host
+    page is loaded again and the frame inserted at once instead, within the same deadline."""
     recovered = False
     deadline = time.monotonic() + _DRIVER_TIMEOUT
     while True:
         _check(cancel_check)
+        ready = None
         try:
-            if wrapped.evaluate(_READY):
+            ready = wrapped.evaluate(_READY)
+            if ready:
                 return
             lost = wrapped.evaluate(_FRAME_LOST) is True
         except AuthChatGPTError as exc:
@@ -477,12 +516,16 @@ def _driver_frame_ready(wrapped, config, cancel_check):
             lost = False
         if lost or time.monotonic() >= deadline:
             if recovered:
-                raise AuthChatGPTError(_NOT_LOADED, "browser_error")
+                raise AuthChatGPTError(_not_loaded(
+                    "the chat frame lost its hook again" if lost
+                    else f"the chat frame was not ready within {_DRIVER_TIMEOUT:g} s"), "browser_error")
             recovered = True
-            wrapped.framed = False
-            wrapped.evaluate(_frame_script(config))
-            wrapped.framed = True
+            _driver_insert_frame(wrapped, config)
             deadline = time.monotonic() + _DRIVER_TIMEOUT
+        elif ready is None and _driver_frame_gone(wrapped):
+            wrapped.framed = False
+            _driver_load(wrapped, _HOST_URL, cancel_check)
+            _driver_insert_frame(wrapped, config)
         time.sleep(.3)
 
 
@@ -492,13 +535,33 @@ def _driver_frame(wrapped, config, cancel_check):
     if not wrapped.evaluate("document.cookie.indexOf('oai-did=') >= 0"):
         # A first visit: chatgpt.com sets up its device cookies on a top-level page load.
         _driver_load(wrapped, BASE_URL + "/", cancel_check)
-        _driver_wait(wrapped, "document.cookie.indexOf('oai-did=') >= 0", cancel_check)
+        _driver_wait(wrapped, "document.cookie.indexOf('oai-did=') >= 0", cancel_check,
+                     "chatgpt.com set no device cookie")
         _driver_load(wrapped, _HOST_URL, cancel_check)
     wrapped.evaluate(_APP_COOKIE_JS)
-    wrapped.evaluate(_frame_script(config))
-    wrapped.framed = True
+    _driver_insert_frame(wrapped, config)
     _driver_frame_ready(wrapped, config, cancel_check)
     wrapped.evaluate("window.__glossarionGPT.watch()")
+
+
+@contextmanager
+def _driver_loading(cancel_check):
+    """One mobile tab loads chatgpt.com at a time; loaded tabs still chat in parallel.
+
+    The in-app WebViews share one cookie jar and one renderer. Parallel requests (glossary
+    extraction, batch translation) opened their tabs together, so every cold tab met
+    Cloudflare's check on its own (a passed check reloads the chat frame without its hook,
+    spending the frame's one recovery in ``_driver_frame_ready``), each ran the first-visit
+    cookie loads, and several chatgpt.com apps started at once on one phone renderer. One more
+    hiccup then failed the request ("did not finish loading") until a later retry found the
+    cookies in place. Loaded one after another, the first tab earns the cookies and the next
+    ones load with them."""
+    while not _DRIVER_LOADING.acquire(timeout=.2):
+        _check(cancel_check)
+    try:
+        yield
+    finally:
+        _DRIVER_LOADING.release()
 
 
 @contextmanager
@@ -516,24 +579,26 @@ def _driver_tab(config, cancel_check=None):
     page = driver.open_page(owner=BROWSER_OWNER, cancel_check=cancelled)
     try:
         wrapped = _DriverPage(page)
-        if config.get("token"):
-            _driver_frame(wrapped, config, cancel_check)
-        else:
-            # Logged out, the app runs as the page itself (in the iframe chatgpt.com refuses a
-            # logged-out turn): the hook is added once it started, which logged-out chat allows.
-            _driver_load(wrapped, BASE_URL + "/", cancel_check)
-            if not wrapped.evaluate("document.cookie.indexOf('__Secure-next-auth.session-token=') >= 0"):
-                wrapped.evaluate(_APP_COOKIE_JS)
+        with _driver_loading(cancel_check):
+            if config.get("token"):
+                _driver_frame(wrapped, config, cancel_check)
+            else:
+                # Logged out, the app runs as the page itself (in the iframe chatgpt.com refuses a
+                # logged-out turn): the hook is added once it started, which logged-out chat allows.
                 _driver_load(wrapped, BASE_URL + "/", cancel_check)
-            composer = "!!document.querySelector('#prompt-textarea')"
-            try:
-                _driver_wait(wrapped, composer, cancel_check)
-            except AuthChatGPTError as exc:
-                if exc.error_type == "cancelled":
-                    raise
-                _driver_load(wrapped, BASE_URL + "/", cancel_check)  # one reload before failing
-                _driver_wait(wrapped, composer, cancel_check)
-            wrapped.evaluate("(" + _hook(config) + ", true)")
+                if not wrapped.evaluate("document.cookie.indexOf('__Secure-next-auth.session-token=') >= 0"):
+                    wrapped.evaluate(_APP_COOKIE_JS)
+                    _driver_load(wrapped, BASE_URL + "/", cancel_check)
+                composer = "!!document.querySelector('#prompt-textarea')"
+                try:
+                    _driver_wait(wrapped, composer, cancel_check, "the ChatGPT composer did not appear")
+                except AuthChatGPTError as exc:
+                    if exc.error_type == "cancelled":
+                        raise
+                    _driver_load(wrapped, BASE_URL + "/", cancel_check)  # one reload before failing
+                    _driver_wait(wrapped, composer, cancel_check,
+                                 "the ChatGPT composer did not appear after a reload")
+                wrapped.evaluate("(" + _hook(config) + ", true)")
         yield wrapped
     finally:
         page.close()

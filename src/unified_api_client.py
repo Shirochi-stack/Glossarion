@@ -17838,6 +17838,17 @@ class UnifiedClient:
                 self._debug_log(f"📤 [{thread_name}] {label} ({ctx}) API call in progress{_think}")
 
 
+    def _wait_before_internal_retry(self) -> bool:
+        """A provider loop's resend is a new API call: it waits the API call delay (a fresh draw
+        from its range) from when the failed call ended, in the shared pacing queue and with the
+        same Queued/in-progress logs as any send. False when a stop ended the wait."""
+        try:
+            self._update_stagger_timestamp()
+            self._apply_api_call_stagger()
+            return True
+        except UnifiedClientError:
+            return False
+
     def _update_stagger_timestamp(self):
         """Push stagger reference to now (end of call) so the next call
         waits SEND_INTERVAL_SECONDS from when this call FINISHED,
@@ -17847,7 +17858,11 @@ class UnifiedClient:
                 with self.__class__._api_stagger_lock:
                     if not hasattr(self.__class__, '_last_api_call_start_by_scope'):
                         self.__class__._last_api_call_start_by_scope = {}
-                    self.__class__._last_api_call_start_by_scope[self._get_api_stagger_scope()] = time.time()
+                    # never earlier than a slot another queued thread already reserved
+                    scope = self._get_api_stagger_scope()
+                    self.__class__._last_api_call_start_by_scope[scope] = max(
+                        self.__class__._last_api_call_start_by_scope.get(scope, 0.0), time.time()
+                    )
         except Exception:
             pass
 
@@ -28243,7 +28258,7 @@ class UnifiedClient:
                     continue
                 last_error = exc
                 if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
+                    self._wait_before_internal_retry()
                     continue
 
             except Exception as exc:
@@ -28281,7 +28296,7 @@ class UnifiedClient:
 
                 last_error = exc
                 if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
+                    self._wait_before_internal_retry()
                     continue
 
         raise UnifiedClientError(
@@ -28701,7 +28716,7 @@ class UnifiedClient:
 
                 last_error = exc
                 if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
+                    self._wait_before_internal_retry()
                     continue
 
             except Exception as exc:
@@ -28713,7 +28728,7 @@ class UnifiedClient:
 
                 last_error = exc
                 if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
+                    self._wait_before_internal_retry()
                     continue
 
         raise UnifiedClientError(
@@ -28937,7 +28952,7 @@ class UnifiedClient:
 
                 last_error = exc
                 if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
+                    self._wait_before_internal_retry()
                     continue
 
             except UnifiedClientError as uce:
@@ -28952,7 +28967,7 @@ class UnifiedClient:
                     raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
                 last_error = uce
                 if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
+                    self._wait_before_internal_retry()
                     continue
 
             except Exception as exc:
@@ -28962,7 +28977,7 @@ class UnifiedClient:
                     raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
                 last_error = exc
                 if attempt < max_retries - 1:
-                    time.sleep(self._get_send_interval())
+                    self._wait_before_internal_retry()
                     continue
 
         raise UnifiedClientError(f"{label} request failed after {max_retries} attempts: {last_error}", error_type="api_error")
@@ -29801,7 +29816,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"⚠️ Antigravity error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.1):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError(
                             "Antigravity: Translation stopped by user",
                             error_type="cancelled",
@@ -29818,7 +29833,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"⚠️ Antigravity error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.1):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError(
                             "Antigravity: Translation stopped by user",
                             error_type="cancelled",
@@ -29971,7 +29986,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"Gemini Free error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError("Gemini Free: Translation stopped by user", error_type="cancelled")
                     continue
 
@@ -29984,7 +29999,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"Gemini Free error (attempt {attempt+1}/{max_retries}): {exc}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError("Gemini Free: Translation stopped by user", error_type="cancelled")
                     continue
 
@@ -30082,7 +30097,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"Opera Aria error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError(
                             "Opera Aria: Translation stopped by user",
                             error_type="cancelled"
@@ -30539,7 +30554,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"AuthND error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError("AuthND: Translation stopped by user", error_type="cancelled")
                     continue
 
@@ -30552,7 +30567,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"AuthND error (attempt {attempt+1}/{max_retries}): {exc}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError("AuthND: Translation stopped by user", error_type="cancelled")
                     continue
 
@@ -30941,7 +30956,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"⚠️ {label} error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError("AuthZA: Translation stopped by user", error_type="cancelled")
                     continue
 
@@ -30955,7 +30970,7 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"⚠️ AuthZA error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                    if not self._wait_before_internal_retry():
                         raise UnifiedClientError("AuthZA: Translation stopped by user", error_type="cancelled")
                     continue
 

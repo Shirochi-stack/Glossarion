@@ -452,6 +452,123 @@ _DELAY_SCANNER = [('@contextmanager\n'
   '                    )\n'
   '\n')]
 
+# 2026-10-22 Clean and Translate load the selected local inpainter when no preload filled its pool
+# (the model was switched after the startup preload): Clean polled for 30 s a pool nothing would fill,
+# then failed. _load_inpainter_into_pool (Translate's last-resort load, lifted out) is shared by both.
+_POOL_LOAD_HELPER = (
+    '    return regions\n'
+    'def _run_clean_background(self, image_path: str, regions: list):\n',
+    '    return regions\n'
+    'def _load_inpainter_into_pool(self, local_model: str, resolved_model_path: str, key, is_custom_image_edit: bool):\n'
+    '    """Load a new inpainter and add it to the shared pool under *key* as a spare (not checked out).\n'
+    '    Used when no preload is filling the pool, e.g. the model was switched after startup preload."""\n'
+    '    from manga_translator import MangaTranslator\n'
+    '    from local_inpainter import LocalInpainter\n'
+    '    new_inpainter = LocalInpainter()\n'
+    '    try:\n'
+    "        if is_custom_image_edit and hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):\n"
+    '            new_inpainter.config.update(self.main_gui.config)\n'
+    "            default_endpoint = ''\n"
+    '            use_custom_openai = bool(\n'
+    "                getattr(self.main_gui, 'use_custom_openai_endpoint_var', False)\n"
+    "                or self.main_gui.config.get('use_custom_openai_endpoint', False)\n"
+    '            )\n'
+    '            if use_custom_openai:\n'
+    "                default_endpoint = self.main_gui.config.get('openai_base_url', '')\n"
+    "                default_endpoint = default_endpoint or getattr(self.main_gui, 'openai_base_url_var', '') or ''\n"
+    "            new_inpainter.config['custom_image_edit_default_endpoint'] = default_endpoint\n"
+    "            new_inpainter.config['openai_base_url'] = default_endpoint\n"
+    "            new_inpainter.config['use_custom_openai_endpoint'] = use_custom_openai\n"
+    '    except Exception:\n'
+    '        pass\n'
+    '    if not new_inpainter.load_model(local_model, resolved_model_path):\n'
+    '        return None\n'
+    '    with MangaTranslator._inpaint_pool_lock:\n'
+    '        rec = MangaTranslator._inpaint_pool.get(key)\n'
+    '        if not rec:\n'
+    '            rec = MangaTranslator._inpaint_pool[key] = {\n'
+    "                'spares': [],\n"
+    "                'checked_out': [],\n"
+    "                'model_type': local_model,\n"
+    "                'model_path': resolved_model_path\n"
+    '            }\n'
+    "        rec.setdefault('spares', []).append(new_inpainter)\n"
+    "        rec.setdefault('checked_out', [])\n"
+    '    return new_inpainter\n'
+    'def _run_clean_background(self, image_path: str, regions: list):\n')
+_POOL_LOAD_CLEAN = (
+    '                    # POLL for inpainter with timeout (same as translator initialization)\n'
+    '                    inpainter = None\n'
+    '                    poll_timeout = 30  # 30 seconds\n',
+    '                    # No pool for this model (no preload ran for it, e.g. the model was switched after\n'
+    '                    # startup): load one into the pool now instead of polling a pool nothing will fill.\n'
+    '                    poll_timeout = 30  # 30 seconds\n'
+    '                    if not is_custom_image_edit:\n'
+    '                        pool_key = (local_model, os.path.abspath(os.path.normpath(resolved_model_path)))\n'
+    '                        with MangaTranslator._inpaint_pool_lock:\n'
+    '                            has_pool = pool_key in MangaTranslator._inpaint_pool\n'
+    '                        if not has_pool:\n'
+    '                            self._log(f"📥 Loading {local_model} inpainter...", "info")\n'
+    '                            if not _load_inpainter_into_pool(self, local_model, pool_key[1], pool_key, False):\n'
+    '                                self._log(f"❌ Failed to load {local_model} inpainter", "error")\n'
+    '                                poll_timeout = 0\n'
+    '\n'
+    '                    # POLL for inpainter with timeout (same as translator initialization)\n'
+    '                    inpainter = None\n')
+# 2026-10-22 a batch Start leaves the manual editor's boxes: the automatic OCR save also writes the
+# page's editor state (manga_env._record_page_editor_state)
+_BATCH_EDITOR_STATE_NO_DOC = (
+    "        if not document or not output_path:\n            return\n",
+    "        if not document or not output_path:\n"
+    "            _record_page_editor_state(self, image_path, manga_ocr_io.make_page(image_path, regions, index=1))\n"
+    "            return\n",
+)
+_BATCH_EDITOR_STATE_DOC = (
+    "            manga_ocr_io.write_document(output_path, document)\n        translated_count = sum(\n",
+    "            manga_ocr_io.write_document(output_path, document)\n"
+    "        _record_page_editor_state(self, image_path, page)\n        translated_count = sum(\n",
+)
+
+_POOL_LOAD_SYNC = (
+    '                        new_inpainter = LocalInpainter()\n'
+    '                        try:\n'
+    "                            if is_custom_image_edit and hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):\n"
+    '                                new_inpainter.config.update(self.main_gui.config)\n'
+    "                                default_endpoint = ''\n"
+    '                                use_custom_openai = bool(\n'
+    "                                    getattr(self.main_gui, 'use_custom_openai_endpoint_var', False)\n"
+    "                                    or self.main_gui.config.get('use_custom_openai_endpoint', False)\n"
+    '                                )\n'
+    '                                if use_custom_openai:\n'
+    "                                    default_endpoint = self.main_gui.config.get('openai_base_url', '')\n"
+    "                                    default_endpoint = default_endpoint or getattr(self.main_gui, 'openai_base_url_var', '') or ''\n"
+    "                                new_inpainter.config['custom_image_edit_default_endpoint'] = default_endpoint\n"
+    "                                new_inpainter.config['openai_base_url'] = default_endpoint\n"
+    "                                new_inpainter.config['use_custom_openai_endpoint'] = use_custom_openai\n"
+    '                        except Exception:\n'
+    '                            pass\n'
+    '                        if new_inpainter.load_model(local_model, resolved_model_path):\n'
+    '                            with MangaTranslator._inpaint_pool_lock:\n'
+    '                                rec = MangaTranslator._inpaint_pool.get(key)\n'
+    '                                if not rec:\n'
+    '                                    MangaTranslator._inpaint_pool[key] = {\n'
+    "                                        'spares': [],\n"
+    "                                        'checked_out': [],\n"
+    "                                        'model_type': local_model,\n"
+    "                                        'model_path': resolved_model_path\n"
+    '                                    }\n'
+    '                                    rec = MangaTranslator._inpaint_pool[key]\n'
+    "                                rec['spares'].append(new_inpainter)\n"
+    "                                rec['checked_out'].append(new_inpainter)\n"
+    '                                inpainter = new_inpainter\n',
+    '                        new_inpainter = _load_inpainter_into_pool(self, local_model, resolved_model_path, key, is_custom_image_edit)\n'
+    '                        if new_inpainter:\n'
+    '                            with MangaTranslator._inpaint_pool_lock:\n'
+    "                                MangaTranslator._inpaint_pool[key]['checked_out'].append(new_inpainter)\n"
+    '                            inpainter = new_inpainter\n')
+
+
+
 APPROVED = (
     {
         "date": "2026-10-13",
@@ -675,6 +792,25 @@ APPROVED = (
             "src/async_api_processor.py": [_DELAY_ASYNC],
             "src/QA_Scanner_GUI.py": _DELAY_QA_GUI,
             "src/scan_html_folder.py": _DELAY_SCANNER,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-10-22",
+        "what": "Clean and Translate load the selected local inpainter when no preload filled its pool (model "
+                "switched after the startup preload) instead of polling 30 s and failing (Clean)",
+        "source": {
+            "src/ImageRenderer.py": [_POOL_LOAD_HELPER, _POOL_LOAD_CLEAN, _POOL_LOAD_SYNC],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-10-22",
+        "what": "A Files batch Start leaves the manual editor's boxes: the automatic OCR save after detection / "
+                "translation also writes the page's editor state (detection boxes, OCR and translations, as an "
+                "OCR import does), so the editor draws the rectangles when the page is opened",
+        "source": {
+            "src/manga_integration.py": [_BATCH_EDITOR_STATE_NO_DOC, _BATCH_EDITOR_STATE_DOC],
         },
         "values": {},
     },

@@ -3063,15 +3063,15 @@ def test_editor_keeps_the_box_selected_with_handles_a_move_tab_and_live_text(iso
         tab.refresh()
         handles = [s for s in tab.canvas.shapes if isinstance(s, cv.Circle)]
         assert [(h.x, h.y) for h in handles] == [(20, 40), (100, 160)]
-        # the panel floats over the viewer, right under the box (bottom 80 px -> 160 dp + page top 50,
-        # + the 6 dp gap): the page keeps its size
+        # the panel is pinned to the viewer's bottom (owner 2026-10-22), over the viewer: the page
+        # keeps its size; a box clear of the panel (bottom 80 px -> 160 dp + page top 50) does not pan
         assert tab.panel_holder.visible and tab.panel_holder.content is tab.panel.control
-        assert tab.viewer_area.controls == [tab.viewer_holder, tab.panel_holder] and tab.panel_side == "below"
-        assert tab.panel_holder.top == 216 and tab.panel_holder.bottom is None
-        tab.selected = 1  # low on the page: still under it, the page scrolls up to make room
+        assert tab.viewer_area.controls == [tab.viewer_holder, tab.panel_holder] and tab.panel_side == "bottom"
+        assert tab.panel_holder.bottom == 0 and tab.panel_holder.top is None and tab.view_transform.ty == 0
+        tab.selected = 1  # low on the page: the page scrolls up so the box clears the panel
         tab.refresh()
-        assert tab.panel_side == "below" and tab.panel_holder.bottom is None
-        assert tab.view_transform.ty == -116 and tab.panel_holder.top == 300
+        assert tab.panel_side == "bottom" and tab.panel_holder.bottom == 0 and tab.panel_holder.top is None
+        assert tab.view_transform.ty == -116  # box bottom 410 - 116 + 6 gap == 500 - 200 (the panel's top)
         assert (tab.stack.width, tab.stack.height) == (200, 400)
         tab.view_transform.ty = 0.0  # (the rest of this test taps in unpanned view coordinates)
         # a tap or a press beside every box keeps the selection; another box takes it

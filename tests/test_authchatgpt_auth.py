@@ -521,7 +521,8 @@ def test_every_mobile_script_is_one_expression(tmp_path, monkeypatch):
 
 class NavPage:
     """A mobile page whose navigations commit a new document only a few polls after ``load``
-    (a real WebView keeps the old document meanwhile). Frame scripts answer from ``frames``."""
+    (a real WebView keeps the old document meanwhile). Frame scripts answer from ``frames``;
+    a frame state with ``gone`` is a host page rebuilt without the frame (frame scripts get None)."""
 
     def __init__(self, frames=()):
         self.doc = {"id": 0, "url": None, "mark": None}
@@ -531,6 +532,7 @@ class NavPage:
         self.frames = list(frames)  # per inserted frame: a callable(poll) -> {"ready", "lost"}
         self.inserted = 0
         self.frame_polls = 0
+        self.gone = False
         self.loaded = []
         self.closed = False
 
@@ -549,11 +551,16 @@ class NavPage:
         if framed:
             self.frame_polls += 1
             state = self.frames[self.inserted - 1](self.frame_polls) if self.inserted else {}
+            if state.get("gone"):
+                self.gone = True
+                return None
             if inner == gpt._READY:
                 return state.get("ready", False)
             if inner == gpt._FRAME_LOST:
                 return state.get("lost", False)
             return True
+        if inner == "!" + gpt._FRAME:
+            return self.gone
         if inner.startswith("(window.__glossarionNav = '"):
             self.doc["mark"] = inner.split("'")[1]
             return True
@@ -569,6 +576,7 @@ class NavPage:
         if "createElement('iframe')" in inner:
             self.inserted += 1
             self.frame_polls = 0
+            self.gone = False
             return True
         if "__glossarionGPT = " in inner:
             self.hooked_doc = self.doc["id"]
@@ -628,21 +636,76 @@ def test_mobile_frame_gets_one_recovery_then_fails(monkeypatch, no_sleep):
     page = NavPage(frames=[lambda poll: {}, lambda poll: {}])
     mobile_driver(monkeypatch, page)
     monkeypatch.setattr(gpt, "_DRIVER_TIMEOUT", 0.05)
-    with pytest.raises(gpt.AuthChatGPTError, match="did not finish loading"):
+    with pytest.raises(gpt.AuthChatGPTError, match=r"did not finish loading \(the chat frame was not ready"):
         with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
             pass
     assert page.inserted == 2 and page.closed
     lost = gpt._FRAME_LOST
     assert "__glossarionGPT" in lost and "about:blank" in lost and "Just a moment" in lost
+    assert "_cf_chl_opt" in lost  # Cloudflare's check in the phone's language is not a lost frame
 
 
 def test_mobile_lost_frame_twice_fails_without_waiting(monkeypatch, no_sleep):
     page = NavPage(frames=[lambda poll: {"lost": True}, lambda poll: {"lost": True}])
     mobile_driver(monkeypatch, page)
-    with pytest.raises(gpt.AuthChatGPTError, match="did not finish loading"):
+    with pytest.raises(gpt.AuthChatGPTError, match=r"did not finish loading \(the chat frame lost its hook again\)"):
         with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
             pass
     assert page.inserted == 2
+
+
+def test_mobile_host_page_rebuilt_is_loaded_again_without_spending_the_recovery(monkeypatch, no_sleep):
+    """A screen change rebuilds the hidden WebView, which loads the bare host page: the frame is
+    gone and probes through it answer None. The host page is loaded again and framed at once,
+    and the frame keeps its one recovery for a hook lost later (Cloudflare's check)."""
+    page = NavPage(frames=[lambda poll: {"gone": poll > 2}, lambda poll: {"lost": poll > 2},
+                           lambda poll: {"ready": poll > 2}])
+    mobile_driver(monkeypatch, page)
+    monkeypatch.setattr(gpt, "_DRIVER_TIMEOUT", 5)
+    with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
+        pass
+    assert page.loaded == [gpt._HOST_URL] * 2 and page.inserted == 3
+
+
+def test_mobile_page_load_failure_names_the_wait(monkeypatch, no_sleep):
+    page = DriverPage()
+    page.load = lambda url: (_ for _ in ()).throw(RuntimeError("the in-app browser did not open the page within 20 s"))
+    mobile_driver(monkeypatch, page)
+    with pytest.raises(gpt.AuthChatGPTError, match=r"loading \(the in-app browser did not open chatgpt.com/robots.txt"):
+        with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
+            pass
+
+
+def test_mobile_tabs_load_one_at_a_time_then_chat_in_parallel(monkeypatch):
+    """Parallel requests (glossary extraction) share the WebViews' cookies: tabs that all loaded
+    at once each met Cloudflare's check and spent their frame recovery on it."""
+    import threading
+    import time
+
+    mobile_driver(monkeypatch, DriverPage())
+    loading, overlap = [], []
+
+    def frame(wrapped, config, cancel_check):
+        loading.append(1)
+        overlap.append(len(loading))
+        time.sleep(.05)
+        loading.pop()
+    monkeypatch.setattr(gpt, "_driver_frame", frame)
+    together = threading.Barrier(3, timeout=10)
+    errors = []
+
+    def request():
+        try:
+            with gpt._open_tab({"token": "tok", "prompt": "p", "model": "auto", "temporary": True}):
+                together.wait()  # every loaded tab is open at the same time
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+    threads = [threading.Thread(target=request) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(15)
+    assert not errors and overlap == [1, 1, 1]
 
 
 class CdpCalls:
