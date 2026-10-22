@@ -257,6 +257,14 @@ def login(log_fn=print, cancel_check=None):
     log_fn("AuthDS: Browser session saved.")
 
 
+def logout(cancel_check=None):
+    """Forget the saved DeepSeek session: drop the page token in the profile and the marker."""
+    (profile_dir() / ".signed_in").unlink(missing_ok=True)
+    with _open_browser(visible=False, cancel_check=cancel_check) as page:
+        with _serialized(cancel_check, _login_gate):
+            page.evaluate("(() => {if (location.origin === 'https://chat.deepseek.com') localStorage.removeItem('userToken'); return true;})()")
+
+
 def _clear_page_token(page):
     # An expired token remains in localStorage. Remove it before interactive
     # re-login, otherwise the presence check would close the window immediately.

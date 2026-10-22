@@ -13179,6 +13179,31 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self.authgpt_login_btn.setEnabled(False)
 
     def _authds_login_clicked(self):
+        from authds_auth import has_session
+        # If already signed in, offer to log out (like ChatGPT's button)
+        if has_session():
+            reply = QMessageBox.question(
+                self, "DeepSeek Account",
+                "Currently signed in to DeepSeek.\n\nDo you want to log out?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self.authds_login_btn.setEnabled(False)
+            self.authds_login_btn.setText("⏳ Logging out…")
+
+            def logout_worker():
+                try:
+                    from authds_auth import logout
+                    logout()
+                    self._authds_login_result = "🔓 DeepSeek: Logged out"
+                except Exception as exc:
+                    self._authds_login_result = f"🔓 DeepSeek: Logged out locally ({exc})"
+                QMetaObject.invokeMethod(self, "_authds_login_finished", Qt.QueuedConnection)
+
+            threading.Thread(target=logout_worker, daemon=True).start()
+            return
+
         self.authds_login_btn.setEnabled(False)
         self.authds_login_btn.setText("⏳ Signing in…")
         self._authds_login_result = None
@@ -13210,7 +13235,7 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
             self.authds_login_btn.setToolTip(
                 "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
                 "Signed in to DeepSeek in the dedicated Chrome/Edge profile. "
-                "Click to open DeepSeek and check or redo the sign-in.</p></qt>"
+                "Click to log out.</p></qt>"
             )
             self.authds_login_btn.setStyleSheet(
                 "background-color: #28a745; color: white; font-weight: bold; "
