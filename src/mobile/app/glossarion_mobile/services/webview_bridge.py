@@ -74,6 +74,9 @@ POLL_SECONDS = 0.05
 #: The hidden pages never leave the web: app / store / local links are refused.
 PREVENT_LINKS = ("intent:", "market:", "file:", "content:")
 CANCELLED = "stream cancelled"  # browser_driver.CANCELLED (the routes' cancel message)
+#: Flet's error when a method call (``load_request``) finds no listener on the Flutter side: the
+#: WebView widget is being (re)built (a screen change, a busy UI loop) and has not subscribed yet.
+NO_LISTENER = "waiting for invoke method listener"
 
 UNSUPPORTED_REASON = (
     "The hidden in-app browser (flet-webview) runs on Android, iOS and macOS only, so AuthND and "
@@ -223,6 +226,7 @@ class WebViewPage:
         self.load_state = new_load_state()
         self.webview: Any = None  # loop thread only
         self.entry: Any = None  # host overlay entry (loop thread only)
+        self.builds = 0  # WebViews built for this page (each overlay entry gets its own key)
         self.console_lines = 0
         self.closed = False
         self._url = ""
@@ -384,13 +388,36 @@ class WebViewPage:
         if self.webview is None:
             # flet-webview loads its ``url`` when the control is built; later loads use
             # load_request (a changed ``url`` property does not navigate a built WebView).
-            self.webview = self.bridge.make_webview(self, url)
-            self.entry = self.bridge.host.add(self.webview, size=self.viewport, key=f"glwvb-{self.id}")
-        else:
-            # the Reader's helper (one place for the rule); a failed load raises out of load()
-            from glossarion_mobile.ui.reader.reader_view import navigate_webview
+            self._build_on_loop(url)
+            return
+        # the Reader's helper (one place for the rule); a failed load raises out of load()
+        from glossarion_mobile.ui.reader.reader_view import navigate_webview
 
+        try:
             await navigate_webview(self.webview, url)
+        except Exception as exc:
+            if NO_LISTENER not in str(exc):
+                raise
+            # No listener answered load_request within Flet's 10 s: the Flutter WebView was being
+            # built again and never took the call (authchatgpt/ on a phone: "did not open
+            # chatgpt.com/", twice, then the request failed). A new WebView built with ``url``
+            # loads it the way every first load does; the cookie jar is shared and the routes set
+            # up their page again after each load, so nothing of the old document is needed.
+            log.info("in-app browser: no load_request listener (%s); building the page's WebView again",
+                     str(exc)[:200])
+            self._build_on_loop(url)
+
+    def _build_on_loop(self, url: str) -> None:
+        """Mount a new WebView that loads ``url`` (replacing the page's current one)."""
+        old, self.entry = self.entry, None
+        if old is not None:
+            self.bridge.host.remove(old)
+        self.builds += 1
+        self._chunks.clear()
+        self.webview = self.bridge.make_webview(self, url)
+        # a Flet 1.0.3 control re-rendered under an old key keeps its old state: a new key per build
+        key = f"glwvb-{self.id}" if self.builds == 1 else f"glwvb-{self.id}-{self.builds}"
+        self.entry = self.bridge.host.add(self.webview, size=self.viewport, key=key)
 
     async def _title_on_loop(self) -> str:
         if self.webview is None:

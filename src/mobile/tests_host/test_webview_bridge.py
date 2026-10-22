@@ -423,6 +423,33 @@ def test_later_loads_navigate_through_load_request_and_failures_raise(ui_loop, m
     other.close()
     assert _wait_for(lambda: not host.entries) and bridge.open_pages == 0
 
+    # owner 2026-10-22 (authchatgpt/ on a phone: "did not open chatgpt.com/: TimeoutException ...
+    # Timeout waiting for invoke method listener for WebView(7655).load_request"): a WebView that is
+    # being built again takes no load_request; the page builds a new WebView with the URL instead
+    class DeafWebView(FakeWebView):
+        async def load_request(self, url):
+            raise RuntimeError("TimeoutException after 0:00:10.000000: Timeout waiting for invoke method "
+                               "listener for WebView(7655).load_request")
+
+    built = []
+
+    def deaf_factory(page_, url):
+        view_ = (DeafWebView if not built else FakeWebView)(page_, url, NvidiaSite())
+        built.append(view_)
+        return view_
+
+    bridge.webview_factory = deaf_factory
+    third = bridge.open_page(owner="authchatgpt")
+    third.load(PAGE_URL)
+    first_key = host.entries[-1].key
+    third.load(second)  # no listener: rebuilt with the URL, under a new key, the old entry gone
+    assert [v.loads for v in built] == [[PAGE_URL], [second]] and third.builds == 2
+    assert len(host.entries) == 1 and host.entries[0].control is built[1] and host.entries[0].key != first_key
+    third.load(PAGE_URL)  # the rebuilt WebView navigates normally again
+    assert built[1].loads == [second, PAGE_URL] and len(built) == 2
+    third.close()
+    assert _wait_for(lambda: not host.entries) and bridge.open_pages == 0
+
 
 async def _call_on_loop(page):
     try:
