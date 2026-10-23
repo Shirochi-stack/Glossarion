@@ -2847,6 +2847,13 @@ class EPUBCompiler:
                 except Exception as _recon_err:
                     self.log(f"⚠️ Post-reconciliation error: {_recon_err}")
 
+            # Glossary name check: the translated chapter titles (translated_headers.txt and the
+            # chapter headers it was written into) before they go into the EPUB
+            for _row, _new, _findings, _n in self._glossary_name_check_titles(('translated_headers.txt',)):
+                for _num, _info in list(chapter_titles_info.items()):
+                    if _info and _info[0] == _row.translated:
+                        chapter_titles_info[_num] = (_new,) + tuple(_info[1:])
+
             # Find HTML files
             html_files = self._find_html_files()
             if not html_files:
@@ -3047,6 +3054,9 @@ class EPUBCompiler:
                                     )
                             metadata_progress_manager.save()
                         # Continue with original metadata
+
+            # Glossary name check: the book title, description... (metadata.json)
+            self._glossary_name_check_metadata(metadata)
 
             # Decide language for EPUB based primarily on GUI's OUTPUT_LANGUAGE
             try:
@@ -5297,6 +5307,54 @@ class EPUBCompiler:
 
         return metadata
     
+    def _glossary_name_check_context(self):
+        """``(name_check, entries, auto_fix, ner)`` when Glossary Name Check After Translation is on
+        and the output folder has a glossary with matching entries, else None."""
+        try:
+            import glossary_name_check as name_check
+            if not name_check.enabled_from_env():
+                return None
+            glossary_path = name_check.find_glossary_for_folder(self.output_dir)
+            entries = name_check.load_entries(glossary_path, **name_check.settings_from_env()) if glossary_path else None
+            if not entries:
+                return None
+            ner = name_check.resolve_ner(name_check.use_ner_from_env(), self.log)
+            return name_check, entries, name_check.auto_fix_from_env(), ner
+        except Exception as e:
+            self.log(f"⚠️ Glossary name check failed: {e}")
+            return None
+
+    def _glossary_name_check_titles(self, names):
+        """Glossary name check on ``names`` (translated_headers.txt / TOC.txt); returns the fixed rows
+        as ``[(row, new translation, findings, replaced)]``."""
+        context = self._glossary_name_check_context()
+        if context is None:
+            return []
+        name_check, entries, auto_fix, ner = context
+        try:
+            results = name_check.check_and_fix_titles(self.output_dir, entries, auto_fix=auto_fix, ner=ner,
+                                                      names=names)
+            name_check.log_title_results(results, self.log, auto_fix=auto_fix)
+            return [row for _result, fixed in results for row in fixed.values()]
+        except Exception as e:
+            self.log(f"⚠️ Glossary name check failed for {', '.join(names)}: {e}")
+            return []
+
+    def _glossary_name_check_metadata(self, metadata: dict) -> None:
+        """Glossary name check on the translated metadata fields; fixes are saved to metadata.json."""
+        context = self._glossary_name_check_context() if isinstance(metadata, dict) else None
+        if context is None:
+            return
+        name_check, entries, auto_fix, ner = context
+        try:
+            result, changed = name_check.fix_metadata(metadata, entries, auto_fix=auto_fix, ner=ner)
+            if result.reportable:
+                name_check.log_title_results([(result, changed)], self.log, auto_fix=auto_fix)
+            if changed:
+                self._save_metadata(metadata)
+        except Exception as e:
+            self.log(f"⚠️ Glossary name check failed for metadata.json: {e}")
+
     def _save_metadata(self, metadata: dict) -> None:
         """Persist metadata.json alongside the translated HTML output.
 
@@ -8117,6 +8175,10 @@ img {
                     except Exception as e:
                         self.log(f"⚠️ toc.ncx translation failed: {e}")
                         translations = {}
+
+            # Glossary name check: the TOC labels (TOC.txt)
+            for _row, _new, _findings, _n in self._glossary_name_check_titles(('TOC.txt',)):
+                translations[int(_row.key)] = _new
 
             # A hard stop can arrive after translated_headers.txt entries were
             # copied into TOC.txt but before the remaining TOC entries receive

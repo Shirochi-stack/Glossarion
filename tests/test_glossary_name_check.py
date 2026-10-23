@@ -312,3 +312,112 @@ def test_every_chapter_completion_runs_the_name_check():
                     and not runs_check:
                 missing.append((fn.name, call.lineno))
     assert not missing, missing
+
+
+# ---- chapter titles, TOC and book metadata ---------------------------------------------------------
+
+HEADERS = ("Chapter Header Translations\r\n" + "=" * 50 + "\r\n\r\n"
+           "Chapter 1:\r\n  Original:   발터 아르겐트의 검\r\n  Translated: Walter Argent's Sword\r\n"
+           "  Output File: chapter0001\r\n" + "-" * 40 + "\r\n"
+           "Chapter 2:\r\n  Original:   새로운 아침\r\n  Translated: A New Morning\r\n"
+           "  Output File: chapter0002\r\n" + "-" * 40 + "\r\n")
+TOC = ("TOC Translations\n" + "=" * 50 + "\n\n"
+       "Chapter 1:\n  Original:   발터 아르겐트의 검\n  Translated: Walter Argent's Sword\n"
+       "  Target URI: response_chapter0001.html\n" + "-" * 40 + "\n")
+
+
+def _titled_book(tmp_path):
+    book = _book(tmp_path, "<h1>Walter Argent's Sword</h1><p>Valter Argent smiled.</p>")
+    (book / "translated_headers.txt").write_bytes(HEADERS.encode("utf-8"))
+    (book / "TOC.txt").write_text(TOC, encoding="utf-8")
+    (book / "metadata.json").write_text(json.dumps({
+        "title": "The Knight Walter Argent", "original_title": "기사 발터 아르겐트",
+        "description": "A story.", "original_description": "이야기."}, ensure_ascii=False), encoding="utf-8")
+    return book, g.load_entries(str(book / "glossary.csv"))
+
+
+def test_title_rows_parse_headers_toc_and_metadata():
+    rows = g.title_rows(HEADERS)
+    assert [(r.key, r.original, r.translated, r.output_ref) for r in rows] == [
+        ("1", "발터 아르겐트의 검", "Walter Argent's Sword", "chapter0001"),
+        ("2", "새로운 아침", "A New Morning", "chapter0002")]
+    meta = g.metadata_rows({"title": "T", "original_title": "원", "creator": "X", "original_creator": "X"})
+    assert [(r.key, r.original, r.translated) for r in meta] == [("title", "원", "T")]
+
+
+def test_pipeline_fixes_titles_toc_and_the_chapter_header(tmp_path):
+    book, ents = _titled_book(tmp_path)
+    results = g.check_and_fix_titles(str(book), ents, auto_fix=True, names=(g.HEADERS_FILE, g.TOC_FILE))
+    assert [(r.output_file, [f.describe() for f in r.reportable], sorted(fixed)) for r, fixed in results] == [
+        ("translated_headers.txt", ["Walter Argent → Valter Argent"], ["1"]),
+        ("TOC.txt", ["Walter Argent → Valter Argent"], ["1"])]
+    # only the Translated line changes; CRLF and the source title stay as they were
+    assert (book / "translated_headers.txt").read_bytes().decode("utf-8") == HEADERS.replace(
+        "Translated: Walter Argent's Sword", "Translated: Valter Argent's Sword")
+    assert "Translated: Valter Argent's Sword\n" in (book / "TOC.txt").read_text(encoding="utf-8")
+    # the header translated_headers.txt was written into
+    assert (book / "response_chapter0001.html").read_text(encoding="utf-8").startswith("<h1>Valter Argent's Sword")
+    logs = []
+    g.log_title_results(results, logs.append, auto_fix=True)
+    assert logs[0] == "📖 Glossary name check: translated_headers.txt: Walter Argent → Valter Argent (fixed)"
+
+
+def test_review_mode_only_reports_titles(tmp_path):
+    book, ents = _titled_book(tmp_path)
+    [(result, fixed)] = g.check_and_fix_titles(str(book), ents, auto_fix=False, names=(g.HEADERS_FILE,))
+    assert result.reportable and fixed == {}
+    assert (book / "translated_headers.txt").read_bytes().decode("utf-8") == HEADERS
+
+
+def test_metadata_is_fixed_in_memory(tmp_path):
+    _book_dir, ents = _titled_book(tmp_path)
+    metadata = {"title": "The Knight Walter Argent", "original_title": "기사 발터 아르겐트"}
+    result, changed = g.fix_metadata(metadata, ents, auto_fix=True)
+    assert [f.describe() for f in result.reportable] == ["Walter Argent → Valter Argent"]
+    assert list(changed) == ["title"] and metadata["title"] == "The Knight Valter Argent"
+    assert metadata["original_title"] == "기사 발터 아르겐트"
+
+
+def test_review_folder_lists_title_files_and_fix_files_applies_them(tmp_path):
+    book, _ents = _titled_book(tmp_path)
+    seen = []
+    review = g.review_folder(str(book), {"mode": "characters", "custom_types": (), "min_chars": 0},
+                             progress=lambda done, total: seen.append((done, total)))
+    assert seen == [(0, 1)]
+    assert [c.output_file for c in review.chapters] == ["translated_headers.txt", "TOC.txt", "metadata.json"]
+    changed = g.fix_files(str(book), {c.output_file: c.reportable for c in review.chapters})
+    assert changed == {"translated_headers.txt": 1, "TOC.txt": 1, "metadata.json": 1}
+    assert json.loads((book / "metadata.json").read_text(encoding="utf-8"))["title"] == "The Knight Valter Argent"
+    backups = book / "glossary_name_check_backup"
+    assert sorted(os.listdir(backups)) == ["TOC.txt", "metadata.json", "response_chapter0001.html",
+                                           "translated_headers.txt"]
+    assert (backups / "translated_headers.txt").read_bytes().decode("utf-8") == HEADERS
+
+
+def test_resolve_ner_passes_download_progress_and_cancel(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ner_names, "runtime_available", lambda: True)
+    monkeypatch.setattr(ner_names, "get_tagger", lambda log=None, cancel=None, progress=None:
+                        calls.append((cancel, progress)) or "tagger")
+    progress, cancel = object(), object()
+    assert g.resolve_ner(True, progress=progress, cancel=cancel) == "tagger"
+    assert calls == [(cancel, progress)]
+
+
+def test_a_failed_model_load_is_not_retried_per_chapter(monkeypatch):
+    """2026-10-23: without network every chapter started the 104 MB download again."""
+    calls = []
+
+    def failing(log=None, cancel=None, progress=None):
+        calls.append(1)
+        raise OSError("no network")
+
+    monkeypatch.setattr(ner_names, "runtime_available", lambda: True)
+    monkeypatch.setattr(ner_names, "get_tagger", failing)
+    monkeypatch.setattr(g, "_ner_notes", set())
+    logs = []
+    assert g.resolve_ner(True, logs.append) is None and g.resolve_ner(True, logs.append) is None
+    assert len(calls) == 1 and len(logs) == 1
+    assert g.resolve_ner(True, logs.append, retry=True) is None and len(calls) == 2  # the dialogs try again
+    monkeypatch.setattr(ner_names, "get_tagger", lambda log=None, cancel=None, progress=None: "tagger")
+    assert g.resolve_ner(True, retry=True) == "tagger" and g.resolve_ner(True) == "tagger"

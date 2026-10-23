@@ -6,7 +6,8 @@ Opened from the QA screen when Settings › QA Scanner Settings › "Check gloss
 (``glossary_name_check.review_folder``: the folder's glossary with the Emergency Glossary Compliance
 entry types / minimum length, chapters matched to their sources through translation_progress.json +
 chapters_full.json) and lists every name that differs from the glossary as ☐ "Found → Glossary
-name ×n" under its chapter file. Rows are pre-checked when one close spelling of a character name
+name ×n" under its chapter file (and translated_headers.txt / TOC.txt / metadata.json for the
+chapter titles, TOC and book metadata). Rows are pre-checked when one close spelling of a character name
 was found (the automatic-fix case). **Apply checked** asks first, then replaces the checked names in
 text (never inside tags), backing each file up to ``glossary_name_check_backup``
 (``glossary_name_check.fix_files``).
@@ -14,6 +15,7 @@ text (never inside tags), backing each file up to ``glossary_name_check_backup``
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Optional, Sequence
@@ -70,11 +72,30 @@ def ner_needs_download() -> bool:
     return ner_names.runtime_available() and not ner_names.model_installed()
 
 
-def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False) -> list:
+def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
+                state: Optional[dict] = None) -> list:
+    """Review every folder on a worker thread; ``state`` gets the progress text and fraction
+    (``text`` / ``value``, None = indeterminate) that ``GlossaryNameFixSheet.scan`` shows."""
     import glossary_name_check as name_check
 
-    ner = name_check.resolve_ner(with_ner, log.info)
-    return [name_check.review_folder(folder, scope, ner=ner) for folder in folders]
+    state = {} if state is None else state
+    mb = 1024 * 1024
+
+    def on_download(report: Any) -> None:
+        state.update(text=f"Downloading the named-entity model (NER): {report.downloaded / mb:.1f} / "
+                          f"{report.total / mb:.1f} MB", value=report.fraction)
+
+    ner = name_check.resolve_ner(with_ner, log.info, progress=on_download, retry=True)
+    reviews = []
+    for index, folder in enumerate(folders):
+        def on_chapter(done: int, total: int, index: int = index) -> None:
+            where = f" (folder {index + 1} of {len(folders)})" if len(folders) > 1 else ""
+            state.update(text=f"Checking chapter {done + 1} of {total}{where}…",
+                         value=done / total if total else None)
+
+        state.update(text="Scanning…", value=None)
+        reviews.append(name_check.review_folder(folder, scope, ner=ner, progress=on_chapter))
+    return reviews
 
 
 class GlossaryNameFixSheet:
@@ -120,11 +141,21 @@ class GlossaryNameFixSheet:
 
     async def scan(self) -> list:
         with_ner = use_ner(self.ctx)
+        state: dict = {}
         if with_ner and ner_needs_download():
-            self.status.value = "Downloading the named-entity model (NER, 104 MB)…"
-            self.ctx.push(self.status)
+            state.update(text="Downloading the named-entity model (NER, 104 MB)…", value=None)
         try:
-            self.reviews = await self.ctx.io(_review_all, self.folders, name_check_scope(self.ctx), with_ner)
+            task = asyncio.ensure_future(
+                self.ctx.io(_review_all, self.folders, name_check_scope(self.ctx), with_ner, state))
+            shown = None
+            while not task.done():
+                current = (state.get("text"), state.get("value"))
+                if current[0] and current != shown:
+                    shown = current
+                    self.status.value, self.progress.value = current
+                    self.ctx.push(self.status, self.progress)
+                await asyncio.wait({task}, timeout=0.25)
+            self.reviews = task.result()
         except Exception as exc:
             log.exception("glossary name check failed")
             self.reviews = []
@@ -165,7 +196,7 @@ class GlossaryNameFixSheet:
         self.progress.visible = False
         if total:
             glossaries = {os.path.basename(r.glossary_path) for r in self.reviews if r.glossary_path}
-            self.status.value = (f"{total} name(s) in {chapters} chapter(s) differ from "
+            self.status.value = (f"{total} name(s) in {chapters} file(s) differ from "
                                  f"{', '.join(sorted(glossaries))}.")
         else:
             self.status.value = "Nothing to fix."
@@ -198,7 +229,7 @@ class GlossaryNameFixSheet:
             return None
         files = sum(len(chapters) for chapters in plan.values())
         answer = await ask(self.ctx, TITLE,
-                           f"Replace the checked names in {files} chapter file(s)?\n"
+                           f"Replace the checked names in {files} file(s)?\n"
                            "The original files are backed up to glossary_name_check_backup.",
                            [("no", "Cancel", "text"), ("yes", "Replace", "filled")], key="gn-confirm")
         if answer != "yes":

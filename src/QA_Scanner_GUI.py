@@ -298,24 +298,92 @@ class QAScannerMixin:
                 pass
             QMessageBox.warning(self, "QA Report", f"Failed to open QA report:\n{e}")
 
-    def _glossary_name_fix_start_folder(self):
-        """Output folder of the current source file, when one exists, for the folder picker."""
-        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-        sources = list(getattr(self, 'selected_files', None) or [])
-        if self.config.get('last_epub_path'):
-            sources.append(self.config.get('last_epub_path'))
-        try:
-            from qa_scan_runtime import automatic_qa_output_candidates
-            for source in sources:
-                for candidate in automatic_qa_output_candidates(
-                        source, current_dir=os.getcwd(),
-                        script_dir=os.path.dirname(os.path.abspath(__file__)),
-                        output_root=override_dir):
-                    if os.path.isfile(os.path.join(candidate, 'translation_progress.json')):
-                        return candidate
-        except Exception:
-            pass
-        return override_dir or os.getcwd()
+    def _glossary_name_fix_folder(self, parent, title):
+        """The output folder to review: the QA scan's Auto-search output (when that toggle is on) for
+        the current source file, else the folder picker."""
+        caption = "Select Output Folder to Check Glossary Names"
+        if self._qa_auto_search_enabled():
+            sources, _stored_source, _direct_text_only = self._qa_auto_search_sources()
+            folders = self._auto_search_output_folders(sources) if sources else []
+            if len(folders) == 1:
+                return folders[0]
+            if len(folders) > 1:
+                from PySide6.QtWidgets import QInputDialog
+                choice, ok = QInputDialog.getItem(parent, title, "Output folder to check:", folders, 0, False)
+                return choice if ok else None
+            caption = "Auto-search failed - " + caption
+        start = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory') or os.getcwd()
+        return _normalize_qa_dialog_path(QFileDialog.getExistingDirectory(parent, caption, start))
+
+    def _glossary_name_review_with_progress(self, parent, title, folder, use_ner):
+        """``review_folder`` on a worker thread behind a progress dialog (the NER model download, then
+        the chapters), so the window keeps responding. None when cancelled."""
+        import glossary_name_check as name_check
+        scope = self._glossary_name_check_scope()
+        log = getattr(self, 'append_log', None)
+        mb = 1024 * 1024
+        cancel = threading.Event()
+        logs = []
+        state = {"text": "Checking glossary names...", "value": 0, "maximum": 0, "done": False,
+                 "result": None, "error": None}
+
+        def on_download(report):
+            speed = f" · {report.bytes_per_sec / mb:.1f} MB/s" if report.bytes_per_sec else ""
+            text = ("Verifying the named-entity model (NER)..." if report.phase == "verify" else
+                    f"Downloading the named-entity model (NER): {report.downloaded / mb:.1f} / "
+                    f"{report.total / mb:.1f} MB{speed}")
+            state.update(text=text, value=report.percent, maximum=100)
+
+        def on_chapter(done, total):
+            state.update(text=f"Checking chapter {done + 1} of {total}...", value=done, maximum=total)
+
+        def work():
+            try:
+                ner = name_check.resolve_ner(use_ner, logs.append, progress=on_download, cancel=cancel.is_set,
+                                             retry=True)
+                state.update(text="Checking glossary names...", value=0, maximum=0)
+                state["result"] = name_check.review_folder(folder, scope, stop=cancel.is_set, ner=ner,
+                                                           progress=on_chapter)
+            except Exception as e:
+                state["error"] = e
+            finally:
+                state["done"] = True
+
+        from PySide6.QtWidgets import QProgressDialog
+        dialog = QProgressDialog(state["text"], "Cancel", 0, 0, parent)
+        dialog.setWindowTitle(title)
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumWidth(460)
+        dialog.canceled.connect(cancel.set)
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(100)
+
+        def tick():
+            while logs:
+                line = logs.pop(0)
+                if log:
+                    log(line)
+            dialog.setLabelText(state["text"])
+            dialog.setMaximum(state["maximum"])
+            dialog.setValue(state["value"])
+            if state["done"]:
+                timer.stop()
+                loop.quit()
+
+        timer.timeout.connect(tick)
+        threading.Thread(target=work, name="GlossaryNameReview", daemon=True).start()
+        timer.start()
+        dialog.show()
+        loop.exec()
+        dialog.canceled.disconnect(cancel.set)  # closing a QProgressDialog emits canceled
+        dialog.close()
+        if state["error"] is not None:
+            raise state["error"]
+        return None if cancel.is_set() else state["result"]
 
     def _glossary_name_check_scope(self):
         """Emergency Glossary Compliance's entry types and the name check's minimum length (live values)."""
@@ -332,8 +400,7 @@ class QAScannerMixin:
         import glossary_name_check as name_check
         parent = parent or self
         title = "Fix Glossary Names"
-        folder = _normalize_qa_dialog_path(QFileDialog.getExistingDirectory(
-            parent, "Select Output Folder to Check Glossary Names", self._glossary_name_fix_start_folder()))
+        folder = self._glossary_name_fix_folder(parent, title)
         if not folder:
             return
         use_ner = bool(getattr(self, 'glossary_name_check_use_ner_var',
@@ -347,13 +414,13 @@ class QAScannerMixin:
                     "Download it now? No uses the capitalization heuristic this time.",
                     QMessageBox.Yes | QMessageBox.No)
                 use_ner = answer == QMessageBox.Yes
-        log = getattr(self, 'append_log', None)
-        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            ner = name_check.resolve_ner(use_ner, log)
-            folder_review = name_check.review_folder(folder, self._glossary_name_check_scope(), ner=ner)
-        finally:
-            QApplication.restoreOverrideCursor()
+            folder_review = self._glossary_name_review_with_progress(parent, title, folder, use_ner)
+        except Exception as e:
+            QMessageBox.warning(parent, title, f"The glossary name check failed:\n{e}")
+            return
+        if folder_review is None:
+            return
         if folder_review.problem or not folder_review.chapters:
             QMessageBox.information(parent, title, folder_review.problem or name_check.ALL_MATCH)
             return
@@ -366,7 +433,7 @@ class QAScannerMixin:
         layout = QVBoxLayout(review)
         total = sum(len(c.reportable) for c in chapters)
         intro = QLabel(
-            f"{total} name(s) in {len(chapters)} chapter(s) differ from <b>{_html.escape(os.path.basename(glossary_path))}</b>.<br>"
+            f"{total} name(s) in {len(chapters)} file(s) differ from <b>{_html.escape(os.path.basename(glossary_path))}</b>.<br>"
             "Checked rows are replaced with the glossary name. Rows are pre-checked when one close "
             "spelling of a character name was found; review the others before checking them.<br>"
             "Each changed file is backed up to <i>glossary_name_check_backup</i> first.")
@@ -415,7 +482,7 @@ class QAScannerMixin:
                 return
             confirm = QMessageBox.question(
                 review, title,
-                f"Replace the checked names in {len(plan)} chapter file(s)?\n"
+                f"Replace the checked names in {len(plan)} file(s)?\n"
                 "The original files are backed up to glossary_name_check_backup.",
                 QMessageBox.Yes | QMessageBox.No)
             if confirm != QMessageBox.Yes:
@@ -490,6 +557,162 @@ class QAScannerMixin:
             except Exception:
                 pass
             return False
+
+    def _qa_auto_search_sources(self):
+        """Source files whose output folders auto-search looks for: the current selection, else the
+        stored source file. Returns ``(sources, stored_source, direct_text_only)``; Direct Text sources
+        are left out (``direct_text_only`` when nothing else was selected)."""
+        epub_files_to_scan = []
+        primary_epub_path = None
+        # First check if current selection contains a supported source file.
+        current_epub_files = []
+        if hasattr(self, 'selected_files') and self.selected_files:
+            current_epub_files = [
+                f for f in self.selected_files
+                if f.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.html', '.htm', '.xhtml'))
+            ]
+            epub_count = len([f for f in current_epub_files if f.lower().endswith('.epub')])
+            txt_count = len([f for f in current_epub_files if f.lower().endswith('.txt')])
+            pdf_count = len([f for f in current_epub_files if f.lower().endswith('.pdf')])
+            md_count = len([f for f in current_epub_files if f.lower().endswith('.md')])
+            html_count = len([
+                f for f in current_epub_files
+                if f.lower().endswith(('.html', '.htm', '.xhtml'))
+            ])
+            print(
+                f"[DEBUG] Current selection contains {epub_count} EPUB files, "
+                f"{txt_count} TXT files, {pdf_count} PDF files, {md_count} MD files, "
+                f"and {html_count} HTML files"
+            )
+
+        if current_epub_files:
+            # Use source files from current selection
+            epub_files_to_scan = current_epub_files
+            print(f"[DEBUG] Using {len(epub_files_to_scan)} source files from current selection")
+        else:
+            # No source files in current selection - check if we have stored path
+            primary_epub_path = self.get_current_epub_path()
+            print(f"[DEBUG] get_current_epub_path returned: {primary_epub_path}")
+
+            if primary_epub_path:
+                epub_files_to_scan = [primary_epub_path]
+                print(f"[DEBUG] Using stored source file for auto-search")
+
+        # Direct Text owns a separate temporary/persistent output workflow and
+        # must never seed automatic QA source or output discovery.
+        try:
+            from qa_scan_runtime import is_direct_text_qa_path
+            direct_text_sources = [
+                source_path for source_path in epub_files_to_scan
+                if is_direct_text_qa_path(source_path)
+            ]
+            epub_files_to_scan = [
+                source_path for source_path in epub_files_to_scan
+                if not is_direct_text_qa_path(source_path)
+            ]
+            for skipped_source in direct_text_sources:
+                self.append_log(f"⏭️ Excluding Direct Text source from QA scan: {skipped_source}")
+            if direct_text_sources and not epub_files_to_scan:
+                self.append_log("⏭️ QA scan skipped: Direct Text cannot trigger automatic QA scanning.")
+                return epub_files_to_scan, primary_epub_path, True
+        except Exception:
+            pass
+        return epub_files_to_scan, primary_epub_path, False
+
+    def _qa_auto_search_enabled(self):
+        """The QA scanner's Auto-search output toggle (checkbox, else saved config)."""
+        auto_search_enabled = self.config.get('qa_auto_search_output', True)
+        if hasattr(self, 'qa_auto_search_output_checkbox'):
+            try:
+                auto_search_enabled = bool(self.qa_auto_search_output_checkbox.isChecked())
+            except Exception:
+                pass
+        return auto_search_enabled
+
+    def _auto_search_output_folders(self, epub_files_to_scan):
+        """Auto-search output: the output folder of each source file that has translated files."""
+        folders_to_scan = []
+        self.append_log(f"🔍 DEBUG: Auto-search running with {len(epub_files_to_scan)} EPUB files")
+        for epub_path in epub_files_to_scan:
+            self.append_log(f"🔍 DEBUG: Processing EPUB: {epub_path}")
+            try:
+                epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                # Use EPUB's parent dir as the primary base (not os.getcwd(), which
+                # returns "/" on macOS frozen .app bundles)
+                epub_parent_dir = os.path.dirname(os.path.abspath(epub_path))
+                current_dir = os.getcwd()
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+
+                self.append_log(f"🔍 DEBUG: EPUB base name: '{epub_base}'")
+                self.append_log(f"🔍 DEBUG: EPUB parent dir: {epub_parent_dir}")
+                self.append_log(f"🔍 DEBUG: Current dir: {current_dir}")
+                self.append_log(f"🔍 DEBUG: Script dir: {script_dir}")
+
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                if override_dir:
+                    self.append_log(f"🔍 DEBUG: Checking override dir: {override_dir}")
+
+                from qa_scan_runtime import automatic_qa_output_candidates
+                candidates = automatic_qa_output_candidates(
+                    epub_path,
+                    current_dir=current_dir,
+                    script_dir=script_dir,
+                    output_root=override_dir,
+                )
+
+                folder_found = None
+                for i, candidate in enumerate(candidates):
+                    exists = os.path.isdir(candidate)
+                    self.append_log(f"  [{epub_base}] Checking candidate {i+1}: {candidate} - {'EXISTS' if exists else 'NOT FOUND'}")
+
+                    if exists:
+                        # Verify the folder actually contains appropriate files (HTML/XHTML or TXT)
+                        try:
+                            files = os.listdir(candidate)
+                            # Determine if text file mode is enabled
+                            text_file_mode = self.config.get('qa_text_file_mode', False)
+                            if hasattr(self, 'qa_text_file_mode_checkbox'):
+                                try:
+                                    text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
+                                except Exception:
+                                    pass
+
+                            # Auto-detect text file mode if source file is .txt or .pdf
+                            if epub_path and epub_path.lower().endswith(('.txt', '.pdf')):
+                                text_file_mode = True
+
+                            if text_file_mode:
+                                # For text mode, check for both .txt AND .html files (PDFs generate .html)
+                                target_files = [
+                                    f for f in files
+                                    if f.lower().endswith('.txt') or is_html_like_path(f)
+                                ]
+                                file_type = "TXT/HTML"
+                            else:
+                                target_files = [f for f in files if is_html_like_path(f)]
+                                file_type = "HTML/XHTML"
+
+                            if target_files:
+                                folder_found = candidate
+                                self.append_log(f"📁 Auto-selected output folder for {epub_base}: {folder_found}")
+                                self.append_log(f"   Found {len(target_files)} {file_type} files to scan")
+                                break
+                            else:
+                                self.append_log(f"  [{epub_base}] Folder exists but contains no {file_type} files: {candidate}")
+                        except Exception as e:
+                            self.append_log(f"  [{epub_base}] Error checking files in {candidate}: {e}")
+
+                if folder_found:
+                    folders_to_scan.append(folder_found)
+                    self.append_log(f"🔍 DEBUG: Added to folders_to_scan: {folder_found}")
+                else:
+                    self.append_log(f"  ⚠️ No output folder found for {epub_base}")
+
+            except Exception as e:
+                self.append_log(f"  ❌ Error processing {epub_base}: {e}")
+
+        self.append_log(f"🔍 DEBUG: Final folders_to_scan: {folders_to_scan}")
+        return folders_to_scan
 
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
@@ -1707,59 +1930,9 @@ class QAScannerMixin:
                 pass
 
         # ALWAYS populate epub_files_to_scan for auto-search, regardless of word count checking
-        # First check if current selection contains a supported source file.
-        current_epub_files = []
-        if hasattr(self, 'selected_files') and self.selected_files:
-            current_epub_files = [
-                f for f in self.selected_files
-                if f.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.html', '.htm', '.xhtml'))
-            ]
-            epub_count = len([f for f in current_epub_files if f.lower().endswith('.epub')])
-            txt_count = len([f for f in current_epub_files if f.lower().endswith('.txt')])
-            pdf_count = len([f for f in current_epub_files if f.lower().endswith('.pdf')])
-            md_count = len([f for f in current_epub_files if f.lower().endswith('.md')])
-            html_count = len([
-                f for f in current_epub_files
-                if f.lower().endswith(('.html', '.htm', '.xhtml'))
-            ])
-            print(
-                f"[DEBUG] Current selection contains {epub_count} EPUB files, "
-                f"{txt_count} TXT files, {pdf_count} PDF files, {md_count} MD files, "
-                f"and {html_count} HTML files"
-            )
-
-        if current_epub_files:
-            # Use source files from current selection
-            epub_files_to_scan = current_epub_files
-            print(f"[DEBUG] Using {len(epub_files_to_scan)} source files from current selection")
-        else:
-            # No source files in current selection - check if we have stored path
-            primary_epub_path = self.get_current_epub_path()
-            print(f"[DEBUG] get_current_epub_path returned: {primary_epub_path}")
-
-            if primary_epub_path:
-                epub_files_to_scan = [primary_epub_path]
-                print(f"[DEBUG] Using stored source file for auto-search")
-
-        # Direct Text owns a separate temporary/persistent output workflow and
-        # must never seed automatic QA source or output discovery.
-        try:
-            from qa_scan_runtime import is_direct_text_qa_path
-            direct_text_sources = [
-                source_path for source_path in epub_files_to_scan
-                if is_direct_text_qa_path(source_path)
-            ]
-            epub_files_to_scan = [
-                source_path for source_path in epub_files_to_scan
-                if not is_direct_text_qa_path(source_path)
-            ]
-            for skipped_source in direct_text_sources:
-                self.append_log(f"⏭️ Excluding Direct Text source from QA scan: {skipped_source}")
-            if direct_text_sources and not epub_files_to_scan:
-                self.append_log("⏭️ QA scan skipped: Direct Text cannot trigger automatic QA scanning.")
-                return
-        except Exception:
-            pass
+        epub_files_to_scan, primary_epub_path, direct_text_only = self._qa_auto_search_sources()
+        if direct_text_only:
+            return
 
         # Now handle word count specific logic if enabled
         if check_word_count:
@@ -1832,97 +2005,11 @@ class QAScannerMixin:
         # Try to auto-detect output folders based on EPUB files
         folders_to_scan = []
         # Get auto-search preference from checkbox if it exists, otherwise from config
-        auto_search_enabled = self.config.get('qa_auto_search_output', True)
-        if hasattr(self, 'qa_auto_search_output_checkbox'):
-            try:
-                auto_search_enabled = bool(self.qa_auto_search_output_checkbox.isChecked())
-            except Exception:
-                pass
-
-        # Debug output for scanning phase removed
+        auto_search_enabled = self._qa_auto_search_enabled()
 
         if auto_search_enabled and epub_files_to_scan:
             # Process each EPUB file to find its corresponding output folder
-            self.append_log(f"🔍 DEBUG: Auto-search running with {len(epub_files_to_scan)} EPUB files")
-            for epub_path in epub_files_to_scan:
-                self.append_log(f"🔍 DEBUG: Processing EPUB: {epub_path}")
-                try:
-                    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-                    # Use EPUB's parent dir as the primary base (not os.getcwd(), which
-                    # returns "/" on macOS frozen .app bundles)
-                    epub_parent_dir = os.path.dirname(os.path.abspath(epub_path))
-                    current_dir = os.getcwd()
-                    script_dir = os.path.dirname(os.path.abspath(__file__))
-
-                    self.append_log(f"🔍 DEBUG: EPUB base name: '{epub_base}'")
-                    self.append_log(f"🔍 DEBUG: EPUB parent dir: {epub_parent_dir}")
-                    self.append_log(f"🔍 DEBUG: Current dir: {current_dir}")
-                    self.append_log(f"🔍 DEBUG: Script dir: {script_dir}")
-
-                    override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-                    if override_dir:
-                        self.append_log(f"🔍 DEBUG: Checking override dir: {override_dir}")
-
-                    from qa_scan_runtime import automatic_qa_output_candidates
-                    candidates = automatic_qa_output_candidates(
-                        epub_path,
-                        current_dir=current_dir,
-                        script_dir=script_dir,
-                        output_root=override_dir,
-                    )
-
-                    folder_found = None
-                    for i, candidate in enumerate(candidates):
-                        exists = os.path.isdir(candidate)
-                        self.append_log(f"  [{epub_base}] Checking candidate {i+1}: {candidate} - {'EXISTS' if exists else 'NOT FOUND'}")
-
-                        if exists:
-                            # Verify the folder actually contains appropriate files (HTML/XHTML or TXT)
-                            try:
-                                files = os.listdir(candidate)
-                                # Determine if text file mode is enabled
-                                text_file_mode = self.config.get('qa_text_file_mode', False)
-                                if hasattr(self, 'qa_text_file_mode_checkbox'):
-                                    try:
-                                        text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
-                                    except Exception:
-                                        pass
-
-                                # Auto-detect text file mode if source file is .txt or .pdf
-                                if epub_path and epub_path.lower().endswith(('.txt', '.pdf')):
-                                    text_file_mode = True
-
-                                if text_file_mode:
-                                    # For text mode, check for both .txt AND .html files (PDFs generate .html)
-                                    target_files = [
-                                        f for f in files
-                                        if f.lower().endswith('.txt') or is_html_like_path(f)
-                                    ]
-                                    file_type = "TXT/HTML"
-                                else:
-                                    target_files = [f for f in files if is_html_like_path(f)]
-                                    file_type = "HTML/XHTML"
-
-                                if target_files:
-                                    folder_found = candidate
-                                    self.append_log(f"📁 Auto-selected output folder for {epub_base}: {folder_found}")
-                                    self.append_log(f"   Found {len(target_files)} {file_type} files to scan")
-                                    break
-                                else:
-                                    self.append_log(f"  [{epub_base}] Folder exists but contains no {file_type} files: {candidate}")
-                            except Exception as e:
-                                self.append_log(f"  [{epub_base}] Error checking files in {candidate}: {e}")
-
-                    if folder_found:
-                        folders_to_scan.append(folder_found)
-                        self.append_log(f"🔍 DEBUG: Added to folders_to_scan: {folder_found}")
-                    else:
-                        self.append_log(f"  ⚠️ No output folder found for {epub_base}")
-
-                except Exception as e:
-                    self.append_log(f"  ❌ Error processing {epub_base}: {e}")
-
-            self.append_log(f"🔍 DEBUG: Final folders_to_scan: {folders_to_scan}")
+            folders_to_scan.extend(self._auto_search_output_folders(epub_files_to_scan))
 
         # Fallback behavior - if no folders found through auto-detection
         if not folders_to_scan:

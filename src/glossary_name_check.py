@@ -193,6 +193,21 @@ def _name_candidates(text):
     return found
 
 
+def _title_candidates(text):
+    """Title Case puts a name in one capitalized run with its neighbours ("Walter Argent's Sword"), so
+    in a chapter title / TOC label / book title every run of up to four capitalized words is a candidate."""
+    found = {}
+    for match in _CAPITALIZED_RUN.finditer(text):
+        words = match.group(1).split()
+        for i in range(len(words)):
+            for j in range(i + 1, min(len(words), i + 4) + 1):
+                core = _clean_candidate(" ".join(words[i:j]))
+                key = _norm(core)
+                if core and len(key) >= 2:
+                    found.setdefault(key, core)
+    return found
+
+
 def _is_variant(expected, expected_key, candidate, candidate_key):
     if expected_key == candidate_key:
         # spacing / hyphenation drift ("Yoo So-jeong" vs "Yoo Sojeong"), not a case change
@@ -289,9 +304,10 @@ def _ner_candidates(text, tagger):
     return found
 
 
-def check_chapter(source_text, output_markup, entries, output_file="", *, ner=None):
+def check_chapter(source_text, output_markup, entries, output_file="", *, ner=None, title=False):
     """Compare one translated chapter with its source chapter. ``ner``: a ``ner_names.NerTagger``
-    finds the candidate spellings (else the capitalization heuristic)."""
+    finds the candidate spellings (else the capitalization heuristic). ``title``: the text is a title in
+    Title Case (``_title_candidates``)."""
     result = ChapterResult(output_file=output_file)
     if not entries or not source_text or not output_markup:
         return result
@@ -320,6 +336,9 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
             # NER adds the names the heuristic cannot see (sentence starts, ordinary words); the
             # heuristic keeps the invented / lowercase-hyphen spellings the model does not tag (corpus)
             candidates = _name_candidates(output_text)
+            if title:
+                for key, core in _title_candidates(output_text).items():
+                    candidates.setdefault(key, core)
             if ner is not None:
                 for key, core in _ner_candidates(output_text, ner).items():
                     candidates.setdefault(key, core)
@@ -457,11 +476,16 @@ def use_ner_from_config(config, env=None):
 
 
 _ner_notes = set()
+_ner_lock = threading.Lock()
 
 
-def resolve_ner(use_ner, log=None):
+def resolve_ner(use_ner, log=None, *, progress=None, cancel=None, retry=False):
     """The NER tagger when it is switched on and this build can run it (downloading the model on first
-    use); None means the capitalization heuristic. Each fallback reason is logged once per process."""
+    use; ``progress`` gets ``manga_models.DownloadProgress`` reports, ``cancel()`` stops the download);
+    None means the capitalization heuristic. Each fallback reason is logged once per process.
+
+    A failed load (no network) is not tried again for every chapter: later calls use the heuristic
+    until a ``retry`` call (the Fix glossary names dialogs, where the user asked for the model)."""
     if not use_ner:
         return None
     try:
@@ -473,13 +497,21 @@ def resolve_ner(use_ner, log=None):
             _ner_notes.add("unsupported")
             log("ℹ️ Glossary name check: NER is not supported in this build; using the capitalization heuristic")
         return None
-    try:
-        return ner_names.get_tagger(log)
-    except Exception as exc:
-        if log and "failed" not in _ner_notes:
+    # parallel chapters wait here for the first load instead of each starting the download
+    with _ner_lock:
+        if "failed" in _ner_notes and not retry:
+            return None
+        try:
+            tagger = ner_names.get_tagger(log, cancel, progress)
+        except Exception as exc:
+            if cancel is not None and cancel():
+                return None  # the user stopped the download; a later run may download it
+            if log and "failed" not in _ner_notes:
+                log(f"⚠️ Glossary name check: the NER model could not be loaded ({exc}); using the capitalization heuristic")
             _ner_notes.add("failed")
-            log(f"⚠️ Glossary name check: the NER model could not be loaded ({exc}); using the capitalization heuristic")
-        return None
+            return None
+        _ner_notes.discard("failed")
+        return tagger
 
 
 def enabled_from_env(env=None):
@@ -539,16 +571,20 @@ def source_chapters_for_folder(folder_path, progress_path=None):
     return mapping
 
 
-def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None, stop=None, ner=None):
-    """Check every mapped output file; returns ``[ChapterResult]`` with reportable findings."""
+def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None, stop=None, ner=None,
+                progress=None):
+    """Check every mapped output file; returns ``[ChapterResult]`` with reportable findings.
+    ``progress(done, total)`` is called after each chapter."""
     results = []
     if not entries:
         return results
     sources = source_chapters_for_folder(folder_path, progress_path)
     wanted = None if selected_files is None else {os.path.basename(f) for f in selected_files}
-    for output_file in sorted(sources):
+    for done, output_file in enumerate(sorted(sources)):
         if stop is not None and stop():
             break
+        if progress is not None:
+            progress(done, len(sources))
         if wanted is not None and output_file not in wanted:
             continue
         path = os.path.join(folder_path, output_file)
@@ -579,7 +615,8 @@ NO_GLOSSARY = "No glossary was found for this output folder."
 NO_ENTRIES = ("No glossary entries match the Emergency Glossary Compliance entry types and the name "
               "check's minimum raw entry length.")
 NO_SOURCES = ("This folder has no translation_progress.json / chapters_full.json, so translated "
-              "chapters cannot be matched to their source chapters.")
+              "chapters cannot be matched to their source chapters, and no translated_headers.txt, "
+              "TOC.txt or metadata.json.")
 ALL_MATCH = "Every glossary name in this folder matches the glossary."
 
 
@@ -592,8 +629,9 @@ class FolderReview:
     problem: str = ""  # why nothing could be checked (NO_GLOSSARY / NO_ENTRIES / NO_SOURCES)
 
 
-def review_folder(folder_path, scope, *, stop=None, ner=None):
-    """Scan one output folder for the review dialog (desktop QA Scanner, Glossarion Mobile)."""
+def review_folder(folder_path, scope, *, stop=None, ner=None, progress=None):
+    """Scan one output folder for the review dialog (desktop QA Scanner, Glossarion Mobile): its
+    chapters, then the chapter titles, TOC and book metadata (``check_titles``)."""
     review = FolderReview(folder=folder_path)
     glossary_path = find_glossary_for_folder(folder_path)
     if not glossary_path:
@@ -604,31 +642,258 @@ def review_folder(folder_path, scope, *, stop=None, ner=None):
     if not entries:
         review.problem = NO_ENTRIES
         return review
-    if not source_chapters_for_folder(folder_path):
+    has_titles = any(os.path.isfile(os.path.join(folder_path, name)) for name in TITLE_FILES)
+    if not source_chapters_for_folder(folder_path) and not has_titles:
         review.problem = NO_SOURCES
         return review
-    review.chapters = scan_folder(folder_path, entries, stop=stop, ner=ner)
+    review.chapters = scan_folder(folder_path, entries, stop=stop, ner=ner, progress=progress)
+    if not (stop is not None and stop()):
+        review.chapters += check_titles(folder_path, entries, ner=ner)
     return review
 
 
 def fix_files(folder_path, plan, *, backup_dir=None):
     """Apply reviewed fixes: ``plan`` maps output file -> [Finding]. Backs up each file first."""
-    import shutil
     backup_dir = backup_dir or os.path.join(folder_path, "glossary_name_check_backup")
     changed = {}
     for output_file, findings in plan.items():
         path = os.path.join(folder_path, output_file)
         if not findings or not os.path.isfile(path):
             continue
+        if output_file in TITLE_FILES:
+            rows = fix_title_file(folder_path, output_file, _reviewed_findings(findings), reviewed=True,
+                                  backup_dir=backup_dir)
+            if rows:
+                changed[output_file] = sum(n for _row, _new, _f, n in rows.values())
+            continue
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             markup = f.read()
         new_markup, replaced = apply_fixes(markup, findings, reviewed=True)
         if not replaced:
             continue
-        os.makedirs(backup_dir, exist_ok=True)
-        backup = os.path.join(backup_dir, output_file)
-        if not os.path.exists(backup):
-            shutil.copy2(path, backup)
+        _backup(path, backup_dir)
         _write_text(path, new_markup)
         changed[output_file] = replaced
     return changed
+
+
+def _backup(path, backup_dir):
+    """Copy ``path`` into ``backup_dir`` once (the first, unfixed version is kept)."""
+    import shutil
+    if not backup_dir:
+        return
+    os.makedirs(backup_dir, exist_ok=True)
+    backup = os.path.join(backup_dir, os.path.basename(path))
+    if not os.path.exists(backup):
+        shutil.copy2(path, backup)
+
+
+# ---- chapter titles, TOC and book metadata ---------------------------------------------------------
+# Chapter titles are translated in their own request (translated_headers.txt, written into each
+# chapter's headers), the source table of contents in another (TOC.txt) and the book's title,
+# description... in a third (metadata.json, the source text kept as ``original_<field>``). Each row
+# is checked like a chapter: its source text against its translation.
+
+HEADERS_FILE = "translated_headers.txt"
+TOC_FILE = "TOC.txt"
+METADATA_FILE = "metadata.json"
+TITLE_FILES = (HEADERS_FILE, TOC_FILE, METADATA_FILE)
+
+_ROW_NUMBER = re.compile(r"^\s*Chapter\s+(\d+)\s*:\s*\r?$")
+_ROW_FIELD = re.compile(r"^(\s*)(Original|Translated|Output File|Target URI):(\s*)(.*?)(\r?)$")
+
+
+@dataclass
+class TitleRow:
+    key: str
+    original: str
+    translated: str
+    line: int = -1
+    output_ref: str = ""
+
+
+def title_rows(text):
+    """``[TitleRow]`` of a translated_headers.txt / TOC.txt (``Chapter N:`` blocks)."""
+    rows, current = [], None
+    for i, line in enumerate(text.split("\n")):
+        number = _ROW_NUMBER.match(line)
+        if number:
+            current = TitleRow(number.group(1), "", "")
+            rows.append(current)
+            continue
+        found = _ROW_FIELD.match(line)
+        if current is None or not found:
+            continue
+        label, value = found.group(2), found.group(4)
+        if label == "Original":
+            current.original = value
+        elif label == "Translated":
+            current.translated, current.line = value, i
+        else:
+            current.output_ref = value
+    return [r for r in rows if r.original and r.translated and r.line >= 0]
+
+
+def metadata_rows(metadata):
+    """``[TitleRow]`` of the translated metadata fields (``title`` with ``original_title``...)."""
+    rows = []
+    for key, value in (metadata or {}).items():
+        original = metadata.get(f"original_{key}")
+        if str(key).startswith("original_") or not isinstance(value, str) or not isinstance(original, str):
+            continue
+        if value.strip() and original.strip() and value != original:
+            rows.append(TitleRow(str(key), original, value))
+    return rows
+
+
+def _row_markup(row):
+    return html_lib.escape(row.translated, quote=False)
+
+
+def check_title_rows(rows, entries, label, *, ner=None):
+    """One ``ChapterResult`` (``output_file`` = ``label``) for rows of one file, equal findings merged."""
+    result = ChapterResult(output_file=label)
+    merged = {}
+    for row in rows:
+        for found in check_chapter(row.original, _row_markup(row), entries, label, ner=ner, title=True).findings:
+            key = (found.raw, found.expected, found.kind, found.variants)
+            if key in merged:
+                merged[key].occurrences += found.occurrences
+            else:
+                merged[key] = found
+                result.findings.append(found)
+    return result
+
+
+def _read_title_rows(folder_path, name):
+    path = os.path.join(folder_path, name)
+    if not os.path.isfile(path):
+        return None, []
+    with open(path, "r", encoding="utf-8", errors="ignore", newline="") as f:  # keeps CRLF files CRLF
+        text = f.read()
+    if name != METADATA_FILE:
+        return text, title_rows(text)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, []
+    return data, (metadata_rows(data) if isinstance(data, dict) else [])
+
+
+def check_titles(folder_path, entries, *, ner=None):
+    """``[ChapterResult]`` with reportable findings for translated_headers.txt, TOC.txt and
+    metadata.json (``output_file`` is the file name)."""
+    results = []
+    if not entries:
+        return results
+    for name in TITLE_FILES:
+        _content, rows = _read_title_rows(folder_path, name)
+        if rows:
+            result = check_title_rows(rows, entries, name, ner=ner)
+            if result.reportable:
+                results.append(result)
+    return results
+
+
+def fix_title_rows(rows, findings_for, *, reviewed=False):
+    """Fix row by row; ``findings_for(row)`` gives that row's findings. Returns
+    ``{row.key: (row, new translation, findings, replaced)}`` for the rows that changed."""
+    changed = {}
+    for row in rows:
+        findings = findings_for(row)
+        if not findings:
+            continue
+        markup, replaced = apply_fixes(_row_markup(row), findings, reviewed=reviewed)
+        if replaced:
+            changed[row.key] = (row, html_lib.unescape(markup), findings, replaced)
+    return changed
+
+
+def _auto_findings(entries, ner):
+    return lambda row: check_chapter(row.original, _row_markup(row), entries, ner=ner, title=True).fixable
+
+
+def _reviewed_findings(findings):
+    # a finding came from rows whose source has its raw name; other rows keep their translation
+    return lambda row: [f for f in findings if f.raw in row.original]
+
+
+def _chapter_html(folder_path, output_ref):
+    """The output HTML file a translated_headers.txt row was written into."""
+    stem = os.path.splitext(os.path.basename(str(output_ref or "").split("#")[0]))[0]
+    if not stem:
+        return None
+    for name in (stem + ".html", "response_" + stem + ".html", stem + ".xhtml", "response_" + stem + ".xhtml"):
+        path = os.path.join(folder_path, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def fix_title_file(folder_path, name, findings_for, *, reviewed=False, backup_dir=None):
+    """Fix one of ``TITLE_FILES`` in place (``fix_title_rows``); the translated_headers.txt titles
+    are also fixed in the chapter HTML files they were written into. Returns the changed rows."""
+    content, rows = _read_title_rows(folder_path, name)
+    changed = fix_title_rows(rows, findings_for, reviewed=reviewed)
+    if not changed:
+        return changed
+    path = os.path.join(folder_path, name)
+    _backup(path, backup_dir)
+    if name == METADATA_FILE:
+        for key, (_row, new, _findings, _n) in changed.items():
+            content[key] = new
+        _write_text(path, json.dumps(content, ensure_ascii=False, indent=2))
+        return changed
+    lines = content.split("\n")
+    for row, new, _findings, _n in changed.values():
+        found = _ROW_FIELD.match(lines[row.line])
+        lines[row.line] = f"{found.group(1)}Translated:{found.group(3)}{new}{found.group(5)}"
+    _write_text(path, "\n".join(lines))
+    if name == HEADERS_FILE:
+        for row, _new, findings, _n in changed.values():
+            html_path = _chapter_html(folder_path, row.output_ref)
+            if not html_path:
+                continue
+            with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
+                markup = f.read()
+            new_markup, replaced = apply_fixes(markup, findings, reviewed=reviewed)
+            if replaced:
+                _backup(html_path, backup_dir)
+                _write_text(html_path, new_markup)
+    return changed
+
+
+def fix_metadata(metadata, entries, *, auto_fix, ner=None):
+    """Check (and with ``auto_fix`` fix) a metadata dict in memory. Returns ``(result, changed rows)``."""
+    rows = metadata_rows(metadata)
+    result = check_title_rows(rows, entries, METADATA_FILE, ner=ner)
+    changed = fix_title_rows(rows, _auto_findings(entries, ner)) if auto_fix and result.fixable else {}
+    for key, (_row, new, _findings, _n) in changed.items():
+        metadata[key] = new
+    return result, changed
+
+
+def check_and_fix_titles(folder_path, entries, *, auto_fix, ner=None, names=(HEADERS_FILE, TOC_FILE)):
+    """The translation pipeline's title check: ``[(ChapterResult, fixed)]`` per file with findings.
+    With ``auto_fix`` the automatic-fix cases are rewritten (``fix_title_file``)."""
+    out = []
+    for name in names:
+        _content, rows = _read_title_rows(folder_path, name)
+        if not rows:
+            continue
+        result = check_title_rows(rows, entries, name, ner=ner)
+        if not result.reportable:
+            continue
+        fixed = {}
+        if auto_fix and result.fixable:
+            fixed = fix_title_file(folder_path, name, _auto_findings(entries, ner))
+        out.append((result, fixed))
+    return out
+
+
+def log_title_results(results, log, *, auto_fix):
+    """Log ``check_and_fix_titles`` / ``fix_metadata`` results like the chapter check does."""
+    for result, fixed in results:
+        for finding in result.reportable:
+            done = auto_fix and finding.fixable and fixed
+            log(f"📖 Glossary name check: {result.output_file}: {finding.describe()}{' (fixed)' if done else ''}")

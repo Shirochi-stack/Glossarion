@@ -59,14 +59,15 @@ def model_installed() -> bool:
     return bool(models.is_installed(models.NER_MODEL_KEY))
 
 
-def ensure_model(log: Optional[Callable[[str], None]] = None, cancel=None) -> Optional[str]:
-    """The model file, downloading it (and its vocabulary / labels) first when missing."""
+def ensure_model(log: Optional[Callable[[str], None]] = None, cancel=None, progress=None) -> Optional[str]:
+    """The model file, downloading it (and its vocabulary / labels) first when missing; ``progress``
+    receives ``manga_models.DownloadProgress`` reports."""
     models = _registry()
     spec = models.get_spec(models.NER_MODEL_KEY)
     if not models.is_installed(spec):
         if log:
             log(f"📥 Downloading {spec.title} ({models.format_size(spec.size)}) for the glossary name check...")
-        models.ensure([spec], cancel=cancel)
+        models.ensure([spec], cancel=cancel, progress=progress)
     return models.model_path(spec)
 
 
@@ -249,14 +250,14 @@ _tagger_lock = threading.Lock()
 _tagger: Optional[NerTagger] = None
 
 
-def get_tagger(log: Optional[Callable[[str], None]] = None, cancel=None) -> Optional[NerTagger]:
+def get_tagger(log: Optional[Callable[[str], None]] = None, cancel=None, progress=None) -> Optional[NerTagger]:
     """The shared tagger (downloads and loads the model once); None when NER cannot run here."""
     global _tagger
     if not runtime_available():
         return None
     with _tagger_lock:
         if _tagger is None:
-            path = ensure_model(log, cancel)
+            path = ensure_model(log, cancel, progress)
             if not path or not os.path.isfile(path):
                 return None
             _tagger = NerTagger(path)
