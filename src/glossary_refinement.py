@@ -574,6 +574,8 @@ def _refinement_budget_label(available_tokens: int, mtoks: int) -> str:
 
 
 def _entry_columns(entries: List[Dict]) -> List[str]:
+    from glossary_usage import INTERNAL_ENTRY_FIELDS
+
     columns = ["type", "raw_name", "translated_name"]
     custom_fields = _active_custom_fields()
     description_active = _description_active(custom_fields)
@@ -583,7 +585,8 @@ def _entry_columns(entries: List[Dict]) -> List[str]:
             continue
         for key in entry.keys():
             key = str(key or "").strip()
-            if key and key not in discovered:
+            # the glossary loader's row number / match key are not glossary columns
+            if key and key not in discovered and key not in INTERNAL_ENTRY_FIELDS:
                 discovered.append(key)
 
     def _find_column(name: str) -> Optional[str]:

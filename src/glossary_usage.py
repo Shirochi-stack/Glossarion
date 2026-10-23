@@ -111,6 +111,11 @@ _ASCII_FOLD_TABLE = _gm_ascii_fold_table
 _norm_text = norm_text
 
 
+# Fields _normalize_entry adds for the usage index (row number, match key): bookkeeping, not
+# glossary columns, so glossary refinement never sends them to the model.
+INTERNAL_ENTRY_FIELDS = ("source_index", "identity")
+
+
 def _entry_identity(entry):
     raw = _norm_text(entry.get("raw_name") or entry.get("original_name") or entry.get("original"))
     translated = _norm_text(

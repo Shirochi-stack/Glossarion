@@ -580,3 +580,16 @@ def test_automatic_scope_and_logs_identify_only_pending_types(resume):
         "pending" in line.lower() and all(t in line.lower() for t in TYPES[2:])
         for line in resume.logs
     )
+
+
+def test_refinement_payload_leaves_out_the_loaders_internal_fields(tmp_path):
+    """2026-10-23: glossary_usage's source_index / identity were sent as columns and echoed back."""
+    from glossary_usage import parse_glossary_file
+
+    glossary = tmp_path / "glossary.csv"
+    glossary.write_text("type,raw_name,translated_name,gender\ncharacter,현석,Hyeon-seok,Male\n", encoding="utf-8")
+    entries = parse_glossary_file(str(glossary))
+    assert {"source_index", "identity"} <= set(entries[0])  # the loader still has them for its own use
+    columns = refinement._entry_columns(entries)
+    assert "source_index" not in columns and "identity" not in columns
+    assert refinement._entry_payload(entries, columns) == "character,현석,Hyeon-seok,Male"
