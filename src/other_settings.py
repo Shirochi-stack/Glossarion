@@ -13818,15 +13818,20 @@ def _auto_update_payload_summary(self):
     config['enable_parallel_extraction'] = bool(getattr(self, 'enable_parallel_extraction_var',
                                                         config.get('enable_parallel_extraction', True)))
     config['extraction_workers'] = getattr(self, 'extraction_workers_var', config.get('extraction_workers', 2))
+    decode_images = bool(getattr(self, 'payload_summary_decode_images_var',
+                                 config.get('payload_summary_decode_images', False)))
     log = getattr(self, 'append_log', None)
 
     def run():
         try:
             import payload_summary
             from unified_api_client import _payloads_dir
-            index = payload_summary.build(_payloads_dir(), workers=payload_summary.default_workers(config))
+            index = payload_summary.build(_payloads_dir(), workers=payload_summary.default_workers(config),
+                                          decode_images=decode_images)
             if log and index:
                 log(f"📝 Payload summary updated: {index}")
+        except FileNotFoundError:
+            pass  # payload saving is off / nothing saved yet: nothing to summarize
         except Exception as e:
             if log:
                 log(f"⚠️ Payload summary auto-update failed: {e}")
@@ -13947,11 +13952,14 @@ def _create_payload_cleanup_section(self, parent_frame):
                                                                 config.get('enable_parallel_extraction', True)))
             config['extraction_workers'] = getattr(self, 'extraction_workers_var', config.get('extraction_workers', 2))
             workers = payload_summary.default_workers(config)
+            decode_images = bool(getattr(self, 'payload_summary_decode_images_var',
+                                         config.get('payload_summary_decode_images', False)))
 
             def work(state, cancelled):
                 def on_file(done, total):
                     state.update(text=f"Reading payload {done:,} of {total:,}...", value=done, maximum=total)
-                return payload_summary.build(payloads, workers=workers, progress=on_file, cancel=cancelled)
+                return payload_summary.build(payloads, workers=workers, progress=on_file, cancel=cancelled,
+                                             decode_images=decode_images)
 
             index = run_with_progress(self, "Payload Summary", work, text="Collecting payloads...",
                                       thread_name="PayloadSummary")
@@ -13984,17 +13992,35 @@ def _create_payload_cleanup_section(self, parent_frame):
     except Exception:
         pass
     summary_auto_cb.setToolTip(_wrapped_tooltip_html(
-        "Rebuild the payload summary in the background whenever a translation or glossary run is stopped, "
-        "after the graceful stop has finished (the log shows where it was written)."))
+        "Rebuild the payload summary in the background when a translation or glossary extraction finishes "
+        "(after 'Translation completed' / the glossary extraction summary) and when one is stopped, once the "
+        "graceful stop has finished (the log shows where it was written)."))
 
     def _on_summary_auto_toggle(checked):
         self.payload_summary_auto_update_var = bool(checked)
 
     summary_auto_cb.toggled.connect(_on_summary_auto_toggle)
+    if not hasattr(self, 'payload_summary_decode_images_var'):
+        self.payload_summary_decode_images_var = bool(self.config.get('payload_summary_decode_images', False))
+    summary_images_cb = self._create_styled_checkbox("Decode images")
+    try:
+        summary_images_cb.setChecked(bool(self.payload_summary_decode_images_var))
+    except Exception:
+        pass
+    summary_images_cb.setToolTip(_wrapped_tooltip_html(
+        "Show the images each request sent (manga pages, inpainting, image translation) on its detail page. "
+        "They are decoded into 'Payload Summary/details/images', which takes about three quarters of their "
+        "size in the payloads on disk and is replaced on every rebuild."))
+
+    def _on_summary_images_toggle(checked):
+        self.payload_summary_decode_images_var = bool(checked)
+
+    summary_images_cb.toggled.connect(_on_summary_images_toggle)
     open_row = QHBoxLayout()
     open_row.addWidget(open_payloads_btn)
     open_row.addWidget(summary_btn)
     open_row.addWidget(summary_auto_cb)
+    open_row.addWidget(summary_images_cb)
     open_row.addStretch()
     section_v.addLayout(open_row)
 

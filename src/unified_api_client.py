@@ -7461,6 +7461,8 @@ class UnifiedClient:
             if ctx.get('total_chunks') is not None:
                 info['total_chunks'] = str(ctx['total_chunks'])
                 applied = True
+            if ctx.get('spine') is not None:
+                info['spine'] = ctx['spine']
             if ctx.get('merged_chapters'):
                 try:
                     info['merged_chapters'] = list(ctx.get('merged_chapters') or [])
@@ -12384,6 +12386,7 @@ class UnifiedClient:
                     merged_chapters=source_chapter_context.get('merged_chapters'),
                     dispatch_order=source_chapter_context.get('dispatch_order'),
                     source_file=source_chapter_context.get('source_file'),
+                    spine=source_chapter_context.get('spine'),
                 )
             except Exception:
                 try:
@@ -13367,6 +13370,7 @@ class UnifiedClient:
                                 merged_chapters=src_ctx.get('merged_chapters'),
                                 dispatch_order=src_ctx.get('dispatch_order'),
                                 source_file=src_ctx.get('source_file'),
+                                spine=src_ctx.get('spine'),
                             )
                     except Exception:
                         pass
@@ -20292,7 +20296,7 @@ class UnifiedClient:
 
     def set_chapter_context(self, chapter=None, chunk=None, total_chunks=None,
                             merged_chapters=None, dispatch_order=None,
-                            source_file=None):
+                            source_file=None, spine=None):
         """Store chapter/chunk context on thread-local state for logging and payload metadata."""
         try:
             tls = self._get_thread_local_client()
@@ -20303,6 +20307,8 @@ class UnifiedClient:
                 "merged_chapters": merged_chapters,
                 "dispatch_order": dispatch_order,
                 "source_file": source_file,
+                # position in the book's chapter list (the progress manager's [009], "Spine 9/108")
+                "spine": spine,
             }
             tls.chapter_context = context
 
@@ -20324,6 +20330,8 @@ class UnifiedClient:
                         info["merged_chapters"] = merged_chapters
                 if dispatch_order is not None:
                     info["dispatch_order"] = int(dispatch_order)
+                if spine is not None:
+                    info["spine"] = int(spine)
                 if source_file:
                     info["source_file"] = os.path.basename(
                         str(source_file).replace("\\", "/")

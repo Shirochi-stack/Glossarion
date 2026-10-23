@@ -15,16 +15,21 @@ Old payloads are fine: a missing value shows N/A and a column no request has is 
 built on worker threads (``workers``: the Parallel Extraction setting, never more than the CPU has).
 """
 
+import base64
+import binascii
 import html
 import json
 import os
 import shutil
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
 SUMMARY_DIR = "Payload Summary"
+# used when the folder beside Payloads cannot be written (read-only install folder, permissions)
+FALLBACK_DIR = "Glossarion_Payload_Summary"
 INDEX_FILE = "logistics.html"
 PREVIEW_CHARS = 160
 DETAIL_MAX_CHARS = 200_000  # per message; the raw JSON link has the rest
@@ -67,8 +72,31 @@ def collect_files(payloads_dir):
             path = os.path.join(root, name)
             if "_payload_" in name or os.path.basename(root) == "failed_requests":
                 found.append(path)
-    found.sort(key=lambda p: (os.path.getmtime(p) if os.path.exists(p) else 0, p))
+    found.sort(key=lambda p: (_mtime(p), p))
     return found
+
+
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:  # removed meanwhile (the Payloads cleanup runs at startup / exit)
+        return 0
+
+
+def _writable_dir(out_dir):
+    """``out_dir`` when it can be written, else a folder in the temp directory; OSError if neither."""
+    tried = []
+    for candidate in (out_dir, os.path.join(tempfile.gettempdir(), FALLBACK_DIR)):
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            probe = os.path.join(candidate, f".write_test_{os.getpid()}_{threading.get_ident()}")
+            with open(probe, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(probe)
+            return candidate
+        except OSError as e:
+            tried.append(f"{candidate}: {e}")
+    raise OSError("No folder the payload summary can be written to (" + "; ".join(tried) + ")")
 
 
 def _load_logistics(payloads_dir):
@@ -166,7 +194,8 @@ def _failed_context(name):
 
 
 def _chapter_text(info):
-    """'Ch 5 · chunk 1/2' from the payload's chapter_info."""
+    """'[009] Ch 5 · chunk 1/2' from the payload's chapter_info ([009]: position in the book, as in the
+    progress manager; payloads saved before 2026-10-23 have no spine)."""
     if not isinstance(info, dict):
         return None if info in (None, "") else str(info)
     chapter = _first(info.get("chapter"), info.get("chapter_num"), info.get("number"))
@@ -176,7 +205,13 @@ def _chapter_text(info):
         pieces.append(f"Ch {chapter}")
     if chunk not in (None, ""):
         pieces.append(f"chunk {chunk}/{total}" if total not in (None, "") else f"chunk {chunk}")
-    return " · ".join(pieces) or None
+    label = " · ".join(pieces)
+    spine = info.get("spine")
+    try:
+        label = f"[{int(spine):03d}] {label}".rstrip() if spine is not None else label
+    except (TypeError, ValueError):
+        pass
+    return label or None
 
 
 def read_row(path, payloads_dir, logistics):
@@ -276,6 +311,8 @@ input, select { background: #2d2d2d; color: #ddd; border: 1px solid #4a5568; bor
 td.time { white-space: nowrap; }
 pre { white-space: pre-wrap; word-break: break-word; background: #252525; border: 1px solid #333;
       border-radius: 6px; padding: 10px; font-size: 13px; }
+.shot { display: inline-block; max-width: min(100%, 900px); max-height: 70vh; margin: 4px 8px 4px 0;
+        border: 1px solid #333; border-radius: 6px; background: #111; }
 .msg { margin: 12px 0; } .role { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px;
        background: #34495e; } .role.system { background: #5a3d12; } .role.user { background: #1f4d2b; }
 .role.assistant { background: #3d2a5a; }
@@ -283,8 +320,60 @@ dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; } dt 
 """
 
 
-def _detail_page(row, data, payload_path):
+_IMAGE_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp",
+              "image/gif": "gif", "image/bmp": "bmp"}
+
+
+def _message_images(content):
+    """The images of one message, in order: ("data", mime, base64 text) for inline images
+    (OpenAI image_url data: URLs, Anthropic base64 sources, Gemini inline_data) or ("url", url, None)."""
+    found = []
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, dict):
+            continue
+        url = part.get("image_url")
+        url = url.get("url") if isinstance(url, dict) else url
+        source = part.get("source") if isinstance(part.get("source"), dict) else {}
+        inline = part.get("inline_data") or part.get("inlineData")
+        if isinstance(url, str) and url.startswith("data:") and ";base64," in url:
+            head, _, payload = url.partition(";base64,")
+            found.append(("data", head[5:].lower(), payload))
+        elif isinstance(url, str) and url.startswith(("http://", "https://")):
+            found.append(("url", url, None))
+        elif source.get("type") == "base64" and source.get("data"):
+            found.append(("data", str(source.get("media_type") or "image/png").lower(), source["data"]))
+        elif isinstance(inline, dict) and inline.get("data"):
+            found.append(("data", str(inline.get("mime_type") or inline.get("mimeType") or "image/png").lower(),
+                          inline["data"]))
+    return found
+
+
+def write_images(data, images_dir, number):
+    """Decode the request's inline images into ``images_dir``; {message index: [img src, ...]} with
+    srcs relative to the detail page. An image that cannot be decoded or written is left out."""
+    shown = {}
+    for index, message in enumerate((data or {}).get("messages") or [], 1):
+        if not isinstance(message, dict):
+            continue
+        for k, (kind, what, payload) in enumerate(_message_images(message.get("content")), 1):
+            if kind == "url":
+                shown.setdefault(index, []).append(what)
+                continue
+            name = f"{number:05d}_{index}_{k}.{_IMAGE_EXT.get(what, 'png')}"
+            try:
+                blob = base64.b64decode(payload, validate=False)
+                os.makedirs(images_dir, exist_ok=True)
+                with open(os.path.join(images_dir, name), "wb") as f:
+                    f.write(blob)
+            except (OSError, ValueError, binascii.Error):
+                continue
+            shown.setdefault(index, []).append(f"images/{name}")
+    return shown
+
+
+def _detail_page(row, data, payload_path, images=None):
     esc = html.escape
+    images = images or {}
 
     def value(v):
         return esc(str(v)) if v not in (None, "") else "<span class='na'>N/A</span>"
@@ -308,6 +397,8 @@ def _detail_page(row, data, payload_path):
             f"<div class='msg'><span class='role {esc(role)}'>{esc(role)}</span> "
             f"<span class='dim'>#{index} · {len(text):,} characters</span>"
             f"<pre>{esc(shown)}{'…' if cut else ''}</pre>"
+            + "".join(f"<a href=\"{esc(src)}\" target=\"_blank\"><img class='shot' src=\"{esc(src)}\" "
+                      f"loading='lazy' alt='image {k}'></a>" for k, src in enumerate(images.get(index, ()), 1))
             + ("<div class='dim'>Cut here; the raw JSON has the full text.</div>" if cut else "") + "</div>")
 
     def block(title, obj):
@@ -524,7 +615,7 @@ function render() {{
   const frag = document.createDocumentFragment();
   shown.forEach(r => {{
     const tr = document.createElement("tr"); tr.className = "row" + (r.kind === "Failed" ? " failed" : "");
-    tr.ondblclick = () => window.open(r.detail, "_blank");  // double-click opens the request details
+    tr.ondblclick = () => {{ if (r.detail) window.open(r.detail, "_blank"); }};  // double-click opens the request details
     tr.oncontextmenu = e => {{ e.preventDefault(); showRowMenu(e, r); }};
     cols.forEach(key => {{
       const td = document.createElement("td"); const v = r[key]; td.dataset.key = key;
@@ -552,10 +643,16 @@ render();
 """
 
 
-def build(payloads_dir, *, out_dir=None, workers=1, progress=None, cancel=None):
+def build(payloads_dir, *, out_dir=None, workers=1, progress=None, cancel=None, decode_images=False):
     """Write the summary; returns the index path (None when cancelled). ``progress(done, total)``
-    is called as files are read; ``cancel()`` stops between files."""
-    out_dir = out_dir or summary_dir(payloads_dir)
+    is called as files are read; ``cancel()`` stops between files. ``decode_images`` (Payloads >
+    "Decode images") writes the requests' inline images into details/images/ so the detail pages
+    show them - about three quarters of their base64 size on disk."""
+    if not payloads_dir or not os.path.isabs(payloads_dir) or not os.path.isdir(payloads_dir):
+        # payload saving is off or no request was saved yet: nothing to summarize, and a relative
+        # path would put the summary in whatever folder the app was started from
+        raise FileNotFoundError(f"No Payloads folder to summarize ({payloads_dir!r})")
+    out_dir = _writable_dir(out_dir or summary_dir(payloads_dir))
     details = os.path.join(out_dir, "details")
     if os.path.isdir(details):
         shutil.rmtree(details, ignore_errors=True)  # the previous summary's pages
@@ -573,8 +670,12 @@ def build(payloads_dir, *, out_dir=None, workers=1, progress=None, cancel=None):
         row, data = read_row(path, payloads_dir, logistics)
         if row is not None:
             row["detail"] = f"details/{number:05d}.html"
-            with open(os.path.join(details, f"{number:05d}.html"), "w", encoding="utf-8") as f:
-                f.write(_detail_page(row, data, path))
+            try:
+                images = write_images(data, os.path.join(details, "images"), number) if decode_images else None
+                with open(os.path.join(details, f"{number:05d}.html"), "w", encoding="utf-8") as f:
+                    f.write(_detail_page(row, data, path, images))
+            except OSError:  # one page that cannot be written (locked, permissions) - the rest still are
+                row["detail"] = None
         with lock:
             done[0] += 1
             count = done[0]

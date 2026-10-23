@@ -882,6 +882,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             chunk=chunk_idx,
                             total_chunks=total_chunks,
                             merged_chapters=merged_chapters,
+                            spine=(chapter_idx + 1) if isinstance(chapter_idx, int) else None,
                         )
                 except Exception:
                     pass

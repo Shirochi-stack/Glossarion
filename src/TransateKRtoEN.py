@@ -9207,7 +9207,7 @@ class TranslationProcessor:
                 print(f"⚠️ Failed to generate rolling summary: {e}")
             return None
     
-    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=None, merged_chapters=None, before_send_callback=None):
+    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=None, merged_chapters=None, before_send_callback=None, spine=None):
         """Handle translation with retry logic
         
         Args:
@@ -9461,6 +9461,7 @@ class TranslationProcessor:
                     'total_chunks': total_chunks,
                     'merged_chapters': merged_chapters,
                     'source_file': _direct_text_html_source_name(c),
+                    'spine': spine,
                 }
 
                 def _mark_progress_on_send():
@@ -10794,6 +10795,7 @@ class BatchTranslationProcessor:
                     'total_chunks': total_chunks,
                     'dispatch_order': chapter.get('_batch_request_order'),
                     'source_file': _direct_text_html_source_name(chapter),
+                    'spine': idx + 1,
                 }
                 
                 # Get chunk timeout from environment
@@ -12735,6 +12737,7 @@ class BatchTranslationProcessor:
                         '_batch_request_order'
                     ),
                     'source_file': _direct_text_html_source_name(parent_chapter),
+                    'spine': parent_idx + 1,
                 }
 
                 def _mark_merged_request_progress_on_send():
@@ -22917,6 +22920,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         total_chunks=chapter_context.get('total_chunks'),
                         merged_chapters=chapter_context.get('merged_chapters'),
                         source_file=chapter_context.get('source_file'),
+                        spine=chapter_context.get('spine'),
                     )
                     dispatch_order = chapter_context.get('dispatch_order')
                     if dispatch_order is not None:
@@ -22928,6 +22932,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         # implement the older chapter-context signature.
                         context_kwargs.pop('dispatch_order', None)
                         context_kwargs.pop('source_file', None)
+                        context_kwargs.pop('spine', None)
                         client.set_chapter_context(**context_kwargs)
                 except Exception:
                     # Context is best-effort and should never break the call
@@ -32062,6 +32067,7 @@ def main(log_callback=None, stop_callback=None):
                     merge_group_len=merge_group_len,
                     merged_chapters=merged_chapters,
                     before_send_callback=_mark_sequential_progress_on_send,
+                    spine=idx + 1,
                 )
                 if finish_reason == "cancelled" or (
                     result is None
@@ -32367,6 +32373,7 @@ def main(log_callback=None, stop_callback=None):
                                     merge_group_len=merge_group_len,
                                     merged_chapters=merged_chapters,
                                     before_send_callback=_mark_sequential_progress_on_send,
+                                    spine=idx + 1,
                                 )
                                 if finish_reason_retry == "cancelled" or (
                                     result_retry is None
@@ -32483,6 +32490,7 @@ def main(log_callback=None, stop_callback=None):
                             before_send_callback=(
                                 _mark_sequential_progress_on_send
                             ),
+                            spine=idx + 1,
                         )
                         sequential_retry_state.update(
                             {

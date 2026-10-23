@@ -846,8 +846,11 @@ TOOLTIP_OVERRIDES = {
         "occurs inside ordinary words; 0 = every length). Names under 3 characters are "
         "only reported, never fixed automatically, unless they differ just in spacing or hyphens."),
     "payload_summary_auto_update": (
-        "Rebuild the readable payload summary (Payload Summary/logistics.html) after a translation or "
-        "glossary run is stopped, once the graceful stop has finished."),
+        "Rebuild the readable payload summary (Payload Summary/logistics.html) when a translation or "
+        "glossary extraction finishes, and when one is stopped, once the graceful stop has finished."),
+    "payload_summary_decode_images": (
+        "The payload summary's detail pages show the images each request sent (decoded into "
+        "Payload Summary/details/images, about three quarters of their base64 size on disk)."),
     "payload_cleanup_limit_mb": (
         "The Payloads and http_requests debug folders are trimmed to this size, oldest files first, at "
         "startup and exit. 0 = never clean up."),

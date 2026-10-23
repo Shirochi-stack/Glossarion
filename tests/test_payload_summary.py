@@ -135,7 +135,7 @@ def test_auto_update_rebuilds_after_a_stop_only_when_on(monkeypatch, tmp_path):
     import unified_api_client
     built, done = [], threading.Event()
     monkeypatch.setattr(unified_api_client, "_payloads_dir", lambda: str(tmp_path / "Payloads"))
-    monkeypatch.setattr(ps, "build", lambda d, workers=1: (built.append((d, workers)), done.set())[0] or "x.html")
+    monkeypatch.setattr(ps, "build", lambda d, workers=1, **_k: (built.append((d, workers)), done.set())[0] or "x.html")
 
     class Gui:
         config = {"extraction_workers": 2}
@@ -151,3 +151,74 @@ def test_auto_update_rebuilds_after_a_stop_only_when_on(monkeypatch, tmp_path):
     assert done.wait(5) and built[0][0] == str(tmp_path / "Payloads")
     src = open(os.path.join(SRC, "translator_gui.py"), encoding="utf-8").read()
     assert src.count("getattr(self, '_auto_update_payload_summary', lambda: None)()") == 2
+
+
+def test_no_payloads_folder_writes_nothing(tmp_path, monkeypatch):
+    # payload saving off leaves a relative "Payloads": never write a summary into the start folder
+    monkeypatch.chdir(tmp_path)
+    for missing in ("Payloads", str(tmp_path / "nope"), None):
+        with pytest.raises(FileNotFoundError):
+            ps.build(missing)
+    assert not os.listdir(tmp_path)
+
+
+def test_unwritable_summary_folder_falls_back_to_temp(payloads, tmp_path, monkeypatch):
+    blocked = str(tmp_path / "blocked")
+    real_makedirs = os.makedirs
+
+    def makedirs(path, *a, **k):
+        if str(path).startswith(blocked):
+            raise PermissionError(13, "Permission denied", path)
+        return real_makedirs(path, *a, **k)
+
+    monkeypatch.setattr(os, "makedirs", makedirs)
+    monkeypatch.setattr(ps.tempfile, "gettempdir", lambda: str(tmp_path / "temp"))
+    index = ps.build(str(payloads), out_dir=blocked)
+    assert index == str(tmp_path / "temp" / ps.FALLBACK_DIR / "logistics.html") and os.path.exists(index)
+
+
+def test_a_detail_page_that_cannot_be_written_does_not_stop_the_rest(payloads, tmp_path, monkeypatch):
+    import builtins
+    real_open = builtins.open
+
+    def flaky_open(path, mode="r", *a, **k):
+        if "w" in mode and str(path).endswith("00001.html"):
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", flaky_open)
+    index = ps.build(str(payloads), out_dir=str(tmp_path / "S"))
+    page = real_open(index, encoding="utf-8").read()
+    assert '"detail": null' in page and page.count('"detail": "details/') == 2
+    assert "if (r.detail) window.open" in page
+
+
+def test_chapter_label_leads_with_the_spine_position():
+    # like the progress manager: [009] is the chapter's place in the book ("Spine 9/108" in the log)
+    assert ps._chapter_text({"chapter": "3", "chunk": "1", "total_chunks": "1", "spine": 9}) == "[009] Ch 3 · chunk 1/1"
+    assert ps._chapter_text({"chapter": "7", "chunk": None, "spine": 12}) == "[012] Ch 7"
+    assert ps._chapter_text({"chapter": "5", "chunk": "1", "total_chunks": "2"}) == "Ch 5 · chunk 1/2"  # older payloads
+    assert ps._chapter_text({"chapter": None, "chunk": None, "total_chunks": None}) is None
+
+
+def test_decode_images_shows_the_request_images(tmp_path):
+    import base64
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+    root = tmp_path / "Payloads"
+    write(root / "image" / "T_1" / "image_payload_1_e_A0_150000_v.json", {"model": "m", "messages": [
+        {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + png}},                 # OpenAI
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": png}},    # Anthropic
+            {"inline_data": {"mime_type": "image/webp", "data": png}},                                  # Gemini
+            {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,@@not base64@@"}}]}]})
+    off = tmp_path / "off"
+    ps.build(str(root), out_dir=str(off))  # Decode images is off by default: no image files, no <img>
+    assert not (off / "details" / "images").exists()
+    assert "class='shot'" not in (off / "details" / "00001.html").read_text(encoding="utf-8")
+    out = tmp_path / "S"
+    ps.build(str(root), out_dir=str(out), decode_images=True)
+    assert sorted(os.listdir(out / "details" / "images")) == ["00001_1_1.png", "00001_1_2.jpg", "00001_1_3.webp"]
+    assert (out / "details" / "images" / "00001_1_1.png").read_bytes() == b"\x89PNG\r\n\x1a\nfake"
+    page = (out / "details" / "00001.html").read_text(encoding="utf-8")
+    assert page.count("class='shot'") == 4 and 'src="https://example.test/a.png"' in page
