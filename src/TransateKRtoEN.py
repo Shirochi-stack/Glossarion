@@ -12261,6 +12261,9 @@ class BatchTranslationProcessor:
                 _write_html_md_txt_sidecars(self.out_dir, fname, cleaned)
             
             print(f"💾 Saved Chapter {log_num}: {fname} ({len(cleaned)} chars)")
+            # Glossary name check: this path marks the chapter completed without chapter_obj, so
+            # ProgressManager.update cannot run it (batch / parallel chapters, Glossarion Mobile)
+            _run_glossary_name_check(self.out_dir, fname, chapter)
 
             # If we reached here, the chapter completed successfully (truncated/partial
             # cases already returned above in the early gate).

@@ -289,3 +289,26 @@ def test_real_model_finds_names():
     tagger = ner_names.get_tagger()
     found = {(e.label, e.text) for e in tagger.entities("Walter Argent drew his sword while Gang Si-hyeon watched.")}
     assert {("PER", "Walter Argent"), ("PER", "Gang Si-hyeon")} <= found
+
+
+def test_every_chapter_completion_runs_the_name_check():
+    """2026-10-23 (Glossarion Mobile run fixed nothing): ProgressManager.update runs the check only when it
+    gets chapter_obj; a completion without it (the batch / parallel chapter path) must call it itself."""
+    import ast
+
+    tree = ast.parse(open(os.path.join(SRC, "TransateKRtoEN.py"), encoding="utf-8-sig").read())
+    missing = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+        runs_check = any(getattr(c.func, "id", None) == "_run_glossary_name_check" for c in calls)
+        for call in calls:
+            if (getattr(call.func, "attr", None) or getattr(call.func, "id", None)) not in ("update", "update_progress_fn"):
+                continue
+            kws = {k.arg: k.value for k in call.keywords}
+            status = kws.get("status")
+            if isinstance(status, ast.Constant) and status.value == "completed" and "chapter_obj" not in kws \
+                    and not runs_check:
+                missing.append((fn.name, call.lineno))
+    assert not missing, missing
