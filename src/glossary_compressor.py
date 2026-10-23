@@ -1639,3 +1639,63 @@ def compress_glossary_file(glossary_path, source_text):
     except Exception as e:
         print(f"⚠️ Failed to compress glossary: {e}")
         return None
+
+
+def _is_glossary_header_line(stripped):
+    lowered = stripped.lower()
+    return lowered.startswith('glossary columns:') or lowered.startswith('glossary:')
+
+
+def merge_glossary_texts(texts):
+    """The glossaries one request carries (book glossary, extension, unified glossary) as one block.
+
+    Token-efficient glossaries (a ``Glossary Columns:`` header, ``=== SECTION ===`` headers and
+    ``* `` entries) are merged: one header, each section once (in first-seen order) holding the
+    entries of every glossary, one blank line between sections - so sections that matched nothing
+    leave no blank runs and a section shared by two glossaries is not repeated. Anything else
+    (CSV, JSON, free text) is joined as it was, with blank-line runs collapsed."""
+    texts = [t for t in texts if t and t.strip()]
+    if not texts:
+        return ""
+    header = None
+    sections = {}   # key -> [header line, entries]
+    order = []
+    for text in texts:
+        current = None
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if _is_glossary_header_line(stripped):
+                if header is None:
+                    header = stripped
+                elif stripped != header:
+                    return _join_glossary_texts(texts)  # different columns: keep them apart
+                continue
+            if stripped.startswith('==='):
+                current = stripped.strip('= ').strip().upper()
+                if current not in sections:
+                    sections[current] = [stripped, []]
+                    order.append(current)
+                continue
+            if stripped.startswith('* '):
+                if current is None:
+                    current = ''
+                    if current not in sections:
+                        sections[current] = [None, []]
+                        order.insert(0, current)
+                sections[current][1].append(line.rstrip())
+                continue
+            return _join_glossary_texts(texts)  # not the token-efficient format
+    blocks = []
+    for key in order:
+        title, entries = sections[key]
+        if entries:
+            blocks.append("\n".join(([title] if title else []) + entries))
+    if not blocks:
+        return ""
+    return "\n\n".join(([header] if header else []) + blocks)
+
+
+def _join_glossary_texts(texts):
+    return re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", "\n\n".join(t.strip("\n") for t in texts))

@@ -23482,9 +23482,6 @@ def build_system_prompt(
                     print(f"⚠️ Glossary compression failed: {e}")
                     # Continue with uncompressed glossary
             
-            if system:
-                system += "\n\n"
-            
             custom_prompt = str(_request_glossary_setting(
                 settings, "APPEND_GLOSSARY_PROMPT", ""
             ) or "").strip()
@@ -23495,9 +23492,12 @@ def build_system_prompt(
                     "Glossary Manager → General Settings → Glossary Append Format"
                 )
             
+            # The book glossary, the extension and the unified glossary are merged into one
+            # block (one header, each section once) and appended after the append prompt below.
+            glossary_pieces = []
             # Skip appending if compression returned empty (0 matching entries)
             if glossary_text and glossary_text.strip():
-                system += f"{custom_prompt}\n{glossary_text}"
+                glossary_pieces.append(glossary_text)
                 if not glossary_compression_logged:
                     glossary_log_parts.append(f"✅ Glossary appended ({len(glossary_text):,} characters)")
             else:
@@ -23611,10 +23611,10 @@ def build_system_prompt(
                 actual_glossary_path, settings
             )
             if additional_glossary_path:
-                system = _append_secondary_glossary(
-                    system, additional_glossary_path, "Glossary Extension",
+                glossary_pieces.append(_append_secondary_glossary(
+                    "", additional_glossary_path, "Glossary Extension",
                     exclude_raw_names=sent_raw_names,
-                )
+                ))
                 try:
                     sent_raw_names = sent_raw_names | unified_glossary.glossary_raw_names(
                         additional_glossary_path
@@ -23627,11 +23627,18 @@ def build_system_prompt(
             # carry are excluded here, in memory, so no entry is sent twice and
             # no per-book copy is ever written.
             if unified_glossary_path:
-                system = _append_secondary_glossary(
-                    system, unified_glossary_path, "Unified Glossary",
+                glossary_pieces.append(_append_secondary_glossary(
+                    "", unified_glossary_path, "Unified Glossary",
                     max_uncompressed_chars=200_000,
                     exclude_raw_names=sent_raw_names,
-                )
+                ))
+
+            from glossary_compressor import merge_glossary_texts
+            merged_glossary = merge_glossary_texts(glossary_pieces)
+            if merged_glossary:
+                if system:
+                    system += "\n\n"
+                system += f"{custom_prompt}\n{merged_glossary}"
 
             # One line for everything glossary-related in this request, e.g.
             # 🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens
