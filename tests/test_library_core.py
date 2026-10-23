@@ -627,7 +627,9 @@ def test_desktop_classes_inherit_the_mixins_and_reexport_every_moved_name(el, le
 #: classes are pinned by tests/test_reader_doc.py.
 LIBRARY_CLASSES_CHANGED = {
     "_BookCard": {"__init__"},
-    "_ScanForRawDialog": {"__init__", "_populate_tree", "_apply_matches"},
+    # _setup_ui: its checkbox delegate is qt_widget_helpers.CheckmarkDelegate (shared with the QA
+    # scanner's glossary name review), 2026-10-23
+    "_ScanForRawDialog": {"__init__", "_populate_tree", "_apply_matches", "_setup_ui"},
     "EpubLibraryDialog": {
         "_library_page_bounds", "_update_library_pagination_controls", "_update_organize_counts",
         "_import_paths_into_library", "_ensure_output_override_matches", "_organize_into_library",

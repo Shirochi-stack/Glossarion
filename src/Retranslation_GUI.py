@@ -15776,26 +15776,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             
             menu = QMenu(listbox)
             # Remove extra left gutter reserved for icons to avoid empty space
-            menu.setStyleSheet(
-                "QMenu {"
-                "  padding: 4px;"
-                "  background-color: #2b2b2b;"
-                "  color: white;"
-                "  border: 1px solid #5a9fd4;"
-                "} "
-                "QMenu::icon { width: 0px; } "
-                "QMenu::item {"
-                "  padding: 6px 12px;"
-                "  background-color: transparent;"
-                "} "
-                "QMenu::item:selected {"
-                "  background-color: #17a2b8;"
-                "  color: white;"
-                "} "
-                "QMenu::item:pressed {"
-                "  background-color: #138496;"
-                "}"
-            )
+            from qt_widget_helpers import CONTEXT_MENU_STYLE
+            menu.setStyleSheet(CONTEXT_MENU_STYLE)
             # Skipped special files get a single-purpose menu: the only
             # meaningful action for them is "Do not skip" (removes the
             # Other Settings keyword that caused the skip).
@@ -17431,26 +17413,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 return
             row = listbox.row(item)
             menu = QMenu(listbox)
-            menu.setStyleSheet(
-                "QMenu {"
-                "  padding: 4px;"
-                "  background-color: #2b2b2b;"
-                "  color: white;"
-                "  border: 1px solid #5a9fd4;"
-                "} "
-                "QMenu::icon { width: 0px; } "
-                "QMenu::item {"
-                "  padding: 6px 12px;"
-                "  background-color: transparent;"
-                "} "
-                "QMenu::item:selected {"
-                "  background-color: #17a2b8;"
-                "  color: white;"
-                "} "
-                "QMenu::item:pressed {"
-                "  background-color: #138496;"
-                "}"
-            )
+            from qt_widget_helpers import CONTEXT_MENU_STYLE
+            menu.setStyleSheet(CONTEXT_MENU_STYLE)
             act_open = menu.addAction("📂 Open File")
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
@@ -17562,26 +17526,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 return
             row = listbox.row(item)
             menu = QMenu(listbox)
-            menu.setStyleSheet(
-                "QMenu {"
-                "  padding: 4px;"
-                "  background-color: #2b2b2b;"
-                "  color: white;"
-                "  border: 1px solid #5a9fd4;"
-                "} "
-                "QMenu::icon { width: 0px; } "
-                "QMenu::item {"
-                "  padding: 6px 12px;"
-                "  background-color: transparent;"
-                "} "
-                "QMenu::item:selected {"
-                "  background-color: #17a2b8;"
-                "  color: white;"
-                "} "
-                "QMenu::item:pressed {"
-                "  background-color: #138496;"
-                "}"
-            )
+            from qt_widget_helpers import CONTEXT_MENU_STYLE
+            menu.setStyleSheet(CONTEXT_MENU_STYLE)
             act_open = menu.addAction("📂 Open File")
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
@@ -17849,26 +17795,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 return
             row = listbox.row(item)
             menu = QMenu(listbox)
-            menu.setStyleSheet(
-                "QMenu {"
-                "  padding: 4px;"
-                "  background-color: #2b2b2b;"
-                "  color: white;"
-                "  border: 1px solid #5a9fd4;"
-                "} "
-                "QMenu::icon { width: 0px; } "
-                "QMenu::item {"
-                "  padding: 6px 12px;"
-                "  background-color: transparent;"
-                "} "
-                "QMenu::item:selected {"
-                "  background-color: #17a2b8;"
-                "  color: white;"
-                "} "
-                "QMenu::item:pressed {"
-                "  background-color: #138496;"
-                "}"
-            )
+            from qt_widget_helpers import CONTEXT_MENU_STYLE
+            menu.setStyleSheet(CONTEXT_MENU_STYLE)
             act_open = menu.addAction("📂 Open File")
             act_delete = menu.addAction("🔁 Delete / Retranslate")
             chosen = menu.exec(listbox.mapToGlobal(pos))

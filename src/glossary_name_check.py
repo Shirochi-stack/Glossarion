@@ -66,6 +66,7 @@ class NameEntry:
     raw: str
     translated: str
     entry_type: str
+    origin: str = ""  # "" = the book's glossary, else LAYER_EXTENSION / LAYER_UNIFIED
 
 
 @dataclass
@@ -76,6 +77,7 @@ class Finding:
     kind: str
     variants: tuple = ()
     occurrences: int = 0
+    origin: str = ""
 
     @property
     def fixable(self):
@@ -262,7 +264,7 @@ def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_c
             continue
         if raw == translated or not re.search(r"[A-Za-z]", translated):
             continue  # untranslated names and non-Latin targets have nothing to check
-        picked.setdefault(raw, NameEntry(raw, translated, entry_type))
+        picked.setdefault(raw, NameEntry(raw, translated, entry_type, str(row.get("_origin") or "")))
     entries = sorted(picked.values(), key=lambda e: -len(e.raw))
     return GlossaryNameEntries(entries, known)
 
@@ -270,21 +272,72 @@ def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_c
 _load_lock = threading.Lock()
 _load_cache = {}
 
+LAYER_EXTENSION = "Glossary Extension"
+LAYER_UNIFIED = "Unified Glossary"
 
-def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars=0):
-    """Parse a glossary file once per (file version, options)."""
+
+def glossary_layers(glossary_path, settings=None):
+    """``[(path, origin)]``: the book's glossary, then the glossaries a translation request adds when
+    they are switched on (``TransateKRtoEN.secondary_glossary_paths``: Add Additional Glossary's
+    extension, Enable Unified Glossary's shared file). ``settings`` as for the request builder
+    (a dict of its env names; None = the environment)."""
+    layers = [(glossary_path, "")]
+    try:
+        from TransateKRtoEN import secondary_glossary_paths
+        extension, unified = secondary_glossary_paths(glossary_path, settings)
+    except Exception:
+        extension = unified = None
+    layers += [(path, origin) for path, origin in ((extension, LAYER_EXTENSION), (unified, LAYER_UNIFIED)) if path]
+    return layers
+
+
+def layer_settings_from_config(config):
+    """The request-builder settings ``glossary_layers`` reads, from a saved config (the GUI process,
+    where no translation env is set)."""
+    config = config if isinstance(config, dict) else {}
+    on = lambda key, default=False: "1" if _truthy(config.get(key, default), default) else "0"
+    return {
+        "ADD_ADDITIONAL_GLOSSARY": on("add_additional_glossary"),
+        "ENABLE_UNIFIED_GLOSSARY": on("enable_unified_glossary"),
+        "UNIFIED_GLOSSARY_SOURCE_LANGUAGE": str(config.get("unified_glossary_source_language") or "auto").lower(),
+        "UNIFIED_GLOSSARY_COMBINE_ALL_LANGUAGES": on("unified_glossary_combine_all_languages"),
+        "OUTPUT_LANGUAGE": str(config.get("output_language") or "English"),
+    }
+
+
+def _layer_rows(layers):
+    """Rows of every layer; a raw name is taken from the first layer that has it (book glossary >
+    extension > unified glossary), whatever its type there."""
+    import glossary_usage
+    rows, seen = [], set()
+    for path, origin in layers:
+        layer_raws = set()
+        for row in glossary_usage.parse_glossary_file(path):
+            raw = str(row.get("raw_name") or "").strip()
+            if not raw or raw in seen:
+                continue
+            layer_raws.add(raw)
+            rows.append(dict(row, _origin=origin) if origin else row)
+        seen |= layer_raws
+    return rows
+
+
+def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars=0, settings=None):
+    """The names to check from the book's glossary and the enabled extension / unified glossary
+    (``glossary_layers``), parsed once per (file versions, options)."""
     if not glossary_path or not os.path.isfile(glossary_path):
         return GlossaryNameEntries((), ())
-    info = os.stat(glossary_path)
-    key = (os.path.normcase(os.path.abspath(glossary_path)), info.st_size, info.st_mtime_ns,
-           str(mode or "characters").lower(), tuple(custom_types or ()), int(min_chars or 0))
+    layers = [(p, o) for p, o in glossary_layers(glossary_path, settings) if os.path.isfile(p)]
+    stamps = []
+    for path, origin in layers:
+        info = os.stat(path)
+        stamps.append((os.path.normcase(os.path.abspath(path)), origin, info.st_size, info.st_mtime_ns))
+    key = (tuple(stamps), str(mode or "characters").lower(), tuple(custom_types or ()), int(min_chars or 0))
     with _load_lock:
         cached = _load_cache.get(key)
         if cached is not None:
             return cached
-    import glossary_usage
-    entries = build_entries(glossary_usage.parse_glossary_file(glossary_path), mode=mode,
-                            custom_types=custom_types, min_chars=min_chars)
+    entries = build_entries(_layer_rows(layers), mode=mode, custom_types=custom_types, min_chars=min_chars)
     with _load_lock:
         _load_cache.clear()
         _load_cache[key] = entries
@@ -352,9 +405,10 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
             kind = KIND_VARIANT if len(variants) == 1 else KIND_AMBIGUOUS
             occurrences = sum(len(_occurrences(v, output_markup)) for v in variants)
             result.findings.append(Finding(entry.raw, entry.translated, entry.entry_type, kind,
-                                           tuple(sorted(variants)), occurrences))
+                                           tuple(sorted(variants)), occurrences, entry.origin))
         else:
-            result.findings.append(Finding(entry.raw, entry.translated, entry.entry_type, KIND_MISSING))
+            result.findings.append(Finding(entry.raw, entry.translated, entry.entry_type, KIND_MISSING,
+                                           origin=entry.origin))
     return result
 
 
@@ -372,6 +426,32 @@ def _occurrences(variant, markup):
             continue
         hits.extend(pattern.findall(piece))
     return hits
+
+
+def _snippets(text, patterns, width, limit):
+    found = []
+    for pattern in patterns:
+        found.extend((m.start(), m.end()) for m in pattern.finditer(text))
+    out = []
+    for start, end in sorted(set(found))[:limit]:
+        # whitespace runs become one space; the space next to the match stays
+        before = re.sub(r"\s+", " ", text[max(0, start - width):start]).lstrip()
+        after = re.sub(r"\s+", " ", text[end:end + width]).rstrip()
+        out.append((("…" if start > width else "") + before, text[start:end],
+                    after + ("…" if end + width < len(text) else "")))
+    return out
+
+
+def finding_snippets(output_markup, finding, *, width=90, limit=50):
+    """``[(before, variant, after)]``: where the finding's variants occur in the translation (text
+    only), in order, for the review's Preview."""
+    text = html_to_text(output_markup)
+    return _snippets(text, [_variant_pattern(v) for v in finding.variants], width, limit)
+
+
+def source_snippets(source_text, finding, *, width=60, limit=20):
+    """``[(before, raw name, after)]``: where the finding's raw name occurs in the source chapter."""
+    return _snippets(source_text or "", [re.compile(re.escape(finding.raw))], width, limit)
 
 
 def apply_fixes(output_markup, findings, *, reviewed=False):
@@ -420,7 +500,8 @@ def _write_text(path, text):
 
 
 def settings_from_env(env=None):
-    """Entry types shared with Emergency Glossary Compliance; the name check's own minimum length."""
+    """Entry types shared with Emergency Glossary Compliance; the name check's own minimum length
+    (default 2: a 1-character raw name such as 강 also occurs inside ordinary words)."""
     env = os.environ if env is None else env
     mode = str(env.get("EMERGENCY_GLOSSARY_COMPLIANCE_MODE", "characters") or "characters").lower()
     try:
@@ -428,9 +509,9 @@ def settings_from_env(env=None):
     except (TypeError, ValueError):
         custom_types = []
     try:
-        min_chars = max(0, min(10, int(env.get("GLOSSARY_NAME_CHECK_MIN_CHARS", 0))))
+        min_chars = max(0, min(10, int(env.get("GLOSSARY_NAME_CHECK_MIN_CHARS", 2))))
     except (TypeError, ValueError):
-        min_chars = 0
+        min_chars = 2
     return {"mode": mode, "custom_types": tuple(custom_types if mode == "custom" else ()),
             "min_chars": min_chars}
 
@@ -485,7 +566,7 @@ def resolve_ner(use_ner, log=None, *, progress=None, cancel=None, retry=False):
     None means the capitalization heuristic. Each fallback reason is logged once per process.
 
     A failed load (no network) is not tried again for every chapter: later calls use the heuristic
-    until a ``retry`` call (the Fix glossary names dialogs, where the user asked for the model)."""
+    until a ``retry`` call (the Check glossary names dialogs, where the user asked for the model)."""
     if not use_ner:
         return None
     try:
@@ -571,31 +652,73 @@ def source_chapters_for_folder(folder_path, progress_path=None):
     return mapping
 
 
+def max_workers_setting():
+    """The QA scanner's "Maximum parallel workers" (AI Hunter performance settings; 0 = every core)."""
+    try:
+        from scan_html_folder import _resolve_scan_max_workers_config
+        return _resolve_scan_max_workers_config()
+    except Exception:
+        return 1
+
+
+def chapter_workers(ner, max_workers=None):
+    """Chapters checked at once. Only NER calls run in parallel (the heuristic is pure Python), each
+    using ``ner_names.ner_threads()`` cores, within the "Maximum parallel workers" budget: 16 cores and
+    "All cores" check 4 chapters at once, 2 cores or "Single thread" one."""
+    if ner is None:
+        return 1
+    cpus = os.cpu_count() or 1
+    budget = max_workers_setting() if max_workers is None else max_workers
+    budget = cpus if not budget or budget <= 0 else min(int(budget), cpus)
+    try:
+        import ner_names
+        per_call = ner_names.ner_threads()
+    except ImportError:
+        per_call = 1
+    return max(1, budget // per_call)
+
+
 def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None, stop=None, ner=None,
-                progress=None):
-    """Check every mapped output file; returns ``[ChapterResult]`` with reportable findings.
-    ``progress(done, total)`` is called after each chapter."""
-    results = []
+                progress=None, workers=None):
+    """Check every mapped output file; returns ``[ChapterResult]`` with reportable findings, in file
+    order. ``progress(done, total)`` is called as chapters finish; with NER ``workers`` (default
+    ``chapter_workers``) chapters are checked at once."""
     if not entries:
-        return results
+        return []
     sources = source_chapters_for_folder(folder_path, progress_path)
     wanted = None if selected_files is None else {os.path.basename(f) for f in selected_files}
-    for done, output_file in enumerate(sorted(sources)):
-        if stop is not None and stop():
-            break
+    names = [n for n in sorted(sources) if wanted is None or n in wanted]
+    total = len(names)
+    done = [0]
+    done_lock = threading.Lock()
+
+    def check(output_file):
+        result = None
+        if stop is None or not stop():
+            path = os.path.join(folder_path, output_file)
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    markup = f.read()
+                result = check_chapter(sources[output_file], markup, entries, output_file, ner=ner)
         if progress is not None:
-            progress(done, len(sources))
-        if wanted is not None and output_file not in wanted:
-            continue
-        path = os.path.join(folder_path, output_file)
-        if not os.path.isfile(path):
-            continue
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            markup = f.read()
-        result = check_chapter(sources[output_file], markup, entries, output_file, ner=ner)
-        if result.reportable:
-            results.append(result)
-    return results
+            with done_lock:
+                done[0] += 1
+                count = done[0]
+            progress(count - 1, total)
+        return result
+
+    workers = chapter_workers(ner) if workers is None else max(1, int(workers))
+    if workers > 1 and total > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(workers, total), thread_name_prefix="name-check") as pool:
+            checked = list(pool.map(check, names))
+    else:
+        checked = []
+        for name in names:
+            if stop is not None and stop():
+                break
+            checked.append(check(name))
+    return [r for r in checked if r is not None and r.reportable]
 
 
 def find_glossary_for_folder(folder_path, source_path=None):
@@ -622,14 +745,14 @@ ALL_MATCH = "Every glossary name in this folder matches the glossary."
 
 @dataclass
 class FolderReview:
-    """What "Fix glossary names in existing chapters" shows for one output folder."""
+    """What "Check glossary names in existing output" shows for one output folder."""
     folder: str
     glossary_path: str = ""
     chapters: list = field(default_factory=list)  # [ChapterResult] with reportable findings
     problem: str = ""  # why nothing could be checked (NO_GLOSSARY / NO_ENTRIES / NO_SOURCES)
 
 
-def review_folder(folder_path, scope, *, stop=None, ner=None, progress=None):
+def review_folder(folder_path, scope, *, stop=None, ner=None, progress=None, workers=None, settings=None):
     """Scan one output folder for the review dialog (desktop QA Scanner, Glossarion Mobile): its
     chapters, then the chapter titles, TOC and book metadata (``check_titles``)."""
     review = FolderReview(folder=folder_path)
@@ -638,7 +761,7 @@ def review_folder(folder_path, scope, *, stop=None, ner=None, progress=None):
         review.problem = NO_GLOSSARY
         return review
     review.glossary_path = glossary_path
-    entries = load_entries(glossary_path, **scope)
+    entries = load_entries(glossary_path, settings=settings, **scope)
     if not entries:
         review.problem = NO_ENTRIES
         return review
@@ -646,7 +769,7 @@ def review_folder(folder_path, scope, *, stop=None, ner=None, progress=None):
     if not source_chapters_for_folder(folder_path) and not has_titles:
         review.problem = NO_SOURCES
         return review
-    review.chapters = scan_folder(folder_path, entries, stop=stop, ner=ner, progress=progress)
+    review.chapters = scan_folder(folder_path, entries, stop=stop, ner=ner, progress=progress, workers=workers)
     if not (stop is not None and stop()):
         review.chapters += check_titles(folder_path, entries, ner=ner)
     return review

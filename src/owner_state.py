@@ -1560,9 +1560,9 @@ Text to analyze:
         except (TypeError, ValueError):
             self.emergency_glossary_compliance_min_chars_var = 3
         try:
-            self.glossary_name_check_min_chars_var = max(0, min(10, int(self.config.get('glossary_name_check_min_chars', 0))))
+            self.glossary_name_check_min_chars_var = max(0, min(10, int(self.config.get('glossary_name_check_min_chars', 2))))
         except (TypeError, ValueError):
-            self.glossary_name_check_min_chars_var = 0
+            self.glossary_name_check_min_chars_var = 2
         
         # NEW: Initialize extraction mode variable
         self.extraction_mode_var = self.config.get('extraction_mode', 'smart')

@@ -244,22 +244,9 @@ def setup_other_settings_methods(gui_instance):
                 setattr(gui_instance, method_name, types.MethodType(method, gui_instance))
 
 
-def _center_messagebox_buttons(
-    msg_box,
-    *,
-    min_button_width=None,
-    min_button_height=None,
-):
-    """Center message-box buttons and optionally enlarge their click targets."""
-    from PySide6.QtWidgets import QDialogButtonBox
-    button_box = msg_box.findChild(QDialogButtonBox)
-    if button_box:
-        button_box.setCenterButtons(True)
-        for button in button_box.buttons():
-            if min_button_width is not None:
-                button.setMinimumWidth(min_button_width)
-            if min_button_height is not None:
-                button.setMinimumHeight(min_button_height)
+# Centered, optionally larger message-box buttons (shared with the QA scanner's glossary name check)
+from qt_widget_helpers import center_messagebox_buttons as _center_messagebox_buttons  # noqa: E402
+
 
 def _create_styled_checkbox(self, text):
     """Create a checkbox with proper checkmark using text overlay - from manga integration"""
@@ -9152,7 +9139,7 @@ def _create_processing_options_section(self, parent):
         "<b>Auto-fix</b> replaces it when exactly one close spelling of a <i>character</i> name "
         "was found; anything less certain is only logged.<br>"
         "<b>Review first</b> only logs what it finds; fix chapters later with QA Scanner "
-        "settings → <i>Fix glossary names in existing chapters…</i><br><br>"
+        "settings → <i>Check glossary names in existing output…</i><br><br>"
         "Uses the entry types set here for Emergency Glossary Compliance (it works without turning "
         "that on) and its own minimum raw entry length (default 0 = every length). Names shorter "
         "than 3 characters are only reported, never fixed automatically, unless they differ just in "
@@ -9185,9 +9172,9 @@ def _create_processing_options_section(self, parent):
     name_check_min_chars_slider.setFixedWidth(180)
     name_check_min_chars_slider.wheelEvent = lambda event: event.ignore()
     try:
-        current_name_check_min_chars = max(0, min(10, int(getattr(self, 'glossary_name_check_min_chars_var', 0))))
+        current_name_check_min_chars = max(0, min(10, int(getattr(self, 'glossary_name_check_min_chars_var', 2))))
     except (TypeError, ValueError):
-        current_name_check_min_chars = 0
+        current_name_check_min_chars = 2
     self.glossary_name_check_min_chars_var = current_name_check_min_chars
     name_check_min_chars_slider.setValue(current_name_check_min_chars)
     name_check_min_chars_layout.addWidget(name_check_min_chars_slider)
@@ -9263,15 +9250,6 @@ def _create_processing_options_section(self, parent):
         self.glossary_name_check_mode_var = 'review' if index == 1 else 'auto'
     name_check_mode_combo.currentIndexChanged.connect(_on_name_check_mode_change)
 
-    # Initial visibility
-    is_enabled = glossary_compliance_cb.isChecked()
-    _refresh_glossary_scope_rows()
-    glossary_compliance_desc.setVisible(is_enabled)
-    name_check_row.setVisible(name_check_cb.isChecked())
-    name_check_min_chars_row.setVisible(name_check_cb.isChecked())
-    name_check_ner_row.setVisible(name_check_cb.isChecked())
-    name_check_desc.setVisible(name_check_cb.isChecked())
-
     # Separators around the glossary section (Emergency Glossary Compliance + Glossary Name Check)
     # A plain 1 px line with its own colour: the dialog's "QFrame { background-color: transparent; }"
     # leaves a sunken HLine invisible on the dark background.
@@ -9297,6 +9275,16 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(name_check_desc)
     left_v.addWidget(glossary_compliance_row)
     left_v.addWidget(sep_glossary_bottom)
+
+    # Initial visibility, once the rows are in the layout: setVisible(True) on a widget without a
+    # parent shows it as its own (white, untitled) window
+    is_enabled = glossary_compliance_cb.isChecked()
+    _refresh_glossary_scope_rows()
+    glossary_compliance_desc.setVisible(is_enabled)
+    name_check_row.setVisible(name_check_cb.isChecked())
+    name_check_min_chars_row.setVisible(name_check_cb.isChecked())
+    name_check_ner_row.setVisible(name_check_cb.isChecked())
+    name_check_desc.setVisible(name_check_cb.isChecked())
     
     # Enable Decimal Chapter Detection
     decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")

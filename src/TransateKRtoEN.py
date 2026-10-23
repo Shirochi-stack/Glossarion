@@ -13568,6 +13568,29 @@ def _multipass_exclude_applied_glossary_entries():
     )
 
 
+def secondary_glossary_paths(actual_glossary_path, settings=None):
+    """The glossaries sent after the book glossary, in priority order: the glossary
+    extension next to it (Add Additional Glossary) and the cross-novel unified
+    glossary (Enable Unified Glossary); None when switched off or missing. A raw
+    name is taken from the first of book glossary > extension > unified that has
+    it. Shared by the request builder and the glossary name check."""
+    extension_path = unified_path = None
+    if str(_request_glossary_setting(settings, "ADD_ADDITIONAL_GLOSSARY", "0")) == "1":
+        glossary_dir = os.path.dirname(actual_glossary_path)
+        for ext in ['.csv', '.md', '.txt', '.json']:
+            candidate = os.path.join(glossary_dir, f"glossary_extension{ext}")
+            if os.path.exists(candidate):
+                extension_path = candidate
+                break
+    if str(_request_glossary_setting(settings, "ENABLE_UNIFIED_GLOSSARY", "0")) == "1":
+        try:
+            import unified_glossary
+            unified_path = unified_glossary.resolve_prompt_glossary_path(actual_glossary_path, settings)
+        except Exception as e:
+            print(f"⚠️ Unified glossary lookup failed: {e}")
+    return extension_path, unified_path
+
+
 def find_glossary_file(
     output_dir,
     *,
@@ -23569,56 +23592,33 @@ def build_system_prompt(
             except Exception as e:
                 print(f"⚠️ Glossary raw-name lookup failed: {e}")
 
-            # Check for glossary extension file (only if ADD_ADDITIONAL_GLOSSARY is enabled)
-            add_additional_glossary = str(_request_glossary_setting(
-                settings, "ADD_ADDITIONAL_GLOSSARY", "0"
-            )) == "1"
-            if add_additional_glossary:
-                glossary_dir = os.path.dirname(actual_glossary_path)
-                # Check for extension with any supported format
-                additional_glossary_path = None
-                for ext in ['.csv', '.md', '.txt', '.json']:
-                    candidate = os.path.join(glossary_dir, f"glossary_extension{ext}")
-                    if os.path.exists(candidate):
-                        additional_glossary_path = candidate
-                        break
-
-                if additional_glossary_path:
-                    system = _append_secondary_glossary(
-                        system, additional_glossary_path, "Glossary Extension",
-                        exclude_raw_names=sent_raw_names,
-                    )
-                    try:
-                        sent_raw_names = sent_raw_names | unified_glossary.glossary_raw_names(
-                            additional_glossary_path
-                        )
-                    except Exception as e:
-                        print(f"⚠️ Glossary extension raw-name lookup failed: {e}")
-
-            # Cross-novel unified glossary (Enable Unified Glossary). One shared
-            # file under Glossary/Unified Glossary/<key>/; the entries the book
-            # glossary and the extension carry are excluded here, in memory, so
-            # no entry is sent twice and no per-book copy is ever written.
-            if str(_request_glossary_setting(
-                settings, "ENABLE_UNIFIED_GLOSSARY", "0"
-            )) == "1":
-                unified_glossary_path = None
-                unified_exclude = None
+            # Glossary extension (Add Additional Glossary), then the cross-novel
+            # unified glossary (Enable Unified Glossary): secondary_glossary_paths
+            additional_glossary_path, unified_glossary_path = secondary_glossary_paths(
+                actual_glossary_path, settings
+            )
+            if additional_glossary_path:
+                system = _append_secondary_glossary(
+                    system, additional_glossary_path, "Glossary Extension",
+                    exclude_raw_names=sent_raw_names,
+                )
                 try:
-                    import unified_glossary
-                    unified_glossary_path = unified_glossary.resolve_prompt_glossary_path(
-                        actual_glossary_path, settings
+                    sent_raw_names = sent_raw_names | unified_glossary.glossary_raw_names(
+                        additional_glossary_path
                     )
-                    if unified_glossary_path:
-                        unified_exclude = sent_raw_names
                 except Exception as e:
-                    print(f"⚠️ Unified glossary lookup failed: {e}")
-                if unified_glossary_path:
-                    system = _append_secondary_glossary(
-                        system, unified_glossary_path, "Unified Glossary",
-                        max_uncompressed_chars=200_000,
-                        exclude_raw_names=unified_exclude,
-                    )
+                    print(f"⚠️ Glossary extension raw-name lookup failed: {e}")
+
+            # The unified glossary is one shared file under Glossary/Unified
+            # Glossary/<key>/; the entries the book glossary and the extension
+            # carry are excluded here, in memory, so no entry is sent twice and
+            # no per-book copy is ever written.
+            if unified_glossary_path:
+                system = _append_secondary_glossary(
+                    system, unified_glossary_path, "Unified Glossary",
+                    max_uncompressed_chars=200_000,
+                    exclude_raw_names=sent_raw_names,
+                )
 
             # One line for everything glossary-related in this request, e.g.
             # 🗜️ Glossary: … chars, … tokens | Unified Glossary: … chars, … tokens

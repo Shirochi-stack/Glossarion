@@ -6975,38 +6975,15 @@ Do not stop after the glossary."""
         file_layout.setContentsMargins(0, 0, 0, 10)
         editor_layout.addWidget(file_widget)
 
-        file_layout.addWidget(QLabel("Glossary File:"))
-
-        # Navigation arrows
-        self._editor_prev_btn = QPushButton("◀")
-        self._editor_prev_btn.setFixedSize(24, 24)
-        self._editor_prev_btn.setStyleSheet(
-            "QPushButton { background: #444; color: white; border-radius: 4px; font-size: 10pt; padding: 0; } "
-            "QPushButton:hover { background: #666; }"
-        )
-        self._editor_prev_btn.setToolTip(_wrapped_tooltip_html("Previous glossary"))
-        self._editor_prev_btn.clicked.connect(lambda: self._editor_nav(-1))
-        file_layout.addWidget(self._editor_prev_btn)
-
-        self.editor_file_combo = QComboBox()
-        self.editor_file_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.editor_file_combo.setStyleSheet("QComboBox { padding: 4px; }")
-        self.editor_file_combo.wheelEvent = lambda e: e.ignore()
-        file_layout.addWidget(self.editor_file_combo)
-
-        self._editor_next_btn = QPushButton("▶")
-        self._editor_next_btn.setFixedSize(24, 24)
-        self._editor_next_btn.setStyleSheet(
-            "QPushButton { background: #444; color: white; border-radius: 4px; font-size: 10pt; padding: 0; } "
-            "QPushButton:hover { background: #666; }"
-        )
-        self._editor_next_btn.setToolTip(_wrapped_tooltip_html("Next glossary"))
-        self._editor_next_btn.clicked.connect(lambda: self._editor_nav(1))
-        file_layout.addWidget(self._editor_next_btn)
-
-        # Hide arrows when only 0-1 items
-        self._editor_prev_btn.setVisible(False)
-        self._editor_next_btn.setVisible(False)
+        # "Glossary File:" ◀ combo ▶ (qt_widget_helpers, shared with the QA scanner's name review);
+        # the arrows stay hidden until there is more than one glossary
+        from qt_widget_helpers import NavComboRow
+        self._editor_file_row = NavComboRow("Glossary File:", "Previous glossary", "Next glossary",
+                                            tooltip=_wrapped_tooltip_html)
+        file_layout.addWidget(self._editor_file_row)
+        self._editor_prev_btn = self._editor_file_row.prev_button
+        self.editor_file_combo = self._editor_file_row.combo
+        self._editor_next_btn = self._editor_file_row.next_button
 
         # Compatibility shim: editor_file_entry.text() / .setText() still work
         class _ComboShim:
@@ -8991,19 +8968,7 @@ Do not stop after the glossary."""
         # ------------------------------------------------------------------
         #  Editor navigation helpers (for multi-EPUB glossary switching)
         # ------------------------------------------------------------------
-        def _editor_nav_impl(direction):
-            """Navigate ◀/▶ through glossary files."""
-            combo = self.editor_file_combo
-            if combo.count() <= 1:
-                return
-            new_idx = combo.currentIndex() + direction
-            if new_idx < 0:
-                new_idx = combo.count() - 1
-            elif new_idx >= combo.count():
-                new_idx = 0
-            combo.setCurrentIndex(new_idx)
-
-        self._editor_nav = _editor_nav_impl
+        self._editor_nav = self._editor_file_row.step  # ◀/▶ through glossary files
 
         def _on_editor_combo_changed_impl(idx):
             """When user picks a different glossary from the combo, load it."""
@@ -9015,13 +8980,7 @@ Do not stop after the glossary."""
 
         self._on_editor_combo_changed = _on_editor_combo_changed_impl
 
-        def _update_editor_nav_buttons_impl():
-            """Show/hide ◀ ▶ arrows depending on combo item count."""
-            show = self.editor_file_combo.count() > 1
-            self._editor_prev_btn.setVisible(show)
-            self._editor_next_btn.setVisible(show)
-
-        self._update_editor_nav_buttons = _update_editor_nav_buttons_impl
+        self._update_editor_nav_buttons = self._editor_file_row.update_arrows
 
         # Reconnect only this setup's previous handler; broad disconnects warn
         # when there is nothing connected and can remove unrelated handlers.

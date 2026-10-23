@@ -488,8 +488,8 @@ DESKTOP_SETTINGS_MAP = (('model', ('model_var',), ('value', None), ('str',)),
  ('glossary_name_check_mode', ('glossary_name_check_mode_var',), ('value', 'auto'), ('str',)),
  ('glossary_name_check_min_chars',
   ('glossary_name_check_min_chars_var',),
-  ('value', 0),
-  ('safe_int', 0, 0, 10, 'max_min')),
+  ('value', 2),
+  ('safe_int', 2, 0, 10, 'max_min')),
  ('glossary_name_check_use_ner', ('glossary_name_check_use_ner_var',), ('value', True), ('bool',)),
  ('retry_duplicate_bodies', ('retry_duplicate_var',), ('value', False), ('bool',)),
  ('token_limit_disabled', ('token_limit_disabled',), ('value', False), ('bool',)),
@@ -5287,7 +5287,7 @@ SETTINGS = {
                 'Si-hyeon</i>).<br><br><b>Auto-fix</b> replaces it when exactly one close spelling '
                 'of a <i>character</i> name was found; anything less certain is only '
                 'logged.<br><b>Review first</b> only logs what it finds; fix chapters later with '
-                'QA Scanner settings → <i>Fix glossary names in existing chapters…</i><br><br>Uses '
+                'QA Scanner settings → <i>Check glossary names in existing output…</i><br><br>Uses '
                 'the entry types set here for Emergency Glossary Compliance (it works without '
                 'turning that on) and its own minimum raw entry length (default 0 = every length). '
                 'Names shorter than 3 characters are only reported, never fixed automatically, '
@@ -5296,17 +5296,17 @@ SETTINGS = {
      'ui_group': 'Processing Options',
      'ui_sites': ('other.processing',),
      'var_names': ('glossary_name_check_var',)},
-    'glossary_name_check_min_chars': {'converter': ('safe_int', 0, 0, 10, 'max_min'),
-     'default': 0,
+    'glossary_name_check_min_chars': {'converter': ('safe_int', 2, 0, 10, 'max_min'),
+     'default': 2,
      'default_source': 'init',
-     'dialog_default': 0,
-     'env': (('GLOSSARY_NAME_CHECK_MIN_CHARS', 'translation', 0),),
-     'init_default': 0,
+     'dialog_default': 2,
+     'env': (('GLOSSARY_NAME_CHECK_MIN_CHARS', 'translation', 2),),
+     'init_default': 2,
      'label': 'Name check minimum raw entry length:',
      'maximum': 10,
      'minimum': 0,
      'origins': ('settings_map', 'init', 'dialog', 'env'),
-     'save_default': 0,
+     'save_default': 2,
      'type': 'int',
      'ui_group': 'Processing Options',
      'ui_sites': ('other.processing',),
@@ -9344,15 +9344,21 @@ SETTINGS = {
      'dialog_default': False,
      'env': (('QA_CHECK_GLOSSARY_NAMES', 'startup', False),
              ('QA_CHECK_GLOSSARY_NAMES', 'qa', False)),
-     'label': 'Check glossary names (Experimental)',
+     'label': 'Check glossary names with NER (Experimental)',
      'nested_default': False,
      'origins': ('nested', 'dialog', 'env'),
      'parent': 'qa_scanner_settings',
      'tooltip': 'Flags chapters where a glossary name from the source chapter was translated with '
                 'a\n'
                 "different spelling (e.g. 'Walter Argent' for glossary 'Valter Argent').\n"
-                'Uses the entry types and minimum length of Emergency Glossary Compliance\n'
-                '(Other Settings). Flagged chapters count as QA failures like other issues.',
+                'Names are found with a named-entity recognition model (NER, 104 MB, downloaded '
+                'on\n'
+                'first use) plus a capitalization heuristic; Other Settings › "Use Named Entity\n'
+                'Recognition model (NER)" turns NER off (builds without ONNX Runtime use the '
+                'heuristic).\n'
+                "Uses the entry types of Emergency Glossary Compliance and the name check's "
+                'minimum\n'
+                'length (Other Settings). Flagged chapters count as QA failures like other issues.',
      'type': 'bool',
      'ui_group': 'Detection Options',
      'ui_sites': ('qa',)},
@@ -11516,7 +11522,7 @@ SETTINGS = {
      'origins': ('settings_map', 'init', 'env'),
      'save_default': 'auto',
      'type': 'str',
-     'ui_sites': ('glossary.unified', 'glossary.editor'),
+     'ui_sites': ('glossary.unified', 'glossary.editor', 'qa'),
      'var_names': ('unified_glossary_source_language_var',)},
     'unknown_finish_as_prohibited': {'default': False,
      'default_source': 'init',

@@ -1,7 +1,7 @@
-"""Fix glossary names (QA Scanner, experimental; desktop QA Scanner settings › "Fix glossary names in
-existing chapters…").
+"""Check glossary names (QA Scanner, experimental; desktop QA Scanner settings › "Check glossary names
+in existing output…").
 
-Opened from the QA screen when Settings › QA Scanner Settings › "Check glossary names
+Opened from the QA screen when Settings › QA Scanner Settings › "Check glossary names with NER
 (Experimental)" is on. It scans the chosen folders on the io pool
 (``glossary_name_check.review_folder``: the folder's glossary with the Emergency Glossary Compliance
 entry types / minimum length, chapters matched to their sources through translation_progress.json +
@@ -35,7 +35,7 @@ CHECK_KEY = ("qa_scanner_settings", "check_glossary_names")
 NER_KEY = "glossary_name_check_use_ner"
 SCOPE_KEYS = ("emergency_glossary_compliance_mode", "emergency_glossary_compliance_custom_types",
               "glossary_name_check_min_chars")
-TITLE = "Fix Glossary Names"
+TITLE = "Check Glossary Names"
 INTRO = ("Checked rows are replaced with the glossary name. Rows are pre-checked when one close spelling of a "
          "character name was found; review the others before checking them. Each changed file is backed up to "
          "glossary_name_check_backup first.")
@@ -64,6 +64,16 @@ def use_ner(ctx: Any) -> bool:
     return name_check.use_ner_from_config({"glossary_name_check_use_ner": ctx.cfg(NER_KEY, True)})
 
 
+def glossary_layer_settings(ctx: Any) -> dict:
+    """Settings › Glossary's Add Additional Glossary / Enable Unified Glossary (and the unified file's
+    language keys): the name check uses only the glossaries a translation request would."""
+    import glossary_name_check as name_check
+
+    keys = ("add_additional_glossary", "enable_unified_glossary", "unified_glossary_source_language",
+            "unified_glossary_combine_all_languages", "output_language")
+    return name_check.layer_settings_from_config({key: ctx.cfg(key) for key in keys if ctx.cfg(key) is not None})
+
+
 def ner_needs_download() -> bool:
     try:
         import ner_names
@@ -73,7 +83,7 @@ def ner_needs_download() -> bool:
 
 
 def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
-                state: Optional[dict] = None) -> list:
+                state: Optional[dict] = None, layer_settings: Optional[dict] = None) -> list:
     """Review every folder on a worker thread; ``state`` gets the progress text and fraction
     (``text`` / ``value``, None = indeterminate) that ``GlossaryNameFixSheet.scan`` shows."""
     import glossary_name_check as name_check
@@ -94,7 +104,8 @@ def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
                          value=done / total if total else None)
 
         state.update(text="Scanning…", value=None)
-        reviews.append(name_check.review_folder(folder, scope, ner=ner, progress=on_chapter))
+        reviews.append(name_check.review_folder(folder, scope, ner=ner, progress=on_chapter,
+                                                settings=layer_settings))
     return reviews
 
 
@@ -146,7 +157,8 @@ class GlossaryNameFixSheet:
             state.update(text="Downloading the named-entity model (NER, 104 MB)…", value=None)
         try:
             task = asyncio.ensure_future(
-                self.ctx.io(_review_all, self.folders, name_check_scope(self.ctx), with_ner, state))
+                self.ctx.io(_review_all, self.folders, name_check_scope(self.ctx), with_ner, state,
+                            glossary_layer_settings(self.ctx)))
             shown = None
             while not task.done():
                 current = (state.get("text"), state.get("value"))

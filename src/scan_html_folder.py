@@ -6678,12 +6678,15 @@ def run_glossary_name_check(folder_path, results, qa_settings, log=print, *, epu
         log("   ⏭️ Glossary name check: no glossary found for this folder")
         return 0
     scope = qa_settings.get("_glossary_name_scope") or name_check.settings_from_env()
-    entries = name_check.load_entries(glossary_path, **scope)
+    layer_settings = qa_settings.get("_glossary_name_layers")  # None: the translation env
+    entries = name_check.load_entries(glossary_path, settings=layer_settings, **scope)
     if not entries:
         log("   ⏭️ Glossary name check: no glossary entries match the Emergency Glossary Compliance entry types")
         return 0
     by_file = {r.get('filename'): r for r in results if isinstance(r, dict) and r.get('filename')}
-    log(f"\n📖 Glossary name check (experimental): {len(entries.entries)} entries from {os.path.basename(glossary_path)}")
+    sources = " + ".join([os.path.basename(glossary_path)] + [
+        origin for _path, origin in name_check.glossary_layers(glossary_path, layer_settings)[1:]])
+    log(f"\n📖 Glossary name check (experimental): {len(entries.entries)} entries from {sources}")
     use_ner = qa_settings.get("_glossary_name_use_ner")
     ner = name_check.resolve_ner(name_check.use_ner_from_env() if use_ner is None else use_ner, log)
     chapters = name_check.scan_folder(folder_path, entries, progress_path=progress_path,

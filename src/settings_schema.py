@@ -842,7 +842,8 @@ TOOLTIP_OVERRIDES = {
         "Finds the names in each translated chapter with an English named-entity model (person / place / "
         "organization; 104 MB, downloaded on first use). Off: a capitalization heuristic finds them."),
     "glossary_name_check_min_chars": (
-        "Glossary names shorter than this are not checked (0 = every length). Names under 3 characters are "
+        "Glossary names shorter than this are not checked (default 2: a 1-character raw name such as 강 also "
+        "occurs inside ordinary words; 0 = every length). Names under 3 characters are "
         "only reported, never fixed automatically, unless they differ just in spacing or hyphens."),
     "glossary_name_check_mode": (
         "Auto-fix replaces one close spelling of a character name; Review first only logs what it finds."),

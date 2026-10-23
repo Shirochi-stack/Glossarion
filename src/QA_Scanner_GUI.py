@@ -298,28 +298,122 @@ class QAScannerMixin:
                 pass
             QMessageBox.warning(self, "QA Report", f"Failed to open QA report:\n{e}")
 
-    def _glossary_name_fix_folder(self, parent, title):
-        """The output folder to review: the QA scan's Auto-search output (when that toggle is on) for
-        the current source file, else the folder picker."""
+    def _glossary_name_message(self, parent, title, text, icon=QMessageBox.Information,
+                               buttons=QMessageBox.Ok):
+        """A name-check message box with centered, wider buttons; returns the button clicked."""
+        box = QMessageBox(icon, title, text, buttons, parent)
+        try:
+            from qt_widget_helpers import center_messagebox_buttons
+            center_messagebox_buttons(box, min_button_width=120, min_button_height=36)
+        except Exception:
+            pass
+        return box.exec()
+
+    def _glossary_name_row_menu(self, review, tree, pos, rows):
+        """Right-click on a review row: open the file, or preview where the name occurs."""
+        from PySide6.QtWidgets import QMenu
+        item = tree.itemAt(pos)
+        row = next((r for r in rows if r[0] is item), None)
+        if row is None:
+            return
+        _item, folder, output_file, finding = row
+        path = os.path.join(folder, output_file)
+        from qt_widget_helpers import CONTEXT_MENU_STYLE
+        menu = QMenu(tree)
+        menu.setStyleSheet(CONTEXT_MENU_STYLE)
+        is_html = output_file.lower().endswith(('.html', '.xhtml', '.htm'))
+        open_action = menu.addAction("📂 Open HTML file" if is_html else "📂 Open file")
+        preview_action = menu.addAction("🔍 Preview")
+        chosen = menu.exec(tree.viewport().mapToGlobal(pos))
+        if chosen is open_action:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            if not os.path.isfile(path) or not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                self._glossary_name_message(review, "Open file", f"Could not open:\n{path}", QMessageBox.Warning)
+        elif chosen is preview_action:
+            self._glossary_name_preview(review, folder, output_file, finding)
+
+    def _glossary_name_preview(self, parent, folder, output_file, finding):
+        """Where a reviewed name occurs: the translation (the variant highlighted) and, for a chapter,
+        the source chapter (the raw name highlighted)."""
+        import glossary_name_check as name_check
+        from PySide6.QtWidgets import QTextBrowser
+        try:
+            with open(os.path.join(folder, output_file), "r", encoding="utf-8", errors="ignore") as f:
+                markup = f.read()
+        except OSError as e:
+            self._glossary_name_message(parent, "Preview", str(e), QMessageBox.Warning)
+            return
+        if output_file in name_check.TITLE_FILES:
+            translated, source = name_check.finding_snippets(_html.escape(markup), finding), []
+        else:
+            translated = name_check.finding_snippets(markup, finding)
+            source = name_check.source_snippets(name_check.source_chapters_for_folder(folder).get(output_file, ""),
+                                                finding)
+
+        def lines(snippets, color):
+            if not snippets:
+                return "<p style='color:#888'>None found.</p>"
+            return "".join(
+                f"<p style='margin:4px 0 8px 0'>{_html.escape(before)}"
+                f"<span style='color:{color}; font-weight:bold'>{_html.escape(found)}</span>"
+                f"{_html.escape(after)}</p>" for before, found, after in snippets)
+
+        origin = finding.origin or "Book glossary"
+        body = (f"<p><b>{_html.escape(' / '.join(finding.variants))}</b> → "
+                f"<b style='color:#5a9fd4'>{_html.escape(finding.expected)}</b> "
+                f"<span style='color:#888'>({_html.escape(finding.raw)}, {_html.escape(finding.entry_type)}, "
+                f"{_html.escape(origin)})</span></p>"
+                f"<h4>In the translation ({len(translated)})</h4>{lines(translated, '#f0ad4e')}")
+        if output_file not in name_check.TITLE_FILES:
+            body += f"<h4>In the source chapter ({len(source)})</h4>{lines(source, '#5a9fd4')}"
+        dialog = QDialog(parent)
+        dialog.setWindowTitle(f"Preview — {output_file}")
+        dialog.resize(760, 520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+        view = QTextBrowser()
+        view.setOpenLinks(False)
+        view.setHtml(body)
+        layout.addWidget(view, 1)
+        close_row = QHBoxLayout()
+        close_btn = QPushButton("Close")
+        close_btn.setMinimumWidth(120)
+        close_btn.clicked.connect(dialog.accept)
+        close_row.addStretch()
+        close_row.addWidget(close_btn)
+        close_row.addStretch()
+        layout.addLayout(close_row)
+        dialog.exec()
+
+    def _glossary_name_fix_folders(self, parent):
+        """The output folders to check: with the QA scan's Auto-search output on, the output folder of
+        every selected input file; else (or when none is found) the folder picker."""
         caption = "Select Output Folder to Check Glossary Names"
         if self._qa_auto_search_enabled():
             sources, _stored_source, _direct_text_only = self._qa_auto_search_sources()
             folders = self._auto_search_output_folders(sources) if sources else []
-            if len(folders) == 1:
-                return folders[0]
-            if len(folders) > 1:
-                from PySide6.QtWidgets import QInputDialog
-                choice, ok = QInputDialog.getItem(parent, title, "Output folder to check:", folders, 0, False)
-                return choice if ok else None
+            if folders:
+                return list(dict.fromkeys(folders))
             caption = "Auto-search failed - " + caption
         start = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory') or os.getcwd()
-        return _normalize_qa_dialog_path(QFileDialog.getExistingDirectory(parent, caption, start))
+        folder = _normalize_qa_dialog_path(QFileDialog.getExistingDirectory(parent, caption, start))
+        return [folder] if folder else []
 
-    def _glossary_name_review_with_progress(self, parent, title, folder, use_ner):
-        """``review_folder`` on a worker thread behind a progress dialog (the NER model download, then
-        the chapters), so the window keeps responding. None when cancelled."""
+    def _glossary_name_review_with_progress(self, parent, title, folders, use_ner):
+        """``review_folder`` for each folder on a worker thread behind a progress dialog (the NER model
+        download, then the chapters, several at once with NER: QA scanner › Maximum parallel workers),
+        so the window keeps responding. Returns the ``FolderReview`` list; None when cancelled."""
         import glossary_name_check as name_check
         scope = self._glossary_name_check_scope()
+        # only the glossaries a translation request uses: the book's, then Add Additional Glossary's
+        # extension and Enable Unified Glossary's shared file when they are on
+        layer_settings = name_check.layer_settings_from_config(self.config)
+        try:
+            layer_settings.update(self._unified_glossary_env_dict())  # the live checkboxes
+        except Exception:
+            pass
         log = getattr(self, 'append_log', None)
         mb = 1024 * 1024
         cancel = threading.Event()
@@ -334,30 +428,62 @@ class QAScannerMixin:
                     f"{report.total / mb:.1f} MB{speed}")
             state.update(text=text, value=report.percent, maximum=100)
 
+        where = {"text": ""}
+
         def on_chapter(done, total):
-            state.update(text=f"Checking chapter {done + 1} of {total}...", value=done, maximum=total)
+            state.update(text=f"{where['text']}Checking chapter {done + 1} of {total}...", value=done, maximum=total)
 
         def work():
             try:
                 ner = name_check.resolve_ner(use_ner, logs.append, progress=on_download, cancel=cancel.is_set,
                                              retry=True)
-                state.update(text="Checking glossary names...", value=0, maximum=0)
-                state["result"] = name_check.review_folder(folder, scope, stop=cancel.is_set, ner=ner,
-                                                           progress=on_chapter)
+                reviews = []
+                for index, folder in enumerate(folders):
+                    if cancel.is_set():
+                        break
+                    if len(folders) > 1:
+                        where["text"] = f"{os.path.basename(folder)} ({index + 1} of {len(folders)})\n"
+                    state.update(text=f"{where['text']}Checking glossary names...", value=0, maximum=0)
+                    reviews.append(name_check.review_folder(folder, scope, stop=cancel.is_set, ner=ner,
+                                                            progress=on_chapter, settings=layer_settings))
+                state["result"] = reviews
             except Exception as e:
                 state["error"] = e
             finally:
                 state["done"] = True
 
-        from PySide6.QtWidgets import QProgressDialog
-        dialog = QProgressDialog(state["text"], "Cancel", 0, 0, parent)
+        # label, bar and a centered, wider Cancel (QProgressDialog keeps its button at the right)
+        from PySide6.QtWidgets import QProgressBar
+        dialog = QDialog(parent)
         dialog.setWindowTitle(title)
         dialog.setWindowModality(Qt.WindowModal)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
         dialog.setMinimumWidth(460)
-        dialog.canceled.connect(cancel.set)
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(18, 16, 18, 14)
+        dialog_layout.setSpacing(10)
+        label = QLabel(state["text"])
+        label.setAlignment(Qt.AlignCenter)
+        label.setWordWrap(True)
+        dialog_layout.addWidget(label)
+        bar = QProgressBar()
+        bar.setRange(0, 0)
+        dialog_layout.addWidget(bar)
+        cancel_row = QHBoxLayout()
+        cancel_button = QPushButton("Cancel")
+        cancel_button.setMinimumWidth(120)
+        cancel_button.setMinimumHeight(36)
+        cancel_row.addStretch()
+        cancel_row.addWidget(cancel_button)
+        cancel_row.addStretch()
+        dialog_layout.addLayout(cancel_row)
+
+        def request_cancel(*_args):
+            cancel.set()
+            cancel_button.setEnabled(False)
+            label.setText("Stopping...")
+
+        cancel_button.clicked.connect(request_cancel)
+        dialog.rejected.connect(request_cancel)  # Esc / the window's close button
         loop = QEventLoop()
         timer = QTimer()
         timer.setInterval(100)
@@ -367,9 +493,10 @@ class QAScannerMixin:
                 line = logs.pop(0)
                 if log:
                     log(line)
-            dialog.setLabelText(state["text"])
-            dialog.setMaximum(state["maximum"])
-            dialog.setValue(state["value"])
+            if not cancel.is_set():
+                label.setText(state["text"])
+                bar.setRange(0, state["maximum"])
+                bar.setValue(state["value"])
             if state["done"]:
                 timer.stop()
                 loop.quit()
@@ -379,11 +506,13 @@ class QAScannerMixin:
         timer.start()
         dialog.show()
         loop.exec()
-        dialog.canceled.disconnect(cancel.set)  # closing a QProgressDialog emits canceled
+        dialog.rejected.disconnect(request_cancel)
         dialog.close()
+        if cancel.is_set():
+            return None
         if state["error"] is not None:
             raise state["error"]
-        return None if cancel.is_set() else state["result"]
+        return state["result"]
 
     def _glossary_name_check_scope(self):
         """Emergency Glossary Compliance's entry types and the name check's minimum length (live values)."""
@@ -396,65 +525,104 @@ class QAScannerMixin:
         return name_check.settings_from_config(config)
 
     def open_glossary_name_fix_dialog(self, parent=None):
-        """Review names that differ from the glossary in an output folder and fix the checked ones."""
+        """Check glossary names in existing output: review the names that differ from the glossary in
+        the output folder of every selected input file and fix the checked ones."""
         import glossary_name_check as name_check
         parent = parent or self
-        title = "Fix Glossary Names"
-        folder = self._glossary_name_fix_folder(parent, title)
-        if not folder:
+        title = "Check Glossary Names"
+        folders = self._glossary_name_fix_folders(parent)
+        if not folders:
             return
         use_ner = bool(getattr(self, 'glossary_name_check_use_ner_var',
                                self.config.get('glossary_name_check_use_ner', True)))
         if use_ner:
             import ner_names
             if ner_names.runtime_available() and not ner_names.model_installed():
-                answer = QMessageBox.question(
+                answer = self._glossary_name_message(
                     parent, title,
                     "The glossary name check finds names with an English named-entity model (NER, 104 MB).\n"
                     "Download it now? No uses the capitalization heuristic this time.",
-                    QMessageBox.Yes | QMessageBox.No)
+                    QMessageBox.Question, QMessageBox.Yes | QMessageBox.No)
                 use_ner = answer == QMessageBox.Yes
         try:
-            folder_review = self._glossary_name_review_with_progress(parent, title, folder, use_ner)
+            reviews = self._glossary_name_review_with_progress(parent, title, folders, use_ner)
         except Exception as e:
-            QMessageBox.warning(parent, title, f"The glossary name check failed:\n{e}")
+            self._glossary_name_message(parent, title, f"The glossary name check failed:\n{e}", QMessageBox.Warning)
             return
-        if folder_review is None:
+        if reviews is None:
             return
-        if folder_review.problem or not folder_review.chapters:
-            QMessageBox.information(parent, title, folder_review.problem or name_check.ALL_MATCH)
+        if not any(r.chapters for r in reviews):
+            lines = [r.problem or name_check.ALL_MATCH for r in reviews]
+            if len(reviews) > 1:
+                lines = [f"{os.path.basename(r.folder)}: {line}" for r, line in zip(reviews, lines)]
+            self._glossary_name_message(parent, title, "\n\n".join(lines))
             return
-        glossary_path, chapters = folder_review.glossary_path, folder_review.chapters
 
-        from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QHeaderView
+        from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QHeaderView, QStackedWidget
+        from qt_widget_helpers import CheckmarkDelegate, NavComboRow
         review = QDialog(parent)
         review.setWindowTitle(title)
-        review.resize(900, 560)
+        review.resize(960, 600)
         layout = QVBoxLayout(review)
-        total = sum(len(c.reportable) for c in chapters)
-        intro = QLabel(
-            f"{total} name(s) in {len(chapters)} file(s) differ from <b>{_html.escape(os.path.basename(glossary_path))}</b>.<br>"
-            "Checked rows are replaced with the glossary name. Rows are pre-checked when one close "
-            "spelling of a character name was found; review the others before checking them.<br>"
-            "Each changed file is backed up to <i>glossary_name_check_backup</i> first.")
-        intro.setTextFormat(Qt.RichText)
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-        tree = QTreeWidget()
-        tree.setColumnCount(5)
-        tree.setHeaderLabels(["Fix", "Chapter", "Found in output", "Glossary name", "Times"])
-        tree.setRootIsDecorated(False)
-        tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
-        rows = []
-        for chapter in chapters:
-            for finding in chapter.reportable:
-                item = QTreeWidgetItem(["", chapter.output_file, " / ".join(finding.variants),
-                                        finding.expected, str(finding.occurrences)])
-                item.setCheckState(0, Qt.Checked if finding.fixable else Qt.Unchecked)
-                item.setToolTip(2, f"Source: {finding.raw} ({finding.entry_type})")
-                tree.addTopLevelItem(item)
-                rows.append((item, chapter.output_file, finding))
-        layout.addWidget(tree)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+        # one page per output folder; the ◀ folder ▶ switcher (as in the glossary editor) when several
+        folder_row = NavComboRow("Output folder:", "Previous folder", "Next folder")
+        pages = QStackedWidget()
+        rows = []  # (item, folder, output file, finding)
+        for folder_review in reviews:
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(10)
+            chapters = folder_review.chapters
+            total = sum(len(c.reportable) for c in chapters)
+            if chapters:
+                text = (f"{total} name(s) in {len(chapters)} file(s) differ from "
+                        f"<b>{_html.escape(os.path.basename(folder_review.glossary_path))}</b>.<br>"
+                        "Checked rows are replaced with the glossary name. Rows are pre-checked when one close "
+                        "spelling of a character name was found; review the others before checking them.<br>"
+                        "Each changed file is backed up to <i>glossary_name_check_backup</i> first.")
+                label = f"{os.path.basename(folder_review.folder)} — {total} name(s)"
+            else:
+                text = _html.escape(folder_review.problem or name_check.ALL_MATCH)
+                label = f"{os.path.basename(folder_review.folder)} — {'not checked' if folder_review.problem else 'all match'}"
+            intro = QLabel(text)
+            intro.setTextFormat(Qt.RichText)
+            intro.setWordWrap(True)
+            page_layout.addWidget(intro)
+            tree = QTreeWidget()
+            tree.setColumnCount(5)
+            tree.setHeaderLabels(["Fix", "Chapter", "Found in output", "Glossary name", "Times"])
+            tree.setRootIsDecorated(False)
+            tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
+            # the app's checkbox (Other Settings / EPUB Library) instead of Qt's bare tick
+            tree.setItemDelegateForColumn(0, CheckmarkDelegate(tree))
+            tree.setContextMenuPolicy(Qt.CustomContextMenu)
+            tree.customContextMenuRequested.connect(
+                lambda pos, t=tree: self._glossary_name_row_menu(review, t, pos, rows))
+            for chapter in chapters:
+                for finding in chapter.reportable:
+                    item = QTreeWidgetItem(["", chapter.output_file, " / ".join(finding.variants),
+                                            finding.expected, str(finding.occurrences)])
+                    item.setCheckState(0, Qt.Checked if finding.fixable else Qt.Unchecked)
+                    item.setToolTip(2, f"Source: {finding.raw} ({finding.entry_type})")
+                    item.setToolTip(3, f"From: {finding.origin or 'Book glossary'}")
+                    tree.addTopLevelItem(item)
+                    rows.append((item, folder_review.folder, chapter.output_file, finding))
+            tree.setVisible(bool(chapters))
+            page_layout.addWidget(tree, 1)
+            pages.addWidget(page)
+            folder_row.combo.addItem(label, folder_review.folder)
+            folder_row.combo.setItemData(folder_row.combo.count() - 1, folder_review.folder, Qt.ToolTipRole)
+        folder_row.combo.currentIndexChanged.connect(pages.setCurrentIndex)
+        folder_row.update_arrows()
+        folder_row.setVisible(len(reviews) > 1)
+        first = next((i for i, r in enumerate(reviews) if r.chapters), 0)
+        folder_row.combo.setCurrentIndex(first)
+        pages.setCurrentIndex(first)
+        layout.addWidget(folder_row)
+        layout.addWidget(pages, 1)
 
         buttons = QHBoxLayout()
         check_all = QPushButton("Check all")
@@ -468,33 +636,46 @@ class QAScannerMixin:
         buttons.addWidget(apply_btn)
         buttons.addWidget(cancel_btn)
         layout.addLayout(buttons)
-        check_all.clicked.connect(lambda: [r[0].setCheckState(0, Qt.Checked) for r in rows])
-        uncheck_all.clicked.connect(lambda: [r[0].setCheckState(0, Qt.Unchecked) for r in rows])
+
+        def _set_shown(state):
+            # Check all / Uncheck all act on the folder shown
+            folder = folder_row.combo.currentData()
+            for item, row_folder, _output_file, _finding in rows:
+                if row_folder == folder:
+                    item.setCheckState(0, state)
+
+        check_all.clicked.connect(lambda: _set_shown(Qt.Checked))
+        uncheck_all.clicked.connect(lambda: _set_shown(Qt.Unchecked))
         cancel_btn.clicked.connect(review.reject)
 
         def _apply():
-            plan = {}
-            for item, output_file, finding in rows:
+            plans = {}
+            for item, folder, output_file, finding in rows:
                 if item.checkState(0) == Qt.Checked:
-                    plan.setdefault(output_file, []).append(finding)
-            if not plan:
-                QMessageBox.information(review, title, "No rows are checked.")
+                    plans.setdefault(folder, {}).setdefault(output_file, []).append(finding)
+            if not plans:
+                self._glossary_name_message(review, title, "No rows are checked.")
                 return
-            confirm = QMessageBox.question(
+            files = sum(len(plan) for plan in plans.values())
+            where = f" in {len(plans)} output folders" if len(plans) > 1 else ""
+            confirm = self._glossary_name_message(
                 review, title,
-                f"Replace the checked names in {len(plan)} file(s)?\n"
+                f"Replace the checked names in {files} file(s){where}?\n"
                 "The original files are backed up to glossary_name_check_backup.",
-                QMessageBox.Yes | QMessageBox.No)
+                QMessageBox.Question, QMessageBox.Yes | QMessageBox.No)
             if confirm != QMessageBox.Yes:
                 return
-            changed = name_check.fix_files(folder, plan)
-            replaced = sum(changed.values())
-            if hasattr(self, 'append_log'):
-                self.append_log(f"📖 Glossary name fix: {replaced} replacement(s) in {len(changed)} file(s) "
-                                f"in {folder}")
-            QMessageBox.information(
+            replaced = changed_files = 0
+            for folder, plan in plans.items():
+                changed = name_check.fix_files(folder, plan)
+                replaced += sum(changed.values())
+                changed_files += len(changed)
+                if hasattr(self, 'append_log'):
+                    self.append_log(f"📖 Glossary name fix: {sum(changed.values())} replacement(s) in "
+                                    f"{len(changed)} file(s) in {folder}")
+            self._glossary_name_message(
                 review, title,
-                f"Replaced {replaced} name(s) in {len(changed)} file(s).\n"
+                f"Replaced {replaced} name(s) in {changed_files} file(s).\n"
                 "Run a QA scan again to clear these chapters' QA issues.")
             review.accept()
 
@@ -3620,24 +3801,28 @@ class QAScannerMixin:
             detection_layout.addWidget(check_glossary_checkbox)
 
             check_glossary_names_checkbox = self._create_styled_checkbox(
-                "Check glossary names (Experimental)")
+                "Check glossary names with NER (Experimental)")
             check_glossary_names_checkbox.setChecked(qa_settings.get('check_glossary_names', False))
             check_glossary_names_checkbox.setToolTip(
                 "Flags chapters where a glossary name from the source chapter was translated with a\n"
                 "different spelling (e.g. 'Walter Argent' for glossary 'Valter Argent').\n"
-                "Uses the entry types and minimum length of Emergency Glossary Compliance\n"
-                "(Other Settings). Flagged chapters count as QA failures like other issues.")
+                "Names are found with a named-entity recognition model (NER, 104 MB, downloaded on\n"
+                "first use) plus a capitalization heuristic; Other Settings › \"Use Named Entity\n"
+                "Recognition model (NER)\" turns NER off (builds without ONNX Runtime use the heuristic).\n"
+                "Uses the entry types of Emergency Glossary Compliance and the name check's minimum\n"
+                "length (Other Settings). Flagged chapters count as QA failures like other issues.")
             detection_layout.addWidget(check_glossary_names_checkbox)
 
             glossary_names_fix_row = QWidget()
             glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)
             glossary_names_fix_layout.setContentsMargins(20, 0, 0, 5)
-            glossary_names_fix_btn = QPushButton("Fix glossary names in existing chapters…")
+            glossary_names_fix_btn = QPushButton("Check glossary names in existing output…")
             glossary_names_fix_btn.setStyleSheet(
                 "background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;")
             glossary_names_fix_btn.setToolTip(
-                "Scan an output folder, review every name that differs from the glossary,\n"
-                "and replace the ones you keep checked. Changed files are backed up first.")
+                "Scan the output folder of every selected input file (Auto-search output; else pick one),\n"
+                "including chapter titles, the TOC and the book metadata, review every name that differs\n"
+                "from the glossary and replace the ones you keep checked. Changed files are backed up first.")
             glossary_names_fix_btn.clicked.connect(
                 lambda: self.open_glossary_name_fix_dialog(dialog))
             glossary_names_fix_layout.addWidget(glossary_names_fix_btn)

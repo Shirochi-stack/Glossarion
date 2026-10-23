@@ -141,8 +141,8 @@ def test_scan_folder_and_fix_files_back_up_first(tmp_path):
 
 
 def test_settings_from_env_and_config():
-    # entry types are Emergency Glossary Compliance's; the minimum length is the name check's own (default 0)
-    assert g.settings_from_env({"EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "5"})["min_chars"] == 0
+    # entry types are Emergency Glossary Compliance's; the minimum length is the name check's own (default 2)
+    assert g.settings_from_env({"EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "5"})["min_chars"] == 2
     env = {"EMERGENCY_GLOSSARY_COMPLIANCE_MODE": "custom",
            "EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES": '["term"]',
            "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "5",
@@ -421,3 +421,84 @@ def test_a_failed_model_load_is_not_retried_per_chapter(monkeypatch):
     assert g.resolve_ner(True, logs.append, retry=True) is None and len(calls) == 2  # the dialogs try again
     monkeypatch.setattr(ner_names, "get_tagger", lambda log=None, cancel=None, progress=None: "tagger")
     assert g.resolve_ner(True, retry=True) == "tagger" and g.resolve_ner(True) == "tagger"
+
+
+# ---- parallel chapters ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cpus,setting,expected", [
+    (16, 0, 4),     # "All cores": 16 cores / 4 threads per NER call
+    (16, 8, 2),     # "Half cores"
+    (16, 1, 1),     # "Single thread"
+    (2, 0, 1),      # a 2-core machine: one chapter at a time, NER on both cores
+    (1, 0, 1),
+    (16, 64, 4),    # never more than the machine has
+])
+def test_chapter_workers_follow_the_qa_performance_setting(monkeypatch, cpus, setting, expected):
+    monkeypatch.setattr(os, "cpu_count", lambda: cpus)
+    assert ner_names.ner_threads() == min(4, cpus)
+    assert g.chapter_workers(object(), setting) == expected
+    assert g.chapter_workers(None, setting) == 1  # the heuristic alone is pure Python
+
+
+def test_parallel_scan_keeps_file_order_and_results(tmp_path):
+    chapters, progress = [], {"chapters": {}}
+    for i in range(1, 9):
+        chapters.append({"content_hash": f"h{i}", "original_basename": f"c{i}.xhtml",
+                         "body": "<p>발터 아르겐트가 웃었다.</p>"})
+        progress["chapters"][str(i)] = {"status": "completed", "output_file": f"response_c{i:02}.html",
+                                        "content_hash": f"h{i}"}
+        (tmp_path / f"response_c{i:02}.html").write_text(
+            "<p>Walter Argent smiled.</p>" if i % 2 else "<p>Valter Argent smiled.</p>", encoding="utf-8")
+    (tmp_path / "chapters_full.json").write_text(json.dumps(chapters), encoding="utf-8")
+    (tmp_path / "translation_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+    ents = g.build_entries(GLOSSARY_ROWS)
+    seen = []
+    one = g.scan_folder(str(tmp_path), ents, workers=1)
+    many = g.scan_folder(str(tmp_path), ents, workers=4, progress=lambda done, total: seen.append(total))
+    assert [r.output_file for r in many] == [r.output_file for r in one] == [
+        "response_c01.html", "response_c03.html", "response_c05.html", "response_c07.html"]
+    assert [[f.describe() for f in r.reportable] for r in many] == [["Walter Argent → Valter Argent"]] * 4
+    assert seen == [8] * 8
+
+
+# ---- which glossaries: the book's, then the enabled extension / unified glossary -----------------
+
+def test_names_come_from_the_enabled_glossaries_in_request_priority(tmp_path, monkeypatch):
+    """2026-10-23 (owner): only the glossaries a request uses, per novel > extension > unified."""
+    import unified_glossary
+
+    book = tmp_path / "glossary.csv"
+    book.write_text("type,raw_name,translated_name\ncharacter,발터 아르겐트,Valter Argent\n", encoding="utf-8")
+    (tmp_path / "glossary_extension.csv").write_text(
+        "type,raw_name,translated_name\ncharacter,발터 아르겐트,Walter Argent\ncharacter,강시현,Kang Si-hyeon\n",
+        encoding="utf-8")
+    unified = tmp_path / "glossary_unified.csv"
+    unified.write_text("type,raw_name,translated_name\ncharacter,강시현,Gang Si-hyeon\n"
+                       "character,유소정,Yoo Sojeong\n", encoding="utf-8")
+    monkeypatch.setattr(unified_glossary, "resolve_prompt_glossary_path", lambda path, settings=None: str(unified))
+
+    def names(add, unify):
+        ents = g.load_entries(str(book), settings={"ADD_ADDITIONAL_GLOSSARY": add, "ENABLE_UNIFIED_GLOSSARY": unify})
+        return {(e.raw, e.translated, e.origin) for e in ents.entries}
+
+    assert names("0", "0") == {("발터 아르겐트", "Valter Argent", "")}
+    assert names("1", "0") == {("발터 아르겐트", "Valter Argent", ""),             # the book wins
+                               ("강시현", "Kang Si-hyeon", g.LAYER_EXTENSION)}
+    assert names("0", "1") == {("발터 아르겐트", "Valter Argent", ""),
+                               ("강시현", "Gang Si-hyeon", g.LAYER_UNIFIED), ("유소정", "Yoo Sojeong", g.LAYER_UNIFIED)}
+    assert names("1", "1") == {("발터 아르겐트", "Valter Argent", ""),
+                               ("강시현", "Kang Si-hyeon", g.LAYER_EXTENSION),  # the extension beats unified
+                               ("유소정", "Yoo Sojeong", g.LAYER_UNIFIED)}
+    [finding] = g.check_chapter("유소정이 웃었다.", "<p>Yoo So-jung smiled.</p>",
+                                g.load_entries(str(book), settings={"ENABLE_UNIFIED_GLOSSARY": "1"})).reportable
+    assert finding.origin == g.LAYER_UNIFIED
+    assert g.layer_settings_from_config({"enable_unified_glossary": True})["ENABLE_UNIFIED_GLOSSARY"] == "1"
+    assert g.layer_settings_from_config({})["ADD_ADDITIONAL_GLOSSARY"] == "0"
+
+
+def test_preview_snippets_show_each_occurrence_in_context():
+    finding = g.Finding("발터 아르겐트", "Valter Argent", "character", g.KIND_VARIANT, ("Walter Argent",), 2)
+    markup = "<p>First, Walter Argent smiled.</p><p title='Walter Argent'>Then Walter Argent's sword fell.</p>"
+    assert g.finding_snippets(markup, finding, width=10) == [
+        ("First, ", "Walter Argent", " smiled.…"), ("…ed. Then ", "Walter Argent", "'s sword f…")]  # not the attribute
+    assert g.source_snippets("그때 발터 아르겐트가 웃었다.", finding, width=3) == [("그때 ", "발터 아르겐트", "가 웃…")]

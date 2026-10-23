@@ -142,6 +142,11 @@ class WordPiece:
 
 
 # ----------------------------------------------------------------------------------------- tagger
+def ner_threads() -> int:
+    """Cores one NER call uses (ONNX Runtime intra-op threads): at most 4, never more than the CPU has."""
+    return max(1, min(4, os.cpu_count() or 1))
+
+
 class NerTagger:
     def __init__(self, model_path: str):
         import numpy as np
@@ -154,10 +159,9 @@ class NerTagger:
             id2label = json.load(f)["id2label"]
         self.labels = [id2label[str(i)] for i in range(len(id2label))]
         options = ort.SessionOptions()
-        options.intra_op_num_threads = max(1, min(4, os.cpu_count() or 1))
+        options.intra_op_num_threads = ner_threads()
         self.session = ort.InferenceSession(model_path, sess_options=options, providers=["CPUExecutionProvider"])
         self.inputs = {i.name for i in self.session.get_inputs()}
-        self._lock = threading.Lock()
         self._cache: dict = {}
 
     def _windows(self, text: str):
@@ -189,8 +193,8 @@ class NerTagger:
             feed["attention_mask"] = np.ones((1, len(ids)), dtype=np.int64)
         if "token_type_ids" in self.inputs:
             feed["token_type_ids"] = np.zeros((1, len(ids)), dtype=np.int64)
-        with self._lock:
-            logits = self.session.run(None, feed)[0][0]
+        # InferenceSession.run is thread-safe: parallel chapters share one session (glossary_name_check)
+        logits = self.session.run(None, feed)[0][0]
         shifted = logits - logits.max(axis=-1, keepdims=True)
         probs = np.exp(shifted) / np.exp(shifted).sum(axis=-1, keepdims=True)
         # one label per word: its first sub-token's (HF aggregation "first")

@@ -154,8 +154,8 @@ class QaScannerScreen(Screen):
         self.log_button = ft.TextButton(content="View log", icon=ft.Icons.TERMINAL, on_click=self._on_view_log,
                                         visible=False, key="qa-log")
         self.progress = ft.ProgressBar(visible=False, key="qa-progress")
-        # QA Scanner Settings › "Check glossary names (Experimental)" shows it (desktop: the same toggle)
-        self.name_fix_button = ft.OutlinedButton(content="Fix glossary names…", icon=ft.Icons.SPELLCHECK,
+        # QA Scanner Settings › "Check glossary names with NER (Experimental)" shows it (desktop: the same toggle)
+        self.name_fix_button = ft.OutlinedButton(content="Check glossary names…", icon=ft.Icons.SPELLCHECK,
                                                  on_click=lambda e: self.open_name_fix(),
                                                  visible=check_name_fix_enabled(self.ctx), key="qa-name-fix")
         run = card("Run", [ft.Row([self.start_button, self.stop_button, self.log_button], wrap=True),
