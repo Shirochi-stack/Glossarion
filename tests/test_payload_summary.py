@@ -68,8 +68,8 @@ def test_build_writes_index_and_details_and_hides_empty_columns(payloads, tmp_pa
     page = (out / "logistics.html").read_text(encoding="utf-8")
     assert '"retry"' not in page.split("const COLS =")[1].split(";")[0]  # no request has a retry: column hidden
     assert "N/A" in page and "glossarion.payloadSummary.columns" in page
-    # header context menu, resizable columns, 500-row pages (all remembered in the browser)
-    assert "oncontextmenu" in page and "resizer" in page and "pageSize : 500" in page and "renderPager" in page
+    # header context menu, resizable columns, 250-row pages (all remembered in the browser)
+    assert "oncontextmenu" in page and "resizer" in page and "pageSize : 250" in page and "renderPager" in page
     details = sorted(os.listdir(out / "details"))
     assert len(details) == 3
     detail = (out / "details" / details[0]).read_text(encoding="utf-8")
@@ -92,3 +92,13 @@ def test_workers_follow_parallel_extraction(monkeypatch, cpus, config, expected)
 def test_summary_folder_is_beside_payloads_not_inside(tmp_path):
     # the Payloads cleanup trims that folder oldest-first; the summary must not count toward it
     assert ps.summary_dir(str(tmp_path / "Payloads")) == str(tmp_path / "Payload Summary")
+
+
+def test_output_folder_and_context_come_from_the_payload(tmp_path):
+    """Payloads saved since 2026-10-23 carry output_dir / context themselves (no Logistics.json needed)."""
+    root = tmp_path / "Payloads"
+    path = write(root / "glossary" / "T_1" / "glossary_payload_1_c_A0_130000_z.json", {
+        "model": "gpt-5", "context": "glossary", "output_dir": "D:/Novels/Book A",
+        "messages": [{"role": "user", "content": "Extract names."}]})
+    row, _data = ps.read_row(str(path), str(root), {})
+    assert row["output_dir"] == "D:/Novels/Book A" and row["context"] == "glossary"

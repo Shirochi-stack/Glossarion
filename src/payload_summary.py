@@ -220,7 +220,7 @@ def read_row(path, payloads_dir, logistics):
         "anti_duplicate": _anti_duplicate_text(_first(data.get("anti_duplicate"), record.get("anti_duplicate"))),
         "retry": _first(retry_info.get("reason"), debug.get("retry_reason"), record.get("retry")),
         "tokens": _tokens_text(data.get("usage")),
-        "output_dir": record.get("output_dir"),
+        "output_dir": _first(data.get("output_dir"), record.get("output_dir")),
         "system": _preview("\n".join(texts["system"])) or None,
         "user": _preview("\n".join(texts["user"])) or None,
         "assistant": _preview("\n".join(texts["assistant"])) or None,
@@ -370,7 +370,7 @@ let order = (prefs.order || []).filter(k => k in LABELS);
 COLS.forEach(([k]) => {{ if (!order.includes(k)) order.push(k); }});
 let hidden = new Set((prefs.hidden || []).filter(k => k in LABELS));
 let widths = Object.fromEntries(Object.entries(prefs.widths || {{}}).filter(([k]) => k in LABELS));
-let pageSize = Number.isInteger(prefs.pageSize) ? prefs.pageSize : 500;  // 0 = all rows
+let pageSize = Number.isInteger(prefs.pageSize) ? prefs.pageSize : 250;  // 0 = all rows
 let page = 1;
 const sizeStyle = (el, key) => {{ const w = widths[key]; if (!w) return;
   el.style.width = el.style.minWidth = el.style.maxWidth = w + "px"; }};

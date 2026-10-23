@@ -15210,6 +15210,9 @@ class UnifiedClient:
                     json.dump({
                         'model': getattr(self, 'model', None),
                         'client_type': getattr(self, 'client_type', None),
+                        # the request's book output folder and context (translation, glossary...)
+                        'output_dir': os.path.abspath(self.output_dir) if getattr(self, 'output_dir', None) else None,
+                        'context': getattr(self, 'context', None),
                         'messages': cleaned_messages,
                         'timestamp': datetime.now().isoformat(),
                         'debug': debug_info,
