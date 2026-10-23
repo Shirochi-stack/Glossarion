@@ -113,3 +113,41 @@ def test_output_folder_is_a_link(tmp_path):
     assert row["output_dir_uri"].startswith("file:///") and row["output_dir_uri"].endswith("%EB%93%9D")
     assert f'<a href="{row["output_dir_uri"]}">' in ps._detail_page(row, data, str(path))
     assert ps._folder_uri("relative/folder") is None and ps._folder_uri(None) is None
+
+
+def test_rows_carry_their_raw_json_and_folder_links(payloads, tmp_path):
+    """Right-click a row: View raw JSON, Open payloads subfolder, Open output folder (when it has one)."""
+    rows = [ps.read_row(p, str(payloads), {})[0] for p in ps.collect_files(str(payloads))]
+    for row in rows:
+        assert row["raw_uri"].startswith("file:///") and row["raw_uri"].endswith(".json")
+        assert row["raw_uri"].startswith(row["folder_uri"] + "/")
+    index = ps.build(str(payloads), out_dir=str(tmp_path / "S"))
+    html = open(index, encoding="utf-8").read()
+    assert "showRowMenu" in html and "View raw JSON" in html and "Open payloads subfolder" in html
+    assert "if (r.output_dir_uri) item(\"Open output folder\"" in html
+    assert "tr.ondblclick" in html and "tr.onclick" not in html  # double-click opens the details
+
+
+def test_auto_update_rebuilds_after_a_stop_only_when_on(monkeypatch, tmp_path):
+    """Payloads > Auto-update: the stop handlers call _auto_update_payload_summary once the worker returned."""
+    import threading
+    import other_settings
+    import unified_api_client
+    built, done = [], threading.Event()
+    monkeypatch.setattr(unified_api_client, "_payloads_dir", lambda: str(tmp_path / "Payloads"))
+    monkeypatch.setattr(ps, "build", lambda d, workers=1: (built.append((d, workers)), done.set())[0] or "x.html")
+
+    class Gui:
+        config = {"extraction_workers": 2}
+        payload_summary_auto_update_var = False
+        logs = []
+        append_log = logs.append
+
+    gui = Gui()
+    other_settings._auto_update_payload_summary(gui)
+    assert not built  # off by default
+    gui.payload_summary_auto_update_var = True
+    other_settings._auto_update_payload_summary(gui)
+    assert done.wait(5) and built[0][0] == str(tmp_path / "Payloads")
+    src = open(os.path.join(SRC, "translator_gui.py"), encoding="utf-8").read()
+    assert src.count("getattr(self, '_auto_update_payload_summary', lambda: None)()") == 2

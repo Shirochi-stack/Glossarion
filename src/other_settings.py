@@ -217,6 +217,7 @@ def setup_other_settings_methods(gui_instance):
         '_create_prompt_management_section', '_create_processing_options_section',
         '_create_image_translation_section', '_create_anti_duplicate_section',
         '_create_payload_cleanup_section', '_create_custom_api_endpoints_section', '_create_debug_controls_section',
+        '_auto_update_payload_summary',
         '_create_output_settings_section', '_create_danger_zone_section',
         # Helper methods
         '_create_multi_key_row', '_create_manual_config_backup', '_manual_restore_config',
@@ -13796,6 +13797,45 @@ def _reset_anti_duplicate_defaults(self):
     if hasattr(self, 'append_log'):
         self.append_log("🔄 Anti-duplicate parameters reset to defaults")
 
+_payload_summary_lock = None
+
+
+def _auto_update_payload_summary(self):
+    """Payloads > "Auto-update": rebuild the payload summary on a background thread. Called by the
+    translation / glossary stop handlers once the stopped worker has returned (after a graceful
+    stop); one rebuild at a time."""
+    global _payload_summary_lock
+    if not bool(getattr(self, 'payload_summary_auto_update_var',
+                        (self.config or {}).get('payload_summary_auto_update', False))):
+        return
+    import threading
+    if _payload_summary_lock is None:
+        _payload_summary_lock = threading.Lock()
+    if not _payload_summary_lock.acquire(blocking=False):
+        return  # one is already running
+
+    config = dict(self.config or {})
+    config['enable_parallel_extraction'] = bool(getattr(self, 'enable_parallel_extraction_var',
+                                                        config.get('enable_parallel_extraction', True)))
+    config['extraction_workers'] = getattr(self, 'extraction_workers_var', config.get('extraction_workers', 2))
+    log = getattr(self, 'append_log', None)
+
+    def run():
+        try:
+            import payload_summary
+            from unified_api_client import _payloads_dir
+            index = payload_summary.build(_payloads_dir(), workers=payload_summary.default_workers(config))
+            if log and index:
+                log(f"📝 Payload summary updated: {index}")
+        except Exception as e:
+            if log:
+                log(f"⚠️ Payload summary auto-update failed: {e}")
+        finally:
+            _payload_summary_lock.release()
+
+    threading.Thread(target=run, name="PayloadSummaryAutoUpdate", daemon=True).start()
+
+
 def _create_payload_cleanup_section(self, parent_frame):
     """Payloads section (above Custom API Endpoints): the debug-dump cleanup limit and a button that opens
     the Payloads folder."""
@@ -13933,12 +13973,28 @@ def _create_payload_cleanup_section(self, parent_frame):
     summary_btn.setToolTip(_wrapped_tooltip_html(
         "Builds 'Payload Summary/logistics.html' next to the Payloads folder from every saved request: "
         "time, context, model, API key, parameters, anti-duplicate settings, token usage, output folder "
-        "and previews of the system / user / assistant prompts, with search and filters; click a request "
+        "and previews of the system / user / assistant prompts, with search and filters; double-click a request "
         "for its full details. Uses the Parallel Extraction workers (never more than the CPU has)."))
     summary_btn.clicked.connect(_create_payload_summary)
+    if not hasattr(self, 'payload_summary_auto_update_var'):
+        self.payload_summary_auto_update_var = bool(self.config.get('payload_summary_auto_update', False))
+    summary_auto_cb = self._create_styled_checkbox("Auto-update")
+    try:
+        summary_auto_cb.setChecked(bool(self.payload_summary_auto_update_var))
+    except Exception:
+        pass
+    summary_auto_cb.setToolTip(_wrapped_tooltip_html(
+        "Rebuild the payload summary in the background whenever a translation or glossary run is stopped, "
+        "after the graceful stop has finished (the log shows where it was written)."))
+
+    def _on_summary_auto_toggle(checked):
+        self.payload_summary_auto_update_var = bool(checked)
+
+    summary_auto_cb.toggled.connect(_on_summary_auto_toggle)
     open_row = QHBoxLayout()
     open_row.addWidget(open_payloads_btn)
     open_row.addWidget(summary_btn)
+    open_row.addWidget(summary_auto_cb)
     open_row.addStretch()
     section_v.addLayout(open_row)
 

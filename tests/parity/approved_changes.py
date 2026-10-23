@@ -670,6 +670,9 @@ _PAYLOAD_CLEANUP_INIT = _after(
     "            self.payload_cleanup_limit_mb_var = max(0, int(self.config.get('payload_cleanup_limit_mb', 400)))",
     "        except (TypeError, ValueError):",
     "            self.payload_cleanup_limit_mb_var = 400")
+# 2026-10-23 Payloads > "Auto-update": the generated schema rows (oracle pinned at HEAD reads the tables from it)
+_PAYLOAD_SUMMARY_AUTO_SCHEMA = [('        "only reported, never fixed automatically, unless they differ just in spacing or hyphens."),\n', '        "only reported, never fixed automatically, unless they differ just in spacing or hyphens."),\n    "payload_summary_auto_update": (\n        "Rebuild the readable payload summary (Payload Summary/logistics.html) after a translation or "\n        "glossary run is stopped, once the graceful stop has finished."),\n')]
+_PAYLOAD_SUMMARY_AUTO_SCHEMA_DATA = [(" 'payload_cleanup_limit_mb',\n", " 'payload_cleanup_limit_mb',\n 'payload_summary_auto_update',\n"), ("  ('safe_int', 400, 0, None, '')),\n", "  ('safe_int', 400, 0, None, '')),\n ('payload_summary_auto_update', ('payload_summary_auto_update_var',), ('value', False), ('bool',)),\n"), (" ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', ('value', True)),\n", " ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', ('value', True)),\n ('payload_summary_auto_update_var', 'payload_summary_auto_update', ('value', False)),\n"), ("     'var_names': ('payload_cleanup_limit_mb_var',)},\n", "     'var_names': ('payload_cleanup_limit_mb_var',)},\n    'payload_summary_auto_update': {'converter': ('bool',),\n     'default': False,\n     'default_source': 'init',\n     'dialog_default': False,\n     'init_default': False,\n     'label': 'Auto-update',\n     'origins': ('settings_map', 'init', 'dialog'),\n     'save_default': False,\n     'tooltip': 'Rebuild the payload summary in the background whenever a translation or glossary '\n                'run is stopped, after the graceful stop has finished (the log shows where it was '\n                'written).',\n     'type': 'bool',\n     'ui_group': 'Payloads',\n     'ui_sites': ('other.dialog',),\n     'var_names': ('payload_summary_auto_update_var',)},\n")]
 # the QA scanner pieces, as edited (dialog toggle + fix dialog, runtime default/env/scope, scanner step)
 _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '\n'
@@ -1872,6 +1875,16 @@ APPROVED = (
             "src/settings_persistence.py": [_PAYLOAD_CLEANUP_SETTINGS_ROW],
             "src/owner_state.py": [_PAYLOAD_CLEANUP_INIT],
             "src/translator_gui.py": [_PAYLOAD_CLEANUP_SETTINGS_ROW_GUI],
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-10-23",
+        "what": "New Payloads > 'Auto-update' setting (payload_summary_auto_update, off): rebuild the readable "
+                "payload summary after a translation / glossary run is stopped",
+        "source": {
+            "src/settings_schema.py": _PAYLOAD_SUMMARY_AUTO_SCHEMA,
+            "src/settings_schema_data.py": _PAYLOAD_SUMMARY_AUTO_SCHEMA_DATA,
         },
         "values": {},
     },

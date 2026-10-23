@@ -24942,6 +24942,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
         os.environ['WAIT_FOR_CHUNKS'] = '0'
         os.environ.pop('TRANSLATION_CANCELLED', None)
+        # Payloads > Auto-update: the stopped run's payloads into the readable summary
+        getattr(self, '_auto_update_payload_summary', lambda: None)()
 
         # Module-level glossary stop flags
         try:
@@ -24994,6 +24996,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
         os.environ['WAIT_FOR_CHUNKS'] = '0'
         os.environ.pop('TRANSLATION_CANCELLED', None)
+        # Payloads > Auto-update: the stopped run's payloads into the readable summary
+        getattr(self, '_auto_update_payload_summary', lambda: None)()
 
         # Module-level stop flags
         try:

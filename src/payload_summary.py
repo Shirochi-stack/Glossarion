@@ -7,7 +7,7 @@ and writes, beside the Payloads folder (so the Payloads cleanup never counts it)
 
 * ``Payload Summary/logistics.html`` - one row per request: time, context, model, provider, key,
   parameters, anti-duplicate settings, retry, token usage, output folder and previews of the system /
-  user / assistant text; search, filters, sorting, click a row for the details.
+  user / assistant text; search, filters, sorting, double-click a row for the details, right-click it for its files.
 * ``Payload Summary/details/<n>.html`` - one page per request: every field, the full messages, the
   parameters / usage / debug data, and a link to the raw JSON file.
 
@@ -230,11 +230,13 @@ def read_row(path, payloads_dir, logistics):
     if row["key"] and row["api_key"]:
         row["key"] = f"{row['key']} · {row['api_key']}"
     row["output_dir_uri"] = _folder_uri(row["output_dir"])
+    row["raw_uri"] = _folder_uri(os.path.abspath(path))
+    row["folder_uri"] = _folder_uri(os.path.dirname(os.path.abspath(path)))
     return row, data
 
 
 def _folder_uri(folder):
-    """file:/// link for an absolute folder path (the output folder cell links to it)."""
+    """file:/// link for an absolute path (output folder, raw JSON, payload subfolder)."""
     try:
         return Path(folder).as_uri() if folder and os.path.isabs(str(folder)) else None
     except (TypeError, ValueError):
@@ -265,7 +267,7 @@ td.sized { overflow: hidden; text-overflow: ellipsis; }
 .menu div { padding: 6px 12px; cursor: pointer; border-radius: 3px; } .menu div:hover { background: #17a2b8; }
 .menu hr { border: none; border-top: 1px solid #444; margin: 4px 0; }
 .pager { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
-tr.row:hover { background: #2c3440; cursor: pointer; }
+tr.row:hover { background: #2c3440; cursor: default; user-select: text; }
 .na { color: #666; } .failed td:nth-child(2) { color: #ff8a8a; }
 .bar { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; align-items: center; }
 input, select { background: #2d2d2d; color: #ddd; border: 1px solid #4a5568; border-radius: 4px; padding: 5px 8px; }
@@ -345,7 +347,7 @@ def _index_page(rows, payloads_dir, generated):
 <style>{STYLE}</style></head><body>
 <h1>Payload summary</h1>
 <p class="dim">{len(rows):,} requests from {esc(os.path.abspath(payloads_dir))} · generated {esc(generated)}.
-Click a row for the full request.</p>
+Double-click a row for the full request; right-click it for its raw JSON and folders.</p>
 <div class="bar">
   <input id="q" type="search" placeholder="Search everything…" size="34">
   <select id="kind"><option value="">All types</option></select>
@@ -393,11 +395,25 @@ const head = document.getElementById("head");
 let dragKey = null, resized = false;
 // right-click a header: hide it, show all, choose columns, reset widths
 const menu = document.getElementById("menu");
-function showMenu(e, key) {{
+function openMenu(e, build) {{
   menu.innerHTML = "";
   const item = (text, action, disabled) => {{ const d = document.createElement("div"); d.textContent = text;
     if (disabled) d.style.opacity = .4; else d.onclick = () => {{ menu.hidden = true; action(); }};
     menu.appendChild(d); }};
+  build(item);
+  menu.hidden = false;
+  menu.style.left = Math.min(e.pageX, window.scrollX + window.innerWidth - menu.offsetWidth - 8) + "px";
+  menu.style.top = Math.min(e.pageY, window.scrollY + window.innerHeight - menu.offsetHeight - 8) + "px";
+}}
+// right-click a request: its raw JSON, its payload subfolder, its output folder (when it has one)
+function showRowMenu(e, r) {{
+  openMenu(e, item => {{
+    item("View raw JSON", () => window.open(r.raw_uri, "_blank"), !r.raw_uri);
+    item("Open payloads subfolder", () => window.open(r.folder_uri, "_blank"), !r.folder_uri);
+    if (r.output_dir_uri) item("Open output folder", () => window.open(r.output_dir_uri, "_blank"));
+  }});
+}}
+function showMenu(e, key) {{ openMenu(e, item => {{
   item("Hide \u201c" + LABELS[key] + "\u201d", () => {{ hidden.add(key); savePrefs(); renderPanel(); render(); }},
        visible().length <= 1);
   item("Show all columns", () => {{ hidden = new Set(); savePrefs(); renderPanel(); render(); }}, !hidden.size);
@@ -405,10 +421,7 @@ function showMenu(e, key) {{
   item("Choose columns\u2026", () => {{ document.getElementById("colpanel").hidden = false; renderPanel();
     document.getElementById("colpanel").scrollIntoView({{block: "nearest"}}); }});
   item("Reset column widths", () => {{ widths = {{}}; savePrefs(); render(); }}, !Object.keys(widths).length);
-  menu.hidden = false;
-  menu.style.left = Math.min(e.pageX, window.scrollX + window.innerWidth - menu.offsetWidth - 8) + "px";
-  menu.style.top = e.pageY + "px";
-}}
+}}); }}
 document.addEventListener("click", e => {{ if (!menu.contains(e.target)) menu.hidden = true; }});
 document.addEventListener("keydown", e => {{ if (e.key === "Escape") menu.hidden = true; }});
 window.addEventListener("scroll", () => {{ menu.hidden = true; }}, true);
@@ -511,7 +524,8 @@ function render() {{
   const frag = document.createDocumentFragment();
   shown.forEach(r => {{
     const tr = document.createElement("tr"); tr.className = "row" + (r.kind === "Failed" ? " failed" : "");
-    tr.onclick = () => window.open(r.detail, "_blank");
+    tr.ondblclick = () => window.open(r.detail, "_blank");  // double-click opens the request details
+    tr.oncontextmenu = e => {{ e.preventDefault(); showRowMenu(e, r); }};
     cols.forEach(key => {{
       const td = document.createElement("td"); const v = r[key]; td.dataset.key = key;
       if (widths[key]) {{ sizeStyle(td, key); td.classList.add("sized"); }}
