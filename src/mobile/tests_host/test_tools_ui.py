@@ -1310,8 +1310,10 @@ def test_qa_fix_glossary_names_sheet_reviews_and_fixes_checked_rows(tmp_path, mo
         assert off.name_fix_button.visible is False  # the QA toggle is off by default
         _conn, session = tb._fake_session("android")
         page = session.page
+        # NER off: the host venv has no ONNX Runtime and the test must not download the 104 MB model
         ctx = _ctx(page, store={"qa_scanner_settings": {"check_glossary_names": True},
-                                "emergency_glossary_compliance_mode": "all"})
+                                "emergency_glossary_compliance_mode": "all",
+                                "glossary_name_check_use_ner": False})
         screen = QaScannerScreen(parse_route("/tools/qa"), ctx)
         _mount(page, screen.get_body())
         assert screen.name_fix_button.visible is True and screen.name_fix_button.disabled is True

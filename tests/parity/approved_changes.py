@@ -609,6 +609,7 @@ _NAME_CHECK_SETTINGS_ROWS = (
     "('glossary_name_check_mode', ['glossary_name_check_mode_var'], 'auto', str),",
     "('glossary_name_check_min_chars', ['glossary_name_check_min_chars_var'], 0, lambda v: max(0, min(10, "
     "safe_int(v, 0)))),",
+    "('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),",
 )
 _NAME_CHECK_MIN_CHARS_ROW = ("('emergency_glossary_compliance_min_chars', ['emergency_glossary_compliance_min_chars_var'], "
                              "3, lambda v: max(0, min(10, safe_int(v, 3)))),")
@@ -618,7 +619,8 @@ _NAME_CHECK_SETTINGS_ROW_GUI = _after(
     "                " + _NAME_CHECK_MIN_CHARS_ROW, *("                " + row for row in _NAME_CHECK_SETTINGS_ROWS))
 _NAME_CHECK_BOOL_ROW = _after(
     "            ('emergency_glossary_compliance_var', 'emergency_glossary_compliance', False),",
-    "            ('glossary_name_check_var', 'glossary_name_check', False),")
+    "            ('glossary_name_check_var', 'glossary_name_check', False),",
+    "            ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', True),")
 _NAME_CHECK_STR_ROW = _after(
     "            ('emergency_glossary_compliance_mode_var', 'emergency_glossary_compliance_mode', 'characters'),",
     "            ('glossary_name_check_mode_var', 'glossary_name_check_mode', 'auto'),")
@@ -628,7 +630,9 @@ _NAME_CHECK_ENV_DICT = _after(
     "            'GLOSSARY_NAME_CHECK': \"1\" if (getattr(self, 'glossary_name_check_var', False) and "
     "auto_glossary_mode != 'no_glossary') else \"0\",",
     "            'GLOSSARY_NAME_CHECK_MODE': str(getattr(self, 'glossary_name_check_mode_var', 'auto')),",
-    "            'GLOSSARY_NAME_CHECK_MIN_CHARS': str(getattr(self, 'glossary_name_check_min_chars_var', 0)),")
+    "            'GLOSSARY_NAME_CHECK_MIN_CHARS': str(getattr(self, 'glossary_name_check_min_chars_var', 0)),",
+    "            'GLOSSARY_NAME_CHECK_USE_NER': \"1\" if getattr(self, 'glossary_name_check_use_ner_var', True) "
+    "else \"0\",")
 # the name check's own minimum raw entry length, read at startup like Emergency Glossary Compliance's
 _NAME_CHECK_MIN_CHARS_INIT = _after(
     "            self.emergency_glossary_compliance_min_chars_var = 3",
@@ -686,9 +690,23 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   'self._glossary_name_fix_start_folder()))\n'
   '        if not folder:\n'
   '            return\n'
+  "        use_ner = bool(getattr(self, 'glossary_name_check_use_ner_var',\n"
+  "                               self.config.get('glossary_name_check_use_ner', True)))\n"
+  '        if use_ner:\n'
+  '            import ner_names\n'
+  '            if ner_names.runtime_available() and not ner_names.model_installed():\n'
+  '                answer = QMessageBox.question(\n'
+  '                    parent, title,\n'
+  '                    "The glossary name check finds names with an English named-entity model (NER, 104 '
+  'MB).\\n"\n'
+  '                    "Download it now? No uses the capitalization heuristic this time.",\n'
+  '                    QMessageBox.Yes | QMessageBox.No)\n'
+  '                use_ner = answer == QMessageBox.Yes\n'
+  "        log = getattr(self, 'append_log', None)\n"
   '        QApplication.setOverrideCursor(Qt.WaitCursor)\n'
   '        try:\n'
-  '            folder_review = name_check.review_folder(folder, self._glossary_name_check_scope())\n'
+  '            ner = name_check.resolve_ner(use_ner, log)\n'
+  '            folder_review = name_check.review_folder(folder, self._glossary_name_check_scope(), ner=ner)\n'
   '        finally:\n'
   '            QApplication.restoreOverrideCursor()\n'
   '        if folder_review.problem or not folder_review.chapters:\n'
@@ -851,10 +869,11 @@ _NAME_CHECK_QA_RUNTIME = [('        "check_glossary_leakage": True,\n        "ch
   '    )\n'
   '\n'
   '    if settings.get("check_glossary_names"):\n'
-  "        # Glossary name check shares Emergency Glossary Compliance's entry types / minimum length\n"
+  "        # Glossary name check: Emergency Glossary Compliance's entry types, its own minimum length / NER\n"
   '        try:\n'
-  '            from glossary_name_check import settings_from_config\n'
+  '            from glossary_name_check import settings_from_config, use_ner_from_config\n'
   '            settings["_glossary_name_scope"] = settings_from_config(live_config)\n'
+  '            settings["_glossary_name_use_ner"] = use_ner_from_config(live_config)\n'
   '        except Exception:\n'
   '            pass\n'
   '\n'
@@ -878,8 +897,10 @@ _NAME_CHECK_SCANNER = [('\ndef check_potential_truncation(raw_text):\n',
   "    by_file = {r.get('filename'): r for r in results if isinstance(r, dict) and r.get('filename')}\n"
   '    log(f"\\n📖 Glossary name check (experimental): {len(entries.entries)} entries from '
   '{os.path.basename(glossary_path)}")\n'
+  '    use_ner = qa_settings.get("_glossary_name_use_ner")\n'
+  '    ner = name_check.resolve_ner(name_check.use_ner_from_env() if use_ner is None else use_ner, log)\n'
   '    chapters = name_check.scan_folder(folder_path, entries, progress_path=progress_path,\n'
-  '                                      selected_files=list(by_file), stop=should_stop)\n'
+  '                                      selected_files=list(by_file), stop=should_stop, ner=ner)\n'
   '    flagged = 0\n'
   '    for chapter in chapters:\n'
   '        result_obj = by_file.get(chapter.output_file)\n'

@@ -14712,8 +14712,9 @@ def _run_glossary_name_check(output_dir, output_file, chapter):
         if not entries:
             return
         auto_fix = name_check.auto_fix_from_env()
+        ner = name_check.resolve_ner(name_check.use_ner_from_env(), print)
         result, replaced = name_check.check_and_fix_file(
-            output_path, name_check.html_to_text(source_html), entries, auto_fix=auto_fix)
+            output_path, name_check.html_to_text(source_html), entries, auto_fix=auto_fix, ner=ner)
         name = os.path.basename(output_path)
         for finding in result.reportable:
             if auto_fix and finding.fixable and replaced:

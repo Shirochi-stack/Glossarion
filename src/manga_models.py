@@ -125,6 +125,9 @@ __all__ = [
 KIND_DETECTOR = "detector"
 KIND_INPAINTER = "inpaint"
 KIND_OCR = "ocr"
+#: The English named-entity model the glossary name check (glossary_name_check / ner_names) runs on
+#: translated chapters; not a manga model, so the manga screens (which list per kind) never show it.
+KIND_NER = "ner"
 
 HF_ENDPOINT_DEFAULT = "https://huggingface.co"
 USER_AGENT = "Glossarion"
@@ -207,6 +210,9 @@ _PPOCR_KOREAN_REPO = "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx"
 _PPOCR_KOREAN_REVISION = "5c6f574b8e2230adf4287b33e736d71b9fabd28e"
 _HAYAI_REPO = "bixii/hayai-ocr-v2.5-nova-onnx"
 _HAYAI_REVISION = "23653e3c09c6e07b9172668cf7fa238f6411ab14"
+_NER_REPO = "Xenova/bert-base-NER"  # dslim/bert-base-NER (CoNLL-2003, cased), int8 ONNX export
+_NER_REVISION = "8e892123e8b7c2c0c2bd1dcb598b7d244c4e53aa"
+NER_MODEL_KEY = "bert_base_ner_int8"
 #: The OCR provider value (``manga_ocr_provider``) whose models are the KIND_OCR specs below.
 HAYAI_OCR_PROVIDER = "hayai-ocr"
 
@@ -409,6 +415,47 @@ _SPECS = (
         cache_env="ONNX_CACHE_DIR",
         selector=HAYAI_OCR_PROVIDER,
         description="Hayai OCR (Japanese, Chinese, Korean, English bubble text): tokenizer.",
+    ),
+    ModelSpec(
+        key=NER_MODEL_KEY,
+        kind=KIND_NER,
+        title="English named-entity model (NER)",
+        repo_id=_NER_REPO,
+        filename="onnx/model_quantized.onnx",
+        revision=_NER_REVISION,
+        sha256="caaee70a5518ec7f9e46e5308fcc9263a8c227703a9ce46cf61c69a552349648",
+        size=108952255,
+        cache_env="ONNX_CACHE_DIR",
+        selector="ner",
+        local_name="ner/bert-base-NER/model_quantized.onnx",
+        description="Finds person / place / organization names in translated chapters for the glossary name check.",
+        companions=("bert_base_ner_vocab", "bert_base_ner_config"),
+    ),
+    ModelSpec(
+        key="bert_base_ner_vocab",
+        kind=KIND_NER,
+        title="English named-entity model vocabulary",
+        repo_id=_NER_REPO,
+        filename="vocab.txt",
+        revision=_NER_REVISION,
+        sha256="eeaa9875b23b04b4c54ef759d03db9d1ba1554838f8fb26c5d96fa551df93d02",
+        size=213450,
+        cache_env="ONNX_CACHE_DIR",
+        selector="ner",
+        local_name="ner/bert-base-NER/vocab.txt",
+    ),
+    ModelSpec(
+        key="bert_base_ner_config",
+        kind=KIND_NER,
+        title="English named-entity model labels",
+        repo_id=_NER_REPO,
+        filename="config.json",
+        revision=_NER_REVISION,
+        sha256="a73a2eccc921bbdea95a94b49a157d3694b5c2abbae7a6f3000e14404a9c31a8",
+        size=999,
+        cache_env="ONNX_CACHE_DIR",
+        selector="ner",
+        local_name="ner/bert-base-NER/config.json",
     ),
 )
 

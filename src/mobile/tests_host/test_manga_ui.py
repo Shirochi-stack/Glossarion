@@ -523,7 +523,7 @@ def test_model_manager_maps_the_registry_states(monkeypatch):
 def test_real_registry_statuses_stay_in_the_tmp_caches(iso):
     manager = svc.ModelManager()
     entries = manager.entries()
-    assert {e.kind for e in entries} == {"detector", "inpaint", "ocr"}
+    assert {e.kind for e in entries} == {"detector", "inpaint", "ocr", "ner"}
     assert all(e.status == "missing" for e in entries)  # nothing downloaded in the tmp caches
     assert all(str(iso["models"]) in e.path for e in entries)
     # RapidOCR's reading models (rapidocr_language auto: both readers) and the provider chip's status

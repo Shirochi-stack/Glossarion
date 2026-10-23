@@ -838,6 +838,9 @@ TOOLTIP_OVERRIDES = {
         "Valter Argent).\n"
         "Uses the Emergency Glossary Compliance entry types (works without that toggle) and its own minimum "
         "length."),
+    "glossary_name_check_use_ner": (
+        "Finds the names in each translated chapter with an English named-entity model (person / place / "
+        "organization; 104 MB, downloaded on first use). Off: a capitalization heuristic finds them."),
     "glossary_name_check_min_chars": (
         "Glossary names shorter than this are not checked (0 = every length). Names under 3 characters are "
         "only reported, never fixed automatically, unless they differ just in spacing or hyphens."),

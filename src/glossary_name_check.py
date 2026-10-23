@@ -203,6 +203,12 @@ def _is_variant(expected, expected_key, candidate, candidate_key):
         return False  # "Son" is not "Sion"
     if expected_key.startswith(candidate_key):
         return False  # a cut-off name ("Shen Yin" for "Shen Yinxue") may be someone else
+    if len(candidate_key) - len(expected_key) >= 3 and candidate_key.startswith(expected_key):
+        return False  # letters glued on ("Mihailtal" for "Mihail") are another word, not a respelling
+    if len(expected_key) - len(candidate_key) >= 3 and expected_key.endswith(candidate_key):
+        return False  # cut off in front ("Lian Sect" for "Singlian Sect")
+    if len(candidate_key) > len(expected_key) and candidate_key.endswith(expected_key):
+        return False  # letters in front make another name ("Asakura" is not "Sakura")
     exp_last = re.split(r"[\s\-]+", expected)[-1]
     cand_last = re.split(r"[\s\-]+", candidate)[-1]
     if exp_last != cand_last and (_ROMAN_OR_NUMBER.match(exp_last) or _ROMAN_OR_NUMBER.match(cand_last)):
@@ -270,15 +276,33 @@ def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars
     return entries
 
 
-def check_chapter(source_text, output_markup, entries, output_file=""):
-    """Compare one translated chapter with its source chapter."""
+def _ner_candidates(text, tagger):
+    """Names the NER model finds in the output (person / place / organization / misc), keyed by
+    ``_norm`` like ``_name_candidates``; NER also sees names at a sentence start and names that are
+    ordinary words elsewhere ("Rose"), which the capitalization heuristic has to skip."""
+    found = {}
+    for entity in tagger.entities(text):
+        core = _clean_candidate(entity.text)
+        key = _norm(core)
+        if core and len(key) >= 2:
+            found.setdefault(key, core)
+    return found
+
+
+def check_chapter(source_text, output_markup, entries, output_file="", *, ner=None):
+    """Compare one translated chapter with its source chapter. ``ner``: a ``ner_names.NerTagger``
+    finds the candidate spellings (else the capitalization heuristic)."""
     result = ChapterResult(output_file=output_file)
     if not entries or not source_text or not output_markup:
         return result
     output_text = html_to_text(output_markup)
     candidates = None
     matched_raws = []
+    # a large (unified) glossary: skip entries whose first two characters never occur in the chapter
+    bigrams = {source_text[i:i + 2] for i in range(len(source_text) - 1)}
     for entry in entries.entries:
+        if len(entry.raw) >= 2 and entry.raw[:2] not in bigrams:
+            continue
         count = source_text.count(entry.raw)
         if not count:
             continue
@@ -293,7 +317,12 @@ def check_chapter(source_text, output_markup, entries, output_file=""):
             # character (Adele / Adela) than drift, so only absences are searched.
             continue
         if candidates is None:
+            # NER adds the names the heuristic cannot see (sentence starts, ordinary words); the
+            # heuristic keeps the invented / lowercase-hyphen spellings the model does not tag (corpus)
             candidates = _name_candidates(output_text)
+            if ner is not None:
+                for key, core in _ner_candidates(output_text, ner).items():
+                    candidates.setdefault(key, core)
         expected_key = _norm(entry.translated)
         # Another glossary name is never drift; a respelling of this one
         # ("Yoo So-jeong" for "Yoo Sojeong") normalizes to the same key.
@@ -351,11 +380,11 @@ def apply_fixes(output_markup, findings, *, reviewed=False):
     return "".join(p for p in pieces if p is not None), total
 
 
-def check_and_fix_file(output_path, source_text, entries, *, auto_fix):
+def check_and_fix_file(output_path, source_text, entries, *, auto_fix, ner=None):
     """Check one output file; with ``auto_fix`` rewrite it with the fixable variants replaced."""
     with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
         markup = f.read()
-    result = check_chapter(source_text, markup, entries, os.path.basename(output_path))
+    result = check_chapter(source_text, markup, entries, os.path.basename(output_path), ner=ner)
     replaced = 0
     if auto_fix and result.fixable:
         new_markup, replaced = apply_fixes(markup, result.fixable)
@@ -404,6 +433,53 @@ def settings_from_config(config, env=None):
         except (TypeError, ValueError):
             pass
     return scope
+
+
+def _truthy(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def use_ner_from_env(env=None):
+    """"Use Named Entity Recognition model (NER)" (default on)."""
+    env = os.environ if env is None else env
+    return _truthy(env.get("GLOSSARY_NAME_CHECK_USE_NER"), True)
+
+
+def use_ner_from_config(config, env=None):
+    config = config if isinstance(config, dict) else {}
+    if "glossary_name_check_use_ner" in config:
+        return _truthy(config["glossary_name_check_use_ner"], True)
+    return use_ner_from_env(env)
+
+
+_ner_notes = set()
+
+
+def resolve_ner(use_ner, log=None):
+    """The NER tagger when it is switched on and this build can run it (downloading the model on first
+    use); None means the capitalization heuristic. Each fallback reason is logged once per process."""
+    if not use_ner:
+        return None
+    try:
+        import ner_names
+    except ImportError:
+        ner_names = None
+    if ner_names is None or not ner_names.runtime_available():
+        if log and "unsupported" not in _ner_notes:
+            _ner_notes.add("unsupported")
+            log("ℹ️ Glossary name check: NER is not supported in this build; using the capitalization heuristic")
+        return None
+    try:
+        return ner_names.get_tagger(log)
+    except Exception as exc:
+        if log and "failed" not in _ner_notes:
+            _ner_notes.add("failed")
+            log(f"⚠️ Glossary name check: the NER model could not be loaded ({exc}); using the capitalization heuristic")
+        return None
 
 
 def enabled_from_env(env=None):
@@ -463,7 +539,7 @@ def source_chapters_for_folder(folder_path, progress_path=None):
     return mapping
 
 
-def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None, stop=None):
+def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None, stop=None, ner=None):
     """Check every mapped output file; returns ``[ChapterResult]`` with reportable findings."""
     results = []
     if not entries:
@@ -480,7 +556,7 @@ def scan_folder(folder_path, entries, *, progress_path=None, selected_files=None
             continue
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             markup = f.read()
-        result = check_chapter(sources[output_file], markup, entries, output_file)
+        result = check_chapter(sources[output_file], markup, entries, output_file, ner=ner)
         if result.reportable:
             results.append(result)
     return results
@@ -500,7 +576,8 @@ def find_glossary_for_folder(folder_path, source_path=None):
 
 
 NO_GLOSSARY = "No glossary was found for this output folder."
-NO_ENTRIES = "No glossary entries match the Emergency Glossary Compliance entry types and minimum length."
+NO_ENTRIES = ("No glossary entries match the Emergency Glossary Compliance entry types and the name "
+              "check's minimum raw entry length.")
 NO_SOURCES = ("This folder has no translation_progress.json / chapters_full.json, so translated "
               "chapters cannot be matched to their source chapters.")
 ALL_MATCH = "Every glossary name in this folder matches the glossary."
@@ -515,7 +592,7 @@ class FolderReview:
     problem: str = ""  # why nothing could be checked (NO_GLOSSARY / NO_ENTRIES / NO_SOURCES)
 
 
-def review_folder(folder_path, scope, *, stop=None):
+def review_folder(folder_path, scope, *, stop=None, ner=None):
     """Scan one output folder for the review dialog (desktop QA Scanner, Glossarion Mobile)."""
     review = FolderReview(folder=folder_path)
     glossary_path = find_glossary_for_folder(folder_path)
@@ -530,7 +607,7 @@ def review_folder(folder_path, scope, *, stop=None):
     if not source_chapters_for_folder(folder_path):
         review.problem = NO_SOURCES
         return review
-    review.chapters = scan_folder(folder_path, entries, stop=stop)
+    review.chapters = scan_folder(folder_path, entries, stop=stop, ner=ner)
     return review
 
 

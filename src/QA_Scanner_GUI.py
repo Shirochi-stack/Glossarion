@@ -336,9 +336,22 @@ class QAScannerMixin:
             parent, "Select Output Folder to Check Glossary Names", self._glossary_name_fix_start_folder()))
         if not folder:
             return
+        use_ner = bool(getattr(self, 'glossary_name_check_use_ner_var',
+                               self.config.get('glossary_name_check_use_ner', True)))
+        if use_ner:
+            import ner_names
+            if ner_names.runtime_available() and not ner_names.model_installed():
+                answer = QMessageBox.question(
+                    parent, title,
+                    "The glossary name check finds names with an English named-entity model (NER, 104 MB).\n"
+                    "Download it now? No uses the capitalization heuristic this time.",
+                    QMessageBox.Yes | QMessageBox.No)
+                use_ner = answer == QMessageBox.Yes
+        log = getattr(self, 'append_log', None)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            folder_review = name_check.review_folder(folder, self._glossary_name_check_scope())
+            ner = name_check.resolve_ner(use_ner, log)
+            folder_review = name_check.review_folder(folder, self._glossary_name_check_scope(), ner=ner)
         finally:
             QApplication.restoreOverrideCursor()
         if folder_review.problem or not folder_review.chapters:

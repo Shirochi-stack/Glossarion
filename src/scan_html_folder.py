@@ -6684,8 +6684,10 @@ def run_glossary_name_check(folder_path, results, qa_settings, log=print, *, epu
         return 0
     by_file = {r.get('filename'): r for r in results if isinstance(r, dict) and r.get('filename')}
     log(f"\n📖 Glossary name check (experimental): {len(entries.entries)} entries from {os.path.basename(glossary_path)}")
+    use_ner = qa_settings.get("_glossary_name_use_ner")
+    ner = name_check.resolve_ner(name_check.use_ner_from_env() if use_ner is None else use_ner, log)
     chapters = name_check.scan_folder(folder_path, entries, progress_path=progress_path,
-                                      selected_files=list(by_file), stop=should_stop)
+                                      selected_files=list(by_file), stop=should_stop, ner=ner)
     flagged = 0
     for chapter in chapters:
         result_obj = by_file.get(chapter.output_file)

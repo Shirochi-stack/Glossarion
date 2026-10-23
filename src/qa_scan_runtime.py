@@ -621,10 +621,11 @@ def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=N
     )
 
     if settings.get("check_glossary_names"):
-        # Glossary name check shares Emergency Glossary Compliance's entry types / minimum length
+        # Glossary name check: Emergency Glossary Compliance's entry types, its own minimum length / NER
         try:
-            from glossary_name_check import settings_from_config
+            from glossary_name_check import settings_from_config, use_ner_from_config
             settings["_glossary_name_scope"] = settings_from_config(live_config)
+            settings["_glossary_name_use_ner"] = use_ner_from_config(live_config)
         except Exception:
             pass
 

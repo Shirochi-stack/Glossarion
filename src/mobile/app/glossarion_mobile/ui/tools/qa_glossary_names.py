@@ -25,11 +25,12 @@ from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
 from glossarion_mobile.ui.tools.common import ask, hint_text, section_header
 
-__all__ = ["CHECK_KEY", "GlossaryNameFixSheet", "check_enabled", "name_check_scope"]
+__all__ = ["CHECK_KEY", "GlossaryNameFixSheet", "NER_KEY", "check_enabled", "name_check_scope", "use_ner"]
 
 log = logging.getLogger("glossarion.tools.qa")
 
 CHECK_KEY = ("qa_scanner_settings", "check_glossary_names")
+NER_KEY = "glossary_name_check_use_ner"
 SCOPE_KEYS = ("emergency_glossary_compliance_mode", "emergency_glossary_compliance_custom_types",
               "glossary_name_check_min_chars")
 TITLE = "Fix Glossary Names"
@@ -54,10 +55,26 @@ def name_check_scope(ctx: Any) -> dict:
     return name_check.settings_from_config(config)
 
 
-def _review_all(folders: Sequence[str], scope: dict) -> list:
+def use_ner(ctx: Any) -> bool:
+    """Settings › "Use Named Entity Recognition model (NER)" (default on)."""
     import glossary_name_check as name_check
 
-    return [name_check.review_folder(folder, scope) for folder in folders]
+    return name_check.use_ner_from_config({"glossary_name_check_use_ner": ctx.cfg(NER_KEY, True)})
+
+
+def ner_needs_download() -> bool:
+    try:
+        import ner_names
+    except ImportError:
+        return False
+    return ner_names.runtime_available() and not ner_names.model_installed()
+
+
+def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False) -> list:
+    import glossary_name_check as name_check
+
+    ner = name_check.resolve_ner(with_ner, log.info)
+    return [name_check.review_folder(folder, scope, ner=ner) for folder in folders]
 
 
 class GlossaryNameFixSheet:
@@ -102,8 +119,12 @@ class GlossaryNameFixSheet:
     # ---- scan --------------------------------------------------------------------------------------
 
     async def scan(self) -> list:
+        with_ner = use_ner(self.ctx)
+        if with_ner and ner_needs_download():
+            self.status.value = "Downloading the named-entity model (NER, 104 MB)…"
+            self.ctx.push(self.status)
         try:
-            self.reviews = await self.ctx.io(_review_all, self.folders, name_check_scope(self.ctx))
+            self.reviews = await self.ctx.io(_review_all, self.folders, name_check_scope(self.ctx), with_ner)
         except Exception as exc:
             log.exception("glossary name check failed")
             self.reviews = []

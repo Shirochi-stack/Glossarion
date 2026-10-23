@@ -10,6 +10,13 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 import glossary_name_check as g  # noqa: E402
+import ner_names  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_ner_download(monkeypatch):
+    """The checks below use the heuristic unless a test brings its own tagger (no 104 MB download)."""
+    monkeypatch.setenv("GLOSSARY_NAME_CHECK_USE_NER", "0")
 
 GLOSSARY_ROWS = [
     {"type": "character", "raw_name": "발터 아르겐트", "translated_name": "Valter Argent"},
@@ -65,6 +72,15 @@ def test_numbered_units_cut_off_names_and_short_words_are_not_variants():
     source = "밀라노-V 아델라 발터 아르겐트"
     output = "<p>Milano-VI fired. Then Ade arrived. Sion and Walt left with Valter.</p>"
     assert [f.kind for f in findings(source, output)] == ["missing", "missing", "missing"]
+
+
+def test_glued_and_cut_names_are_not_variants():
+    rows = [{"type": "character", "raw_name": "사쿠라", "translated_name": "Sakura"},
+            {"type": "character", "raw_name": "미하일", "translated_name": "Mihail"},
+            {"type": "character", "raw_name": "싱리안 종", "translated_name": "Singlian Sect"}]
+    ents = g.build_entries(rows)
+    output = "<p>He met Asakura, then Mihailtal and the Lian Sect.</p>"
+    assert [f.kind for f in g.check_chapter("사쿠라 미하일 싱리안 종", output, ents).findings] == ["missing"] * 3
 
 
 def test_missing_names_are_not_reportable():
@@ -191,3 +207,85 @@ def test_qa_setting_defaults_off_and_exports_env():
         assert os.environ["QA_CHECK_GLOSSARY_NAMES"] == "1"
     finally:
         q.restore_env(env)
+
+
+# --------------------------------------------------------------------------------------------- NER
+def test_basic_words_and_wordpiece(tmp_path):
+    text = "Yoo So-jeong's sword, 林水!"
+    assert [text[a:b] for a, b in ner_names.basic_words(text)] == \
+        ["Yoo", "So", "-", "jeong", "'", "s", "sword", ",", "林", "水", "!"]
+    vocab = tmp_path / "vocab.txt"
+    vocab.write_text("\n".join(["[PAD]", "[UNK]", "[CLS]", "[SEP]", "Wal", "##ter", "Ar", "##gent"]), encoding="utf-8")
+    wp = ner_names.WordPiece(str(vocab))
+    assert wp.pieces("Walter") == [4, 5] and wp.pieces("Argent") == [6, 7] and wp.pieces("Xyz") == [1]
+
+
+class _FakeSession:
+    """Labels each word by a fixed map (first sub-token), like the CoNLL model would."""
+
+    def __init__(self, tags):
+        self.tags = tags  # list of label ids, one per token position after [CLS]
+
+    def run(self, _outputs, feed):
+        import numpy as np
+        ids = feed["input_ids"][0]
+        logits = np.full((1, len(ids), 9), -5.0, dtype=np.float32)
+        for position in range(len(ids)):
+            label = self.tags[position - 1] if 0 < position <= len(self.tags) else 0
+            logits[0, position, label] = 5.0
+        return [logits]
+
+
+def _fake_tagger(tmp_path, text, word_labels):
+    import numpy as np  # noqa: F401  (NerTagger needs numpy)
+    words = [text[a:b] for a, b in ner_names.basic_words(text)]
+    vocab = tmp_path / "vocab.txt"
+    vocab.write_text("\n".join(["[PAD]", "[UNK]", "[CLS]", "[SEP]"] + sorted(set(words))), encoding="utf-8")
+    tagger = ner_names.NerTagger.__new__(ner_names.NerTagger)
+    tagger._np = np
+    tagger.wordpiece = ner_names.WordPiece(str(vocab))
+    tagger.labels = ["O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC"]
+    tagger.session = _FakeSession([word_labels.get(w, 0) for w in words])
+    tagger.inputs = {"input_ids", "attention_mask", "token_type_ids"}
+    import threading
+    tagger._lock = threading.Lock()
+    tagger._cache = {}
+    return tagger
+
+
+def test_tagger_merges_words_and_hyphenated_names(tmp_path):
+    text = "Walter Argent met Yoo So-jeong in Lumina"
+    tagger = _fake_tagger(tmp_path, text, {"Walter": 3, "Argent": 4, "Yoo": 3, "So": 4, "jeong": 4, "Lumina": 7})
+    assert [(e.label, e.text) for e in tagger.entities(text)] == [
+        ("PER", "Walter Argent"), ("PER", "Yoo So-jeong"), ("LOC", "Lumina")]
+
+
+def test_ner_candidates_find_sentence_initial_names(tmp_path):
+    # the heuristic skips a single capitalized word at a sentence start; NER does not
+    output = "<p>He left.</p><p>Walther drew his sword.</p>"
+    rows = [{"type": "character", "raw_name": "발터", "translated_name": "Walter"}]
+    ents = g.build_entries(rows)
+    assert [f.kind for f in g.check_chapter("발터", output, ents).findings] == ["missing"]
+    text = g.html_to_text(output)
+    tagger = _fake_tagger(tmp_path, text, {"Walther": 3})
+    [finding] = g.check_chapter("발터", output, ents, ner=tagger).findings
+    assert (finding.kind, finding.variants) == ("variant", ("Walther",))
+
+
+def test_resolve_ner_falls_back_when_unsupported(monkeypatch):
+    monkeypatch.setattr(ner_names, "runtime_available", lambda: False)
+    monkeypatch.setattr(g, "_ner_notes", set())
+    logs = []
+    assert g.resolve_ner(True, logs.append) is None and g.resolve_ner(True, logs.append) is None
+    assert logs == ["ℹ️ Glossary name check: NER is not supported in this build; using the capitalization heuristic"]
+    assert g.resolve_ner(False, logs.append) is None
+    assert g.use_ner_from_env({}) is True and g.use_ner_from_env({"GLOSSARY_NAME_CHECK_USE_NER": "0"}) is False
+    assert g.use_ner_from_config({"glossary_name_check_use_ner": False}, {}) is False
+
+
+@pytest.mark.skipif(not (ner_names.runtime_available() and ner_names.model_installed()),
+                    reason="the NER model is not downloaded here (ONNX_CACHE_DIR)")
+def test_real_model_finds_names():
+    tagger = ner_names.get_tagger()
+    found = {(e.label, e.text) for e in tagger.entities("Walter Argent drew his sword while Gang Si-hyeon watched.")}
+    assert {("PER", "Walter Argent"), ("PER", "Gang Si-hyeon")} <= found

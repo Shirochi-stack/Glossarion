@@ -234,7 +234,8 @@ class ModelDownloadRow:
 
 
 class ModelManagerSheet:
-    """Every downloadable model (detector, inpainting, OCR) with its row and the disk usage."""
+    """Every downloadable model (detector, inpainting, OCR, the name check's NER model) with its row and the
+    disk usage."""
 
     def __init__(self, ctx: Any, manager: svc.ModelManager, *, on_change: Optional[Callable[[Any], Any]] = None) -> None:
         self.ctx = ctx
@@ -244,7 +245,8 @@ class ModelManagerSheet:
         self.usage = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT,
                              key="mm-usage")
         controls: list = []
-        groups = (("detector", "Bubble detection"), ("inpaint", "Inpainting"), ("ocr", "OCR"))
+        groups = (("detector", "Bubble detection"), ("inpaint", "Inpainting"), ("ocr", "OCR"),
+                  ("ner", "Glossary name check (NER)"))
         entries = manager.entries()
         for kind, title in groups:
             members = [e for e in entries if e.kind == kind]
@@ -253,7 +255,7 @@ class ModelManagerSheet:
             controls.append(ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY))
             for entry in members:
                 row = ModelDownloadRow(ctx, manager, entry.id, key_prefix=f"mm-{entry.id}",
-                                       on_change=self._changed, allow_load=kind != "ocr")
+                                       on_change=self._changed, allow_load=kind not in ("ocr", "ner"))
                 self.rows[entry.id] = row
                 controls.append(row.control)
         others = [e for e in entries if e.kind not in dict(groups)]

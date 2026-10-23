@@ -90,8 +90,9 @@ def _tree(name):
 def test_registry_shape():
     companions = {key for spec in mm.REGISTRY.values() for key in spec.companions}
     assert companions and [s.key for s in mm.specs()] == [k for k in mm.REGISTRY if k not in companions]
-    assert {s.kind for s in mm.specs()} == {mm.KIND_DETECTOR, mm.KIND_INPAINTER, mm.KIND_OCR}
-    cache_envs = {mm.KIND_DETECTOR: "BUBBLE_CACHE_DIR", mm.KIND_INPAINTER: "MODEL_CACHE_DIR", mm.KIND_OCR: "ONNX_CACHE_DIR"}
+    assert {s.kind for s in mm.specs()} == {mm.KIND_DETECTOR, mm.KIND_INPAINTER, mm.KIND_OCR, mm.KIND_NER}
+    cache_envs = {mm.KIND_DETECTOR: "BUBBLE_CACHE_DIR", mm.KIND_INPAINTER: "MODEL_CACHE_DIR", mm.KIND_OCR: "ONNX_CACHE_DIR",
+                  mm.KIND_NER: "ONNX_CACHE_DIR"}  # the glossary name check's NER model (ner_names)
     for spec in mm.REGISTRY.values():
         assert re.fullmatch(r"[0-9a-f]{64}", spec.sha256), spec.key
         assert re.fullmatch(r"[0-9a-f]{40}", spec.revision), spec.key  # pinned commit, never 'main'

@@ -9202,6 +9202,39 @@ def _create_processing_options_section(self, parent):
 
     name_check_min_chars_slider.valueChanged.connect(_on_name_check_min_chars_change)
     _on_name_check_min_chars_change(current_name_check_min_chars)
+
+    # NER: an English named-entity model finds the names in the translation (ONNX Runtime builds:
+    # Heavy / NoCuda / mobile); without it the capitalization heuristic does.
+    if not hasattr(self, 'glossary_name_check_use_ner_var'):
+        self.glossary_name_check_use_ner_var = bool(self.config.get('glossary_name_check_use_ner', True))
+    try:
+        import ner_names
+        ner_supported = ner_names.runtime_available()
+        ner_unsupported_reason = ner_names.UNSUPPORTED_REASON
+    except ImportError:
+        ner_supported, ner_unsupported_reason = False, "Not supported in this build"
+    name_check_ner_row = QWidget()
+    name_check_ner_layout = QHBoxLayout(name_check_ner_row)
+    name_check_ner_layout.setContentsMargins(20, 0, 0, 0)
+    name_check_ner_cb = self._create_styled_checkbox("Use Named Entity Recognition model (NER)")
+    name_check_ner_cb.setChecked(bool(self.glossary_name_check_use_ner_var) and ner_supported)
+    if ner_supported:
+        name_check_ner_cb.setToolTip(
+            "Finds the names in each translated chapter with an English named-entity model\n"
+            "(person / place / organization; 104 MB, downloaded on first use).\n"
+            "Off: a capitalization heuristic finds them instead.")
+    else:
+        name_check_ner_cb.setEnabled(False)
+        name_check_ner_cb.setText(f"Use Named Entity Recognition model (NER) — {ner_unsupported_reason}")
+        name_check_ner_cb.setToolTip(
+            "This build has no ONNX Runtime (the NoCuda / Heavy builds and Glossarion Mobile have it).\n"
+            "The glossary name check uses its capitalization heuristic here.")
+
+    def _on_name_check_ner_toggle(checked):
+        self.glossary_name_check_use_ner_var = bool(checked)
+    name_check_ner_cb.toggled.connect(_on_name_check_ner_toggle)
+    name_check_ner_layout.addWidget(name_check_ner_cb)
+    name_check_ner_layout.addStretch()
     name_check_desc = QLabel("Fixes or logs glossary names the model spelled differently<br>"
                              "in each finished chapter (uses the entry types below)")
     name_check_desc.setStyleSheet("color: gray; font-size: 10pt;")
@@ -9219,6 +9252,7 @@ def _create_processing_options_section(self, parent):
             self.glossary_name_check_var = bool(checked)
             name_check_row.setVisible(checked)
             name_check_min_chars_row.setVisible(checked)
+            name_check_ner_row.setVisible(checked)
             name_check_desc.setVisible(checked)
             _refresh_glossary_scope_rows()
         except Exception:
@@ -9235,9 +9269,23 @@ def _create_processing_options_section(self, parent):
     glossary_compliance_desc.setVisible(is_enabled)
     name_check_row.setVisible(name_check_cb.isChecked())
     name_check_min_chars_row.setVisible(name_check_cb.isChecked())
+    name_check_ner_row.setVisible(name_check_cb.isChecked())
     name_check_desc.setVisible(name_check_cb.isChecked())
 
+    # Separators around the glossary section (Emergency Glossary Compliance + Glossary Name Check)
+    # A plain 1 px line with its own colour: the dialog's "QFrame { background-color: transparent; }"
+    # leaves a sunken HLine invisible on the dark background.
+    sep_glossary_top = QFrame()
+    sep_glossary_top.setFrameShape(QFrame.NoFrame)
+    sep_glossary_top.setFixedHeight(1)
+    sep_glossary_top.setStyleSheet("QFrame { background-color: #555555; border: none; }")
+    sep_glossary_bottom = QFrame()
+    sep_glossary_bottom.setFrameShape(QFrame.NoFrame)
+    sep_glossary_bottom.setFixedHeight(1)
+    sep_glossary_bottom.setStyleSheet("QFrame { background-color: #555555; border: none; }")
+
     glossary_compliance_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(sep_glossary_top)
     left_v.addWidget(glossary_compliance_cb)
     left_v.addWidget(glossary_compliance_desc)
     left_v.addWidget(glossary_min_chars_row)
@@ -9245,8 +9293,10 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(name_check_cb)
     left_v.addWidget(name_check_row)
     left_v.addWidget(name_check_min_chars_row)
+    left_v.addWidget(name_check_ner_row)
     left_v.addWidget(name_check_desc)
     left_v.addWidget(glossary_compliance_row)
+    left_v.addWidget(sep_glossary_bottom)
     
     # Enable Decimal Chapter Detection
     decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")
