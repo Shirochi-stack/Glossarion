@@ -1,6 +1,7 @@
 """Logistics.json: a compact record of every API request, for tracking API key usage (desktop only).
 
-One line per request in the logs folder (``GLOSSARION_LOG_DIR``, else ``<app dir>/logs``): when it
+One line per request in the Payloads folder, next to the payloads it points to
+(``unified_api_client._payloads_dir``; the logs folder when payload saving is off): when it
 was sent, which API key (pool label, index, masked key), provider / model / endpoint, the request
 parameters, the anti-duplicate settings of the section the request used (translation or glossary)
 and what of them was sent, the book's output folder, and the full path of the saved payload
@@ -9,7 +10,9 @@ and what of them was sent, the book's output folder, and the full path of the sa
 The file stays a valid JSON array: each record is appended before the closing ``]`` under a
 lock file, so several translation / glossary processes can write to it at once. Over
 ``MAX_BYTES`` it is renamed ``Logistics_<date>_<time>.json`` and a new one starts.
-``GLOSSARION_LOGISTICS=0`` switches it off; Glossarion Mobile never writes it.
+``GLOSSARION_LOGISTICS=0`` switches it off; Glossarion Mobile never writes it. The Payloads cleanup
+(Other Settings > Payloads) trims oldest files first: the live file changes with every request,
+so rotated ``Logistics_*.json`` files go long before it.
 """
 
 import json
@@ -44,8 +47,21 @@ def logs_dir():
     return folder
 
 
+def logistics_dir():
+    """The Payloads folder (the payloads' own folder, temp fallback included); the logs folder when
+    payload saving is off."""
+    try:
+        import unified_api_client
+        folder = unified_api_client._payloads_dir()
+        if folder and not unified_api_client._PAYLOADS_DISABLED:
+            return folder
+    except Exception:
+        pass
+    return logs_dir()
+
+
 def logistics_path():
-    return os.path.join(logs_dir(), FILE_NAME)
+    return os.path.join(logistics_dir(), FILE_NAME)
 
 
 def mask_key(key):

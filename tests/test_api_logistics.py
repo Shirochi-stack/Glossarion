@@ -15,7 +15,7 @@ import api_logistics  # noqa: E402
 
 @pytest.fixture
 def logs(tmp_path, monkeypatch):
-    monkeypatch.setenv("GLOSSARION_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(api_logistics, "logistics_dir", lambda: str(tmp_path))
     monkeypatch.delenv("GLOSSARION_LOGISTICS", raising=False)
     monkeypatch.delenv("GLOSSARION_MOBILE", raising=False)
     return tmp_path
@@ -143,3 +143,14 @@ def test_outgoing_request_is_saved_with_headers_redacted(tmp_path, monkeypatch):
     saved = json.loads((tmp_path / "req_test_request.json").read_text(encoding="utf-8"))
     assert saved["body"] == {"model": "claude-sonnet-5-5", "max_tokens": 128000}
     assert "SECRET" not in json.dumps(saved)
+
+
+def test_logistics_lives_in_the_payloads_folder(tmp_path, monkeypatch):
+    import unified_api_client as api
+
+    monkeypatch.setattr(api, "_payloads_dir", lambda: str(tmp_path / "Payloads"))
+    monkeypatch.setattr(api, "_PAYLOADS_DISABLED", False)
+    assert api_logistics.logistics_path() == str(tmp_path / "Payloads" / "Logistics.json")
+    monkeypatch.setattr(api, "_PAYLOADS_DISABLED", True)  # payload saving off: the logs folder
+    monkeypatch.setenv("GLOSSARION_LOG_DIR", str(tmp_path / "logs"))
+    assert api_logistics.logistics_path() == str(tmp_path / "logs" / "Logistics.json")

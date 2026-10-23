@@ -216,7 +216,7 @@ def setup_other_settings_methods(gui_instance):
         '_create_context_management_section', '_create_response_handling_section',
         '_create_prompt_management_section', '_create_processing_options_section',
         '_create_image_translation_section', '_create_anti_duplicate_section',
-        '_create_custom_api_endpoints_section', '_create_debug_controls_section',
+        '_create_payload_cleanup_section', '_create_custom_api_endpoints_section', '_create_debug_controls_section',
         '_create_output_settings_section', '_create_danger_zone_section',
         # Helper methods
         '_create_multi_key_row', '_create_manual_config_backup', '_manual_restore_config',
@@ -1412,6 +1412,7 @@ def open_other_settings(self, *args, show=True):
         ("processing_options", lambda: self._create_processing_options_section(container)),
         ("image_translation", lambda: self._create_image_translation_section(container)),
         ("anti_duplicate", lambda: self._create_anti_duplicate_section(container)),
+        ("payloads", lambda: self._create_payload_cleanup_section(container)),
         ("custom_api_endpoints", lambda: self._create_custom_api_endpoints_section(container)),
         ("debug_controls", lambda: self._create_debug_controls_section(container)),
         ("output_settings", lambda: self._create_output_settings_section(container)),
@@ -13795,6 +13796,122 @@ def _reset_anti_duplicate_defaults(self):
     if hasattr(self, 'append_log'):
         self.append_log("🔄 Anti-duplicate parameters reset to defaults")
 
+def _create_payload_cleanup_section(self, parent_frame):
+    """Payloads section (above Custom API Endpoints): the debug-dump cleanup limit and a button that opens
+    the Payloads folder."""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QLineEdit, QPushButton
+    from PySide6.QtCore import Qt
+
+    section_box = QGroupBox("Payloads")
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)
+    section_v.setSpacing(4)
+
+    # Payloads/ and http_requests/ (debug dumps) are trimmed, oldest files first, to this size at
+    # startup and exit (shutdown_utils.sweep_large_caches); 0 keeps everything.
+    from PySide6.QtWidgets import QSlider
+    try:
+        self.payload_cleanup_limit_mb_var = max(0, int(getattr(self, 'payload_cleanup_limit_mb_var',
+                                                               self.config.get('payload_cleanup_limit_mb', 400))))
+    except (TypeError, ValueError):
+        self.payload_cleanup_limit_mb_var = 400
+    payload_cleanup_row = QWidget()
+    payload_cleanup_h = QHBoxLayout(payload_cleanup_row)
+    payload_cleanup_h.setContentsMargins(0, 5, 0, 5)
+    payload_cleanup_h.addWidget(QLabel("Payload cleanup limit:"))
+    # Slider: 50-10000 MB in 50 MB steps, then one more notch = Unlimited (saved as 0: never clean up).
+    # The field takes any value; a typed limit above 10000 MB parks the slider at its end but stays a limit.
+    cleanup_slider_max = 10000
+    cleanup_unlimited_pos = cleanup_slider_max + 50
+    payload_cleanup_slider = QSlider(Qt.Horizontal)
+    payload_cleanup_slider.setRange(50, cleanup_unlimited_pos)
+    payload_cleanup_slider.setSingleStep(50)
+    payload_cleanup_slider.setPageStep(500)
+    payload_cleanup_slider.setFixedWidth(220)
+    payload_cleanup_slider.wheelEvent = lambda event: event.ignore()
+    payload_cleanup_field = QLineEdit()
+    payload_cleanup_field.setFixedWidth(80)
+    cleanup_tip = _wrapped_tooltip_html(
+        "The Payloads and http_requests debug folders are trimmed to this size, oldest files first, "
+        "when Glossarion starts and exits. Default 400 MB. Past 10000 MB the slider reaches Unlimited "
+        "(never clean up); type a larger limit in the field to keep one.")
+    payload_cleanup_slider.setToolTip(cleanup_tip)
+    payload_cleanup_field.setToolTip(cleanup_tip)
+
+    def _show_payload_cleanup(value):
+        """Slider position and field text for a saved value (0 = Unlimited)."""
+        payload_cleanup_slider.blockSignals(True)
+        payload_cleanup_slider.setValue(cleanup_unlimited_pos if value <= 0 or value > cleanup_slider_max
+                                        else max(50, value))
+        payload_cleanup_slider.blockSignals(False)
+        text = "Unlimited" if value <= 0 else str(value)
+        if payload_cleanup_field.text() != text:
+            payload_cleanup_field.setText(text)
+
+    def _on_payload_cleanup_slider(value):
+        value = int(round(value / 50.0) * 50)
+        self.payload_cleanup_limit_mb_var = 0 if value >= cleanup_unlimited_pos else max(50, value)
+        _show_payload_cleanup(self.payload_cleanup_limit_mb_var)
+
+    def _on_payload_cleanup_field(text):
+        text = str(text or "").strip().lower()
+        if text.startswith("unl"):
+            value = 0
+        elif text.isdigit():
+            value = int(text)
+        else:
+            return  # still typing
+        self.payload_cleanup_limit_mb_var = value
+        payload_cleanup_slider.blockSignals(True)
+        payload_cleanup_slider.setValue(cleanup_unlimited_pos if value <= 0 or value > cleanup_slider_max
+                                        else max(50, value))
+        payload_cleanup_slider.blockSignals(False)
+
+    payload_cleanup_slider.valueChanged.connect(_on_payload_cleanup_slider)
+    payload_cleanup_field.textEdited.connect(_on_payload_cleanup_field)
+    payload_cleanup_field.editingFinished.connect(
+        lambda: _show_payload_cleanup(self.payload_cleanup_limit_mb_var))
+    _show_payload_cleanup(self.payload_cleanup_limit_mb_var)
+    payload_cleanup_h.addWidget(payload_cleanup_slider)
+    payload_cleanup_h.addWidget(payload_cleanup_field)
+    payload_cleanup_hint = QLabel("MB · slider end = Unlimited (never clean up)")
+    payload_cleanup_hint.setStyleSheet("color: gray; font-size: 9pt;")
+    payload_cleanup_h.addWidget(payload_cleanup_hint)
+    payload_cleanup_h.addStretch()
+    section_v.addWidget(payload_cleanup_row)
+
+    payload_desc = QLabel("API request / response dumps (Payloads, http_requests) used for debugging; "
+                          "the oldest files go first when the folder is over the limit.")
+    payload_desc.setWordWrap(True)
+    payload_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    section_v.addWidget(payload_desc)
+
+    def _open_payloads_folder():
+        try:
+            from unified_api_client import _payloads_dir
+            folder = _payloads_dir()  # the folder requests are saved in (temp fallback when not writable)
+            os.makedirs(folder, exist_ok=True)
+            self._open_folder_in_file_manager(folder)
+        except Exception as e:
+            QMessageBox.warning(self, "Payloads", f"Could not open the Payloads folder:\n{e}")
+
+    open_payloads_btn = QPushButton("📂 Open Payloads Folder")
+    open_payloads_btn.setToolTip(_wrapped_tooltip_html("Open the folder the API payloads are saved in."))
+    open_payloads_btn.clicked.connect(_open_payloads_folder)
+    open_row = QHBoxLayout()
+    open_row.addWidget(open_payloads_btn)
+    open_row.addStretch()
+    section_v.addLayout(open_row)
+
+    # Row 7, above Custom API Endpoints (row 8), spanning both columns
+    try:
+        grid = parent_frame.layout()
+        if grid:
+            grid.addWidget(section_box, 7, 0, 1, 2)
+    except Exception:
+        section_box.setParent(parent_frame)
+
+
 def _create_custom_api_endpoints_section(self, parent_frame):
     """Create the Custom API Endpoints section (PySide6)"""
     from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget, QLineEdit, QPushButton, QComboBox
@@ -13877,39 +13994,6 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     authza_general_cb.toggled.connect(_on_authza_general_api_toggled)
     _refresh_authza_mode_help(self.authza_use_general_api_var)
     section_v.addWidget(authza_mode_box)
-
-    # Payloads/ and http_requests/ (debug dumps) are trimmed, oldest files first, to this size at
-    # startup and exit (shutdown_utils.sweep_large_caches); 0 keeps everything.
-    from PySide6.QtWidgets import QSpinBox
-    try:
-        self.payload_cleanup_limit_mb_var = max(0, int(getattr(self, 'payload_cleanup_limit_mb_var',
-                                                               self.config.get('payload_cleanup_limit_mb', 400))))
-    except (TypeError, ValueError):
-        self.payload_cleanup_limit_mb_var = 400
-    payload_cleanup_row = QWidget()
-    payload_cleanup_h = QHBoxLayout(payload_cleanup_row)
-    payload_cleanup_h.setContentsMargins(0, 5, 0, 5)
-    payload_cleanup_h.addWidget(QLabel("Payload cleanup limit (MB):"))
-    payload_cleanup_spin = QSpinBox()
-    payload_cleanup_spin.setRange(0, 100000)
-    payload_cleanup_spin.setSingleStep(50)
-    payload_cleanup_spin.setValue(self.payload_cleanup_limit_mb_var)
-    payload_cleanup_spin.setFixedWidth(110)
-    self._disable_spinbox_mousewheel(payload_cleanup_spin)
-    payload_cleanup_spin.setToolTip(_wrapped_tooltip_html(
-        "The Payloads and http_requests debug folders are trimmed to this size, oldest files first, "
-        "when Glossarion starts and exits. 0 = never clean up. Default 400 MB."))
-
-    def _on_payload_cleanup_changed(value):
-        self.payload_cleanup_limit_mb_var = int(value)
-
-    payload_cleanup_spin.valueChanged.connect(_on_payload_cleanup_changed)
-    payload_cleanup_h.addWidget(payload_cleanup_spin)
-    payload_cleanup_hint = QLabel("0 = never clean up")
-    payload_cleanup_hint.setStyleSheet("color: gray; font-size: 9pt;")
-    payload_cleanup_h.addWidget(payload_cleanup_hint)
-    payload_cleanup_h.addStretch()
-    section_v.addWidget(payload_cleanup_row)
 
     # Checkbox to enable/disable custom endpoint
     enable_cb = self._create_styled_checkbox("Enable Custom OpenAI Endpoint")
@@ -14694,11 +14778,11 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     test_btn.clicked.connect(lambda: self.test_api_connections())
     section_v.addWidget(test_btn)
     
-    # Place the section at row 7, spanning both columns
+    # Place the section at row 8 (the Payloads section is row 7), spanning both columns
     try:
         grid = parent_frame.layout()
         if grid:
-            grid.addWidget(section_box, 7, 0, 1, 2)
+            grid.addWidget(section_box, 8, 0, 1, 2)
     except Exception:
         # Fallback: just stack
         section_box.setParent(parent_frame)
