@@ -520,16 +520,19 @@ def test_accounts_experimental_rows_follow_the_bridge(monkeypatch):
     assert tile.key == "accounts-experimental" and tile.title == f"Experimental ({len(accounts.EXPERIMENTAL_ACCOUNTS)})"
     # U9: enabled rows with no tap action (a disabled ListTile would disable the ReasonChip)
     assert all(not row.disabled and row.on_click is None for row in tile.controls)
-    assert {row.trailing.reason for row in tile.controls} == {accounts.NEEDS_WEBVIEW_CHIP}
-    assert all(row.trailing.detail == wb.UNSUPPORTED_REASON for row in tile.controls)
+    from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
+
+    assert {tile_reason_chip(row).reason for row in tile.controls} == {accounts.NEEDS_WEBVIEW_CHIP}
+    assert all(tile_reason_chip(row).detail == wb.UNSUPPORTED_REASON for row in tile.controls)
     monkeypatch.setattr(wb, "availability", lambda: (True, ""))
     tile = screen._experimental_tile()
     assert [row.key for row in tile.controls] == ["experimental-authnd/", "experimental-search/gemini", "experimental-authchatgpt/"]
     assert not any(row.disabled for row in tile.controls)
-    assert {row.trailing.reason for row in tile.controls} == {accounts.EXPERIMENTAL_CHIP}
+    assert {tile_reason_chip(row).reason for row in tile.controls} == {accounts.EXPERIMENTAL_CHIP}
     sheet = screen.show_experimental("AuthND (NVIDIA Build)", accounts.EXPERIMENTAL_ACCOUNTS[0][2])
     assert "hCaptcha" in sheet.body and "user agent" in sheet.body
-    assert isinstance(tile.controls[0].subtitle, ft.Text) and "no sign-in" in tile.controls[0].subtitle.value
+    route_line = tile.controls[0].subtitle.controls[0]  # above the Experimental chip
+    assert isinstance(route_line, ft.Text) and "no sign-in" in route_line.value
 
 
 @needs_flet

@@ -1160,7 +1160,9 @@ def test_settings_home_groups_chips_banners(tmp_path, test_key):
         assert isinstance(home.route_tiles["settings.logs"].trailing, ft.Icon)
         assert home.route_tiles["settings.env_preview"].trailing.icon == ft.Icons.CHEVRON_RIGHT
         # U4 has shipped: a route nothing implements here says so instead of "Arrives in U4" (U9 Integrate)
-        assert home.route_tiles["settings.models"].trailing.reason == "Not available in this build"
+        from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
+
+        assert tile_reason_chip(home.route_tiles["settings.models"]).reason == "Not available in this build"
         assert [n.key for n in home.notices.controls] == ["settings-notice-keys"]  # api_key kept, re-enter notice
         home.section_tiles["glossary"].on_click(None)
         home.route_tiles["settings.env_preview"].on_click(None)

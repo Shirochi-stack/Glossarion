@@ -44,7 +44,7 @@ import flet as ft
 from glossarion_mobile.services import manga as svc
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.field_commit import commit_on_blur
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.tools.common import hint_text, schema_tiles
 from glossarion_mobile.ui.tools.manga.common import MangaTab, push, reason_or_chip
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
@@ -637,7 +637,8 @@ class SettingsTab(MangaTab):
             controls.append(ft.ListTile(
                 leading=ft.Icon(ft.Icons.RADIO_BUTTON_CHECKED if selected else ft.Icons.RADIO_BUTTON_UNCHECKED),
                 title=ft.Text(row.label, color=_muted(row.disabled)), dense=True,
-                trailing=ReasonChip(reason=row.chip or row.reason, detail=row.reason) if row.disabled else None,
+                subtitle=reason_subtitle(ReasonChip(reason=row.chip or row.reason, detail=row.reason))
+                if row.disabled else None,
                 on_click=None if row.disabled else (lambda e, v=row.value: self._select_detector(v)),
                 key=self.k(f"ms-detector-{row.value}-{self._gen}")))
         manager = self.session.models
@@ -801,7 +802,8 @@ class SettingsTab(MangaTab):
             controls.append(ft.ListTile(
                 leading=ft.Icon(ft.Icons.RADIO_BUTTON_CHECKED if selected else ft.Icons.RADIO_BUTTON_UNCHECKED),
                 title=ft.Text(row.label, color=_muted(row.disabled)), dense=True,
-                trailing=ReasonChip(reason=row.chip or row.reason, detail=row.reason) if row.disabled else None,
+                subtitle=reason_subtitle(ReasonChip(reason=row.chip or row.reason, detail=row.reason))
+                if row.disabled else None,
                 on_click=None if row.disabled else (lambda e, v=row.value: self.select_inpaint(v)),
                 key=self.k(f"ms-inpaint-{row.value}-{self._gen}")))
         if method == "local":
@@ -815,9 +817,10 @@ class SettingsTab(MangaTab):
                 controls.append(ft.ListTile(
                     leading=ft.Icon(ft.Icons.RADIO_BUTTON_CHECKED if selected else ft.Icons.RADIO_BUTTON_UNCHECKED),
                     title=ft.Text(row.label, color=_muted(row.disabled)),
-                    subtitle=ft.Text(row.value, theme_style=ft.TextThemeStyle.BODY_SMALL),
+                    subtitle=reason_subtitle(ReasonChip(reason=row.chip or row.reason, detail=row.reason),
+                                             ft.Text(row.value, theme_style=ft.TextThemeStyle.BODY_SMALL))
+                    if row.disabled else ft.Text(row.value, theme_style=ft.TextThemeStyle.BODY_SMALL),
                     dense=True,
-                    trailing=ReasonChip(reason=row.chip or row.reason, detail=row.reason) if row.disabled else None,
                     on_click=None if row.disabled else (lambda e, v=row.value: self.select_inpaint("local", v)),
                     key=self.k(f"ms-local-{row.value}-{self._gen}")))
             if local in svc.ONNX_INPAINT_MODELS:

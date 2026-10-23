@@ -33,7 +33,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.library.models import size_text
 
 __all__ = ["OUTPUT_MISMATCH_TITLE", "TranslateSheet", "confirm_output_root", "open_translate_sheet",
@@ -156,7 +156,8 @@ class TranslateSheet:
             else:
                 rows.append(ft.ListTile(leading=ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.ERROR),
                                         title=ft.Text(name, max_lines=2),
-                                        trailing=ReasonChip(reason="missing raw", detail=MISSING_RAW_REASON),
+                                        subtitle=reason_subtitle(ReasonChip(reason="missing raw",
+                                                                            detail=MISSING_RAW_REASON)),
                                         dense=True, key=f"translate-book-{index}"))
         model = str(cfg("model", "") or "")
         profile = str(cfg("active_profile", "") or "")

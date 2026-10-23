@@ -6,7 +6,8 @@ action lists are a custom ``BottomSheet(show_drag_handle=True, scrollable=True)`
 of ``ListTile`` rows plus a Cancel row. On tablets the same rows sit in a
 centred ``AlertDialog`` (<= 560 dp). Tapping a row closes the sheet first,
 then runs the action. Destructive rows use the error colour; unavailable rows
-stay visible, disabled, with a ReasonChip (nothing hidden, §0 item 6).
+stay visible, disabled, with a ReasonChip under the label (nothing hidden,
+§0 item 6).
 
 The rows scroll when they may not fit (a 14-row chapter menu on a phone, any
 menu at large text); a scrolling body makes a Flet 1.0.3 sheet full height, so
@@ -23,7 +24,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.components.sheet import fits_compact, page_width, sheet_frame, text_height
 from glossarion_mobile.ui.theme import icon_data
 
@@ -112,8 +113,8 @@ class ActionSheet:
         color = ft.Colors.ON_SURFACE_VARIANT if unavailable else (ft.Colors.ERROR if item.destructive else None)
         return ft.ListTile(
             title=ft.Text(item.label, color=color),
+            subtitle=reason_subtitle(ReasonChip(reason=item.disabled_reason)) if unavailable else None,
             leading=ft.Icon(icon_data(item.icon), color=color) if item.icon is not None else None,
-            trailing=ReasonChip(reason=item.disabled_reason) if item.disabled_reason else None,
             on_click=lambda e, it=item: self._on_select(e, it),
             min_height=tokens.SIZES["hit_target"],
             key=item.key or item.label,
@@ -125,7 +126,8 @@ class ActionSheet:
         inner = max(120.0, width - 88)  # ListTile padding and the leading icon
         total = 8.0
         for label, reason in [(i.label, i.disabled_reason) for i in self.items] + [("Cancel", None)]:
-            total += max(hit, text_height(label, inner - (140 if reason else 0), 16) + 16)
+            # an unavailable row's ReasonChip sits under its label (about 40 dp at 200 % text)
+            total += max(hit, text_height(label, inner, 16) + 16 + (40 if reason else 0))
         if self.title:
             total += text_height(self.title, width - 32, 16)
         if self.subtitle:

@@ -19,7 +19,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.empty_state import EmptyState
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.router import ROUTES, ROUTES_BY_NAME, RouteMatch, RouteSpec
 
 __all__ = ["HubScreen", "PlaceholderScreen", "Screen", "SHIPPED_MILESTONES", "ROUTE_ICONS", "build_screen_view",
@@ -177,7 +177,7 @@ class HubScreen(Screen):
             shipped = child.milestone in SHIPPED_MILESTONES
             tile = ft.ListTile(
                 title=ft.Text(child.title),
-                trailing=None if shipped else ReasonChip(reason=f"Arrives in {child.milestone}"),
+                subtitle=None if shipped else reason_subtitle(ReasonChip(reason=f"Arrives in {child.milestone}")),
                 leading=ft.Icon(ft.Icons.CHEVRON_RIGHT if shipped else ft.Icons.SCHEDULE),
                 on_click=lambda e, name=child.name: self.navigate(name),
                 min_height=tokens.SIZES["hit_target"],

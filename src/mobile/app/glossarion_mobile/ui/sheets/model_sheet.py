@@ -71,7 +71,7 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.poll_border import PollBorder
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.components.sheet import scroll_column, sheet_frame
 from glossarion_mobile.ui.theme import HIT_TARGET, semantic
 
@@ -664,31 +664,38 @@ class ModelSheet:
         provider = mc.provider_of(model)
         if state == "excluded":
             dot = _dot(ft.Colors.OUTLINE, "Not available on mobile")
-            trailing: Any = ReasonChip(reason="Not available on mobile", detail=excluded_detail(model) or excluded_route(model))
+            chip: Optional[ReasonChip] = ReasonChip(reason="Not available on mobile",
+                                                    detail=excluded_detail(model) or excluded_route(model))
+            trailing: Any = None
         elif state == "unavailable":
-            chip, detail = dependency_reason(model) or ("Not available", "")
-            dot = _dot(ft.Colors.OUTLINE, chip)
-            trailing = ReasonChip(reason=chip, detail=detail)
+            reason, detail = dependency_reason(model) or ("Not available", "")
+            dot = _dot(ft.Colors.OUTLINE, reason)
+            chip = ReasonChip(reason=reason, detail=detail)
+            trailing = None
         elif state == "sign_in":
             dot = _dot(semantic("warning"), "Needs sign-in")
+            chip = None
             trailing = ft.TextButton(content=action, on_click=lambda e, m=model: self._sign_in(m))
         elif state == "add_key":
             dot = _dot(semantic("warning"), "Needs an API key")
+            chip = None
             trailing = ft.TextButton(content=action, on_click=lambda e: self._nav("settings.keys"))
         else:
             dot = _dot(semantic("success"), "Ready")
+            chip = None
             trailing = None
         subtitle_parts = [mc.provider_label(provider)]
         if polled:
             subtitle_parts.append("✓ polled")
         if model in self.favorites():
             subtitle_parts.append("★")
+        subtitle = ft.Text(" · ".join(subtitle_parts), theme_style=ft.TextThemeStyle.BODY_SMALL,
+                           color=ft.Colors.ON_SURFACE_VARIANT)
         selected = model == self.current["model"]
         row = ft.ListTile(
             leading=dot,
             title=ft.Text(model, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            subtitle=ft.Text(" · ".join(subtitle_parts), theme_style=ft.TextThemeStyle.BODY_SMALL,
-                             color=ft.Colors.ON_SURFACE_VARIANT),
+            subtitle=reason_subtitle(chip, subtitle) if chip is not None else subtitle,
             trailing=trailing,
             selected=selected,
             dense=True,

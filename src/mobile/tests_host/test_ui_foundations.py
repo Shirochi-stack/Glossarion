@@ -1040,7 +1040,7 @@ def test_components_construct_and_serialize():
     from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
     from glossarion_mobile.ui.components.dialogs import ConfirmDialog
     from glossarion_mobile.ui.components.empty_state import EmptyState
-    from glossarion_mobile.ui.components.reason_chip import ReasonChip
+    from glossarion_mobile.ui.components.reason_chip import ReasonChip, tile_reason_chip
     from glossarion_mobile.ui.components.section_card import SectionCard
     from glossarion_mobile.ui.components.status import StatusChip
     from glossarion_mobile.ui.shell.job_strip import JobStrip
@@ -1057,7 +1057,7 @@ def test_components_construct_and_serialize():
     assert isinstance(sheet.dialog, ft.BottomSheet) and sheet.dialog.show_drag_handle and sheet.dialog.scrollable
     assert len(sheet.tiles) == 3 and sheet.tiles[1].title.color == ft.Colors.ERROR
     # U9: an unavailable item keeps an enabled row (its ReasonChip must stay tappable); a tap explains it
-    assert not sheet.tiles[2].disabled and isinstance(sheet.tiles[2].trailing, ReasonChip)
+    assert not sheet.tiles[2].disabled and isinstance(tile_reason_chip(sheet.tiles[2]), ReasonChip)
     assert sheet.tiles[2].title.color == ft.Colors.ON_SURFACE_VARIANT
     sheet._on_select(None, sheet.item("Rename"))
     sheet._on_select(None, sheet.item("Move to Series…"))

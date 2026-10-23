@@ -1942,7 +1942,9 @@ def test_feature_on_the_real_app_renders_every_page(app_env, caplog, monkeypatch
                          "settings.about", "settings.danger", "settings.profiles", "settings.prefill", "settings.accounts"):
                 assert name in home.implemented, name
                 tile = home.route_tiles.get(name)
-                assert tile is None or getattr(tile.trailing, "reason", None) is None, name
+                from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
+
+                assert tile is None or tile_reason_chip(tile) is None, name
         finally:
             app.jobs.close()
             await tf._stop(app)

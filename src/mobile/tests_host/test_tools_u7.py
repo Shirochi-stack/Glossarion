@@ -1774,6 +1774,14 @@ def test_file_browser_open_with_rename_and_delete(tmp_path):
         assert [i.label for i in open_sheet.items] == ["Text editor", "Reader", "Media viewer", "Another app…"]
         assert open_sheet.items[0].disabled_reason is None
         assert open_sheet.items[2].disabled_reason == "Not an image, video or audio file"
+        # the reason sits under "Media viewer", never beside it: a trailing chip takes its full width
+        # first and left the label one letter per line at 320 dp (Android emulator, 2026-10-23)
+        from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
+
+        media_tile = open_sheet.tiles[2]
+        assert media_tile.trailing is None and media_tile.title.value == "Media viewer"
+        assert tile_reason_chip(media_tile).reason == "Not an image, video or audio file"
+        assert all(tile.trailing is None for tile in open_sheet.tiles)
         # Open with › Reader: EPUB, TXT, Markdown and HTML (a translated chapter opens its book there);
         # a PDF or another type says why instead of failing after the Reader opened
         for name in ("response_chapter0001.html", "page.xhtml", "notes.md", "book.epub"):

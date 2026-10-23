@@ -34,7 +34,7 @@ import flet as ft
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.field_commit import commit_on_blur
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET, number_keyboard
@@ -235,13 +235,16 @@ class QaScannerScreen(Screen):
         for target in self.targets:
             lines = [f"📁 {target.folder_name or '(no output folder)'}"]
             lines.append(f"📖 {target.source_name}" if target.source else "📖 No source file")
-            trailing = None
-            if target.source and target.folder and not qm.names_match(target.source, target.folder, settings):
-                trailing = ReasonChip(reason="Name mismatch", detail=qm.mismatch_text(target.source, target.folder))
+            subtitle: ft.Control = ft.Text(" · ".join(lines), max_lines=2, theme_style=ft.TextThemeStyle.BODY_SMALL)
+            mismatch = bool(target.source and target.folder
+                            and not qm.names_match(target.source, target.folder, settings))
+            if mismatch:
+                subtitle = reason_subtitle(ReasonChip(reason="Name mismatch",
+                                                      detail=qm.mismatch_text(target.source, target.folder)), subtitle)
             rows.append(ft.ListTile(
                 leading=ft.Icon(ft.Icons.MENU_BOOK), title=ft.Text(target.title, max_lines=2),
-                subtitle=ft.Text(" · ".join(lines), max_lines=2, theme_style=ft.TextThemeStyle.BODY_SMALL),
-                trailing=trailing or ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Remove",
+                subtitle=subtitle,
+                trailing=None if mismatch else ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Remove",
                                                    on_click=lambda e, t=target: self.remove_target(t), size_constraints=HIT_TARGET),
                 on_click=lambda e, t=target: self.target_actions(t),
                 dense=True, key=f"qa-target-{target.key}"))

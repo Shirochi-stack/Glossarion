@@ -32,7 +32,7 @@ from glossarion_mobile.ui.components import surface
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.master_detail import MasterDetail
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.components.section_card import SectionCard
 from glossarion_mobile.ui.router import ROUTES_BY_NAME, RouteError, RouteMatch, RouteSpec, build_route, parse_route
 from glossarion_mobile.ui.screens.base import HubScreen, unavailable_reason
@@ -239,8 +239,9 @@ class SettingsHome(HubScreen):
             routable = False
         tile = ft.ListTile(
             title=ft.Text(section.title, theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=ft.Colors.ON_SURFACE),
-            subtitle=ft.Text(subtitle, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
-            trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT) if routable else ReasonChip(reason="Unsupported section id"),
+            subtitle=(ft.Text(subtitle, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT)
+                      if routable else reason_subtitle(ReasonChip(reason="Unsupported section id"), subtitle)),
+            trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT) if routable else None,
             disabled=not routable,
             selected=section.id == self.selected_section,
             min_height=tokens.SIZES["hit_target"],
@@ -256,7 +257,8 @@ class SettingsHome(HubScreen):
         tile = ft.ListTile(
             title=ft.Text(spec.title, theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=ft.Colors.ON_SURFACE),
             leading=ft.Icon(icon_data(_ROUTE_ICONS.get(spec.name, "CHEVRON_RIGHT")), size=20),
-            trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT) if shipped else ReasonChip(reason=unavailable_reason(spec)),
+            subtitle=None if shipped else reason_subtitle(ReasonChip(reason=unavailable_reason(spec))),
+            trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT) if shipped else None,
             min_height=tokens.SIZES["hit_target"],
             dense=True,
             on_click=lambda e, name=spec.name: self.navigate(name),

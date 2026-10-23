@@ -1012,7 +1012,9 @@ def test_model_sheet_rows_sections_selection_and_route_row(tmp_path):
         page.update()
         rows = sheet.rows
         # excluded route: grey, ReasonChip, not selectable
-        assert isinstance(rows["ocz/qwen3-8b"].trailing, ReasonChip) and rows["ocz/qwen3-8b"].on_click is None
+        from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
+
+        assert isinstance(tile_reason_chip(rows["ocz/qwen3-8b"]), ReasonChip) and rows["ocz/qwen3-8b"].on_click is None
         # ChatGPT route not signed in: amber + "Sign in with ChatGPT"
         assert rows["authgpt/gpt-6-luna"].trailing.content == "Sign in with ChatGPT"
         signed.add("authgpt")

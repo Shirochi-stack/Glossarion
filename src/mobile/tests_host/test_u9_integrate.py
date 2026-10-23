@@ -126,7 +126,9 @@ def test_real_app_has_no_placeholder_screens_or_milestone_chips(app_env):
             # Settings home: every route tile opens (no "Arrives in U<n>" ReasonChip)
             await app.navigate("/settings")
             home = app.shell.top_screen
-            chips = {name: getattr(tile.trailing, "reason", None) for name, tile in home.route_tiles.items()}
+            from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
+
+            chips = {name: getattr(tile_reason_chip(tile), "reason", None) for name, tile in home.route_tiles.items()}
             assert chips and not {n: r for n, r in chips.items() if r}, chips
             # Tools hub: every tool opens
             await app.navigate("/tools")

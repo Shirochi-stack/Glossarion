@@ -20,7 +20,7 @@ from typing import Any, Optional
 import flet as ft
 
 from glossarion_mobile.ui import tokens
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.settings.model import help_line, label_for, sample_value, spec_attr, tile_kind
 
@@ -116,12 +116,13 @@ class AllPromptsView(ft.Column):
                     padding=ft.Padding.only(left=16, top=10, bottom=2),
                     content=ft.Text(entry.group, theme_style=ft.TextThemeStyle.TITLE_SMALL, color=ft.Colors.PRIMARY),
                 ))
+            subtitle = ft.Text(entry.section_title + (f" · {entry.help}" if entry.help else ""), max_lines=2,
+                               overflow=ft.TextOverflow.ELLIPSIS, theme_style=ft.TextThemeStyle.BODY_SMALL,
+                               color=ft.Colors.ON_SURFACE_VARIANT)
             tile = ft.ListTile(
                 title=ft.Text(entry.label, theme_style=ft.TextThemeStyle.BODY_MEDIUM),
-                subtitle=ft.Text(entry.section_title + (f" · {entry.help}" if entry.help else ""), max_lines=2,
-                                 overflow=ft.TextOverflow.ELLIPSIS, theme_style=ft.TextThemeStyle.BODY_SMALL,
-                                 color=ft.Colors.ON_SURFACE_VARIANT),
-                trailing=ReasonChip(reason=entry.unavailable) if entry.unavailable else ft.Icon(ft.Icons.CHEVRON_RIGHT),
+                subtitle=reason_subtitle(ReasonChip(reason=entry.unavailable), subtitle) if entry.unavailable else subtitle,
+                trailing=None if entry.unavailable else ft.Icon(ft.Icons.CHEVRON_RIGHT),
                 on_click=lambda e, en=entry: self.open(en),
                 min_height=tokens.SIZES["hit_target"],
                 dense=True,

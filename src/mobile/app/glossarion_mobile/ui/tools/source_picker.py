@@ -46,7 +46,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
-from glossarion_mobile.ui.components.reason_chip import ReasonChip
+from glossarion_mobile.ui.components.reason_chip import ReasonChip, reason_subtitle
 from glossarion_mobile.ui.components.sheet import sheet_frame
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools import targets as tg
@@ -364,13 +364,13 @@ class SourcePicker:
                                   on_change=lambda e, t=target: self.toggle(t))
         else:
             leading = ft.Icon(ft.Icons.RADIO_BUTTON_CHECKED if checked else ft.Icons.RADIO_BUTTON_UNCHECKED)
+        subtitle = ft.Text(_subtitle(target), max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
+                           theme_style=ft.TextThemeStyle.BODY_SMALL)
         tile = ft.ListTile(
             leading=leading,
             title=ft.Text(target.title, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-            subtitle=ft.Text(_subtitle(target), max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
-                             theme_style=ft.TextThemeStyle.BODY_SMALL),
-            trailing=ReasonChip(reason=reason if len(reason) <= 28 else reason[:26] + "…", detail=reason)
-            if reason else None,
+            subtitle=reason_subtitle(ReasonChip(reason=reason if len(reason) <= 28 else reason[:26] + "…", detail=reason),
+                                     subtitle) if reason else subtitle,
             disabled=reason is not None,
             on_click=lambda e, t=target: self.toggle(t),
             min_height=tokens.SIZES["hit_target"],

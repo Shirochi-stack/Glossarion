@@ -712,10 +712,10 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             menu = _visible(tester, r"^share-provider-")
             assert [k for k, _c in menu] == ["share-provider-transferit", "share-provider-gofile", "share-provider-send",
                                              "share-provider-pixeldrain"], menu
-            from glossarion_mobile.ui.components.reason_chip import ReasonChip
+            from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
 
             for key, control in menu:
-                assert not isinstance(getattr(control, "trailing", None), ReasonChip), f"{key} is off: {control.trailing}"
+                assert tile_reason_chip(control) is None, f"{key} is off: {tile_reason_chip(control)}"
             assert "Open transfer.it…" in _texts_under(menu[0][1])
             await d.tap(key="share-provider-send")
             send_url = await wait_link_sheet()
@@ -990,7 +990,9 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             await d.wait(key="share-settings", timeout=30)
             off = _control(tester, "share-provider-send")
             # an off service stays tappable in the list (its consent sheet turns it on): no reason chip
-            assert not isinstance(off.trailing, ReasonChip) and not off.disabled, off.trailing
+            from glossarion_mobile.ui.components.reason_chip import tile_reason_chip
+
+            assert tile_reason_chip(off) is None and not off.disabled, tile_reason_chip(off)
             await d.tap(key="cancel")
             await d.wait(key="share-settings", gone=True, timeout=15)
             assert len(send.uploads) == uploads_before

@@ -38,7 +38,7 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.field_commit import commit_on_blur
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
-from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip, unavailable_tile
+from glossarion_mobile.ui.components.reason_chip import NOT_ON_MOBILE, ReasonChip, reason_subtitle, unavailable_tile
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
@@ -1019,9 +1019,9 @@ class AccountsScreen(Screen):
                 rows.append(ft.ListTile(
                     key=f"experimental-{route}",
                     title=ft.Text(label),
-                    subtitle=ft.Text(f"{route} · no sign-in · hidden in-app browser",
-                                     theme_style=ft.TextThemeStyle.BODY_SMALL),
-                    trailing=ReasonChip(reason=EXPERIMENTAL_CHIP, detail=webview_bridge.LIMITATIONS),
+                    subtitle=reason_subtitle(ReasonChip(reason=EXPERIMENTAL_CHIP, detail=webview_bridge.LIMITATIONS),
+                                             ft.Text(f"{route} · no sign-in · hidden in-app browser",
+                                                     theme_style=ft.TextThemeStyle.BODY_SMALL)),
                     on_click=lambda e, title=label, text=about: self.show_experimental(title, text),
                 ))
             else:
