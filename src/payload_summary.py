@@ -248,6 +248,14 @@ button { background: #2d2d2d; color: #ddd; border: 1px solid #4a5568; border-rad
          max-width: 420px; }
 .panel ul { list-style: none; padding: 0; margin: 8px 0; } .panel li { display: flex; align-items: center; gap: 6px;
          padding: 2px 0; } .panel li label { flex: 1; } .panel li button { padding: 1px 7px; }
+.resizer { position: absolute; top: 0; right: -3px; width: 7px; height: 100%; cursor: col-resize; z-index: 2; }
+.resizer:hover, .resizing .resizer { background: #7bb3e0; opacity: .5; }
+td.sized { overflow: hidden; text-overflow: ellipsis; }
+.menu { position: absolute; z-index: 10; background: #2b2b2b; border: 1px solid #5a9fd4; border-radius: 4px;
+        padding: 4px; min-width: 200px; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
+.menu div { padding: 6px 12px; cursor: pointer; border-radius: 3px; } .menu div:hover { background: #17a2b8; }
+.menu hr { border: none; border-top: 1px solid #444; margin: 4px 0; }
+.pager { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
 tr.row:hover { background: #2c3440; cursor: pointer; }
 .na { color: #666; } .failed td:nth-child(2) { color: #ff8a8a; }
 .bar { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; align-items: center; }
@@ -337,7 +345,10 @@ Click a row for the full request.</p>
   <ul id="collist"></ul>
   <button id="colreset" type="button">Reset</button>
 </div>
+<div class="pager" id="pagerTop"></div>
 <table><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table>
+<div class="pager" id="pagerBottom"></div>
+<div id="menu" class="menu" hidden></div>
 <script>
 const ROWS = {data};
 const COLS = {columns};
@@ -350,23 +361,65 @@ function loadPrefs() {{
   try {{ return JSON.parse(localStorage.getItem(PREFS_KEY)) || {{}}; }} catch (e) {{ return {{}}; }}
 }}
 function savePrefs() {{
-  try {{ localStorage.setItem(PREFS_KEY, JSON.stringify({{order, hidden: [...hidden]}})); }} catch (e) {{}}
+  try {{ localStorage.setItem(PREFS_KEY, JSON.stringify({{order, hidden: [...hidden], widths, pageSize}})); }}
+  catch (e) {{}}
 }}
 let prefs = loadPrefs();
 // saved order first (columns this summary has), then any new column in its default place
 let order = (prefs.order || []).filter(k => k in LABELS);
 COLS.forEach(([k]) => {{ if (!order.includes(k)) order.push(k); }});
 let hidden = new Set((prefs.hidden || []).filter(k => k in LABELS));
+let widths = Object.fromEntries(Object.entries(prefs.widths || {{}}).filter(([k]) => k in LABELS));
+let pageSize = Number.isInteger(prefs.pageSize) ? prefs.pageSize : 500;  // 0 = all rows
+let page = 1;
+const sizeStyle = (el, key) => {{ const w = widths[key]; if (!w) return;
+  el.style.width = el.style.minWidth = el.style.maxWidth = w + "px"; }};
 const visible = () => order.filter(k => !hidden.has(k));
 const head = document.getElementById("head");
-let dragKey = null;
+let dragKey = null, resized = false;
+// right-click a header: hide it, show all, choose columns, reset widths
+const menu = document.getElementById("menu");
+function showMenu(e, key) {{
+  menu.innerHTML = "";
+  const item = (text, action, disabled) => {{ const d = document.createElement("div"); d.textContent = text;
+    if (disabled) d.style.opacity = .4; else d.onclick = () => {{ menu.hidden = true; action(); }};
+    menu.appendChild(d); }};
+  item("Hide \u201c" + LABELS[key] + "\u201d", () => {{ hidden.add(key); savePrefs(); renderPanel(); render(); }},
+       visible().length <= 1);
+  item("Show all columns", () => {{ hidden = new Set(); savePrefs(); renderPanel(); render(); }}, !hidden.size);
+  menu.appendChild(document.createElement("hr"));
+  item("Choose columns\u2026", () => {{ document.getElementById("colpanel").hidden = false; renderPanel();
+    document.getElementById("colpanel").scrollIntoView({{block: "nearest"}}); }});
+  item("Reset column widths", () => {{ widths = {{}}; savePrefs(); render(); }}, !Object.keys(widths).length);
+  menu.hidden = false;
+  menu.style.left = Math.min(e.pageX, window.scrollX + window.innerWidth - menu.offsetWidth - 8) + "px";
+  menu.style.top = e.pageY + "px";
+}}
+document.addEventListener("click", e => {{ if (!menu.contains(e.target)) menu.hidden = true; }});
+document.addEventListener("keydown", e => {{ if (e.key === "Escape") menu.hidden = true; }});
+window.addEventListener("scroll", () => {{ menu.hidden = true; }}, true);
 function renderHead() {{
   head.innerHTML = "";
   visible().forEach(key => {{
     const th = document.createElement("th"); th.textContent = LABELS[key]; th.draggable = true;
+    sizeStyle(th, key);
     if (key === sortKey) {{ const a = document.createElement("span"); a.className = "arrow";
       a.textContent = sortDir > 0 ? " ▲" : " ▼"; th.appendChild(a); }}
-    th.onclick = () => {{ sortDir = sortKey === key ? -sortDir : 1; sortKey = key; render(); }};
+    th.onclick = () => {{ if (resized) {{ resized = false; return; }}
+      sortDir = sortKey === key ? -sortDir : 1; sortKey = key; page = 1; render(); }};
+    th.oncontextmenu = e => {{ e.preventDefault(); showMenu(e, key); }};
+    // drag the right edge to resize; the width is remembered
+    const grip = document.createElement("span"); grip.className = "resizer";
+    grip.onmousedown = e => {{
+      e.preventDefault(); e.stopPropagation(); th.draggable = false; th.classList.add("resizing");
+      const startX = e.pageX, startW = th.getBoundingClientRect().width;
+      const move = ev => {{ widths[key] = Math.max(50, Math.round(startW + ev.pageX - startX));
+        sizeStyle(th, key); document.querySelectorAll("td[data-key='" + key + "']").forEach(td => sizeStyle(td, key)); }};
+      const up = () => {{ document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up);
+        th.classList.remove("resizing"); th.draggable = true; resized = true; savePrefs(); }};
+      document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+    }};
+    th.appendChild(grip);
     th.ondragstart = e => {{ dragKey = key; e.dataTransfer.effectAllowed = "move"; }};
     th.ondragover = e => {{ e.preventDefault(); th.classList.add("dragover"); }};
     th.ondragleave = () => th.classList.remove("dragover");
@@ -400,16 +453,31 @@ document.getElementById("colbtn").onclick = () => {{
   const panel = document.getElementById("colpanel"); panel.hidden = !panel.hidden; renderPanel();
 }};
 document.getElementById("colreset").onclick = () => {{
-  order = COLS.map(([k]) => k); hidden = new Set(); savePrefs(); renderPanel(); render();
+  order = COLS.map(([k]) => k); hidden = new Set(); widths = {{}}; savePrefs(); renderPanel(); render();
 }};
 for (const id of ["kind", "context", "model"]) {{
   const sel = document.getElementById(id);
   [...new Set(ROWS.map(r => r[id]).filter(v => v))].sort().forEach(v => {{
     const o = document.createElement("option"); o.value = o.textContent = v; sel.appendChild(o);
   }});
-  sel.onchange = render;
+  sel.onchange = () => {{ page = 1; render(); }};
 }}
-document.getElementById("q").oninput = render;
+document.getElementById("q").oninput = () => {{ page = 1; render(); }};
+function renderPager(id, total, pages) {{
+  const bar = document.getElementById(id); bar.innerHTML = "";
+  const btn = (text, to, disabled) => {{ const b = document.createElement("button"); b.textContent = text;
+    b.disabled = disabled; b.onclick = () => {{ page = to; render(); window.scrollTo(0, 0); }}; bar.appendChild(b); }};
+  btn("\u00ab First", 1, page <= 1); btn("\u2039 Prev", page - 1, page <= 1);
+  const info = document.createElement("span"); info.className = "dim";
+  info.textContent = "Page " + page + " of " + pages; bar.appendChild(info);
+  btn("Next \u203a", page + 1, page >= pages); btn("Last \u00bb", pages, page >= pages);
+  const label = document.createElement("span"); label.className = "dim"; label.textContent = "Rows per page:";
+  const sel = document.createElement("select");
+  [[100, "100"], [250, "250"], [500, "500"], [1000, "1000"], [0, "All"]].forEach(([v, t]) => {{
+    const o = document.createElement("option"); o.value = v; o.textContent = t; o.selected = v === pageSize; sel.appendChild(o); }});
+  sel.onchange = () => {{ pageSize = parseInt(sel.value, 10); page = 1; savePrefs(); render(); }};
+  bar.append(label, sel);
+}}
 function render() {{
   renderHead();
   const cols = visible();
@@ -422,23 +490,31 @@ function render() {{
     const x = a[sortKey] ?? "", y = b[sortKey] ?? "";
     return (typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y), undefined, {{numeric: true}})) * sortDir;
   }});
+  const pages = pageSize ? Math.max(1, Math.ceil(rows.length / pageSize)) : 1;
+  page = Math.min(Math.max(1, page), pages);
+  const shown = pageSize ? rows.slice((page - 1) * pageSize, page * pageSize) : rows;
   const body = document.getElementById("body"); body.innerHTML = "";
   const frag = document.createDocumentFragment();
-  rows.forEach(r => {{
+  shown.forEach(r => {{
     const tr = document.createElement("tr"); tr.className = "row" + (r.kind === "Failed" ? " failed" : "");
     tr.onclick = () => window.open(r.detail, "_blank");
     cols.forEach(key => {{
-      const td = document.createElement("td"); const v = r[key];
-      if (v === null || v === undefined || v === "") {{ td.textContent = "N/A"; td.className = "na"; }}
-      else if (PREVIEW.has(key)) {{ td.className = "preview"; const d = document.createElement("div");
+      const td = document.createElement("td"); const v = r[key]; td.dataset.key = key;
+      if (widths[key]) {{ sizeStyle(td, key); td.classList.add("sized"); }}
+      if (v === null || v === undefined || v === "") {{ td.textContent = "N/A"; td.classList.add("na"); }}
+      else if (PREVIEW.has(key)) {{ td.classList.add("preview"); const d = document.createElement("div");
         d.className = "clamp"; d.textContent = v; td.appendChild(d); }}
-      else {{ td.textContent = v; if (key === "time") td.className = "time"; }}
+      else {{ td.textContent = v; td.title = v; if (key === "time") td.classList.add("time"); }}
       tr.appendChild(td);
     }});
     frag.appendChild(tr);
   }});
   body.appendChild(frag);
-  document.getElementById("count").textContent = rows.length.toLocaleString() + " of " + ROWS.length.toLocaleString() + " shown";
+  renderPager("pagerTop", rows.length, pages); renderPager("pagerBottom", rows.length, pages);
+  const first = rows.length ? (pageSize ? (page - 1) * pageSize + 1 : 1) : 0;
+  document.getElementById("count").textContent = (rows.length === ROWS.length ? "" : rows.length.toLocaleString() +
+    " match · ") + "showing " + first.toLocaleString() + "\u2013" + (first + shown.length - (rows.length ? 1 : 0)).toLocaleString() +
+    " of " + rows.length.toLocaleString();
 }}
 render();
 </script></body></html>

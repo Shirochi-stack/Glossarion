@@ -68,6 +68,8 @@ def test_build_writes_index_and_details_and_hides_empty_columns(payloads, tmp_pa
     page = (out / "logistics.html").read_text(encoding="utf-8")
     assert '"retry"' not in page.split("const COLS =")[1].split(";")[0]  # no request has a retry: column hidden
     assert "N/A" in page and "glossarion.payloadSummary.columns" in page
+    # header context menu, resizable columns, 500-row pages (all remembered in the browser)
+    assert "oncontextmenu" in page and "resizer" in page and "pageSize : 500" in page and "renderPager" in page
     details = sorted(os.listdir(out / "details"))
     assert len(details) == 3
     detail = (out / "details" / details[0]).read_text(encoding="utf-8")
