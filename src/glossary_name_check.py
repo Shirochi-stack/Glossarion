@@ -1172,15 +1172,15 @@ def write_report(output_dir, data=None):
             css = "review" if status == STATUS_REVIEW else "fixed"
             origin = row.get("origin") or "Book glossary"
             body.append(
-                f"<tr class='{css}'><td>{esc(output_file)}</td>"
+                f"<tr class='{css}'><td class='file'>{esc(output_file)}</td>"
                 f"<td><b>{esc(' / '.join(row.get('variants') or ()))}</b> → <b>{esc(row.get('expected', ''))}</b>"
                 f"<div class='dim'>{esc(row.get('raw', ''))} · {esc(row.get('entry_type', ''))} · {esc(origin)}</div></td>"
-                f"<td class='num'>{int(row.get('occurrences') or 0)}</td>"
-                f"<td><span class='tag {css}'>{esc(status)}</span></td>"
+                f"<td class='num'><span class='label'>Times </span>{int(row.get('occurrences') or 0)}</td>"
+                f"<td class='status'><span class='tag {css}'>{esc(status)}</span></td>"
                 f"<td>{context(row.get('snippets') or ())}</td></tr>")
     title = os.path.basename(os.path.normpath(output_dir))
     page = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Glossary name check — {esc(title)}</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Glossary name check — {esc(title)}</title>
 <style>
 body {{ font-family: Segoe UI, Arial, sans-serif; background: #1e1e1e; color: #ddd; margin: 24px; }}
 h1 {{ font-size: 20px; margin: 0 0 6px; }} .summary {{ margin: 0 0 18px; color: #aaa; }}
@@ -1191,12 +1191,24 @@ th {{ background: #2a2a2a; position: sticky; top: 0; }}
 .ctx {{ font-size: 13px; margin-bottom: 4px; }} mark {{ background: #6b4e16; color: #fff; padding: 0 2px; }}
 .tag {{ padding: 2px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }}
 .tag.fixed {{ background: #1f4d2b; color: #9be3ae; }} .tag.review {{ background: #5a3d12; color: #ffd28a; }}
+.label {{ display: none; }}
+/* phones (the mobile Reader): one card per name instead of a five-column table */
+@media (max-width: 700px) {{
+  body {{ margin: 12px; }}
+  table, tbody, tr, td {{ display: block; width: auto; }}
+  th, tr.head {{ display: none; }}
+  tr {{ border: 1px solid #333; border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }}
+  td {{ border: none; padding: 3px 0; text-align: left; }}
+  td.file {{ color: #aaa; font-size: 12px; word-break: break-all; }}
+  td.num, td.status {{ display: inline-block; margin-right: 12px; }}
+  .label {{ display: inline; color: #888; }}
+}}
 </style></head><body>
 <h1>Glossary name check — {esc(title)}</h1>
 <p class="summary">{counts['names']} name(s) in {counts['files']} file(s) differ from the glossary:
 {counts['fixed']} fixed, {counts['review']} to review. Fix the rest with QA Scanner settings →
 <i>Check glossary names in existing output…</i></p>
-<table><tr><th>File</th><th>Found → glossary name</th><th>Times</th><th>Status</th><th>Context (as translated)</th></tr>
+<table><tr class='head'><th>File</th><th>Found → glossary name</th><th>Times</th><th>Status</th><th>Context (as translated)</th></tr>
 {''.join(body)}
 </table></body></html>
 """
