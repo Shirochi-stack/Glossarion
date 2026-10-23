@@ -1567,6 +1567,10 @@ Text to analyze:
             self.glossary_name_check_autofix_level_var = max(1, min(3, int(self.config.get('glossary_name_check_autofix_level', 1))))
         except (TypeError, ValueError):
             self.glossary_name_check_autofix_level_var = 1
+        try:
+            self.payload_cleanup_limit_mb_var = max(0, int(self.config.get('payload_cleanup_limit_mb', 400)))
+        except (TypeError, ValueError):
+            self.payload_cleanup_limit_mb_var = 400
         
         # NEW: Initialize extraction mode variable
         self.extraction_mode_var = self.config.get('extraction_mode', 'smart')

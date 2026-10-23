@@ -845,6 +845,9 @@ TOOLTIP_OVERRIDES = {
         "Glossary names shorter than this are not checked (default 2: a 1-character raw name such as 강 also "
         "occurs inside ordinary words; 0 = every length). Names under 3 characters are "
         "only reported, never fixed automatically, unless they differ just in spacing or hyphens."),
+    "payload_cleanup_limit_mb": (
+        "The Payloads and http_requests debug folders are trimmed to this size, oldest files first, at "
+        "startup and exit. 0 = never clean up."),
     "glossary_name_check_autofix_level": (
         "Which findings Auto-fix replaces (and the review pre-checks). 1 Conservative: one close spelling of "
         "a character name. 2 Balanced: also the other entry types in scope. 3 Aggressive: every close "

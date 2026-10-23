@@ -13877,7 +13877,40 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     authza_general_cb.toggled.connect(_on_authza_general_api_toggled)
     _refresh_authza_mode_help(self.authza_use_general_api_var)
     section_v.addWidget(authza_mode_box)
-    
+
+    # Payloads/ and http_requests/ (debug dumps) are trimmed, oldest files first, to this size at
+    # startup and exit (shutdown_utils.sweep_large_caches); 0 keeps everything.
+    from PySide6.QtWidgets import QSpinBox
+    try:
+        self.payload_cleanup_limit_mb_var = max(0, int(getattr(self, 'payload_cleanup_limit_mb_var',
+                                                               self.config.get('payload_cleanup_limit_mb', 400))))
+    except (TypeError, ValueError):
+        self.payload_cleanup_limit_mb_var = 400
+    payload_cleanup_row = QWidget()
+    payload_cleanup_h = QHBoxLayout(payload_cleanup_row)
+    payload_cleanup_h.setContentsMargins(0, 5, 0, 5)
+    payload_cleanup_h.addWidget(QLabel("Payload cleanup limit (MB):"))
+    payload_cleanup_spin = QSpinBox()
+    payload_cleanup_spin.setRange(0, 100000)
+    payload_cleanup_spin.setSingleStep(50)
+    payload_cleanup_spin.setValue(self.payload_cleanup_limit_mb_var)
+    payload_cleanup_spin.setFixedWidth(110)
+    self._disable_spinbox_mousewheel(payload_cleanup_spin)
+    payload_cleanup_spin.setToolTip(_wrapped_tooltip_html(
+        "The Payloads and http_requests debug folders are trimmed to this size, oldest files first, "
+        "when Glossarion starts and exits. 0 = never clean up. Default 400 MB."))
+
+    def _on_payload_cleanup_changed(value):
+        self.payload_cleanup_limit_mb_var = int(value)
+
+    payload_cleanup_spin.valueChanged.connect(_on_payload_cleanup_changed)
+    payload_cleanup_h.addWidget(payload_cleanup_spin)
+    payload_cleanup_hint = QLabel("0 = never clean up")
+    payload_cleanup_hint.setStyleSheet("color: gray; font-size: 9pt;")
+    payload_cleanup_h.addWidget(payload_cleanup_hint)
+    payload_cleanup_h.addStretch()
+    section_v.addWidget(payload_cleanup_row)
+
     # Checkbox to enable/disable custom endpoint
     enable_cb = self._create_styled_checkbox("Enable Custom OpenAI Endpoint")
     try:

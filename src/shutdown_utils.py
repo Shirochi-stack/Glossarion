@@ -1977,6 +1977,23 @@ def sweep_size_capped_dir(folder: str, max_bytes: int, label: str = "") -> tuple
         return (0, 0, 0, 0)
 
 
+def payload_cleanup_limit_bytes(default: Optional[int] = 400 * 1024 * 1024, config_file: Optional[str] = None):
+    """The debug-cache cap from Other Settings › "Payload cleanup limit (MB)" (``payload_cleanup_limit_mb``
+    in config.json; 0 = never clean up -> None); ``default`` when the config has no such key. Read
+    from the saved config because the startup sweep runs before the GUI has loaded it."""
+    try:
+        if config_file is None:
+            from app_paths import CONFIG_FILE as config_file
+        with open(config_file, "r", encoding="utf-8") as f:
+            value = json.load(f).get("payload_cleanup_limit_mb")
+        if value is None:
+            return default
+        megabytes = int(value)
+        return None if megabytes <= 0 else megabytes * 1024 * 1024
+    except Exception:
+        return default
+
+
 def sweep_large_caches(max_bytes: int = 400 * 1024 * 1024, phase: str = "startup", *,
                        script_file: Optional[str] = None, extra_roots: Iterable[str] = ()) -> None:
     """Enforce a per-folder size cap on app-local debug caches.
@@ -1998,11 +2015,17 @@ def sweep_large_caches(max_bytes: int = 400 * 1024 * 1024, phase: str = "startup
     the writers above depends on which one happens to be writable at the
     moment the first dump is saved.
 
+    The cap is the saved "Payload cleanup limit (MB)" setting when there is one
+    (``payload_cleanup_limit_bytes``; 0 = never clean up), else ``max_bytes``.
+
     ``phase`` is just a label for log output (``startup`` or ``exit``).
     When anything is actually deleted, each folder produces a
     ``[CLEANUP] <folder>: removed N file(s), freed X MB (...)`` line and
     a final ``[CLEANUP] <phase>: total removed ... freed ...`` summary.
     """
+    max_bytes = payload_cleanup_limit_bytes(max_bytes)
+    if max_bytes is None:
+        return  # "0 = never clean up"
     try:
         # Candidate roots: exe dir (frozen), script dir (dev), and CWD.
         roots = []

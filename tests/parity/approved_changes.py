@@ -655,6 +655,21 @@ _NAME_CHECK_QA_LABEL = _after(
 _NAME_CHECK_QA_ENV_PAIR = _after(
     "                ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),",
     "                ('QA_CHECK_GLOSSARY_NAMES', '1' if qa_settings.get('check_glossary_names', False) else '0'),")
+# 2026-10-23 "Payload cleanup limit (MB)" (payload_cleanup_limit_mb, 400; 0 = never clean up)
+_PAYLOAD_CLEANUP_ROWS = ("('payload_cleanup_limit_mb', ['payload_cleanup_limit_mb_var'], 400, "
+                         "lambda v: max(0, safe_int(v, 400))),",)
+_PAYLOAD_CLEANUP_SETTINGS_ROW = _after(
+    "            ('glossary_name_check_autofix_level', ['glossary_name_check_autofix_level_var'], 1, lambda v: "
+    "max(1, min(3, safe_int(v, 1)))),", *("            " + row for row in _PAYLOAD_CLEANUP_ROWS))
+_PAYLOAD_CLEANUP_SETTINGS_ROW_GUI = _after(
+    "                ('glossary_name_check_autofix_level', ['glossary_name_check_autofix_level_var'], 1, lambda v: "
+    "max(1, min(3, safe_int(v, 1)))),", *("                " + row for row in _PAYLOAD_CLEANUP_ROWS))
+_PAYLOAD_CLEANUP_INIT = _after(
+    "            self.glossary_name_check_autofix_level_var = 1",
+    "        try:",
+    "            self.payload_cleanup_limit_mb_var = max(0, int(self.config.get('payload_cleanup_limit_mb', 400)))",
+    "        except (TypeError, ValueError):",
+    "            self.payload_cleanup_limit_mb_var = 400")
 # the QA scanner pieces, as edited (dialog toggle + fix dialog, runtime default/env/scope, scanner step)
 _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '\n'
@@ -1907,6 +1922,17 @@ APPROVED = (
                 "replaces the 'Downloading <model> model' line logged when the model was already cached",
         "source": {
             "src/ImageRenderer.py": _INPAINT_NO_POOL_SYNC,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-10-23",
+        "what": "New 'Payload cleanup limit (MB)' setting (Other Settings, above the custom OpenAI endpoint; "
+                "default 400, 0 = never clean up) for the startup / exit trim of Payloads and http_requests",
+        "source": {
+            "src/settings_persistence.py": [_PAYLOAD_CLEANUP_SETTINGS_ROW],
+            "src/owner_state.py": [_PAYLOAD_CLEANUP_INIT],
+            "src/translator_gui.py": [_PAYLOAD_CLEANUP_SETTINGS_ROW_GUI],
         },
         "values": {},
     },
