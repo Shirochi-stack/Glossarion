@@ -416,103 +416,43 @@ class QAScannerMixin:
             pass
         log = getattr(self, 'append_log', None)
         mb = 1024 * 1024
-        cancel = threading.Event()
         logs = []
-        state = {"text": "Checking glossary names...", "value": 0, "maximum": 0, "done": False,
-                 "result": None, "error": None}
 
-        def on_download(report):
-            speed = f" · {report.bytes_per_sec / mb:.1f} MB/s" if report.bytes_per_sec else ""
-            text = ("Verifying the named-entity model (NER)..." if report.phase == "verify" else
-                    f"Downloading the named-entity model (NER): {report.downloaded / mb:.1f} / "
-                    f"{report.total / mb:.1f} MB{speed}")
-            state.update(text=text, value=report.percent, maximum=100)
+        def work(state, cancelled):
+            def on_download(report):
+                speed = f" · {report.bytes_per_sec / mb:.1f} MB/s" if report.bytes_per_sec else ""
+                text = ("Verifying the named-entity model (NER)..." if report.phase == "verify" else
+                        f"Downloading the named-entity model (NER): {report.downloaded / mb:.1f} / "
+                        f"{report.total / mb:.1f} MB{speed}")
+                state.update(text=text, value=report.percent, maximum=100)
 
-        where = {"text": ""}
+            where = {"text": ""}
 
-        def on_chapter(done, total):
-            state.update(text=f"{where['text']}Checking chapter {done + 1} of {total}...", value=done, maximum=total)
+            def on_chapter(done, total):
+                state.update(text=f"{where['text']}Checking chapter {done + 1} of {total}...", value=done,
+                             maximum=total)
 
-        def work():
-            try:
-                ner = name_check.resolve_ner(use_ner, logs.append, progress=on_download, cancel=cancel.is_set,
-                                             retry=True)
-                reviews = []
-                for index, folder in enumerate(folders):
-                    if cancel.is_set():
-                        break
-                    if len(folders) > 1:
-                        where["text"] = f"{os.path.basename(folder)} ({index + 1} of {len(folders)})\n"
-                    state.update(text=f"{where['text']}Checking glossary names...", value=0, maximum=0)
-                    reviews.append(name_check.review_folder(folder, scope, stop=cancel.is_set, ner=ner,
-                                                            progress=on_chapter, settings=layer_settings))
-                state["result"] = reviews
-            except Exception as e:
-                state["error"] = e
-            finally:
-                state["done"] = True
+            ner = name_check.resolve_ner(use_ner, logs.append, progress=on_download, cancel=cancelled, retry=True)
+            reviews = []
+            for index, folder in enumerate(folders):
+                if cancelled():
+                    break
+                if len(folders) > 1:
+                    where["text"] = f"{os.path.basename(folder)} ({index + 1} of {len(folders)})\n"
+                state.update(text=f"{where['text']}Checking glossary names...", value=0, maximum=0)
+                reviews.append(name_check.review_folder(folder, scope, stop=cancelled, ner=ner,
+                                                        progress=on_chapter, settings=layer_settings))
+            return reviews
 
-        # label, bar and a centered, wider Cancel (QProgressDialog keeps its button at the right)
-        from PySide6.QtWidgets import QProgressBar
-        dialog = QDialog(parent)
-        dialog.setWindowTitle(title)
-        dialog.setWindowModality(Qt.WindowModal)
-        dialog.setMinimumWidth(460)
-        dialog_layout = QVBoxLayout(dialog)
-        dialog_layout.setContentsMargins(18, 16, 18, 14)
-        dialog_layout.setSpacing(10)
-        label = QLabel(state["text"])
-        label.setAlignment(Qt.AlignCenter)
-        label.setWordWrap(True)
-        dialog_layout.addWidget(label)
-        bar = QProgressBar()
-        bar.setRange(0, 0)
-        dialog_layout.addWidget(bar)
-        cancel_row = QHBoxLayout()
-        cancel_button = QPushButton("Cancel")
-        cancel_button.setMinimumWidth(120)
-        cancel_button.setMinimumHeight(36)
-        cancel_row.addStretch()
-        cancel_row.addWidget(cancel_button)
-        cancel_row.addStretch()
-        dialog_layout.addLayout(cancel_row)
-
-        def request_cancel(*_args):
-            cancel.set()
-            cancel_button.setEnabled(False)
-            label.setText("Stopping...")
-
-        cancel_button.clicked.connect(request_cancel)
-        dialog.rejected.connect(request_cancel)  # Esc / the window's close button
-        loop = QEventLoop()
-        timer = QTimer()
-        timer.setInterval(100)
-
-        def tick():
+        def flush_logs():
             while logs:
                 line = logs.pop(0)
                 if log:
                     log(line)
-            if not cancel.is_set():
-                label.setText(state["text"])
-                bar.setRange(0, state["maximum"])
-                bar.setValue(state["value"])
-            if state["done"]:
-                timer.stop()
-                loop.quit()
 
-        timer.timeout.connect(tick)
-        threading.Thread(target=work, name="GlossaryNameReview", daemon=True).start()
-        timer.start()
-        dialog.show()
-        loop.exec()
-        dialog.rejected.disconnect(request_cancel)
-        dialog.close()
-        if cancel.is_set():
-            return None
-        if state["error"] is not None:
-            raise state["error"]
-        return state["result"]
+        from qt_widget_helpers import run_with_progress
+        return run_with_progress(parent, title, work, text="Checking glossary names...", on_tick=flush_logs,
+                                 thread_name="GlossaryNameReview")
 
     def _glossary_name_check_scope(self):
         """Emergency Glossary Compliance's entry types and the name check's minimum length (live values)."""

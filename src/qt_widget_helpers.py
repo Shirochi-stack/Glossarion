@@ -5,6 +5,8 @@
 * ``CheckmarkDelegate`` - paints Other Settings' checkbox (``_create_styled_checkbox``) in a tree
   column (EPUB Library raw-file matching, the QA scanner's glossary name review).
 * ``CONTEXT_MENU_STYLE`` - the Progress Manager's right-click menu style (no empty icon gutter).
+* ``run_with_progress`` - run work on a thread behind a progress window with a centered Cancel (the QA
+  scanner's glossary name review, Other Settings' payload summary).
 * ``center_messagebox_buttons`` - centered, optionally larger message-box buttons (Other Settings,
   the QA scanner's glossary name check).
 """
@@ -192,3 +194,86 @@ def center_messagebox_buttons(
                 button.setMinimumWidth(min_button_width)
             if min_button_height is not None:
                 button.setMinimumHeight(min_button_height)
+
+
+def run_with_progress(parent, title, work, *, text="Working...", on_tick=None, thread_name="ProgressWork"):
+    """Run ``work(state, cancelled)`` on a worker thread behind a modal progress window, so the GUI
+    keeps responding. ``work`` updates ``state`` (``text``; ``value`` / ``maximum``, maximum 0 = busy)
+    and checks ``cancelled()``. ``on_tick()`` runs on the GUI thread every 100 ms (e.g. to flush log
+    lines). Returns what ``work`` returned; None when cancelled; re-raises ``work``'s error."""
+    import threading
+    from PySide6.QtCore import QEventLoop, QTimer
+    from PySide6.QtWidgets import QDialog, QProgressBar, QVBoxLayout
+
+    cancel = threading.Event()
+    state = {"text": text, "value": 0, "maximum": 0}
+    outcome = {"done": False, "result": None, "error": None}
+
+    def run():
+        try:
+            outcome["result"] = work(state, cancel.is_set)
+        except Exception as e:  # noqa: BLE001 - re-raised on the GUI thread
+            outcome["error"] = e
+        finally:
+            outcome["done"] = True
+
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setWindowModality(Qt.WindowModal)
+    dialog.setMinimumWidth(460)
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(18, 16, 18, 14)
+    layout.setSpacing(10)
+    label = QLabel(text)
+    label.setAlignment(Qt.AlignCenter)
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    bar = QProgressBar()
+    bar.setRange(0, 0)
+    layout.addWidget(bar)
+    # a centered, wider Cancel (QProgressDialog keeps its button at the right)
+    cancel_row = QHBoxLayout()
+    cancel_button = QPushButton("Cancel")
+    cancel_button.setMinimumWidth(120)
+    cancel_button.setMinimumHeight(36)
+    cancel_row.addStretch()
+    cancel_row.addWidget(cancel_button)
+    cancel_row.addStretch()
+    layout.addLayout(cancel_row)
+
+    def request_cancel(*_args):
+        cancel.set()
+        cancel_button.setEnabled(False)
+        label.setText("Stopping...")
+
+    cancel_button.clicked.connect(request_cancel)
+    dialog.rejected.connect(request_cancel)  # Esc / the window's close button
+    loop = QEventLoop()
+    timer = QTimer()
+    timer.setInterval(100)
+
+    def tick():
+        if on_tick is not None:
+            on_tick()
+        if not cancel.is_set():
+            label.setText(state["text"])
+            bar.setRange(0, state["maximum"])
+            bar.setValue(state["value"])
+        if outcome["done"]:
+            timer.stop()
+            loop.quit()
+
+    timer.timeout.connect(tick)
+    threading.Thread(target=run, name=thread_name, daemon=True).start()
+    timer.start()
+    dialog.show()
+    loop.exec()
+    dialog.rejected.disconnect(request_cancel)
+    dialog.close()
+    if on_tick is not None:
+        on_tick()
+    if cancel.is_set():
+        return None
+    if outcome["error"] is not None:
+        raise outcome["error"]
+    return outcome["result"]

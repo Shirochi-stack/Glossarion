@@ -13895,11 +13895,50 @@ def _create_payload_cleanup_section(self, parent_frame):
         except Exception as e:
             QMessageBox.warning(self, "Payloads", f"Could not open the Payloads folder:\n{e}")
 
+    def _create_payload_summary():
+        """Payload Summary/logistics.html beside the Payloads folder (payload_summary), on worker threads."""
+        try:
+            import payload_summary
+            from unified_api_client import _payloads_dir
+            from qt_widget_helpers import run_with_progress
+            payloads = _payloads_dir()
+            config = dict(self.config or {})
+            config['enable_parallel_extraction'] = bool(getattr(self, 'enable_parallel_extraction_var',
+                                                                config.get('enable_parallel_extraction', True)))
+            config['extraction_workers'] = getattr(self, 'extraction_workers_var', config.get('extraction_workers', 2))
+            workers = payload_summary.default_workers(config)
+
+            def work(state, cancelled):
+                def on_file(done, total):
+                    state.update(text=f"Reading payload {done:,} of {total:,}...", value=done, maximum=total)
+                return payload_summary.build(payloads, workers=workers, progress=on_file, cancel=cancelled)
+
+            index = run_with_progress(self, "Payload Summary", work, text="Collecting payloads...",
+                                      thread_name="PayloadSummary")
+        except Exception as e:
+            QMessageBox.warning(self, "Payload Summary", f"Could not create the payload summary:\n{e}")
+            return
+        if not index:
+            return
+        if hasattr(self, 'append_log'):
+            self.append_log(f"📝 Payload summary: {index}")
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(index))
+
     open_payloads_btn = QPushButton("📂 Open Payloads Folder")
     open_payloads_btn.setToolTip(_wrapped_tooltip_html("Open the folder the API payloads are saved in."))
     open_payloads_btn.clicked.connect(_open_payloads_folder)
+    summary_btn = QPushButton("📝 Create Readable Payload Summary")
+    summary_btn.setToolTip(_wrapped_tooltip_html(
+        "Builds 'Payload Summary/logistics.html' next to the Payloads folder from every saved request: "
+        "time, context, model, API key, parameters, anti-duplicate settings, token usage, output folder "
+        "and previews of the system / user / assistant prompts, with search and filters; click a request "
+        "for its full details. Uses the Parallel Extraction workers (never more than the CPU has)."))
+    summary_btn.clicked.connect(_create_payload_summary)
     open_row = QHBoxLayout()
     open_row.addWidget(open_payloads_btn)
+    open_row.addWidget(summary_btn)
     open_row.addStretch()
     section_v.addLayout(open_row)
 
