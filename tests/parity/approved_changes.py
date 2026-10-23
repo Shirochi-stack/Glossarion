@@ -1429,6 +1429,12 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '            glossary_names_fix_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
   '            check_glossary_names_checkbox.toggled.connect(glossary_names_fix_row.setVisible)\n'
   '\n'),
+ ('            # AI Hunter Performance Section\n'
+  '            ai_hunter_group = QGroupBox("AI Hunter Performance Settings")\n'
+  "            ai_hunter_group.setFont(QFont('Arial', 12, QFont.Bold))\n",
+  '            # AI Hunter Performance Section\n'
+  '            ai_hunter_group = QGroupBox("Scanner Performance Settings")\n'
+  "            ai_hunter_group.setFont(QFont('Arial', 12, QFont.Bold))\n"),
  ("                        'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),\n"
   "                        'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: "
   'x.isChecked()),\n',

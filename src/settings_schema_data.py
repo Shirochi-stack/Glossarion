@@ -1545,7 +1545,7 @@ SETTINGS = {
      'origins': ('nested', 'dialog', 'env'),
      'parent': 'ai_hunter_config',
      'type': 'str',
-     'ui_group': 'AI Hunter Performance Settings',
+     'ui_group': 'Scanner Performance Settings',
      'ui_sites': ('qa',)},
     'ai_hunter_config.detection_mode': {'default': 'weighted_average',
      'default_source': 'nested',

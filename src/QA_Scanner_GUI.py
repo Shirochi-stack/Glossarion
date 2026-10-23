@@ -5480,7 +5480,7 @@ class QAScannerMixin:
 
             yield
             # AI Hunter Performance Section
-            ai_hunter_group = QGroupBox("AI Hunter Performance Settings")
+            ai_hunter_group = QGroupBox("Scanner Performance Settings")
             ai_hunter_group.setFont(QFont('Arial', 12, QFont.Bold))
             ai_hunter_layout = QVBoxLayout(ai_hunter_group)
             ai_hunter_layout.setContentsMargins(20, 15, 20, 15)

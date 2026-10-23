@@ -687,7 +687,7 @@ def source_chapters_for_folder(folder_path, progress_path=None):
 
 
 def max_workers_setting():
-    """The QA scanner's "Maximum parallel workers" (AI Hunter performance settings; 0 = every core)."""
+    """The QA scanner's "Maximum parallel workers" (Scanner Performance Settings; 0 = every core)."""
     try:
         from scan_html_folder import _resolve_scan_max_workers_config
         return _resolve_scan_max_workers_config()
