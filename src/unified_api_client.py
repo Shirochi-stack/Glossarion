@@ -1125,9 +1125,8 @@ def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, 
         if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1" or _PAYLOADS_DISABLED:
             return
 
-        # Abort immediately if a stop/cancel has been requested
-        if getattr(self, "_is_stop_requested", None) and self._is_stop_requested():
-            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+        # (A stop check on ``self`` stood here: this is a module function, so it raised NameError and
+        # the except below swallowed it - no request was ever saved. The callers check for stop.)
         out_dir = out_dir or _payloads_dir()
         try:
             os.makedirs(out_dir, exist_ok=True)
@@ -14886,8 +14885,9 @@ class UnifiedClient:
         - Safety configs to ``Payloads/safety_configs/`` folder.
         """
         if _PAYLOADS_DISABLED:
+            self._record_logistics(None, request_params, retry_reason)
             return
-        
+
         # Route to Payloads/image/ for both vision-input *and* image-output
         # (text→image) requests. Previously this only checked the input
         # messages, so text-to-image generation requests ended up in
@@ -15214,6 +15214,8 @@ class UnifiedClient:
                         'timestamp': datetime.now().isoformat(),
                         'debug': debug_info,
                         'request_params': request_params,
+                        'anti_duplicate': self._anti_duplicate_snapshot(
+                            (request_params or {}).get('temperature')),
                         'key_identifier': getattr(self, 'key_identifier', None),
                         'retry_info': {
                             'reason': retry_reason,
@@ -15232,9 +15234,82 @@ class UnifiedClient:
                     logger.debug(f"[{thread_name}] Saved IMAGE payload to: {filepath}")
                 else:
                     logger.debug(f"[{thread_name}] Saved payload to: {filepath} (reason: {retry_reason or 'initial'})")
-                
+                self._record_logistics(filepath, request_params, retry_reason)
+
         except Exception as e:
             print(f"Failed to save payload: {e}")
+
+    # Anti-duplicate settings and their defaults (translation: TOP_P...; glossary: GLOSSARY_TOP_P...)
+    _LOGISTICS_ANTI_DUPLICATE = (
+        ("TOP_P", 1.0), ("MIN_P", 0.0), ("TOP_K", 0), ("FREQUENCY_PENALTY", 0.0), ("PRESENCE_PENALTY", 0.0),
+        ("REPETITION_PENALTY", 1.0), ("CANDIDATE_COUNT", 1), ("CUSTOM_STOP_SEQUENCES", ""),
+        ("LOGIT_BIAS_ENABLED", "0"),
+    )
+
+    def _anti_duplicate_snapshot(self, temperature=None):
+        """The anti-duplicate settings of the section this request uses (translation: TOP_P...;
+        glossary: GLOSSARY_TOP_P...): enabled, the changed settings, and what of them is sent
+        (provider-filtered). Saved in each payload and in Logistics.json."""
+        section = "glossary" if self._get_anti_duplicate_prefix() == "GLOSSARY_" else "translation"
+        snapshot = {"section": section,
+                    "enabled": self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") == "1"}
+        if not snapshot["enabled"]:
+            return snapshot
+        settings = {}
+        for key, default in self._LOGISTICS_ANTI_DUPLICATE:
+            value = self._get_anti_duplicate_env(key, None)
+            if value is None or str(value).strip() == "":
+                continue
+            try:
+                changed = float(value) != float(default)
+            except (TypeError, ValueError):
+                changed = str(value) != str(default)
+            if changed:
+                settings[key.lower()] = value
+        snapshot["settings"] = settings
+        try:
+            sent = dict(self._get_anti_duplicate_params(temperature, log=False))
+            sent.update(self._get_anti_duplicate_min_p_params(getattr(self, "client_type", None)) or {})
+            snapshot["sent"] = sent
+        except Exception:
+            pass
+        return snapshot
+
+    def _record_logistics(self, payload_path, request_params, retry_reason=None):
+        """One compact line per request in logs/Logistics.json (api_logistics; desktop only): API key,
+        provider / model / endpoint, request parameters, the anti-duplicate settings of the section
+        the request used (translation or glossary) and what of them is sent, the book's output
+        folder and the saved payload's full path."""
+        if _is_mobile_runtime():
+            return
+        try:
+            import api_logistics
+            if not api_logistics.enabled():
+                return
+            params = {k: v for k, v in (request_params or {}).items() if v is not None}
+            anti_duplicate = self._anti_duplicate_snapshot(params.get("temperature"))
+            try:
+                model = self._get_active_request_model()
+            except Exception:
+                model = getattr(self, "model", None)
+            api_logistics.record({
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "key": getattr(self, "key_identifier", None),
+                "key_index": getattr(self, "current_key_index", None),
+                "api_key": api_logistics.mask_key(getattr(self, "api_key", None)),
+                "provider": getattr(self, "client_type", None),
+                "model": model,
+                "endpoint": getattr(self, "base_url", None),
+                "context": getattr(self, "context", None),
+                "params": params,
+                "key_params": getattr(self, "current_key_request_parameters", None) or None,
+                "anti_duplicate": anti_duplicate,
+                "output_dir": os.path.abspath(self.output_dir) if getattr(self, "output_dir", None) else None,
+                "payload": os.path.abspath(payload_path) if payload_path else None,
+                "retry": retry_reason,
+            })
+        except Exception as e:
+            logger.debug(f"Logistics record failed: {e}")
 
 
     def _attach_usage_to_last_payload(self, usage: Optional[Dict[str, Any]]) -> None:
