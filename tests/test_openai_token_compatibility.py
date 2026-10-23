@@ -1086,3 +1086,33 @@ def test_no_advertised_values_does_not_guess():
     error = {'error': {'param': 'reasoning.effort', 'message': "Unsupported value: 'max'"}}
     assert supported_reasoning_efforts(400, error) == []
     assert not repair_reasoning_effort({'reasoning_effort': 'max'}, [], print)
+
+
+# ---- output token limit errors (shared parser; Anthropic SSE retry) ------------------------------
+
+ANTHROPIC_LIMIT_ERROR = ('{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 300000 > '
+                         '128000, which is the maximum allowed number of output tokens for claude-sonnet-5-5"}}')
+
+
+@pytest.mark.parametrize("text, expected", [
+    (ANTHROPIC_LIMIT_ERROR, (None, 128000)),
+    ("This model supports at most 32768 completion tokens", (None, 32768)),
+    ("max_tokens must be less than or equal to `8192`", (None, 8192)),
+    ("Invalid max_tokens value, the valid range of max_tokens is [1, 8192]", (1, 8192)),
+    ("something else went wrong", (None, None)),
+])
+def test_output_token_limit_parser(text, expected):
+    assert UnifiedClient._parse_output_token_limit(text) == expected
+
+
+def test_anthropic_payload_is_lowered_to_the_named_limit_and_cached(monkeypatch):
+    monkeypatch.setattr(UnifiedClient, "_model_token_limits", {})
+    client = UnifiedClient.__new__(UnifiedClient)
+    payload = {"model": "claude-sonnet-5-5", "max_tokens": 300000,
+               "thinking": {"type": "enabled", "budget_tokens": 200000}}
+    assert client._lower_anthropic_max_tokens(payload, ANTHROPIC_LIMIT_ERROR) is True
+    assert payload["max_tokens"] == 128000 and payload["thinking"]["budget_tokens"] == 64000
+    assert UnifiedClient._model_token_limits["claude-sonnet-5-5"] == 128000
+    # already within the limit, or no limit named: leave it (the normal error path handles it)
+    assert client._lower_anthropic_max_tokens(payload, ANTHROPIC_LIMIT_ERROR) is False
+    assert client._lower_anthropic_max_tokens({"model": "m", "max_tokens": 5}, "bad request") is False

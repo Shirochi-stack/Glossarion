@@ -3031,6 +3031,67 @@ class UnifiedClient:
         model_lower = (getattr(self, 'model', '') or '').strip().lower()
         return model_lower.startswith('antigravity') or getattr(self, 'client_type', None) == 'antigravity'
 
+    @staticmethod
+    def _parse_output_token_limit(error_text):
+        """``(supported_min, supported_max)`` from a provider's "output token limit exceeded" message;
+        ``(None, None)`` when it names no limit. Shared by _http_request_with_retries and the
+        Anthropic SSE path."""
+        import re
+        text = str(error_text or "")
+        supported_min = None
+        supported_max = None
+        # Pattern 1: "supports at most X completion/output tokens"
+        match = re.search(r'supports at most (\d+) (?:completion|output) tokens', text)
+        if match:
+            supported_max = int(match.group(1))
+        # Pattern 2: "must be less than or equal to X" (common format)
+        if not supported_max and 'must be less than or equal to' in text:
+            pos = text.find('must be less than or equal to')
+            numbers = re.findall(r'\d+', text[pos:pos + 120])
+            if numbers:
+                supported_max = int(numbers[0])
+        # Pattern 3: "valid range of max_tokens is [MIN, MAX]" (DeepSeek)
+        if not supported_max:
+            m_range = re.search(r'valid range of max_tokens is \[(\d+)\s*,\s*(\d+)\]', text, re.IGNORECASE)
+            if m_range:
+                supported_min = int(m_range.group(1))
+                supported_max = int(m_range.group(2))
+        # Pattern 4: "max_tokens: X > Y, which is the maximum allowed number of output tokens" (Anthropic)
+        if not supported_max:
+            m_anthropic = re.search(r'max_tokens:\s*\d+\s*>\s*(\d+)\s*,\s*which is the maximum allowed', text)
+            if m_anthropic:
+                supported_max = int(m_anthropic.group(1))
+        return supported_min, supported_max
+
+    def _lower_anthropic_max_tokens(self, payload, error_text):
+        """A 400 naming the model's output limit (``max_tokens: 300000 > 128000, which is the maximum
+        allowed number of output tokens for claude-...``): lower the payload's max_tokens to it, keep an
+        extended-thinking budget below it, and remember the limit for the model so later requests
+        start there. True when the payload changed (retry it)."""
+        _supported_min, supported_max = self._parse_output_token_limit(error_text)
+        try:
+            current = int(payload.get('max_tokens'))
+        except (TypeError, ValueError):
+            return False
+        if not supported_max or current <= supported_max:
+            return False
+        payload['max_tokens'] = int(supported_max)
+        thinking = payload.get('thinking')
+        if isinstance(thinking, dict) and thinking.get('type') == 'enabled':
+            budget = thinking.get('budget_tokens')
+            if isinstance(budget, int) and budget >= supported_max:
+                thinking['budget_tokens'] = max(1024, int(supported_max) // 2)
+        model_name = payload.get('model')
+        if model_name:
+            try:
+                with self.__class__._model_limits_lock:
+                    self.__class__._model_token_limits[str(model_name)] = int(supported_max)
+            except Exception:
+                pass
+        print(f"    🔧 AUTO-ADJUSTING: max_tokens {current:,} is above {model_name}'s limit of "
+              f"{int(supported_max):,} — retrying with {int(supported_max):,} (kept for this session)")
+        return True
+
     def _clamp_antigravity_max_tokens(self, max_tokens: Optional[int]) -> Optional[int]:
         if max_tokens is None:
             return None
@@ -18434,36 +18495,8 @@ class UnifiedClient:
                     # Log the original error first
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1}/{max_retries})")
                     
-                    import re
-                    supported_min = None
-                    supported_max = None
-                    
-                    # Try multiple patterns to extract the max token limit
-                    # Pattern 1: "supports at most X completion/output tokens"
-                    match = re.search(r'supports at most (\d+) (?:completion|output) tokens', resp.text)
-                    if match:
-                        supported_max = int(match.group(1))
-                    
-                    # Pattern 2: "must be less than or equal to X" (common format)
-                    if not supported_max and 'must be less than or equal to' in resp.text:
-                        pos = resp.text.find('must be less than or equal to')
-                        after_text = resp.text[pos:pos+120]
-                        numbers = re.findall(r'\d+', after_text)
-                        if numbers:
-                            supported_max = int(numbers[0])
-                    
-                    # Pattern 3: "valid range of max_tokens is [MIN, MAX]" (DeepSeek)
-                    if not supported_max:
-                        m_range = re.search(r'valid range of max_tokens is \[(\d+)\s*,\s*(\d+)\]', resp.text, re.IGNORECASE)
-                        if m_range:
-                            supported_min = int(m_range.group(1))
-                            supported_max = int(m_range.group(2))
-                    
-                    # Pattern 4: "max_tokens: X > Y, which is the maximum allowed number of output tokens" (Anthropic)
-                    if not supported_max:
-                        m_anthropic = re.search(r'max_tokens:\s*\d+\s*>\s*(\d+)\s*,\s*which is the maximum allowed', resp.text)
-                        if m_anthropic:
-                            supported_max = int(m_anthropic.group(1))
+                    # The limit the provider names (supports at most / <= / valid range / Anthropic's ">")
+                    supported_min, supported_max = self._parse_output_token_limit(resp.text)
                     
                     if supported_max:
                         # Try to find current output limit in the request body
@@ -23778,6 +23811,22 @@ class UnifiedClient:
 
                 err_lower = err_body.lower() if isinstance(err_body, str) else ""
 
+                def _reopen_stream(after, fail_status=None):
+                    """Send the adjusted ``data`` again; raises when that fails too."""
+                    try:
+                        client = _httpx.Client(timeout=_httpx_timeout)
+                        resp = client.send(client.build_request("POST", api_url, headers=headers, json=data), stream=True)
+                    except Exception as e:
+                        if self._is_stop_requested():
+                            self._cancelled = True
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
+                    if resp.status_code != 200:
+                        resp.read()
+                        raise UnifiedClientError(f"Anthropic streaming error after {after}: {resp.text[:300]}",
+                                                 http_status=fail_status or resp.status_code)
+                    return client, resp
+
                 # Handle thinking-unsupported errors (same logic as _http_request_with_retries)
                 if raw_resp.status_code == 400 and "does not support thinking" in err_lower:
                     print(f"🧠 [anthropic] Model does not support thinking — retrying without thinking")
@@ -23791,18 +23840,7 @@ class UnifiedClient:
                     data.pop('thinking', None)
                     data.pop('output_config', None)
                     # Retry without thinking
-                    try:
-                        _hx_client = _httpx.Client(timeout=_httpx_timeout)
-                        _hx_req = _hx_client.build_request("POST", api_url, headers=headers, json=data)
-                        raw_resp = _hx_client.send(_hx_req, stream=True)
-                    except Exception as e:
-                        if self._is_stop_requested():
-                            self._cancelled = True
-                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                        raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
-                    if raw_resp.status_code != 200:
-                        raw_resp.read()
-                        raise UnifiedClientError(f"Anthropic streaming error after thinking removal: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
+                    _hx_client, raw_resp = _reopen_stream("thinking removal")
                     if not self._is_stop_requested():
                         print(f"🛰️ [anthropic] SSE stream re-opened after stripping thinking (status={raw_resp.status_code})")
                     start_ts = _t.time()  # reset timing baseline to successful re-open
@@ -23811,18 +23849,7 @@ class UnifiedClient:
                     model_name = data.get('model')
                     print(f"🧠 [anthropic] {model_name} requires adaptive thinking — retrying with adaptive (cached for session)")
                     self._switch_anthropic_payload_to_adaptive(data, f"{api_url}:{model_name}")
-                    try:
-                        _hx_client = _httpx.Client(timeout=_httpx_timeout)
-                        _hx_req = _hx_client.build_request("POST", api_url, headers=headers, json=data)
-                        raw_resp = _hx_client.send(_hx_req, stream=True)
-                    except Exception as e:
-                        if self._is_stop_requested():
-                            self._cancelled = True
-                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                        raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
-                    if raw_resp.status_code != 200:
-                        raw_resp.read()
-                        raise UnifiedClientError(f"Anthropic streaming error after switching to adaptive thinking: {raw_resp.text[:300]}", http_status=raw_resp.status_code)
+                    _hx_client, raw_resp = _reopen_stream("switching to adaptive thinking")
                     if not self._is_stop_requested():
                         print(f"🛰️ [anthropic] SSE stream re-opened with adaptive thinking (status={raw_resp.status_code})")
                     start_ts = _t.time()  # reset timing baseline to successful re-open
@@ -23851,20 +23878,16 @@ class UnifiedClient:
                         data['thinking'] = {'type': 'enabled', 'budget_tokens': budget}
                         print(f"    🔄 Falling back to extended thinking (budget={budget:,} tokens)")
                     # Retry with standard thinking
-                    try:
-                        _hx_client = _httpx.Client(timeout=_httpx_timeout)
-                        _hx_req = _hx_client.build_request("POST", api_url, headers=headers, json=data)
-                        raw_resp = _hx_client.send(_hx_req, stream=True)
-                    except Exception as e:
-                        if self._is_stop_requested():
-                            self._cancelled = True
-                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                        raise UnifiedClientError(f"Anthropic streaming retry failed: {e}")
-                    if raw_resp.status_code != 200:
-                        raw_resp.read()
-                        raise UnifiedClientError(f"Anthropic streaming error after adaptive fallback: {raw_resp.text[:300]}", http_status=422)
+                    _hx_client, raw_resp = _reopen_stream("adaptive fallback", fail_status=422)
                     if not self._is_stop_requested():
                         print(f"🛰️ [anthropic] SSE stream re-opened with standard thinking (status={raw_resp.status_code})")
+                    start_ts = _t.time()  # reset timing baseline to successful re-open
+
+                elif raw_resp.status_code == 400 and self._lower_anthropic_max_tokens(data, err_body):
+                    # max_tokens above the model's output limit: retry once at the limit it names
+                    _hx_client, raw_resp = _reopen_stream("lowering max_tokens")
+                    if not self._is_stop_requested():
+                        print(f"🛰️ [anthropic] SSE stream re-opened with max_tokens={data.get('max_tokens'):,} (status={raw_resp.status_code})")
                     start_ts = _t.time()  # reset timing baseline to successful re-open
 
                 else:
@@ -26869,33 +26892,9 @@ class UnifiedClient:
                         if max_tokens_adjusted:
                             print(f"    ⚠️ max_tokens already adjusted once, not retrying again to prevent loop")
                         else:
-                            import re
-                            supported_min = None
-                            supported_max = None
-                            
-                            # Try multiple patterns to extract the max token limit
+                            # The limit the provider names (supports at most / <= / valid range / Anthropic's ">")
                             error_text = str(e)
-                            
-                            # Pattern 1: "supports at most X completion tokens" (standard)
-                            match = re.search(r'supports at most (\d+) completion tokens', error_text)
-                            if match:
-                                supported_max = int(match.group(1))
-                            
-                            # Pattern 2: "must be less than or equal to X" (Groq format)
-                            if not supported_max:
-                                if 'must be less than or equal to' in error_text:
-                                    pos = error_text.find('must be less than or equal to')
-                                    after_text = error_text[pos:pos+100]  # Look at next 100 chars
-                                    numbers = re.findall(r'\d+', after_text)
-                                    if numbers:
-                                        supported_max = int(numbers[0])
-
-                            # Pattern 3: "valid range of max_tokens is [MIN, MAX]" (DeepSeek format)
-                            if not supported_max:
-                                m_range = re.search(r'valid range of max_tokens is \[(\d+)\s*,\s*(\d+)\]', error_text, re.IGNORECASE)
-                                if m_range:
-                                    supported_min = int(m_range.group(1))
-                                    supported_max = int(m_range.group(2))
+                            supported_min, supported_max = self._parse_output_token_limit(error_text)
                             
                             if supported_max:
                                 current_max = max_tokens or norm_max_tokens or 8192
