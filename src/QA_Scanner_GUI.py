@@ -519,7 +519,7 @@ class QAScannerMixin:
         import glossary_name_check as name_check
         config = dict(self.config or {})
         for key in ('emergency_glossary_compliance_mode', 'emergency_glossary_compliance_custom_types',
-                    'glossary_name_check_min_chars'):
+                    'glossary_name_check_min_chars', 'glossary_name_check_autofix_level'):
             if hasattr(self, key + '_var'):
                 config[key] = getattr(self, key + '_var')
         return name_check.settings_from_config(config)

@@ -14740,7 +14740,8 @@ def _run_glossary_name_check(output_dir, output_file, chapter):
         auto_fix = name_check.auto_fix_from_env()
         ner = name_check.resolve_ner(name_check.use_ner_from_env(), print)
         result, replaced = name_check.check_and_fix_file(
-            output_path, name_check.html_to_text(source_html), entries, auto_fix=auto_fix, ner=ner)
+            output_path, name_check.html_to_text(source_html), entries, auto_fix=auto_fix, ner=ner,
+            record=True)
         name = os.path.basename(output_path)
         for finding in result.reportable:
             if auto_fix and finding.fixable and replaced:
@@ -14749,6 +14750,18 @@ def _run_glossary_name_check(output_dir, output_file, chapter):
                 print(f"📖 Glossary name check: {name}: {finding.describe()}")
     except Exception as e:
         print(f"⚠️ Glossary name check failed for {output_file}: {e}")
+
+
+def _glossary_name_check_summary(output_dir):
+    """End of a run: one line with the name check's counts and its report (glossary_name_check/report.html)."""
+    try:
+        import glossary_name_check as name_check
+        if name_check.enabled_from_env():
+            line = name_check.summary_line(output_dir)
+            if line:
+                print(line)
+    except Exception as e:
+        print(f"⚠️ Glossary name check report failed: {e}")
 
 
 def clean_memory_artifacts(text):
@@ -34320,6 +34333,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"   • Successfully completed: {stats['completed']}")
             print(f"   • Missing files: {stats['missing_files']}")
             print(f"   • In progress: {stats['in_progress']}")
+            _glossary_name_check_summary(out)
                 
         except Exception as e:
             print("❌ EPUB build failed:", e)

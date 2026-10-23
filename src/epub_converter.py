@@ -5333,7 +5333,7 @@ class EPUBCompiler:
         name_check, entries, auto_fix, ner = context
         try:
             results = name_check.check_and_fix_titles(self.output_dir, entries, auto_fix=auto_fix, ner=ner,
-                                                      names=names)
+                                                      names=names, record=True)
             name_check.log_title_results(results, self.log, auto_fix=auto_fix)
             return [row for _result, fixed in results for row in fixed.values()]
         except Exception as e:
@@ -5347,7 +5347,8 @@ class EPUBCompiler:
             return
         name_check, entries, auto_fix, ner = context
         try:
-            result, changed = name_check.fix_metadata(metadata, entries, auto_fix=auto_fix, ner=ner)
+            result, changed = name_check.fix_metadata(metadata, entries, auto_fix=auto_fix, ner=ner,
+                                                      record_dir=self.output_dir)
             if result.reportable:
                 name_check.log_title_results([(result, changed)], self.log, auto_fix=auto_fix)
             if changed:

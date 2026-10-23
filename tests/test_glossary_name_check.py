@@ -147,11 +147,14 @@ def test_settings_from_env_and_config():
            "EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES": '["term"]',
            "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "5",
            "GLOSSARY_NAME_CHECK_MIN_CHARS": "2"}
-    assert g.settings_from_env(env) == {"mode": "custom", "custom_types": ("term",), "min_chars": 2}
+    assert g.settings_from_env(env) == {"mode": "custom", "custom_types": ("term",), "min_chars": 2,
+                                        "autofix_level": 1}
     assert g.settings_from_config({"emergency_glossary_compliance_mode": "all",
                                    "emergency_glossary_compliance_min_chars": 5,
-                                   "glossary_name_check_min_chars": 4}, env) == {
-        "mode": "all", "custom_types": (), "min_chars": 4}
+                                   "glossary_name_check_min_chars": 4,
+                                   "glossary_name_check_autofix_level": 3}, env) == {
+        "mode": "all", "custom_types": (), "min_chars": 4, "autofix_level": 3}
+    assert g.settings_from_env({"GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL": "9"})["autofix_level"] == 3
 
 
 def test_short_raw_names_are_only_fixed_for_spacing_respellings():
@@ -502,3 +505,56 @@ def test_preview_snippets_show_each_occurrence_in_context():
     assert g.finding_snippets(markup, finding, width=10) == [
         ("First, ", "Walter Argent", " smiled.…"), ("…ed. Then ", "Walter Argent", "'s sword f…")]  # not the attribute
     assert g.source_snippets("그때 발터 아르겐트가 웃었다.", finding, width=3) == [("그때 ", "발터 아르겐트", "가 웃…")]
+
+
+# ---- Auto-fix strength and the book report -----------------------------------------------------
+
+@pytest.mark.parametrize("level,expected", [
+    (1, {"character long"}),
+    (2, {"character long", "location long"}),
+    (3, {"character long", "location long", "character short", "character two"}),
+])
+def test_autofix_strength_levels(level, expected):
+    findings = {
+        "character long": g.Finding("발터 아르겐트", "Valter Argent", "character", g.KIND_VARIANT, ("Walter Argent",)),
+        "location long": g.Finding("아벨란 제국", "Abelan Empire", "location", g.KIND_VARIANT, ("Avelan Empire",)),
+        "character short": g.Finding("칼", "Carl", "character", g.KIND_VARIANT, ("Karl",)),
+        "character two": g.Finding("유소정", "Yoo Sojeong", "character", g.KIND_AMBIGUOUS, ("Yoo Sojung", "Yu Sojeong")),
+        "missing": g.Finding("강시현", "Kang Si-hyeon", "character", g.KIND_MISSING),
+    }
+    for finding in findings.values():
+        finding.autofix_level = level
+    assert {name for name, f in findings.items() if f.fixable} == expected
+    # the level travels from the settings to the findings
+    ents = g.build_entries(GLOSSARY_ROWS, autofix_level=level)
+    [found] = g.check_chapter("아벨란 제국이 무너졌다.", "<p>The Avelan Empire fell.</p>",
+                              g.build_entries(GLOSSARY_ROWS, mode="all", autofix_level=level)).reportable
+    assert found.fixable == (level >= 2) and ents.autofix_level == level
+
+
+def test_translation_records_findings_and_writes_the_report(tmp_path):
+    book = _book(tmp_path, "<p>Walter Argent smiled.</p>")
+    ents = g.load_entries(str(book / "glossary.csv"))
+    path = str(book / "response_chapter0001.html")
+    g.check_and_fix_file(path, "발터 아르겐트가 웃었다.", ents, auto_fix=False, record=True)
+    report = (book / "glossary_name_check" / "report.html").read_text(encoding="utf-8")
+    assert "Walter Argent</b> → <b>Valter Argent" in report and "to review" in report
+    assert "<mark>Walter Argent</mark>" in report
+    line = g.summary_line(str(book))
+    assert line.startswith("📖 Glossary name check: 1 name(s) in 1 file(s) differ from the glossary: 0 fixed, 1 to review")
+    # fixing it from the review marks it fixed
+    [chapter] = g.scan_folder(str(book), ents)
+    g.fix_files(str(book), {chapter.output_file: chapter.reportable})
+    assert g.report_counts(str(book)) == {"files": 1, "names": 1, "fixed": 1, "review": 0}
+    assert "fixed (reviewed)" in (book / "glossary_name_check" / "report.html").read_text(encoding="utf-8")
+    # a clean re-check removes the file's record
+    g.check_and_fix_file(path, "발터 아르겐트가 웃었다.", ents, auto_fix=False, record=True)
+    assert g.report_counts(str(book))["names"] == 0
+    assert g.summary_line(str(book)).startswith("📖 Glossary name check: every glossary name matches")
+
+
+def test_no_record_no_report(tmp_path):
+    book = _book(tmp_path, "<p>Valter Argent smiled.</p>")
+    g.check_and_fix_file(str(book / "response_chapter0001.html"), "발터 아르겐트가 웃었다.",
+                         g.load_entries(str(book / "glossary.csv")), auto_fix=True, record=True)
+    assert not (book / "glossary_name_check").exists() and g.summary_line(str(book)) is None

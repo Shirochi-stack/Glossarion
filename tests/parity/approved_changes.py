@@ -608,7 +608,9 @@ _NAME_CHECK_SETTINGS_ROWS = (
     "('glossary_name_check', ['glossary_name_check_var'], False, bool),",
     "('glossary_name_check_mode', ['glossary_name_check_mode_var'], 'auto', str),",
     "('glossary_name_check_min_chars', ['glossary_name_check_min_chars_var'], 2, lambda v: max(0, min(10, "
-    "safe_int(v, 0)))),",
+    "safe_int(v, 2)))),",
+    "('glossary_name_check_autofix_level', ['glossary_name_check_autofix_level_var'], 1, lambda v: max(1, min(3, "
+    "safe_int(v, 1)))),",
     "('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),",
 )
 _NAME_CHECK_MIN_CHARS_ROW = ("('emergency_glossary_compliance_min_chars', ['emergency_glossary_compliance_min_chars_var'], "
@@ -631,6 +633,7 @@ _NAME_CHECK_ENV_DICT = _after(
     "auto_glossary_mode != 'no_glossary') else \"0\",",
     "            'GLOSSARY_NAME_CHECK_MODE': str(getattr(self, 'glossary_name_check_mode_var', 'auto')),",
     "            'GLOSSARY_NAME_CHECK_MIN_CHARS': str(getattr(self, 'glossary_name_check_min_chars_var', 2)),",
+    "            'GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL': str(getattr(self, 'glossary_name_check_autofix_level_var', 1)),",
     "            'GLOSSARY_NAME_CHECK_USE_NER': \"1\" if getattr(self, 'glossary_name_check_use_ner_var', True) "
     "else \"0\",")
 # the name check's own minimum raw entry length, read at startup like Emergency Glossary Compliance's
@@ -640,7 +643,12 @@ _NAME_CHECK_MIN_CHARS_INIT = _after(
     "            self.glossary_name_check_min_chars_var = max(0, min(10, int(self.config.get("
     "'glossary_name_check_min_chars', 2))))",
     "        except (TypeError, ValueError):",
-    "            self.glossary_name_check_min_chars_var = 2")
+    "            self.glossary_name_check_min_chars_var = 2",
+    "        try:",
+    "            self.glossary_name_check_autofix_level_var = max(1, min(3, int(self.config.get("
+    "'glossary_name_check_autofix_level', 1))))",
+    "        except (TypeError, ValueError):",
+    "            self.glossary_name_check_autofix_level_var = 1")
 _NAME_CHECK_QA_LABEL = _after(
     "            'QA_CHECK_GLOSSARY_LEAKAGE': 'Check for glossary leakage',",
     "            'QA_CHECK_GLOSSARY_NAMES': 'Check glossary names (experimental)',")
@@ -879,7 +887,7 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '        import glossary_name_check as name_check\n'
   '        config = dict(self.config or {})\n'
   "        for key in ('emergency_glossary_compliance_mode', 'emergency_glossary_compliance_custom_types',\n"
-  "                    'glossary_name_check_min_chars'):\n"
+  "                    'glossary_name_check_min_chars', 'glossary_name_check_autofix_level'):\n"
   "            if hasattr(self, key + '_var'):\n"
   "                config[key] = getattr(self, key + '_var')\n"
   '        return name_check.settings_from_config(config)\n'

@@ -1632,6 +1632,7 @@ class RunEnvMixin:
             'GLOSSARY_NAME_CHECK': "1" if (getattr(self, 'glossary_name_check_var', False) and auto_glossary_mode != 'no_glossary') else "0",
             'GLOSSARY_NAME_CHECK_MODE': str(getattr(self, 'glossary_name_check_mode_var', 'auto')),
             'GLOSSARY_NAME_CHECK_MIN_CHARS': str(getattr(self, 'glossary_name_check_min_chars_var', 2)),
+            'GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL': str(getattr(self, 'glossary_name_check_autofix_level_var', 1)),
             'GLOSSARY_NAME_CHECK_USE_NER': "1" if getattr(self, 'glossary_name_check_use_ner_var', True) else "0",
             'COMPRESS_GLOSSARY_PROMPT': '1' if self.config.get('compress_glossary_prompt') else '0',
             'COMPRESSION_FACTOR': str(self.compression_factor_var),

@@ -60,6 +60,7 @@ SETTINGS_MAP_ORDER = ('model',
  'glossary_name_check',
  'glossary_name_check_mode',
  'glossary_name_check_min_chars',
+ 'glossary_name_check_autofix_level',
  'glossary_name_check_use_ner',
  'retry_duplicate_bodies',
  'token_limit_disabled',
@@ -490,6 +491,10 @@ DESKTOP_SETTINGS_MAP = (('model', ('model_var',), ('value', None), ('str',)),
   ('glossary_name_check_min_chars_var',),
   ('value', 2),
   ('safe_int', 2, 0, 10, 'max_min')),
+ ('glossary_name_check_autofix_level',
+  ('glossary_name_check_autofix_level_var',),
+  ('value', 1),
+  ('safe_int', 1, 1, 3, 'max_min')),
  ('glossary_name_check_use_ner', ('glossary_name_check_use_ner_var',), ('value', True), ('bool',)),
  ('retry_duplicate_bodies', ('retry_duplicate_var',), ('value', False), ('bool',)),
  ('token_limit_disabled', ('token_limit_disabled',), ('value', False), ('bool',)),
@@ -5284,18 +5289,40 @@ SETTINGS = {
                 'the translation. When it is missing, the translation is searched for a close '
                 'spelling the model used instead (e.g. <i>Walter Argent</i> for glossary <i>Valter '
                 'Argent</i>, <i>Gang Si-hyeon</i> for <i>Kang '
-                'Si-hyeon</i>).<br><br><b>Auto-fix</b> replaces it when exactly one close spelling '
-                'of a <i>character</i> name was found; anything less certain is only '
-                'logged.<br><b>Review first</b> only logs what it finds; fix chapters later with '
-                'QA Scanner settings → <i>Check glossary names in existing output…</i><br><br>Uses '
-                'the entry types set here for Emergency Glossary Compliance (it works without '
-                'turning that on) and its own minimum raw entry length (default 0 = every length). '
-                'Names shorter than 3 characters are only reported, never fixed automatically, '
-                'unless they differ just in spacing or hyphens.',
+                'Si-hyeon</i>).<br><br><b>Auto-fix</b> replaces what <i>Auto-fix strength</i> '
+                'allows (default: exactly one close spelling of a <i>character</i> name); anything '
+                'less certain is only logged.<br><b>Review first</b> only logs what it finds; fix '
+                'chapters later with QA Scanner settings → <i>Check glossary names in existing '
+                'output…</i><br><br>Every finding is also listed in '
+                "<i>glossary_name_check/report.html</i> in the book's output folder (fixed / to "
+                'review, with context); the end of the run logs its path.<br><br>Uses the entry '
+                'types set here for Emergency Glossary Compliance (it works without turning that '
+                'on) and its own minimum raw entry length (default 2; 0 = every length).',
      'type': 'bool',
      'ui_group': 'Processing Options',
      'ui_sites': ('other.processing',),
      'var_names': ('glossary_name_check_var',)},
+    'glossary_name_check_autofix_level': {'converter': ('safe_int', 1, 1, 3, 'max_min'),
+     'default': 1,
+     'default_source': 'init',
+     'dialog_default': 1,
+     'env': (('GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL', 'translation', 1),),
+     'init_default': 1,
+     'label': 'Auto-fix strength:',
+     'maximum': 3,
+     'minimum': 1,
+     'origins': ('settings_map', 'init', 'dialog', 'env'),
+     'save_default': 1,
+     'tooltip': '<b>Auto-fix strength</b><br><b>1 Conservative</b> (default): one close spelling '
+                'of a <i>character</i> name; names under 3 characters only when they differ just '
+                'in spacing or hyphens.<br><b>2 Balanced</b>: also the other entry types set below '
+                '(places, terms...).<br><b>3 Aggressive</b>: every close spelling found, several '
+                'per name and short names included.<br>Also decides which rows start checked in '
+                '<i>Check glossary names in existing output…</i>',
+     'type': 'int',
+     'ui_group': 'Processing Options',
+     'ui_sites': ('other.processing',),
+     'var_names': ('glossary_name_check_autofix_level_var',)},
     'glossary_name_check_min_chars': {'converter': ('safe_int', 2, 0, 10, 'max_min'),
      'default': 2,
      'default_source': 'init',

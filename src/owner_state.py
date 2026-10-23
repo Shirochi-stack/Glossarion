@@ -1563,6 +1563,10 @@ Text to analyze:
             self.glossary_name_check_min_chars_var = max(0, min(10, int(self.config.get('glossary_name_check_min_chars', 2))))
         except (TypeError, ValueError):
             self.glossary_name_check_min_chars_var = 2
+        try:
+            self.glossary_name_check_autofix_level_var = max(1, min(3, int(self.config.get('glossary_name_check_autofix_level', 1))))
+        except (TypeError, ValueError):
+            self.glossary_name_check_autofix_level_var = 1
         
         # NEW: Initialize extraction mode variable
         self.extraction_mode_var = self.config.get('extraction_mode', 'smart')

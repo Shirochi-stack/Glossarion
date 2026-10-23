@@ -845,6 +845,10 @@ TOOLTIP_OVERRIDES = {
         "Glossary names shorter than this are not checked (default 2: a 1-character raw name such as 강 also "
         "occurs inside ordinary words; 0 = every length). Names under 3 characters are "
         "only reported, never fixed automatically, unless they differ just in spacing or hyphens."),
+    "glossary_name_check_autofix_level": (
+        "Which findings Auto-fix replaces (and the review pre-checks). 1 Conservative: one close spelling of "
+        "a character name. 2 Balanced: also the other entry types in scope. 3 Aggressive: every close "
+        "spelling found, several per name and short names included."),
     "glossary_name_check_mode": (
         "Auto-fix replaces one close spelling of a character name; Review first only logs what it finds."),
     "glossary_refinement_chunking_mode": (

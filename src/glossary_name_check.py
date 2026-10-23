@@ -58,6 +58,9 @@ KIND_VARIANT = "variant"
 #: Raw names shorter than this are only fixed automatically when the variant differs in spacing / hyphens
 SHORT_RAW = 3
 KIND_AMBIGUOUS = "ambiguous"
+# "Auto-fix strength" (glossary_name_check_autofix_level)
+AUTOFIX_CONSERVATIVE, AUTOFIX_BALANCED, AUTOFIX_AGGRESSIVE = 1, 2, 3
+AUTOFIX_LEVEL_NAMES = {1: "Conservative", 2: "Balanced", 3: "Aggressive"}
 KIND_MISSING = "missing"
 
 
@@ -78,14 +81,25 @@ class Finding:
     variants: tuple = ()
     occurrences: int = 0
     origin: str = ""
+    autofix_level: int = AUTOFIX_CONSERVATIVE
 
     @property
     def fixable(self):
-        """The automatic-fix case: one close spelling of a character name. A raw name shorter than
-        ``SHORT_RAW`` characters (surnames like 박 / 강, words like 하나) also matches unrelated source
-        text, and its fuzzy matches were wrong on the corpus ("Sparks" for Park, "Hanja" for Hana),
-        so only a spacing / hyphen respelling of it ("Soyoon" for So-yoon) is fixed automatically."""
-        if self.kind != KIND_VARIANT or self.entry_type != "character":
+        """The automatic-fix case, by "Auto-fix strength" (``autofix_level``):
+
+        1 Conservative: one close spelling of a character name. A raw name shorter than
+          ``SHORT_RAW`` characters (surnames like 박 / 강, words like 하나) also matches unrelated
+          source text, and its fuzzy matches were wrong on the corpus ("Sparks" for Park, "Hanja"
+          for Hana), so only a spacing / hyphen respelling of it ("Soyoon" for So-yoon) is fixed.
+        2 Balanced: also the other entry types in scope (places, terms...), same rules otherwise.
+        3 Aggressive: every close spelling found, several per name and short raw names included."""
+        if self.kind == KIND_MISSING or not self.variants:
+            return False
+        if self.autofix_level >= AUTOFIX_AGGRESSIVE:
+            return True
+        if self.kind != KIND_VARIANT:
+            return False
+        if self.autofix_level < AUTOFIX_BALANCED and self.entry_type != "character":
             return False
         return len(self.raw) >= SHORT_RAW or all(_norm(v) == _norm(self.expected) for v in self.variants)
 
@@ -236,15 +250,17 @@ def _is_variant(expected, expected_key, candidate, candidate_key):
 class GlossaryNameEntries:
     """Entries to check plus every translated name in the glossary (never a variant)."""
 
-    def __init__(self, entries, known_names):
+    def __init__(self, entries, known_names, autofix_level=AUTOFIX_CONSERVATIVE):
         self.entries = tuple(entries)
         self.known = frozenset(known_names)
+        self.autofix_level = autofix_level
 
     def __bool__(self):
         return bool(self.entries)
 
 
-def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_chars=0):
+def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_chars=0,
+                  autofix_level=AUTOFIX_CONSERVATIVE):
     """Pick the entries to check from ``glossary_usage.parse_glossary_file`` rows."""
     known = set()
     picked = {}
@@ -266,7 +282,7 @@ def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_c
             continue  # untranslated names and non-Latin targets have nothing to check
         picked.setdefault(raw, NameEntry(raw, translated, entry_type, str(row.get("_origin") or "")))
     entries = sorted(picked.values(), key=lambda e: -len(e.raw))
-    return GlossaryNameEntries(entries, known)
+    return GlossaryNameEntries(entries, known, autofix_level)
 
 
 _load_lock = threading.Lock()
@@ -322,7 +338,8 @@ def _layer_rows(layers):
     return rows
 
 
-def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars=0, settings=None):
+def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars=0, settings=None,
+                 autofix_level=AUTOFIX_CONSERVATIVE):
     """The names to check from the book's glossary and the enabled extension / unified glossary
     (``glossary_layers``), parsed once per (file versions, options)."""
     if not glossary_path or not os.path.isfile(glossary_path):
@@ -332,12 +349,14 @@ def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars
     for path, origin in layers:
         info = os.stat(path)
         stamps.append((os.path.normcase(os.path.abspath(path)), origin, info.st_size, info.st_mtime_ns))
-    key = (tuple(stamps), str(mode or "characters").lower(), tuple(custom_types or ()), int(min_chars or 0))
+    key = (tuple(stamps), str(mode or "characters").lower(), tuple(custom_types or ()), int(min_chars or 0),
+           int(autofix_level))
     with _load_lock:
         cached = _load_cache.get(key)
         if cached is not None:
             return cached
-    entries = build_entries(_layer_rows(layers), mode=mode, custom_types=custom_types, min_chars=min_chars)
+    entries = build_entries(_layer_rows(layers), mode=mode, custom_types=custom_types, min_chars=min_chars,
+                            autofix_level=autofix_level)
     with _load_lock:
         _load_cache.clear()
         _load_cache[key] = entries
@@ -365,6 +384,7 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
     if not entries or not source_text or not output_markup:
         return result
     output_text = html_to_text(output_markup)
+    level = getattr(entries, "autofix_level", AUTOFIX_CONSERVATIVE)
     candidates = None
     matched_raws = []
     # a large (unified) glossary: skip entries whose first two characters never occur in the chapter
@@ -405,10 +425,10 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
             kind = KIND_VARIANT if len(variants) == 1 else KIND_AMBIGUOUS
             occurrences = sum(len(_occurrences(v, output_markup)) for v in variants)
             result.findings.append(Finding(entry.raw, entry.translated, entry.entry_type, kind,
-                                           tuple(sorted(variants)), occurrences, entry.origin))
+                                           tuple(sorted(variants)), occurrences, entry.origin, level))
         else:
             result.findings.append(Finding(entry.raw, entry.translated, entry.entry_type, KIND_MISSING,
-                                           origin=entry.origin))
+                                           origin=entry.origin, autofix_level=level))
     return result
 
 
@@ -479,8 +499,9 @@ def apply_fixes(output_markup, findings, *, reviewed=False):
     return "".join(p for p in pieces if p is not None), total
 
 
-def check_and_fix_file(output_path, source_text, entries, *, auto_fix, ner=None):
-    """Check one output file; with ``auto_fix`` rewrite it with the fixable variants replaced."""
+def check_and_fix_file(output_path, source_text, entries, *, auto_fix, ner=None, record=False):
+    """Check one output file; with ``auto_fix`` rewrite it with the fixable variants replaced.
+    ``record``: keep the findings in the book's report (``record_findings``)."""
     with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
         markup = f.read()
     result = check_chapter(source_text, markup, entries, os.path.basename(output_path), ner=ner)
@@ -489,6 +510,9 @@ def check_and_fix_file(output_path, source_text, entries, *, auto_fix, ner=None)
         new_markup, replaced = apply_fixes(markup, result.fixable)
         if replaced:
             _write_text(output_path, new_markup)
+    if record:
+        record_findings(os.path.dirname(output_path), result.output_file, result.reportable, markup,
+                        fixed=bool(auto_fix and replaced))
     return result, replaced
 
 
@@ -513,7 +537,15 @@ def settings_from_env(env=None):
     except (TypeError, ValueError):
         min_chars = 2
     return {"mode": mode, "custom_types": tuple(custom_types if mode == "custom" else ()),
-            "min_chars": min_chars}
+            "min_chars": min_chars,
+            "autofix_level": _autofix_level(env.get("GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL"))}
+
+
+def _autofix_level(value, default=AUTOFIX_CONSERVATIVE):
+    try:
+        return max(AUTOFIX_CONSERVATIVE, min(AUTOFIX_AGGRESSIVE, int(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def settings_from_config(config, env=None):
@@ -532,6 +564,8 @@ def settings_from_config(config, env=None):
             scope["min_chars"] = max(0, min(10, int(config["glossary_name_check_min_chars"])))
         except (TypeError, ValueError):
             pass
+    if "glossary_name_check_autofix_level" in config:
+        scope["autofix_level"] = _autofix_level(config["glossary_name_check_autofix_level"], scope["autofix_level"])
     return scope
 
 
@@ -788,6 +822,7 @@ def fix_files(folder_path, plan, *, backup_dir=None):
                                   backup_dir=backup_dir)
             if rows:
                 changed[output_file] = sum(n for _row, _new, _f, n in rows.values())
+                mark_fixed(folder_path, {output_file: findings})
             continue
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             markup = f.read()
@@ -797,6 +832,7 @@ def fix_files(folder_path, plan, *, backup_dir=None):
         _backup(path, backup_dir)
         _write_text(path, new_markup)
         changed[output_file] = replaced
+    mark_fixed(folder_path, {name: plan[name] for name in changed})
     return changed
 
 
@@ -986,25 +1022,36 @@ def fix_title_file(folder_path, name, findings_for, *, reviewed=False, backup_di
     return changed
 
 
-def fix_metadata(metadata, entries, *, auto_fix, ner=None):
-    """Check (and with ``auto_fix`` fix) a metadata dict in memory. Returns ``(result, changed rows)``."""
+def fix_metadata(metadata, entries, *, auto_fix, ner=None, record_dir=None):
+    """Check (and with ``auto_fix`` fix) a metadata dict in memory. Returns ``(result, changed rows)``.
+    ``record_dir``: keep the findings in that book's report."""
     rows = metadata_rows(metadata)
     result = check_title_rows(rows, entries, METADATA_FILE, ner=ner)
+    if record_dir:
+        record_findings(record_dir, METADATA_FILE, result.reportable,
+                        "\n".join(html_lib.escape(r.translated, quote=False) for r in rows),
+                        fixed=bool(auto_fix and result.fixable))
     changed = fix_title_rows(rows, _auto_findings(entries, ner)) if auto_fix and result.fixable else {}
     for key, (_row, new, _findings, _n) in changed.items():
         metadata[key] = new
     return result, changed
 
 
-def check_and_fix_titles(folder_path, entries, *, auto_fix, ner=None, names=(HEADERS_FILE, TOC_FILE)):
+def check_and_fix_titles(folder_path, entries, *, auto_fix, ner=None, names=(HEADERS_FILE, TOC_FILE),
+                         record=False):
     """The translation pipeline's title check: ``[(ChapterResult, fixed)]`` per file with findings.
-    With ``auto_fix`` the automatic-fix cases are rewritten (``fix_title_file``)."""
+    With ``auto_fix`` the automatic-fix cases are rewritten (``fix_title_file``); ``record`` keeps
+    the findings in the book's report."""
     out = []
     for name in names:
         _content, rows = _read_title_rows(folder_path, name)
         if not rows:
             continue
         result = check_title_rows(rows, entries, name, ner=ner)
+        if record:
+            record_findings(folder_path, name, result.reportable,
+                            "\n".join(html_lib.escape(r.translated, quote=False) for r in rows),
+                            fixed=bool(auto_fix and result.fixable))
         if not result.reportable:
             continue
         fixed = {}
@@ -1020,3 +1067,152 @@ def log_title_results(results, log, *, auto_fix):
         for finding in result.reportable:
             done = auto_fix and finding.fixable and fixed
             log(f"📖 Glossary name check: {result.output_file}: {finding.describe()}{' (fixed)' if done else ''}")
+
+
+# ---- the book's report: glossary_name_check/report.html ------------------------------------------
+# Every check of a translated file (chapters as they are saved, chapter titles / TOC / metadata at
+# EPUB build) replaces that file's record in glossary_name_check/findings.json; report.html is
+# rewritten from it, so it always shows the book's current state: what was fixed and what is left to
+# review (Review first, or what Auto-fix found too uncertain). Fixes applied later in "Check glossary
+# names in existing output…" mark their rows as fixed.
+
+REPORT_DIR = "glossary_name_check"
+RECORDS_FILE = "findings.json"
+REPORT_FILE = "report.html"
+STATUS_FIXED = "fixed"
+STATUS_FIXED_REVIEWED = "fixed (reviewed)"
+STATUS_REVIEW = "to review"
+_records_lock = threading.Lock()
+
+
+def _records_path(output_dir):
+    return os.path.join(output_dir, REPORT_DIR, RECORDS_FILE)
+
+
+def _load_records(output_dir):
+    try:
+        with open(_records_path(output_dir), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and isinstance(data.get("files"), dict) else {"files": {}}
+    except (OSError, ValueError):
+        return {"files": {}}
+
+
+def _save_records(output_dir, data):
+    os.makedirs(os.path.join(output_dir, REPORT_DIR), exist_ok=True)
+    _write_text(_records_path(output_dir), json.dumps(data, ensure_ascii=False, indent=1))
+    write_report(output_dir, data)
+
+
+def record_findings(output_dir, output_file, findings, markup, *, fixed):
+    """Replace ``output_file``'s record with ``findings`` (with context from ``markup``, the file as
+    checked, before any fix); ``fixed``: the automatic-fix cases were applied."""
+    rows = []
+    for finding in findings:
+        rows.append({
+            "raw": finding.raw, "expected": finding.expected, "variants": list(finding.variants),
+            "occurrences": finding.occurrences, "entry_type": finding.entry_type, "origin": finding.origin,
+            "kind": finding.kind,
+            "status": STATUS_FIXED if fixed and finding.fixable else STATUS_REVIEW,
+            "snippets": [list(snip) for snip in finding_snippets(markup, finding, width=70, limit=3)],
+        })
+    with _records_lock:
+        data = _load_records(output_dir)
+        if not rows and output_file not in data["files"]:
+            return
+        if rows:
+            data["files"][output_file] = rows
+        else:
+            data["files"].pop(output_file, None)
+        _save_records(output_dir, data)
+
+
+def mark_fixed(output_dir, plan):
+    """Fixes applied from the review (``plan``: file -> findings) count as fixed in the report."""
+    with _records_lock:
+        data = _load_records(output_dir)
+        touched = False
+        for output_file, findings in plan.items():
+            keys = {(f.raw, tuple(f.variants)) for f in findings}
+            for row in data["files"].get(output_file, ()):
+                if (row.get("raw"), tuple(row.get("variants") or ())) in keys and row.get("status") == STATUS_REVIEW:
+                    row["status"] = STATUS_FIXED_REVIEWED
+                    touched = True
+        if touched:
+            _save_records(output_dir, data)
+
+
+def report_counts(output_dir, data=None):
+    """``{"files", "names", "fixed", "review"}`` over the book's record."""
+    data = _load_records(output_dir) if data is None else data
+    rows = [row for file_rows in data["files"].values() for row in file_rows]
+    review = sum(1 for row in rows if row.get("status") == STATUS_REVIEW)
+    return {"files": len(data["files"]), "names": len(rows), "fixed": len(rows) - review, "review": review}
+
+
+def report_path(output_dir):
+    path = os.path.join(output_dir, REPORT_DIR, REPORT_FILE)
+    return path if os.path.isfile(path) else None
+
+
+def write_report(output_dir, data=None):
+    """Write glossary_name_check/report.html from the record; returns its path."""
+    data = _load_records(output_dir) if data is None else data
+    counts = report_counts(output_dir, data)
+    esc = html_lib.escape
+
+    def context(snippets):
+        return "".join(f"<div class='ctx'>{esc(b)}<mark>{esc(f)}</mark>{esc(a)}</div>"
+                       for b, f, a in snippets) or "<div class='ctx dim'>—</div>"
+
+    body = []
+    for output_file in sorted(data["files"], key=lambda n: (n in TITLE_FILES, n)):
+        for row in data["files"][output_file]:
+            status = row.get("status") or STATUS_REVIEW
+            css = "review" if status == STATUS_REVIEW else "fixed"
+            origin = row.get("origin") or "Book glossary"
+            body.append(
+                f"<tr class='{css}'><td>{esc(output_file)}</td>"
+                f"<td><b>{esc(' / '.join(row.get('variants') or ()))}</b> → <b>{esc(row.get('expected', ''))}</b>"
+                f"<div class='dim'>{esc(row.get('raw', ''))} · {esc(row.get('entry_type', ''))} · {esc(origin)}</div></td>"
+                f"<td class='num'>{int(row.get('occurrences') or 0)}</td>"
+                f"<td><span class='tag {css}'>{esc(status)}</span></td>"
+                f"<td>{context(row.get('snippets') or ())}</td></tr>")
+    title = os.path.basename(os.path.normpath(output_dir))
+    page = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Glossary name check — {esc(title)}</title>
+<style>
+body {{ font-family: Segoe UI, Arial, sans-serif; background: #1e1e1e; color: #ddd; margin: 24px; }}
+h1 {{ font-size: 20px; margin: 0 0 6px; }} .summary {{ margin: 0 0 18px; color: #aaa; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ border-bottom: 1px solid #333; padding: 8px 10px; text-align: left; vertical-align: top; }}
+th {{ background: #2a2a2a; position: sticky; top: 0; }}
+.num {{ text-align: right; }} .dim {{ color: #888; font-size: 12px; margin-top: 2px; }}
+.ctx {{ font-size: 13px; margin-bottom: 4px; }} mark {{ background: #6b4e16; color: #fff; padding: 0 2px; }}
+.tag {{ padding: 2px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }}
+.tag.fixed {{ background: #1f4d2b; color: #9be3ae; }} .tag.review {{ background: #5a3d12; color: #ffd28a; }}
+</style></head><body>
+<h1>Glossary name check — {esc(title)}</h1>
+<p class="summary">{counts['names']} name(s) in {counts['files']} file(s) differ from the glossary:
+{counts['fixed']} fixed, {counts['review']} to review. Fix the rest with QA Scanner settings →
+<i>Check glossary names in existing output…</i></p>
+<table><tr><th>File</th><th>Found → glossary name</th><th>Times</th><th>Status</th><th>Context (as translated)</th></tr>
+{''.join(body)}
+</table></body></html>
+"""
+    os.makedirs(os.path.join(output_dir, REPORT_DIR), exist_ok=True)
+    path = os.path.join(output_dir, REPORT_DIR, REPORT_FILE)
+    _write_text(path, page)
+    return path
+
+
+def summary_line(output_dir):
+    """The end-of-run log line, or None when the book has no record."""
+    if not os.path.isfile(_records_path(output_dir)):
+        return None
+    counts = report_counts(output_dir)
+    path = report_path(output_dir) or write_report(output_dir)
+    if not counts["names"]:
+        return f"📖 Glossary name check: every glossary name matches — report: {path}"
+    return (f"📖 Glossary name check: {counts['names']} name(s) in {counts['files']} file(s) differ from the "
+            f"glossary: {counts['fixed']} fixed, {counts['review']} to review — report: {path}")

@@ -9136,14 +9136,14 @@ def _create_processing_options_section(self, parent):
         "looked up in the translation. When it is missing, the translation is searched for "
         "a close spelling the model used instead (e.g. <i>Walter Argent</i> for glossary "
         "<i>Valter Argent</i>, <i>Gang Si-hyeon</i> for <i>Kang Si-hyeon</i>).<br><br>"
-        "<b>Auto-fix</b> replaces it when exactly one close spelling of a <i>character</i> name "
-        "was found; anything less certain is only logged.<br>"
+        "<b>Auto-fix</b> replaces what <i>Auto-fix strength</i> allows (default: exactly one close "
+        "spelling of a <i>character</i> name); anything less certain is only logged.<br>"
         "<b>Review first</b> only logs what it finds; fix chapters later with QA Scanner "
         "settings → <i>Check glossary names in existing output…</i><br><br>"
+        "Every finding is also listed in <i>glossary_name_check/report.html</i> in the book's output "
+        "folder (fixed / to review, with context); the end of the run logs its path.<br><br>"
         "Uses the entry types set here for Emergency Glossary Compliance (it works without turning "
-        "that on) and its own minimum raw entry length (default 0 = every length). Names shorter "
-        "than 3 characters are only reported, never fixed automatically, unless they differ just in "
-        "spacing or hyphens."
+        "that on) and its own minimum raw entry length (default 2; 0 = every length)."
     )
     name_check_row = QWidget()
     name_check_row_layout = QHBoxLayout(name_check_row)
@@ -9189,6 +9189,46 @@ def _create_processing_options_section(self, parent):
 
     name_check_min_chars_slider.valueChanged.connect(_on_name_check_min_chars_change)
     _on_name_check_min_chars_change(current_name_check_min_chars)
+
+    # Auto-fix strength: which findings Auto-fix replaces (and the review pre-checks)
+    name_check_autofix_level_row = QWidget()
+    name_check_autofix_level_layout = QHBoxLayout(name_check_autofix_level_row)
+    name_check_autofix_level_layout.setContentsMargins(20, 0, 0, 0)
+    name_check_autofix_level_layout.setSpacing(8)
+    name_check_autofix_level_layout.addWidget(QLabel("Auto-fix strength:"))
+    name_check_autofix_level_slider = QSlider(Qt.Horizontal)
+    name_check_autofix_level_slider.setRange(1, 3)
+    name_check_autofix_level_slider.setSingleStep(1)
+    name_check_autofix_level_slider.setPageStep(1)
+    name_check_autofix_level_slider.setTickPosition(QSlider.TicksBelow)
+    name_check_autofix_level_slider.setTickInterval(1)
+    name_check_autofix_level_slider.setFixedWidth(180)
+    name_check_autofix_level_slider.wheelEvent = lambda event: event.ignore()
+    name_check_autofix_level_slider.setToolTip(
+        "<b>Auto-fix strength</b><br>"
+        "<b>1 Conservative</b> (default): one close spelling of a <i>character</i> name; names under 3 "
+        "characters only when they differ just in spacing or hyphens.<br>"
+        "<b>2 Balanced</b>: also the other entry types set below (places, terms...).<br>"
+        "<b>3 Aggressive</b>: every close spelling found, several per name and short names included.<br>"
+        "Also decides which rows start checked in <i>Check glossary names in existing output…</i>")
+    try:
+        current_name_check_autofix_level = max(1, min(3, int(getattr(self, 'glossary_name_check_autofix_level_var', 1))))
+    except (TypeError, ValueError):
+        current_name_check_autofix_level = 1
+    self.glossary_name_check_autofix_level_var = current_name_check_autofix_level
+    name_check_autofix_level_slider.setValue(current_name_check_autofix_level)
+    name_check_autofix_level_layout.addWidget(name_check_autofix_level_slider)
+    name_check_autofix_level_value = QLabel()
+    name_check_autofix_level_value.setMinimumWidth(110)
+    name_check_autofix_level_layout.addWidget(name_check_autofix_level_value)
+    name_check_autofix_level_layout.addStretch()
+
+    def _on_name_check_autofix_level_change(value):
+        self.glossary_name_check_autofix_level_var = value
+        name_check_autofix_level_value.setText({1: "1 Conservative", 2: "2 Balanced", 3: "3 Aggressive"}.get(value, str(value)))
+
+    name_check_autofix_level_slider.valueChanged.connect(_on_name_check_autofix_level_change)
+    _on_name_check_autofix_level_change(current_name_check_autofix_level)
 
     # NER: an English named-entity model finds the names in the translation (ONNX Runtime builds:
     # Heavy / NoCuda / mobile); without it the capitalization heuristic does.
@@ -9239,6 +9279,7 @@ def _create_processing_options_section(self, parent):
             self.glossary_name_check_var = bool(checked)
             name_check_row.setVisible(checked)
             name_check_min_chars_row.setVisible(checked)
+            name_check_autofix_level_row.setVisible(checked)
             name_check_ner_row.setVisible(checked)
             name_check_desc.setVisible(checked)
             _refresh_glossary_scope_rows()
@@ -9271,6 +9312,7 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(name_check_cb)
     left_v.addWidget(name_check_row)
     left_v.addWidget(name_check_min_chars_row)
+    left_v.addWidget(name_check_autofix_level_row)
     left_v.addWidget(name_check_ner_row)
     left_v.addWidget(name_check_desc)
     left_v.addWidget(glossary_compliance_row)
@@ -9283,6 +9325,7 @@ def _create_processing_options_section(self, parent):
     glossary_compliance_desc.setVisible(is_enabled)
     name_check_row.setVisible(name_check_cb.isChecked())
     name_check_min_chars_row.setVisible(name_check_cb.isChecked())
+    name_check_autofix_level_row.setVisible(name_check_cb.isChecked())
     name_check_ner_row.setVisible(name_check_cb.isChecked())
     name_check_desc.setVisible(name_check_cb.isChecked())
     
