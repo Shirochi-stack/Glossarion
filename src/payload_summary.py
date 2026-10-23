@@ -229,7 +229,16 @@ def read_row(path, payloads_dir, logistics):
     }
     if row["key"] and row["api_key"]:
         row["key"] = f"{row['key']} · {row['api_key']}"
+    row["output_dir_uri"] = _folder_uri(row["output_dir"])
     return row, data
+
+
+def _folder_uri(folder):
+    """file:/// link for an absolute folder path (the output folder cell links to it)."""
+    try:
+        return Path(folder).as_uri() if folder and os.path.isabs(str(folder)) else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ---- pages -----------------------------------------------------------------------------------------
@@ -278,7 +287,12 @@ def _detail_page(row, data, payload_path):
     def value(v):
         return esc(str(v)) if v not in (None, "") else "<span class='na'>N/A</span>"
 
-    fields = "".join(f"<dt>{esc(label)}</dt><dd>{value(row.get(key))}</dd>"
+    def cell(key):
+        if key == "output_dir" and row.get("output_dir_uri"):
+            return f"<a href=\"{esc(row['output_dir_uri'])}\">{esc(str(row['output_dir']))}</a>"
+        return value(row.get(key))
+
+    fields = "".join(f"<dt>{esc(label)}</dt><dd>{cell(key)}</dd>"
                      for key, label in COLUMNS if key not in ("system", "user", "assistant"))
     messages = []
     for index, message in enumerate(data.get("messages") or [], 1):
@@ -504,6 +518,9 @@ function render() {{
       if (v === null || v === undefined || v === "") {{ td.textContent = "N/A"; td.classList.add("na"); }}
       else if (PREVIEW.has(key)) {{ td.classList.add("preview"); const d = document.createElement("div");
         d.className = "clamp"; d.textContent = v; td.appendChild(d); }}
+      else if (key === "output_dir" && r.output_dir_uri) {{ const a = document.createElement("a");
+        a.href = r.output_dir_uri; a.textContent = v; a.title = "Open " + v; a.target = "_blank";
+        a.onclick = e => e.stopPropagation(); td.appendChild(a); }}
       else {{ td.textContent = v; td.title = v; if (key === "time") td.classList.add("time"); }}
       tr.appendChild(td);
     }});

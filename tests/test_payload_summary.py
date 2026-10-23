@@ -102,3 +102,14 @@ def test_output_folder_and_context_come_from_the_payload(tmp_path):
         "messages": [{"role": "user", "content": "Extract names."}]})
     row, _data = ps.read_row(str(path), str(root), {})
     assert row["output_dir"] == "D:/Novels/Book A" and row["context"] == "glossary"
+
+
+def test_output_folder_is_a_link(tmp_path):
+    root = tmp_path / "Payloads"
+    book = tmp_path / "Books" / "[362697] 말랑쫀득"
+    path = write(root / "translation" / "T_1" / "translation_payload_1_d_A0_140000_w.json",
+                 {"model": "m", "output_dir": str(book), "messages": []})
+    row, data = ps.read_row(str(path), str(root), {})
+    assert row["output_dir_uri"].startswith("file:///") and row["output_dir_uri"].endswith("%EB%93%9D")
+    assert f'<a href="{row["output_dir_uri"]}">' in ps._detail_page(row, data, str(path))
+    assert ps._folder_uri("relative/folder") is None and ps._folder_uri(None) is None
