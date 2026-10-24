@@ -15,7 +15,7 @@
 # Promoting a suite once it has passed in CI is that one line.
 #
 # wheels-android / wheels-ios (.github/workflows/mobile-wheels.yml) build the security pins'
-# mobile wheels (cryptography 50.0.2, Pillow 12.3.0) and the on-device engine with vision
+# mobile wheels (cryptography 50.0.2, Pillow 13.0.0) and the on-device engine with vision
 # (llama-cpp-python 0.3.32 with libmtmd; src/mobile/ci/wheels/wheelhouse.toml), which
 # no index has. Android needs prepare + wheels-android, the iOS jobs prepare + wheels-ios. Each
 # build job hands them to flet build through .github/actions/mobile-wheelhouse (strict check +

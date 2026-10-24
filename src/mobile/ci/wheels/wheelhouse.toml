@@ -1,4 +1,4 @@
-# Self-built mobile wheels: the security pins (cryptography==50.0.2, pillow==12.3.0) and the on-device
+# Self-built mobile wheels: the security pins (cryptography==50.0.2, pillow==13.0.0) and the on-device
 # engine with vision (llama-cpp-python==0.3.32 with libmtmd).
 #
 # pypi.flet.dev and PyPI have no Android/iOS cp313 wheels for these versions (pypi.flet.dev's
@@ -104,14 +104,14 @@ requires_dist = [
     "typing-extensions>=4.13.2; python_full_version < \"3.11\"",
 ]
 
-# iOS keeps PyPI's official pillow-12.3.0 cp313 wheels; only Android is built here.
+# iOS keeps PyPI's official pillow-13.0.0 cp313 wheels; only Android is built here.
 # Android links the flet-lib* C libraries as published on pypi.flet.dev (follow-up: newer
 # libjpeg-turbo / FreeType builds).
 [[wheel]]
 name = "pillow"
-version = "12.3.0"
+version = "13.0.0"
 recipe = "recipes/pillow"
-sdist_sha256 = "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce"
+sdist_sha256 = "cdcd1ba258178f7356d74170c9a81ba4eab6a5d55748bc402a5a2a6fe6be3510"
 targets = ["arm64-v8a", "x86_64"]
 requires_dist = ["flet-libjpeg==3.0.90", "flet-libfreetype==2.13.3", "flet-libwebp==1.6.0"]
 

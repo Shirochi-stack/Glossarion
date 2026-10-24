@@ -11,7 +11,7 @@ torchvision and ultralytics; ONNX inference remains available. Existing macOS
 Lite packaging specifications already exclude the PyTorch/ultralytics stack.
 PyTorch model loading and PT-to-ONNX conversion are unavailable on Intel.
 
-Mobile pyproject.toml and uv.lock use Pillow 12.3.0 and cryptography 50.0.2.
+Mobile pyproject.toml and uv.lock use Pillow 13.0.0 and cryptography 50.0.2.
 cryptography 50.0.2 also avoids GHSA-g6cj-pr64-35w5, which upgrading to 49.0.0
 would introduce even though it was not among the original repository alerts.
 

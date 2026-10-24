@@ -208,7 +208,7 @@ def test_pyproject_pins_exactly_the_tier_b_set():
     for dist in NOT_SHIPPED:
         assert dist not in deps and dist not in platform_deps, f"{dist} must not be pinned (see the module docstring)"
     # The security pins are never touched by Tier B.
-    assert deps.get("cryptography") == "50.0.2" and deps.get("pillow") == "12.3.0"
+    assert deps.get("cryptography") == "50.0.2" and deps.get("pillow") == "13.0.0"
 
 
 @needs_toml

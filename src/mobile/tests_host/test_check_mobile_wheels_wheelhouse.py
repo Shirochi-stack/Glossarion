@@ -45,7 +45,7 @@ wh = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wh)
 
 CRYPTO_SHA = "7b46165bb56eb4704e2eaaf86f3c940d19154535d9b0ca7d6d590b04060e00d5"
-PILLOW_SHA = "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce"
+PILLOW_SHA = "cdcd1ba258178f7356d74170c9a81ba4eab6a5d55748bc402a5a2a6fe6be3510"
 CRYPTO_REQS = ['cffi>=2.0.0; platform_python_implementation != "PyPy"',
                'typing-extensions>=4.13.2; python_full_version < "3.11"']
 PILLOW_REQS = ["flet-libjpeg==3.0.90", "flet-libfreetype==2.13.3", "flet-libwebp==1.6.0"]
@@ -96,7 +96,7 @@ requires_dist = {json.dumps(CRYPTO_REQS)}
 
 [[wheel]]
 name = "pillow"
-version = "12.3.0"
+version = "13.0.0"
 recipe = "recipes/pillow"
 sdist_sha256 = "{PILLOW_SHA}"
 targets = {json.dumps(ANDROID)}
@@ -109,7 +109,7 @@ name = "fixture"
 version = "1.0"
 dependencies = [
   "cryptography==50.0.2",
-  "pillow==12.3.0",
+  "pillow==13.0.0",
   "app-pure==1.0",
 ]
 
@@ -127,8 +127,8 @@ sdist = {{ url = "https://files.pythonhosted.org/x/cryptography-50.0.2.tar.gz", 
 
 [[package]]
 name = "pillow"
-version = "12.3.0"
-sdist = {{ url = "https://files.pythonhosted.org/x/pillow-12.3.0.tar.gz", hash = "sha256:{PILLOW_SHA}" }}
+version = "13.0.0"
+sdist = {{ url = "https://files.pythonhosted.org/x/pillow-13.0.0.tar.gz", hash = "sha256:{PILLOW_SHA}" }}
 """
 
 
@@ -169,7 +169,7 @@ def full_wheelhouse(directory: Path, targets_crypto=None, targets_pillow=None) -
         make_wheel(directory, "cryptography", "50.0.2", f"cp313-cp313-{LABEL[t]}",
                    requires=CRYPTO_REQS + ['bcrypt>=3.1.5; extra == "ssh"'])
     for t in targets_pillow if targets_pillow is not None else ANDROID:
-        make_wheel(directory, "pillow", "12.3.0", f"cp313-cp313-{LABEL[t]}",
+        make_wheel(directory, "pillow", "13.0.0", f"cp313-cp313-{LABEL[t]}",
                    requires=["flet-libjpeg (==3.0.90)", "flet-libfreetype (==2.13.3)", "flet-libwebp (==1.6.0)",
                              'furo; extra == "docs"'])
     return directory
@@ -238,9 +238,9 @@ def default_index() -> FakeIndex:
     ix.add("flet", "cffi", *(f"cffi-2.0.0-1-cp313-cp313-{LABEL[t]}.whl" for t in ANDROID + IOS))
     ix.meta[("cffi", "2.0.0")] = ["pycparser; implementation_name != 'PyPy'"]
     ix.add("pypi", "pycparser", "pycparser-2.23-py3-none-any.whl", requires=[], version="2.23")
-    ix.add("pypi", "pillow", "pillow-12.3.0.tar.gz", "pillow-12.3.0-cp313-cp313-manylinux_2_28_x86_64.whl",
-           *(f"pillow-12.3.0-cp313-cp313-{LABEL[t]}.whl" for t in IOS),
-           requires=['furo; extra == "docs"'], version="12.3.0")
+    ix.add("pypi", "pillow", "pillow-13.0.0.tar.gz", "pillow-13.0.0-cp313-cp313-manylinux_2_28_x86_64.whl",
+           *(f"pillow-13.0.0-cp313-cp313-{LABEL[t]}.whl" for t in IOS),
+           requires=['furo; extra == "docs"'], version="13.0.0")
     ix.add("flet", "pillow", *(f"pillow-12.2.0-2-cp313-cp313-{LABEL[t]}.whl" for t in ANDROID))
     for lib, ver, build in (("flet-libjpeg", "3.0.90", "1"), ("flet-libfreetype", "2.13.3", "10"),
                             ("flet-libwebp", "1.6.0", "1")):
@@ -437,10 +437,10 @@ def test_tag_priority_follows_pip():
 
 def test_pip_rank_build_tag_breaks_ties_and_index_wins_exact_ties():
     t = cmw.TARGETS["iphoneos.arm64"]
-    local = cmw.parse_filename("pillow-12.3.0-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl", "pillow", "wheelhouse")
-    index_same = cmw.parse_filename("pillow-12.3.0-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl", "pillow", "pypi")
-    index_plain = cmw.parse_filename("pillow-12.3.0-cp313-cp313-ios_13_0_arm64_iphoneos.whl", "pillow", "pypi")
-    index_more = cmw.parse_filename("pillow-12.3.0-1001-cp313-cp313-ios_13_0_arm64_iphoneos.whl", "pillow", "flet")
+    local = cmw.parse_filename("pillow-13.0.0-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl", "pillow", "wheelhouse")
+    index_same = cmw.parse_filename("pillow-13.0.0-1000-cp313-cp313-ios_13_0_arm64_iphoneos.whl", "pillow", "pypi")
+    index_plain = cmw.parse_filename("pillow-13.0.0-cp313-cp313-ios_13_0_arm64_iphoneos.whl", "pillow", "pypi")
+    index_more = cmw.parse_filename("pillow-13.0.0-1001-cp313-cp313-ios_13_0_arm64_iphoneos.whl", "pillow", "flet")
     assert local.build == (1000, "") and index_plain.build == ()
 
     def best(*files):
@@ -450,7 +450,7 @@ def test_pip_rank_build_tag_breaks_ties_and_index_wins_exact_ties():
     assert best(local, index_same) is index_same
     assert best(local, index_more) is index_more
     # a better tag beats any build tag
-    abi3 = cmw.parse_filename("pillow-12.3.0-1000-cp311-abi3-ios_13_0_arm64_iphoneos.whl", "pillow", "wheelhouse")
+    abi3 = cmw.parse_filename("pillow-13.0.0-1000-cp311-abi3-ios_13_0_arm64_iphoneos.whl", "pillow", "wheelhouse")
     assert best(abi3, index_plain) is index_plain
 
 
@@ -483,7 +483,7 @@ def test_wheelhouse_mode_passes(proj):
     assert rc == 0, errors_text(data)
     for target in ("android-arm64", "android-x86_64", "ios-device", "ios-sim-arm64", "ios-sim-x86_64"):
         assert data["targets"][target]["cryptography"]["source"] == "wheelhouse"
-    assert data["targets"]["android-x86_64"]["pillow"]["file"] == "pillow-12.3.0-1000-cp313-cp313-android_24_x86_64.whl"
+    assert data["targets"]["android-x86_64"]["pillow"]["file"] == "pillow-13.0.0-1000-cp313-cp313-android_24_x86_64.whl"
     text = report.read_text(encoding="utf-8")
     assert "(wheelhouse)" in text and "Self-built wheels" in text
 
@@ -536,16 +536,16 @@ def test_pin_mismatch_is_an_error(proj):
 
 def test_unpinned_range_is_an_error(proj):
     pp = proj["root"] / "pyproject.toml"
-    pp.write_text(PYPROJECT.replace("pillow==12.3.0", "pillow>=12.3.0"), encoding="utf-8")
+    pp.write_text(PYPROJECT.replace("pillow==13.0.0", "pillow>=13.0.0"), encoding="utf-8")
     rc, data = run_main(proj, "--wheelhouse-plan")
-    assert rc == 1 and "pyproject has 'pillow>=12.3.0'" in errors_text(data)
+    assert rc == 1 and "pyproject has 'pillow>=13.0.0'" in errors_text(data)
 
 
 def test_uv_lock_sdist_mismatch_is_an_error(proj):
     lock = proj["root"] / "uv.lock"
     lock.write_text(UV_LOCK.replace(PILLOW_SHA, "f" * 64), encoding="utf-8")
     rc, data = run_main(proj, "--wheelhouse-plan")
-    assert rc == 1 and "pillow 12.3.0: sdist_sha256" in errors_text(data)
+    assert rc == 1 and "pillow 13.0.0: sdist_sha256" in errors_text(data)
     lock.unlink()
     rc, data = run_main(proj, "--wheelhouse-plan")
     assert rc == 1 and "uv.lock: not found" in errors_text(data)
@@ -553,11 +553,11 @@ def test_uv_lock_sdist_mismatch_is_an_error(proj):
 
 def test_wrong_requires_dist_is_an_error(proj):
     whdir = full_wheelhouse(proj["tmp"] / "wh", targets_pillow=["x86_64"])
-    make_wheel(whdir, "pillow", "12.3.0", "cp313-cp313-android_24_arm64_v8a",
+    make_wheel(whdir, "pillow", "13.0.0", "cp313-cp313-android_24_arm64_v8a",
                requires=["flet-libjpeg==3.0.90", "flet-libfreetype==2.13.3"])
     rc, data = run_main(proj, "--wheelhouse", str(whdir))
     assert rc == 1
-    assert "pillow-12.3.0-1000-cp313-cp313-android_24_arm64_v8a.whl: Requires-Dist without extras" in errors_text(data)
+    assert "pillow-13.0.0-1000-cp313-cp313-android_24_arm64_v8a.whl: Requires-Dist without extras" in errors_text(data)
 
 
 def test_wrong_build_tag_and_tag_are_errors(proj):
@@ -628,13 +628,13 @@ def test_verify_wheelhouse_ok(proj, capsys):
 def test_verify_wheelhouse_catches_tampering(proj, capsys):
     whdir = full_wheelhouse(proj["tmp"] / "wh", targets_crypto=ANDROID)
     write_sums(whdir)
-    victim = whdir / "pillow-12.3.0-1000-cp313-cp313-android_24_x86_64.whl"
+    victim = whdir / "pillow-13.0.0-1000-cp313-cp313-android_24_x86_64.whl"
     with zipfile.ZipFile(victim, "a") as zf:   # a member RECORD does not know
         zf.writestr("PIL/_evil.so", b"payload")
     assert verify(proj, whdir, "android") == 1
     out = capsys.readouterr().out
     assert "PIL/_evil.so is not in RECORD" in out
-    assert "pillow-12.3.0-1000-cp313-cp313-android_24_x86_64.whl: sha256 differs from SHA256SUMS" in out
+    assert "pillow-13.0.0-1000-cp313-cp313-android_24_x86_64.whl: sha256 differs from SHA256SUMS" in out
 
 
 def test_verify_wheelhouse_record_hash_mismatch(proj, capsys):
@@ -663,7 +663,7 @@ def test_verify_installed(proj, capsys):
     root = proj["root"]
     sp = proj["tmp"] / "site-packages"
     make_site_packages(sp, ANDROID)
-    make_site_packages(sp, ANDROID, name="pillow", version="12.3.0")
+    make_site_packages(sp, ANDROID, name="pillow", version="13.0.0")
     whdir = full_wheelhouse(proj["tmp"] / "wh", targets_crypto=ANDROID)
     argv = ["--wheelhouse-manifest", str(root / "wheelhouse.toml"), "--verify-installed", str(sp),
             "--platform", "android"]
@@ -673,12 +673,12 @@ def test_verify_installed(proj, capsys):
     # pypi.flet.dev's copy: Build 11
     other = proj["tmp"] / "site-packages-index"
     make_site_packages(other, ANDROID, build="11")
-    make_site_packages(other, ANDROID, name="pillow", version="12.3.0", build=None)
+    make_site_packages(other, ANDROID, name="pillow", version="13.0.0", build=None)
     argv[3] = str(other)
     assert cmw.main(argv) == 1
     out = capsys.readouterr().out
     assert "arm64-v8a: cryptography 50.0.2 was installed from an index, not the wheelhouse (WHEEL Build 11" in out
-    assert "x86_64: pillow 12.3.0 was installed from an index, not the wheelhouse (WHEEL Build (none)" in out
+    assert "x86_64: pillow 13.0.0 was installed from an index, not the wheelhouse (WHEEL Build (none)" in out
     # nothing built for the platform at all
     argv[3] = str(proj["tmp"] / "empty")
     assert cmw.main(argv) == 1
@@ -723,7 +723,7 @@ def test_real_manifest_matches_pins_lock_and_recipes():
     manifest = cmw.load_wheelhouse_manifest(cmw.DEFAULT_WHEELHOUSE_MANIFEST)
     project = cmw.load_project(cmw.DEFAULT_PYPROJECT)
     assert cmw.check_manifest_pins(manifest, project, MOBILE / "uv.lock") == []
-    assert {w.name: w.version for w in manifest.wheels} == {"cryptography": "50.0.2", "pillow": "12.3.0",
+    assert {w.name: w.version for w in manifest.wheels} == {"cryptography": "50.0.2", "pillow": "13.0.0",
                                                             "llama-cpp-python": "0.3.32"}
     assert manifest.build_tag > 11, "must outrank pypi.flet.dev's build tags"
     crypto = manifest.wheel("cryptography")
@@ -817,10 +817,10 @@ def test_recipes_render_like_forge():
         # forge's build environment starts empty: the recipe is the only way to reach rustc
         assert ios["build"]["script_env"]["IPHONEOS_DEPLOYMENT_TARGET"] == manifest.data["toolchain"]["ios_deployment_target"]
     pillow = _render_recipe(recipes / "pillow" / "meta.yaml", "android")
-    assert pillow["package"]["version"] == "12.3.0" and pillow["build"]["number"] == 1000
-    assert pillow["patches"] == ["setup-12.x.patch"]
+    assert pillow["package"]["version"] == "13.0.0" and pillow["build"]["number"] == 1000
+    assert pillow["patches"] == ["setup-13.x.patch"]
     assert pillow["requirements"]["host"] == ["flet-libjpeg 3.0.90", "flet-libfreetype 2.13.3", "flet-libwebp 1.6.0"]
-    assert (recipes / "pillow" / "patches" / "setup-12.x.patch").is_file()
+    assert (recipes / "pillow" / "patches" / "setup-13.x.patch").is_file()
 
 
 def test_llama_recipe_builds_cpu_variants_only_for_android_arm64():
@@ -974,7 +974,7 @@ def test_recipe_meta_reader():
     assert wh.recipe_meta(recipes / "cryptography" / "meta.yaml") == {
         "name": "cryptography", "version": "50.0.2", "openssl": "openssl 3.5.9", "number": "1000",
         "ios_deployment_target": "13.0"}
-    assert wh.recipe_meta(recipes / "pillow" / "meta.yaml") == {"name": "Pillow", "version": "12.3.0", "number": "1000"}
+    assert wh.recipe_meta(recipes / "pillow" / "meta.yaml") == {"name": "Pillow", "version": "13.0.0", "number": "1000"}
 
 
 def test_ios_recipes_must_set_the_deployment_target(tmp_path):
@@ -1002,12 +1002,13 @@ def test_ios_recipes_must_set_the_deployment_target(tmp_path):
     assert ctx.recipe_dir(ctx.manifest.wheel("pillow")) == (recipes / "pillow").resolve()
 
 
-def test_pillow_patch_is_upstream_verbatim():
-    """recipes/pillow/patches/setup-12.x.patch = mobile-forge@0fadbfab's file (git blob id)."""
-    data = (MOBILE / "ci" / "wheels" / "recipes" / "pillow" / "patches" / "setup-12.x.patch").read_bytes()
+def test_pillow_patch_is_the_reviewed_file():
+    """recipes/pillow/patches/setup-13.x.patch = mobile-forge@0fadbfab's setup-12.x.patch re-anchored on
+    Pillow 13.0.0's setup.py (git blob id of the reviewed file; see recipes/pillow/meta.yaml)."""
+    data = (MOBILE / "ci" / "wheels" / "recipes" / "pillow" / "patches" / "setup-13.x.patch").read_bytes()
     data = data.replace(b"\r\n", b"\n")      # a Windows checkout may add CRs
     blob = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
-    assert blob == "62279a3576b8e1ea0997eb1fe89c7c7e337729eb"
+    assert blob == "65ec2431c5056fad7ce5efa5ca3d5fd874f460fb"
     assert (MOBILE / "ci" / "wheels" / "recipes" / "LICENSE.mobile-forge").read_text(encoding="utf-8").startswith(
         "Copyright (c) 2023 Russell Keith-Magee.")
 
@@ -1414,7 +1415,7 @@ def _android_wheelhouse(directory: Path, rust_symbols, rust_text=OPENSSL_TEXT) -
                    files={RUST_SO: make_elf(machine=machine, needed=RUST_NEEDED, symbols=rust_symbols, extra=rust_text)})
         pil = make_elf(machine=machine, needed=("libjpeg.so", "libpython3.13.so", "libc.so"),
                        symbols=[("PyModule_Create2", GLOBAL, UND), ("malloc", GLOBAL, UND)])
-        make_wheel(directory, "pillow", "12.3.0", f"cp313-cp313-{LABEL[target]}", requires=PILLOW_REQS,
+        make_wheel(directory, "pillow", "13.0.0", f"cp313-cp313-{LABEL[target]}", requires=PILLOW_REQS,
                    files={f"PIL/{m}.cpython-313-{triple}.so": pil for m in wh.PILLOW_MODULES})
     return directory
 
@@ -1579,7 +1580,7 @@ def test_verify_native_wheel(tmp_path):
                      files={so: make_elf(machine=62, needed=("libpython3.13.so", "libc.so"), extra=OPENSSL_TEXT)})
     errors, notes = wh.verify_native_wheel(whl, "cryptography", "x86_64", "3.5.9", (13, 0))
     assert errors == [] and notes
-    pil = make_wheel(tmp_path, "pillow", "12.3.0", "cp313-cp313-android_24_arm64_v8a",
+    pil = make_wheel(tmp_path, "pillow", "13.0.0", "cp313-cp313-android_24_arm64_v8a",
                      files={"PIL/_imaging.cpython-313-aarch64-linux-android.so": make_elf(needed=("libjpeg.so",))})
     errors, _ = wh.verify_native_wheel(pil, "pillow", "arm64-v8a", "3.5.9", (13, 0))
     assert errors == [f"{pil.name}: no PIL/_imagingft*.so", f"{pil.name}: no PIL/_webp*.so"]
@@ -1591,7 +1592,7 @@ def selftest_report(**overrides) -> dict:
         "checks": [
             {"name": "fernet", "status": "pass", "detail": {"version": "50.0.2", "openssl": "OpenSSL 3.5.9 30 Sep 2026"}},
             {"name": "pillow", "status": "pass", "detail": {
-                "version": "12.3.0", "features": {"jpg": True, "zlib": True, "webp": True, "freetype2": True},
+                "version": "13.0.0", "features": {"jpg": True, "zlib": True, "webp": True, "freetype2": True},
                 "roundtrip": {"JPEG": [16, 16], "PNG": [16, 16], "WEBP": [16, 16]}, "font": "FreeTypeFont"}},
         ],
     }
@@ -1600,18 +1601,18 @@ def selftest_report(**overrides) -> dict:
 
 
 def test_selftest_assertion():
-    assert wh.check_selftest_report(selftest_report(), "android", "50.0.2", "3.5.9", "12.3.0") == []
-    errs = wh.check_selftest_report(selftest_report(suite="e2e", platform="ios"), "android", "50.0.2", "3.5.9", "12.3.0")
+    assert wh.check_selftest_report(selftest_report(), "android", "50.0.2", "3.5.9", "13.0.0") == []
+    errs = wh.check_selftest_report(selftest_report(suite="e2e", platform="ios"), "android", "50.0.2", "3.5.9", "13.0.0")
     assert any("suite is 'e2e'" in e for e in errs) and any("platform is 'ios'" in e for e in errs)
     report = selftest_report()
     report["checks"][0]["detail"]["openssl"] = "OpenSSL 3.0.21 27 Jan 2026"
     report["checks"][1]["detail"]["features"]["webp"] = False
     report["checks"][1]["detail"]["font"] = "ImageFont"
-    errs = "\n".join(wh.check_selftest_report(report, "android", "50.0.2", "3.5.9", "12.3.0"))
+    errs = "\n".join(wh.check_selftest_report(report, "android", "50.0.2", "3.5.9", "13.0.0"))
     assert "expected OpenSSL 3.5.9" in errs and "['webp']" in errs and "FreeTypeFont" in errs
     report = selftest_report()
     del report["checks"][1]
-    assert wh.check_selftest_report(report, "android", "50.0.2", "3.5.9", "12.3.0") == [
+    assert wh.check_selftest_report(report, "android", "50.0.2", "3.5.9", "13.0.0") == [
         "check 'pillow' is missing from the report"]
 
 
@@ -1621,9 +1622,9 @@ def test_assert_selftest_command_reads_pins(proj, tmp_path, capsys):
     report.write_text(json.dumps(selftest_report()), encoding="utf-8")
     base = ["--manifest", str(root / "wheelhouse.toml"), "--pyproject", str(root / "pyproject.toml")]
     assert wh.main(base + ["assert-selftest", "--platform", "android", str(report)]) == 0
-    (root / "pyproject.toml").write_text(PYPROJECT.replace("pillow==12.3.0", "pillow==12.4.0"), encoding="utf-8")
+    (root / "pyproject.toml").write_text(PYPROJECT.replace("pillow==13.0.0", "pillow==13.0.1"), encoding="utf-8")
     assert wh.main(base + ["assert-selftest", "--platform", "android", str(report)]) == 1
-    assert "pyproject pins pillow 12.4.0" in capsys.readouterr().err
+    assert "pyproject pins pillow 13.0.1" in capsys.readouterr().err
 
 
 def wheels_marker(report: dict) -> str:
@@ -1655,7 +1656,7 @@ def test_assert_selftest_reads_the_marker_from_logcat(proj, tmp_path, capsys):
     assert wh.main(base + [str(log)]) == 1
     assert "expected OpenSSL 3.5.9" in capsys.readouterr().out
     report, source = wh.load_selftest_evidence([log])
-    assert wh.check_selftest_report(report, "android", "50.0.2", "3.0.21", "12.3.0") == [] and str(log) in source
+    assert wh.check_selftest_report(report, "android", "50.0.2", "3.0.21", "13.0.0") == [] and str(log) in source
 
 
 def test_assert_selftest_falls_back_through_its_inputs(proj, tmp_path, capsys):
@@ -1817,8 +1818,8 @@ def test_collect_and_assemble(proj, tmp_path, monkeypatch):
     base = ["--manifest", str(root / "wheelhouse.toml"), "--pyproject", str(root / "pyproject.toml")]
     assert wh.main(base + ["collect", "--platform", "android", "--dist", str(dist), "--cache", str(cache)]) == 0
     assert sorted(p.name for p in (cache / "pillow").iterdir()) == [
-        "build-info.json", "pillow-12.3.0-1000-cp313-cp313-android_24_arm64_v8a.whl",
-        "pillow-12.3.0-1000-cp313-cp313-android_24_x86_64.whl"]
+        "build-info.json", "pillow-13.0.0-1000-cp313-cp313-android_24_arm64_v8a.whl",
+        "pillow-13.0.0-1000-cp313-cp313-android_24_x86_64.whl"]
     assert len(list((cache / "cryptography").glob("*.whl"))) == 2      # only the Android slices
     assert wh.main(base + ["assemble", "--platform", "android", "--cache", str(cache), "--out", str(out)]) == 0
     assert wh.main(base + ["provenance", "--platform", "android", "--wheelhouse", str(out), "--cache", str(cache),

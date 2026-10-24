@@ -1,15 +1,18 @@
 # Glossarion overlay of recipes/pillow/meta.yaml from flet-dev/mobile-forge
 # (https://github.com/flet-dev/mobile-forge at 0fadbfab0d63d11164030dfddc955ed980e32e2c,
 # BSD-3-Clause, see ../LICENSE.mobile-forge). build_wheels.sh runs forge on this directory
-# in place. Only two values differ from upstream: version "12.3.0" (the security pin;
-# upstream 12.2.0) and build number 1000 (upstream 2). patches/setup-12.x.patch is the
-# upstream file byte for byte (git blob 62279a3576b8e1ea0997eb1fe89c7c7e337729eb); it
-# applies to Pillow 12.3.0's setup.py. Forge is given a directory, so the template's
-# `version` is unset and the setup-10.x branch below is never rendered.
+# in place. Only two values differ from upstream: version "13.0.0" (the security pin;
+# upstream 12.2.0) and build number 1000 (upstream 2). patches/setup-13.x.patch is the
+# upstream setup-12.x.patch (git blob 62279a3576b8e1ea0997eb1fe89c7c7e337729eb) with one
+# hunk re-anchored: Pillow 13 replaced the two sys.prefix _add_directory calls with
+# sysconfig LIBDIR/INCLUDEDIR ones, and the patch now wraps those in the same
+# `if not self.disable_platform_guessing:` guard. The other three hunks are unchanged. Forge
+# is given a directory, so the template's `version` is unset and the setup-10.x branch
+# below is never rendered.
 #
 package:
   name: Pillow
-  version: "12.3.0"
+  version: "13.0.0"
 
 requirements:
   # PNG support is internal: libpng is not used.
@@ -36,10 +39,11 @@ requirements:
 # {% if not version or version >= (12,0,0) %}
 # pillow >= 12.x  (12.x drops `self.add_imaging_libs = ""` from
 # initialize_options, so the 11.x patch's hunk-1 context no longer
-# matches; the 12.x patch is otherwise identical to the 11.x one.)
+# matches; the 12.x patch is otherwise identical to the 11.x one, and
+# the 13.x patch is the 12.x one re-anchored on 13.0.0's setup.py.)
 
 patches:
-  - setup-12.x.patch
+  - setup-13.x.patch
 
 # {% else %}
 # pillow <= 10.x
