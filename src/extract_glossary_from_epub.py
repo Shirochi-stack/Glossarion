@@ -524,7 +524,13 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config, con
         context == 'glossary'
         and os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
     )
-    use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1' or config.get('use_glossary_refinement_keys', False)
+    # The GUI exports the live switch ('0' or '1'); config.json can still hold the
+    # state from before the pool was switched off, so it only decides when unset.
+    refinement_env = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS')
+    if refinement_env in ('0', '1'):
+        use_refinement_keys = refinement_env == '1'
+    else:
+        use_refinement_keys = bool(config.get('use_glossary_refinement_keys', False))
     refinement_keys = []
     if use_refinement_keys:
         refinement_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]')

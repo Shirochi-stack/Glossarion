@@ -70,3 +70,27 @@ def test_refinement_pool_disable_and_reenable_routes_and_identifies_the_right_ke
     assert send('translation') == ('sk-main', 'Single Key', False)
     tls = client._get_thread_local_client()
     assert getattr(tls, 'key_identifier', None) != 'GlossaryRefinementKey#1 (gpt-4o-mini)'
+
+
+@pytest.mark.parametrize('env_value,config_value,expected', [
+    ('0', True, False),   # switched off in the dialog; config.json still says on
+    ('1', False, True),
+    (None, True, True),   # standalone run without the GUI's env: config decides
+    (None, False, False),
+])
+def test_glossary_client_follows_the_live_refinement_switch_over_stale_config(
+        tmp_path, monkeypatch, env_value, config_value, expected):
+    import extract_glossary_from_epub as extractor
+
+    if env_value is None:
+        monkeypatch.delenv('USE_GLOSSARY_REFINEMENT_KEYS', raising=False)
+    else:
+        monkeypatch.setenv('USE_GLOSSARY_REFINEMENT_KEYS', env_value)
+    monkeypatch.setenv('GLOSSARY_REFINEMENT_API_KEYS', '[]')
+    config = {'use_glossary_refinement_keys': config_value, 'glossary_refinement_keys': REFINEMENT_KEYS}
+
+    extractor.create_client_with_multi_key_support(
+        'sk-main', 'gpt-4o-mini', str(tmp_path), config, context='glossary_refinement')
+
+    assert (UnifiedClient._glossary_refinement_key_pool is not None) is expected
+    assert (extractor.os.environ.get('USE_GLOSSARY_REFINEMENT_KEYS') == '1') is expected
