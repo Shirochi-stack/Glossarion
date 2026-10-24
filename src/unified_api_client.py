@@ -7661,6 +7661,8 @@ class UnifiedClient:
             'instance_pool': self.__dict__.get('_api_key_pool', None),
             'active_key_pool_scope': getattr(self, '_active_key_pool_scope', None),
             'active_key_pool_expected_pool': getattr(self, '_active_key_pool_expected_pool', None),
+            'key_identifier': getattr(self, 'key_identifier', None),
+            'current_key_index': getattr(self, 'current_key_index', None),
             'dedicated_override_lock_acquired': True,
         }
 
@@ -8091,6 +8093,7 @@ class UnifiedClient:
             except Exception:
                 pass
             self.current_key_output_token_limit = None
+            self._restore_key_identity_after_dedicated_override(state.get('key_identifier'), state.get('current_key_index'))
             self._restoring_dedicated_key_override = True
             try:
                 self._setup_client()
@@ -8104,6 +8107,28 @@ class UnifiedClient:
                     self._dedicated_override_lock.release()
                 except Exception:
                     pass
+
+    def _restore_key_identity_after_dedicated_override(self, key_identifier, key_index):
+        """Hand the thread back to its own pool or single key after a dedicated-pool request.
+
+        The override labels this client and the thread with the dedicated key
+        (``GlossaryRefinementKey#1 (...)``). Left in place, every later request on the
+        thread was still identified as that key although it went out with another one
+        (single-key mode never re-initializes an "initialized" thread), e.g. after the
+        Refinement pool was switched off and on again.
+        """
+        self.key_identifier = key_identifier
+        self.current_key_index = key_index
+        try:
+            tls = self._get_thread_local_client()
+            tls.initialized = False
+            tls.api_key = None
+            tls.model = None
+            tls.key_index = None
+            tls.key_identifier = None
+            tls.request_count = 0
+        except Exception:
+            pass
 
     def _switch_anthropic_payload_to_adaptive(self, payload: dict, endpoint_cache_key: str = None):
         """Rewrite budget thinking as adaptive and cache the model as adaptive-only."""
@@ -8201,6 +8226,8 @@ class UnifiedClient:
         _original_multi_key_mode = None
         _had_instance_pool = False
         _original_instance_pool = None
+        _original_key_identifier = getattr(self, 'key_identifier', None)
+        _original_key_index = getattr(self, 'current_key_index', None)
         _vision_override_lock_acquired = False
         _glossary_override_lock_acquired = False
         def _retry_without_glossary_refinement_pool(reason: str):
@@ -9115,6 +9142,7 @@ class UnifiedClient:
                 except Exception:
                     pass
                 self.current_key_output_token_limit = None
+                self._restore_key_identity_after_dedicated_override(_original_key_identifier, _original_key_index)
                 self._restoring_dedicated_key_override = True
                 try:
                     self._setup_client()
