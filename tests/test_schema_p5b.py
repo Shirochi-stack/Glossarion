@@ -215,8 +215,9 @@ def test_settings_map_converters_are_the_same_objects_or_behave_the_same():
             expected, actual = _outcome(old_conv, value), _outcome(new_conv, value)
             assert expected == actual, (key, value, expected, actual)
             checked += 1
-    # 74: the delay row's lambda became the named delay_range_min (2026-10-21, approved_changes.py)
-    assert lambdas == 74 and checked > 74 * 120
+    # 74: the delay row's lambda became the named delay_range_min (2026-10-21, approved_changes.py);
+    # 77: + glossary_name_check_min_chars / _autofix_level and payload_cleanup_limit_mb (2026-10-22/23)
+    assert lambdas == 77 and checked > 77 * 120
 
 
 BASE_INPUTS = [

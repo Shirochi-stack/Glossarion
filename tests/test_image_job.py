@@ -169,38 +169,39 @@ def _git_ok():
 #: line, new line count) of each non-equal difflib block. U9 gap closures moved more code out (pinned by
 #: tests/parity/test_u9_extractions.py, test_u9_gap_moves.py and tests/test_translation_pipeline.py); their
 #: spans are listed too, so the file still changes nowhere else.
+#: 2026-10-24: +17 / +6 lines in the legacy sweep (approved payload cleanup limit), later spans +23.
 TG_U7_SPANS = (
-    (224, 324, 2),       # U9: _fmt_bytes / _sweep_size_capped_dir -> shutdown_utils (imported under the old names)
-    (328, 328, 1),       #   _sweep_large_caches docstring
-    (330, 415, 4),       #   ... its body calls shutdown_utils.sweep_large_caches(script_file=__file__)
-    (1342, 1341, 8),     # import the Direct Text rule functions from direct_text_store
-    (2751, 2759, 5),     # dialog __init__: configured_glossary_override_mode(...)
-    (3560, 3564, 2),     # _on_glossary_override_toggled: glossary_override_config_updates(mode)
-    (3567, 3571, 1),     #   ... config.update(updates)
-    (3593, 3593, 0),     # _request_direct_text_manual_glossary: json_lib import gone
-    (3596, 3596, 1),     #   allowed_extensions = set(MANUAL_GLOSSARY_EXTENSIONS)
-    (3754, 3754, 9),     #   _accept: manual_glossary_source_record(...)
-    (3761, 3789, 1),     #   ... result.update(record)
-    (5700, 5700, 1),     # _rename_chat: chat_rename_title(new_title)
-    (12277, 12276, 2),   # U9 review: select_google_credentials imports the settings_rules check + messages
-    (12281, 12281, 1),   #   if is_google_service_account(creds_data):
-    (12300, 12300, 1),   #   INVALID_GOOGLE_CREDENTIALS (tests/parity/test_u9_gap_round4.py runs it vs the frozen one)
-    (12303, 12303, 1),   #   google_credentials_load_error(e)
-    (13613, 13623, 8),   # _authgem_projects_loaded: authgem_auth.authgem_project_items(...)
-    (13625, 13635, 1),   #   ... authgem_auth.choose_authgem_project_index(...)
-    (14648, 14657, 1),   # U9: _show_model_info_dialog imports model_options.provider_info_html
-    (14659, 14851, 1),   #   ... info_text = provider_info_html() (the HTML moved verbatim)
-    (19821, 19845, 0),   # U9: _rename_input_for_existing_workspace_collision moved into run_env.RunEnvMixin
-    (23411, 23468, 0),   # U9: _get_pdf_range_entries_for_preview moved into the GlossaryPipelineMixin
-    (23577, 25279, 0),   # _run_generative_prompt_mode, _process_image_file, _process_rpgmaker_game moved
+    (224, 341, 2),       # U9: _fmt_bytes / _sweep_size_capped_dir -> shutdown_utils (imported under the old names)
+    (345, 345, 1),       #   _sweep_large_caches docstring
+    (347, 438, 4),       #   ... its body calls shutdown_utils.sweep_large_caches(script_file=__file__)
+    (1365, 1364, 8),     # import the Direct Text rule functions from direct_text_store
+    (2774, 2782, 5),     # dialog __init__: configured_glossary_override_mode(...)
+    (3583, 3587, 2),     # _on_glossary_override_toggled: glossary_override_config_updates(mode)
+    (3590, 3594, 1),     #   ... config.update(updates)
+    (3616, 3616, 0),     # _request_direct_text_manual_glossary: json_lib import gone
+    (3619, 3619, 1),     #   allowed_extensions = set(MANUAL_GLOSSARY_EXTENSIONS)
+    (3777, 3777, 9),     #   _accept: manual_glossary_source_record(...)
+    (3784, 3812, 1),     #   ... result.update(record)
+    (5723, 5723, 1),     # _rename_chat: chat_rename_title(new_title)
+    (12300, 12299, 2),   # U9 review: select_google_credentials imports the settings_rules check + messages
+    (12304, 12304, 1),   #   if is_google_service_account(creds_data):
+    (12323, 12323, 1),   #   INVALID_GOOGLE_CREDENTIALS (tests/parity/test_u9_gap_round4.py runs it vs the frozen one)
+    (12326, 12326, 1),   #   google_credentials_load_error(e)
+    (13636, 13646, 8),   # _authgem_projects_loaded: authgem_auth.authgem_project_items(...)
+    (13648, 13658, 1),   #   ... authgem_auth.choose_authgem_project_index(...)
+    (14671, 14680, 1),   # U9: _show_model_info_dialog imports model_options.provider_info_html
+    (14682, 14874, 1),   #   ... info_text = provider_info_html() (the HTML moved verbatim)
+    (19844, 19868, 0),   # U9: _rename_input_for_existing_workspace_collision moved into run_env.RunEnvMixin
+    (23434, 23491, 0),   # U9: _get_pdf_range_entries_for_preview moved into the GlossaryPipelineMixin
+    (23600, 25302, 0),   # _run_generative_prompt_mode, _process_image_file, _process_rpgmaker_game moved
     # U7 Integrate: the QA Stop handlers call the qa_scan_runtime stop helpers (tests/test_u7_tool_cores.py
     # pins them against the frozen blocks)
-    (26497, 26496, 2),   # stop_qa_scan: next_qa_stop_phase(current_phase, graceful_stop_enabled)
-    (26500, 26500, 1),   #   if next_phase == 'graceful':
-    (26506, 26517, 4),   #   apply_qa_graceful_stop_flags()
-    (26552, 26553, 2),   #   elif next_phase == 'force':
-    (26563, 26583, 5),   # _do_qa_force_stop: apply_qa_force_stop_flags()
-    (26662, 26667, 2),   # _check_qa_stop_done._delayed_flag_cleanup: clear_qa_stop_flags()
+    (26520, 26519, 2),   # stop_qa_scan: next_qa_stop_phase(current_phase, graceful_stop_enabled)
+    (26523, 26523, 1),   #   if next_phase == 'graceful':
+    (26529, 26540, 4),   #   apply_qa_graceful_stop_flags()
+    (26575, 26576, 2),   #   elif next_phase == 'force':
+    (26586, 26606, 5),   # _do_qa_force_stop: apply_qa_force_stop_flags()
+    (26685, 26690, 2),   # _check_qa_stop_done._delayed_flag_cleanup: clear_qa_stop_flags()
 )
 
 

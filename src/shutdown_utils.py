@@ -1977,7 +1977,7 @@ def sweep_size_capped_dir(folder: str, max_bytes: int, label: str = "") -> tuple
         return (0, 0, 0, 0)
 
 
-def payload_cleanup_limit_bytes(default: Optional[int] = 400 * 1024 * 1024, config_file: Optional[str] = None):
+def payload_cleanup_limit_bytes(default=400 * 1024 * 1024, config_file=None):
     """The debug-cache cap from Other Settings › "Payload cleanup limit (MB)" (``payload_cleanup_limit_mb``
     in config.json; 0 = never clean up -> None); ``default`` when the config has no such key. Read
     from the saved config because the startup sweep runs before the GUI has loaded it."""
