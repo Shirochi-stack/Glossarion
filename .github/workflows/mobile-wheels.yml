@@ -1,5 +1,5 @@
 # Self-built mobile wheels for the security pins: cryptography 50.0.2 (Android + iOS) and Pillow
-# 12.3.0 (Android), and the on-device engine with vision: llama-cpp-python 0.3.32 with libmtmd
+# 13.0.0 (Android), and the on-device engine with vision: llama-cpp-python 0.3.32 with libmtmd
 # (Android + iOS; pypi.flet.dev's builds lack libmtmd). No index or release has Android/iOS cp313
 # wheels for these, so this
 # workflow builds them with flet-dev/mobile-forge (pinned in src/mobile/ci/wheels/wheelhouse.toml),

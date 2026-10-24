@@ -330,7 +330,7 @@ _PILLOW_FEATURES = (("jpg", "codec"), ("zlib", "codec"), ("webp", "module"), ("f
 
 
 def check_pillow(ctx: Context) -> dict[str, Any]:
-    """Pillow's codecs and FreeType (Android: the self-built 12.3.0 wheel on flet-lib*;
+    """Pillow's codecs and FreeType (Android: the self-built 13.0.0 wheel on flet-lib*;
     iOS: PyPI's wheel): JPEG / PNG / WebP round trips through safe_image.open_image and
     text drawn with the scalable default font."""
     import io

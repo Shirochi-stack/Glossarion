@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helpers for the self-built mobile wheels (cryptography 50.0.2, Pillow 12.3.0) in CI.
+"""Helpers for the self-built mobile wheels (cryptography 50.0.2, Pillow 13.0.0) in CI.
 
 Stdlib only, Python 3.11+. Every pinned value comes from ``wheelhouse.toml`` (next to this
 file); ``assert-selftest`` also reads the pins in ``src/mobile/pyproject.toml``. The manifest

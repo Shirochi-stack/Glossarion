@@ -72,7 +72,7 @@ python app/main.py                         # same, without the flet CLI
 
 ### Host checks
 
-The security pins require Pillow 12.3.0 and cryptography 50.0.2. The PyPI/Flet indexes have
+The security pins require Pillow 13.0.0 and cryptography 50.0.2. The PyPI/Flet indexes have
 no Android builds of either (and no iOS cryptography 50.0.2), so CI builds them itself
 (`.github/workflows/mobile-wheels.yml`, `ci/wheels/`, `.github/actions/mobile-wheelhouse`):
 `check_mobile_wheels.py --wheelhouse-plan` checks the index side plus the planned wheels, and

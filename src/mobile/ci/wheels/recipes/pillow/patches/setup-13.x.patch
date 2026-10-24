@@ -1,9 +1,9 @@
 diff --git a/setup.py b/setup.py
 --- a/setup.py
 +++ b/setup.py
-@@ -372,11 +372,17 @@
+@@ -371,13 +371,19 @@
          return True if value in configuration.get(option, []) else None
-
+ 
      def initialize_options(self) -> None:
 -        self.disable_platform_guessing = self.check_configuration(
 -            "platform-guessing", "disable"
@@ -22,20 +22,38 @@ diff --git a/setup.py b/setup.py
 +        # _imaging.so link with `ld: library 'brotlicommon' not found`.
 +        self.disable_brotli = True
          for x in ("raqm", "fribidi"):
-@@ -547,8 +545,10 @@
+             setattr(self, f"vendor_{x}", self.check_configuration(x, "vendor"))
+         if self.check_configuration("debug", "true"):
+@@ -572,16 +578,18 @@
                  for d in os.environ[k].split(os.path.pathsep):
                      _add_directory(library_dirs, d)
  
--        _add_directory(library_dirs, os.path.join(sys.prefix, "lib"))
--        _add_directory(include_dirs, os.path.join(sys.prefix, "include"))
+-        _add_directory(
+-            library_dirs,
+-            (sys.prefix == sys.base_prefix and sysconfig.get_config_var("LIBDIR"))
+-            or os.path.join(sys.prefix, "lib"),
+-        )
+-        _add_directory(
+-            include_dirs,
+-            (sys.prefix == sys.base_prefix and sysconfig.get_config_var("INCLUDEDIR"))
+-            or os.path.join(sys.prefix, "include"),
+-        )
 +        # Skip sys.prefix paths when cross-compiling to avoid host headers
 +        if not self.disable_platform_guessing:
-+            _add_directory(library_dirs, os.path.join(sys.prefix, "lib"))
-+            _add_directory(include_dirs, os.path.join(sys.prefix, "include"))
++            _add_directory(
++                library_dirs,
++                (sys.prefix == sys.base_prefix and sysconfig.get_config_var("LIBDIR"))
++                or os.path.join(sys.prefix, "lib"),
++            )
++            _add_directory(
++                include_dirs,
++                (sys.prefix == sys.base_prefix and sysconfig.get_config_var("INCLUDEDIR"))
++                or os.path.join(sys.prefix, "include"),
++            )
  
          #
          # add platform directories
-@@ -683,6 +683,31 @@
+@@ -724,6 +732,31 @@
          self.compiler.include_dirs = include_dirs + self.compiler.include_dirs
  
          #
@@ -65,13 +83,14 @@ diff --git a/setup.py b/setup.py
 +            self.compiler.library_dirs = [d for d in self.compiler.library_dirs if d not in _host_leaks]
 +        #
          # look for available libraries
-
+ 
          feature = self.feature
-@@ -998,7 +1023,7 @@
-
+@@ -972,7 +1005,7 @@
+ 
              if sys.platform == "ios":
                  # Ensure transitive dependencies are linked.
 -                libs.extend(["z", "bz2", "brotlicommon", "brotlidec", "png"])
 +                libs.extend(["z", "bz2"])
-
+ 
              self._update_extension("PIL._imagingft", libs, defs, srcs)
+ 
