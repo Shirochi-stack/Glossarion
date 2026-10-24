@@ -647,3 +647,129 @@ class PendingOAuthMixin:
                     os.remove(path)
             except OSError as exc:
                 logger.warning("Failed to remove pending sign-in file: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Private window of the default browser
+# ---------------------------------------------------------------------------
+
+#: The default browser's private-window flag, by executable / bundle id / .desktop name (lower case).
+#: Chromium browsers (Chrome, Brave, Vivaldi, Chromium) take --incognito, Edge --inprivate, Opera and
+#: Opera GX --private, Firefox and its forks -private-window. Safari has none.
+PRIVATE_WINDOW_FLAGS = (
+    (("msedge", "microsoft-edge", "com.microsoft.edgemac"), "--inprivate"),
+    (("opera", "launcher", "com.operasoftware.opera", "com.operasoftware.operagx"), "--private"),
+    (("firefox", "librewolf", "waterfox", "org.mozilla.firefox", "io.gitlab.librewolf-community",
+      "net.waterfox.waterfox"), "-private-window"),
+    (("chrome", "google-chrome", "chromium", "chromium-browser", "brave", "brave-browser", "vivaldi",
+      "vivaldi-stable", "com.google.chrome", "org.chromium.chromium", "com.brave.browser",
+      "com.vivaldi.vivaldi"), "--incognito"),
+)
+
+
+def _private_flag(name: str, path: str = "") -> Optional[str]:
+    """The private-window flag for a browser executable name / bundle id; None when unknown.
+    ``launcher.exe`` only counts as Opera when it lives in an Opera folder."""
+    key = name.lower()
+    if key.endswith(".exe"):
+        key = key[:-4]
+    if key.endswith(".desktop"):
+        key = key[:-8]
+    if key == "launcher" and "opera" not in path.lower():
+        return None
+    for names, flag in PRIVATE_WINDOW_FLAGS:
+        if key in names:
+            return flag
+    return None
+
+
+def _split_command(command: str) -> List[str]:
+    import shlex
+    try:
+        return shlex.split(command, posix=not sys.platform.startswith("win"))
+    except ValueError:
+        return []
+
+
+def _default_browser_windows() -> Optional[List[str]]:
+    import winreg
+    key = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+        prog_id = winreg.QueryValueEx(handle, "ProgId")[0]
+    with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, prog_id + r"\shell\open\command") as handle:
+        command = winreg.QueryValueEx(handle, "")[0]
+    parts = _split_command(command)
+    if not parts:
+        return None
+    exe = parts[0].strip('"')
+    flag = _private_flag(os.path.basename(exe), exe)
+    return [exe, flag] if flag and os.path.isfile(exe) else None
+
+
+def _default_browser_macos() -> Optional[List[str]]:
+    import plistlib
+    path = os.path.expanduser(
+        "~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist")
+    with open(path, "rb") as handle:
+        handlers = plistlib.load(handle).get("LSHandlers", [])
+    bundle = next((h.get("LSHandlerRoleAll") for h in handlers
+                   if h.get("LSHandlerURLScheme") in ("https", "http") and h.get("LSHandlerRoleAll")), None)
+    flag = _private_flag(str(bundle or ""))
+    # open -n: a new instance, so the flag is not dropped when the browser is already running
+    return ["open", "-n", "-b", bundle, "--args", flag] if bundle and flag else None
+
+
+def _default_browser_linux() -> Optional[List[str]]:
+    import shutil
+    import subprocess
+    desktop = subprocess.run(["xdg-settings", "get", "default-web-browser"], capture_output=True, text=True,
+                             timeout=5).stdout.strip()
+    flag = _private_flag(desktop)
+    if not flag:
+        return None
+    dirs = [os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")]
+    dirs += (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":")
+    for base in dirs:
+        entry = os.path.join(base, "applications", desktop)
+        if not os.path.isfile(entry):
+            continue
+        with open(entry, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("Exec="):
+                    parts = [p for p in _split_command(line[5:].strip()) if not p.startswith("%")]
+                    exe = shutil.which(parts[0]) if parts else None
+                    return [exe, flag] if exe else None
+    exe = shutil.which(desktop[:-8] if desktop.endswith(".desktop") else desktop)
+    return [exe, flag] if exe else None
+
+
+def private_window_command() -> Optional[List[str]]:
+    """The command that opens a URL (appended) in a private window of the default browser, or
+    None: Glossarion Mobile, an unknown browser (Safari has no such flag), or no default found."""
+    if is_mobile():
+        return None
+    try:
+        if sys.platform.startswith("win"):
+            return _default_browser_windows()
+        if sys.platform == "darwin":
+            return _default_browser_macos()
+        return _default_browser_linux()
+    except Exception as exc:  # registry / plist / xdg missing or unreadable
+        logger.debug("No private window command: %s", exc)
+        return None
+
+
+def open_private_window(url: str) -> bool:
+    """Open *url* in a private window of the default browser; False when that is not possible
+    (the caller then opens it normally)."""
+    command = private_window_command()
+    if not command:
+        return False
+    import subprocess
+    try:
+        subprocess.Popen(command + [url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
+        return True
+    except OSError as exc:
+        logger.debug("Private window failed (%s): %s", command[0], exc)
+        return False

@@ -522,6 +522,8 @@ def begin_oauth(
     )
     session.manual_auth_url = manual_auth_url
     session.manual_redirect_uri = CLAUDE_REDIRECT_URI
+    # the same sign-in without the claude.ai sign-out, for a private window (no session to sign out of)
+    session.private_auth_url = _authorize_url(_authorize_query(code_challenge, state, redirect_uri), False)
 
     try:
         session._add_server(server)
@@ -608,10 +610,13 @@ def run_automatic_oauth_login(timeout: int = 180, open_browser=None,
                               sign_out_wait: float = CLAUDE_AI_SIGN_OUT_WAIT_SECONDS) -> Dict:
     """Sign in through the browser and return tokens, with no pasting.
 
-    ``open_browser(url)`` defaults to ``webbrowser.open``. With
-    ``sign_out_first`` the browser is first signed out of claude.ai, so the
-    authorize page asks for an account instead of reusing the one already
-    signed in. The browser then redirects to http://localhost:<port>/callback,
+    ``open_browser(url)`` defaults to a private window of the default browser
+    (``oauth_session.open_private_window``): it has no claude.ai session, so
+    the authorize page asks for an account, and the normal browser stays signed
+    in. When that is not possible (an unknown browser, Safari) it falls back to
+    ``webbrowser.open``; with ``sign_out_first`` that page signs claude.ai out
+    first (claude.ai asks "Log out of Claude?" there), so the authorize page asks
+    for an account instead of reusing the one already signed in. The browser then redirects to http://localhost:<port>/callback,
     which this function answers, and is sent on to Anthropic's success page.
 
     Composes :func:`begin_oauth` (one IPv4 listener served here, so a stop
@@ -623,9 +628,11 @@ def run_automatic_oauth_login(timeout: int = 180, open_browser=None,
         dual_stack=False, auto_close=False, serve=False,
     )
     del sign_out_wait  # kept for callers; the redirect replaces the wait
-    open_url = open_browser or webbrowser.open
     try:
-        open_url(session.auth_url)
+        if open_browser is not None:
+            open_browser(session.auth_url)
+        elif not (sign_out_first and oauth_session.open_private_window(session.private_auth_url)):
+            webbrowser.open(session.auth_url)
         deadline = time.time() + timeout
         while not session.callback_received:
             if is_cancelled():
