@@ -743,10 +743,20 @@ def _default_browser_linux() -> Optional[List[str]]:
     return [exe, flag] if exe else None
 
 
+def _subprocesses_available() -> bool:
+    """mobile_runtime.subprocesses_available() (the gate of every process launch); True on desktop
+    when the shared module is unavailable."""
+    try:
+        import mobile_runtime
+        return bool(mobile_runtime.subprocesses_available())
+    except Exception:
+        return not is_mobile()
+
+
 def private_window_command() -> Optional[List[str]]:
     """The command that opens a URL (appended) in a private window of the default browser, or
     None: Glossarion Mobile, an unknown browser (Safari has no such flag), or no default found."""
-    if is_mobile():
+    if is_mobile() or not _subprocesses_available():
         return None
     try:
         if sys.platform.startswith("win"):

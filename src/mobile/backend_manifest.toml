@@ -280,6 +280,8 @@ files = []
 "glm_proxy:_solve_captcha_in_window" = { apis = ["subprocess.Popen"], count = 1, reason = "AuthZA free-plan captcha window (desktop); gated in the caller: _claim_free_plan_once returns early unless subprocesses_available()" }
 "local_inpainter:<module>" = { apis = ["multiprocessing.Process"], count = 1, reason = "class _LocalInpainterWorker(mp.Process); only started by _start_worker (P17)" }
 "local_inpainter:LocalInpainter._start_worker" = { apis = ["multiprocessing.get_context"], count = 1, reason = "P17: only called when self._mp_enabled, which requires processes_available()" }
+"oauth_session:_default_browser_linux" = { apis = ["subprocess.run"], count = 1, reason = "xdg-settings for the default browser (AuthCD private-window sign-in); private_window_command returns early unless subprocesses_available()" }
+"oauth_session:open_private_window" = { apis = ["subprocess.Popen"], count = 1, reason = "opens the AuthCD sign-in in a private browser window (desktop); private_window_command is None unless subprocesses_available(), then it returns False" }
 "pdf_extractor:extract_pdf_with_formatting" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P9: _pdf_extraction_worker_count() is 1 without processes -> sequential branch" }
 "pdf_fast_extractor:_extract_pdf_fast_impl" = { apis = ["concurrent.futures.ProcessPoolExecutor"], count = 1, reason = "P9: resolve_pdf_extraction_workers() is 1 without processes -> sequential branch" }
 "pdf_generation_manager:PdfGenerationManager._run_pdf_subprocess" = { apis = ["subprocess.Popen"], count = 1, reason = "P14: generate_pdf_async picks _run_pdf_inprocess when not subprocesses_available()" }
