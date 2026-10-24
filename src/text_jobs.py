@@ -564,7 +564,7 @@ class TextJobsMixin(JobHooksMixin):
                     if isinstance(e, UnifiedClientError):
                         is_cancelled = getattr(e, 'error_type', None) == 'cancelled'
                         # Setup and plan-quota errors already say what to do.
-                        is_config_error = getattr(e, 'error_type', None) in ('config_error', 'entitlement_error')
+                        is_config_error = getattr(e, 'error_type', None) in ('config_error', 'entitlement_error', 'autharena_verification_error')
                 except Exception:
                     pass
 

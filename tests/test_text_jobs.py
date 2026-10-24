@@ -216,10 +216,12 @@ def test_process_text_file_is_moved_verbatim(legacy_tg):
     edits = _Edits(insert_before=[("if translation_main is None:\n    self.append_log('❌ Translation module is not available')\n    return False",
                                    "translation_main = self._backend_entry('translation_main')")],
                    **_SNAPSHOT_RESTORE)
-    # bedb340a (owner): plan-quota errors (entitlement_error) skip the traceback like config_error
+    # bedb340a (owner): plan-quota errors (entitlement_error) skip the traceback like config_error;
+    # 2026-10-24: so do Arena's reCAPTCHA rejections (autharena_verification_error)
     edits.replace.append(([ast.unparse(s) for s in _stmt(
         "is_config_error = getattr(e, 'error_type', None) == 'config_error'")],
-        "is_config_error = getattr(e, 'error_type', None) in ('config_error', 'entitlement_error')"))
+        "is_config_error = getattr(e, 'error_type', None) in ('config_error', 'entitlement_error', "
+        "'autharena_verification_error')"))
     _assert_moved(legacy_tg["_process_text_file"], new["_process_text_file"], edits, expected_hits=4)
     _assert_moved(legacy_tg["_run_parallel_metadata_files"], new["_run_parallel_metadata_files"])
 

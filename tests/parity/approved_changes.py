@@ -686,6 +686,8 @@ _PAYLOAD_SUMMARY_LEGACY_TRANSLATOR_GUI = [("            ('glossary_name_check_us
 # 2026-10-24 CI: the glossary name check / payload cleanup settings in the pinned translator_gui
 _OLD_SETTINGS_INIT_GUI = [('            self.emergency_glossary_compliance_min_chars_var = 3\n        \n        # NEW: Initialize extraction mode variable\n', "            self.emergency_glossary_compliance_min_chars_var = 3\n        try:\n            self.glossary_name_check_min_chars_var = max(0, min(10, int(self.config.get('glossary_name_check_min_chars', 2))))\n        except (TypeError, ValueError):\n            self.glossary_name_check_min_chars_var = 2\n        try:\n            self.glossary_name_check_autofix_level_var = max(1, min(3, int(self.config.get('glossary_name_check_autofix_level', 1))))\n        except (TypeError, ValueError):\n            self.glossary_name_check_autofix_level_var = 1\n        try:\n            self.payload_cleanup_limit_mb_var = max(0, int(self.config.get('payload_cleanup_limit_mb', 400)))\n        except (TypeError, ValueError):\n            self.payload_cleanup_limit_mb_var = 400\n        \n        # NEW: Initialize extraction mode variable\n")]
 _PAYLOAD_CLEANUP_SWEEP_GUI = [('        return (0, 0, 0, 0)\n\n\ndef _sweep_large_caches(max_bytes: int = 400 * 1024 * 1024, phase: str = "startup") -> None:\n', '        return (0, 0, 0, 0)\n\n\ndef payload_cleanup_limit_bytes(default=400 * 1024 * 1024, config_file=None):\n    """The debug-cache cap from Other Settings › "Payload cleanup limit (MB)" (``payload_cleanup_limit_mb``\n    in config.json; 0 = never clean up -> None); ``default`` when the config has no such key. Read\n    from the saved config because the startup sweep runs before the GUI has loaded it."""\n    try:\n        if config_file is None:\n            from app_paths import CONFIG_FILE as config_file\n        with open(config_file, "r", encoding="utf-8") as f:\n            value = json.load(f).get("payload_cleanup_limit_mb")\n        if value is None:\n            return default\n        megabytes = int(value)\n        return None if megabytes <= 0 else megabytes * 1024 * 1024\n    except Exception:\n        return default\n\n\ndef _sweep_large_caches(max_bytes: int = 400 * 1024 * 1024, phase: str = "startup") -> None:\n'), ('    moment the first dump is saved.\n\n    ``phase`` is just a label', '    moment the first dump is saved.\n\n    The cap is the saved "Payload cleanup limit (MB)" setting when there is one\n    (``payload_cleanup_limit_bytes``; 0 = never clean up), else ``max_bytes``.\n\n    ``phase`` is just a label'), ('    """\n    try:\n        # Candidate roots: exe dir (frozen), script dir (dev), and CWD.\n', '    """\n    max_bytes = payload_cleanup_limit_bytes(max_bytes)\n    if max_bytes is None:\n        return  # "0 = never clean up"\n    try:\n        # Candidate roots: exe dir (frozen), script dir (dev), and CWD.\n')]
+# 2026-10-24 Arena reCAPTCHA rejections: no full traceback (like config / entitlement errors)
+_ARENA_VERIFICATION_NO_TRACEBACK = [("is_config_error = getattr(e, 'error_type', None) in ('config_error', 'entitlement_error')", "is_config_error = getattr(e, 'error_type', None) in ('config_error', 'entitlement_error', 'autharena_verification_error')")]
 # the QA scanner pieces, as edited (dialog toggle + fix dialog, runtime default/env/scope, scanner step)
 _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '\n'
@@ -1924,6 +1926,15 @@ APPROVED = (
                 "in the pinned translator_gui (its _init_variables and the startup / exit cache sweep)",
         "source": {
             "src/translator_gui.py": _OLD_SETTINGS_INIT_GUI + _PAYLOAD_CLEANUP_SWEEP_GUI,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-10-24",
+        "what": "Arena's reCAPTCHA rejection (autharena_verification_error) is logged without the full "
+                "traceback, like config / entitlement errors",
+        "source": {
+            "src/text_jobs.py": _ARENA_VERIFICATION_NO_TRACEBACK,
         },
         "values": {},
     },
