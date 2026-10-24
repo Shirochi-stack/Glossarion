@@ -348,6 +348,15 @@ def _load_key_pool_from_env_or_config(env_name, config_key, config):
     keys = config.get(config_key, []) if isinstance(config, dict) else []
     return keys if isinstance(keys, list) else []
 
+def _pool_switch_from_env_or_config(env_name, config_key, config):
+    """A key pool's on/off switch: the GUI exports the live value ('0' or '1');
+    config.json can still hold the state from before the pool was switched off,
+    so it only decides when the env value is unset."""
+    env_value = os.getenv(env_name)
+    if env_value in ('0', '1'):
+        return env_value == '1'
+    return bool(config.get(config_key, False)) if isinstance(config, dict) else False
+
 def _pool_output_limit_override(keys, global_limit):
     """Return the safe effective output limit for a rotating key pool."""
     enabled_keys = [k for k in (keys or []) if isinstance(k, dict) and k.get("enabled", True)]
@@ -427,12 +436,12 @@ def _effective_glossary_output_limit(config, model_name=None):
         effective = live_limit
     else:
         # ── Priority 2: Env / config JSON fallback ──
-        if os.getenv("USE_GLOSSARY_KEYS", "0") == "1" or config.get("use_glossary_keys", False):
+        if _pool_switch_from_env_or_config("USE_GLOSSARY_KEYS", "use_glossary_keys", config):
             glossary_keys = _load_key_pool_from_env_or_config("GLOSSARY_API_KEYS", "glossary_keys", config)
             pool_limit = _pool_output_limit_override(glossary_keys, effective)
             if pool_limit is not None:
                 effective = pool_limit
-        elif config.get("use_multi_api_keys", False) or os.getenv("USE_MULTI_API_KEYS", "0") == "1":
+        elif _pool_switch_from_env_or_config("USE_MULTI_API_KEYS", "use_multi_api_keys", config):
             multi_keys = _load_key_pool_from_env_or_config("MULTI_API_KEYS", "multi_api_keys", config)
             pool_limit = _pool_output_limit_override(multi_keys, effective)
             if pool_limit is not None:
@@ -524,13 +533,8 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config, con
         context == 'glossary'
         and os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
     )
-    # The GUI exports the live switch ('0' or '1'); config.json can still hold the
-    # state from before the pool was switched off, so it only decides when unset.
-    refinement_env = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS')
-    if refinement_env in ('0', '1'):
-        use_refinement_keys = refinement_env == '1'
-    else:
-        use_refinement_keys = bool(config.get('use_glossary_refinement_keys', False))
+    use_refinement_keys = _pool_switch_from_env_or_config(
+        'USE_GLOSSARY_REFINEMENT_KEYS', 'use_glossary_refinement_keys', config)
     refinement_keys = []
     if use_refinement_keys:
         refinement_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]')

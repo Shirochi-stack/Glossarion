@@ -94,3 +94,54 @@ def test_glossary_client_follows_the_live_refinement_switch_over_stale_config(
 
     assert (UnifiedClient._glossary_refinement_key_pool is not None) is expected
     assert (extractor.os.environ.get('USE_GLOSSARY_REFINEMENT_KEYS') == '1') is expected
+
+
+@pytest.mark.parametrize('env_value,config_value,expected', [
+    ('0', True, 8000),    # switched off in the dialog; config.json still says on
+    ('1', False, 1000),
+    (None, True, 1000),   # standalone run without the GUI's env: config decides
+    (None, False, 8000),
+])
+def test_glossary_output_limit_follows_the_live_glossary_switch_over_stale_config(
+        monkeypatch, env_value, config_value, expected):
+    import extract_glossary_from_epub as extractor
+
+    if env_value is None:
+        monkeypatch.delenv('USE_GLOSSARY_KEYS', raising=False)
+    else:
+        monkeypatch.setenv('USE_GLOSSARY_KEYS', env_value)
+    monkeypatch.setenv('GLOSSARY_API_KEYS', '[]')
+    monkeypatch.setenv('GLOSSARY_MAX_OUTPUT_TOKENS', '8000')
+    monkeypatch.setattr(extractor, '_peek_live_pool_output_limit', lambda: None)
+    config = {
+        'use_glossary_keys': config_value,
+        'glossary_keys': [{'api_key': 'sk-g', 'model': 'gpt-4o-mini', 'individual_output_token_limit': 1000}],
+    }
+
+    assert extractor._effective_glossary_output_limit(config, 'test-model-without-cached-limit') == expected
+
+
+@pytest.mark.parametrize('env_value,config_value,expected', [
+    ('0', True, 8000),    # switched off in the dialog; config.json still says on
+    ('1', False, 1000),
+    (None, True, 1000),   # standalone run without the GUI's env: config decides
+    (None, False, 8000),
+])
+def test_glossary_output_limit_follows_the_live_multi_key_switch_over_stale_config(
+        monkeypatch, env_value, config_value, expected):
+    import extract_glossary_from_epub as extractor
+
+    monkeypatch.setenv('USE_GLOSSARY_KEYS', '0')
+    if env_value is None:
+        monkeypatch.delenv('USE_MULTI_API_KEYS', raising=False)
+    else:
+        monkeypatch.setenv('USE_MULTI_API_KEYS', env_value)
+    monkeypatch.setenv('MULTI_API_KEYS', '[]')
+    monkeypatch.setenv('GLOSSARY_MAX_OUTPUT_TOKENS', '8000')
+    monkeypatch.setattr(extractor, '_peek_live_pool_output_limit', lambda: None)
+    config = {
+        'use_multi_api_keys': config_value,
+        'multi_api_keys': [{'api_key': 'sk-m', 'model': 'gpt-4o-mini', 'individual_output_token_limit': 1000}],
+    }
+
+    assert extractor._effective_glossary_output_limit(config, 'test-model-without-cached-limit') == expected
