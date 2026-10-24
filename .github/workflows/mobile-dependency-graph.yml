@@ -1,0 +1,49 @@
+# Keeps the dependency graph (and Dependabot alerts) for src/mobile in step with uv.lock.
+# src/mobile/tools/dependency_snapshot.py turns the lock into a dependency submission
+# snapshot and this job posts it; the script's docstring explains why a submission is
+# needed (a stale older snapshot outranks the static parse and cannot be deleted).
+#
+# Triggers: pushes to main that touch the lock, the pyproject, the script or this file;
+# workflow_dispatch. No secrets beyond GITHUB_TOKEN (contents: write is what the
+# submission endpoint requires).
+
+name: Mobile dependency graph
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/mobile/uv.lock
+      - src/mobile/pyproject.toml
+      - src/mobile/tools/dependency_snapshot.py
+      - .github/workflows/mobile-dependency-graph.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobile-dependency-graph
+  cancel-in-progress: true
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build snapshot from src/mobile/uv.lock
+        run: >
+          python src/mobile/tools/dependency_snapshot.py
+          --sha "$GITHUB_SHA" --ref "$GITHUB_REF" --job-id "$GITHUB_RUN_ID"
+          --out snapshot.json
+
+      - name: Submit snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/dependency-graph/snapshots" --input snapshot.json
