@@ -29,7 +29,7 @@ import zipfile
 import requests
 
 REVISION = "e9655ea6d74cddabdfdd651da285aa4ca60091ad"
-ADAPTER_VERSION = 34
+ADAPTER_VERSION = 35
 CATALOG_TTL_SECONDS = 24 * 60 * 60
 UV_VERSION = "0.8.22"
 ROUTE_RE = re.compile(r"^autharena(\d{0,4})(?:/|$)", re.I)
@@ -786,6 +786,22 @@ def open_login(log_fn=print, account_id=0):
     return _request("/login", {"slot": account_id}, timeout=660, status=status)
 
 
+def logout(account_id):
+    """Log Arena account slot *account_id* out: forget its encrypted credentials and close the
+    running proxy's browser contexts for it. Returns the account's email ("" when unknown)."""
+    slot = int(account_id)
+    status = check_proxy_health()
+    if status.get("running"):
+        return _request("/logout", {"slot": slot}, timeout=30, status=status).get("email", "")
+    # No current proxy (an outdated one is replaced on the next request): edit the store directly.
+    with disk_lock():
+        accounts = _load("accounts.enc")
+        removed = accounts.pop(str(slot), None)
+        if removed is not None:
+            _save("accounts.enc", accounts)
+    return (removed or {}).get("email", "")
+
+
 def list_models(timeout=30):
     # A stopped local worker is not a logged-out account. Catalog polling runs
     # off the GUI thread; _request starts the worker and restores saved sessions.
@@ -1139,6 +1155,23 @@ class _ArenaBridgeResponse:
             await self.cleanup()
 
 
+def _arena_stream_payload(path, payload):
+    """The bridge's create-/post-to-evaluation payload in Arena's current schema.
+
+    A new chat is ``direct-battle`` (Arena retired plain ``direct``). Its first turn is a
+    one-model turn: arena.ai's own client sends ``modelBMessageId`` only together with a
+    model B, and a direct-battle turn carrying one is a two-model battle turn, which Arena
+    refuses as the first turn ("Direct chat must start with one model"). The CAPTCHA token
+    fields are left as they are."""
+    path = str(path).rstrip("/")
+    if path == "/nextjs-api/stream/create-evaluation" and payload.get("mode") == "direct":
+        payload = dict(payload, mode="direct-battle")
+    if (path == "/nextjs-api/stream/create-evaluation" or path.startswith("/nextjs-api/stream/post-to-evaluation/")) \
+            and payload.get("modelBMessageId") and not payload.get("modelBId"):
+        payload = {k: v for k, v in payload.items() if k != "modelBMessageId"}
+    return payload
+
+
 def _bridge_error_metadata(page, activity=None):
     """Pass the HTTP error body into upstream's metadata-based error handling."""
     errors = []
@@ -1313,6 +1346,28 @@ async def _serve_worker(key, qt_helper_command=None):
                     page.remove_listener("close", on_login_closed)
                 with contextlib.suppress(Exception):
                     await login_browser.__aexit__(None, None, None)
+
+    @app.post("/logout")
+    async def logout_route(request: Request):
+        try:
+            slot = int((await request.json()).get("slot"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid Arena account slot")
+        # Like a new login for the slot: requests already running finish in their own
+        # contexts; idle contexts close now and none is restored for this slot again.
+        async with slot_pool_lock:
+            with disk_lock():
+                saved = _load("accounts.enc")
+                removed = saved.pop(str(slot), None)
+                if removed is not None:
+                    _save("accounts.enc", saved)
+            previous = slots.pop(slot, [])
+            for state in previous:
+                state["retired"] = True
+        for state in previous:
+            if not state["lock"].locked():
+                await close_slot(state)
+        return {"slot": slot, "email": (removed or {}).get("email", ""), "removed": removed is not None}
 
     async def get_slot(slot):
         """Reserve an idle context, or create another for overlapping requests."""
@@ -1509,8 +1564,7 @@ async def _serve_worker(key, qt_helper_command=None):
             state["submitted"] = True
             # Preserve the current Arena conversation schema, without changing
             # either of the proxy's CAPTCHA token fields.
-            if parsed.path.rstrip("/") == "/nextjs-api/stream/create-evaluation" and payload.get("mode") == "direct":
-                payload = dict(payload, mode="direct-battle")
+            payload = _arena_stream_payload(parsed.path, payload)
             before = set(context.pages)
             original_new_page = context.new_page
             dispatched = False
@@ -1896,7 +1950,7 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
                     identities = ", ".join(f"#{a['slot']} ({a.get('email') or 'saved account'})" for a in selected_accounts)
                     self.login_button.setToolTip(
                         ("Selected pool account: " if slot is None else "Saved Arena account: ") + identities
-                        + ". Credentials are encrypted and restored automatically. Click to reconnect. "
+                        + ". Credentials are encrypted and restored automatically. Click to log out. "
                         "Saved login does not guarantee CAPTCHA acceptance.")
                 else:
                     self.login_button.setToolTip("Log into Arena in the app's Qt6 WebEngine browser")
@@ -1926,6 +1980,26 @@ def create_login_controls(parent, get_model, set_model, log_fn=print, on_login=N
             slot, _ = parse_route(get_model())
             if slot is None:
                 slot = self.login_slot
+            account = next((a for a in self.saved_accounts if a["slot"] == slot), None)
+            if account is not None:
+                # Like the ChatGPT / Gemini / Claude logins: a signed-in slot offers to log out.
+                suffix = f" #{slot}" if slot else ""
+                reply = QMessageBox.question(
+                    self, "Arena Account",
+                    f"Currently logged in as: {account.get('email') or 'saved account'}{suffix}\n\n"
+                    "Do you want to log out?",
+                    QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    try:
+                        logout(slot)
+                    except Exception as exc:
+                        self.progress.emit(f"⚠️ Arena{suffix}: could not log out: {exc}")
+                        return
+                    self.saved_accounts = [a for a in self.saved_accounts if a["slot"] != slot]
+                    self.accounts_checked_at = None
+                    self.progress.emit(f"🔓 Arena{suffix}: Logged out")
+                    self.refresh()
+                return
             self.start(slot, False)
 
         def start(self, slot, update_route):

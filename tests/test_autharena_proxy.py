@@ -796,3 +796,76 @@ def test_verification_cookie_survives_encrypted_session_restore():
     import asyncio
     asyncio.run(arena._restore_login_session(Context(), 1))
     assert restored == [auth, verification]
+
+
+def test_logout_without_a_running_proxy_forgets_only_that_slot(monkeypatch):
+    monkeypatch.setattr(arena, "check_proxy_health", lambda: {"running": False})
+    arena._save("accounts.enc", {"0": {"user_id": "a", "email": "a@x"}, "1": {"user_id": "b", "email": "b@x"}})
+    assert arena.logout(1) == "b@x"
+    assert [a["slot"] for a in arena.list_accounts()] == [0]
+    assert arena.logout(5) == ""  # unknown slot: nothing to remove
+
+
+def test_logout_asks_the_running_proxy_to_close_the_slot(monkeypatch):
+    calls = []
+    monkeypatch.setattr(arena, "check_proxy_health", lambda: {"running": True, "url": "u", "key": "k"})
+    monkeypatch.setattr(arena, "_request", lambda path, payload=None, timeout=600, status=None:
+                        (calls.append((path, payload)), {"email": "b@x"})[1])
+    assert arena.logout("1") == "b@x" and calls == [("/logout", {"slot": 1})]
+
+
+@pytest.mark.parametrize("answer", ["yes", "no"])
+def test_logged_in_button_offers_to_log_out_like_authgpt(qt, monkeypatch, answer):
+    widgets, app = qt
+    monkeypatch.setattr(arena, "list_accounts", lambda: [{"slot": 1, "email": "b@x", "user_id": "b"}])
+    asked, logged_out, started, logs = [], [], [], []
+
+    def question(parent, title, text, buttons):
+        asked.append(text)
+        return widgets.QMessageBox.Yes if answer == "yes" else widgets.QMessageBox.No
+
+    monkeypatch.setattr(widgets.QMessageBox, "question", question)
+    monkeypatch.setattr(arena, "logout", lambda slot: logged_out.append(slot) or "b@x")
+    parent = widgets.QWidget()
+    control = arena.create_login_controls(parent, lambda: "autharena1/m", lambda value: None, log_fn=logs.append)
+    control.receive_accounts([{"slot": 1, "email": "b@x", "user_id": "b"}], None)
+    assert control.login_button.text() == "✅ Arena #1"
+    monkeypatch.setattr(control, "start", lambda slot, update: started.append(slot))
+    control.login()
+    assert asked and "b@x #1" in asked[0] and "log out" in asked[0]
+    assert started == []  # a signed-in slot never starts a new sign-in from this button
+    if answer == "yes":
+        assert logged_out == [1] and "🔓 Arena #1: Logged out" in logs
+        assert control.saved_accounts == [] and control.login_button.text() == "Arena #1 Login"
+    else:
+        assert logged_out == []
+    parent.close()
+
+
+def test_signed_out_button_still_starts_the_sign_in(qt, monkeypatch):
+    widgets, app = qt
+    monkeypatch.setattr(arena, "list_accounts", lambda: [])
+    monkeypatch.setattr(widgets.QMessageBox, "question", lambda *a: pytest.fail("no logout prompt when signed out"))
+    parent = widgets.QWidget()
+    control = arena.create_login_controls(parent, lambda: "autharena1/m", lambda value: None, log_fn=lambda v: None)
+    control.receive_accounts([], None)
+    started = []
+    monkeypatch.setattr(control, "start", lambda slot, update: started.append(slot))
+    control.login()
+    assert started == [1]
+    parent.close()
+
+
+def test_new_chat_is_a_one_model_direct_battle_turn():
+    """Arena: "Direct chat must start with one model" when the first turn carries a model-B id."""
+    bridge = {"id": "s", "mode": "direct", "modelAId": "m", "userMessageId": "u", "modelAMessageId": "a",
+              "modelBMessageId": "b", "userMessage": {"content": "hi"}, "modality": "chat", "recaptchaV3Token": "t"}
+    sent = arena._arena_stream_payload("/nextjs-api/stream/create-evaluation", bridge)
+    assert sent["mode"] == "direct-battle" and "modelBMessageId" not in sent
+    assert sent["modelAId"] == "m" and sent["recaptchaV3Token"] == "t" and bridge["modelBMessageId"] == "b"
+    follow = arena._arena_stream_payload("/nextjs-api/stream/post-to-evaluation/s", dict(bridge))
+    assert "modelBMessageId" not in follow
+    battle = arena._arena_stream_payload("/nextjs-api/stream/create-evaluation", dict(bridge, modelBId="m2"))
+    assert battle["modelBMessageId"] == "b"  # a real two-model turn keeps it
+    other = arena._arena_stream_payload("/nextjs-api/stream/resample/s", dict(bridge))
+    assert other["mode"] == "direct" and other["modelBMessageId"] == "b"
