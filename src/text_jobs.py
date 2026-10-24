@@ -534,8 +534,9 @@ class TextJobsMixin(JobHooksMixin):
                         self.append_log("✅ Metadata translation completed successfully!")
                     else:
                         self.append_log("✅ Translation completed successfully!")
-                    # Payloads > Auto-update: this run's payloads into the readable summary (desktop only)
-                    getattr(self, '_auto_update_payload_summary', lambda: None)()
+                    # Payloads > Auto-update (desktop setting): this run's payloads into the readable summary
+                    import payload_summary
+                    payload_summary.auto_update(self)
                     return True
                 else:
                     return False

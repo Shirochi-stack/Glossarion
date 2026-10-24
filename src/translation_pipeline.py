@@ -1080,9 +1080,10 @@ class GlossaryPipelineMixin(PipelineHooksMixin):
             
             self.append_log(f"   📁 Total processed: {total_groups}")
             self.append_log(f"{'='*60}")
-            # Payloads > Auto-update: this run's payloads into the readable summary (desktop only)
-            getattr(self, '_auto_update_payload_summary', lambda: None)()
-
+            # Payloads > Auto-update (desktop setting): this run's payloads into the readable summary
+            import payload_summary
+            payload_summary.auto_update(self)
+            
         except Exception as e:
             self.append_log(f"❌ Glossary extraction setup error: {e}")
             import traceback

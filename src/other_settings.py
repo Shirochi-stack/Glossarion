@@ -13797,48 +13797,11 @@ def _reset_anti_duplicate_defaults(self):
     if hasattr(self, 'append_log'):
         self.append_log("🔄 Anti-duplicate parameters reset to defaults")
 
-_payload_summary_lock = None
-
-
 def _auto_update_payload_summary(self):
-    """Payloads > "Auto-update": rebuild the payload summary on a background thread. Called by the
-    translation / glossary stop handlers once the stopped worker has returned (after a graceful
-    stop); one rebuild at a time."""
-    global _payload_summary_lock
-    if not bool(getattr(self, 'payload_summary_auto_update_var',
-                        (self.config or {}).get('payload_summary_auto_update', False))):
-        return
-    import threading
-    if _payload_summary_lock is None:
-        _payload_summary_lock = threading.Lock()
-    if not _payload_summary_lock.acquire(blocking=False):
-        return  # one is already running
-
-    config = dict(self.config or {})
-    config['enable_parallel_extraction'] = bool(getattr(self, 'enable_parallel_extraction_var',
-                                                        config.get('enable_parallel_extraction', True)))
-    config['extraction_workers'] = getattr(self, 'extraction_workers_var', config.get('extraction_workers', 2))
-    decode_images = bool(getattr(self, 'payload_summary_decode_images_var',
-                                 config.get('payload_summary_decode_images', False)))
-    log = getattr(self, 'append_log', None)
-
-    def run():
-        try:
-            import payload_summary
-            from unified_api_client import _payloads_dir
-            index = payload_summary.build(_payloads_dir(), workers=payload_summary.default_workers(config),
-                                          decode_images=decode_images)
-            if log and index:
-                log(f"📝 Payload summary updated: {index}")
-        except FileNotFoundError:
-            pass  # payload saving is off / nothing saved yet: nothing to summarize
-        except Exception as e:
-            if log:
-                log(f"⚠️ Payload summary auto-update failed: {e}")
-        finally:
-            _payload_summary_lock.release()
-
-    threading.Thread(target=run, name="PayloadSummaryAutoUpdate", daemon=True).start()
+    """Payloads > "Auto-update" (payload_summary.auto_update): the translation / glossary stop handlers
+    call this once the stopped worker has returned (after a graceful stop)."""
+    import payload_summary
+    payload_summary.auto_update(self)
 
 
 def _create_payload_cleanup_section(self, parent_frame):

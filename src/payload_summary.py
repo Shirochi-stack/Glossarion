@@ -696,3 +696,40 @@ def build(payloads_dir, *, out_dir=None, workers=1, progress=None, cancel=None, 
     with open(index, "w", encoding="utf-8") as f:
         f.write(_index_page(rows, payloads_dir, datetime.now().isoformat(timespec="seconds")))
     return index
+
+
+_auto_update_lock = threading.Lock()
+
+
+def auto_update(owner):
+    """Payloads > "Auto-update": rebuild the summary on a background thread when the owner's
+    ``payload_summary_auto_update`` setting is on (desktop; Glossarion Mobile has no such setting, so
+    this does nothing there). Called after a finished translation / glossary extraction and by the
+    stop handlers once a stopped worker has returned. One rebuild at a time."""
+    config = dict(getattr(owner, 'config', None) or {})
+    if not bool(getattr(owner, 'payload_summary_auto_update_var', config.get('payload_summary_auto_update', False))):
+        return
+    if not _auto_update_lock.acquire(blocking=False):
+        return  # one is already running
+    config['enable_parallel_extraction'] = bool(getattr(owner, 'enable_parallel_extraction_var',
+                                                        config.get('enable_parallel_extraction', True)))
+    config['extraction_workers'] = getattr(owner, 'extraction_workers_var', config.get('extraction_workers', 2))
+    decode_images = bool(getattr(owner, 'payload_summary_decode_images_var',
+                                 config.get('payload_summary_decode_images', False)))
+    log = getattr(owner, 'append_log', None)
+
+    def run():
+        try:
+            from unified_api_client import _payloads_dir
+            index = build(_payloads_dir(), workers=default_workers(config), decode_images=decode_images)
+            if log and index:
+                log(f"📝 Payload summary updated: {index}")
+        except FileNotFoundError:
+            pass  # payload saving is off / nothing saved yet: nothing to summarize
+        except Exception as e:
+            if log:
+                log(f"⚠️ Payload summary auto-update failed: {e}")
+        finally:
+            _auto_update_lock.release()
+
+    threading.Thread(target=run, name="PayloadSummaryAutoUpdate", daemon=True).start()
