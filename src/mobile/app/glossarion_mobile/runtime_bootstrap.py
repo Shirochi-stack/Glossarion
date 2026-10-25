@@ -34,6 +34,7 @@ Built apps hard-exit (no ``atexit``): every handler here flushes per record.
 from __future__ import annotations
 
 import faulthandler
+import gc
 import hashlib
 import importlib
 import json
@@ -1211,6 +1212,24 @@ def start_warm_import(
     thread = threading.Thread(target=run, name="gl-warm-import", daemon=True)
     thread.start()
     return thread
+
+
+def freeze_startup_heap(paths: Optional[AppPaths] = None) -> int:
+    """Hotfix 2: after the warm import, move every live object into the permanent generation
+    (``gc.freeze``), so gen-2 passes stop re-scanning the backend modules (90-120 ms UI stalls
+    while scrolling the glossary editor). Collects first so startup garbage is freed, not frozen.
+    Real devices only (not ``GLOSSARION_SIMULATE_PLATFORM`` host runs), once per process; returns
+    the frozen object count (0 when skipped)."""
+    paths = paths or get_paths()
+    if paths is None or not paths.is_device or os.environ.get("GLOSSARION_SIMULATE_PLATFORM", "").strip():
+        return 0
+    if gc.get_freeze_count():
+        return gc.get_freeze_count()
+    gc.collect()
+    gc.freeze()
+    count = gc.get_freeze_count()
+    log.info("startup heap frozen after the backend warm import: %d objects", count)
+    return count
 
 
 def backend_ready(timeout: Optional[float] = None) -> Optional[dict[str, Any]]:
