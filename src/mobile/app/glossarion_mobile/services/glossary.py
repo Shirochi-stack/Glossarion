@@ -60,6 +60,7 @@ __all__ = [
     "ContractMismatch",
     "GLOSSARY_EXTENSIONS",
     "GLOSSARY_MODES",
+    "GlossaryChanging",
     "GlossaryFile",
     "GlossaryService",
     "JobBusy",
@@ -163,6 +164,20 @@ class ContractMismatch(CoreMissing):
 
 class JobBusy(RuntimeError):
     """An editor tool that touches process-global state must wait for the running job."""
+
+
+class GlossaryChanging(RuntimeError):
+    """The auto-reload caught the glossary file while it was still being written (a running job saving it):
+    it was empty, or its size or mtime moved during the read. Read it again on the next check."""
+
+
+def _file_state(path: str) -> Optional[tuple]:
+    """``(mtime_ns, size)`` of ``path`` (None when it cannot be read)."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 # ---------------------------------------------------------------------------
@@ -863,10 +878,31 @@ class GlossaryService:
         return doc
 
     def reload_document(self, doc: Any) -> Any:
-        """Reload / force refresh / the auto-reload (``load_glossary_for_editing``)."""
+        """Reload / force refresh (``load_glossary_for_editing``)."""
         doc.load()
         self._decorate(doc, getattr(doc, "source_path", None))
         return doc
+
+    def reread_document(self, doc: Any) -> Any:
+        """The auto-reload (desktop ``_silent_glossary_reload``: ``load_glossary_for_editing`` when the file's
+        mtime moved, e.g. a running job wrote it): the file read into a NEW document like :meth:`open_document`.
+        The open one is never touched off the UI loop, so an edit made while the file is read stays in it
+        (the editor swaps the new document in only while the open one has no unsaved edits). A file still
+        being written - empty, or its size / mtime moved during the read - raises :class:`GlossaryChanging`
+        (read it again on the next check); one that does not parse raises the load error. Either way the
+        open document stays as it was. The "Loaded N entries" log line is not repeated (the desktop keeps
+        the old log on an auto-reload)."""
+        gd = self.gd()
+        before = _file_state(doc.path)
+        if before is None or before[1] == 0:
+            raise GlossaryChanging(doc.path)
+        fresh = gd.GlossaryDocument(self.config_snapshot(), backup=self.backup_callback, log=self.log)
+        fresh._last_loaded_glossary_log = getattr(doc, "_last_loaded_glossary_log", "")
+        fresh.load(doc.path)
+        if _file_state(doc.path) != before:
+            raise GlossaryChanging(doc.path)
+        self._decorate(fresh, getattr(doc, "source_path", None))
+        return fresh
 
     @staticmethod
     def _decorate(doc: Any, source_path: Optional[str]) -> None:
@@ -932,6 +968,23 @@ class GlossaryService:
         except Exception:
             return None
         return status if isinstance(status, dict) else None
+
+    def can_resolve_gender(self, status: Any) -> bool:
+        """The row offers "Resolve Gender…" (the desktop context menu): ``glossary_document.can_resolve_gender``
+        (a tracked conflict)."""
+        shared = self.core.fn("glossary_document", "can_resolve_gender")
+        if shared is not None:
+            return bool(shared(status))
+        return isinstance(status, dict) and bool(status.get("conflict"))
+
+    @staticmethod
+    def gender_pending(doc: Any, entry: Mapping[str, Any]) -> bool:
+        """A Resolve Gender decision of this row waits for Save (``apply_gender_decision`` records it by raw
+        name; the desktop marks the row updated until the save writes it to the tracker)."""
+        pending = getattr(doc, "_pending_gender_decisions", None)
+        if not pending or not isinstance(entry, Mapping):
+            return False
+        return str(entry.get("raw_name", "") or "").strip() in pending
 
     def gender_model(self, doc: Any, ref: Any) -> Optional[dict]:
         """The Resolve Tracked Gender sheet (``_open_gender_resolution``) as texts + the current decision."""

@@ -9,10 +9,24 @@ Anatomy
     Undo · Redo · Save (dirty dot) · ⋯;
   * the WindowedList of rows (10k+ entries: a 1,500-row window, 150 rows per scroll
     step): raw (title) → translated, type badge, gender chip, ⚠ tracked-gender conflict,
-    "edited" when the translated name differs from the saved one (desktop orange rows);
+    "edited" when the translated name differs from the saved one or a Resolve Gender
+    decision waits for Save (desktop orange rows); on the right ✎ Edit (the EntrySheet)
+    and, for a row whose tracked gender conflicts, the gender menu next to it (the desktop
+    context menu's "Resolve Gender…": the decisions Auto / Male / Female applied at once,
+    and "Resolve Gender…" for the full sheet with the tracking history);
     tap → EntrySheet, long-press → selection (Delete · Export selection · Change type),
     swipe left → delete with Undo;
   * FAB "＋ Entry".
+
+Responsiveness (hotfix 1 issue 1: the app froze while the editor was used during a
+translation): no event handler of the editor leaves Flet's whole-page auto-update behind
+(``common.quiet`` / ``quiet_scroll``: a scroll event, a keystroke or a tap used to diff every
+View, the chat with its live job card included); a render sends the editor's header and its
+list, never the whole page; mounted rows are reused while their look is unchanged (a search,
+a save or an auto-reload builds and sends only the rows that changed) and a one-row edit sends
+that row alone. The auto-reload reads a file the running job rewrote into a new document off
+the UI loop and swaps it in only while there are no unsaved edits; a half-written file leaves
+the open document as it was.
 
 ⋯ menu: Find / Replace · Save As… · Export selection… · Backups · Edit raw · Use as manual
 glossary · Update output files on save (``update_html_on_save``) · Hide unused entries ·
@@ -37,12 +51,14 @@ import asyncio
 import dataclasses
 import logging
 import os
+from collections import OrderedDict
 from typing import Any, Optional, Sequence
 
 import flet as ft
 
 from glossarion_mobile.services.glossary import (
     CoreMissing,
+    GlossaryChanging,
     JobBusy,
     OpReport,
     RowSpec,
@@ -58,10 +74,16 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
-from glossarion_mobile.ui.components.windowed_list import WindowedList
+from glossarion_mobile.ui.components.windowed_list import WINDOW_ROWS, WindowedList
 from glossarion_mobile.ui.foreground import poll_sleep
-from glossarion_mobile.ui.glossary.common import ask, chip
-from glossarion_mobile.ui.glossary.entry_sheet import EntrySheet, GenderSheet, field_label
+from glossarion_mobile.ui.glossary.common import ask, chip, quiet
+from glossarion_mobile.ui.glossary.entry_sheet import (
+    GENDER_DECISIONS,
+    RESOLVE_GENDER_LABEL,
+    EntrySheet,
+    GenderSheet,
+    field_label,
+)
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET
 
@@ -78,6 +100,15 @@ SORTS = (
 )
 POLL_SECONDS = 2.0
 SEARCH_DEBOUNCE = 0.25  # seconds of typing pause before the search runs
+#: Row controls kept for reuse (a window of mounted rows plus a search / filter round trip).
+ROW_CACHE_MAX = 2 * WINDOW_ROWS
+#: Rows one build step (one UI-loop callback: a scroll step, a search, a re-render) builds with their full
+#: card; its further rows start as light placeholders (or keep their last look) and ``_fill`` completes them,
+#: ``FILL_CHUNK`` per loop step. Sending a full row costs about 0.5 ms on the host (several on a phone), so a
+#: whole 150-row step at once stalled the loop well past 100 ms.
+FULL_ROWS_PER_STEP = 20
+FILL_CHUNK = 12
+PLACEHOLDER_HEIGHT = 72
 
 
 def _error_text(exc: Exception) -> str:
@@ -114,6 +145,19 @@ def new_entry_form(doc: Any, fields: Sequence[str], raw_term: str = "") -> tuple
 UNRESOLVED_GENDER_PINK = "#ec4899"
 
 
+@ft.control(isolated=True)
+class RowShell(ft.Dismissible):
+    """A mounted editor row (swipe left: delete). Isolated: when the list is sent (a scroll step appended,
+    a new search) Flet 1.0.3 compares the row object but not its card - without it every mounted row's
+    whole subtree was diffed again on each append (hundreds of ms once a window filled up). A row that
+    changes is sent on its own (``EditorPane._refresh_row`` / ``_rows_in_place``)."""
+
+
+@ft.control(isolated=True)
+class RowCard(ft.Container):
+    """A mounted row in selection mode (the card itself, toggled in place); isolated like :class:`RowShell`."""
+
+
 class EditorPane:
     def __init__(self, screen: Any) -> None:
         self.screen = screen
@@ -141,9 +185,21 @@ class EditorPane:
         self._rows_selecting = False  # the mounted rows are built in the selection layout
         self.generation = 0  # bumped whenever the rows are recomputed (the swipe Undo's staleness check)
         self.root: Optional[ft.Control] = None
+        self.header: Optional[ft.Control] = None
         self.sheets: list = []  # opened sheets (tests)
         self.reports: list = []  # OpReports shown (tests)
-        self.windowed = WindowedList(build_row=self._row_control, key_of=lambda spec: spec.key, key="ge")
+        self._by_key: dict = {}  # row key -> the current RowSpec (row handlers look their row up at tap time)
+        #: row key -> (look, control): a mounted row is reused while what it shows is unchanged (``_row_view``)
+        self._row_cache: "OrderedDict[str, tuple]" = OrderedDict()
+        self._unreadable_mtime: Optional[float] = None  # an auto-reload that failed: retried once the file changes
+        self._step_built = 0  # full rows built in this loop step (``FULL_ROWS_PER_STEP``)
+        self._step_reset = False
+        self._fill_queue: "OrderedDict[str, None]" = OrderedDict()  # mounted rows waiting for their card
+        self._fill_task: Any = None
+        self._filling = False
+        # quiet_scroll: a scroll event that appends nothing sends nothing (no whole-page auto-update)
+        self.windowed = WindowedList(build_row=self._row_control, key_of=lambda spec: spec.key, key="ge",
+                                     quiet_scroll=True)
         size = self.service.cfg("glossary_editor_tree_font_size", None)
         try:
             self.text_size = max(8, min(32, int(float(size)))) if size not in (None, "") else 14
@@ -163,65 +219,72 @@ class EditorPane:
     # ---- build -------------------------------------------------------------------------------------
 
     def build(self) -> ft.Control:
+        # Every handler is ``quiet``: it pushes what it changes, Flet never diffs the whole page after it.
         self.prev_button = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, tooltip="Previous glossary",
-                                         size_constraints=HIT_TARGET, on_click=lambda e: self.ctx.spawn(self.nav(-1)),
+                                         size_constraints=HIT_TARGET,
+                                         on_click=quiet(lambda: self.ctx.spawn(self.nav(-1))),
                                          key="ge-prev")
         self.next_button = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, tooltip="Next glossary",
-                                         size_constraints=HIT_TARGET, on_click=lambda e: self.ctx.spawn(self.nav(1)),
+                                         size_constraints=HIT_TARGET,
+                                         on_click=quiet(lambda: self.ctx.spawn(self.nav(1))),
                                          key="ge-next")
         self.file_button = ft.TextButton(content=self._file_label(), icon=ft.Icons.ARROW_DROP_DOWN, expand=True,
-                                         on_click=lambda e: self.open_file_picker(), key="ge-file")
+                                         on_click=quiet(self.open_file_picker), key="ge-file")
         self.reload_dot = ft.Container(width=10, height=10, border_radius=5, bgcolor=ft.Colors.GREEN_400,
                                        tooltip="Auto-reload on change", key="ge-reload-dot")
         self.stats = ft.Text("Loading glossary…", theme_style=ft.TextThemeStyle.BODY_SMALL, italic=True,
                              color=ft.Colors.ON_SURFACE_VARIANT, max_lines=3, key="ge-stats")
         self.search = ft.TextField(hint_text="Search entries", prefix_icon=ft.Icons.SEARCH, dense=True, expand=True,
-                                   on_change=lambda e: self._on_search(), key="ge-search")
+                                   on_change=quiet(self._on_search), key="ge-search")
         self.filter_button = ft.IconButton(icon=ft.Icons.FILTER_LIST, tooltip="Filter columns",
-                                           size_constraints=HIT_TARGET, on_click=lambda e: self.open_filter(),
+                                           size_constraints=HIT_TARGET, on_click=quiet(self.open_filter),
                                            key="ge-filter")
         self.sort_menu = ft.PopupMenuButton(icon=ft.Icons.SORT, tooltip="Sort", key="ge-sort", items=[
-            ft.PopupMenuItem(content=label, on_click=lambda e, s=sid: self.set_sort(s)) for sid, label, _f, _d in SORTS])
+            ft.PopupMenuItem(content=label, on_click=quiet(lambda s=sid: self.set_sort(s)))
+            for sid, label, _f, _d in SORTS])
         self.undo_button = ft.IconButton(icon=ft.Icons.UNDO, tooltip="Nothing to undo", disabled=True,
-                                         size_constraints=HIT_TARGET, on_click=lambda e: self.ctx.spawn(self.undo()),
+                                         size_constraints=HIT_TARGET,
+                                         on_click=quiet(lambda: self.ctx.spawn(self.undo())),
                                          key="ge-undo")
         self.redo_button = ft.IconButton(icon=ft.Icons.REDO, tooltip="Nothing to redo", disabled=True,
                                          size_constraints=HIT_TARGET,
-                                         on_click=lambda e: self.ctx.spawn(self.undo(redo=True)), key="ge-redo")
+                                         on_click=quiet(lambda: self.ctx.spawn(self.undo(redo=True))), key="ge-redo")
         self.save_button = ft.IconButton(icon=ft.Icons.SAVE_OUTLINED, tooltip="Save", size_constraints=HIT_TARGET,
-                                         on_click=lambda e: self.ctx.spawn(self.save()), key="ge-save")
+                                         on_click=quiet(lambda: self.ctx.spawn(self.save())), key="ge-save")
         self.menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Glossary editor", key="ge-menu",
                                        items=self._menu_items())
         self.filter_row = ft.Row(spacing=6, wrap=True, visible=False, key="ge-filter-chips")
         self.changed_banner = ft.Container(
             content=ft.Row([ft.Icon(ft.Icons.SYNC_PROBLEM, size=18),
                             ft.Text("The file changed on disk.", expand=True),
-                            ft.TextButton(content="Reload", on_click=lambda e: self.ctx.spawn(self.reload(force=True)))],
+                            ft.TextButton(content="Reload",
+                                          on_click=quiet(lambda: self.ctx.spawn(self.reload(force=True))))],
                            spacing=6),
             bgcolor=ft.Colors.TERTIARY_CONTAINER, border_radius=tokens.RADII["card"], padding=6, visible=False,
             key="ge-changed")
-        self.selection_bar = SelectionTopBar(on_close=self.exit_selection, on_select_all=self.select_all,
+        self.selection_bar = SelectionTopBar(on_close=quiet(self.exit_selection), on_select_all=quiet(self.select_all),
                                              key="ge-selection")
         self.bulk_bar = BulkActionBar(page=self.ctx.page, tablet=self.ctx.tablet,
                                       compact=self.ctx.text_scale >= tokens.COMPACT_TEXT_SCALE, key="ge-bulk")
         self.loading_bar = ft.ProgressBar(visible=True, key="ge-loading")
         self.list_holder = ft.Container(content=self.windowed.control, expand=True, key="ge-list-holder")
-        self.fab = ft.FloatingActionButton(icon=ft.Icons.ADD, content="Entry", on_click=lambda e: self.open_new_entry(),
+        self.fab = ft.FloatingActionButton(icon=ft.Icons.ADD, content="Entry", on_click=quiet(self.open_new_entry),
                                            key="ge-fab")
         self.fab_slot = ft.Container(content=self.fab, right=16, bottom=16, key="ge-fab-slot")
+        self.header = ft.Container(content=ft.Column([
+            ft.Row([self.prev_button, self.file_button, self.next_button, self.reload_dot], spacing=0,
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            self.stats,
+            self.changed_banner,
+            ft.Row([self.search, self.filter_button, self.sort_menu], spacing=0,
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([self.undo_button, self.redo_button, ft.Container(expand=True), self.save_button, self.menu],
+                   spacing=0),
+            self.filter_row,
+            self.selection_bar.control,
+        ], spacing=4, tight=True), padding=ft.Padding.only(left=8, right=8, top=4), key="ge-header")
         self.root = ft.Column([
-            ft.Container(content=ft.Column([
-                ft.Row([self.prev_button, self.file_button, self.next_button, self.reload_dot], spacing=0,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                self.stats,
-                self.changed_banner,
-                ft.Row([self.search, self.filter_button, self.sort_menu], spacing=0,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Row([self.undo_button, self.redo_button, ft.Container(expand=True), self.save_button, self.menu],
-                       spacing=0),
-                self.filter_row,
-                self.selection_bar.control,
-            ], spacing=4, tight=True), padding=ft.Padding.only(left=8, right=8, top=4)),
+            self.header,
             self.loading_bar,
             ft.Stack([self.list_holder, self.fab_slot], expand=True),
             self.bulk_bar.control,
@@ -238,7 +301,7 @@ class EditorPane:
         update_on_save = bool(self.service.cfg("update_html_on_save", True))
 
         def item(label: str, handler: Any, icon: Any = None, checked: Optional[bool] = None) -> ft.PopupMenuItem:
-            return ft.PopupMenuItem(content=label, icon=icon, checked=checked, on_click=lambda e: handler())
+            return ft.PopupMenuItem(content=label, icon=icon, checked=checked, on_click=quiet(handler))
 
         return [
             item("Find / Replace", self.open_find_replace, ft.Icons.FIND_REPLACE),
@@ -282,12 +345,16 @@ class EditorPane:
         self.sort_id = "original"
         self.selected = set()
         self.selecting = False
+        # the row cache stays: the new file's rows refill the mounted row objects (their looks differ)
+        self._unreadable_mtime = None
         return await self.reload(source_path=source_path)
 
     async def reload(self, *, force: bool = False, source_path: Optional[str] = None, silent: bool = False) -> Any:
-        """Read the file (desktop Reload / force refresh / the auto-reload)."""
+        """Read the file (desktop Reload / force refresh / the auto-reload: ``silent``)."""
         if not self.path:
             return None
+        if silent and self.doc is not None:
+            return await self._auto_reload()
         self.loading = True
         if not silent and self.root is not None:
             self.loading_bar.visible = True
@@ -322,6 +389,55 @@ class EditorPane:
         await self._after_reload(keep_window=silent)
         return doc
 
+    async def _auto_reload(self) -> Any:
+        """The auto-reload (desktop ``_silent_glossary_reload``) of a file changed on disk - typically a running
+        job writing the book's glossary: ``GlossaryService.reread_document`` reads it into a new document on
+        the io pool. The open document is swapped for it only while it is still the open one, still has no
+        unsaved edits (an edit made meanwhile keeps the "changed on disk" banner instead) and no save
+        re-baselined it meanwhile. A file caught while it is written (``GlossaryChanging``) or that does
+        not parse leaves the open document as it was: the first is read again on the next check, the
+        second once the file changes again. Returns the new document, or None."""
+        doc = self.doc
+        if doc is None:
+            return None
+        baseline = getattr(doc, "mtime", None)
+        self.loading = True
+        try:
+            fresh = await self.ctx.io(lambda: self.service.reread_document(doc))
+        except GlossaryChanging:
+            log.debug("%s is still being written; read again on the next check", self.path)
+            return None
+        except Exception as exc:
+            log.info("auto-reloading %s failed (read again once it changes): %s", self.path, exc)
+            try:
+                self._unreadable_mtime = await self.ctx.io(os.path.getmtime, doc.path)
+            except OSError:
+                self._unreadable_mtime = None
+            return None
+        finally:
+            self.loading = False
+        if doc is not self.doc or self._saving or getattr(doc, "mtime", None) != baseline:
+            return None  # another file, or a save wrote this one meanwhile (the next poll compares with it)
+        if doc.dirty:
+            self._show_changed_on_disk()
+            return None
+        self._unreadable_mtime = None
+        self.doc = fresh
+        self.changed_on_disk = False
+        if self.root is not None:
+            self.reload_dot.bgcolor = ft.Colors.GREEN_400
+        await self._after_reload(keep_window=True)
+        return fresh
+
+    def _show_changed_on_disk(self) -> None:
+        if self.changed_on_disk:
+            return
+        self.changed_on_disk = True
+        if self.root is not None:
+            self.reload_dot.bgcolor = ft.Colors.AMBER_400
+            self.changed_banner.visible = True
+            self.ctx.push(self.header)
+
     async def _after_reload(self, *, keep_window: bool = True) -> None:
         """The document was re-read (Reload, the auto-reload, Delete, a tool, Undo of a glossary step,
         a restore): derive the view again like the desktop's load - column filters of columns the file
@@ -339,16 +455,16 @@ class EditorPane:
         self.generation += 1
         doc = self.doc
         if doc is None:
-            self.specs, self.visible = [], []
+            self.specs, self.visible, self._by_key = [], [], {}
             return
         self.specs = self.service.row_specs(doc)
+        self._by_key = {spec.key: spec for spec in self.specs}
         self.visible = self.service.visible(doc, self.state, self.specs)
 
     # ---- render ------------------------------------------------------------------------------------
 
-    def render(self, *, keep_window: bool = False) -> None:
-        if self.root is None:
-            return
+    def _render_header(self) -> None:
+        """The header's state (file name, stats line, banner, filter chips, Undo / Redo / Save, ◀ ▶, ⋯)."""
         doc = self.doc
         self.file_button.content = self._file_label()
         self.stats.value = self._stats_text()
@@ -358,25 +474,72 @@ class EditorPane:
         self._sync_history()
         self._sync_nav()
         self._refresh_menu()
+
+    def render(self, *, keep_window: bool = False) -> None:
+        """The header, the list and the bars - sent as those controls, never as the whole page. Mounted rows
+        whose look did not change are reused (``_row_control``), so only changed rows are built and sent."""
+        if self.root is None:
+            return
+        doc = self.doc
+        self._render_header()
+        list_changed = True
         if self.error and doc is None:
             self.list_holder.content = EmptyState(icon="ERROR_OUTLINE", title="Glossary could not be opened",
                                                   body=self.error, key="ge-error",
-                                                  primary=("Edit raw", lambda e: self.ctx.spawn(self.open_raw())))
+                                                  primary=("Edit raw", quiet(lambda: self.ctx.spawn(self.open_raw()))))
         elif doc is not None and not self.specs:
             self.list_holder.content = EmptyState(icon="SPELLCHECK", title="No entries",
                                                   body="This glossary has no entries yet.", key="ge-empty",
-                                                  primary=("＋ Entry", lambda e: self.open_new_entry()))
+                                                  primary=("＋ Entry", quiet(self.open_new_entry)))
         elif doc is not None and not self.visible:
             self.list_holder.content = EmptyState(icon="FILTER_LIST_OFF", title="No entries match",
                                                   body="Change the search or the filters.", key="ge-nomatch",
-                                                  primary=("Clear filters", lambda e: self.clear_filters()))
+                                                  primary=("Clear filters", quiet(self.clear_filters)))
         else:
+            in_place = (keep_window and self.list_holder.content is self.windowed.control
+                        and self._rows_selecting == self.selecting and self._rows_in_place())
             self.list_holder.content = self.windowed.control
-            self.windowed.set_items(self.visible, keep_window=keep_window, keep_rendered=keep_window)
+            if in_place:
+                list_changed = False  # the same rows: only the ones that changed were sent
+            else:
+                self.windowed.set_items(self.visible, keep_window=keep_window, keep_rendered=keep_window)
             self._rows_selecting = self.selecting
         self.fab_slot.visible = doc is not None and not self.selecting
         self._sync_selection_bars()
-        self.ctx.push(self.root)
+        targets = [self.header, self.loading_bar, self.fab_slot, self.bulk_bar.control]
+        if list_changed:
+            targets.insert(2, self.list_holder)
+        self.ctx.push(*targets)
+
+    def _rows_in_place(self) -> bool:
+        """``render(keep_window=True)`` when the list keeps its rows (same keys, same order - an auto-reload,
+        a save, Select all): the mounted rows whose look changed get it in place and are sent one by one;
+        the list itself is not sent (that diffs every mounted row). False when the rows changed, or a row
+        cannot be refilled (the caller rebuilds the window)."""
+        wl = self.windowed
+        if len(wl.items) != len(self.visible) or any(a.key != b.key for a, b in zip(wl.items, self.visible)):
+            return False
+        wl.items = list(self.visible)  # the same keys at the same positions
+        refilled: list = []
+        for spec in self.visible[wl.window_start:wl.rendered]:
+            shell = wl.controls.get(spec.key)
+            if shell is None:
+                return False
+            view = self._row_view(spec)
+            cached = self._row_cache.get(spec.key)
+            if cached is not None and cached[1] is shell and cached[0] == view:
+                continue
+            if hasattr(shell, "_frozen") or not self._same_kind(shell):
+                return False
+            if not self._full_row_allowed():
+                self._queue_fill(spec.key)  # the next loop steps send it (``_fill``)
+                continue
+            if not self._refill(shell, spec, view):
+                return False
+            self._remember_row(spec.key, view, shell)
+            refilled.append(shell)
+        self.ctx.push(*refilled)
+        return True
 
     def _stats_text(self) -> str:
         doc = self.doc
@@ -395,7 +558,7 @@ class EditorPane:
         chips = []
         for name, allowed in sorted(self.state.filters.items()):
             chips.append(ft.Chip(label=ft.Text(f"{field_label(name)}: {len(allowed)}"),
-                                 on_delete=lambda e, f=name: self.set_column_filter(f, None),
+                                 on_delete=quiet(lambda f=name: self.set_column_filter(f, None)),
                                  key=f"ge-chip-{name}"))
         self.filter_row.controls = chips
         self.filter_row.visible = bool(chips)
@@ -422,86 +585,359 @@ class EditorPane:
 
     # ---- rows --------------------------------------------------------------------------------------
 
-    def _row_control(self, spec: RowSpec, position: int) -> ft.Control:
+    def _row_view(self, spec: RowSpec) -> tuple:
+        """What a row shows (its look; also the row cache's check): every value of the entry, the tracked
+        gender status, the edited flag, the selection and the highlight. ``_row_control`` reuses a mounted
+        row while this is unchanged."""
+        doc = self.doc
+        entry = spec.entry
+        status = self.service.gender_status(doc, entry) if doc is not None else None
+        status = status if isinstance(status, dict) else {}
+        updated = doc is not None and (is_updated(doc, spec) or self.service.gender_pending(doc, entry))
+        return (
+            spec.source_idx, str(spec.ref), tuple((str(k), str(v)) for k, v in entry.items()),
+            str(status.get("label") or ""), bool(status.get("conflict")), bool(status.get("unresolved")),
+            str(status.get("decision") or "auto"), bool(status) and self.service.can_resolve_gender(status),
+            bool(updated), spec.source_idx in self.selected, self.selecting, spec.key == self.current_key,
+            self.text_size,
+        )
+
+    def _row_control(self, spec: RowSpec, position: int = 0) -> ft.Control:
+        """The WindowedList's ``build_row``: the cached row of ``spec`` while it looks the same; a cached row
+        of the same kind refilled in place when it changed (the list then keeps that row object); else a new
+        row. Keeping the row objects matters beyond the work saved: Flet 1.0.3 diffs a NEW object that takes
+        the place of an old one with the same key as a frozen value, and a frozen row can never be changed
+        in place again (``_refill`` / ``_mark_selected`` would raise). Past ``FULL_ROWS_PER_STEP`` rows in
+        one loop step a row starts as a placeholder (or keeps its last look) and ``_fill`` completes it."""
+        key = spec.key
+        cached = self._row_cache.get(key)
+        if cached is None and not self._full_row_allowed():
+            return self._placeholder_for(key, spec)
+        view = self._row_view(spec)
+        if cached is not None:
+            # hotfix 1 #1: a cached row coming back into the list (a search cleared, a filter removed, a scroll
+            # step) is sent whole like a new row, so it counts towards this step's budget too; past it, it
+            # starts as a placeholder that ``_fill`` completes (a mounted row costs nothing to keep)
+            mounted = self._is_mounted(key, cached[1])
+            if cached[0] == view:
+                if not mounted and not self._full_row_allowed():
+                    return self._placeholder_for(key, spec)
+                self._row_cache.move_to_end(key)
+                return cached[1]
+            if not self._full_row_allowed():
+                if mounted and not hasattr(cached[1], "_frozen") and self._same_kind(cached[1]):
+                    self._queue_fill(key)
+                    return cached[1]  # its last look until ``_fill`` reaches it
+                return self._placeholder_for(key, spec)
+        if cached is not None and self._refill(cached[1], spec, view):
+            self._remember_row(key, view, cached[1])
+            return cached[1]
+        control = self._build_row(spec, view)
+        self._remember_row(key, view, control)
+        return control
+
+    def _is_mounted(self, key: str, control: Any) -> bool:
+        """``control`` is the row the list shows for ``key`` (while the list is rebuilt: what it showed until then,
+        ``WindowedList.mounted_before``)."""
+        wl = self.windowed
+        before = wl.mounted_before
+        return (before is not None and before.get(key) is control) or wl.controls.get(key) is control
+
+    def _placeholder_for(self, key: str, spec: RowSpec) -> ft.Control:
+        shell = self._placeholder_row(spec)
+        self._remember_row(key, None, shell)
+        self._queue_fill(key)
+        return shell
+
+    def _remember_row(self, key: str, view: Optional[tuple], control: Any) -> None:
+        self._row_cache[key] = (view, control)
+        self._row_cache.move_to_end(key)
+        while len(self._row_cache) > ROW_CACHE_MAX:
+            self._row_cache.popitem(last=False)
+
+    def _same_kind(self, shell: Any) -> bool:
+        """``shell`` is the kind of row the list shows now (a swipe row, or a selection-mode card)."""
+        return isinstance(shell, RowCard) if self.selecting else isinstance(shell, ft.Dismissible)
+
+    def _full_row_allowed(self) -> bool:
+        """This loop step may still build a full row card: ``FULL_ROWS_PER_STEP`` per loop callback (always
+        outside a running loop, and while ``_fill`` completes rows)."""
+        if self._filling:
+            return True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return True
+        if not self._step_reset:
+            self._step_reset = True
+            loop.call_soon(self._reset_step)
+        self._step_built += 1
+        return self._step_built <= FULL_ROWS_PER_STEP
+
+    def _reset_step(self) -> None:
+        self._step_built = 0
+        self._step_reset = False
+
+    def _placeholder_row(self, spec: RowSpec) -> ft.Control:
+        """A row's light stand-in (an empty card of a row's height; no swipe) until ``_fill`` gives it its card."""
+        if self.selecting:
+            return RowCard(height=PLACEHOLDER_HEIGHT, border_radius=tokens.RADII["card"],
+                           bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, data={}, ink=True,
+                           padding=ft.Padding.only(left=10, right=0, top=4, bottom=4),
+                           on_click=quiet(lambda k=spec.key, s=spec: self._tap_key(k, s)),
+                           on_long_press=quiet(lambda k=spec.key, s=spec: self._long_press_key(k, s)))
+        return RowShell(content=ft.Container(height=PLACEHOLDER_HEIGHT, border_radius=tokens.RADII["card"],
+                                             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW),
+                        dismiss_direction=ft.DismissDirection.NONE,
+                        on_dismiss=quiet(lambda k=spec.key, s=spec: self._on_dismiss(k, s)))
+
+    def _queue_fill(self, key: str) -> None:
+        self._fill_queue[key] = None
+        task = self._fill_task
+        if task is None or task.done():
+            self._fill_task = self.ctx.spawn(self._fill())
+
+    async def _fill(self) -> None:
+        """Complete the mounted rows a build step left as placeholders (or with their last look), up to
+        ``FILL_CHUNK`` per loop step; each completed row is sent on its own (the list is not sent)."""
+        while self._fill_queue:
+            await asyncio.sleep(0)
+            wl = self.windowed
+            done: list = []
+            rebuilt = False
+            self._filling = True
+            try:
+                while self._fill_queue and len(done) < FILL_CHUNK:
+                    key, _none = self._fill_queue.popitem(last=False)
+                    shell, position = wl.controls.get(key), wl.positions.get(key)
+                    if shell is None or position is None or position >= len(wl.items):
+                        continue  # not mounted any more
+                    spec = wl.items[position]
+                    view = self._row_view(spec)
+                    cached = self._row_cache.get(key)
+                    if cached is not None and cached[1] is shell and cached[0] == view:
+                        continue
+                    if self._refill(shell, spec, view):
+                        self._remember_row(key, view, shell)
+                        done.append(shell)
+                    elif wl.replace(spec):  # a frozen row: a new one takes its place
+                        rebuilt = True
+            finally:
+                self._filling = False
+            self.ctx.push(*done)
+            if rebuilt:
+                self.ctx.push(wl.list_view)
+
+    def _refill(self, shell: Any, spec: RowSpec, view: tuple) -> bool:
+        """Give a row object ``view``'s look in place: a swipe row gets a new card (a placeholder its swipe),
+        a selection-mode card its new content, colour and frame. False when it cannot be (frozen by Flet, or
+        the other kind of row)."""
+        if hasattr(shell, "_frozen"):
+            return False
+        selecting = bool(view[10])
+        if not selecting and isinstance(shell, ft.Dismissible):
+            shell.content = self._row_content(spec, view)
+            shell.dismiss_direction = ft.DismissDirection.END_TO_START
+            if shell.background is None:
+                shell.background = self._swipe_background()
+            return True
+        if selecting and isinstance(shell, RowCard) and isinstance(getattr(shell, "data", None), dict):
+            card = self._row_content(spec, view)
+            shell.content, shell.bgcolor, shell.border, shell.data = card.content, card.bgcolor, card.border, card.data
+            shell.height = None
+            card.content = None  # the Row now belongs to the mounted card
+            return True
+        return False
+
+    @staticmethod
+    def _swipe_background() -> ft.Control:
+        return ft.Container(bgcolor=ft.Colors.ERROR, border_radius=tokens.RADII["card"],
+                            alignment=ft.Alignment.CENTER_RIGHT, padding=ft.Padding.only(right=16),
+                            content=ft.Icon(ft.Icons.DELETE_OUTLINE, color=ft.Colors.ON_ERROR))
+
+    def _build_row(self, spec: RowSpec, view: tuple) -> ft.Control:
+        if self.selecting:
+            return self._row_content(spec, view, card=RowCard)  # toggled in place (_mark_selected: row.data)
+        return RowShell(
+            content=self._row_content(spec, view),
+            dismiss_direction=ft.DismissDirection.END_TO_START,
+            background=self._swipe_background(),
+            on_dismiss=quiet(lambda k=spec.key, s=spec: self._on_dismiss(k, s)),
+        )
+
+    def _row_content(self, spec: RowSpec, view: tuple, card: type = ft.Container) -> ft.Container:
+        """The row's card: the names, description and the chip line closed by the row number (expanding,
+        ellipsized), then on the right the gender menu (rows with a tracked gender conflict) and ✎ Edit,
+        48 dp targets each. ``card``: the card's class (``RowCard`` when the card is the mounted row)."""
+        (_idx, _ref, _values, label, conflict, unresolved, decision, resolvable, updated, selected, selecting,
+         current, text_size) = view
         doc = self.doc
         entry = spec.entry
         raw = str(entry.get(raw_field(doc), "") or entry.get("original", "") or "") if doc is not None else ""
         translated = str(entry.get(translated_field(doc), "") or "") if doc is not None else ""
-        selected = spec.source_idx in self.selected
-        updated = doc is not None and is_updated(doc, spec)
         badges: list = []
         entry_type = str(entry.get("type") or "")
         if entry_type:
             badges.append(chip(entry_type, key="type"))
         gender = str(entry.get("gender") or "")
-        status = self.service.gender_status(doc, entry) if doc is not None else None
         # U12 item 6, desktop ``_apply_editor_gender_presentation``: the gender column shows the tracker's
         # label (the tracked decision, e.g. with its share) when the tracker knows the name
-        tracked = str(status.get("label") or "") if isinstance(status, dict) and not status.get("conflict") else ""
+        tracked = label if label and not conflict else ""
         if gender or tracked:
             badges.append(chip(tracked or gender, bgcolor=ft.Colors.TERTIARY_CONTAINER, key="gender"))
-        if isinstance(status, dict) and status.get("conflict"):
-            badges.append(chip(f"⚠ {status.get('label') or 'Gender conflict'}", bgcolor=ft.Colors.ERROR_CONTAINER,
-                               key="conflict", tooltip="Tap the row › Resolve gender…"))
+        if conflict:
+            badges.append(chip(f"⚠ {label or 'Gender conflict'}", bgcolor=ft.Colors.ERROR_CONTAINER,
+                               key="conflict", tooltip=RESOLVE_GENDER_LABEL))
         if updated:
             badges.append(chip("edited", bgcolor=ft.Colors.ORANGE_200, key="edited"))
-        lines: list = [ft.Text(raw or "—", size=self.text_size, weight=ft.FontWeight.W_600, max_lines=3,
+        lines: list = [ft.Text(raw or "—", size=text_size, weight=ft.FontWeight.W_600, max_lines=3,
                                overflow=ft.TextOverflow.ELLIPSIS),
-                       ft.Text(f"→ {translated}" if translated else "→ (no translation)", size=self.text_size - 1,
+                       ft.Text(f"→ {translated}" if translated else "→ (no translation)", size=text_size - 1,
                                max_lines=3, overflow=ft.TextOverflow.ELLIPSIS)]
         description = str(entry.get("description") or "")
         if description:
-            lines.append(ft.Text(description, size=max(8, self.text_size - 3), color=ft.Colors.ON_SURFACE_VARIANT,
+            lines.append(ft.Text(description, size=max(8, text_size - 3), color=ft.Colors.ON_SURFACE_VARIANT,
                                  max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
-        if badges:
-            lines.append(ft.Row(badges, spacing=4, wrap=True, run_spacing=2))
+        # the row number (the desktop tree's # column) closes the chip line
+        badges.append(ft.Text(f"#{spec.source_idx + 1}", size=10, color=ft.Colors.ON_SURFACE_VARIANT, key="number"))
+        lines.append(ft.Row(badges, spacing=4, wrap=True, run_spacing=2,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER))
         leading: list = []
         check = None
-        if self.selecting:
+        if selecting:
             check = ft.Icon(ft.Icons.CHECK_CIRCLE if selected else ft.Icons.RADIO_BUTTON_UNCHECKED,
                             color=ft.Colors.PRIMARY if selected else ft.Colors.OUTLINE, size=22)
             leading.append(check)
+        actions: list = [self._gender_menu(spec, decision)] if resolvable else []
+        actions.append(ft.IconButton(icon=ft.Icons.EDIT_OUTLINED, tooltip="Edit", size_constraints=HIT_TARGET,
+                                     on_click=quiet(lambda k=spec.key, s=spec: self.edit_key(k, s)),
+                                     key=f"ge-edit-{spec.key}"))
         base_bgcolor = ft.Colors.with_opacity(0.10, ft.Colors.ORANGE) if updated else ft.Colors.SURFACE_CONTAINER_LOW
-        if isinstance(status, dict) and status.get("unresolved"):  # desktop: unresolved rows are tinted pink
+        if unresolved:  # desktop: unresolved rows are tinted pink
             base_bgcolor = ft.Colors.with_opacity(0.28, UNRESOLVED_GENDER_PINK)
-        row = ft.Container(
-            content=ft.Row(leading + [
-                ft.Column(lines, spacing=1, expand=True, tight=True),
-                ft.Text(f"{spec.source_idx + 1}", size=10, color=ft.Colors.ON_SURFACE_VARIANT),
-            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
-            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+        row = card(
+            content=ft.Row(leading + [ft.Column(lines, spacing=1, expand=True, tight=True)] + actions,
+                           spacing=4, vertical_alignment=ft.CrossAxisAlignment.START),
+            padding=ft.Padding.only(left=10, right=0, top=4, bottom=4),
             border_radius=tokens.RADII["card"],
             bgcolor=ft.Colors.SECONDARY_CONTAINER if selected else base_bgcolor,
-            border=ft.Border.all(2, ft.Colors.PRIMARY) if spec.key == self.current_key else None,
-            on_click=lambda e, s=spec: self.on_row_tap(s),
-            on_long_press=lambda e, s=spec: self.on_row_long_press(s),
+            border=ft.Border.all(2, ft.Colors.PRIMARY) if current else None,
+            on_click=quiet(lambda k=spec.key, s=spec: self._tap_key(k, s)),
+            on_long_press=quiet(lambda k=spec.key, s=spec: self._long_press_key(k, s)),
             ink=True,
         )
-        if self.selecting:
-            row.data = {"check": check, "bgcolor": base_bgcolor}  # toggled in place (_mark_selected)
-            return row
-        return ft.Dismissible(
-            content=row,
-            dismiss_direction=ft.DismissDirection.END_TO_START,
-            background=ft.Container(bgcolor=ft.Colors.ERROR, border_radius=tokens.RADII["card"],
-                                    alignment=ft.Alignment.CENTER_RIGHT, padding=ft.Padding.only(right=16),
-                                    content=ft.Icon(ft.Icons.DELETE_OUTLINE, color=ft.Colors.ON_ERROR)),
-            on_dismiss=lambda e, s=spec: self.ctx.spawn(self.swipe_delete(s)),
-        )
+        if selecting:
+            row.data = {"check": check, "bgcolor": base_bgcolor}
+        return row
+
+    def _gender_menu(self, spec: RowSpec, decision: str) -> ft.PopupMenuButton:
+        """The row's gender menu (desktop context menu "Resolve Gender…" for a tracked conflict): the desktop
+        decisions Auto / Male / Female (the current one checked), applied at once like the desktop dialog's
+        Apply (undoable; written to the tracker on Save), and "Resolve Gender…" for the full sheet."""
+        items = [ft.PopupMenuItem(content=label, checked=value == decision,
+                                  on_click=quiet(lambda k=spec.key, s=spec, v=value: self.apply_gender_key(k, v, s)),
+                                  key=f"ge-gender-{spec.key}-{value}")
+                 for value, label in GENDER_DECISIONS]
+        items.append(ft.PopupMenuItem(content=RESOLVE_GENDER_LABEL, icon=ft.Icons.WC,
+                                      on_click=quiet(lambda k=spec.key, s=spec: self.open_gender_key(k, s)),
+                                      key=f"ge-gender-{spec.key}-sheet"))
+        return ft.PopupMenuButton(icon=ft.Icons.WC, tooltip=RESOLVE_GENDER_LABEL, size_constraints=HIT_TARGET,
+                                  items=items, key=f"ge-gender-{spec.key}")
+
+    def _refresh_row(self, spec: RowSpec) -> bool:
+        """Show one row's new look at once: a mounted swipe row keeps its place in the list and only its card is
+        replaced and sent (sending the list would diff every mounted row). False when it is not mounted."""
+        key = spec.key
+        position = self.windowed.positions.get(key)
+        if position is not None and position < len(self.windowed.items):
+            self.windowed.items[position] = spec
+        shell = self.windowed.controls.get(key)
+        if shell is None:
+            return False
+        view = self._row_view(spec)
+        cached = self._row_cache.get(key)
+        if cached is not None and cached[1] is shell and cached[0] == view:
+            return True
+        if self._refill(shell, spec, view):
+            self._remember_row(key, view, shell)
+            self.ctx.push(shell)
+            return True
+        if self._replace_row(spec):  # a frozen row: a new one takes its place (the list is sent)
+            self.ctx.push(self.windowed.list_view)
+            return True
+        return False
+
+    def _replace_row(self, spec: RowSpec) -> bool:
+        """``WindowedList.replace`` with a full row (never a placeholder: one row is cheap)."""
+        previous, self._filling = self._filling, True
+        try:
+            return self.windowed.replace(spec)
+        finally:
+            self._filling = previous
 
     def spec_for_key(self, key: Optional[str]) -> Optional[RowSpec]:
         if key is None:
             return None
-        for spec in self.specs:
-            if spec.key == key:
-                return spec
-        return None
+        return self._by_key.get(key)
+
+    def _current_spec(self, key: str, fallback: Optional[RowSpec] = None) -> Optional[RowSpec]:
+        """The row's spec as it is now (rows are reused across recomputes, so their handlers look it up)."""
+        spec = self._by_key.get(key)
+        if spec is None and fallback is not None and not self._by_key:
+            return fallback  # rows built without a computed document view
+        return spec
+
+    def _tap_key(self, key: str, fallback: Optional[RowSpec] = None) -> Any:
+        spec = self._current_spec(key, fallback)
+        return self.on_row_tap(spec) if spec is not None else None
+
+    def _long_press_key(self, key: str, fallback: Optional[RowSpec] = None) -> None:
+        spec = self._current_spec(key, fallback)
+        if spec is not None:
+            self.on_row_long_press(spec)
+
+    def edit_key(self, key: str, fallback: Optional[RowSpec] = None) -> Optional[EntrySheet]:
+        """The row's ✎ Edit: the entry sheet (also in selection mode, where a tap selects)."""
+        spec = self._current_spec(key, fallback)
+        if spec is None:
+            return None
+        self._set_current(spec.key)
+        return self.open_entry(spec)
+
+    def apply_gender_key(self, key: str, decision: str, fallback: Optional[RowSpec] = None) -> bool:
+        """The gender menu's Auto / Male / Female."""
+        spec = self._current_spec(key, fallback)
+        return self.apply_gender(spec, decision) if spec is not None else False
+
+    def open_gender_key(self, key: str, fallback: Optional[RowSpec] = None) -> Optional[GenderSheet]:
+        """The gender menu's "Resolve Gender…"."""
+        spec = self._current_spec(key, fallback)
+        return self.open_gender(spec) if spec is not None else None
+
+    def _on_dismiss(self, key: str, fallback: Optional[RowSpec] = None) -> Any:
+        """Swipe left: a dismissed ``Dismissible`` must leave the tree in this update and never be mounted
+        again, so its row leaves the list and the cache at once; the delete (and its re-render) follows."""
+        self._row_cache.pop(key, None)
+        spec = self._current_spec(key, fallback)
+        if self.windowed.remove_key(key):
+            self.ctx.push(self.windowed.control)
+        return self.ctx.spawn(self.swipe_delete(spec)) if spec is not None else None
+
+    def _set_current(self, key: Optional[str]) -> None:
+        """Highlight ``key``'s row (and un-highlight the last one) in place."""
+        previous, self.current_key = self.current_key, key
+        if self.root is None:
+            return
+        for k in dict.fromkeys((previous, key)):
+            spec = self.spec_for_key(k)
+            if spec is not None:
+                self._refresh_row(spec)
 
     def on_row_tap(self, spec: RowSpec) -> Any:
         if self.selecting:
             self.toggle(spec.source_idx)
             return None
-        self.current_key = spec.key
+        self._set_current(spec.key)
         return self.open_entry(spec)
 
     def on_row_long_press(self, spec: RowSpec) -> None:
@@ -511,13 +947,12 @@ class EditorPane:
         self.toggle(spec.source_idx, force=True)
 
     async def jump_to(self, key: str) -> bool:
-        previous = self.current_key
-        self.current_key = key
-        for k in (previous, key):
-            spec = self.spec_for_key(k)
-            if spec is not None:
-                self.windowed.replace(spec)  # no-op when that row is not mounted
-        return await self.windowed.jump_to(key)
+        self._set_current(key)
+        jumped = await self.windowed.jump_to(key)
+        spec = self.spec_for_key(key)
+        if spec is not None:
+            self._refresh_row(spec)  # the target gets its card now even when the jump built it as a placeholder
+        return jumped
 
     # ---- search / filters / sort --------------------------------------------------------------------
 
@@ -631,15 +1066,22 @@ class EditorPane:
             return  # not mounted: built with its state when it scrolls in
         selected = source_idx in self.selected
         parts = control.data if isinstance(getattr(control, "data", None), dict) else None
-        if parts is None or parts.get("check") is None:
+        if parts is None or parts.get("check") is None or hasattr(control, "_frozen"):
+            # a placeholder (refilled now) or a frozen row (replaced): that row alone, in full
             position = self.windowed.positions.get(key)
-            if position is not None and self.windowed.replace(self.windowed.items[position]):
-                self.ctx.push(self.windowed.list_view)
+            if position is not None and position < len(self.windowed.items):
+                self._refresh_row(self.windowed.items[position])
             return
         check = parts["check"]
         check.icon = ft.Icons.CHECK_CIRCLE if selected else ft.Icons.RADIO_BUTTON_UNCHECKED
         check.color = ft.Colors.PRIMARY if selected else ft.Colors.OUTLINE
         control.bgcolor = ft.Colors.SECONDARY_CONTAINER if selected else parts["bgcolor"]
+        spec = self.spec_for_key(key)
+        cached = self._row_cache.get(key)
+        if spec is not None and cached is not None and cached[1] is control:
+            self._remember_row(key, self._row_view(spec), control)  # the cache knows the row's new look
+        else:
+            self._row_cache.pop(key, None)
         self.ctx.push(control)
 
     def select_all(self) -> None:
@@ -665,9 +1107,9 @@ class EditorPane:
             typed = self.doc is not None and is_list_doc(self.doc) and "type" in self.fields
             self.bulk_bar.set_actions([
                 BulkAction("delete", f"Delete {count}", "DELETE_OUTLINE",
-                           lambda: self.ctx.spawn(self.delete_selected()), destructive=True),
-                BulkAction("export", "Export selection", "IOS_SHARE", self.open_export_selection),
-                BulkAction("type", "Change type", "CATEGORY", self.open_change_type,
+                           quiet(lambda: self.ctx.spawn(self.delete_selected())), destructive=True),
+                BulkAction("export", "Export selection", "IOS_SHARE", quiet(self.open_export_selection)),
+                BulkAction("type", "Change type", "CATEGORY", quiet(self.open_change_type),
                            None if typed else "Only list glossaries have entry types"),
             ])
 
@@ -705,13 +1147,15 @@ class EditorPane:
         old_keys = [s.key for s in self.visible]
         self._recompute()
         if spec is not None and [s.key for s in self.visible] == old_keys and self.root is not None:
-            for candidate in self.visible:
-                if candidate.key == spec.key:
-                    self.windowed.replace(candidate)
+            # the same rows: that row's card and the header go out, not the list (or the page)
+            self.windowed.items = list(self.visible)
+            candidate = self._by_key.get(spec.key)
+            if candidate is not None:
+                self._refresh_row(candidate)
             self.stats.value = self._stats_text()
             self.file_button.content = self._file_label()
             self._sync_history()
-            self.ctx.push(self.root)
+            self.ctx.push(self.header)
             return
         self.render(keep_window=True)
 
@@ -840,7 +1284,7 @@ class EditorPane:
             self.ctx.say(_error_text(exc))
             return 0, 0
         self._sync_history()
-        self.ctx.push(self.root)
+        self.ctx.push(self.header)
         return result
 
     # ---- undo / redo / save ---------------------------------------------------------------------------
@@ -858,7 +1302,7 @@ class EditorPane:
                 self.ctx.say(f"⚠️ {'Redo' if redo else 'Undo'} (output files) failed")
             self._sync_history()
             if self.root is not None:
-                self.ctx.push(self.root)
+                self.ctx.push(self.header)
         elif kind == "glossary":
             await self._after_reload()  # restored, saved and re-read
         return kind
@@ -1352,22 +1796,37 @@ class EditorPane:
         self._poll_task = self.ctx.spawn(self._poll())
 
     def stop_polling(self) -> None:
+        """The screen is disposed: no more auto-reload checks, and no row completion either."""
         task = self._poll_task
         self._poll_task = None
         if task is not None and not task.done():
             task.cancel()
+        self._fill_queue.clear()
+        fill, self._fill_task = self._fill_task, None
+        if fill is not None and not fill.done():
+            fill.cancel()
 
     async def _poll(self) -> None:
         """Auto-reload: an external change reloads a clean document; an edited one shows the banner.
-        No checks while the app is in the background (``foreground.poll_sleep``)."""
+        No checks while the app is in the background (``foreground.poll_sleep``). A failed check (the file
+        being rewritten, a render error) is logged and the next interval checks again."""
         try:
             while True:
                 await poll_sleep(getattr(self.ctx, "page", None), POLL_SECONDS)
-                await self.check_disk()
+                try:
+                    await self.check_disk()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("glossary auto-reload check failed")
         except asyncio.CancelledError:
             return
 
     async def check_disk(self) -> Optional[str]:
+        """One auto-reload check (desktop ``_silent_glossary_reload``, every 2 s): "reloaded" when a clean
+        document was swapped for the file's new state, "changed" when unsaved edits keep it (the banner),
+        else None. Nothing while a save writes the file or a read runs; a file state the last auto-reload
+        could not read is not read again."""
         doc = self.doc
         if doc is None or not self.path or self._saving or self.loading:
             return None
@@ -1375,15 +1834,13 @@ class EditorPane:
             mtime = await self.ctx.io(os.path.getmtime, self.path)
         except OSError:
             return None
-        if not getattr(doc, "mtime", 0) or mtime == doc.mtime:
+        if doc is not self.doc or self._saving or self.loading:
+            return None  # another file, a save or a read started meanwhile (it sets the baseline)
+        if not getattr(doc, "mtime", 0) or mtime == doc.mtime or mtime == self._unreadable_mtime:
             return None
         if self.dirty:
-            if not self.changed_on_disk:
-                self.changed_on_disk = True
-                if self.root is not None:
-                    self.reload_dot.bgcolor = ft.Colors.AMBER_400
-                    self.changed_banner.visible = True
-                    self.ctx.push(self.root)
+            self._show_changed_on_disk()
             return "changed"
-        await self.reload(silent=True)
-        return "reloaded"
+        if await self.reload(silent=True) is not None:
+            return "reloaded"
+        return "changed" if self.changed_on_disk else None

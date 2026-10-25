@@ -276,6 +276,8 @@ iOS uses the swipe-from-left-edge back gesture on pushed Views. On the chat root
 - **Interrupted:** jobs recovered from `jobs/active.state`. Actions: **Resume** and **Discard**.
 - **Finished:** the last 50 jobs from `jobs/history.state`.
 
+**One job per target** (hotfix 1 #5). `JobService.submit` reuses an ACTIVE job (queued, starting, running, waiting at the glossary gate, refining, stopping) that already does the same work instead of queueing a second one: the very same request of any kind (kind + normalised inputs + params), and within a family a job whose target covers the new one (translation: `translate` and attachment sends that name their file; glossary: `extract_glossary` / `glossary_refine`; QA: `qa_scan`; chapter: `single_chapter`, per chapter). The check and the insert run under the service lock, so concurrent taps, two chats with one file, the Library and the chat give one job. The caller gets the existing job's id (`submit_job(spec).reused`, `active_job_for(spec_or_path, family)`); chats bind to their own job, and the UI says "Translating “Book.epub” is already running (Chat · Novel)" · Open for someone else's. Typed-text sends and vision attachments are never merged. Gate answers are idempotent (the first answer wins). Jobs still run one at a time. A chat Send / Plan card Start refused that way records nothing: the Plan card stays (Start can be tapped again), a Send without a Plan card puts its text and attachment back into the composer; a Resume the app's model preflight refuses shows only the preflight's notice ("… · Choose model").
+
 **Row anatomy.**
 - Kind icon; title; origin line ("Chat · My novel" or "Library · Book title").
 - `ProgressBar` (Running only); state chip: Queued · Starting · Running · Stopping · Force stopping · Done · Failed · Cancelled · Interrupted.
@@ -807,6 +809,7 @@ Each one re-runs the same source text with a fixed instruction passed through th
   - "Save" is atomic and keeps the BOM.
 - **✓ Yes** (`FilledButton`, success colour) continues the run.
 - **■ No** (`OutlinedButton`, error colour) rejects and calls `stop_translation()`.
+- **✨ Refine** refines the generated glossary at the gate (`JobService.refine_at_gate`, the shared manual refinement with the waiting job's owner). Hotfix 1 #2: from the tap until the refinement ends, Edit / ✨ Refine / ✓ Yes / ■ No / Always accept are hidden and the card shows a spinner and "Refining the glossary… ✓ Yes and ■ No come back when it is done" (header "GLOSSARION · REFINING THE GLOSSARY…"); the running card and the composer say "Refining the glossary…". The gate refuses every answer meanwhile (`JobService.answer`, also from the notification's Accept and the Book page), so the translation never starts before the refinement ended; a second Refine is refused. The state follows `JobSnapshot.refining`, so it survives a repaint, a rebuilt card, a chat switch and the app coming back. Afterwards the buttons return with "✨ Refined", or with the error and ✨ Refine enabled again.
 - **Always accept** (`TextButton`, chat cards only): turns on the All-chats "Always accept generated glossaries" (Prefs `chat_auto_accept_glossary`; this chat's own "ask" override in its sidecar is cleared) and answers this question Yes like ✓ Yes; snackbar "Generated glossaries are accepted automatically from now on" · Chat settings. The Library review gate's sheet has no such button.
 
 **No file.** Edit is disabled and the body reads "No editable glossary file was found. You can continue or stop this run."
@@ -852,11 +855,12 @@ A Plan card is created when you send an attachment that is an EPUB, PDF, CBZ, ZI
 - chapter range (N or N-M) + spine order + 🔍 preview list;
 - input and output token limits;
 - chunk size;
+- API call delay (hotfix 1 #8): the desktop main window's "API call delay (s, or range 5-7)" (`delay` + `delay_max`, exported as `SEND_INTERVAL_SECONDS` / `SEND_INTERVAL_MAX_SECONDS`), the Settings `DelayRangeTile`; the collapsed line shows "Delay 3-7 s". Also on the Result card's Run options (Resume / Retry failed), the BatchPlanCard and the Library TranslateSheet;
 - temperature (+ disable);
 - batch translation + size;
 - context mode (+ history limit, summarize, retain);
 - multipass + mode;
-- post-translation QA scan;
+- post-translation QA scan (hotfix 1 #6: when the scanning phase is on and the translation completed (not stopped), the same job runs the QA scanner on its output in the scan-phase mode, through the `qa_scan` job's own scan: mobile duplicate-check sample size 0, QA Stop, reports in the job's outputs, `qa_failed` rows in the Chapters tab; Direct Text (chat "This chat") runs never scan, as on the desktop);
 - remove AI artifacts.
 
 Switch **"Only for this run"** (default on): values go into JobSpec overrides. When off, they write config.
@@ -912,7 +916,9 @@ Switch **"Only for this run"** (default on): values go into JobSpec overrides. W
 **Status line**, one of:
 - "Done · 48/48 chapters"
 - "Stopped · 12/48 chapters" → **Resume**, which resubmits the same JobSpec; the backend resumes from progress and chunks. Three params follow the chat as it is now: the turn's index, the chat's next request number (the resumed run's cards do not repeat the stopped run's "Request N") and a prompt profile renamed or deleted since Send, which gives way to the chat's profile now (a rename is followed) or is inherited (`ChatView.resume_profile`; never the backend's silent first profile). A profile that still exists stays as sent. Retry failed and an Interrupted job's Resume do the same.
-- "Finished with issues · 3 failed"
+  - Hotfix 1 #4: the tap turns that card into the running card at once ("Starting translation…" with Stop; a second tap does nothing) while the workspace is looked up and the run submitted; it reads "Queued · starts after <job>" only while another job really runs, and the Result comes back if nothing was resumed. A card resumes its own turn's job (`ChatRuns.resubmit(user_index=…)`), never the chat's latest one. Stop before the run exists cancels the Resume.
+  - Hotfix 1 #5: Resume of a job that is already active (queued, running, at the gate, refining, stopping) binds the card to that job; one another chat or the Library runs says so ("Translating “Book.epub” is already running (Chat · Novel)" · Open) and queues nothing.
+- "Finished with issues · 3 failed" → **Retry failed**: such a run keeps its run root like a stopped one, so the retry continues from its progress and sends only the failed chapters (hotfix 1).
 
 When failures exist, a pinned error chip **"3 failed – Retry"** sits at the top.
 
@@ -1307,7 +1313,9 @@ Counts come from `progress_core.compute_stats` (via `library_core`), so the card
 
 **Header.**
 - An output-folder chip "📁 <folder name>" (tap → FileBrowser at `/tools/files/<oid>`) and the output-mode badge.
+- **Run translation** · **Run QA scan** (hotfix 1 #7). Run QA scan queues the book's one-tap Quick Scan (the chat's scan, `qa_model.qa_spec` with `CHAT_QA_MODE`; the mobile duplicate-check sample size 0 unless one is saved) on its workspace and raw source; when it ends the rows reload, the Output tab is marked stale and a snackbar offers the report. Both buttons are disabled, with the reason as tooltip, while any translation or glossary run is active (one job at a time; also at its glossary gate) or one is queued for this book (`book_page.run_wait_reason`); Run QA scan also while this book's scan is queued or running. They follow the jobs events, so they turn back on as soon as the run ends.
 - When the Progress Manager logic creates a missing output folder, a snackbar shows "📁 Created: <folder>".
+- **Feedback** (hotfix 1 #9, desktop refresh-then-message): every action (mark Completed / Failed / In progress, Restore In Progress Status, Remove QA Failed / Pending / refinement marks, Delete, Retranslate, bulk selection actions) runs the tab's progress bar while it writes; then the rows, the stats chips and the strip refresh at once and the desktop result text follows ("Successfully marked 1 as failed.", "Removed failed mark from 1 chapters."; a sheet when long). A failed write or reload says why. "Queued…" appears only when the strip already shows another job of this book.
 
 **Stats row.** A scrolling row of `StatusChip`s with leading emoji and counts. Each chip is hidden when its count is 0, except Completed and the missing/failed groups.
 
@@ -1444,6 +1452,8 @@ The Book page uses this PM vocabulary everywhere. The Library-only badges ("✔ 
 **Selection bottom bar:** ✅ Mark as Completed · 🗑️ Remove from progress · ✨ Refine (selected types) · More (📝 Show glossary footnote(s) → Markdown sheet with Copy · 📄 Generate completed summary → writes `glossary_footnotes/<book>_completed_glossary_footnotes.md` and shares it · ✅/❌ Skip unmatched entries (toggles `glossary_progress_skip_unmatched_entries`)).
 
 **Path-row actions:** Select All · ✨ Refinement (preview sheet: types, chunk count from `plan_refinement`; Start → job) · Files · ✏️ Open Glossary.
+
+**Feedback** (hotfix 1 #9): Mark as Completed / Remove from progress run the tab's progress bar, reload the rows at once (a forced reload, never dropped behind a poll load in flight) and confirm ("Marked 3 chapters as completed"); a failure says why.
 
 **Writes** go through `glossary_progress_core`, with the extractor's lock + atomic replace. The desktop's plain dumps are a recorded bug; desktop changes only in a separate, user-approved commit.
 
@@ -1594,7 +1604,9 @@ File row ⋯ (`ActionSheet`): Open · Use as manual glossary · Share · Delete 
 - **Top bar:** file name ▾ (switch file), ◀ ▶ (prev/next), and an "auto-reload on change" dot.
 - **Toolbar:** Search · Filter (type, gender, has description, custom fields) · Undo · Redo · Save (with a dirty dot; Ctrl+S on keyboards).
 - **List.** WindowedList rows (min 56 dp; they wrap at large text): **raw** (titleSmall) → translated (bodyMedium), a type badge, a gender chip, and ⚠ conflict.
-  - Tap opens the **EntrySheet**: every column plus custom fields, and "Resolve gender…".
+  - Tap (or the row's ✎ **Edit** button) opens the **EntrySheet**: every column plus custom fields, and "Resolve Gender…".
+  - A row whose tracked gender conflicts (shown "Male / Female") has a gender menu button next to ✎ Edit with the desktop choices **Auto · Male · Female** (applied at once, undoable, written to the glossary and the gender tracker on Save) and **Resolve Gender…** (the full sheet with the tracking history).
+  - Hotfix 1 #1: the editor never sends a whole-page update (every handler marks its update as sent; scrolls are quiet), pushes only the rows that changed (rows coming back into the list - a search cleared, a filter removed - count towards the per-step row budget like new ones and are completed over the next loop steps), builds the settings tabs on first show, and its auto-reload reads the file off the loop into a new document that replaces the open one only while nothing is unsaved (a half-written file keeps the open document). It never waits on a lock a running job holds, so it stays usable while a book translates.
   - Swipe left deletes (`Dismissible` + undo).
   - Long-press selects; the bulk bar offers Delete / Export selection / Change type.
 - **FAB:** "＋ Entry".
@@ -1869,6 +1881,7 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
   - Gemini also has a GCP project picker and a verification-URL action.
 - **LoginSheet** (OAuthBridge): steps Opening browser → Waiting for sign-in → Exchanging token → Done, with **Reopen browser** · **Paste redirect URL / code** · **Cancel**. Claude also exposes the manual paste-code flow.
 - **Experimental (U9, best effort):** AuthND (NVIDIA Build) and Gemini Free (search/gemini), through the off-screen WebViewBridge. On platforms without flet-webview (Windows/Linux dev) the rows are disabled with a ReasonChip.
+  - In the background (hotfix 1 #3): Flutter builds no widgets while the app is hidden, so a WebView mounted then never starts. While jobs run, a closed page's WebView is parked on about:blank and reused by the next page (authchatgpt/, authnd/, authds/, search/gemini); a job on a browser-route model gets one WebView built at its start while the app is still visible. A page that needs a new WebView while the app is hidden waits (Stop ends the wait) instead of timing out. Android keeps a parked WebView working under the foreground service; iOS suspends web content in the background, so these routes pause there until the app is opened (LIMITATIONS text).
 - **"Unavailable on mobile" section.** It is always listed, as an `ExpansionTile` with its count, expanded on the first visit. Each entry is a disabled row with its ReasonChip: Antigravity, OCAGY, OpenCode Zen (ocz/), Z.AI login, Arena, Opera Aria, Tor, Managed Ollama (ollamapull/), Claude Code CLI import, Grok CLI import.
 
 ### 4.14 Profiles and prompts
@@ -2168,7 +2181,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `ChaptersPane` (`library/chapters_pane.py`) | Header chips · StatusChipRow · toolbar · ProgressRow list · selection bars | loading (phase 1/2) · list · empty · "file could not be read" banner | `Column`, `ListView(build_controls_on_demand=True)` (never `first_item_prototype`) or `WindowedList` |
 | `GlossaryProgressPane` (`library/glossary_pane.py`) | Header + file chip · file card · stats chips · pinned Minimal/Refinement rows · chapter rows with ⋯ | as ChaptersPane, plus a deleted-file banner | same as ChaptersPane, plus `Banner` |
 | `DeleteConfirmView` (`library/delete_confirm.py`) | Per-target checkbox rows · contents summary · keyword field · red Delete | Delete disabled until the keyword is typed · deleting (progress) | `View`, `Checkbox`, `ListView`, `TextField`, `FilledButton` in the error colour |
-| `EntrySheet` (`glossary/entry_sheet.py`) | Raw · translated · type · gender · description · custom fields · Resolve gender… · Save / Delete | new · edit · conflict warning | `BottomSheet(scrollable=True)` (SidePanel on tablet), `TextField`, `Dropdown`, `FilledButton` |
+| `EntrySheet` (`glossary/entry_sheet.py`) | Raw · translated · type · gender · description · custom fields · Resolve Gender… · Save / Delete | new · edit · conflict warning | `BottomSheet(scrollable=True)` (SidePanel on tablet), `TextField`, `Dropdown`, `FilledButton` |
 | `FindReplaceSheet` (`glossary/find_replace.py`) | Find · replace with · Find Next · Replace · Replace all (case-insensitive, every column: the desktop dialog) | n rows · n matches · none → the "apply to output HTML files?" dialog | `BottomSheet`, `TextField`, `ConfirmDialog` |
 
 ### 5.7 Settings tiles and editors (schema-bound; `settings/tiles.py`)

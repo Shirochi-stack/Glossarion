@@ -13,6 +13,7 @@ no long-press), ``pill`` and ``mode_badge``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data, resolve_color, status_color
 
 __all__ = [
+    "BusyBar",
     "LibraryContext",
     "OPENS_ELSEWHERE_REASON",
     "icon_button",
@@ -234,6 +236,44 @@ class LibraryContext:
 
     def color(self, status: str) -> str:
         return status_color(status, self.dark)
+
+
+class BusyBar:
+    """A Book page tab's progress bar while one of its actions writes and its rows reload (hotfix 1 issue 9:
+    the Progress Manager actions gave no sign of work). ``bar()`` is the tab's ``ProgressBar`` (None before the
+    tab is built); ``idle()`` says whether it shows anyway (the first load). Nested runs count."""
+
+    def __init__(self, ctx: Any, bar: Callable[[], Any], idle: Callable[[], bool] = lambda: False) -> None:
+        self.ctx = ctx
+        self._bar = bar
+        self._idle = idle
+        self.count = 0
+
+    @property
+    def active(self) -> bool:
+        return self.count > 0
+
+    def visible(self) -> bool:
+        return self.active or bool(self._idle())
+
+    def sync(self) -> None:
+        bar = self._bar()
+        if bar is None:
+            return
+        visible = self.visible()
+        if bar.visible != visible:
+            bar.visible = visible
+            self.ctx.push(bar)
+
+    @contextlib.asynccontextmanager
+    async def run(self) -> Any:
+        self.count += 1
+        self.sync()
+        try:
+            yield self
+        finally:
+            self.count = max(0, self.count - 1)
+            self.sync()
 
 
 #: Why a PDF without a translation workspace has no Reader action (card menus, the Book page).

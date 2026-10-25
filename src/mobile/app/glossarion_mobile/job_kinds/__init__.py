@@ -17,7 +17,9 @@ runs for the same action:
 * ``single_chapter``: the translate pair with the owner's ``_single_chapter_filter`` /
   ``_force_stream_all`` set (desktop ``start_single_chapter_translation``; the Reader's
   "Translate this chapter" and the Book page's chapter rows);
-* ``qa_scan``: ``qa_scan_runtime.run_qa_scan_path`` per output folder (U6, QA Scanner);
+* ``qa_scan``: ``qa_scan_runtime.run_qa_scan_path`` per output folder (U6, QA Scanner); the same scan
+  runs at the end of a translation job when the scanning phase is on (``qa.run_scan_phase``, the
+  desktop ``trigger_qa_scan`` handler);
 * ``validate_epub`` / ``rename_outputs``: Converter actions (``TransateKRtoEN`` validation,
   ``output_naming._rename_output_files_for_retain``);
 * ``translate_headers``: ``translate_headers_standalone.run_translation`` per EPUB + rebuild;

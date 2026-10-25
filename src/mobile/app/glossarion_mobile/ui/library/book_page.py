@@ -48,7 +48,8 @@ from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.common import LibraryContext, icon_button, mode_badge
 from glossarion_mobile.ui.screens.base import Screen
 
-__all__ = ["BOOK_TABS", "BookPageScreen", "job_for_book"]
+__all__ = ["BOOK_TABS", "BookPageScreen", "GLOSSARY_RUN_KINDS", "TRANSLATION_RUN_KINDS", "job_for_book",
+           "job_kind_of", "jobs_for_book", "run_wait_reason"]
 
 log = logging.getLogger("glossarion.library.ui")
 
@@ -56,6 +57,16 @@ BOOK_TABS = ("overview", "chapters", "glossary", "output")
 #: Tabs beside the Overview pane on wide screens (master-detail).
 WIDE_TABS = BOOK_TABS[1:]
 _TAB_LABELS = {"overview": "Overview", "chapters": "Chapters", "glossary": "Glossary", "output": "Output"}
+
+#: Hotfix 1 issue 7: the translation runs and the glossary runs (job kinds) that Chapters › Run translation and
+#: Run QA scan wait for - while one of them runs (any book: jobs run one at a time) or is queued for this book.
+TRANSLATION_RUN_KINDS = frozenset({"translate", "single_chapter", "direct_text", "resolve_qa", "metadata",
+                                   "translate_headers", "async_batch", "translate_image", "manga", "rpgmaker"})
+GLOSSARY_RUN_KINDS = frozenset({"extract_glossary", "glossary_refine", "unified_glossary", "parallel_pair"})
+RUN_WAIT_TRANSLATION = "Wait for the running translation to finish"
+RUN_WAIT_GLOSSARY = "Wait for the running glossary run to finish"
+RUN_WAIT_QUEUED_TRANSLATION = "This book's translation is already queued"
+RUN_WAIT_QUEUED_GLOSSARY = "This book's glossary run is already queued"
 
 
 def _norm(path: Any) -> str:
@@ -65,27 +76,59 @@ def _norm(path: Any) -> str:
         return str(path or "")
 
 
-def job_for_book(view: Any, bid: str, book: Mapping[str, Any], *, include_queued: bool = True,
-                 folder: Optional[str] = None) -> Optional[Any]:
-    """The running (or, with ``include_queued``, queued) job of this book: origin ``bid``, or the
-    same output folder (``folder``: the resolved workspace, else the row's) / raw input."""
+def job_kind_of(snap: Any) -> str:
+    """A job snapshot's kind (``JobSnapshot.kind``, else its spec's)."""
+    kind = getattr(snap, "kind", None) or getattr(getattr(snap, "spec", None), "kind", None)
+    return str(getattr(kind, "value", kind) or "")
+
+
+def jobs_for_book(view: Any, bid: str, book: Mapping[str, Any], *, include_queued: bool = True,
+                  folder: Optional[str] = None) -> list:
+    """Every running (and, with ``include_queued``, queued) job of this book, the running one first: origin
+    ``bid``, or the same output folder (``folder``: the resolved workspace, else the row's) / raw input."""
     if view is None:
-        return None
+        return []
     folder = folder or book.get("output_folder")
     folder = _norm(folder) if folder else None
     raw = _norm(book.get("raw_source_path")) if book.get("raw_source_path") else None
     candidates = ([view.active] if getattr(view, "active", None) is not None else []) + (
         list(getattr(view, "queue", ()) or ()) if include_queued else [])
+    out = []
     for snap in candidates:
         spec = getattr(snap, "spec", None)
         origin = getattr(spec, "origin", {}) or {}
-        if origin.get("bid") == bid:
-            return snap
         dirs = [getattr(snap, "output_dir", None)] + list((getattr(snap, "output_dirs", {}) or {}).values())
-        if folder and any(d and _norm(d) == folder for d in dirs):
-            return snap
-        if raw and any(_norm(p) == raw for p in getattr(spec, "inputs", ()) or ()):
-            return snap
+        if (origin.get("bid") == bid or (folder and any(d and _norm(d) == folder for d in dirs))
+                or (raw and any(_norm(p) == raw for p in getattr(spec, "inputs", ()) or ()))):
+            out.append(snap)
+    return out
+
+
+def job_for_book(view: Any, bid: str, book: Mapping[str, Any], *, include_queued: bool = True,
+                 folder: Optional[str] = None) -> Optional[Any]:
+    """The running (or, with ``include_queued``, queued) job of this book: origin ``bid``, or the
+    same output folder (``folder``: the resolved workspace, else the row's) / raw input."""
+    matches = jobs_for_book(view, bid, book, include_queued=include_queued, folder=folder)
+    return matches[0] if matches else None
+
+
+def run_wait_reason(view: Any, bid: str, book: Mapping[str, Any], *, folder: Optional[str] = None) -> Optional[str]:
+    """Why Chapters › Run translation / Run QA scan wait (None: they can start), hotfix 1 issue 7: a translation
+    or glossary run is going (``view.active``, also while it waits at its glossary gate) or one is queued for this
+    book."""
+    active = getattr(view, "active", None) if view is not None else None
+    if active is not None and not getattr(active, "is_terminal", False):
+        kind = job_kind_of(active)
+        if kind in GLOSSARY_RUN_KINDS:
+            return RUN_WAIT_GLOSSARY
+        if kind in TRANSLATION_RUN_KINDS:
+            return RUN_WAIT_TRANSLATION
+    for snap in jobs_for_book(view, bid, book, folder=folder):
+        kind = job_kind_of(snap)
+        if kind in GLOSSARY_RUN_KINDS:
+            return RUN_WAIT_QUEUED_GLOSSARY
+        if kind in TRANSLATION_RUN_KINDS:
+            return RUN_WAIT_QUEUED_TRANSLATION
     return None
 
 
@@ -113,6 +156,7 @@ class BookPageScreen(Screen):
         self._loading_glossary = False
         self._full_refreshing = False
         self._progress_lock = None  # asyncio.Lock, created on the loop
+        self._glossary_lock = None  # asyncio.Lock, created on the loop (forced Glossary reloads wait on it)
         self.tabs_built: dict = {}
         self.wide = False  # master-detail: the Overview in its own pane (``_arrange``)
         self.tab_names: tuple = BOOK_TABS
@@ -436,17 +480,22 @@ class BookPageScreen(Screen):
         self.overview.render()
         return view
 
-    async def reload_glossary(self) -> Optional[pm.GlossaryView]:
-        if self._loading_glossary:
+    async def reload_glossary(self, *, force: bool = False) -> Optional[pm.GlossaryView]:
+        """Reload the Glossary Progress view. A poll tick that finds a load running is skipped; ``force`` (after a
+        Glossary tab action wrote the file) waits for it and reads again, so the action's rows always show."""
+        if self._loading_glossary and not force:
             return self.glossary
-        self._loading_glossary = True
-        try:
-            previous = self.glossary if self.glossary is not None and self.glossary.state is not None else None
-            progress = self.progress
-            view = await self.ctx.io(lambda: pm.load_glossary_view(self.service, self.book, previous=previous,
-                                                                   progress=progress))
-        finally:
-            self._loading_glossary = False
+        if getattr(self, "_glossary_lock", None) is None:
+            self._glossary_lock = asyncio.Lock()
+        async with self._glossary_lock:
+            self._loading_glossary = True
+            try:
+                previous = self.glossary if self.glossary is not None and self.glossary.state is not None else None
+                progress = self.progress
+                view = await self.ctx.io(lambda: pm.load_glossary_view(self.service, self.book, previous=previous,
+                                                                       progress=progress))
+            finally:
+                self._loading_glossary = False
         self.glossary = view
         self._gp_signature = view.signature
         self.glossary_tab.apply(view)
@@ -503,6 +552,7 @@ class BookPageScreen(Screen):
         finished = self.job is not None and job is None
         self.job = job
         self._render_strip()
+        self.chapters.sync_run_buttons(view)  # issue 7: Run translation / Run QA scan follow every job event
         self._maybe_review(job)
         if finished:
             self.ctx.spawn(self.reload_progress())

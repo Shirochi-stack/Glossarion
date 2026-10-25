@@ -3,7 +3,7 @@
 EntrySheet: every column of the row (``glossary_column_fields`` except the internal
 ``_section``) - type (configured + present types, editable), raw / translated names,
 gender (Male / Female / Unknown / empty), description (multi-line), custom fields -
-plus "Resolve gender…" when the row's tracked gender conflicts, and Save / Delete /
+plus "Resolve Gender…" when the row's tracked gender conflicts, and Save / Delete /
 Cancel. Save applies the changed columns through ``GlossaryService.update_entry`` (the
 desktop cell-edit data step: one undo step for the sheet; standard columns stay as ''
 when cleared). "＋ Entry" opens the same sheet for a new row.
@@ -22,9 +22,15 @@ import flet as ft
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.glossary.common import SheetHost, sheet
 
-__all__ = ["EntrySheet", "GENDER_OPTIONS", "GenderSheet", "field_label"]
+__all__ = ["EntrySheet", "GENDER_DECISIONS", "GENDER_OPTIONS", "GenderSheet", "RESOLVE_GENDER_LABEL", "field_label"]
 
 GENDER_OPTIONS = ("", "Male", "Female", "Unknown")
+#: The desktop "Resolve Tracked Gender" decisions (GlossaryManager_GUI ``_open_gender_resolution``: the
+#: Decision radios) in the desktop order, with the desktop labels: the sheet's radios and the editor
+#: row's gender menu.
+GENDER_DECISIONS = (("auto", "Auto"), ("male", "Male"), ("female", "Female"))
+#: The desktop editor's context-menu entry for a row with a tracked gender conflict.
+RESOLVE_GENDER_LABEL = "Resolve Gender…"
 
 
 def field_label(name: str) -> str:
@@ -70,7 +76,7 @@ class EntrySheet:
             controls.append(control)
         actions: list = []
         if on_resolve_gender is not None and conflict:
-            actions.append(ft.TextButton(content="Resolve gender…", icon=ft.Icons.WC,
+            actions.append(ft.TextButton(content=RESOLVE_GENDER_LABEL, icon=ft.Icons.WC,
                                          on_click=lambda e: self._resolve(), key="entry-resolve"))
         if on_delete is not None and not new:
             actions.append(ft.TextButton(content="Delete", icon=ft.Icons.DELETE_OUTLINE,
@@ -191,8 +197,8 @@ class GenderSheet:
         lines.append(ft.Text("Counts are unique chapter/file tracker observations, not textual mention counts.",
                              italic=True, theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT))
         self.group = ft.RadioGroup(value=str(model.get("decision") or "auto"), content=ft.Row([
-            ft.Radio(value="auto", label="Auto"), ft.Radio(value="male", label="Male"),
-            ft.Radio(value="female", label="Female")], wrap=True), key="gender-decision")
+            ft.Radio(value=value, label=label) for value, label in GENDER_DECISIONS], wrap=True),
+            key="gender-decision")
         lines.append(ft.Text("Decision", theme_style=ft.TextThemeStyle.LABEL_LARGE, color=ft.Colors.PRIMARY))
         lines.append(self.group)
         self.dialog = sheet("Resolve Tracked Gender", lines, actions=[

@@ -40,6 +40,15 @@ params: ``mode`` (``quick-scan`` | ``aggressive`` | ``ai-hunter`` | ``custom``),
 chat submitted; else every input is a folder), ``disable_word_count``.
 outputs: the ``validation_results.html`` reports that exist after the scan.
 
+The post-translation scan (desktop "scanning phase", hotfix 1 issue 6): ``run_scan_phase`` is the
+desktop handler of the shared worker's ``_ui_request('trigger_qa_scan')``
+(``TranslatorGUI._trigger_qa_scan_on_main_thread`` -> ``run_qa_scan(mode_override=
+_get_scan_phase_mode(), non_interactive=True)``) for the translation's own job
+(``translate.post_translation_qa``): the translated sources' output folders (the desktop
+auto-search over the run's selection, here the folders the job recorded), then ``scan`` - the
+same scan as a ``qa_scan`` job, so its reports, ``qa_failed`` marks and result fields are the ones
+a QA job leaves.
+
 Why the mobile sample size is not the generic ``params["config_overrides"]``: that is a shallow
 top-level ``config.update`` at job start (``services.jobs._config_snapshot``), so a nested
 ``qa_scanner_settings`` override would replace the whole saved dict; the default here only
@@ -49,10 +58,12 @@ fills the one key the saved settings lack.
 from __future__ import annotations
 
 import os
+import traceback
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 __all__ = ["KINDS", "MOBILE_QUICK_SAMPLE_SIZE", "MODES", "QUICK_SAMPLE_KEY", "REPORT_FILE",
-           "normalize_targets", "report_path_for", "run", "saved_quick_sample_size", "with_mobile_qa_defaults"]
+           "SCAN_PHASE_SOURCE_EXTENSIONS", "normalize_targets", "report_path_for", "run", "run_scan_phase",
+           "saved_quick_sample_size", "scan", "scan_phase_mode", "with_mobile_qa_defaults"]
 
 MODES = ("quick-scan", "aggressive", "ai-hunter", "custom")
 REPORT_FILE = "validation_results.html"
@@ -172,7 +183,14 @@ def run(ctx: Any) -> dict:
     targets = normalize_targets(params, ctx.inputs, with_flags=True)
     if not targets:
         raise JobError("Nothing to scan: no output folder.")
-    qa = _qa_runtime()
+    return scan(ctx, targets, mode, disable_word_count=bool(params.get("disable_word_count")))
+
+
+def scan(ctx: Any, targets: Sequence[tuple], mode: str, *, disable_word_count: bool = False,
+         qa: Any = None) -> dict:
+    """The scan of a ``qa_scan`` job over ``[(folder, source or None, direct_text)]`` (``run``; the
+    post-translation scan ``run_scan_phase`` too); returns ``{"ok", "outputs", "error"}``."""
+    qa = qa if qa is not None else _qa_runtime()
     is_direct_text = getattr(qa, "is_direct_text_qa_path", lambda _path: False)
     config = ctx.config or getattr(ctx.owner, "config", {}) or {}
     log = ctx.log
@@ -242,7 +260,7 @@ def run(ctx: Any) -> dict:
             qa_settings=qa_settings,
             load_settings=load_settings,
             selected_mode_value=mode,
-            disable_word_count_for_run=bool(params.get("disable_word_count")),
+            disable_word_count_for_run=bool(disable_word_count),
             epub_basename_map=epub_basename_map,
             global_selected_files=None,
             log=scan_log,
@@ -262,6 +280,138 @@ def run(ctx: Any) -> dict:
     if successful == 0:
         return {"ok": False, "outputs": reports, "error": "No folder could be scanned (see the log)."}
     return {"ok": True, "outputs": reports}
+
+
+# ---- the post-translation scan (desktop "scanning phase") --------------------------------------------
+
+#: The sources whose output folders the scanning phase looks for: the run's selection filtered like
+#: ``QA_Scanner_GUI._qa_auto_search_sources`` (EPUB / TXT / PDF / MD / HTML).
+SCAN_PHASE_SOURCE_EXTENSIONS = (".epub", ".txt", ".pdf", ".md", ".html", ".htm", ".xhtml")
+
+
+def scan_phase_mode(owner: Any, config: Optional[Mapping[str, Any]] = None) -> str:
+    """The scanning phase's QA mode: the owner's ``_get_scan_phase_mode`` (shared ``run_env.RunEnvMixin``,
+    the desktop handler's call), else config.json ``scan_phase_mode``; ``quick-scan`` when unknown."""
+    get = getattr(owner, "_get_scan_phase_mode", None)
+    mode: Any = None
+    if callable(get):
+        try:
+            mode = get()
+        except Exception:
+            mode = None
+    if not mode:
+        mode = (config or {}).get("scan_phase_mode") if isinstance(config, Mapping) else None
+    mode = str(mode or "quick-scan").strip().lower()
+    return mode if mode in MODES else "quick-scan"
+
+
+def _scan_file_count(folder: str, text_mode: bool, is_html: Callable[[str], bool]) -> int:
+    """The auto-search folder check (``QA_Scanner_GUI._auto_search_output_folders``): HTML/XHTML files,
+    in text mode also ``.txt``."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    return sum(1 for name in names if (text_mode and name.lower().endswith(".txt")) or is_html(name))
+
+
+def run_scan_phase(ctx: Any, sources: Sequence[str], folder_for: Callable[[str], Optional[str]], *,
+                   mode: Optional[str] = None) -> list:
+    """The desktop post-translation QA scan, in the translation's own job; returns the reports it wrote.
+
+    Desktop: the worker's ``_ui_request('trigger_qa_scan')`` reaches ``_trigger_qa_scan_on_main_thread``,
+    i.e. ``run_qa_scan(mode_override=self._get_scan_phase_mode(), non_interactive=True)``: the scanner
+    starts, the selection's sources (Direct Text ones left out) are auto-searched for their output folders
+    (none found, or Auto-search output off: "Skipping scan"), and the folders are scanned in that mode
+    without a dialog; a scan error is logged and the translation stays done. Here ``folder_for(source)``
+    gives the output folder the job translated into, and ``scan`` runs exactly what a ``qa_scan`` job runs
+    (the mobile Quick Scan sample size, the QA Stop escalation, the reports added to the job's outputs and
+    ``qa_reports`` / ``qa_mode`` / ``qa_folders`` on its result). A Stop before the scan skips it.
+    """
+    log = ctx.log
+    owner = ctx.owner
+    config = ctx.config or getattr(owner, "config", {}) or {}
+    if not isinstance(config, Mapping):
+        config = {}
+    mode = mode if mode in MODES else scan_phase_mode(owner, config)
+    if ctx.stop_requested():
+        log("⏹️ Post-translation QA scan skipped: the job was stopped")
+        return []
+    try:
+        qa = _qa_runtime()
+    except Exception as exc:
+        log(f"❌ Failed to start QA scan: {exc}")
+        return []
+    log("✅ QA scanner initialized successfully")
+    is_direct_text = getattr(qa, "is_direct_text_qa_path", lambda _path: False)
+    candidates: list = []
+    seen: set = set()
+    for path in sources or ():
+        if not path or not str(path).lower().endswith(SCAN_PHASE_SOURCE_EXTENSIONS):
+            continue
+        path = os.path.abspath(os.fspath(path))
+        if os.path.normcase(path) not in seen:
+            seen.add(os.path.normcase(path))
+            candidates.append(path)
+    direct = [path for path in candidates if is_direct_text(path)]
+    candidates = [path for path in candidates if not is_direct_text(path)]
+    for path in direct:
+        log(f"⏭️ Excluding Direct Text source from QA scan: {path}")
+    if direct and not candidates:
+        log("⏭️ QA scan skipped: Direct Text cannot trigger automatic QA scanning.")
+        return []
+    if not candidates:
+        log("⚠️ Scanning phase: No EPUB files available for folder detection")
+        log("⚠️ Skipping scan")
+        return []
+    if not config.get("qa_auto_search_output", True):
+        # the desktop's non-interactive skip lines (its Expected / Exists / Available-folders debug lines name
+        # '<EPUB folder>/<stem>', which is not where a mobile job writes: DISCREPANCIES "Post-translation QA scan")
+        log(f"⚠️ Scanning phase: No matching output folders found for {len(candidates)} EPUB file(s)")
+        log("⚠️ Skipping scan")
+        return []
+    is_html = getattr(qa, "is_html_like_path", None)
+    if not callable(is_html):
+        def is_html(name: str) -> bool:
+            return str(name).lower().endswith((".html", ".xhtml", ".htm"))
+    text_setting = bool(config.get("qa_text_file_mode", False))
+    targets: list = []
+    folders_seen: set = set()
+    for source in candidates:
+        base = os.path.splitext(os.path.basename(source))[0]
+        try:
+            folder = folder_for(source)
+        except Exception:
+            folder = None
+        folder = os.path.abspath(os.fspath(folder)) if folder else None
+        text_mode = text_setting or source.lower().endswith((".txt", ".pdf"))
+        file_type = "TXT/HTML" if text_mode else "HTML/XHTML"
+        count = _scan_file_count(folder, text_mode, is_html) if folder and os.path.isdir(folder) else 0
+        if count:
+            log(f"📁 Auto-selected output folder for {base}: {folder}")
+            log(f"   Found {count} {file_type} files to scan")
+            if os.path.normcase(folder) not in folders_seen:
+                folders_seen.add(os.path.normcase(folder))
+                targets.append((folder, source, False))
+            continue
+        if folder and os.path.isdir(folder):
+            log(f"  [{base}] Folder exists but contains no {file_type} files: {folder}")
+        log(f"  ⚠️ No output folder found for {base}")
+    if not targets:
+        log(f"⚠️ Scanning phase: No matching output folders found for {len(candidates)} EPUB file(s)")
+        log("⚠️ Skipping scan")
+        return []
+    if len(candidates) > 1:
+        log(f"📚 {len(candidates)} source files selected (primary: {os.path.basename(candidates[0])})")
+    else:
+        log(f"📚 Using EPUB from scan list: {os.path.basename(candidates[0])}")
+    try:
+        result = scan(ctx, targets, mode, qa=qa)
+    except Exception as exc:
+        log(f"❌ QA scan error: {exc}")
+        log(f"Traceback: {traceback.format_exc()}")
+        return []
+    return [path for path in (result.get("outputs") or ()) if path]
 
 
 KINDS = {

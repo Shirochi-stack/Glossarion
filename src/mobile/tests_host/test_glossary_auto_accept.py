@@ -153,7 +153,7 @@ def test_auto_accept_glossary_param_answers_without_asking(tmp_path):
 
     asked.clear()
     plain = service.submit(JobSpec("translate", "Plain", (epub(tmp_path),), params={AUTO_ACCEPT_GLOSSARY_PARAM: False}))
-    legacy = service.submit(JobSpec("translate", "Legacy", (epub(tmp_path),)))  # a job checkpointed before the flag
+    legacy = service.submit(JobSpec("translate", "Legacy", (epub(tmp_path, "Legacy.epub"),)))  # a job checkpointed before the flag
     assert service.wait_idle(TIMEOUT)
     assert answers[plain] == ["asked", "asked", "asked"] and answers[legacy] == ["asked", "asked", "asked"]
     assert asked == [GATE, "glossary_approval", "async_batch_question"] * 2

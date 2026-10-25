@@ -19,6 +19,15 @@ The adapter only validates the inputs, records each input's output folder
 (``owner._resolve_translation_output_dir``: checkpointed for recovery and read
 by ``ProgressWatcher``), maps the worker's outcome to the job state (False:
 Failed, or Stopped after a Stop) and lists the compiled files afterwards.
+
+The post-translation QA scan (hotfix 1 issue 6): the worker decides it exactly as on desktop
+(scanning phase on, the run completed and was not stopped, no CSV/JSON/image/SDLXLIFF/subtitle
+input, not metadata-only, not the refinement / image output mode, not a Direct Text run) and asks
+the front end with ``self._ui_request('trigger_qa_scan')``, which the GUI-free default only logs
+as unavailable. ``post_translation_qa_trigger`` catches that request on this job's owner (as
+``glossary_review_gate`` wraps the glossary pre-pass) and, once the worker has returned (the
+desktop scan starts on the GUI thread after the worker emitted it), ``post_translation_qa`` runs
+the desktop handler's scan in the same job (``qa.run_scan_phase``); the job ends after it.
 """
 
 from __future__ import annotations
@@ -29,8 +38,9 @@ from typing import Any, Callable, Iterator, Optional
 
 from glossarion_mobile.job_kinds import compiled_outputs, owner_method, result_fields
 
-__all__ = ["GLOSSARY_REVIEW_QUESTION", "KINDS", "NOT_COMPLETED", "SUPPORTS_GLOSSARY_REVIEW", "app_owned_roots",
-           "check_inputs", "follow_input_rename", "glossary_review_gate", "is_app_owned", "record_output_dirs",
+__all__ = ["GLOSSARY_REVIEW_QUESTION", "KINDS", "NOT_COMPLETED", "QA_SCAN_TRIGGER", "SUPPORTS_GLOSSARY_REVIEW",
+           "app_owned_roots", "check_inputs", "follow_input_rename", "glossary_review_gate", "is_app_owned",
+           "post_translation_qa", "post_translation_qa_trigger", "record_output_dirs",
            "resolve_workspace_collisions", "run", "run_translation"]
 
 
@@ -170,6 +180,80 @@ def record_output_dirs(ctx: Any, files: list) -> dict:
 #: The worker reported an unfinished run (``_translation_worker`` returned False) without a Stop.
 NOT_COMPLETED = "The translation did not complete (see the log)."
 
+#: The worker's post-translation scan request (``_ui_request`` kind; desktop ``trigger_qa_scan_signal``).
+QA_SCAN_TRIGGER = "trigger_qa_scan"
+
+
+@contextlib.contextmanager
+def post_translation_qa_trigger(ctx: Any) -> Iterator[list]:
+    """While the worker runs, this job's owner answers ``_ui_request('trigger_qa_scan')`` itself.
+
+    The request is recorded (the yielded list) instead of reaching the GUI-free default, which would log
+    that no front end runs the scan; every other ``_ui_request`` kind goes to the owner's own method.
+    The owner instance gets the wrapper (the shared method is unchanged) and afterwards what it had before."""
+    owner = ctx.owner
+    original = getattr(owner, "_ui_request", None)
+    own = getattr(owner, "__dict__", {})
+    had_own, previous = "_ui_request" in own, own.get("_ui_request")
+    requests: list = []
+    if not callable(original):
+        yield requests
+        return
+
+    def ui_request(kind: Any, *args: Any, **data: Any) -> Any:
+        if kind == QA_SCAN_TRIGGER:
+            requests.append(kind)
+            return None
+        return original(kind, *args, **data)
+
+    wrapped = False
+    try:
+        owner._ui_request = ui_request
+        wrapped = True
+    except Exception:
+        ctx.log("⚠️ The post-translation QA scan could not attach to the translation run")
+    try:
+        yield requests
+    finally:
+        if wrapped:
+            try:
+                if had_own:
+                    owner._ui_request = previous
+                else:
+                    del owner._ui_request
+            except Exception:
+                pass
+
+
+def post_translation_qa(ctx: Any, files: list, mapping: Optional[dict] = None, outputs: Any = ()) -> list:
+    """The scan the worker asked for, on the translated output (``qa.run_scan_phase``); returns its reports.
+
+    The sources are the owner's selection (the desktop scan reads ``selected_files``), else the job's files;
+    each one's folder is the output folder this job recorded (``record_output_dirs``), else the owner's
+    resolver. ``outputs`` (the compiled files) go into the job's outputs first, so they stay ahead of the
+    reports the scan adds."""
+    from glossarion_mobile.job_kinds import qa
+
+    owner = ctx.owner
+    selected = [p for p in (getattr(owner, "selected_files", None) or ()) if p] or list(files)
+    sources = [os.path.abspath(os.fspath(p)) for p in selected]
+    known = {os.path.normcase(os.path.abspath(os.fspath(k))): v for k, v in (mapping or {}).items() if v}
+    resolve = getattr(owner, "_resolve_translation_output_dir", None)
+
+    def folder_for(source: str) -> Optional[str]:
+        folder = known.get(os.path.normcase(source))
+        if not folder and callable(resolve):
+            try:
+                folder = resolve(source)
+            except Exception:
+                folder = None
+        return os.path.abspath(os.fspath(folder)) if folder else None
+
+    compiled = [p for p in (outputs or ()) if p]
+    if compiled:
+        ctx.add_outputs(compiled)
+    return qa.run_scan_phase(ctx, sources, folder_for)
+
 
 def run_translation(ctx: Any, files: list) -> dict:
     """The shared prepare + worker pair; returns ``{"ok", "outputs", "error"}``.
@@ -197,7 +281,8 @@ def run_translation(ctx: Any, files: list) -> dict:
     if ctx.stop_requested():
         ctx.log("⏹️ Translation stopped before it started")
         return {"ok": None, "outputs": []}
-    outcome = worker(request)
+    with post_translation_qa_trigger(ctx) as qa_requests:
+        outcome = worker(request)
     ok, outputs, error = result_fields(outcome)
     if ok is False and ctx.stop_requested():
         ok, error = None, None  # stopped: the run ends as Stopped (Resume continues it)
@@ -207,6 +292,11 @@ def run_translation(ctx: Any, files: list) -> dict:
     for path in compiled_outputs(folders):
         if path not in outputs:
             outputs.append(path)
+    if qa_requests and ok is not False:
+        # the desktop scanning phase: the scan the worker asked for, then the job ends
+        for path in post_translation_qa(ctx, files, mapping, outputs):
+            if path not in outputs:
+                outputs.append(path)
     return {"ok": ok, "outputs": outputs, "error": error}
 
 

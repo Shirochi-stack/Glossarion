@@ -690,16 +690,18 @@ def apply_action(service: Any, view: ProgressView, plan: ActionPlan, *, restore_
             output_path = plan.extra["output_path"]
             outcome = pa.resolve_llm_token_qa(progress_file, plan.targets[0], output_path)
             repair = outcome.get("repair") or {}
-            if not repair.get("resolved"):  # desktop "QA Issue Not Resolved"
-                return str(repair.get("error") or "The empty-attribute repair did not remove the LLM token issue.")
-            if outcome.get("error"):  # desktop "QA Issue Not Fully Resolved"
-                return ("The malformed tags were repaired, but the progress file could not be updated:\n"
-                        f"{outcome['error']}")
+            if not repair.get("resolved"):
+                return TitledResult(str(repair.get("error") or "The empty-attribute repair did not remove the LLM "
+                                        "token issue."), "QA Issue Not Resolved")
+            if outcome.get("error"):
+                return TitledResult("The malformed tags were repaired, but the progress file could not be updated:\n"
+                                    f"{outcome['error']}", "QA Issue Not Fully Resolved")
             return RepairResult(pa.llm_token_repair_summary(outcome, output_path), repair.get("repairs") or (),
                                 int(repair.get("repaired") or 0))
         if action == "insert_image":
-            kind, _title, message, _refreshed = pa.insert_missing_images(data, plan.targets[0], restore_fn)
-            return str(message)
+            # the desktop shows the shared action's own (kind, title, message): ``title`` heads the result sheet
+            _kind, title, message, _refreshed = pa.insert_missing_images(data, plan.targets[0], restore_fn)
+            return TitledResult(str(message), str(title or ""))
         if action == "do_not_skip":
             changed = pa.remove_special_keyword(state.owner, plan.extra["keyword"])
             if changed is False:
@@ -710,16 +712,29 @@ def apply_action(service: Any, view: ProgressView, plan: ActionPlan, *, restore_
     raise ValueError(action)
 
 
-class RepairResult(str):
+class TitledResult(str):
+    """An action's result text with the title of the desktop result box that shows it (``box_title``; '' when
+    the action's box has no title of its own, ``chapters_tab.ACTION_RESULT_TITLES`` then)."""
+
+    box_title: str = ""
+
+    def __new__(cls, text: str, box_title: str = "") -> "TitledResult":
+        obj = super().__new__(cls, text)
+        obj.box_title = str(box_title or "")
+        return obj
+
+
+class RepairResult(TitledResult):
     """Resolve QA's result text (``progress_actions.llm_token_repair_summary``) carrying the repair's
     before / after previews (``outcome['repair']['repairs']``, at most 20) for the desktop
-    "QA Issue Resolved — Before / After" sheet (RG ``_show_llm_token_repair_comparison``)."""
+    "QA Issue Resolved — Before / After" sheet (RG ``_show_llm_token_repair_comparison``); without repairs
+    the desktop "QA Issue Resolved" box."""
 
     repairs: list = []
     repaired: int = 0
 
     def __new__(cls, text: str, repairs: Any = (), repaired: int = 0) -> "RepairResult":
-        obj = super().__new__(cls, text)
+        obj = super().__new__(cls, text, "QA Issue Resolved")
         obj.repairs = [dict(r) for r in (repairs or ()) if isinstance(r, dict)]
         obj.repaired = int(repaired or 0)
         return obj

@@ -149,6 +149,29 @@ library itself does not declare:
   `@drawable/glossarion_native_ic_notification` (meta-data
   `com.glossarion.native.notification_icon`).
 
+### In-app browser routes in the background (hotfix 1)
+
+authchatgpt/, authnd/, authds/ and search/gemini run in hidden flet-webview
+pages (`services/webview_bridge.py`). Under the foreground service they need
+no native code:
+
+- Flutter builds widgets only in frames, and draws none while the app is
+  hidden or paused (`SchedulerBinding.scheduleFrame` returns at once). A
+  WebView mounted then never runs flet-webview's `initState` (native WebView,
+  first load, `load_request` / `run_javascript` listener). So the bridge keeps
+  the WebViews built while the app was on screen for the next request while
+  jobs run, and a request never mounts a new one in the background.
+- A built WebView keeps working in the background. Method calls and console
+  and page events travel over the Flet connection, not through frames.
+  webview_flutter_android never calls `onPause` or `pauseTimers`. AwContents'
+  default renderer policy is `RENDERER_PRIORITY_IMPORTANT`, not waived when
+  not visible, so the renderer process keeps the app's FGS importance. Adding
+  `onResume`, `resumeTimers` or `setRendererPriorityPolicy(IMPORTANT, false)`
+  here would change nothing.
+- Chromium still treats a page as hidden while its window is: it aligns timers
+  to once a second and stops `requestAnimationFrame`. Only a device can show
+  whether a site's own page needs more.
+
 ### Open with / Share
 
 `ShareReceiverActivity` is the exported entry point for:
@@ -376,6 +399,12 @@ to every plugin.
   The iOS 26 code is compiled only with Swift 6.2+ (Xcode 26):
   `#if compiler(>=6.2)` + `#available(iOS 26.0, *)`. Older toolchains build
   and report `continued_processing: False`.
+- **In-app browser routes.** WebKit suspends a backgrounded app's web content
+  process. The hidden pages of authchatgpt/, authnd/, authds/ and search/gemini
+  therefore pause in the background even while a background task or continued
+  processing keeps Python running. Public API offers no way around this. A
+  request that needs a new page waits until the app is opened again (Accounts
+  › Experimental says so).
 - **Packaging.** SwiftPM (`ios/flet_glossarion_native/Package.swift`, which
   depends on `../FlutterFramework` like receive_sharing_intent 1.9.0 and
   flutter_foreground_task 11.0.3). `flet_glossarion_native.podspec` is the
@@ -430,3 +459,6 @@ to every plugin.
   - The Android 15 timeout event fires.
   - BGContinuedProcessingTask submits with a `com.glossarion.app.job.*` id
     on iOS 26.
+- Hotfix 1: an authchatgpt/ book job keeps translating with the app on Home
+  and the screen off (Android), one request after another on the reused
+  hidden page.

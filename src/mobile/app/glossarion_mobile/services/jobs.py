@@ -45,6 +45,18 @@ configured through process-global state (``os.environ``, ``sys.argv``, stdout,
   callback gets every message of that job whole (blank ones and the blank lines inside
   streamed text included) before any log-buffer filtering, on the thread that logged
   it, after a replay of the messages the job logged before (the Reader's live panel).
+* Job safety (hotfix 1 issue 5): the same work is never queued twice. ``submit`` reuses an
+  ACTIVE job (queued, starting, running, waiting at the glossary gate, refining, stopping)
+  that already does the submission's work - the same request (``spec_key``: kind, inputs,
+  params), or the same job family over a target it covers (``job_target``: a book's
+  translation run, glossary phase included, a book's glossary extraction, a workspace's QA
+  scan, one chapter's translation) - and returns that job's id; the check and the insert
+  run under the service lock. ``submit_job`` says whether it reused (``SubmitResult``),
+  ``active_job_for`` finds that job before anything is recorded. ``resume`` of an active
+  job (or of one already resumed into a job that still runs) returns that job. A gate's
+  answers are idempotent (the first one counts) and refused while ``refine_at_gate``
+  refines its glossary: the job waits until the refinement ended, so the translation never
+  starts before it.
 
 Threading: internal state is guarded by one lock and is safe to call from any
 thread. Listeners (``subscribe``, ``on_transition``, ``on_question``,
@@ -80,12 +92,19 @@ from glossarion_mobile.services.dispatcher import LogBuffer
 __all__ = [
     "ACTIVE_STATE_FILE",
     "AUTO_ACCEPT_GLOSSARY_PARAM",
+    "FAMILY_CHAPTER",
+    "FAMILY_GLOSSARY",
+    "FAMILY_QA",
+    "FAMILY_TRANSLATION",
     "GLOSSARY_ACCEPTED_LINE",
     "GLOSSARY_AUTO_ACCEPTED_LINE",
     "GLOSSARY_QUESTION_KINDS",
     "HISTORY_LIMIT",
     "HISTORY_STATE_FILE",
     "INTERRUPTED_STATE_FILE",
+    "JOB_FAMILIES",
+    "JOB_TARGET_PARAM",
+    "JobAlreadyActive",
     "JobBackend",
     "JobContext",
     "JobError",
@@ -94,21 +113,27 @@ __all__ = [
     "JobSnapshot",
     "JobSpec",
     "JobState",
+    "JobTarget",
     "JobsView",
     "Progress",
     "STATE_LABELS",
+    "SubmitResult",
     "TERMINAL_STATES",
     "ACTIVE_STATES",
     "ISSUE_LABELS",
+    "already_active_text",
     "classify_issue",
     "client_log_handlers",
     "format_duration",
     "is_glossary_question",
     "issue_label",
+    "job_target",
     "notification_text",
     "progress_line",
+    "spec_key",
     "status_key",
     "strip_model_for",
+    "target_key",
 ]
 
 log = logging.getLogger("glossarion.jobs")
@@ -124,6 +149,7 @@ JOB_BUFFERS_KEPT = 4  # finished jobs whose LogBuffer stays in memory
 JOB_MESSAGES_KEPT = 4000  # whole log messages a job keeps for listeners that attach late
 LAST_LINE_CHARS = 240
 STREAM_DRAIN_INTERVAL = 0.1  # seconds between the job-side budgeted drains of the request stream
+ANSWERS_KEPT = 64  # answered questions remembered, so a repeated tap of the same answer stays a no-op
 
 #: Lines the auth modules print when a job has no usable login and falls back to the interactive
 #: browser login (``get_valid_access_token`` / ``recover_from_unauthorized``), refuses it (the
@@ -348,6 +374,17 @@ class JobError(RuntimeError):
     """A job could not run (bad spec, missing input, shared module missing). Message is user-facing."""
 
 
+class JobAlreadyActive(JobError):
+    """A submission whose work an active job already does (hotfix 1 issue 5): nothing new was queued. The
+    message is user-facing (``already_active_text``); ``job_id`` / ``snapshot`` name the job the UI binds
+    to or opens instead (Jobs › job)."""
+
+    def __init__(self, snapshot: Any = None, message: str = "") -> None:
+        self.snapshot = snapshot
+        self.job_id = getattr(snapshot, "id", None)
+        super().__init__(message or already_active_text(snapshot))
+
+
 class _Cancelled(Exception):
     """The job was stopped before its adapter started."""
 
@@ -373,6 +410,111 @@ def _norm(path: Any) -> str:
         return os.path.normcase(os.path.abspath(os.fspath(path)))
     except Exception:
         return str(path)
+
+
+# ---------------------------------------------------------------------------
+# Job safety (hotfix 1 issue 5): what a job works on, for the duplicate check
+# ---------------------------------------------------------------------------
+
+#: ``JobSpec.params`` key: the path(s) whose work the job does, for the duplicate check (``job_target``).
+#: A submitter sets it when its inputs are not the book itself: a chat attachment send runs the pipeline on
+#: an input of its own run root, so it names the attached file here (``ChatRuns.send``).
+JOB_TARGET_PARAM = "job_target"
+
+FAMILY_TRANSLATION = "translation"
+FAMILY_GLOSSARY = "glossary"
+FAMILY_QA = "qa"
+FAMILY_CHAPTER = "chapter"
+
+#: kind -> job family. An active job of the same family whose target covers a submission's target already
+#: does its work (``JobService.submit`` reuses it): the translation family is a book's translation run, its
+#: glossary phase included (Library / Progress Manager / QA card "Run translation", the chat's "Save to:
+#: Library" plan, a chat attachment send - which names its target with ``JOB_TARGET_PARAM``); the glossary
+#: family a book's standalone glossary extraction; the QA family a workspace's QA scan; the chapter family
+#: one chapter's "Translate this chapter" (Reader, Book page rows). Other kinds are only ever reused for the
+#: very same request (``spec_key``).
+JOB_FAMILIES = {
+    "translate": FAMILY_TRANSLATION,
+    "direct_text": FAMILY_TRANSLATION,
+    "extract_glossary": FAMILY_GLOSSARY,
+    "glossary_refine": FAMILY_GLOSSARY,
+    "qa_scan": FAMILY_QA,
+    "single_chapter": FAMILY_CHAPTER,
+}
+
+
+@dataclass(frozen=True)
+class JobTarget:
+    """A job's family and the normalised paths it works on (``target_key``; a chapter job's keys are
+    ``<book>::<chapter file>``)."""
+
+    family: str
+    keys: frozenset
+
+    def covers(self, other: Optional["JobTarget"]) -> bool:
+        """All of ``other``'s work is part of this job's (same family, its paths a subset of ours)."""
+        return (other is not None and self.family == other.family and bool(other.keys)
+                and other.keys <= self.keys)
+
+    def names(self, key: str) -> bool:
+        return any(k == key or k.startswith(key + "::") for k in self.keys)
+
+
+def target_key(path: Any) -> str:
+    """A path as the duplicate check compares it: absolute, symbolic links resolved and case-folded where
+    the file system is case-insensitive (``os.path.normcase``)."""
+    try:
+        return os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(path))))
+    except Exception:
+        return _norm(path)
+
+
+def _spec_kind(spec: Any) -> str:
+    kind = spec.get("kind") if isinstance(spec, Mapping) else getattr(spec, "kind", None)
+    return str(getattr(kind, "value", kind) or "")
+
+
+def _spec_field(spec: Any, name: str, default: Any = None) -> Any:
+    return spec.get(name, default) if isinstance(spec, Mapping) else getattr(spec, name, default)
+
+
+def job_target(spec: Any) -> Optional[JobTarget]:
+    """The family and paths of a submission (``JOB_FAMILIES``), or None when its kind has no family or it
+    names nothing: ``params[JOB_TARGET_PARAM]`` when set, else the inputs (a typed-text chat send, which
+    names no target, has none). Pure: no disk access beyond resolving the paths."""
+    kind = _spec_kind(spec)
+    family = JOB_FAMILIES.get(kind)
+    if family is None:
+        return None
+    params = _spec_field(spec, "params") or {}
+    params = params if isinstance(params, Mapping) else {}
+    explicit = params.get(JOB_TARGET_PARAM)
+    if explicit:
+        paths = [explicit] if isinstance(explicit, (str, os.PathLike)) else list(explicit)
+    elif kind == "direct_text":
+        return None  # its input is a file of its own run root: only the target the chat names counts
+    else:
+        paths = list(_spec_field(spec, "inputs") or ())
+    keys = {target_key(p) for p in paths if p and str(p).strip()}
+    if kind == "single_chapter":
+        chapter = str(params.get("chapter_file") or "").strip()
+        if not chapter:
+            return None
+        keys = {f"{key}::{chapter}" for key in keys}
+    return JobTarget(family, frozenset(keys)) if keys else None
+
+
+def spec_key(spec: Any) -> str:
+    """What makes two submissions the very same request, for any kind: the kind, the inputs and the params
+    (not the title or the origin, which only say where it was tapped). '' when it cannot be told."""
+    try:
+        params = _spec_field(spec, "params") or {}
+        return json.dumps({"kind": _spec_kind(spec),
+                           "inputs": [target_key(p) for p in (_spec_field(spec, "inputs") or ())],
+                           "params": _jsonable(dict(params) if isinstance(params, Mapping) else {})},
+                          sort_keys=True, ensure_ascii=False, default=repr)
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +768,16 @@ class JobsView:
         return None
 
 
+@dataclass(frozen=True)
+class SubmitResult:
+    """``JobService.submit_job`` / ``resume_job``: the job that does the submitted work. ``reused``: it is an
+    active job that already did (nothing new was queued); ``snapshot`` is that job as it was then."""
+
+    job_id: str
+    reused: bool = False
+    snapshot: Optional[JobSnapshot] = None
+
+
 @dataclass
 class _Job:
     """Mutable job record (guarded by ``JobService._lock``)."""
@@ -669,6 +821,9 @@ class _Job:
     message_lock: threading.RLock = field(default_factory=threading.RLock)
     issue: Optional[dict] = None  # U9: the last request wait (direct_text_stream.classify_request_issue)
     refining: bool = False  # issue 12: the gate's glossary is being refined (``refine_at_gate``)
+    # hotfix 1 issue 5: what the job works on (``job_target``) and its request (``spec_key``), set at submit
+    target: Optional[JobTarget] = None
+    spec_key: str = ""
 
     def snapshot(self) -> JobSnapshot:
         return JobSnapshot(
@@ -870,6 +1025,24 @@ def notification_text(snap: JobSnapshot) -> str:
         details = [("refining the glossary" if getattr(snap, "refining", False) else "waiting for your glossary decision")
                    if is_glossary_question(_question_kind(snap.question)) else "waiting for your answer"]
     return f"{text}: {' · '.join(details)}" if details else text
+
+
+def already_active_text(snap: Any) -> str:
+    """Hotfix 1 issue 5: why nothing new was queued - "Translating “Book.epub” is already running (Chat ·
+    Novel)" / "… is already queued" / "… is still stopping"; a generic line without a snapshot."""
+    if snap is None:
+        return "This job is already running"
+    spec = getattr(snap, "spec", None)
+    kind = _spec_kind(spec) if spec is not None else ""
+    state = getattr(snap, "state", None)
+    state = str(getattr(state, "value", state) or "").upper()
+    where = {"QUEUED": "already queued", "STOPPING": "still stopping",
+             "FORCE_STOPPING": "still stopping"}.get(state, "already running")
+    title = str(getattr(spec, "title", "") or "").strip()
+    text = f"{kind_verb(kind)} “{title}” is {where}" if title else f"{kind_verb(kind)} is {where}"
+    origin = getattr(spec, "origin", None) or {}
+    label = str(origin.get("label") or "").strip() if isinstance(origin, Mapping) else ""
+    return f"{text} ({label})" if label else text
 
 
 def strip_model_for(snap: Optional[JobSnapshot], queued: int = 0, now: Optional[float] = None) -> Any:
@@ -1391,7 +1564,13 @@ class JobService:
         self._paused = False
         self._closed = False
         self._thread: Optional[threading.Thread] = None
-        self._answers: dict[str, tuple[threading.Event, list]] = {}
+        # question id -> (answered event, [value], the asking job); the last answers the jobs took (repeats)
+        self._answers: dict[str, tuple[threading.Event, list, Optional[_Job]]] = {}
+        self._answered: "collections.OrderedDict[str, Any]" = collections.OrderedDict()
+        # hotfix 1 issue 5: Resume runs one at a time; a job resumed in this session -> the job it became
+        # (a second Resume returns that job while it is active)
+        self._resume_lock = threading.RLock()
+        self._resumed_into: dict[str, str] = {}
         self.adopted_ids: list[str] = []  # interrupted jobs found at this launch (launch banner)
         #: ``spec -> params | None``: the params a Resume without its own runs with (the chat sets it:
         #: a chat job resumed from the Jobs page / banner uses the chat's model now, ``ChatRuns.with_current_model``)
@@ -1572,28 +1751,90 @@ class JobService:
     # ---- submit / queue -------------------------------------------------------------------------------
 
     def submit(self, spec: JobSpec, *, front: bool = False) -> str:
-        """Queue ``spec`` (starts at once when idle); returns the job id."""
+        """Queue ``spec`` (starts at once when idle); returns the job id: the id of the active job that already
+        does this work when there is one (``submit_job``, hotfix 1 issue 5), so the caller binds to it."""
+        return self.submit_job(spec, front=front).job_id
+
+    def submit_job(self, spec: JobSpec, *, front: bool = False) -> SubmitResult:
+        """``submit`` that says whether it queued a job (``SubmitResult``; ``reused``: nothing new was queued).
+
+        An ACTIVE job (queued, starting, running, waiting at the glossary gate, refining, stopping) that does
+        the same request (``spec_key``) or, in the same family, a target that covers this one's
+        (``job_target``) is reused: two surfaces, a double tap, two chats with the same file, a Resume of a
+        book that is running never queue the same work twice. The check and the insert run under the service
+        lock, so concurrent submits from any thread give one job. Jobs still run one at a time."""
         if not isinstance(spec, JobSpec):
             raise TypeError("submit() takes a JobSpec")
         if not self.has_kind(spec.kind):
             raise JobError(f"Unknown job kind: {spec.kind}")
-        job = _Job(id=uuid.uuid4().hex[:12], spec=spec, created=self.clock())
+        target, key = job_target(spec), spec_key(spec)  # paths are resolved outside the lock
+        job = _Job(id=uuid.uuid4().hex[:12], spec=spec, created=self.clock(), target=target, spec_key=key)
         job.log_path = self.job_log_path(job.id)
         with self._cond:
             if self._closed:
                 raise JobError("The job service is closed")
-            if front:
-                self._queue.insert(0, job)
+            existing = self._covering_job_locked(target, key)
+            if existing is not None:
+                snap = existing.snapshot()
             else:
-                self._queue.append(job)
-            self._write_active_locked()
-            snap = job.snapshot()
-            self._ensure_worker_locked()
-            self._cond.notify_all()
+                if front:
+                    self._queue.insert(0, job)
+                else:
+                    self._queue.append(job)
+                self._write_active_locked()
+                snap = job.snapshot()
+                self._ensure_worker_locked()
+                self._cond.notify_all()
+        if existing is not None:
+            log.info("job %s reused for %s %s (it is %s)", existing.id, spec.kind, spec.title, snap.state.value)
+            return SubmitResult(existing.id, True, snap)
         log.info("job %s queued: %s %s", job.id, spec.kind, spec.title)
         self._post(self._deliver_transition, snap, None)
         job.announced.set()  # the worker starts it only now: listeners see QUEUED before STARTING
-        return job.id
+        return SubmitResult(job.id, False, snap)
+
+    def _live_jobs_locked(self) -> list:
+        """The jobs that have not ended: the running one (also while it starts, waits at a gate or stops),
+        then the queue in order."""
+        jobs = []
+        active = self._active
+        if active is not None and active.state not in TERMINAL_STATES:
+            jobs.append(active)
+        jobs.extend(job for job in self._queue if job.state not in TERMINAL_STATES)
+        return jobs
+
+    def _covering_job_locked(self, target: Optional[JobTarget], key: str) -> Optional[_Job]:
+        for job in self._live_jobs_locked():
+            if key and job.spec_key == key:
+                return job
+            if target is not None and job.target is not None and job.target.covers(target):
+                return job
+        return None
+
+    def active_job_for(self, what: Any, family: Optional[str] = None) -> Optional[JobSnapshot]:
+        """The active job that already does ``what``'s work, else None (hotfix 1 issue 5).
+
+        ``what``: a ``JobSpec`` - the job ``submit`` would reuse for it (check before recording anything, e.g.
+        a chat turn); or a path (a book's source file, a workspace folder) - an active job whose target names
+        it, of ``family`` when given (``FAMILY_TRANSLATION`` / ``FAMILY_GLOSSARY`` / ``FAMILY_QA`` /
+        ``FAMILY_CHAPTER``). Any thread; the answer can be stale by the time it is used, so a submission
+        still goes through ``submit``, which decides under the lock."""
+        if isinstance(what, JobSpec):
+            target, key = job_target(what), spec_key(what)
+            with self._lock:
+                job = self._covering_job_locked(target, key)
+                return job.snapshot() if job is not None else None
+        if not what:
+            return None
+        wanted = target_key(what)
+        with self._lock:
+            for job in self._live_jobs_locked():
+                found = job.target
+                if found is None or (family is not None and found.family != family):
+                    continue
+                if found.names(wanted):
+                    return job.snapshot()
+        return None
 
     def cancel_queued(self, job_id: str) -> bool:
         with self._cond:
@@ -1657,28 +1898,49 @@ class JobService:
         omitted, the spec runs as it was.
 
         An Interrupted job that was already resumed (its entry resolved ``resumed``) is refused:
-        a second Resume (launch banner, Jobs page, the chat) would run the same work twice."""
-        with self._lock:
-            snap = next((s for s in self._interrupted if s.id == job_id), None)
-            from_interrupted = snap is not None
-            if snap is None:
-                snap = next((s for s in self._history if s.id == job_id), None)
-                if snap is not None and snap.resolution == "resumed":
-                    return None
-        if snap is None:
-            return None
-        if params is None and self.resume_params is not None:
-            try:
-                params = self.resume_params(snap.spec)
-            except Exception:
-                log.exception("resume params hook failed")
-                params = None
-        new_id = self.submit(snap.spec if params is None else replace(snap.spec, params=dict(params)))
-        if from_interrupted:
-            self._resolve_interrupted(job_id, "resumed")
-        return new_id
+        a second Resume (launch banner, Jobs page, the chat) would run the same work twice.
+
+        Hotfix 1 issue 5: a job that is still active returns its own id, a stopped / failed job this session
+        already resumed returns the job it became while that one is active, and the resubmission itself
+        reuses an active job that does the same work (``submit_job``); ``resume_job`` says which."""
+        result = self.resume_job(job_id, params)
+        return result.job_id if result is not None else None
 
     retry = resume
+
+    def resume_job(self, job_id: str, params: Optional[Mapping[str, Any]] = None) -> Optional[SubmitResult]:
+        """``resume`` that says whether it reused an active job (``SubmitResult.reused``); None when there is
+        nothing to resume. Resumes run one at a time (a double tap resumes once)."""
+        with self._resume_lock:
+            with self._lock:
+                live = self._find_live(job_id)
+                if live is not None and live.state not in TERMINAL_STATES:
+                    return SubmitResult(live.id, True, live.snapshot())  # it is still active itself
+                snap = next((s for s in self._interrupted if s.id == job_id), None)
+                from_interrupted = snap is not None
+                if snap is None:
+                    snap = next((s for s in self._history if s.id == job_id), None)
+                    if snap is not None and snap.resolution == "resumed":
+                        return None  # an Interrupted entry resumed already: refused, as before
+                into = self._resumed_into.get(job_id)
+                current = self._find_live(into) if into else None
+                if current is not None and current.state not in TERMINAL_STATES:
+                    # a stopped / failed job this session resumed already, into a job that is still active
+                    return SubmitResult(current.id, True, current.snapshot())
+            if snap is None:
+                return None
+            if params is None and self.resume_params is not None:
+                try:
+                    params = self.resume_params(snap.spec)
+                except Exception:
+                    log.exception("resume params hook failed")
+                    params = None
+            result = self.submit_job(snap.spec if params is None else replace(snap.spec, params=dict(params)))
+            with self._lock:
+                self._resumed_into[job_id] = result.job_id
+            if from_interrupted:
+                self._resolve_interrupted(job_id, "resumed")
+            return result
 
     def discard(self, job_id: str) -> bool:
         return self._resolve_interrupted(job_id, "discarded")
@@ -1889,14 +2151,33 @@ class JobService:
     # ---- questions ----------------------------------------------------------------------------------------------
 
     def answer(self, question_id: str, value: Any) -> bool:
+        """Answer a job's pending question (the approval card's Yes / No, the Book page / Jobs sheet, the
+        notification). Hotfix 1: idempotent - the first answer is the one the job gets; the same answer again
+        is a no-op (True), a different one is refused (False). Refused while the question's glossary is being
+        refined (``refine_at_gate``, issue 2): the job waits at the gate until the refinement ended, so its
+        translation never starts before it."""
         with self._lock:
             entry = self._answers.get(question_id)
             if entry is None:
+                # already taken by the job: a repeat of its answer is still a no-op success
+                return question_id in self._answered and self._answered[question_id] == value
+            event, slot, job = entry
+            if job is not None and job.refining:
+                log.info("answer to %s refused: its glossary is being refined", question_id)
                 return False
-            event, slot = entry
+            if event.is_set():
+                return slot[0] == value
             slot[0] = value
             event.set()
         return True
+
+    def is_refining(self, job_id: Optional[str]) -> bool:
+        """The job's gate glossary is being refined now (``refine_at_gate``; its answers are refused)."""
+        if job_id is None:
+            return False
+        with self._lock:
+            job = self._find_live(str(job_id))
+            return bool(job is not None and job.refining)
 
     def refine_at_gate(self, job_id: str, glossary_path: str, selected_types: Optional[Sequence[str]] = None) -> dict:
         """U12 item 5, "✨ Refine" on the glossary approval card: refine the generated glossary while the job
@@ -1904,12 +2185,37 @@ class JobService:
         paused translation forever (one job at a time), so this runs the shared manual refinement
         (``glossary_progress_core.plan_manual_glossary_refinement`` / ``run_manual_glossary_refinement``)
         with the paused job's own owner and environment; its log lines go to the job's log. The question
-        stays open: the user then accepts (Yes), edits or rejects the refined file."""
-        job = self._find_live(job_id)
-        if job is None or not job.question or job.owner is None:
-            raise RuntimeError("The job is not waiting for a glossary decision")
+        stays open: the user then accepts (Yes), edits or rejects the refined file.
+
+        Hotfix 1 issue 2: from the tap on, the gate refuses answers (``answer``) and its alerts and approval
+        card are hidden (``JobSnapshot.refining``), so Yes cannot start the translation while the refinement
+        sends its requests; a second Refine while one runs, or a Refine after the gate was answered, is
+        refused. A Stop meanwhile is honoured once the refinement has ended (it polls the owner's stop flag)."""
         if not glossary_path or not os.path.isfile(glossary_path):
             raise RuntimeError("The generated glossary file was not found")
+        with self._lock:
+            job = self._find_live(job_id)
+            question = dict(job.question) if job is not None and job.question else None
+            entry = self._answers.get(str(question.get("id"))) if question else None
+            if job is None or question is None or job.owner is None or (entry is not None and entry[0].is_set()):
+                raise RuntimeError("The job is not waiting for a glossary decision")
+            if job.refining:
+                raise RuntimeError("The glossary is already being refined")
+            job.refining = True  # under the lock: from here on the gate refuses answers
+        try:
+            return self._refine_at_gate(job, glossary_path, selected_types)
+        finally:
+            with self._lock:
+                job.refining = False  # also when the refinement could not start (``_resume_question`` did not run)
+
+    def _refine_at_gate(self, job: _Job, glossary_path: str, selected_types: Optional[Sequence[str]]) -> dict:
+        question = self._suspend_question(job)  # the card and the alerts go away at once
+        try:
+            return self._run_gate_refinement(job, glossary_path, selected_types)
+        finally:
+            self._resume_question(job, question)
+
+    def _run_gate_refinement(self, job: _Job, glossary_path: str, selected_types: Optional[Sequence[str]]) -> dict:
         import glossary_progress_core as gpc
 
         from glossarion_mobile.services.library import bind_call
@@ -1935,11 +2241,7 @@ class JobService:
             raise RuntimeError("The selected entry type(s) contain no glossary entries")
         options, plan = planned[0], planned[1]
         log(f"\n✨ Refining the generated glossary before translation: {', '.join(types)}")
-        question = self._suspend_question(job)
-        try:
-            gpc.run_manual_glossary_refinement(owner, glossary_path, progress_path, options, plan)
-        finally:
-            self._resume_question(job, question)
+        gpc.run_manual_glossary_refinement(owner, glossary_path, progress_path, options, plan)
         log("✨ Glossary refinement finished: review it, then choose Edit, Yes or No")
         return {"ok": True, "glossary_path": glossary_path}
 
@@ -1960,9 +2262,12 @@ class JobService:
     def _resume_question(self, job: _Job, question: Optional[dict]) -> None:
         """The refinement ended: a question that still waits raises its alerts again (delivered anew to the
         question listeners: the "Glossary ready" notification / snackbar unless its card is on screen)."""
+        stop_event = getattr(job, "stop_event", None)
         with self._lock:
             job.refining = False
             waiting = question is not None and bool(job.question) and job.question.get("id") == question.get("id")
+            if waiting and stop_event is not None and stop_event.is_set():
+                waiting = False  # stopped meanwhile: the gate gives up now, nothing is asked again
             if waiting:
                 job.warning = True
             snap = job.snapshot()
@@ -2005,7 +2310,7 @@ class JobService:
         event = threading.Event()
         slot = [default]
         with self._lock:
-            self._answers[question["id"]] = (event, slot)
+            self._answers[question["id"]] = (event, slot, job)
             job.question = question
             job.warning = True
             snap = job.snapshot()
@@ -2013,12 +2318,19 @@ class JobService:
         self._changed()
         try:
             while not event.wait(0.25):
-                if job.stop_event.is_set():
+                # A Stop gives the gate up - never while its glossary is being refined (hotfix 1 issue 2):
+                # the refinement runs on this job's owner and process state, so the job waits for it to
+                # end (it stops early on the owner's stop flag) before the next job may start.
+                if job.stop_event.is_set() and not job.refining:
                     break
             return slot[0]
         finally:
             with self._lock:
                 self._answers.pop(question["id"], None)
+                if event.is_set():
+                    self._answered[question["id"]] = slot[0]
+                    while len(self._answered) > ANSWERS_KEPT:
+                        self._answered.popitem(last=False)
                 job.question = None
                 job.warning = False
             self._post(self._deliver_event, job.id, "question_resolved", {"id": question["id"], "kind": kind})

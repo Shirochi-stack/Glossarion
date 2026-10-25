@@ -996,7 +996,7 @@ def test_queued_jobs_are_recovered_too_and_discard(tmp_path):
 def test_history_keeps_the_last_50_and_reloads(tmp_path):
     service, backend = make_service(tmp_path, history_limit=50)
     for index in range(53):
-        service.submit(JobSpec("translate", f"Book {index}", (epub(tmp_path),)))
+        service.submit(JobSpec("translate", f"Book {index}", (epub(tmp_path, f"Book{index}.epub"),)))
     assert service.wait_idle(TIMEOUT * 3)
     history = service.view().history
     assert len(history) == 50 and history[0].title == "Book 52"
@@ -1476,7 +1476,7 @@ def test_jobs_screen_sections_actions_and_detail(tmp_path):
         running = service.submit(JobSpec("translate", "Running book", (epub(tmp_path),),
                                          origin={"type": "chat", "cid": "3", "label": "Chat · Novel"}))
         assert await asyncio.to_thread(gate.entered.wait, TIMEOUT)
-        queued = service.submit(JobSpec("translate", "Queued book", (epub(tmp_path),)))
+        queued = service.submit(JobSpec("translate", "Queued book", (epub(tmp_path, "Queued.epub"),)))
         navigated = []
         screen = JobsScreen(_match("/jobs"), service=service, page=page,
                             navigate=lambda name, params=None: navigated.append((name, params)))

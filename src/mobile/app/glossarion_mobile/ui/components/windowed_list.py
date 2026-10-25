@@ -89,6 +89,9 @@ class WindowedList:
         self.window_start = 0
         self.rendered = 0  # absolute index of the next row to build (window_start <= rendered <= window_end)
         self.controls: dict = {}  # row key -> mounted control
+        #: while the window is rebuilt (``_mount_window``): row key -> the control it showed until then, so a
+        #: ``build_row`` can tell a row that stays from one coming back into the list (sent whole); else None
+        self.mounted_before: Optional[dict] = None
         self.positions: dict = {}  # row key -> absolute index in ``items``
         if list_view is None:
             list_view = ft.ListView(spacing=spacing, padding=padding if padding is not None else
@@ -160,10 +163,13 @@ class WindowedList:
         last = ((total - 1) // self.window_rows) * self.window_rows if total else 0
         self.window_start = max(0, min((max(0, int(start)) // self.window_rows) * self.window_rows, last))
         self.rendered = self.window_start
-        self.controls = {}
+        self.mounted_before, self.controls = self.controls, {}
         self.list_view.controls = []
         self._sync_selector()
-        self.extend_to(self.window_start + max(self.step, minimum) - 1)
+        try:
+            self.extend_to(self.window_start + max(self.step, minimum) - 1)
+        finally:
+            self.mounted_before = None
 
     def _sync_selector(self) -> None:
         self.selector.visible = self.windowed

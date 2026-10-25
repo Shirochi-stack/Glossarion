@@ -39,12 +39,12 @@ from glossarion_mobile.ui.components.reason_chip import ReasonChip
 from glossarion_mobile.ui.components.windowed_list import WindowedList
 from glossarion_mobile.ui.library import progress_model as pm
 from glossarion_mobile.ui.library.colors import GP_STATUS_PALETTE_KEY
-from glossarion_mobile.ui.library.common import stat_chip, status_avatar
+from glossarion_mobile.ui.library.common import BusyBar, stat_chip, status_avatar
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET, status_color
 
-__all__ = ["DELETED_BANNER", "EMPTY_BODY", "GlossaryTab", "empty_title", "glossary_file_summary",
-           "summary_line"]
+__all__ = ["DELETED_BANNER", "EMPTY_BODY", "GlossaryTab", "action_done_text", "empty_title",
+           "glossary_file_summary", "summary_line"]
 
 log = logging.getLogger("glossarion.library.ui")
 
@@ -95,6 +95,21 @@ def glossary_file_summary(path: str) -> dict:
     return out
 
 
+def action_done_text(action: str, rows: Sequence[Any]) -> str:
+    """What a Glossary Progress action did (hotfix 1 issue 9): "Marked 3 chapters as completed",
+    "Removed Ch.4 from progress" (the row's name as the confirmation names it)."""
+    count = len(rows)
+    chapters = bool(rows) and all(getattr(r, "kind", "") == "chapter" for r in rows)
+    noun = ("chapter" if count == 1 else "chapters") if chapters else ("row" if count == 1 else "rows")
+    if action == "mark_completed":
+        return f"Marked {count} {noun} as completed"
+    if action == "remove":
+        if count == 1:
+            return f"Removed {str(getattr(rows[0], 'title', '') or '').split(' · ')[0] or '1 row'} from progress"
+        return f"Removed {count} {noun} from progress"
+    return "Done"
+
+
 def summary_line(summary: dict) -> str:
     """"N entries · character 12 · term 30 … · modified 2026-10-08 14:02" ('' without a file)."""
     import time
@@ -131,6 +146,8 @@ class GlossaryTab:
         self.last_result: Any = None
         self.file_summary: dict = {}
         self._summary_key: Any = None
+        # hotfix 1 issue 9: the list's progress bar while an action writes and the rows reload
+        self.busy = BusyBar(self.ctx, lambda: getattr(self, "loading", None), idle=lambda: self.view is None)
 
     # ---- build -----------------------------------------------------------------------------------
 
@@ -239,7 +256,7 @@ class GlossaryTab:
         self.view = view
         if getattr(self, "root", None) is None:
             return
-        self.loading.visible = False
+        self.loading.visible = self.busy.active
         title = view.book_title or str(self.page.book.get("name") or "")
         self.title_text.value = f"\U0001f4d6 {title}"
         self.banner.visible = view.deleted
@@ -552,21 +569,29 @@ class GlossaryTab:
                 self.ctx.show(dialog)
                 if not await answer:
                     return None
-        try:
-            result = await self.ctx.io(pm.run_glossary_action, self.page.service, self.view, action, list(rows))
-        except CoreMissing as exc:
-            self.ctx.say(f"Not available in this build ({exc.name})")
-            return None
-        except Exception as exc:
-            log.exception("glossary progress action %s failed", action)
-            self.ctx.say(f"Could not update the glossary progress: {exc}")
-            return None
-        self.last_result = result
-        changed = bool(first_value(result, "changed", default=True))
+        async with self.busy.run():  # hotfix 1 issue 9: the progress bar until the rows have reloaded
+            try:
+                result = await self.ctx.io(pm.run_glossary_action, self.page.service, self.view, action, list(rows))
+            except CoreMissing as exc:
+                self.ctx.say(f"Not available in this build ({exc.name})")
+                return None
+            except Exception as exc:
+                log.exception("glossary progress action %s failed", action)
+                self.ctx.say(f"Could not update the glossary progress: {exc}")
+                return None
+            self.last_result = result
+            changed = bool(first_value(result, "changed", default=True))
+            self.exit_selection()
+            try:  # the rows and the stats at once (a poll reload in flight is waited for, then read again)
+                await self.page.reload_glossary(force=True)
+            except Exception as exc:
+                log.exception("reloading the glossary progress after %s failed", action)
+                self.ctx.say(f"Could not refresh the glossary progress: {exc}")
+                return result
         if not changed:
             self.ctx.say("Nothing to mark as completed" if action == "mark_completed" else "Nothing was removed")
-        self.exit_selection()
-        await self.page.reload_glossary()
+        else:
+            self.ctx.say(action_done_text(action, rows))
         return result
 
     async def show_footnotes(self, rows: Sequence[pm.GlossaryRowVM]) -> Any:

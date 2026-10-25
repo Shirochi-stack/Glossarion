@@ -1,8 +1,9 @@
 """Plan card pieces (UI_SPEC §2.12.1): Run options, Choose chapters, the destination sheet.
 
 ``RunOptionsPanel`` - the collapsed "Run options" ``ExpansionTile`` (summary "Batch 10 · Temp 0.3 ·
-Rolling summary"): the Settings pages' own schema tiles (``settings.tiles.make_tile``) for
-``plan_model.RUN_OPTION_KEYS`` and the switch **Only for this run** (default off, owner 2026-10-18). On, the tiles
+Rolling summary · Delay 3-7 s"): the Settings pages' own schema tiles (``settings.tiles.make_tile``) for
+``PANEL_KEYS`` (``plan_model.RUN_OPTION_KEYS`` and, hotfix 1 #8, the desktop API call delay) and the switch
+**Only for this run** (default off, owner 2026-10-18). On, the tiles
 write into a ``plan_model.RunOverlayStore`` whose values become the JobSpec ``config_overrides``
 (merged over the config snapshot at job start, like every other override); off, they write
 config.json like Settings. The tiles are rebuilt under a per-build key when the switch flips
@@ -35,9 +36,29 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import scroll_sheet
 
-__all__ = ["ChooseChaptersSheet", "DESTINATIONS", "RunOptionsPanel", "destination_sheet"]
+__all__ = ["ChooseChaptersSheet", "DESTINATIONS", "PANEL_KEYS", "RunOptionsPanel", "destination_sheet"]
 
 log = logging.getLogger("glossarion.chat.plan")
+
+#: Hotfix 1 #8: the desktop main window's "API call delay (s, or range 5-7)" (config ``delay`` + ``delay_max``,
+#: the job's SEND_INTERVAL_SECONDS / SEND_INTERVAL_MAX_SECONDS) is a Run option too, next to the chunk size as on
+#: the desktop window (its "Threading delay · Chunk size" row, then "API call delay"); the Settings tile itself
+#: (``settings.tiles.DelayRangeTile``: '5' or a range '5-7').
+DELAY_KEY = "delay"
+
+
+def _with_delay(keys: Sequence[str]) -> tuple:
+    keys = tuple(keys)
+    if DELAY_KEY in keys:
+        return keys
+    at = keys.index("manual_chunk_size") + 1 if "manual_chunk_size" in keys else len(keys)
+    return keys[:at] + (DELAY_KEY,) + keys[at:]
+
+
+#: The panel's tiles: ``plan_model.RUN_OPTION_KEYS`` with the API call delay.
+PANEL_KEYS = _with_delay(RUN_OPTION_KEYS)
+#: The config keys the panel's summary follows (the delay's range max is written with it).
+PANEL_SUMMARY_KEYS = tuple(dict.fromkeys((*SUMMARY_KEYS, DELAY_KEY, DELAY_KEY + "_max")))
 
 
 def _edited(tile: Any) -> bool:
@@ -78,7 +99,7 @@ class RunOptionsPanel:
     saved overrides; ``on_change(values, only_this_run)`` persists them with the plan."""
 
     def __init__(self, ctx: Any, *, values: Optional[dict] = None, only_this_run: bool = False,
-                 on_change: Optional[Callable[[dict, bool], Any]] = None, keys: Sequence[str] = RUN_OPTION_KEYS,
+                 on_change: Optional[Callable[[dict, bool], Any]] = None, keys: Sequence[str] = PANEL_KEYS,
                  key: str = "run-options") -> None:
         self.ctx = ctx
         self.keys = tuple(keys)
@@ -107,7 +128,8 @@ class RunOptionsPanel:
         if store is not None and hasattr(store, "observe_keys"):
             on_ui = getattr(ctx, "on_ui", None)
             self._unsub = store.observe_keys(
-                SUMMARY_KEYS, lambda _k, _v: on_ui(self._store_changed) if callable(on_ui) else self._store_changed())
+                PANEL_SUMMARY_KEYS,
+                lambda _k, _v: on_ui(self._store_changed) if callable(on_ui) else self._store_changed())
 
     # ---- state -------------------------------------------------------------------------------------
 
@@ -134,7 +156,19 @@ class RunOptionsPanel:
             return None
 
     def summary(self) -> str:
-        return run_options_summary(self.get)
+        """The collapsed line (``plan_model.run_options_summary``) and the API call delay as its tile shows it."""
+        line = run_options_summary(self.get)
+        tile = self.tiles.get(DELAY_KEY) if DELAY_KEY in self.keys else None
+        text = ""
+        if tile is not None:
+            try:
+                text = str(tile.field_text() or "")
+            except Exception:
+                log.debug("the API call delay summary failed", exc_info=True)
+        if not text:
+            return line
+        delay = f"Delay {text} s"
+        return delay if line == run_options_summary(lambda _key: None) else f"{line} · {delay}"
 
     def range_chip_label(self) -> str:
         return range_label(self.get("chapter_range"), self.get("use_spine_order"))

@@ -41,7 +41,9 @@ __all__ = [
     "ACTIVE_STATES",
     "CardPhase",
     "EtaEstimator",
+    "GLOSSARY_REFINING_LABEL",
     "JobsAdapter",
+    "STARTING_LABEL",
     "TERMINAL_STATES",
     "chat_id_of",
     "ended_card",
@@ -196,17 +198,26 @@ def progress_line(snapshot: Any, *, eta: Optional[EtaEstimator] = None, now: Opt
     return " · ".join(parts)
 
 
-def running_label(snapshot: Any, *, waiting_for_glossary: bool = False) -> str:
-    """JobCard Running header (UI_SPEC §2.12.3)."""
+#: Hotfix 1 #2: the running card while the gate's glossary is refined (``JobSnapshot.refining``; the same words
+#: as the job's progress line, ``services.jobs.GLOSSARY_REFINING_TEXT``)
+GLOSSARY_REFINING_LABEL = "Refining the glossary…"
+#: Hotfix 1 #4: a resumed run whose job is about to start (Resume tapped, nothing ahead of it in the queue)
+STARTING_LABEL = "Starting translation…"
+
+
+def running_label(snapshot: Any, *, waiting_for_glossary: bool = False, refining: bool = False) -> str:
+    """JobCard Running header (UI_SPEC §2.12.3); ``refining``: the gate's glossary is being refined."""
     state = state_name(snapshot)
     if state == "STOPPING":
         return "Stopping after current request…"
     if state == "FORCE_STOPPING":
         return "Force stopping…"
+    if refining or (waiting_for_glossary and bool(_get(snapshot, "refining", False))):
+        return GLOSSARY_REFINING_LABEL
     if waiting_for_glossary:
         return "Waiting for your glossary decision"
     if state in ("QUEUED", "STARTING"):
-        return "Starting translation…"
+        return STARTING_LABEL
     last = str(_get(snapshot, "last_line", "") or "").lower()
     if "glossary" in last and ("extract" in last or "generat" in last):
         return "Generating glossary…"

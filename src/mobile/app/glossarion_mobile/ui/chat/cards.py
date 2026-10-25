@@ -61,6 +61,7 @@ __all__ = [
     "GlossaryReviewSheet",
     "JobCard",
     "NO_GLOSSARY_FILE_TEXT",
+    "REFINING_TEXT",
     "RequestSheet",
     "U10_ACTIONS",
     "glossary_preview",
@@ -74,6 +75,10 @@ NO_GLOSSARY_FILE_TEXT = "No editable glossary file was found. You can continue o
 ALWAYS_ACCEPT_LABEL = "Always accept"
 ACTION_REQUIRED_LABEL = "GLOSSARION · ACTION REQUIRED"
 REFINING_LABEL = "GLOSSARION · REFINING THE GLOSSARY…"
+#: Hotfix 1 #2: what the approval card shows instead of its buttons while ✨ Refine runs (the job waits at the
+#: gate; the refinement is for the translation, so ✓ Yes cannot start the translation before it is done)
+REFINING_TEXT = "Refining the glossary… ✓ Yes and ■ No come back when it is done."
+REFINE_FAILED_TEXT = "Could not refine the glossary: {error}"
 ALWAYS_CONFIRM_LABEL = "Tap again to always accept"
 ALWAYS_CONFIRM_SECONDS = 2.0
 _MUTED = ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE)
@@ -214,6 +219,10 @@ class GlossaryApprovalCard(ft.Container):
         self.on_refine = on_refine
         self.answered: Optional[bool] = None
         self.always_accepted = False
+        # Hotfix 1 #2: True while the refinement runs (``set_refining``): Edit / Refine / Yes / No / Always accept
+        # are hidden and refuse a tap; ``refine_outcome`` is "refined" / "failed" once it ended (``refined``)
+        self.refining = False
+        self.refine_outcome: Optional[str] = None
         self.types_text: Optional[ft.Text] = None
         self._always_armed_at: Optional[float] = None
         success = semantic("success", dark)
@@ -262,9 +271,18 @@ class GlossaryApprovalCard(ft.Container):
                                                   visible=on_refine is not None, on_click=lambda e: self.refine(),
                                                   tooltip="Refine this glossary (the refinement settings) before translating")
         # Issue 26: ✓ Yes and ■ No always share one row (Edit / Refine above them)
-        body.append(ft.Row([self.edit_button, self.refine_button], wrap=True, spacing=8, run_spacing=8,
-                           key="approval-edit-row"))
-        body.append(ft.Row([self.yes_button, self.no_button], spacing=8, key="approval-answer-row"))
+        self.edit_row = ft.Row([self.edit_button, self.refine_button], wrap=True, spacing=8, run_spacing=8,
+                               key="approval-edit-row")
+        self.answer_row = ft.Row([self.yes_button, self.no_button], spacing=8, key="approval-answer-row")
+        # Hotfix 1 #2: shown instead of the buttons while the refinement runs; its error once it failed
+        self.refining_row = ft.Row(
+            [ft.ProgressRing(width=16, height=16, stroke_width=2),
+             ft.Text(REFINING_TEXT, theme_style=ft.TextThemeStyle.BODY_SMALL, expand=True)],
+            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER, visible=False, key="approval-refining",
+        )
+        self.refine_error = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ERROR,
+                                    visible=False, key="approval-refine-error")
+        body.extend([self.refine_error, self.edit_row, self.answer_row, self.refining_row])
         self.always_button = ft.TextButton(
             content=ALWAYS_ACCEPT_LABEL, icon=ft.Icons.DONE_ALL, on_click=lambda e: self.always_tap(),
             tooltip="Accept this glossary and every generated glossary from now on (Chat settings to change)",
@@ -285,26 +303,69 @@ class GlossaryApprovalCard(ft.Container):
             pass
 
     def answer(self, accepted: bool) -> bool:
-        if self.answered is not None:
-            return False
+        if self.answered is not None or self.refining:
+            return False  # hotfix 1 #2: never an answer while the glossary is refined
         self.answered = bool(accepted)
         self._disable()
         if self.on_answer is not None:
             self.on_answer(bool(accepted))
         return True
 
-    def refine(self) -> bool:
-        if self.answered is not None or self.on_refine is None or self.refine_button.disabled:
-            return False
-        self.refine_button.disabled = True
-        self.refine_button.content = "✨ Refining…"
-        self.action_label.value = REFINING_LABEL  # issue 12: no "action required" while it refines
+    def reopen(self) -> None:
+        """The chat refused the answer (hotfix 1 #2: the gate's glossary is being refined): the tap is not spent,
+        the buttons are offered again (once the refinement ended)."""
+        self.answered = None
+        self.always_accepted = False
+        exists = bool(self.info.get("exists"))
+        self.edit_button.disabled = not exists
+        self.refine_button.disabled = not exists or self.refining or self.refine_outcome == "refined"
+        for button in (self.yes_button, self.no_button, self.always_button):
+            button.disabled = False
         self._push()
+
+    def refine(self) -> bool:
+        if self.answered is not None or self.on_refine is None or self.refine_button.disabled or self.refining:
+            return False
+        self.set_refining(True)
         self.on_refine()
         return True
 
-    def refined(self, ok: bool, info: Optional[dict] = None) -> None:
-        """The refinement ended: show the refined file's entries again and let the user answer."""
+    def set_refining(self, on: bool = True) -> bool:
+        """Hotfix 1 #2: while ✨ Refine runs, the card shows the refining state (a ring and ``REFINING_TEXT``)
+        instead of Edit / Refine / ✓ Yes / ■ No / Always accept, which also refuse a tap; ``on`` False brings
+        them back as they were. Returns True when the card changed."""
+        on = bool(on)
+        if on == self.refining:
+            return False
+        self.refining = on
+        if on:
+            self.refine_outcome = None
+            self.refine_button.disabled = True
+            self.refine_button.content = "✨ Refining…"
+            self.refine_error.visible = False
+        else:
+            self.refine_button.content = "✨ Refine"
+            self.refine_button.disabled = self.answered is not None or not bool(self.info.get("exists"))
+        # issue 12: no "action required" while it refines
+        self.action_label.value = REFINING_LABEL if on else ACTION_REQUIRED_LABEL
+        for row in (self.edit_row, self.answer_row):
+            row.visible = not on
+        self.always_button.visible = self.on_always is not None and not on
+        self.refining_row.visible = on
+        self._push()
+        return True
+
+    def refined(self, ok: bool, info: Optional[dict] = None, error: Optional[str] = None) -> None:
+        """The refinement ended: show the refined file's entries again and let the user answer (Edit / ✓ Yes /
+        ■ No come back; Refine reads "✨ Refined", or stays "✨ Refine" with the error under the preview)."""
+        self.refining = False
+        self.refine_outcome = "refined" if ok else "failed"
+        for row in (self.edit_row, self.answer_row):
+            row.visible = True
+        self.always_button.visible = self.on_always is not None
+        self.refining_row.visible = False
+        self.refine_error.value = "" if ok else REFINE_FAILED_TEXT.format(error=error or "it did not finish")
+        self.refine_error.visible = not ok
         if info:
             self.info = info
             preview = [ft.Text(f"{raw} → {translated}" if translated else raw, theme_style=ft.TextThemeStyle.BODY_SMALL,
@@ -322,7 +383,7 @@ class GlossaryApprovalCard(ft.Container):
                     self.types_text.visible = bool(info.get("types"))
                     first += 1
                 end = first + 1
-                while end < len(controls) and isinstance(controls[end], ft.Text):
+                while end < len(controls) and isinstance(controls[end], ft.Text) and controls[end] is not self.refine_error:
                     end += 1
                 self.content.controls = controls[:first + 1] + preview + controls[end:]
         self.refine_button.content = "✨ Refined" if ok else "✨ Refine"
@@ -339,7 +400,7 @@ class GlossaryApprovalCard(ft.Container):
     def always_tap(self, now: Optional[float] = None) -> bool:
         """Issue 27: the "Always accept" button needs a second tap within ``ALWAYS_CONFIRM_SECONDS`` (the label
         reads "Tap again to always accept" meanwhile), so one stray tap never turns the setting on."""
-        if self.answered is not None or self.on_always is None:
+        if self.answered is not None or self.on_always is None or self.refining:
             return False
         now = time.monotonic() if now is None else now
         armed = self._always_armed_at
@@ -375,7 +436,7 @@ class GlossaryApprovalCard(ft.Container):
 
     def always(self) -> bool:
         """"Always accept": ``on_always`` stores the choice and answers Yes (one answer, never two)."""
-        if self.answered is not None or self.on_always is None:
+        if self.answered is not None or self.on_always is None or self.refining:
             return False
         self.answered = True
         self.always_accepted = True
@@ -384,7 +445,7 @@ class GlossaryApprovalCard(ft.Container):
         return True
 
     def _edit(self, e: Any = None) -> None:
-        if self.on_edit is not None and self.path:
+        if self.on_edit is not None and self.path and not self.refining:
             self.on_edit(self.path)
 
 
