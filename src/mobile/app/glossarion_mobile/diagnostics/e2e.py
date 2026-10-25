@@ -1479,7 +1479,9 @@ class E2ESession:
         from glossarion_mobile.ui.library import progress_model as pm
 
         self.setup()
-        self.configure("off")
+        # scanning phase off (its desktop default is on): step 4's QA quick scan flags the partly
+        # Korean chapter, not a post-translation scan of step 1 (hotfix 1 issue 6)
+        self.configure("off", scan_phase_enabled=False)
         server = self.server
         name = "e2e-retranslate.epub"
         path = self.import_epub(name)

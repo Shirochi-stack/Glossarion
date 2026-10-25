@@ -1,7 +1,8 @@
 """Glossary view (``/glossary/<gid>?tab=``; UI_SPEC §4.1): Editor · General · Balanced/Full · Minimal · Refinement.
 
 A scrollable ``TabBar`` over the editor of one glossary file and the Glossary Manager's
-settings tabs (global: the same tabs as Settings › Glossary). Opening the view runs the
+settings tabs (global: the same tabs as Settings › Glossary; each built the first time it is
+shown, so opening the editor builds the editor alone). Opening the view runs the
 Glossary Manager's mode lock pass once (``settings_rules.apply_glossary_mode_locks``), and
 a mode change made while it is open runs it again, so the 🔒 badges and the forced toggle
 values always follow the mode. Android back leaves the editor's selection mode first;
@@ -22,7 +23,7 @@ from typing import Any, Optional
 import flet as ft
 
 from glossarion_mobile.ui.components.empty_state import EmptyState
-from glossarion_mobile.ui.glossary.common import attach_mode_locks, mode_locks_changed
+from glossarion_mobile.ui.glossary.common import attach_mode_locks, mode_locks_changed, quiet
 from glossarion_mobile.ui.glossary.editor import EditorPane
 from glossarion_mobile.ui.glossary.settings_tabs import GlossarySettingsTab
 from glossarion_mobile.ui.router import RouteMatch
@@ -172,20 +173,22 @@ class GlossaryScreen(Screen):
 
     def actions(self) -> list:
         feature = self.ctx.feature
+        # quiet: each pushes / opens what it changes (no whole-page diff after the tap)
         self.extract_button = ft.IconButton(icon=ft.Icons.AUTO_AWESOME, tooltip="Extract glossary",
-                                            on_click=lambda e: self.ctx.spawn(self.open_extract())
-                                            if feature else None, key="gv-extract", size_constraints=HIT_TARGET)
+                                            on_click=quiet(lambda: self.ctx.spawn(self.open_extract())
+                                                           if feature else None),
+                                            key="gv-extract", size_constraints=HIT_TARGET)
         self.menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, tooltip="Glossary", key="gv-menu", items=[
             ft.PopupMenuItem(content="Glossary progress", icon=ft.Icons.PLAYLIST_ADD_CHECK,
-                             on_click=lambda e: feature.open_progress_for_path(self.path) if feature else None),
+                             on_click=quiet(lambda: feature.open_progress_for_path(self.path) if feature else None)),
             ft.PopupMenuItem(content="Reload", icon=ft.Icons.REFRESH,
-                             on_click=lambda e: self.ctx.spawn(self.editor.reload(force=True))),
+                             on_click=quiet(lambda: self.ctx.spawn(self.editor.reload(force=True)))),
             ft.PopupMenuItem(content="Share file", icon=ft.Icons.SHARE,
-                             on_click=lambda e: self.ctx.spawn(self.editor.share_file())),
+                             on_click=quiet(lambda: self.ctx.spawn(self.editor.share_file()))),
             ft.PopupMenuItem(content="Search settings", icon=ft.Icons.SEARCH,
-                             on_click=lambda e: self.search_settings()),
+                             on_click=quiet(self.search_settings)),
             ft.PopupMenuItem(content="Discard settings changes since opening", icon=ft.Icons.UNDO,
-                             on_click=lambda e: self.discard_settings_changes()),
+                             on_click=quiet(self.discard_settings_changes)),
         ])
         return [self.extract_button, self.menu]
 
@@ -228,20 +231,33 @@ class GlossaryScreen(Screen):
                               body="This glossary is no longer available.", key="gv-missing",
                               primary=("Glossaries", lambda e: self.ctx.go("glossary")))
         self.tab_index = {name: i for i, name in enumerate(GLOSSARY_TABS)}
+        # The settings tabs are built when first shown: four schema pages of tiles (long prompt fields
+        # included) made opening the editor slow and sat in every whole-page diff (hotfix 1 issue 1).
+        self.tab_slots = {name: ft.Container(expand=True, key=f"gv-tab-{name}") for name in GLOSSARY_TABS[1:]}
+        if self.initial_tab in self.tab_slots:
+            self._build_tab(self.initial_tab)
         self.tabs = ft.Tabs(
             length=len(GLOSSARY_TABS),
             selected_index=self.tab_index[self.initial_tab],
-            on_change=self._on_tab,
+            on_change=quiet(self._on_tab),
             expand=True,
             content=ft.Column([
                 ft.TabBar(tabs=[ft.Tab(label=_TAB_LABELS[name]) for name in GLOSSARY_TABS], scrollable=True,
                           key="gv-tabbar"),
-                ft.TabBarView(controls=[self.editor.build()] + [tab.build() for tab in self.settings_tabs.values()],
+                ft.TabBarView(controls=[self.editor.build()] + [self.tab_slots[name] for name in GLOSSARY_TABS[1:]],
                               expand=True, key="gv-tabview"),
             ], expand=True, spacing=0),
             key="gv-tabs",
         )
         return self.tabs
+
+    def _build_tab(self, name: str) -> bool:
+        """Build settings tab ``name`` into its slot (once); True when it was built now."""
+        slot = getattr(self, "tab_slots", {}).get(name)
+        if slot is None or slot.content is not None:
+            return False
+        slot.content = self.settings_tabs[name].build()
+        return True
 
     @property
     def current_tab(self) -> str:
@@ -257,9 +273,14 @@ class GlossaryScreen(Screen):
         self._on_tab()
 
     def _on_tab(self, e: Any = None) -> None:
-        tab = self.settings_tabs.get(self.current_tab)
+        name = self.current_tab
+        tab = self.settings_tabs.get(name)
         if tab is not None:
+            self._build_tab(name)
             tab.did_show()
+            slot = getattr(self, "tab_slots", {}).get(name)
+            if slot is not None:
+                self.ctx.push(slot)  # the tab (built now, or what its did_show changed); not the page
 
     # ---- lifecycle ----------------------------------------------------------------------------------------
 

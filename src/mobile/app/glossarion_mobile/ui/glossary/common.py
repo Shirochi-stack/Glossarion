@@ -18,13 +18,43 @@ from typing import Any, Callable, Optional
 import flet as ft
 
 from glossarion_mobile.ui.components import surface
+from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.sheet import scroll_sheet
 from glossarion_mobile.ui.library.common import LibraryContext
 
-__all__ = ["GlossaryContext", "ask", "ago", "attach_mode_locks", "kind_icon", "kind_label", "mode_locks_changed"]
+__all__ = ["GlossaryContext", "ask", "ago", "attach_mode_locks", "kind_icon", "kind_label", "mode_locks_changed",
+           "no_auto_update", "quiet"]
 
 log = logging.getLogger("glossarion.glossary.ui")
+
+
+def no_auto_update() -> None:
+    """Tell Flet the running event handler sent what it changed itself.
+
+    Flet 1.0.3 auto-updates the nearest isolated ancestor after a handler that called no ``update()``:
+    the Page, a whole-page diff of every View (the chat and its live job card behind the editor
+    included). The Glossary editor sends that diff on every scroll event, keystroke and tap without it;
+    during a translation each diff also competes with the job's own repaints, which froze the app
+    (hotfix 1 issue 1). Harmless outside an event handler."""
+    try:
+        ft.context.mark_update_called()
+    except Exception:
+        pass
+
+
+def quiet(handler: Callable[[], Any]) -> Callable[..., None]:
+    """An event handler (``on_click`` / ``on_change`` / ...) that runs ``handler()`` and leaves no
+    whole-page auto-update behind (:func:`no_auto_update`): what it changes it pushes itself (its own
+    ``ctx.push``, a sheet it opens, or the coroutine it spawns)."""
+
+    def run(e: Any = None) -> None:
+        try:
+            call_handler(handler)  # a returned coroutine runs as a task
+        finally:
+            no_auto_update()
+
+    return run
 
 KIND_LABELS = {"book": "Book", "output": "Book (output)", "manual": "Manual", "unified": "Unified"}
 KIND_ICONS = {"book": "MENU_BOOK", "output": "FOLDER_SPECIAL", "manual": "DESCRIPTION", "unified": "MERGE_TYPE"}

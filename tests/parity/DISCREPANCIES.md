@@ -4285,3 +4285,52 @@ Two desktop-shared changes in `src/reader_doc.py`; the rest is mobile only.
   `ms` (`rm.PAGE_TURN_MS` 260, else 0; live via `setTurn`, no reload); the native reader slides `page_slot` on
   chapter turns; `DocumentBuilder.prefetch` / the native blocks prepare the neighbour chapter 0.4 s after a page
   is up.
+
+## Hotfix 1 (owner device report, 10 issues on the mobile APK; mobile only, no desktop change)
+
+No desktop-shared `src/*.py` file changed; config.json gets no key. Every item below is a mobile-only behaviour.
+
+- **One job per target (issue 5).** The desktop runs one translation from one window, so it cannot queue the same
+  book twice. Mobile `JobService.submit` reuses an ACTIVE job (queued, starting, running, at the glossary gate,
+  refining, stopping) that already does the same work: the identical request of any kind, and within a family
+  (translation incl. attachment sends that name their file, glossary, QA, single chapter) a job whose target covers
+  the new one; check + insert under the service lock; jobs still run one at a time. Gate answers are idempotent
+  (the first answer wins). Behaviour to know: a book still finishing its graceful stop is reused too, so Run
+  translation / Resume tapped then binds to the stopping job. A chat Send / Plan card Start that another chat or
+  the Library already runs records nothing: the Plan card stays (Start can be tapped again) and a Send without a
+  Plan card puts its text and attachment back into the composer.
+- **✨ Refine at the gate (issue 2).** Mobile-only feature (U12): while `JobService.refine_at_gate` runs, the gate
+  refuses answers and the approval card hides its buttons; a Stop meanwhile ends the job only after the
+  refinement ended (the refinement uses the waiting job's owner and env).
+- **Resume from a Result card (issue 4).** Resumes that card's own turn's job (`ChatRuns.resubmit(user_index=...)`);
+  the desktop Direct Text dialog has a single run per dialog. A chat run that ends Done with failed chapters keeps
+  its run root like a stopped one (the desktop dialog has no Retry failed), so Retry failed continues from its
+  `translation_progress.json` and sends only the failed chapters.
+- **Run options API call delay (issue 8).** The desktop main window's `delay` / `delay_max` as a per-run override
+  (the existing config keys and `DelayRangeTile`; `SEND_INTERVAL_SECONDS` / `SEND_INTERVAL_MAX_SECONDS` as the
+  desktop exports them). No divergence in what the run gets.
+- **Post-translation QA scan (issue 6).** Desktop parity in what runs: `TranslatorGUI._trigger_qa_scan_on_main_thread`
+  calls `run_qa_scan(mode_override=_get_scan_phase_mode(), non_interactive=True)` after the worker; mobile
+  `job_kinds.translate` catches the shared worker's `_ui_request('trigger_qa_scan')` on the job's HeadlessOwner and
+  runs the `qa_scan` job's scan in the same job after the worker returned (mobile duplicate-check sample size 0,
+  the QA Stop escalation). `translation_pipeline.UNSHARED_UI_REQUESTS['trigger_qa_scan']` stays as the GUI-free
+  fallback and is no longer reached by mobile translate jobs. Chat "This chat" (Direct Text) runs never scan, as on
+  the desktop. `scan_phase_enabled` keeps its desktop default (on). When no output folder is found, mobile skips
+  the scan without the desktop's "Auto-search failed - Select Output Folder to Scan" folder dialog (the desktop's
+  non-interactive path follows that dialog with the same skip anyway, or "QA scan canceled" on Cancel), and its
+  skip lines leave out the desktop's "⚠️ Auto-search enabled but no matching output folder found" / "📁 Falling
+  back to manual folder selection..." and the Expected / Exists / Available-folders debug lines (they name
+  `<EPUB folder>/<stem>`, which is not where a mobile job writes); every line it does log is a desktop line, and
+  the source extensions are the desktop's `_qa_auto_search_sources` tuple (both pinned by
+  `tests_host/test_hotfix1_post_qa.py`), but "⏹️ Post-translation QA scan skipped: the job was stopped" (a mobile
+  Stop before the scan; the desktop worker asks for the scan only after an unstopped translation).
+- **Progress Manager (issues 7, 9).** Mobile addition: Run QA scan next to Run translation (the chat's one-tap
+  Quick Scan), both disabled while a translation / glossary run is active. Action results use the desktop
+  Progress Manager's result text after its refresh as a snackbar (a sheet when long) instead of message boxes.
+- **Glossary editor (issues 1, 10).** Rows get an Edit button and, for tracked gender conflicts, a gender menu with
+  the desktop "Resolve Gender…" context-menu choices (Auto / Male / Female) applied through the shared
+  `GlossaryDocument` (same glossary bytes and tracker JSON on Save). The editor's auto-reload swaps in a re-read
+  document only while nothing is unsaved.
+- **Browser routes in the background (issue 3).** The WebViewBridge parks and reuses hidden WebViews while jobs run
+  and builds one at the start of a browser-route job; the desktop CDP path (`browser_driver` / `cdp_browser`) is
+  unchanged. iOS suspends web content in the background (documented limit).

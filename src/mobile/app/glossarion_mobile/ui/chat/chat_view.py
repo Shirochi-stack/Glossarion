@@ -55,6 +55,7 @@ from typing import Any, Callable, Mapping, Optional
 import flet as ft
 
 from glossarion_mobile.services.background import IOS_BACKGROUND_NOTICE
+from glossarion_mobile.services.jobs import JobAlreadyActive, already_active_text
 from glossarion_mobile.state.app_state import AppState, ChatContext, JobStripModel
 from glossarion_mobile.ui.chat.cards import (
     LIBRARY_WAIT_REASON,
@@ -96,6 +97,9 @@ from glossarion_mobile.ui.chat.direct_text_rules import (
 )
 from glossarion_mobile.ui.chat.header import ChatHeader
 from glossarion_mobile.ui.chat.job_binding import (
+    ACTIVE_STATES,
+    GLOSSARY_REFINING_LABEL,
+    STARTING_LABEL,
     CardPhase,
     EtaEstimator,
     chat_id_of,
@@ -123,6 +127,7 @@ from glossarion_mobile.ui.chat.run_request import attachment_record, run_config_
 from glossarion_mobile.ui.chat.send_state import (
     BLOCK_ATTACHMENT_MISSING,
     BLOCK_GLOSSARY_PENDING,
+    BlockReason,
     SendAction,
     SendInputs,
     SendState,
@@ -197,6 +202,51 @@ NOTHING_TO_SCAN = "Nothing to scan in this turn's workspace"
 LIBRARY_ATTACHMENT_META = "library_attachment"
 #: chat sidecar meta key: ``{created_at: data}`` of the chat's tool-job card messages (Library job, QA scan)
 TOOL_JOBS_META = "tool_jobs"
+#: Hotfix 1 #2: an answer tried while the gate's glossary is refined, and the composer's caption meanwhile
+GLOSSARY_REFINING_WAIT = "The glossary is being refined: ✓ Yes and ■ No come back when it is done"
+BLOCK_GLOSSARY_REFINING = BlockReason("glossary_refining", GLOSSARY_REFINING_LABEL)
+#: Hotfix 1 #4: Resume on a card whose run is not the chat's latest (it would resubmit the other turn's job)
+OLDER_RUN_RESUME = "Only the chat's latest run can be resumed from its card"
+
+
+# ---- job safety (hotfix 1 #5) ---------------------------------------------------------------------------------
+
+def active_job_of(jobs: Any, kind: str, title: str, inputs: tuple, params: Mapping[str, Any],
+                  origin: Mapping[str, Any]) -> Any:
+    """``JobService.active_job_for`` through the chat's ``JobsAdapter``: the active job (queued, running, at the
+    gate, refining, stopping) that already does the work these parts would submit, else None (also when the
+    service cannot tell)."""
+    finder = getattr(getattr(jobs, "jobs", None), "active_job_for", None) if jobs is not None else None
+    build_spec = getattr(jobs, "build_spec", None)
+    if not callable(finder) or not callable(build_spec):
+        return None
+    try:
+        return finder(build_spec(kind, title, tuple(inputs), dict(params), dict(origin)))
+    except Exception:
+        log.debug("the active-job check failed", exc_info=True)
+        return None
+
+
+def say_already_active(notify: Callable[..., Any], navigate: Callable[..., Any], snapshot: Any) -> None:
+    """"Translating “Book.epub” is already running (Chat · Novel)" with Open (that job's page)."""
+    job_id = getattr(snapshot, "id", None)
+    if job_id:
+        notify(already_active_text(snapshot), "Open", lambda: navigate("jobs.detail", {"jid": str(job_id)}))
+    else:
+        notify(already_active_text(snapshot))
+
+
+def notify_not_started(notify: Callable[..., Any], navigate: Callable[..., Any], exc: Exception, prefix: str) -> None:
+    """A Send / Resume that started nothing: ``JobAlreadyActive`` (another chat or the Library already runs that
+    book) says where, with Open; any other error why it failed."""
+    if isinstance(exc, JobAlreadyActive):
+        job_id = exc.job_id
+        if job_id:
+            notify(str(exc), "Open", lambda: navigate("jobs.detail", {"jid": str(job_id)}))
+        else:
+            notify(str(exc))
+        return
+    notify(f"{prefix}: {exc}")
 
 
 def _same_path(a: Any, b: Any) -> bool:
@@ -427,6 +477,13 @@ class ChatView:
         self.live_job_card: Optional[JobCard] = None
         self.approval_card: Optional[GlossaryApprovalCard] = None
         self._approval_key: Any = None
+        self._approval_builds = 0  # approval cards built (each gets its own key)
+        # Hotfix 1 #2: the gate's ✨ Refine per question id, {"state": "refining" | "refined" | "failed", "info",
+        # "error"}: a rebuilt approval card (repaint, chat switch, app back from the background) shows it again
+        self._gate_refines: dict = {}
+        # Hotfix 1 #4: Resume / Retry failed tapped and its run not created yet, (cid, turn index) -> {"cancel": bool}:
+        # the turn's card is the running card from the tap on (``_job_control``), a second tap does nothing
+        self._resuming: dict = {}
         self._stream_task: Any = None
         self._eta = EtaEstimator()
         self._applying_mode = False
@@ -1019,9 +1076,11 @@ class ChatView:
                       "extension": os.path.splitext(name)[1].lower(), "size": file_message[3] if len(file_message) > 3 else 0}
         slot_key = f"job-{item.index}"
         live = run is not None and item.index >= 0 and run.user_index == item.index
+        # hotfix 1 #4: Resume tapped, its run not created yet: already the running card (``begin_resume``)
+        resuming = not live and run is None and self._resume_pending(item.index) is not None
         row_page = getattr(self, "_row_page", None) or 20
         plan = self._pending_plan()
-        if plan is not None and plan.get("user_index") == item.index and not live:
+        if plan is not None and plan.get("user_index") == item.index and not live and not resuming:
             context = self.state.chat_context.value
             glossary = self._plan_glossary_label()
 
@@ -1032,19 +1091,23 @@ class ChatView:
 
             return self._card(slot_key, ("plan", self.cid, item.index, record, self._plan_signature(plan), context,
                                          glossary), build_plan)
-        if getattr(item, "library", None) is not None and not live:
+        if getattr(item, "library", None) is not None and not live and not resuming:
             return self._library_job_control(item, messages, record)
-        if live:
+        if live or resuming:
             # The running card stays the same object for the whole run: progress, phase and its
             # request rows are updated in place (here and on every job snapshot). Its rows are the
             # turn's committed cards (the glossary gate freezes its phase into the chat) + the live ones.
+            # A Resume's card is this card from the tap on, before its run exists (hotfix 1 #4).
             slot = self._card(slot_key, ("live", self.cid, item.index, record),
                               lambda: JobCard(attachment=record, phase=CardPhase("running"), on_action=self._on_job_action,
                                               on_open_request=self._open_request, row_page=row_page,
                                               requests_expanded=False))  # U12 item 3: a summary until opened
             slot.card.saved_requests = self._saved_request_segments(item, messages)
             self.live_job_card = slot.card
-            self._update_live_job_card(run)
+            if live:
+                self._update_live_job_card(run)
+            else:
+                self._show_resuming(slot.card, item)
             return slot
         status = ""
         if item.report is not None:
@@ -1269,46 +1332,132 @@ class ChatView:
     def _approval_control(self, run: Any) -> GlossaryApprovalCard:
         question = run.question or {}
         key = question.get("id") or "q"
-        if self.approval_card is not None and self._approval_key == key:
-            return self.approval_card
-        path = str((question.get("data") or {}).get("path") or (question.get("data") or {}).get("glossary_path") or "")
-        info = None
-        try:
-            info = glossary_preview(path)
-        except Exception:
+        if self.approval_card is None or self._approval_key != key:
+            path = str((question.get("data") or {}).get("path") or (question.get("data") or {}).get("glossary_path") or "")
             info = None
-        prefs = getattr(self.env, "prefs", None) if self.env is not None else None
-        self.approval_card = GlossaryApprovalCard(
-            path=path, info=info, on_answer=self._answer_glossary, on_edit=self.open_glossary_editor,
-            on_always=self._always_accept_glossary if prefs is not None else None,
-            on_refine=(lambda: self._spawn(self._refine_at_gate(run, path))) if path else None,
-        )
-        self._approval_key = key
+            try:
+                info = glossary_preview(path)
+            except Exception:
+                info = None
+            prefs = getattr(self.env, "prefs", None) if self.env is not None else None
+            # a key per build: Flet 1.0.3 diffs a NEW card under the key of the mounted one as a frozen value (a
+            # reload of the open chat rebuilt it so: its Yes did nothing, a refinement's end could not show Yes)
+            self._approval_builds += 1
+            self.approval_card = GlossaryApprovalCard(
+                path=path, info=info, on_answer=self._answer_glossary, on_edit=self.open_glossary_editor,
+                on_always=self._always_accept_glossary if prefs is not None else None,
+                on_refine=(lambda: self._start_gate_refine(run, path)) if path else None,
+                key=f"approval-card-{self._approval_builds}",
+            )
+            self._approval_key = key
+            # one job runs at a time, so one gate waits at a time: the refinements of earlier gates are done with
+            for old in [k for k in self._gate_refines if k != key]:
+                self._gate_refines.pop(old, None)
+        self._sync_gate_refine(self.approval_card, key, run)
         return self.approval_card
 
-    async def _refine_at_gate(self, run: Any, path: str) -> None:
-        """U12 item 5: the approval card's "✨ Refine" (``JobService.refine_at_gate``, off the loop)."""
+    @staticmethod
+    def _snapshot_refining(run: Any) -> bool:
+        """JobService says the gate's glossary is being refined (``JobSnapshot.refining``, ``refine_at_gate``; the
+        run controller keeps it as ``ChatRun.refining``)."""
+        return bool(getattr(run, "refining", False)) or bool(getattr(getattr(run, "last_snapshot", None), "refining", False))
+
+    def _gate_refining(self, run: Any = None) -> bool:
+        """Hotfix 1 #2: the glossary of the chat's waiting gate is being refined (✨ Refine tapped and not ended
+        yet, or JobService says so): ✓ Yes / ■ No / Always accept wait for it."""
+        if run is None and self.bound and self.env.runs is not None:
+            run = self.env.runs.live_run(self.cid)
+        if run is None or not run.awaiting_glossary:
+            return False
+        key = (run.question or {}).get("id") or "q"
+        return (self._gate_refines.get(key) or {}).get("state") == "refining" or self._snapshot_refining(run)
+
+    def _sync_gate_refine(self, card: GlossaryApprovalCard, key: Any, run: Any) -> None:
+        """The approval card shows the gate's refinement as it stands (``_gate_refines`` + ``JobSnapshot.refining``),
+        whichever card object is on screen: the one ✨ Refine was tapped on or one rebuilt since."""
+        record = self._gate_refines.get(key) or {}
+        state = record.get("state")
+        if state == "refining" or self._snapshot_refining(run):
+            card.set_refining(True)
+        elif state in ("refined", "failed"):
+            if card.refining or card.refine_outcome != state:
+                card.refined(state == "refined", record.get("info"), record.get("error"))
+        elif card.refining:
+            card.set_refining(False)
+
+    def _refresh_gate(self, key: Any) -> None:
+        """The gate's refinement changed: its approval card, the running card's line and the composer follow."""
+        run = self.env.runs.live_run(self.cid) if (self.bound and self.env.runs is not None) else None
         card = self.approval_card
+        if card is not None and self._approval_key == key and run is not None and run.awaiting_glossary:
+            self._sync_gate_refine(card, key, run)
+            self._push(card)
+        if run is not None and self.live_job_card is not None:
+            self._update_live_job_card(run)
+            self.live_job_card.push()
+        self.refresh_send()
+
+    def _start_gate_refine(self, run: Any, path: str) -> Any:
+        """The approval card's "✨ Refine" tap: the gate is "refining" from this moment on (a repaint before the
+        refinement task starts must not bring the buttons back), then ``_refine_at_gate`` runs it."""
+        key = (run.question or {}).get("id") or "q"
+        if (self._gate_refines.get(key) or {}).get("state") == "refining":
+            return None  # one refinement at a time
+        self._gate_refines[key] = {"state": "refining"}
+        self._refresh_gate(key)
+        return self._spawn(self._refine_at_gate(run, path, started=True))
+
+    async def _refine_at_gate(self, run: Any, path: str, *, started: bool = False) -> None:
+        """U12 item 5: the approval card's "✨ Refine" (``JobService.refine_at_gate``, off the loop).
+
+        Hotfix 1 #2: the refinement is for the translation, so it ends before the translation can start: from the
+        tap until it ended the gate is "refining" (``_gate_refines``), the approval card shows that instead of its
+        buttons and ✓ Yes / ■ No / Always accept are refused (``_answer_glossary``), also on a card rebuilt
+        meanwhile; when it ends the card offers them again ("✨ Refined", or the error)."""
+        key = (run.question or {}).get("id") or "q"
+        if not started:
+            if (self._gate_refines.get(key) or {}).get("state") == "refining":
+                return  # one refinement at a time
+            self._gate_refines[key] = {"state": "refining"}
+            self._refresh_gate(key)
         jobs = getattr(self.env, "jobs", None)
         job_id = getattr(run, "job_id", None)
-        ok = False
-        info = None
+        outcome: dict = {"state": "failed", "info": None, "error": ""}
         try:
             if jobs is None or job_id is None or not hasattr(jobs, "refine_at_gate"):
                 raise RuntimeError("Glossary refinement is not available here")
             await self.env.run_io(lambda: jobs.refine_at_gate(job_id, path))
-            info = await self.env.run_io(lambda: glossary_preview(path))
-            ok = True
+            outcome["info"] = await self.env.run_io(lambda: glossary_preview(path))
+            outcome["state"] = "refined"
         except Exception as exc:
             log.info("glossary refinement at the gate failed: %s", exc)
-            self.notify(f"Could not refine the glossary: {exc}")
+            outcome["error"] = str(exc) or type(exc).__name__
+            if str(run.cid) != self.cid:  # in its chat the approval card shows the error
+                self.notify(f"Could not refine the glossary: {exc}")
+        finally:
+            self._gate_refines[key] = outcome
+            if str(run.cid) == self.cid:
+                self._refresh_gate(key)
+
+    def _refuse_gate_answer(self) -> None:
+        """An answer reached the chat while the gate's glossary is refined (a card that had not shown the
+        refinement yet): it is not sent, the card's tap is not spent and the card shows the refinement."""
+        self.notify(GLOSSARY_REFINING_WAIT)
+        card = self.approval_card
+        run = self.env.runs.live_run(self.cid) if (self.bound and self.env.runs is not None) else None
         if card is not None:
-            card.refined(ok, info)
+            card.reopen()
+            if run is not None and run.awaiting_glossary:
+                self._sync_gate_refine(card, self._approval_key, run)
+        self.refresh_send()
 
     def _always_accept_glossary(self) -> None:
         """The approval card's "Always accept": the All-chats switch of Chat settings ("Always accept
         generated glossaries", Prefs ``chat_auto_accept_glossary``) turns on, then this question is
         answered Yes like ✓ Yes (``RunController.answer_glossary``). Later sends carry it into their job."""
+        if self._gate_refining():
+            self._refuse_gate_answer()
+            return
         prefs = getattr(self.env, "prefs", None) if self.env is not None else None
         if prefs is not None:
             prefs.set(AUTO_ACCEPT_GLOSSARY_PREF, True)
@@ -1349,6 +1498,10 @@ class ChatView:
         if run is not None and self.live_job_card is not None:
             self._update_live_job_card(run)
             self.live_job_card.push()
+        card = self.approval_card
+        if run is not None and run.awaiting_glossary and card is not None and \
+                self._approval_key == ((run.question or {}).get("id") or "q"):
+            self._sync_gate_refine(card, self._approval_key, run)  # JobSnapshot.refining went on / off
 
     def _track_tool_job(self, snapshot: Any) -> bool:
         """A chat's QA scan changed state: its "QA scan" card shows the new state, and once it ends the
@@ -1375,9 +1528,8 @@ class ChatView:
             return
         snapshot = run.last_snapshot
         counts = progress_counts(snapshot)
-        phase_name = {"queued": "queued", "stopping": "stopping", "force_stopping": "force_stopping"}.get(run.state, "running")
-        card.set_phase(CardPhase(phase_name), status=running_label(snapshot, waiting_for_glossary=run.awaiting_glossary)
-                       if phase_name == "running" else "")
+        phase_name, status = self._live_phase(run, snapshot)
+        card.set_phase(CardPhase(phase_name), status=status)
         segments = run.stream.segments()
         current = str(segments[-1].get("label") or "") if segments else ""
         card.set_progress(counts.get("fraction"), progress_line(snapshot, eta=self._eta), current)
@@ -1407,6 +1559,38 @@ class ChatView:
             card.set_issue(issue_label(active_issue()) if callable(active_issue) else "")
         except Exception:
             card.set_issue("")
+
+    def _live_phase(self, run: Any, snapshot: Any) -> tuple:
+        """(JobCard phase, state line) of a live run. A run that is being submitted or waits in the queue
+        (``preparing`` / ``queued``) is "Queued · starts after <job>" only while another job runs; with nothing
+        ahead of it its job starts now: "Starting translation…" with Stop (hotfix 1 #4: a resumed run's card
+        never looks queued, or ended, while its job is starting). A Stop tapped on a Resume's card before its
+        run existed shows "Stopping…"."""
+        state = run.state
+        if self._resume_cancelled((str(run.cid), run.user_index)):
+            return "stopping", "Stopping…"
+        if state in ("stopping", "force_stopping"):
+            return state, ""
+        if state in ("preparing", "queued"):
+            ahead = self._job_ahead(run)
+            if ahead:
+                return "queued", f"Queued · starts after {ahead}"
+            return "running", STARTING_LABEL
+        return "running", running_label(snapshot, waiting_for_glossary=run.awaiting_glossary,
+                                        refining=self._gate_refining(run))
+
+    def _job_ahead(self, run: Any) -> str:
+        """The title of the job ``run``'s job waits behind (the active job, when it is another chat's or another
+        kind's), else ''."""
+        jobs = self.env.jobs if self.env is not None else None
+        snap = jobs.snapshot() if jobs is not None else None
+        if snap is None or state_name(snap) not in ACTIVE_STATES:
+            return ""
+        if run.job_id is not None and getattr(snap, "id", None) == run.job_id:
+            return ""
+        if run.job_id is None and chat_id_of(snap) == str(run.cid) and job_kind(snap) in ("direct_text", "generate_media"):
+            return ""  # the run's own job, already announced while its submit returns
+        return str(getattr(getattr(snap, "spec", None), "title", "") or "the current job")
 
     def _ensure_stream_task(self) -> None:
         if not self.bound or self.env.runs is None:
@@ -1466,7 +1650,7 @@ class ChatView:
             return block
         run = self.env.runs.live_run(self.cid) if (self.bound and self.env.runs is not None) else None
         if run is not None and run.awaiting_glossary:
-            return BLOCK_GLOSSARY_PENDING
+            return BLOCK_GLOSSARY_REFINING if self._gate_refining(run) else BLOCK_GLOSSARY_PENDING
         record = self.composer.attachment
         if record and not os.path.isfile(str(record.get("path") or "")):
             return BLOCK_ATTACHMENT_MISSING
@@ -1691,7 +1875,8 @@ class ChatView:
             return
         self._after_send_ui(output_mode)
         self.sent.append((cid, text, dict(record) if record else None))
-        self._spawn(self._submit(cid, text, record, settings, output_mode, manual, None, once, anchor))
+        self._spawn(self._submit(cid, text, record, settings, output_mode, manual, None, once, anchor,
+                                 composer=(text, dict(record) if record else None) if record else None))
 
     def _after_send_ui(self, output_mode: str) -> None:
         """Clear the composer and restore the mode non-automatically (desktop after recording the turn)."""
@@ -1759,7 +1944,12 @@ class ChatView:
     async def _submit(self, cid: str, text: str, record: Optional[dict], settings: DirectTextSettings,
                       output_mode: str, manual: Optional[ManualGlossarySource], user_index: Optional[int],
                       once: Optional[dict] = None, anchor: Optional[int] = None,
-                      config_extra: Optional[dict] = None) -> Any:
+                      config_extra: Optional[dict] = None, plan: Optional[dict] = None,
+                      composer: Optional[tuple] = None) -> Any:
+        """``ChatRuns.send`` for a Send / a Plan card's Start. Hotfix 1 #5: a send that started nothing for its
+        turn (another chat or the Library already runs the file, the app's preflight refused it) gives the turn
+        back: a Plan card Start keeps its ``plan`` (Start can be tapped again, like "Save to: Library"), a plain
+        Send puts its ``composer`` (text, attachment) back - nothing was recorded for it."""
         overrides = self.run_overrides(cid)
         if once:
             overrides = {**overrides, **{k: v for k, v in once.items() if v}}
@@ -1772,13 +1962,43 @@ class ChatView:
             )
         except Exception as exc:
             log.warning("chat send failed: %s", exc)
-            self.notify(f"Could not start: {exc}")
+            notify_not_started(self.notify, self.navigate, exc, "Could not start")
+            if isinstance(exc, JobAlreadyActive):
+                self._give_back(cid, plan, composer, expected)
             self._link_version(cid, anchor, expected)
             self._on_run_changed(cid)
             return None
+        if run is None or (plan is not None and getattr(run, "user_index", None) != plan.get("user_index")):
+            self._give_back(cid, plan, composer, expected)  # nothing started for this turn
         self._link_version(cid, anchor, getattr(run, "user_index", expected))
         self._on_run_changed(cid)
         return run
+
+    def _give_back(self, cid: str, plan: Optional[dict], composer: Optional[tuple], expected: Optional[int]) -> None:
+        """A send that started nothing for its turn (``_submit``): the Plan card comes back (unless the chat has a
+        plan again), or - a plain Send that recorded nothing - its text and attachment go back into an empty
+        composer of the same chat."""
+        if not self.bound:
+            return
+        chats = self.env.chats
+        if plan is not None:
+            if not isinstance(chats.meta(cid).get("pending_plan"), dict):
+                chats.set_meta(cid, "pending_plan", plan)
+            if self.cid == cid:
+                self.render_transcript(follow=True)
+            return
+        if composer is None or self.cid != cid or expected is None:
+            return
+        if len(chats.messages(cid)) != expected:
+            return  # the send recorded its turn (its card says what happened)
+        text, record = composer
+        if self.composer.send_text() or self.composer.attachment is not None:
+            return  # the user typed or attached something new meanwhile
+        self.composer.set_text(text or "")
+        self.composer.set_attachment(dict(record) if record else None)
+        if record:
+            chats.set_attachment(cid, dict(record))  # the chat's pending attachment again (like Cancel on a plan)
+        self.refresh_send()
 
     def add_without_translating(self) -> None:
         if not self.bound:
@@ -2102,6 +2322,9 @@ class ChatView:
             # the output-root question comes first; Cancel there keeps this plan
             self._spawn(self._start_library_plan(plan))
             return
+        run_config = self._take_run_config(cid, plan)
+        # the plan as saved now (with the Run options its panel's commit saved): a refused Start gives it back
+        plan = self._pending_plan() or plan
         env.chats.set_meta(cid, "pending_plan", None)
         manual_data = plan.get("manual_glossary")
         manual = None
@@ -2110,12 +2333,11 @@ class ChatView:
                 kind=str(manual_data.get("kind") or "content"), path=str(manual_data.get("path") or ""),
                 content=str(manual_data.get("content") or ""), extension=str(manual_data.get("extension") or ".txt"),
             )
-        run_config = self._take_run_config(cid, plan)
         self.sent.append((cid, plan.get("text") or "", record))
         once = plan.get("once") if isinstance(plan.get("once"), dict) else None
         self._spawn(self._submit(cid, str(plan.get("text") or ""), record, self.settings(cid),
                                  str(plan.get("output_mode") or "text"), manual, int(plan.get("user_index") or 0),
-                                 once, config_extra=run_config))
+                                 once, config_extra=run_config, plan=plan))
 
     def _take_run_config(self, cid: str, plan: dict) -> dict:
         """The Plan card's Run options for this start (its panel, else the values saved with the plan);
@@ -2209,6 +2431,14 @@ class ChatView:
         origin = {"type": "chat", "cid": cid, "label": f"Chat · {title}"}
         if bid:
             origin["bid"] = bid  # the Book page's last-run line matches on it
+        active = active_job_of(self.env.jobs, "translate", name, (path,), params, origin)
+        if active is not None:
+            # hotfix 1 #5: the book is already queued / running (another chat, the Library): nothing new is
+            # queued and the turn gets no "Translating in the Library" card for a job that is not its own
+            say_already_active(self.notify, self.navigate, active)
+            self.env.chats.set_meta(cid, "pending_plan", plan)  # the plan stays, Start can be tapped again
+            self.render_transcript()
+            return str(active.id)
         try:
             job_id = await self.env.jobs.submit("translate", name, (path,), params, origin)
         except Exception as exc:
@@ -2351,6 +2581,10 @@ class ChatView:
         if isinstance(job, str):  # why this workspace cannot be scanned here
             self.notify(job)
             return None
+        active = active_job_of(self.env.jobs, *job)
+        if active is not None:  # hotfix 1 #5: this workspace's scan is already queued / running
+            say_already_active(self.notify, self.navigate, active)
+            return str(active.id)
         try:
             job_id = await self.env.jobs.submit(*job)
         except Exception as exc:
@@ -2531,10 +2765,10 @@ class ChatView:
             self._open_progress(item)
         elif action == "cancel_plan":
             self.cancel_plan()
-        elif action in ("stop", "cancel_queued"):
-            self.on_send_action(SendAction.STOP)
-        elif action == "force_stop":
-            self.on_send_action(SendAction.FORCE_STOP)
+        elif action in ("stop", "cancel_queued", "force_stop"):
+            if self._cancel_pending_resume():
+                return  # Resume was tapped and its run is not submitted yet: it stops as soon as it is
+            self.on_send_action(SendAction.FORCE_STOP if action == "force_stop" else SendAction.STOP)
         elif action == "log":
             run = self.env.runs.run_for(self.cid) if self.bound else None
             if run is not None and run.job_id is not None:
@@ -2557,9 +2791,86 @@ class ChatView:
             if item is None:
                 self._resume_last()
             else:
-                self._spawn(self._resume_turn(item))
+                self.begin_resume(item)
         else:
             self.notify("This action is not available here")
+
+    # ---- Resume / Retry failed (hotfix 1 #4) --------------------------------------------------------------
+
+    def begin_resume(self, item: Any) -> Any:
+        """Resume / Retry failed on a Result card (owner, hotfix 1 #4: "clicking resume doesn't update the
+        response card"). From the tap on the turn's card is the running card ("Starting translation…", with
+        Stop and no Resume to tap twice) while the run is prepared and submitted (``_resume_turn``: the
+        workspace lookup on the io pool, then ``ChatRuns.resubmit``); the run's live card is that same card
+        object once the run exists (``_job_control``), and the Result comes back if nothing was resumed.
+
+        The card resumes its own turn's job: ``ChatRuns.resubmit`` takes the turn (``user_index``) where it can;
+        where it resubmits the chat's latest job only, an older turn's card is refused instead of starting the
+        other turn's job (whose card it is not)."""
+        if not self.bound or self.env.runs is None or item is None:
+            return None
+        cid = self.cid
+        key = (cid, item.index)
+        if key in self._resuming:
+            return None  # a second tap while the first one is being submitted
+        if self.env.runs.live_run(cid) is not None:
+            self.notify("This chat is already translating")
+            return None
+        config = self._take_resume_config(item)
+        self._resuming[key] = {"cancel": False}
+        self.render_transcript(follow=self.transcript.follow_tail)
+        return self._spawn(self._resume_turn(item, config=config, pending=key, turn=self._resume_turn_kwargs(cid, item)))
+
+    def _resume_turn_kwargs(self, cid: str, item: Any) -> Optional[dict]:
+        """How ``ChatRuns.resubmit`` resumes the job of ``item``'s turn: ``{"user_index": n}`` when it picks a
+        turn's job, ``{}`` when the chat's latest job (what it resubmits without one) is this turn's, None when
+        it would resubmit another turn's job."""
+        import inspect
+
+        runs = self.env.runs
+        try:
+            if "user_index" in inspect.signature(runs.resubmit).parameters:
+                return {"user_index": item.index}
+        except (TypeError, ValueError):
+            pass
+        last = runs.run_for(cid)
+        if last is not None and getattr(last, "params", None):
+            return {} if self._run_turn(last) == item.index else None
+        try:
+            _ending, newest, _folder, _source = runs.last_job_ending(cid)
+            own = runs.persisted_job(cid, item.index)
+        except Exception:
+            log.debug("looking up the turn's job failed", exc_info=True)
+            return {}
+        if newest is None or own is None:
+            return {}  # nothing to tell apart: ``resubmit`` answers for itself
+        return {} if getattr(newest, "id", None) == getattr(own, "id", None) else None
+
+    def _resume_pending(self, index: Any) -> Optional[dict]:
+        """The pending Resume of this chat's turn ``index`` (``begin_resume``), or None."""
+        return self._resuming.get((self.cid, index))
+
+    def _resume_cancelled(self, pending: Optional[tuple]) -> bool:
+        return pending is not None and bool((self._resuming.get(pending) or {}).get("cancel"))
+
+    def _cancel_pending_resume(self) -> bool:
+        """Stop on the card of a Resume that is not submitted yet: the run stops as soon as it exists (or is not
+        submitted at all). False when this chat has no pending Resume."""
+        keys = [k for k in self._resuming if k[0] == self.cid]
+        if not keys:
+            return False
+        for key in keys:
+            self._resuming[key]["cancel"] = True
+        self.render_transcript(follow=self.transcript.follow_tail)
+        return True
+
+    def _show_resuming(self, card: JobCard, item: Any) -> None:
+        """The running card of a Resume whose run does not exist yet."""
+        cancel = bool((self._resume_pending(item.index) or {}).get("cancel"))
+        card.set_phase(CardPhase("stopping" if cancel else "running"), status="Stopping…" if cancel else STARTING_LABEL)
+        card.set_progress(None, "", "")
+        card.set_requests(card.saved_requests)
+        card.set_issue("")
 
     async def open_in_library(self, item: Any = None) -> Optional[str]:
         """Result card › Open in Library: the Book page of the Library book this turn's workspace became
@@ -2579,19 +2890,33 @@ class ChatView:
         self.navigate("library")
         return None
 
-    async def _resume_turn(self, item: Any) -> Any:
+    async def _resume_turn(self, item: Any, *, config: Optional[tuple] = None, pending: Optional[tuple] = None,
+                           turn: Optional[dict] = None) -> Any:
         """Resume / Retry failed of a Result card: a workspace that moved into the Library continues in
         the Library's translate sheet (``ChatEnv.library_translate``: its own progress file); the chat's
-        run root otherwise (``ChatRuns.resubmit``)."""
-        run_config, run_key = self._take_resume_config(item)
-        folder, in_attachments = await self.env.run_io(self._job_workspace_state, item)
-        hand_off = getattr(self.env, "library_translate", None)
-        if folder and not in_attachments and hand_off is not None:
-            # the card's "Only for this run" values go with it (the sheet starts switched on with them)
-            extra = {"run_config": run_config} if run_config else {}
-            return await self._await(hand_off(folder, self._turn_source(item), **extra))
-        self._resume_last(run_config, run_key)
-        return None
+        run root otherwise (``ChatRuns.resubmit``). ``config``: the card's ``_take_resume_config`` (taken at the
+        tap), ``pending``: the ``_resuming`` key ``begin_resume`` set, released here whatever happens."""
+        cid = pending[0] if pending is not None else self.cid
+        try:
+            run_config, run_key = config if config is not None else self._take_resume_config(item)
+            folder, in_attachments = await self.env.run_io(self._job_workspace_state, item)
+            hand_off = getattr(self.env, "library_translate", None)
+            if folder and not in_attachments and hand_off is not None:
+                if self._resume_cancelled(pending):
+                    return None
+                # the card's "Only for this run" values go with it (the sheet starts switched on with them)
+                extra = {"run_config": run_config} if run_config else {}
+                return await self._await(hand_off(folder, self._turn_source(item), **extra))
+            if pending is None:
+                self._resume_last(run_config, run_key)
+                return None
+            if turn is None:  # ``resubmit`` would run another turn's job (``_resume_turn_kwargs``)
+                self.notify(OLDER_RUN_RESUME)
+                return None
+            return await self._resubmit(cid, run_config, run_key, pending=pending, turn=turn)
+        finally:
+            if pending is not None and self._resuming.pop(pending, None) is not None and self.cid == cid:
+                self._on_run_changed(cid)  # the live card, or the Result again when nothing was resumed
 
     async def _open_reader(self, item: Any = None) -> None:
         """Job card Read / Open reader (U5): the turn's workspace in the Reader."""
@@ -2758,29 +3083,41 @@ class ChatView:
         they belong to (``resubmit`` ignores them for another run, e.g. an older turn's card)."""
         if self.env is None or self.env.runs is None:
             return
+        self._spawn(self._resubmit(self.cid, run_config, run_key))
 
-        cid = self.cid
-
-        async def go() -> None:
-            try:
-                kwargs = {"run_config": run_config, "run_config_for": run_key} if run_config is not None else {}
-                # what the card's chips show: the chat's profile / language / glossary now (the model follows
-                # the chat in ``resubmit`` itself)
-                run = await self.env.runs.resubmit(cid, profile_check=lambda name: self.resume_profile(cid, name),
-                                                   overrides=self.run_overrides(cid), settings=self.settings(cid),
-                                                   **kwargs)
-            except Exception as exc:
-                self.notify(f"Could not resume: {exc}")
-                return
-            if run is None:
+    async def _resubmit(self, cid: str, run_config: Optional[dict] = None, run_key: Optional[str] = None, *,
+                        pending: Optional[tuple] = None, turn: Optional[dict] = None) -> Any:
+        """``ChatRuns.resubmit`` for Resume / Retry failed (``turn``: ``_resume_turn_kwargs``); a Stop tapped on
+        the card meanwhile (``pending`` cancelled) stops the run as soon as it exists."""
+        if self._resume_cancelled(pending):
+            return None
+        try:
+            kwargs = {"run_config": run_config, "run_config_for": run_key} if run_config is not None else {}
+            kwargs.update(turn or {})
+            # what the card's chips show: the chat's profile / language / glossary now (the model follows
+            # the chat in ``resubmit`` itself)
+            run = await self.env.runs.resubmit(cid, profile_check=lambda name: self.resume_profile(cid, name),
+                                               overrides=self.run_overrides(cid), settings=self.settings(cid),
+                                               **kwargs)
+        except Exception as exc:
+            notify_not_started(self.notify, self.navigate, exc, "Could not resume")
+            return None
+        if run is None:
+            refused = getattr(self.env.runs, "take_refused", None)
+            if not (callable(refused) and refused(cid)):  # the preflight's own notice already said why
                 self.notify("Nothing to resume in this chat")
-            self._on_run_changed(self.cid)
-
-        self._spawn(go())
+        elif self._resume_cancelled(pending) and run.live:
+            self.env.runs.request_stop(cid)  # Stop was tapped while the run was being submitted
+        self._on_run_changed(self.cid)
+        return run
 
     # ---- glossary approval ------------------------------------------------------------------
 
     def _answer_glossary(self, accepted: bool) -> None:
+        if self._gate_refining():
+            # hotfix 1 #2: the refinement is for this translation; the answer waits until it is done
+            self._refuse_gate_answer()
+            return
         if self.bound and self.env.runs is not None:
             self.env.runs.answer_glossary(self.cid, accepted)
         self.refresh_send()

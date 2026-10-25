@@ -54,6 +54,10 @@ Both: ``Wakelock`` while a job runs when "Keep screen on during jobs" is on
 (Prefs ``keep_screen_on_during_jobs``; default on for iOS, off on Android
 where the foreground service holds a CPU wake lock with the screen off).
 
+Both: while jobs run, the in-app browser routes (authchatgpt/, authnd/, authds/, search/gemini)
+keep their built WebViews for the next request, and a job that uses one gets a WebView built at
+its start (``webview_bridge.jobs_running``): Flutter builds no new WebView while the app is hidden.
+
 Native calls go through ``NativeBridge`` (stub on desktop); permission and
 wakelock objects are injected (tests use fakes). Event handlers run on the UI
 loop. Pure asyncio, no Flet import at module scope.
@@ -546,6 +550,7 @@ class BackgroundExecution:
         self._last_update = self.clock()
         self._last_text = text
         self._pending = None
+        self._browser_pages(True, snap)
         self._sync_ticker()  # a job that starts while the app is hidden
 
     async def job_progress(self, snap: Any, *, force: bool = False) -> bool:
@@ -590,6 +595,7 @@ class BackgroundExecution:
                 await self._native("update_job_service", title="Glossarion", text="Starting the next job…")
                 self._last_text = "Starting the next job…"
             return  # the next queued job inherits the service / background grant / wakelock (and the ticker)
+        self._browser_pages(False)
         if self.is_android and (self.service_running or self.service_job == snap.id):
             holds = service_holds(self.native)
             remaining = holds.release(JOBS_HOLD) if holds is not None else None
@@ -616,6 +622,19 @@ class BackgroundExecution:
             except Exception as exc:
                 log.info("wakelock disable failed: %s", exc)
             self.wakelock_on = False
+
+    def _browser_pages(self, running: bool, snap: Any = None) -> None:
+        """The in-app browser routes (authchatgpt/, authnd/, authds/, search/gemini) while jobs run:
+        their used WebViews stay mounted for the next request, and a job that uses one of them gets a
+        WebView built at its start, while the app is on screen (``webview_bridge.jobs_running``).
+        Flutter builds no new WebView while the app is hidden, so a request that met none in the
+        background stood still until the app came back (hotfix 1, issue 3)."""
+        try:
+            from glossarion_mobile.services import webview_bridge
+
+            webview_bridge.jobs_running(running, snap)
+        except Exception:
+            log.debug("in-app browser pages not kept for jobs", exc_info=True)
 
     async def _end_ios_background(self, success: bool) -> None:
         if self.continued_started:

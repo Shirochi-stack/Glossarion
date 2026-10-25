@@ -101,7 +101,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 37 | Per-file-type dispatch inside a run | Plan card shows the detected type | Automatic |
 | 38 | Threading delay | Settings › Translation defaults › Pacing |  |
 | 39 | Chunk Size | Settings › Translation defaults; Plan card › Run options |  |
-| 40 | API call delay | Settings › Translation defaults › Pacing |  |
+| 40 | API call delay | Settings › Translation defaults › Pacing; Plan / Job card › Run options (per run) |  |
 | 41 | API Preflight | Settings › Translation defaults › Pacing |  |
 | 42 | Chapter range + Spine Order + 🔍 preview | Plan card › Choose chapters (range field, spine switch, live preview list) |  |
 | 43 | Input Token limit + Enable/Disable toggle | Settings › Translation defaults; Plan card › Run options |  |
@@ -488,7 +488,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 60 | Editor: 📂 Backups | Editor ⋯ › Backups |  |
 | 61 | Editor: ✏️ Edit in Notepad | Editor ⋯ › Edit raw (CodeEditor) | Adapted |
 | 62 | Editor: Find / Replace (Ctrl+F) | Find / Replace sheet |  |
-| 63 | Editor: Resolve Gender… (tracked conflicts) | EntrySheet › Resolve gender |  |
+| 63 | Editor: Resolve Gender… (tracked conflicts) | Editor row gender menu (Auto · Male · Female · Resolve Gender…); EntrySheet › Resolve Gender… | Adapted: a row button opens the desktop context-menu choices |
 | 64 | Editor Advanced: Reload | Editor ⋯ › Advanced |  |
 | 65 | Editor Advanced: Clean Empty Fields | Advanced |  |
 | 66 | Editor Advanced: Remove Duplicates | Advanced |  |
@@ -634,7 +634,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 120 | PDF Input: Paragraph alignment / Header alignment / Paragraph justification / RTL layout | PDF › Input layout |  |
 | 121 | Disable 0-based Chapter Detection | Processing › Chapter numbering |  |
 | 122 | Chapter Number Offset | Chapter numbering |  |
-| 123 | Enable post-translation Scanning phase + Mode | Processing › Post-translation scan; Plan card |  |
+| 123 | Enable post-translation Scanning phase + Mode | Processing › Post-translation scan; Plan card | The scan runs inside the translation's own job (Jobs, Book › Chapters QA rows) |
 | 124 | Batching Mode: Conservative (× multiplier) / Direct / No batching | Processing › Batching mode |  |
 | 125 | Fallback Keys (pool preview) | Provider options & safety › KeyPoolTile |  |
 | 126 | Disable API Safety Filters (Gemini, Groq, Fireworks…) + Threshold | Provider options & safety |  |
@@ -761,7 +761,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 
 | # | Feature | Mobile surface | Notes |
 |---|---|---|---|
-| 0 | QA Scan launcher (toolbar 'QA Scan' button) | Tools › QA Scanner; ＋ sheet › QA scan; `/qa`; Book ⋯; Job card; chat Result card › QA scan (Quick Scan of the chat workspace, `qa_model.chat_qa_job`) |  |
+| 0 | QA Scan launcher (toolbar 'QA Scan' button) | Tools › QA Scanner; ＋ sheet › QA scan; `/qa`; Book ⋯; Book › Chapters › Run QA scan; Job card; chat Result card › QA scan (Quick Scan of the chat workspace, `qa_model.chat_qa_job`) |  |
 | 1 | Detection mode: AI Hunter | QA mode card | Threads |
 | 2 | Detection mode: Aggressive | Mode card |  |
 | 3 | Detection mode: Quick Scan | Mode card (Recommended) |  |

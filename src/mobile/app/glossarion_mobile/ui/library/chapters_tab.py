@@ -1,6 +1,8 @@
 """Book page › Chapters: Progress Manager parity (UI_SPEC §3.7; Retranslation_GUI single-file view).
 
-Header: "📁 <output folder>" chip (Files) + "Mode: Text" badge. Stats row: the
+Header: "📁 <output folder>" chip (Files) + "Mode: Text" badge + Run translation · Run QA scan (the book's
+one-tap Quick Scan); both wait, disabled with the reason as tooltip, while a translation or glossary run goes
+or one is queued for this book (``book_page.run_wait_reason``, followed live on every jobs event). Stats row: the
 ``progress_core`` stats as chips "✅ Completed n" · "🔗 Merged n" · "🔄 In Progress n" ·
 "❓ Pending n" · "⬜ Not Translated n" (Not Refined / No TTS by mode) · "❌ Failed n"
 (Refine Failed) · "⏭️ Skipped n" - tap filters by ``STATUS_GROUPS`` (toggle),
@@ -23,7 +25,9 @@ page size while scrolling; a jump first extends the window to the target.
 Selection (long-press): "N selected · Select all · Select ▾ (Completed / QA
 Failed / Failed group)" and the bottom bar Retranslate (Reset TTS in audio mode) ·
 Remove QA mark · More ▾. Every write is a ``progress_actions`` call (lock,
-re-read, three-way merge, atomic replace); confirmations use the desktop copy.
+re-read, three-way merge, atomic replace); confirmations use the desktop copy. While an action writes, the
+list's progress bar runs; the rows and the stats then reload at once and the desktop result text follows
+(a snackbar, a sheet when long), failures say why.
 
 **Retranslate** plans with ``progress_actions.plan_retranslation`` (its refusals and
 confirmation copy verbatim; the RECYCLED TOC/header pair asks "Delete Both Linked
@@ -56,7 +60,7 @@ from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.components.pull_to_refresh import PullToRefresh
 from glossarion_mobile.ui.components.skeleton import Skeleton
 from glossarion_mobile.ui.library import progress_model as pm
-from glossarion_mobile.ui.library.common import icon_button, mode_badge, stat_chip, status_avatar, tinted
+from glossarion_mobile.ui.library.common import BusyBar, icon_button, mode_badge, stat_chip, status_avatar, tinted
 from glossarion_mobile.ui.library.models import PAGE_SIZES, page_size_value
 from glossarion_mobile.ui.library.selection_bar import BulkAction, BulkActionBar, SelectionTopBar
 from glossarion_mobile.ui.theme import HIT_TARGET, status_color
@@ -76,6 +80,23 @@ UNTRACKED_STATUSES = ("", "not_translated")  # rows with no progress entry to re
 PROCESS_RUNNING_TITLE = "Process Running"
 PROCESS_RUNNING = "Wait for the current translation or glossary process to finish first."
 RETRANSLATE_FAILED = "Retranslation Reset Failed"
+# Hotfix 1 issue 9: a job-backed action that waits behind another job says so (it would otherwise do nothing
+# visible until that job ends)
+RETRANSLATE_QUEUED = "Queued: resetting {count} row(s) for retranslation · runs after the current job"
+QA_QUEUED = "Queued: QA scan · runs after the current job"
+# Hotfix 1 issue 7: Run QA scan (the book's one-tap Quick Scan, next to Run translation)
+QA_RUNNING = "This book's QA scan is already queued or running"
+QA_UNAVAILABLE = "QA scans are not available in this session"
+QA_NO_FOLDER = "No output folder to scan"
+#: The desktop result-box titles of the Progress Manager actions (a long result text opens in a sheet under
+#: it). Resolve QA and Insert Missing Image carry the title the desktop picks for their outcome on the result
+#: itself (``progress_model.TitledResult``: "QA Issue Resolved" / "… Not Resolved" / "… Not Fully Resolved", the
+#: shared ``insert_missing_images`` title).
+ACTION_RESULT_TITLES = {
+    "remove_qa": "Success", "remove_pending": "Remove Pending Mark", "remove_refinement": "Success",
+    "restore_in_progress": "In Progress Restored", "reset_tts": "TTS Reset", "delete_audio": "Audio Deleted",
+    "do_not_skip": "Do not skip",
+}
 #: Desktop row menu: "🔍 Edit Translation" is offered when Manual editing is on for an HTML
 #: row, or when the source exists and the row has a translated output.
 EDIT_TRANSLATION_REASON = "No translated output for this row (turn on Manual editing to edit it)"
@@ -211,6 +232,10 @@ class ChaptersTab:
         self.pending_range: Optional[tuple] = tuple(initial_range) if initial_range else None
         # No output workspace: the rows are the book's own EPUB chapters (``pm.spine_rows``)
         self.spine_mode = False
+        # Hotfix 1 issue 9: the list's progress bar while an action writes the progress and the rows reload
+        self.busy = BusyBar(self.ctx, lambda: getattr(self, "loading", None),
+                            idle=lambda: self.view is None and not self.image_folder)
+        self._starting: set = set()  # hotfix 1 issue 7: Run translation / Run QA scan taps being handled
 
     # ---- build ----------------------------------------------------------------------------------
 
@@ -241,7 +266,11 @@ class ChaptersTab:
         # U13 item 1: the desktop "Run Translation" for this book: pending / failed chapters are translated
         self.run_button = ft.FilledTonalButton(content="Run translation", icon=ft.Icons.PLAY_ARROW, key="ch-run",
                                                on_click=lambda e: self.ctx.spawn(self.run_translation()))
-        header = ft.Row([self.folder_chip, self.mode, self.run_button], spacing=8, wrap=True)
+        # Hotfix 1 issue 7: the book's QA scan next to it; both wait while a translation / glossary run goes
+        self.qa_button = ft.FilledTonalButton(content="Run QA scan", icon=ft.Icons.FACT_CHECK, key="ch-qa",
+                                              on_click=lambda e: self.ctx.spawn(self.run_qa_scan()))
+        header = ft.Row([self.folder_chip, self.mode, self.run_button, self.qa_button], spacing=8, wrap=True)
+        self.sync_run_buttons()
         if self.image_folder:
             return self._build_image_folder(header)
         self.root = ft.Column([
@@ -335,7 +364,7 @@ class ChaptersTab:
         self.image_view = view
         keys = {item.key for item in view.items}
         self.image_selected &= keys
-        self.loading.visible = False
+        self.loading.visible = self.busy.active
         if view.error:
             self.banner.content = ft.Text(view.error, color=ft.Colors.ON_ERROR_CONTAINER)
             self.banner.visible = True
@@ -434,18 +463,19 @@ class ChaptersTab:
             copy_text = (copy_text[0], shared)
         if not await self._confirm(copy_text[0], copy_text[1], destructive=True):
             return None
-        try:
-            title, message = await self.ctx.io(pm.image_folder_action, self.page.service, view, action, items)
-        except CoreMissing as exc:
-            self.ctx.say(f"Not available in this build ({exc.name})")
-            return None
-        except Exception as exc:
-            log.exception("image-folder action %s failed", action)
-            self.ctx.say(f"Could not update the images: {exc}")
-            return None
-        self.image_selected = set()
+        async with self.busy.run():  # issue 9: the progress bar until the grid has reloaded
+            try:
+                title, message = await self.ctx.io(pm.image_folder_action, self.page.service, view, action, items)
+            except CoreMissing as exc:
+                self.ctx.say(f"Not available in this build ({exc.name})")
+                return None
+            except Exception as exc:
+                log.exception("image-folder action %s failed", action)
+                self.ctx.say(f"Could not update the images: {exc}")
+                return None
+            self.image_selected = set()
+            await self.reload_images()
         self.show_message(title, message)
-        await self.reload_images()
         return message
 
     def _more_items(self) -> list:
@@ -495,11 +525,12 @@ class ChaptersTab:
             self.ctx.spawn(self.reload_images())
             return
         self.spine_mode = bool(getattr(view, "no_workspace", False))
+        self.sync_run_buttons()  # Run QA scan needs a workspace
         if self.spine_mode:
             self._render_spine()
             self.ctx.push(self.root)
             return
-        self.loading.visible = False
+        self.loading.visible = self.busy.active
         folder = view.output_dir or pm.book_workspace(self.page.service, self.page.book)
         self.folder_chip.label = ft.Text(f"\U0001f4c1 {os.path.basename(folder) if folder else '—'}")
         self.folder_chip.visible = self.mode.visible = True
@@ -549,7 +580,7 @@ class ChaptersTab:
             self.selected = set()
             self._sync_selection()
         self.filter_group = None
-        self.loading.visible = False
+        self.loading.visible = self.busy.active
         self.folder_chip.visible = self.mode.visible = False
         self.stats_row.controls = []
         details = self.page.details
@@ -1427,11 +1458,15 @@ class ChaptersTab:
             folder = self._workspace()
             reset = service.core.fn("library_core", "mark_chapter_pending_for_retranslation",
                                     "_mark_chapter_pending_for_retranslation")
-            if folder and os.path.isdir(folder) and reset is not None:
-                try:
-                    await self.ctx.io(reset, folder, row.filename)
-                except Exception:
-                    log.debug("progress reset failed", exc_info=True)
+            if folder and reset is not None and await self.ctx.io(os.path.isdir, folder):
+                # hotfix 1 issue 9: the progress bar while the entry is reset, then the row and the chips from
+                # disk at once (no longer "Completed" until the next poll tick), like every other action
+                async with self.busy.run():
+                    try:
+                        await self.ctx.io(reset, folder, row.filename)
+                    except Exception:
+                        log.debug("progress reset failed", exc_info=True)
+                    await self._reload_after_action()
         spec = JobSpec(kind="single_chapter", title=f"{self.page.book.get('name') or ''} · {row.filename}",
                        inputs=(source,), params={"chapter_file": row.filename},
                        origin=service.origin_for(self.page.book))
@@ -1440,11 +1475,160 @@ class ChaptersTab:
 
     async def run_translation(self) -> Any:
         """U13 item 1, the desktop "Run Translation": the book's translation run (the Library Translate sheet),
-        which translates what is pending, failed or reset by Retranslate."""
-        if self._jobs_busy():
-            self.ctx.say(ALREADY_RUNNING, "Jobs", lambda: self.ctx.go("jobs"))
+        which translates what is pending, failed or reset by Retranslate. It waits (the button is disabled, the
+        same rule) while a translation or glossary run goes or one is queued for this book (hotfix 1 issue 7);
+        after any other job (a compile, a QA scan) the new run queues."""
+        if "translate" in self._starting:  # a double tap opens one sheet
             return None
-        return await self.page.open_translate()
+        reason = self.run_wait_reason()
+        if reason is not None:
+            self.ctx.say(reason, "Jobs", lambda: self.ctx.go("jobs"))
+            return None
+        self._starting.add("translate")
+        try:
+            return await self.page.open_translate()
+        finally:
+            self._starting.discard("translate")
+
+    # ---- hotfix 1 issue 7: Run QA scan, and both run buttons following the jobs --------------------------
+
+    def _job_view(self, view: Any = None) -> Any:
+        if view is not None:
+            return view
+        view = getattr(self.page, "job_view", None)
+        if view is None:
+            jobs = getattr(self.page.service, "jobs", None)
+            current = getattr(jobs, "view", None) if jobs is not None else None
+            if callable(current):
+                try:
+                    view = current()
+                except Exception:
+                    view = None
+        return view
+
+    def _book_jobs(self, view: Any) -> list:
+        from glossarion_mobile.ui.library.book_page import jobs_for_book
+
+        page = self.page
+        return jobs_for_book(view, str(getattr(page, "bid", "") or ""), page.book, folder=self._workspace() or None)
+
+    def run_wait_reason(self, view: Any = None) -> Optional[str]:
+        """Why Run translation (and Run QA scan) wait: ``book_page.run_wait_reason`` over the current JobsView."""
+        from glossarion_mobile.ui.library.book_page import run_wait_reason
+
+        page = self.page
+        return run_wait_reason(self._job_view(view), str(getattr(page, "bid", "") or ""), page.book,
+                               folder=self._workspace() or None)
+
+    def qa_wait_reason(self, view: Any = None) -> Optional[str]:
+        """Why Run QA scan waits: a translation / glossary run (``run_wait_reason``), this book's QA scan already
+        queued or running (the same scan is never queued twice), or no output workspace to scan."""
+        view = self._job_view(view)
+        reason = self.run_wait_reason(view)
+        if reason is not None:
+            return reason
+        from glossarion_mobile.ui.library.book_page import job_kind_of
+
+        if any(job_kind_of(snap) == "qa_scan" for snap in self._book_jobs(view)):
+            return QA_RUNNING
+        if self.spine_mode or (self.view is not None and getattr(self.view, "no_workspace", False)):
+            return QA_NO_FOLDER
+        return None
+
+    def sync_run_buttons(self, view: Any = None) -> tuple:
+        """Disable Run translation / Run QA scan (the reason as their tooltip) while they must wait. The Book
+        page calls this on every JobsView delivery, so they come back the moment the run ends."""
+        run_button = getattr(self, "run_button", None)
+        qa_button = getattr(self, "qa_button", None)
+        if run_button is None or qa_button is None:
+            return None, None
+        view = self._job_view(view)
+        reasons = (self.run_wait_reason(view), QA_RUNNING if "qa" in self._starting else self.qa_wait_reason(view))
+        changed = []
+        for button, reason in zip((run_button, qa_button), reasons):
+            if button.disabled != (reason is not None) or button.tooltip != reason:
+                button.disabled = reason is not None
+                button.tooltip = reason
+                changed.append(button)
+        self.ctx.push(*changed)
+        return reasons
+
+    async def run_qa_scan(self) -> Optional[str]:
+        """Run QA scan: the chat's one-tap scan on this book (``qa_model.CHAT_QA_MODE`` Quick Scan through the
+        ``qa_scan`` job, which applies the mobile duplicate-check sample size 0 unless one is saved; no word-count
+        question: without a raw source that check is off for the run) on the book's workspace and raw source
+        (``targets.target_for_book``, the row Book ⋯ › QA scan preselects in Tools › QA Scanner)."""
+        if "qa" in self._starting:  # a double tap queues one scan (the button is off until the job is seen)
+            return None
+        reason = self.qa_wait_reason()
+        if reason is not None:
+            self.ctx.say(reason)
+            return None
+        service = self.page.service
+        if not service.has_job_kind("qa_scan"):
+            self.ctx.say(QA_UNAVAILABLE)
+            return None
+        self._starting.add("qa")
+        button = getattr(self, "qa_button", None)
+        if button is not None:
+            button.disabled = True
+            self.ctx.push(button)
+        try:
+            return await self._submit_qa_scan(service)
+        finally:
+            self._starting.discard("qa")
+            self.sync_run_buttons()
+
+    async def _submit_qa_scan(self, service: Any) -> Optional[str]:
+        from glossarion_mobile.ui.tools import qa_model as qm
+        from glossarion_mobile.ui.tools import targets as tg
+        from glossarion_mobile.ui.tools.qa_screen import qa_eligibility
+
+        target = await self.ctx.io(tg.target_for_book, service, self.page.book)
+        refusal = qa_eligibility(target) if target is not None else QA_NO_FOLDER
+        if refusal is not None:
+            self.ctx.say(refusal)
+            return None
+        spec = qm.qa_spec([target], qm.CHAT_QA_MODE, disable_word_count=not target.source,
+                          origin=service.origin_for(self.page.book))
+        behind = self._strip_taken()
+        job_id = await service.submit(spec)
+        if not job_id:
+            self.ctx.say("The job service is not running")
+            return None
+        self.watch_job(job_id, self._on_qa_end)
+        if behind:
+            self.ctx.say(QA_QUEUED, "Jobs", lambda: self.ctx.go("jobs"))
+        return job_id
+
+    async def _on_qa_end(self, snap: Any) -> Optional[str]:
+        """The scan ended: the rows reload (its QA marks), the Output tab lists the new report, and a finished
+        scan offers its report (a failed one says why)."""
+        try:
+            await self.page.reload_progress(force=True)
+        except Exception:
+            log.debug("reloading after the QA scan failed", exc_info=True)
+        output = getattr(self.page, "output", None)
+        if output is not None and hasattr(output, "mark_stale"):
+            output.mark_stale()
+        self.sync_run_buttons()
+        state = str(getattr(getattr(snap, "state", None), "value", getattr(snap, "state", None)) or "").upper()
+        if state == "FAILED":
+            message = f"QA scan failed: {getattr(snap, 'error', None) or 'see the job log'}"
+            self.ctx.say(message, "Log", lambda: self.ctx.go("jobs.detail", {"jid": snap.id}))
+            return message
+        if state != "DONE":
+            return None
+        from glossarion_mobile.job_kinds.qa import REPORT_FILE
+
+        report = next((str(p) for p in getattr(snap, "outputs", ()) or () if str(p).endswith(REPORT_FILE)), None)
+        if report:
+            from glossarion_mobile.ui.tools.qa_screen import open_qa_report
+
+            self.ctx.say("QA scan finished", "Report", lambda: open_qa_report(self.ctx, report))
+        else:
+            self.ctx.say("QA scan finished")
+        return "QA scan finished"
 
     async def retranslate(self, rows: Sequence[pm.RowVM]) -> Any:
         """Retranslate Selected (desktop ``retranslate_selected``): plan -> refusal or confirmation
@@ -1488,6 +1672,7 @@ class ChaptersTab:
             self.ctx.say("Retranslate jobs are not available in this build")
             return None
         spec = pm.retranslate_spec(service, self.page.book, vm, linked_choice)
+        behind = self._strip_taken()
         job_id = await service.submit(spec)
         if not job_id:
             from glossarion_mobile.job_kinds import retranslate as retranslate_kind
@@ -1497,7 +1682,15 @@ class ChaptersTab:
             return None
         self.exit_selection()
         self.watch_job(job_id, self._on_retranslate_end)
+        if behind:
+            self.ctx.say(RETRANSLATE_QUEUED.format(count=vm.count), "Jobs", lambda: self.ctx.go("jobs"))
         return job_id
+
+    def _strip_taken(self) -> bool:
+        """The Book page strip already shows another job of this book, so a job queued now would not show there
+        until that one ends: it is announced (otherwise the strip itself shows it, "· queued" while it waits -
+        no snackbar for what the UI shows, owner 2026-10-20)."""
+        return getattr(self.page, "job", None) is not None
 
     def _jobs_busy(self) -> bool:
         jobs = getattr(self.page.service, "jobs", None)
@@ -1589,6 +1782,10 @@ class ChaptersTab:
         if isinstance(refusal, Mapping) and refusal.get("message"):
             self.show_message(str(refusal.get("title") or "Resolve QA issue"), str(refusal["message"]))
             return str(refusal["message"])
+        state_value = getattr(getattr(snap, "state", None), "value", getattr(snap, "state", None))
+        if getattr(snap, "error", None) and str(state_value or "").upper() == "FAILED":  # issue 9: say why
+            self.show_message("Resolve QA issue", f"QA issue resolution failed: {snap.error}")
+            return str(snap.error)
         return None
 
     async def resolve_qa_job(self, plan: pm.ActionPlan) -> Optional[str]:
@@ -1608,6 +1805,7 @@ class ChaptersTab:
             return None
         self.exit_selection()
         self.watch_job(job_id, self._on_resolve_qa_end)
+        self.sync_run_buttons()  # a QA resolution is a translation run: Run translation / Run QA scan wait
         return job_id
 
     async def _confirm(self, title: str, body: str, *, destructive: bool = False) -> bool:
@@ -1648,20 +1846,38 @@ class ChaptersTab:
             return None
         return await self._apply_planned(plan)
 
-    async def _apply_planned(self, plan: pm.ActionPlan) -> Optional[str]:
-        """Apply a confirmed plan on the io pool; the desktop result text as a snackbar."""
+    async def _reload_after_action(self) -> bool:
+        """The rows and the stats chips (and the Book page strip) from disk at once after an action wrote the
+        progress (desktop ``_refresh_retranslation_data`` before its result box); a failed reload says so."""
         try:
-            message = await self.ctx.io(pm.apply_action, self.page.service, self.view, plan)
+            await self.page.reload_progress(force=True)
         except Exception as exc:
-            log.exception("progress action %s failed", plan.action)
-            self.ctx.say(f"Could not update progress: {exc}")
-            return None
-        self.last_result = message
+            log.exception("reloading the chapters after an action failed")
+            self.ctx.say(f"Could not refresh the chapters: {exc}")
+            return False
+        return True
+
+    async def _apply_planned(self, plan: pm.ActionPlan) -> Optional[str]:
+        """Apply a confirmed plan on the io pool, refresh the rows and the stats, then the desktop result text
+        (``show_message``: a snackbar, a sheet when long), like the desktop Progress Manager's result box after
+        its refresh (hotfix 1 issue 9: the action used to change the file without any confirmation)."""
+        async with self.busy.run():
+            try:
+                message = await self.ctx.io(pm.apply_action, self.page.service, self.view, plan)
+            except Exception as exc:
+                log.exception("progress action %s failed", plan.action)
+                self.ctx.say(f"Could not update progress: {exc}")
+                return None
+            self.last_result = message
+            self.exit_selection()
+            await self._reload_after_action()
         repairs = getattr(message, "repairs", None)
         if repairs and int(getattr(message, "repaired", 0) or 0) > 0:
             self.show_repair_comparison(str(message), repairs, int(message.repaired))
-        self.exit_selection()
-        await self.page.reload_progress(force=True)
+        elif str(message or ""):
+            own = message.box_title if isinstance(message, pm.TitledResult) else ""
+            title = own or ACTION_RESULT_TITLES.get(plan.action, "Progress Manager")
+            self.show_message(title, str(message))
         return message
 
     def show_repair_comparison(self, summary: str, repairs: list, total: int) -> Any:

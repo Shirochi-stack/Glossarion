@@ -973,12 +973,43 @@ class ChatFeature:
         book, raw = found
         try:
             spec = library.translate_spec([book], sources=[raw], config_overrides=dict(config_overrides or {}))
+            active = self._active_job_for(spec)
             job_id = await library.submit(spec)
         except Exception as exc:
             notify(f"Could not start: {exc}")
             return None
+        if active is not None and job_id is not None and str(job_id) == str(active.id):
+            # hotfix 1 issue 5: the book's job is already queued / running: JobService reused it (nothing new
+            # was queued); say so, with the way to it
+            self._say_already_active(active)
         # no "… started · Jobs" snackbar (owner 2026-10-20): the progress strip shows the running job
         return job_id
+
+    def _active_job_for(self, spec: Any) -> Any:
+        """``JobService.active_job_for(spec)``: the active job that already does ``spec``'s work, else None."""
+        service = self.jobs.jobs
+        finder = getattr(service, "active_job_for", None) if service is not None else None
+        if not callable(finder):
+            return None
+        try:
+            return finder(spec)
+        except Exception:
+            log.debug("the active-job check failed", exc_info=True)
+            return None
+
+    def _say_already_active(self, snapshot: Any) -> None:
+        """Hotfix 1 issue 5: "Translating “Book” is already running (Chat · Novel)" with Open (its Jobs page)."""
+        notify = getattr(self.app, "notify", None)
+        if not callable(notify):
+            return
+        from glossarion_mobile.services.jobs import already_active_text
+
+        navigate = getattr(self.app, "navigate_to", None)
+        job_id = getattr(snapshot, "id", None)
+        if callable(navigate) and job_id:
+            notify(already_active_text(snapshot), "Open", lambda *_: navigate("jobs.detail", {"jid": str(job_id)}))
+        else:
+            notify(already_active_text(snapshot))
 
     async def open_progress(self, folder: str, source: str = "", select: Optional[tuple] = None) -> Optional[str]:
         """A chat workspace in the Progress manager (``/tools/progress?out=<bid>``, Chapters tab): the

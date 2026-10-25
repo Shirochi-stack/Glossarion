@@ -1,5 +1,5 @@
-"""WebViewBridge (mobile-app design §5.6): hidden in-app browser pages for ``authnd/`` and
-``search/gemini``.
+"""WebViewBridge (mobile-app design §5.6): hidden in-app browser pages for ``authnd/``,
+``search/gemini``, ``authds/`` and ``authchatgpt/``.
 
 The desktop runs these routes in QtWebEngine helper processes. Mobile has neither Qt nor
 helper processes, so this bridge registers a ``browser_driver`` driver (``src/browser_driver.py``)
@@ -28,22 +28,41 @@ Threads. Route code runs on worker threads (the job thread, the API worker pool)
 At most :data:`MAX_PAGES` pages are open at once (the routes' own token / sub-chunk
 concurrency settings usually keep it at one); further ``open_page`` calls wait for a slot.
 
-Known limitations (best effort; shown in Accounts › Experimental): see :data:`LIMITATIONS`.
+Background (hotfix 1, issue 3: authchatgpt/ stopped while the app was hidden). Flutter builds
+widgets only in frames and produces no frames while the app is hidden or paused
+(``SchedulerBinding.scheduleFrame`` returns at once unless the lifecycle state is resumed or
+inactive). flet-webview creates its native WebView, starts its first load and subscribes to
+``load_request`` / ``run_javascript`` in the widget's ``initState``, so a WebView mounted while
+the app is hidden does nothing until the app shows again: its calls end with Flet's "Timeout
+waiting for invoke method listener" and the route's page waits run out. A WebView that was
+built while the app was on screen keeps working in the background (method calls and console /
+page events go over the Flet connection, not through frames). So:
+
+* while jobs run (:func:`jobs_running`, from ``BackgroundExecution``), a closed page's WebView
+  is parked on :data:`BLANK_URL` instead of unmounted, and the next page takes it over
+  (``_WebViewSlot`` routes the WebView's events to the page using it);
+* a job whose model is a browser route (:func:`uses_browser_route`) gets one WebView built at
+  its start, while the app is still on screen (:meth:`WebViewBridge.prewarm`);
+* a page that needs a WebView while the app is hidden and finds none parked never builds one:
+  it waits (cancellable) until one is parked or the app is visible again.
 """
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import json
 import logging
 import threading
 import time
 import uuid
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 from glossarion_mobile.ui.reader.bridge import parse_console_message
 
 __all__ = [
+    "BLANK_URL",
+    "BROWSER_ROUTE_PREFIXES",
     "CHUNK_CHARS",
     "CONSOLE_PREFIX",
     "LIMITATIONS",
@@ -52,10 +71,15 @@ __all__ = [
     "WebViewBridge",
     "WebViewBridgeFeature",
     "WebViewPage",
+    "WebViewUnavailable",
     "availability",
+    "configured_models",
     "current",
+    "job_models",
+    "jobs_running",
     "page_script",
     "platform_supported",
+    "uses_browser_route",
 ]
 
 log = logging.getLogger("glossarion.webview_bridge")
@@ -77,6 +101,21 @@ CANCELLED = "stream cancelled"  # browser_driver.CANCELLED (the routes' cancel m
 #: Flet's error when a method call (``load_request``) finds no listener on the Flutter side: the
 #: WebView widget is being (re)built (a screen change, a busy UI loop) and has not subscribed yet.
 NO_LISTENER = "waiting for invoke method listener"
+#: What a parked WebView shows between pages (no network, no script).
+BLANK_URL = "about:blank"
+#: Seconds a parked WebView's blank page may take to finish before it counts as parked anyway.
+PARK_SETTLE = 3.0
+#: Seconds a page (app visible) waits for a WebView being parked before it builds its own.
+PARK_WAIT = 5.0
+#: Times ``load`` waits for a WebView again after the app was hidden at the moment it needed one.
+LOAD_ATTEMPTS = 3
+#: Models whose requests run on these hidden pages (``authnd`` also covers ``authnd/``).
+BROWSER_ROUTE_PREFIXES = ("authchatgpt/", "authnd", "authds/", "search/gemini")
+HIDDEN_WAIT_MESSAGE = (
+    "in-app browser: Glossarion is in the background and no in-app page is ready; the request "
+    "waits until one is free or the app is opened again (Android and iOS build no new page "
+    "while the app is hidden)"
+)
 
 UNSUPPORTED_REASON = (
     "The hidden in-app browser (flet-webview) runs on Android, iOS and macOS only, so AuthND and "
@@ -91,8 +130,11 @@ LIMITATIONS = (
     "so NVIDIA and Google may serve other pages or extra verification than on desktop.\n"
     "• Google may show a consent or verification page instead of AI Mode; the request then fails "
     "with that message.\n"
-    "• Keep Glossarion open while these requests run: Android and iOS can pause a hidden browser "
-    "in the background.\n"
+    "• In the background: on Android these requests keep running while a job runs (its "
+    "notification is showing): the job opens its in-app page while Glossarion is on screen and "
+    "reuses it afterwards. A request that needs a new page while Glossarion is hidden waits until "
+    "you open the app again. iOS pauses the in-app browser in the background: keep Glossarion "
+    "open while these requests run.\n"
     f"• Every request opens its own hidden page; Token concurrency and the Gemini Free sub-chunk "
     f"concurrency limit how many run at once (never more than {MAX_PAGES})."
 )
@@ -128,6 +170,56 @@ def platform_supported(page: Any) -> bool:
     from glossarion_mobile.ui.reader.reader_view import webview_supported
 
     return webview_supported(page)
+
+
+def uses_browser_route(model: Any) -> bool:
+    """``model`` runs on these hidden pages (authchatgpt/, authnd/, authds/, search/gemini)."""
+    return str(model or "").strip().lower().startswith(BROWSER_ROUTE_PREFIXES)
+
+
+def job_models(snap: Any) -> list:
+    """The models a job's spec names (a chat send's ``model``, ``config_overrides.model``)."""
+    params = getattr(getattr(snap, "spec", None), "params", None)
+    if not isinstance(params, Mapping):
+        return []
+    overrides = params.get("config_overrides")
+    found = [params.get("model"), overrides.get("model") if isinstance(overrides, Mapping) else None]
+    return [str(model) for model in found if model]
+
+
+def configured_models(store: Any) -> list:
+    """The models the settings send requests with: ``model`` and the multi-key / fallback keys'."""
+    get = getattr(store, "get", None)
+    if not callable(get):
+        return []
+    try:
+        found = [get("model")]
+        for key in ("multi_api_keys", "fallback_keys"):
+            entries = get(key)
+            if isinstance(entries, (list, tuple)):
+                found.extend(entry.get("model") for entry in entries if isinstance(entry, Mapping))
+    except Exception as exc:  # the store is closing / not loaded: no warm-up, nothing breaks
+        log.debug("configured models unavailable: %s", exc)
+        return []
+    return [str(model) for model in found if model]
+
+
+def jobs_running(running: bool, snap: Any = None) -> None:
+    """``BackgroundExecution``: a job started (``running``; ``snap`` is its snapshot) or the queue
+    drained. While jobs run the bridge parks used WebViews for the next page, and a job whose
+    model is a browser route gets one built now, while the app is still on screen. No-op
+    without a registered bridge (desktop, web)."""
+    bridge = current()
+    if bridge is None:
+        return
+    if running:
+        bridge.job_started(job_models(snap))
+    else:
+        bridge.keep_warm(False)
+
+
+class WebViewUnavailable(RuntimeError):
+    """The page needed a new WebView while the app is hidden (none can be built then)."""
 
 
 def _clean_expression(expression: str) -> str:
@@ -178,27 +270,93 @@ def page_script(request_id: str, expression: str, *, chunk_chars: int = CHUNK_CH
     return head + _clean_expression(expression) + tail
 
 
-def _flet_webview(page: "WebViewPage", url: str) -> Any:
-    """The real hidden WebView of ``page`` (the bridge's default factory)."""
+def _flet_webview(slot: "_WebViewSlot", url: str) -> Any:
+    """The real hidden WebView of ``slot`` (the bridge's default factory); its events go to the
+    slot, which hands them to the page using the WebView."""
     import flet_webview as fwv
 
-    width, height = page.viewport
+    width, height = slot.viewport
     return fwv.WebView(
         url=url,
         width=width,
         height=height,
         prevent_links=list(PREVENT_LINKS),
-        on_page_started=page.on_page_started,
-        on_page_ended=page.on_page_ended,
-        on_url_change=page.on_url_change,
-        on_web_resource_error=page.on_resource_error,
-        on_console_message=page.on_console,
+        on_page_started=slot.on_page_started,
+        on_page_ended=slot.on_page_ended,
+        on_url_change=slot.on_url_change,
+        on_web_resource_error=slot.on_resource_error,
+        on_console_message=slot.on_console,
     )
 
 
 def _short_url(url: Any) -> str:
     text = str(url or "")
     return text.split("#", 1)[0].split("?", 1)[0][:300]
+
+
+class _WebViewSlot:
+    """One mounted hidden WebView and the page using it now (None while it is parked).
+
+    The WebView's event handlers are the slot's, so the page that takes a parked WebView over
+    gets its events. ``alive`` turns True with the first event: Flutter built the WebView (its
+    ``initState`` ran), so ``load_request`` / ``run_javascript`` reach it even while the app is
+    hidden. Events of the blank page a parked WebView shows reach no page. Other attributes
+    (``load_state``, ``url()``, ``owner``, ``id``) are the current page's, for diagnostics.
+    Loop thread only, except ``alive`` (a bool) which workers may read.
+    """
+
+    def __init__(self, bridge: "WebViewBridge", viewport: Tuple[int, int],
+                 page: Optional["WebViewPage"] = None) -> None:
+        self.bridge = bridge
+        self.viewport = viewport
+        self.page = page
+        self.webview: Any = None
+        self.entry: Any = None
+        self.alive = False
+        self.parking = False  # navigating to BLANK_URL before it becomes a spare (or a warm-up WebView)
+        self.warmup = False  # built by prewarm(): its first event proves it is built (no old document)
+        self.parked: Optional[asyncio.Event] = None
+
+    def __getattr__(self, name: str) -> Any:
+        page = self.__dict__.get("page")
+        if page is None:
+            raise AttributeError(name)
+        return getattr(page, name)
+
+    def _target(self, e: Any, *, ended: bool = False) -> Optional["WebViewPage"]:
+        self.alive = True
+        if str(getattr(e, "data", "") or "").lower().startswith("about:"):
+            if self.parking and (ended or self.warmup):
+                self.bridge.parked_on_loop(self)
+            return None  # the routes only open web pages: this is a parked WebView's blank page
+        return self.page
+
+    def on_page_started(self, e: Any) -> None:
+        page = self._target(e)
+        if page is not None:
+            page.on_page_started(e)
+
+    def on_page_ended(self, e: Any) -> None:
+        page = self._target(e, ended=True)
+        if page is not None:
+            page.on_page_ended(e)
+
+    def on_url_change(self, e: Any) -> None:
+        page = self._target(e)
+        if page is not None:
+            page.on_url_change(e)
+
+    def on_resource_error(self, e: Any) -> None:  # ``data`` is the error text, not a URL
+        self.alive = True
+        page = self.page
+        if page is not None:
+            page.on_resource_error(e)
+
+    def on_console(self, e: Any) -> None:
+        self.alive = True
+        page = self.page
+        if page is not None:
+            page.on_console(e)
 
 
 class WebViewPage:
@@ -224,9 +382,12 @@ class WebViewPage:
         self.viewport = viewport
         self.cancel_check = cancel_check
         self.load_state = new_load_state()
-        self.webview: Any = None  # loop thread only
+        self.slot: Optional[_WebViewSlot] = None  # the WebView this page uses (loop thread only)
+        self.webview: Any = None  # the slot's WebView (loop thread only)
         self.entry: Any = None  # host overlay entry (loop thread only)
+        self._claimed: Optional[_WebViewSlot] = None  # a parked WebView claimed for the first load
         self.builds = 0  # WebViews built for this page (each overlay entry gets its own key)
+        self.reused = 0  # parked WebViews this page took over
         self.console_lines = 0
         self.closed = False
         self._url = ""
@@ -242,7 +403,15 @@ class WebViewPage:
         if not url.lower().startswith(("https://", "http://")):
             raise ValueError(f"the in-app browser only opens web pages, not {url[:40]!r}")
         self._url = url
-        self._call(self._load_on_loop, url, timeout=LOAD_TIMEOUT, what="open the page")
+        for attempt in range(LOAD_ATTEMPTS):
+            if self.webview is None and self._claimed is None:
+                self.bridge.claim(self)  # a parked WebView, or the app is visible (waits otherwise)
+            try:
+                self._call(self._load_on_loop, url, timeout=LOAD_TIMEOUT, what="open the page")
+                return
+            except WebViewUnavailable as exc:  # the app was hidden when the page needed a new WebView
+                if attempt + 1 >= LOAD_ATTEMPTS:
+                    raise RuntimeError(f"the in-app browser could not open the page: {exc}") from exc
 
     def url(self) -> str:
         return self._url
@@ -291,7 +460,8 @@ class WebViewPage:
             time.sleep(min(POLL_SECONDS, remaining))
 
     def close(self) -> None:
-        """Release the page (any thread; idempotent): fail its waits, unmount its WebView."""
+        """Release the page (any thread; idempotent): fail its waits, then park its WebView for
+        the next page while jobs run (:func:`jobs_running`), else unmount it."""
         with self._lock:
             if self.closed:
                 return
@@ -299,8 +469,10 @@ class WebViewPage:
             pending = list(self._pending.values())
             self._pending.clear()
         self._fail(pending, "the in-app browser page was closed")
+        if self._cancel_reason is None:
+            self.bridge.expect_parking(self.slot)  # before the slot is free: the next page waits for it
         self.bridge.forget(self)
-        self.bridge.post(self._unmount_on_loop)
+        self.bridge.post(self._release_on_loop)
 
     # ---- cancellation (any thread; never blocks) -------------------------------------------
 
@@ -386,10 +558,18 @@ class WebViewPage:
         if self.closed or self._cancel_reason is not None:
             raise RuntimeError("the in-app browser page is closed")
         if self.webview is None:
-            # flet-webview loads its ``url`` when the control is built; later loads use
-            # load_request (a changed ``url`` property does not navigate a built WebView).
-            self._build_on_loop(url)
-            return
+            claimed, self._claimed = self._claimed, None
+            if claimed is not None and claimed.webview is not None:
+                self._adopt_on_loop(claimed)  # a parked WebView: navigated below like a later load
+            elif not self.bridge.app_visible():
+                # Flutter would build a new WebView only once the app shows again (no frames
+                # while hidden): load() waits for a parked one or for the app instead.
+                raise WebViewUnavailable("Glossarion is in the background")
+            else:
+                # flet-webview loads its ``url`` when the control is built; later loads use
+                # load_request (a changed ``url`` property does not navigate a built WebView).
+                self._build_on_loop(url)
+                return
         # the Reader's helper (one place for the rule); a failed load raises out of load()
         from glossarion_mobile.ui.reader.reader_view import navigate_webview
 
@@ -398,6 +578,12 @@ class WebViewPage:
         except Exception as exc:
             if NO_LISTENER not in str(exc):
                 raise
+            if not self.bridge.app_visible():
+                # The WebView's Flutter State is gone and none is built while the app is hidden.
+                log.info("in-app browser: no load_request listener while the app is hidden (%s)",
+                         str(exc)[:200])
+                self._unmount_on_loop()
+                raise WebViewUnavailable("Glossarion is in the background") from exc
             # No listener answered load_request within Flet's 10 s: the Flutter WebView was being
             # built again and never took the call (authchatgpt/ on a phone: "did not open
             # chatgpt.com/", twice, then the request failed). A new WebView built with ``url``
@@ -409,15 +595,35 @@ class WebViewPage:
 
     def _build_on_loop(self, url: str) -> None:
         """Mount a new WebView that loads ``url`` (replacing the page's current one)."""
-        old, self.entry = self.entry, None
+        old, self.slot = self.slot, None
         if old is not None:
-            self.bridge.host.remove(old)
+            self.bridge.retire_on_loop(old, reuse=False)
         self.builds += 1
         self._chunks.clear()
-        self.webview = self.bridge.make_webview(self, url)
+        slot = _WebViewSlot(self.bridge, self.viewport, self)
+        slot.webview = self.bridge.make_webview(slot, url)
         # a Flet 1.0.3 control re-rendered under an old key keeps its old state: a new key per build
         key = f"glwvb-{self.id}" if self.builds == 1 else f"glwvb-{self.id}-{self.builds}"
-        self.entry = self.bridge.host.add(self.webview, size=self.viewport, key=key)
+        slot.entry = self.bridge.host.add(slot.webview, size=self.viewport, key=key)
+        self._use_slot(slot)
+
+    def _adopt_on_loop(self, slot: _WebViewSlot) -> None:
+        """Take a parked WebView over (its blank page is replaced by the next navigation)."""
+        self._chunks.clear()
+        self.reused += 1
+        if tuple(slot.viewport) != tuple(self.viewport):
+            slot.viewport = self.viewport
+            resize = getattr(self.bridge.host, "resize", None)
+            if callable(resize) and slot.entry is not None:
+                resize(slot.entry, self.viewport)
+        self._use_slot(slot)
+
+    def _use_slot(self, slot: _WebViewSlot) -> None:
+        slot.page = self
+        slot.warmup = False
+        self.slot = slot
+        self.webview = slot.webview
+        self.entry = slot.entry
 
     async def _title_on_loop(self) -> str:
         if self.webview is None:
@@ -434,11 +640,23 @@ class WebViewPage:
             self._resolve(request_id, None)
 
     def _unmount_on_loop(self) -> None:
-        entry, self.entry = self.entry, None
+        """Cancel / lost State: the page's WebView goes (an unused claimed one is kept)."""
+        self._drop_slots_on_loop(reuse=False)
+
+    def _release_on_loop(self) -> None:
+        """Close: a WebView that served a request without a cancel is parked while jobs run."""
+        self._drop_slots_on_loop(reuse=self._cancel_reason is None)
+
+    def _drop_slots_on_loop(self, *, reuse: bool) -> None:
+        slot, self.slot = self.slot, None
+        claimed, self._claimed = self._claimed, None
+        self.entry = None
         self.webview = None
         self._chunks.clear()
-        if entry is not None:
-            self.bridge.host.remove(entry)
+        if slot is not None:
+            self.bridge.retire_on_loop(slot, reuse=reuse)
+        if claimed is not None:  # claimed for a load that never ran: still parked on the blank page
+            self.bridge.retire_on_loop(claimed, reuse=True, blank=True)
 
     # WebView events (loop thread). load_state mirrors the Qt helper's loadStarted/loadFinished.
 
@@ -546,6 +764,15 @@ class WebViewBridge:
         self._slots = threading.BoundedSemaphore(self.max_pages)
         self._pages: dict[str, WebViewPage] = {}
         self._lock = threading.Lock()
+        # Hotfix 1 (issue 3): built WebViews kept for the next page while jobs run.
+        self.warm = False  # jobs run: park used WebViews instead of unmounting them
+        self.max_spares = self.max_pages
+        self.config_models: Optional[Callable[[], Any]] = None  # the settings' models (prewarm check)
+        self.prewarmed = 0
+        self.hidden_waits = 0  # pages that waited because the app was hidden and nothing was parked
+        self._spares: list = []  # parked _WebViewSlots on BLANK_URL (lock)
+        self._parking: set = set()  # slots on their way to becoming spares (lock)
+        self._tasks: set = set()
 
     # ---- browser_driver.BrowserDriver ------------------------------------------------------
 
@@ -603,8 +830,186 @@ class WebViewBridge:
         with self._lock:
             return [page for page in self._pages.values() if owner is None or page.owner == owner]
 
-    def make_webview(self, page: WebViewPage, url: str) -> Any:
-        return self.webview_factory(page, url)
+    def make_webview(self, slot: _WebViewSlot, url: str) -> Any:
+        return self.webview_factory(slot, url)
+
+    def app_visible(self) -> bool:
+        """The app is on screen (Flet's ``page.app_visible``: False while hidden or paused), so
+        Flutter builds widgets; True when the host has no page (tests, desktop)."""
+        try:
+            return bool(getattr(getattr(self.host, "page", None), "app_visible", True))
+        except Exception:
+            return True
+
+    # ---- built WebViews kept for the next page (hotfix 1, issue 3) ---------------------------
+
+    def job_started(self, models: Any = ()) -> None:
+        """A job started (any thread): keep used WebViews while jobs run, and build one now when
+        the job (or the settings) use a browser route and none is ready."""
+        self.keep_warm(True)
+        wanted = list(models or ())
+        if self.config_models is not None:
+            try:
+                wanted.extend(self.config_models() or ())
+            except Exception as exc:
+                log.debug("configured models unavailable: %s", exc)
+        if any(uses_browser_route(model) for model in wanted):
+            self.prewarm()
+
+    def keep_warm(self, on: bool) -> None:
+        """While on, closed pages park their WebViews for the next page; off unmounts the parked
+        ones (any thread)."""
+        with self._lock:
+            self.warm = bool(on)
+        if not on:
+            self.post(self._drop_spares_on_loop)
+
+    def prewarm(self) -> None:
+        """Build one parked WebView now (any thread), while the app is on screen: a request
+        that needs a page after the app was hidden takes it over instead of waiting."""
+        self.post(self._prewarm_on_loop)
+
+    def claim(self, page: WebViewPage) -> None:
+        """Worker thread, before ``page`` loads its first URL: hand it a parked WebView (any
+        viewport; one of its own size first), or return when it may build one (the app is
+        visible and no WebView is about to be parked). While the app is hidden nothing is built
+        (Flutter would build it only once the app shows again), so the page waits, cancellably."""
+        page._check_usable()
+        since: Optional[float] = None
+        told = False
+        while True:
+            visible = self.app_visible()
+            with self._lock:
+                spare = next((slot for slot in self._spares if tuple(slot.viewport) == tuple(page.viewport)),
+                             self._spares[0] if self._spares else None)
+                if spare is not None:
+                    self._spares.remove(spare)
+                    page._claimed = spare
+                    return
+                parking = len(self._parking)
+            if visible:
+                if not parking:
+                    return
+                since = time.monotonic() if since is None else since
+                if time.monotonic() - since >= PARK_WAIT:
+                    return
+            elif not parking and not told:  # a WebView being parked is built: wait for it quietly
+                told = True
+                with self._lock:
+                    self.hidden_waits += 1
+                log.info(HIDDEN_WAIT_MESSAGE)
+            page._raise_if_cancelled()
+            if page.closed:
+                raise RuntimeError("the in-app browser page is closed")
+            time.sleep(POLL_SECONDS)
+
+    def _has_room(self, slot: Optional[_WebViewSlot] = None) -> bool:
+        """Lock held: another WebView may be parked."""
+        parking = len(self._parking) - (1 if slot is not None and slot in self._parking else 0)
+        return self.warm and self.registered and len(self._spares) + parking < self.max_spares
+
+    def expect_parking(self, slot: Optional[_WebViewSlot]) -> None:
+        """A page closes (worker thread): its WebView will be parked, so a page opening next
+        waits for it instead of building another (``retire_on_loop`` settles it)."""
+        if slot is None or not slot.alive:
+            return
+        with self._lock:
+            if self._has_room(slot):
+                self._parking.add(slot)
+
+    def retire_on_loop(self, slot: _WebViewSlot, *, reuse: bool, blank: bool = False) -> None:
+        """A page is done with ``slot``: park it (``reuse``, while jobs run and there is room;
+        ``blank``: it still shows the blank page), else unmount it."""
+        with self._lock:
+            keep = reuse and slot.alive and slot.webview is not None and self._has_room(slot)
+            if keep:
+                self._parking.add(slot)
+        if not keep:
+            self._unmount_slot(slot)
+            return
+        slot.page = None
+        slot.parking = True
+        if blank:
+            self.parked_on_loop(slot)
+            return
+        task = asyncio.ensure_future(self._park_on_loop(slot))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _park_on_loop(self, slot: _WebViewSlot) -> None:
+        """Navigate a used WebView to the blank page (stops the old site), then make it a spare."""
+        from glossarion_mobile.ui.reader.reader_view import navigate_webview
+
+        slot.parked = asyncio.Event()
+        if slot.webview is None:  # dropped before this task ran (the queue drained)
+            return
+        try:
+            await navigate_webview(slot.webview, BLANK_URL)
+            await asyncio.wait_for(slot.parked.wait(), PARK_SETTLE)
+        except asyncio.TimeoutError:
+            pass  # no page-ended event for the blank page: the WebView is built, park it anyway
+        except Exception as exc:
+            log.info("in-app browser: a used page could not be kept for the next request: %s", str(exc)[:200])
+            slot.parking = False
+            self._unmount_slot(slot)
+            return
+        self.parked_on_loop(slot)
+
+    def parked_on_loop(self, slot: _WebViewSlot) -> None:
+        """The blank page of a parked (or warm-up) WebView finished: it becomes a spare."""
+        if not slot.parking:
+            return
+        slot.parking = False
+        if slot.parked is not None:
+            slot.parked.set()
+        with self._lock:
+            self._parking.discard(slot)
+            keep = slot.webview is not None and slot.alive and self._has_room()
+            if keep:
+                self._spares.append(slot)
+        if not keep:
+            self._unmount_slot(slot)
+
+    def _unmount_slot(self, slot: _WebViewSlot) -> None:
+        """Remove ``slot``'s WebView from the host (loop thread; idempotent)."""
+        with self._lock:
+            self._parking.discard(slot)
+            if slot in self._spares:
+                self._spares.remove(slot)
+        slot.parking = False
+        entry, slot.entry = slot.entry, None
+        slot.webview = None
+        if entry is not None:
+            self.host.remove(entry)
+
+    def _drop_spares_on_loop(self) -> None:
+        with self._lock:
+            if self.warm:
+                return  # a job started again before this ran
+            slots = list(self._spares) + list(self._parking)
+        for slot in slots:
+            self._unmount_slot(slot)
+
+    def _prewarm_on_loop(self) -> None:
+        if not (self.registered and self.app_visible()):
+            return
+        with self._lock:
+            if not self.warm or self._spares or self._parking:
+                return
+            if any(page.slot is not None for page in self._pages.values()):
+                return  # a page has a WebView: it is parked for the next one when it closes
+            self.prewarmed += 1
+            count = self.prewarmed
+        slot = _WebViewSlot(self, self.default_viewport)
+        slot.parking = slot.warmup = True
+        with self._lock:
+            self._parking.add(slot)
+        try:
+            slot.webview = self.make_webview(slot, BLANK_URL)
+            slot.entry = self.host.add(slot.webview, size=slot.viewport, key=f"glwvb-warm-{count}")
+        except Exception as exc:  # pages still build their own WebViews while the app is visible
+            log.warning("in-app browser: no WebView could be prepared for the job: %s", exc)
+            self._unmount_slot(slot)
 
     def submit(self, coro_fn: Callable[..., Any], *args: Any) -> Optional[concurrent.futures.Future]:
         return self.dispatcher.submit(coro_fn, *args)
@@ -634,16 +1039,19 @@ class WebViewBridge:
             _set_current(None, reason)
 
     def shutdown(self) -> None:
-        """Unregister and cancel every page (app teardown)."""
+        """Unregister and cancel every page, unmount the parked WebViews (app teardown)."""
         self.unregister()
         self.cancel_pages(None, "the app is closing")
+        self.keep_warm(False)
 
     def status(self) -> dict:
         with self._lock:
             owners = sorted({page.owner for page in self._pages.values()})
             count = len(self._pages)
+            spares, parking, warm = len(self._spares), len(self._parking), self.warm
         return {"registered": self.registered, "open_pages": count, "owners": owners,
-                "opened": self.opened, "max_pages": self.max_pages}
+                "opened": self.opened, "max_pages": self.max_pages, "warm": warm, "spares": spares,
+                "parking": parking, "prewarmed": self.prewarmed, "hidden_waits": self.hidden_waits}
 
 
 class WebViewBridgeFeature:
@@ -665,6 +1073,9 @@ class WebViewBridgeFeature:
         from glossarion_mobile.ui.components.hidden_webview import HiddenWebViewHost
 
         bridge = WebViewBridge(app.dispatcher, HiddenWebViewHost(page)).register()
+        store = getattr(app, "config_store", None)
+        if store is not None:
+            bridge.config_models = lambda: configured_models(store)  # a job warms a WebView for these
         app.webview_bridge = bridge
-        log.info("WebView bridge registered (authnd/, search/gemini)")
+        log.info("WebView bridge registered (authnd/, authds/, authchatgpt/, search/gemini)")
         return bridge

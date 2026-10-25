@@ -43,6 +43,19 @@ before it is deleted: Delete message records the turn of every job the chat know
 (``chat_job_turns``) by fingerprint under the run's key (``turn_key``: its run root, shared
 by Resume / Retry of the same run), and ``turn_index`` / ``persisted_job`` / ``resubmit``
 resolve turns through the recorded ``ChatStoreAdapter.job_turns``.
+
+Job safety (hotfix 1 issue 5): a chat has one run at a time and a file one job. ``send`` /
+``resubmit`` / ``generate`` while the chat's run is live (queued, running, at the glossary gate,
+refining, stopping, finishing) return that run; a second send of the same chat while the first
+one prepares is a no-op (None). An attachment send names its file (``JOB_TARGET_PARAM``) and,
+before it records anything, binds to this chat's active job for that file or refuses with
+``JobAlreadyActive`` when another chat or the Library already runs it (``JobService.
+active_job_for``); a send of the same file from another chat is refused while this one
+prepares. ``JobService.submit_job`` decides last, under its lock: when it reuses a job anyway,
+the prepared run is dropped and the turn gets the "could not be started" card saying where the
+book runs. While the gate's glossary is refined (``JobSnapshot.refining`` -> ``ChatRun.refining``)
+``answer_glossary`` refuses Yes / No (JobService refuses them too), so the translation never
+starts before the refinement ended (issue 2).
 """
 
 from __future__ import annotations
@@ -56,7 +69,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
-from glossarion_mobile.services.jobs import GLOSSARY_QUESTION_KINDS, is_glossary_question  # contract C1
+from glossarion_mobile.services.jobs import (  # contract C1
+    GLOSSARY_QUESTION_KINDS,
+    GLOSSARY_REFINING_TEXT,
+    JOB_TARGET_PARAM,
+    JobAlreadyActive,
+    is_glossary_question,
+    target_key,
+)
 from glossarion_mobile.ui.chat.direct_text_rules import DirectTextSettings, ManualGlossarySource
 from glossarion_mobile.ui.chat.job_binding import (
     RUNNING_STATES,
@@ -85,8 +105,8 @@ from glossarion_mobile.ui.chat.run_request import (
 )
 from glossarion_mobile.ui.chat.stream_bridge import RunStream
 
-__all__ = ["CHAT_JOB_KINDS", "ChatRun", "ChatRuns", "GLOSSARY_QUESTION_KINDS", "RESUMABLE_ENDINGS", "STATUS",
-           "is_glossary_question", "turn_key"]
+__all__ = ["CHAT_JOB_KINDS", "ChatRun", "ChatRuns", "GLOSSARY_QUESTION_KINDS", "JobAlreadyActive", "RESUMABLE_ENDINGS",
+           "STATUS", "attachment_target", "is_glossary_question", "turn_key"]
 
 log = logging.getLogger("glossarion.chat.runs")
 
@@ -104,7 +124,11 @@ STATUS = {
     "could_not_start": "Could not start",
     "manual_glossary": "Manual glossary required",
     "ready": "Ready",
+    "refining": GLOSSARY_REFINING_TEXT,  # hotfix 1 issue 2: the gate's glossary is being refined
 }
+
+#: Hotfix 1 issue 5: a send of a file another chat is starting a run for at this moment
+STARTING_ELSEWHERE = "“{name}” is already starting in another chat"
 
 #: The glossary gate's question kinds and predicate live in ``services.jobs`` (contract C1); the old
 #: names stay importable from here.
@@ -119,6 +143,23 @@ RESUMABLE_ENDINGS = ("live", "stopped", "failed", "interrupted", "discarded", "i
 def _now_iso() -> str:
     """Desktop ``_direct_response_timestamp`` format (timezone-aware, seconds)."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def attachment_target(attachment: Optional[Mapping[str, Any]]) -> str:
+    """The file an attachment send works on, for the duplicate check (``JOB_TARGET_PARAM``): the attached
+    file's absolute path; '' for typed text and for a Vision attachment (an image / image archive the chat
+    asks about - two questions about one picture are two requests)."""
+    path = str((attachment or {}).get("path") or "") if attachment else ""
+    if not path:
+        return ""
+    try:
+        from glossarion_mobile.ui.chat.output_modes import is_vision_attachment
+
+        if is_vision_attachment(path):
+            return ""
+    except Exception:
+        pass
+    return os.path.abspath(path)
 
 
 def turn_key(params: Any, job_id: Any = None) -> Optional[str]:
@@ -236,6 +277,8 @@ class ChatRun:
     #: gate's, the finish's) are the chat's messages from here on; the turn's earlier cards (a stopped
     #: run's, before a Resume) are not (``ChatView._update_live_job_card``).
     committed_from: int = 0
+    #: Hotfix 1 issue 2: the gate's glossary is being refined (``JobSnapshot.refining``, ✨ Refine)
+    refining: bool = False
 
     @property
     def live(self) -> bool:
@@ -243,7 +286,14 @@ class ChatRun:
 
     @property
     def awaiting_glossary(self) -> bool:
+        """A glossary gate question waits for this run, also while its glossary is being refined (then
+        ``refining`` is True and ``answer_glossary`` refuses Yes / No until the refinement ended)."""
         return bool(self.question) and is_glossary_question(self.question.get("kind"))
+
+    @property
+    def gate_open(self) -> bool:
+        """The gate takes the user's Yes / No now: a glossary question waits and is not being refined."""
+        return self.awaiting_glossary and not self.refining
 
 
 class ChatRuns:
@@ -268,6 +318,25 @@ class ChatRuns:
         self._finished_listeners: list = []
         self._job_unsub: Optional[Callable[[], None]] = None
         self.finish_threads: list = []
+        #: Hotfix 1 issue 5: chats whose send / resubmit is preparing (cid -> the file it works on, '' for
+        #: none): a second send of that chat, or another chat's send of the same file, cannot start a job
+        self._starting: dict = {}
+        #: chats whose last send / resubmit queued nothing because the app's preflight refused it (the app said
+        #: why, e.g. "… · Choose model"): ``take_refused`` tells that apart from "nothing to resume"
+        self._refused: set = set()
+
+    def take_refused(self, cid: Any) -> bool:
+        """The chat's last send / resubmit was refused by the app's preflight, which already told the user why
+        (cleared by this call)."""
+        with self._lock:
+            if str(cid) in self._refused:
+                self._refused.discard(str(cid))
+                return True
+            return False
+
+    def _mark_refused(self, cid: str) -> None:
+        with self._lock:
+            self._refused.add(str(cid))
 
     # ---- listeners ------------------------------------------------------------------
 
@@ -365,7 +434,7 @@ class ChatRuns:
         run = self.live_run(cid)
         if run is not None:
             if run.awaiting_glossary:
-                return STATUS["glossary"]
+                return STATUS["refining"] if run.refining else STATUS["glossary"]
             return run.status
         text = self.status.get(str(cid))
         return None if not text or text == STATUS["ready"] else text
@@ -397,13 +466,47 @@ class ChatRuns:
         manual_glossary: Optional[ManualGlossarySource] = None,
         user_index: Optional[int] = None,
         config_extra: Optional[Mapping[str, Any]] = None,
-    ) -> ChatRun:
+    ) -> Optional[ChatRun]:
         """Record the turn (unless ``user_index`` points at an already recorded one, e.g. a
         Plan card), prepare the run off the loop and submit the ``direct_text`` job.
 
         ``config_extra``: config keys for this run only (the Plan card's "Only for this run" Run
-        options), merged into the JobSpec ``config_overrides`` under the chat overrides."""
+        options), merged into the JobSpec ``config_overrides`` under the chat overrides.
+
+        Hotfix 1 issue 5 (module docstring): returns this chat's live run when it has one and None while
+        its previous send still prepares (nothing is recorded either way); raises ``JobAlreadyActive``
+        when another chat or the Library already runs the attached file."""
         cid = str(cid)
+        target = attachment_target(attachment)
+        claimed = self._claim(cid, target)
+        if claimed is not True:
+            return claimed
+        try:
+            if target:
+                active = self._active_job_for(DIRECT_TEXT_JOB_KIND, (target,),
+                                              {JOB_TARGET_PARAM: [target], "is_attachment": True})
+                if active is not None:
+                    return self._bind_or_refuse(cid, active)
+            return await self._send(cid, text=text, attachment=attachment, settings=settings,
+                                    output_mode=output_mode, overrides=overrides, manual_glossary=manual_glossary,
+                                    user_index=user_index, config_extra=config_extra, target=target)
+        finally:
+            self._release(cid)
+
+    async def _send(
+        self,
+        cid: str,
+        *,
+        text: str,
+        attachment: Optional[Mapping[str, Any]],
+        settings: DirectTextSettings,
+        output_mode: str,
+        overrides: Optional[Mapping[str, Any]],
+        manual_glossary: Optional[ManualGlossarySource],
+        user_index: Optional[int],
+        config_extra: Optional[Mapping[str, Any]],
+        target: str,
+    ) -> ChatRun:
         text = str(text or "").strip()
         role = settings.attachment_prompt_role
         if user_index is None:
@@ -428,11 +531,14 @@ class ChatRuns:
                            user_index=int(user_index), committed_from=self._message_count(cid))
         chat_run.stream.provider = self._stream_provider(chat_run)
         with self._lock:
+            previous = self.runs.get(cid)
             self.runs[cid] = chat_run
             self.status.pop(cid, None)
         self.store.set_running(cid, True)
         await self._io(self.store.flush)  # history on disk before the job starts (desktop saves at send)
         params = job_params(chat_id=self._chat_id_value(cid), user_index=user_index, run=run, settings=settings, overrides=overrides)
+        if target:
+            params[JOB_TARGET_PARAM] = [target]  # the attached file, for JobService's duplicate check
         if config_extra:
             params["config_overrides"] = {**dict(config_extra), **dict(params.get("config_overrides") or {})}
         # The job's DirectTextStream starts at the chat's next request number (the dialog's
@@ -444,13 +550,24 @@ class ChatRuns:
         title = str((self.store.session(cid) or {}).get("title") or "Chat")
         origin = {"type": "chat", "cid": cid, "label": f"Chat · {title}"}
         try:
-            job_id = await self.jobs.submit(DIRECT_TEXT_JOB_KIND, job_title(run, title), (run.source_path,), params, origin)
+            job_id, reused = await self._submit_job(DIRECT_TEXT_JOB_KIND, job_title(run, title), (run.source_path,),
+                                                    params, origin)
         except Exception as exc:
             with self._lock:
                 chat_run.finished = True
             self.store.set_running(cid, False)
             self._could_not_start(cid, exc)
             raise
+        if reused is not None:
+            # another surface queued this file's job while the run was prepared: nothing new runs
+            await self._drop_prepared(cid, chat_run, previous, remove_root=True)
+            self._refuse_reused(cid, reused)
+        if job_id is None:
+            # not queued (the app's preflight refused the run and said why): the chat must not keep a run
+            # without a job, which would hold its Send as Stop and bind every later send to it
+            await self._drop_prepared(cid, chat_run, previous, remove_root=True)
+            self._emit(cid)
+            return None
         with self._lock:
             chat_run.job_id = job_id
             chat_run.params = dict(params)
@@ -470,13 +587,25 @@ class ChatRuns:
         output_mode: str,
         settings: DirectTextSettings,
         overrides: Optional[Mapping[str, Any]] = None,
-    ) -> ChatRun:
+    ) -> Optional[ChatRun]:
         """"Generate from prompt (no input)" (UI_SPEC §2.6): record ``["user", prompt]`` and submit a
-        ``generate_media`` job (the desktop generative-only run, the composer text as the prompt)."""
+        ``generate_media`` job (the desktop generative-only run, the composer text as the prompt).
+        Hotfix 1 issue 5: this chat's live run is returned (None while its previous send prepares)."""
         cid = str(cid)
         prompt = str(prompt or "").strip()
         if not prompt:
             raise ValueError("Type a prompt in the composer first")
+        claimed = self._claim(cid, "")
+        if claimed is not True:
+            return claimed
+        try:
+            return await self._generate(cid, prompt=prompt, output_mode=output_mode, settings=settings,
+                                        overrides=overrides)
+        finally:
+            self._release(cid)
+
+    async def _generate(self, cid: str, *, prompt: str, output_mode: str, settings: DirectTextSettings,
+                        overrides: Optional[Mapping[str, Any]]) -> Optional[ChatRun]:
         user_index = self.store.record_user_turn(cid, user_turn(prompt, None, settings.attachment_prompt_role), prompt)
         self._emit(cid)
         try:
@@ -493,6 +622,7 @@ class ChatRuns:
                            committed_from=self._message_count(cid))
         chat_run.stream.provider = self._stream_provider(chat_run)
         with self._lock:
+            previous = self.runs.get(cid)
             self.runs[cid] = chat_run
             self.status.pop(cid, None)
         self.store.set_running(cid, True)
@@ -516,6 +646,10 @@ class ChatRuns:
             self.store.set_running(cid, False)
             self._could_not_start(cid, exc)
             raise
+        if job_id is None:  # not queued (the app's preflight said why): no run without a job
+            await self._drop_prepared(cid, chat_run, previous, remove_root=True)
+            self._emit(cid)
+            return None
         with self._lock:
             chat_run.job_id = job_id
             chat_run.params = dict(params)
@@ -526,6 +660,136 @@ class ChatRuns:
                 chat_run.state = "running" if same and state_name(snapshot) in RUNNING_STATES else "queued"
         self._emit(cid)
         return chat_run
+
+    # ---- job safety (hotfix 1 issue 5) ----------------------------------------------------------
+
+    def _claim(self, cid: str, target: str) -> Any:
+        """Before a send / resubmit records anything: True when this chat may start a run now (claimed until
+        ``_release``); else this chat's live run (a second Send / Start / Resume binds to it) or None (its
+        previous send is still preparing: a double tap). Raises ``JobAlreadyActive`` while another chat
+        prepares a send of the same file."""
+        key = target_key(target) if target else ""
+        with self._lock:
+            live = self.runs.get(cid)
+            if live is not None and live.live:
+                return live
+            if cid in self._starting:
+                return None
+            if key and any(other == key for other in self._starting.values()):
+                raise JobAlreadyActive(None, STARTING_ELSEWHERE.format(name=os.path.basename(target)))
+            self._starting[cid] = key
+        return True
+
+    def _release(self, cid: str) -> None:
+        with self._lock:
+            self._starting.pop(cid, None)
+
+    def _service(self) -> Any:
+        return getattr(self.jobs, "jobs", None)
+
+    @staticmethod
+    def _own(cid: str, snapshot: Any) -> bool:
+        """``snapshot`` is a job of this chat (a chat job kind with its ``params["chat_id"]``)."""
+        return job_kind(snapshot) in CHAT_JOB_KINDS and chat_id_of(snapshot) == str(cid)
+
+    def _active_job_for(self, kind: str, inputs: tuple, params: Mapping[str, Any]) -> Any:
+        """``JobService.active_job_for`` the job these parts make (None when the service cannot tell)."""
+        service = self._service()
+        finder = getattr(service, "active_job_for", None) if service is not None else None
+        if not callable(finder):
+            return None
+        try:
+            return finder(self.jobs.build_spec(kind, "", tuple(inputs), dict(params), {}))
+        except Exception:
+            log.debug("the active-job check failed", exc_info=True)
+            return None
+
+    async def _submit_job(self, kind: str, title: str, inputs: tuple, params: Mapping[str, Any],
+                          origin: Mapping[str, Any]) -> tuple:
+        """``(job id or None, the reused job's snapshot or None)``. The adapter's submit - the app's Send /
+        Start path (``JobsFeature.submit``: the model preflight, the background preparation on the user's
+        tap, then ``JobService.submit``) - and whether JobService answered with an active job that is not
+        this submission (it reuses one that already does the same work, also one queued while the
+        preparation awaited a permission dialog): the job's spec is not the one sent."""
+        job_id = await self.jobs.submit(kind, title, inputs, params, origin)
+        snapshot_of = getattr(self.jobs, "snapshot_of", None)
+        build_spec = getattr(self.jobs, "build_spec", None)
+        if job_id is None or not callable(snapshot_of) or not callable(build_spec):
+            return job_id, None  # (a jobs object without per-job lookups cannot tell)
+        snapshot = snapshot_of(job_id)
+        spec = getattr(snapshot, "spec", None)
+        try:
+            ours = build_spec(kind, title, tuple(inputs), dict(params), dict(origin))
+            same = spec is None or not hasattr(ours, "to_dict") or spec.to_dict() == ours.to_dict()
+        except Exception:
+            same = True
+        return job_id, (None if same else snapshot)
+
+    def _resume_job(self, job_id: Any, params: Mapping[str, Any]) -> tuple:
+        """``(job id or None, the reused job's snapshot or None)``: ``JobService.resume_job`` when the service
+        has it, else the adapter's resume."""
+        service = self._service()
+        resume_job = getattr(service, "resume_job", None) if service is not None else None
+        if not callable(resume_job):
+            return self.jobs.resume(job_id, params=params), None
+        try:
+            result = resume_job(str(job_id), params=dict(params))
+        except Exception:
+            log.exception("resuming job %s failed", job_id)
+            return None, None
+        if result is None:
+            return None, None
+        return result.job_id, (result.snapshot if result.reused else None)
+
+    def _service_refining(self, job_id: Any) -> bool:
+        """JobService says the job's gate glossary is being refined (``JobService.is_refining``)."""
+        service = self._service()
+        check = getattr(service, "is_refining", None) if service is not None else None
+        if job_id is None or not callable(check):
+            return False
+        try:
+            return bool(check(job_id))
+        except Exception:
+            return False
+
+    def _bind(self, cid: str, snapshot: Any) -> Optional[ChatRun]:
+        """This chat's active job: the chat's run follows it (re-attached when the chat did not track it)."""
+        self.on_snapshot(snapshot)
+        return self.live_run(cid)
+
+    def _bind_or_refuse(self, cid: str, snapshot: Any) -> Optional[ChatRun]:
+        if self._own(cid, snapshot):
+            return self._bind(cid, snapshot)
+        raise JobAlreadyActive(snapshot)
+
+    async def _drop_prepared(self, cid: str, chat_run: ChatRun, previous: Optional[ChatRun], *,
+                             remove_root: bool) -> None:
+        """Nothing new was queued for ``chat_run``: the chat keeps its previous run; a send's fresh run root
+        goes away (a resubmit's is the stopped run's own and stays)."""
+        with self._lock:
+            chat_run.finished = True
+            chat_run.state = "stopped"
+            if self.runs.get(cid) is chat_run:
+                if previous is not None:
+                    self.runs[cid] = previous
+                else:
+                    self.runs.pop(cid, None)
+        self.store.set_running(cid, False)
+        root = str(chat_run.run.temp_root or "") if remove_root else ""
+        if root and os.path.isdir(root):
+            try:
+                await self._io(shutil.rmtree, root, True)
+            except Exception:
+                log.debug("removing the unused run root failed", exc_info=True)
+
+    def _refuse_reused(self, cid: str, snapshot: Any) -> None:
+        """A submission JobService answered with an active job: this chat's job is followed, the turn gets the
+        "could not be started" card saying where the book runs, and ``JobAlreadyActive`` is raised."""
+        if self._own(cid, snapshot):
+            self._bind(cid, snapshot)
+        exc = JobAlreadyActive(snapshot)
+        self._could_not_start(cid, exc)
+        raise exc
 
     def _store_for(self, cid: Any) -> Any:
         """The shared ChatStore that owns chat ``cid`` (a scratch chat has its own)."""
@@ -616,6 +880,7 @@ class ChatRuns:
                 run.title = str(getattr(spec, "title", "") or "")
             run.last_snapshot = snapshot
             run.job_state = state
+            run.refining = bool(getattr(snapshot, "refining", False))
             question = question_of(snapshot)
             new_question = question is not None and (run.question or {}).get("id") != question.get("id")
             run.question = question
@@ -758,15 +1023,19 @@ class ChatRuns:
                 return snap
         return None
 
-    def _last_job(self, cid: str) -> tuple:
+    def _last_job(self, cid: str, user_index: Optional[int] = None) -> tuple:
         """(params, title, interrupted job id, kind) of the chat's last chat job: this session's
         run, else the newest JobService entry (the id is set when that entry is an unresolved
-        Interrupted job, which Resume must resolve)."""
+        Interrupted job, which Resume must resolve). ``user_index``: the newest job of that turn
+        instead of the chat's last one."""
         run = self.run_for(cid)
-        if run is not None and run.params:
+        if run is not None and run.params and (user_index is None or self.turn_index(cid, run) == user_index):
             return dict(run.params), run.title, None, run.kind
+        resolve = self._turn_resolver(cid) if user_index is not None else None
         for snap, interrupted in self._chat_jobs(cid):
             spec = getattr(snap, "spec", None)
+            if resolve is not None and resolve(getattr(spec, "params", None) or {}, getattr(snap, "id", None)) != user_index:
+                continue
             pending = interrupted and getattr(snap, "resolution", None) is None
             return (dict(getattr(spec, "params", {}) or {}), str(getattr(spec, "title", "") or ""),
                     getattr(snap, "id", None) if pending else None, job_kind(snap) or DIRECT_TEXT_JOB_KIND)
@@ -850,9 +1119,13 @@ class ChatRuns:
                        run_config: Optional[Mapping[str, Any]] = None,
                        run_config_for: Optional[str] = None,
                        overrides: Optional[Mapping[str, Any]] = None,
-                       settings: Optional[DirectTextSettings] = None) -> Optional[ChatRun]:
+                       settings: Optional[DirectTextSettings] = None,
+                       user_index: Optional[int] = None) -> Optional[ChatRun]:
         """Resume / Retry failed: the same JobSpec params (same run root), so the pipeline continues
         from its ``translation_progress.json`` and only redoes missing or failed chapters.
+
+        ``user_index``: the turn whose newest job to resume (a Result card's own turn, hotfix 1 #4); None
+        resumes the chat's last job.
 
         Four params follow the chat as it is now: the turn's index (``user_index``), the chat's next
         request number (``request_number``, as a new Send would get: the resumed run's cards do not
@@ -874,11 +1147,30 @@ class ChatRuns:
         ``overrides`` / ``settings`` (the Result card's chips: ``ChatView.run_overrides`` / ``settings`` now):
         the run's profile, target language and glossary prompts follow the chat's overrides now
         (``run_request.with_chat_overrides``) and its glossary the chat's policy now
-        (``run_request.with_current_glossary``), like the model; None keeps the Send-time values."""
+        (``run_request.with_current_glossary``), like the model; None keeps the Send-time values.
+
+        Hotfix 1 issue 5: Resume while the chat's run is live returns that run (None while a send of the chat
+        still prepares); a run whose book an active job of this chat already runs (resumed from the Jobs page)
+        binds to that job, one another chat or the Library runs raises ``JobAlreadyActive`` - nothing new is
+        queued either way."""
         cid = str(cid)
-        if self.live_run(cid) is not None:
-            return None
-        params, title, interrupted_id, kind = self._last_job(cid)
+        claimed = self._claim(cid, "")
+        if claimed is not True:
+            return claimed
+        self.take_refused(cid)  # a refusal of an earlier submit is not this one's
+        try:
+            return await self._resubmit(cid, profile_check=profile_check, run_config=run_config,
+                                        run_config_for=run_config_for, overrides=overrides, settings=settings,
+                                        user_index=user_index)
+        finally:
+            self._release(cid)
+
+    async def _resubmit(self, cid: str, *, profile_check: Optional[Callable[[str], Optional[str]]],
+                        run_config: Optional[Mapping[str, Any]], run_config_for: Optional[str],
+                        overrides: Optional[Mapping[str, Any]],
+                        settings: Optional[DirectTextSettings],
+                        user_index: Optional[int] = None) -> Optional[ChatRun]:
+        params, title, interrupted_id, kind = self._last_job(cid, user_index)
         run_dict = params.get("run") if isinstance(params, Mapping) else None
         if not isinstance(run_dict, Mapping):
             return None
@@ -899,6 +1191,11 @@ class ChatRuns:
         params = self.with_current_model(cid, params)
         params = _rechecked_profile(params, profile_check)
         resumed = DirectTextRun.from_dict(run_dict)
+        inputs = () if kind == GENERATE_MEDIA_JOB_KIND else (resumed.source_path,)
+        # the run's book may be running already (the Jobs page's Resume, a Library run, another chat)
+        active = self._active_job_for(kind, inputs, params)
+        if active is not None:
+            return self._bind_or_refuse(cid, active)
         chat_run = ChatRun(
             cid=cid, run=resumed, user_index=user_index,
             stream=RunStream(),
@@ -907,15 +1204,28 @@ class ChatRuns:
         )
         chat_run.stream.provider = self._stream_provider(chat_run)
         with self._lock:
+            previous = self.runs.get(cid)
             self.runs[cid] = chat_run
             self.status.pop(cid, None)
         self.store.set_running(cid, True)
-        job_id = self.jobs.resume(interrupted_id, params=params) if interrupted_id else None
-        if not job_id:
-            session_title = str((self.store.session(cid) or {}).get("title") or "Chat")
-            inputs = () if kind == GENERATE_MEDIA_JOB_KIND else (resumed.source_path,)
-            job_id = await self.jobs.submit(kind, chat_run.title, inputs, params,
-                                            {"type": "chat", "cid": cid, "label": f"Chat · {session_title}"})
+        try:
+            job_id, reused = self._resume_job(interrupted_id, params) if interrupted_id else (None, None)
+            if not job_id:
+                session_title = str((self.store.session(cid) or {}).get("title") or "Chat")
+                job_id, reused = await self._submit_job(kind, chat_run.title, inputs, params,
+                                                        {"type": "chat", "cid": cid, "label": f"Chat · {session_title}"})
+        except Exception:
+            await self._drop_prepared(cid, chat_run, previous, remove_root=False)
+            raise
+        if reused is not None:
+            # an active job already runs this book: nothing new was queued (the run root is the stopped run's)
+            await self._drop_prepared(cid, chat_run, previous, remove_root=False)
+            return self._bind_or_refuse(cid, reused)
+        if not job_id:  # not queued (the app's preflight said why): the stopped run stays as it was
+            await self._drop_prepared(cid, chat_run, previous, remove_root=False)
+            self._mark_refused(cid)
+            self._emit(cid)
+            return None
         with self._lock:
             chat_run.job_id = job_id
             if chat_run.state == "preparing":
@@ -985,12 +1295,21 @@ class ChatRuns:
         return committed
 
     def answer_glossary(self, cid: Any, accepted: bool) -> bool:
-        """✓ Yes / ■ No on the approval card (desktop ``_resolve_glossary_approval``)."""
+        """✓ Yes / ■ No on the approval card (desktop ``_resolve_glossary_approval``).
+
+        Hotfix 1 issue 2: refused (False, nothing changes) while the gate's glossary is being refined - the
+        refinement is for this translation, which must not start before it ended; JobService refuses the
+        answer too (``JobService.answer``), also when the refinement started a moment ago."""
         run = self.live_run(cid)
-        if run is None or not run.awaiting_glossary:
+        if run is None or not run.awaiting_glossary or run.refining:
             return False
         question = run.question or {}
         ok = self.jobs.answer(question.get("id"), bool(accepted))
+        if not ok and self._service_refining(run.job_id):
+            with self._lock:
+                run.refining = True
+            self._emit(run.cid)
+            return False
         with self._lock:
             run.question = None
             run.status = STATUS["starting"] if accepted else STATUS["stopping"]
@@ -1075,9 +1394,13 @@ class ChatRuns:
             return STATUS["stopped"] if cancelled else STATUS["ready"]
         model = run.stream.model()
         # Keep the run root of a stopped / failed run so Resume continues from its progress file.
-        cleanup = state == "DONE" and not run.stop_requested
+        done = state == "DONE" and not run.stop_requested
+        # Hotfix 1: also the run root of a run that ended with failed chapters ("Finished with issues"): its Retry
+        # failed continues from that progress file and sends only the failed chapters, never the whole book again.
+        final = snapshot if snapshot is not None else run.last_snapshot
+        cleanup = done and not progress_counts(final)["failed"]
         run_state = self.finish_run_state(run, snapshot)
-        if not cleanup and not _streamed_text(model, run_state):
+        if not done and not _streamed_text(model, run_state):
             # A failed / stopped run with no reply: its output file still holds the untranslated input
             # (the text pipeline writes the source for an unfinished chunk), which the card showed as the
             # answer. Not read: the card says no output was produced; the run root stays for Resume.

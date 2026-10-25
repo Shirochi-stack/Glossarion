@@ -28,7 +28,7 @@ from glossarion_mobile.ui.components.action_sheet import ActionItem, ActionSheet
 from glossarion_mobile.ui.components.empty_state import EmptyState
 from glossarion_mobile.ui.components.error_card import ErrorCard
 from glossarion_mobile.ui.components.skeleton import Skeleton
-from glossarion_mobile.ui.glossary.common import ago, kind_icon, kind_label
+from glossarion_mobile.ui.glossary.common import ago, kind_icon, kind_label, quiet
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.screens.base import Screen
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
@@ -88,9 +88,9 @@ class GlossariesScreen(Screen):
         ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER, key="gh-loaded")
         self._render_loaded()
         self.search = ft.TextField(hint_text="Filter glossaries…", prefix_icon=ft.Icons.SEARCH, dense=True,
-                                   on_change=lambda e: self._on_search(), key="gh-search")
+                                   on_change=quiet(self._on_search), key="gh-search")
         self.kind_buttons = ft.SegmentedButton(
-            selected=[self.kind], show_selected_icon=False, on_change=self._on_kind, key="gh-kind",
+            selected=[self.kind], show_selected_icon=False, on_change=quiet(self._on_kind), key="gh-kind",
             segments=[ft.Segment(value=k, label=ft.Text(label)) for k, label in KIND_FILTERS])
         self.count_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_MEDIUM, key="gh-count")
         self.loading = ft.ProgressBar(visible=True, key="gh-loading")

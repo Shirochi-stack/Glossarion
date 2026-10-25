@@ -15,6 +15,10 @@ mounted, sized and painted, but shows at most one pixel, at 1 % opacity. The ent
 pointer input and is excluded from the accessibility tree. Every entry has its own key (a
 Flet 1.0.3 control re-rendered under an old key keeps its old state).
 
+Flutter builds an entry added while the app is hidden only once the app shows again (no
+frames in the background), so the WebViewBridge keeps used entries mounted while jobs run and
+hands them to the next page (:meth:`HiddenWebViewHost.resize` gives one another page size).
+
 All methods run on the Flet loop thread (the WebViewBridge posts them there).
 """
 
@@ -68,6 +72,20 @@ class HiddenWebViewHost:
         self.page.overlay.append(entry)
         self._update()
         return entry
+
+    def resize(self, entry: Optional[ft.Control], size: Tuple[int, int]) -> bool:
+        """Lay ``entry``'s control out at ``size`` (a parked WebView taken by a page of another
+        viewport); False when it already has that size or is not one of these entries."""
+        try:
+            frame = entry.content.content.controls[0]
+        except (AttributeError, IndexError, TypeError):
+            return False
+        width, height = (max(1, int(size[0])), max(1, int(size[1])))
+        if (frame.width, frame.height) == (width, height):
+            return False
+        frame.width, frame.height = width, height
+        self._update()
+        return True
 
     def remove(self, entry: Optional[ft.Control]) -> bool:
         """Unmount an entry (disposes its WebView); False when it was not mounted."""
