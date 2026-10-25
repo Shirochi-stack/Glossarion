@@ -893,7 +893,7 @@ class WebViewBridge:
                 since = time.monotonic() if since is None else since
                 if time.monotonic() - since >= PARK_WAIT:
                     return
-            elif not told:
+            elif not parking and not told:  # a WebView being parked is built: wait for it quietly
                 told = True
                 with self._lock:
                     self.hidden_waits += 1
