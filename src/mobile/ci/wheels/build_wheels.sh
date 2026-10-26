@@ -89,6 +89,7 @@ echo "::group::cargo on forge's PATH"
 # (macos-26 images from 2026-10: $(brew --prefix rustup)/bin), so its proxies go into ~/.cargo/bin;
 # a rustup proxy picks the tool by its own name, so links work.
 forge_path="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+echo "cargo: $(command -v cargo || echo none) (PATH), $(PATH="$forge_path" command -v cargo || echo none) (forge's PATH)"
 if ! PATH="$forge_path" command -v cargo > /dev/null; then
   cargo="$(command -v cargo)" || die "no cargo on PATH (install the Rust toolchain first)"
   mkdir -p "$HOME/.cargo/bin"
