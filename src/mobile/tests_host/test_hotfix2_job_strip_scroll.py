@@ -474,6 +474,16 @@ class Harness:
         await self.steps.run(lambda host: (host.emit("progress", total=107, completed=18, in_progress=1, failed=0),
                                            host.emit("api_state", in_flight=1, queued=0)))
         await self.tick()
+        # Hotfix 4: the job's start flips the root View's back handling once (AppShell._on_jobs_changed,
+        # a whole-View update). That is the job starting, not a strip tick: let it land before the
+        # ticks are measured (a fast runner delivered the Jobs badge inside the first tick).
+        shell = self.app.shell
+        keeps = getattr(shell, "_keeps_running", None)
+        for _ in range(50):
+            if keeps is None or (keeps() and shell._kept):
+                break
+            await self.tick()
+        self.settled_back = keeps is None or (keeps() and shell._kept)
 
     async def tick(self) -> list:
         """One dispatcher tick; returns the messages it sent."""
@@ -590,6 +600,7 @@ def test_strip_ticks_patch_only_the_strip_and_never_move_the_page(app_env, tmp_p
         h = Harness(tmp_path)
         try:
             await h.start()
+            assert h.settled_back, "the running job never reached the root View's back handling"
             # chat home: the chat column's strip shows the job (not this chat's), above the composer
             assert h.app.chat_view.job_strip.visible
             for second in range(10, 13):
