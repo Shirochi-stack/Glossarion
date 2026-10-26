@@ -49,6 +49,7 @@ from typing import Any, Mapping, Optional
 
 from glossarion_mobile.services.jobs import AUTO_ACCEPT_GLOSSARY_PARAM
 from glossarion_mobile.ui.chat.direct_text_rules import (
+    FORCE_MULTIPASS_OFF,
     MOBILE_EXTRA_ATTACHMENT_EXTENSIONS,
     DirectTextSettings,
     ManualGlossarySource,
@@ -194,12 +195,14 @@ def prepare_direct_text_run(
 
 
 def run_options_dict(run: DirectTextRun, settings: DirectTextSettings) -> dict:
-    """``DirectTextRunOptions`` fields exactly as ``_start_translation`` passes them."""
+    """``DirectTextRunOptions`` fields exactly as ``_start_translation`` passes them, except Multipass:
+    never forced off on mobile, the run follows the Multipass setting (``FORCE_MULTIPASS_OFF``; the dialog
+    passes its "Force Multipass off" checkbox, which mobile does not have)."""
     return {
         "selected_files": [run.source_path],
         "force_stream_all": True,
         "archive_conversion_dir": os.path.join(run.temp_root, "_archive_input"),
-        "force_multipass_off": bool(settings.force_multipass_off),
+        "force_multipass_off": FORCE_MULTIPASS_OFF,
         "force_no_glossary": bool(
             force_no_glossary_for_mode(settings.glossary_override_mode, run.is_attachment)
             and not run.manual_glossary_path
@@ -296,8 +299,11 @@ def with_current_glossary(options: Optional[Mapping[str, Any]], run: DirectTextR
                           settings: DirectTextSettings) -> dict:
     """A resubmitted job's run options with the glossary the chat would send with now (``run_options_dict``):
     the run's own manual glossary only while the chat's policy is still Manual, ``force_no_glossary`` from
-    the chat's policy now. Everything else stays as the job ran with."""
+    the chat's policy now. Multipass follows the setting as at a Send (``FORCE_MULTIPASS_OFF``), also for a
+    run an older build sent with "Force Multipass off". Everything else stays as the job ran with."""
     out = dict(options or {})
+    if "force_multipass_off" in out:  # every Send's options carry it (run_options_dict), an older build's too
+        out["force_multipass_off"] = FORCE_MULTIPASS_OFF
     manual = run.manual_glossary_path if settings.glossary_override_mode == "manual" else ""
     out["manual_glossary_path"] = manual
     out["force_no_glossary"] = bool(force_no_glossary_for_mode(settings.glossary_override_mode, run.is_attachment)

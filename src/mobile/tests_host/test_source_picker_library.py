@@ -8,7 +8,8 @@ SegmentedButton), the Library's "Filter title or tag…" search (shared ``book_m
 newest first (the Library's Date sort through ``visible_books`` + ``LibraryService.sort_books``),
 the Library's own list rows (``card_model_for`` + ``BookListRow(show_more=False)``, covers through
 ``CoverQueue``) and one tap that hands the book to the chat. Tools pickers keep the defaults: the
-four segments, plain rows in snapshot order, and ``library_targets`` output unchanged.
+default segments (hotfix 2: Recent outputs · Books · Browse), plain rows in snapshot order, and
+``library_targets`` output unchanged.
 
 A real ``LibraryService`` over a fake ``library_core`` that carries the REAL shared
 ``sort_books`` / ``book_matches_query`` (no scan: the snapshot is set directly) and a fake
@@ -249,8 +250,10 @@ def test_unresolved_rows_keep_distinct_keys_and_the_default_output_is_unchanged(
     assert tg.target_key(tg.ToolTarget("x", extra={"book": {"path": lib.gamma["path"]}})) == \
         "path:" + os.path.normcase(os.path.abspath(lib.gamma["path"]))
     assert tg.target_key(tg.ToolTarget("x")) == "src:" + os.path.normcase(os.path.abspath(""))
-    # Recent outputs (folders only) never see them
-    assert [t.title for t in tg.recent_output_targets(service, library_rows=full)] == ["Alpha Novel"]
+    # Recent outputs (folders only) never see them; both workspaces are there (hotfix 2: a Completed book's
+    # workspace too - a translation that just finished is on the Completed shelf)
+    assert sorted(t.title for t in tg.recent_output_targets(service, library_rows=full)) == ["Alpha Novel",
+                                                                                              "Beta Saga"]
 
 
 def test_the_sort_adapter_takes_reverse_by_keyword(tmp_path):
@@ -480,10 +483,14 @@ def test_tools_picker_defaults_are_unchanged(tmp_path):
         page.update()
         assert picker.segment_row.visible and [s.value for s in picker.segmented.segments] == [v for v, _l in SEGMENTS]
         assert picker.search_field is None and picker.header_button is None and picker.book_cards == {}
-        # plain rows in snapshot order (In progress, then Completed); unresolved rows stay out
+        # plain rows in snapshot order (In progress, then Completed); unresolved rows stay out. Hotfix 2: the
+        # Library books are on the merged Books segment (``segment="library"`` opens it) and Recent outputs
+        # lists every workspace, Completed ones too
+        assert picker.segment == "books" and SEGMENTS == (("recent", "Recent outputs"), ("books", "Books"),
+                                                           ("browse", "Browse"))
         assert [c.key for c in picker.list_view.controls] == [f"pick-{t.key}" for t in tg.library_targets(lib.service)]
-        assert [t.title for t in picker.rows["library"]] == ["Alpha Novel", "Beta Saga"]
-        assert [t.title for t in picker.rows["recent"]] == ["Alpha Novel"]
+        assert [t.title for t in picker.rows["books"]] == ["Alpha Novel", "Beta Saga"] and picker.rows["library"] == []
+        assert sorted(t.title for t in picker.rows["recent"]) == ["Alpha Novel", "Beta Saga"]
         assert picker.status.value == "2 items"
         assert len(checked) == len(set(checked)) == 2  # once per row, in gather
         picker.set_segment("recent")

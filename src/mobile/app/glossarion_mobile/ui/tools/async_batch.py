@@ -5,7 +5,7 @@
 * **Configuration**: "Wait for completion" (``async_wait_for_completion``) and "Poll interval
   (seconds)" (``async_poll_interval``, 10-600), saved like the dialog saves them; the note
   "Async processing will skip chapters that require chunking".
-* **Source**: the SourcePicker (a Library book's raw file, Browse); "Start Async Processing"
+* **Source**: the SourcePicker (a Library or chat book's raw file, Browse); "Start Async Processing"
   and "Estimate Cost Only" run ``async_batch`` jobs (``job_kinds.async_batch``: the dialog's
   own handlers through ``async_batch_core.HeadlessAsyncBatch``). The dialog's questions come
   back from the job (``JobService.on_question``, kind ``async_batch_question``) and are asked
@@ -339,11 +339,10 @@ class AsyncBatchScreen(Screen):
     def open_picker(self) -> SourcePicker:
         picker = SourcePicker(self.ctx, title="Create batch from…", multi=False,
                               eligible=lambda t: None if t.source else "No raw source file",
-                              on_done=self.set_target, segment="library", find_folder=True)
+                              on_done=self.set_target, segment="books", find_folder=True)
         self.picker = picker
         if self.ctx.page is not None:
-            picker.show(self.ctx.page)
-            self.ctx.spawn(picker.load())
+            picker.show(self.ctx.page)  # show() loads the rows (a second load listed and resolved them twice)
         return picker
 
     def set_target(self, targets: Sequence[tg.ToolTarget]) -> None:

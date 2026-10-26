@@ -180,9 +180,9 @@ libmtmd (the image encoder of vision models).
     (verified upstream on Adreno 830 / Snapdragon 8 Elite, Adreno 7xx too; A6xx and older are likely
     refused or slow): Mali, Xclipse (Exynos) and Tensor GPUs are dropped by the backend and the card says
     "no supported GPU". Its fast kernels are for Q4_0 (Q6_K runs unoptimized, other K-quants can be
-    slower than the CPU), so with the GPU on, "Add GPU-friendly presets (Q4_0)" appends
+    slower than the CPU), so switching the GPU on appends
     `presets.GPU_PRESETS` (unsloth's `Qwen3.5-{0.8B,2B,4B,9B}-Q4_0.gguf`: 507 MB / 1215 MB / 2583 MB /
-    5379 MB). Those files keep a few tensors (e.g. the output) in higher quants, which run unoptimized.
+    5379 MB; "Add GPU-friendly presets (Q4_0)" re-adds any that are missing). Those files keep a few tensors (e.g. the output) in higher quants, which run unoptimized.
     Vulkan is not built (often slower than the CPU on Adreno). x86_64 has no GPU backend. Size:
     `libggml-opencl.so` is 2.0 MB (stripped, kernels embedded), so the arm64 APK grows by about 2 MB.
   - iOS: `GGML_METAL=ON` + `GGML_METAL_EMBED_LIBRARY=ON` (the shader source is embedded and compiled on

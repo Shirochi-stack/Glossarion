@@ -34,7 +34,10 @@ translated name and gender) and sets its Request size (``ON_DEVICE_SETTINGS``: t
 size 1, output limit half the context, input token limit the whole context); choosing a model
 that is not ``local/`` again restores everything that was there before, where it still holds the
 On-device value (a value or profile the user changed meanwhile stays) and the defaults where nothing was
-saved (``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``).
+saved (``ON_DEVICE_PROFILE``, ``ON_DEVICE_BEFORE_KEY``). The Auto glossary mode is the exception (owner,
+mobile hotfix 3): when no mode was saved before the on-device model, or the saved one was No glossary
+itself, the cloud model gets Balanced back (``GLOSSARY_MODE_AFTER_ON_DEVICE``, the Welcome's default),
+written the way the glossary-mode selector writes it, instead of the unset key's "Off".
 
 Every global writer on mobile (Settings tiles, ModelSheet / Plan chips, Chat settings › All chats,
 the Welcome flow) goes through ``write_setting`` / ``write_settings``, which run the shared rules
@@ -156,6 +159,13 @@ OUTPUT_LIMIT_KEY = "max_output_tokens"
 #: Auto glossary on an on-device model (owner 2026-10-19): NO GLOSSARY (the Welcome card's writes,
 #: ``welcome_flow.welcome_glossary_updates("no_glossary")``), except the 9B model, which can extract one
 ON_DEVICE_GLOSSARY_SETTINGS = {"auto_glossary_mode": "no_glossary", "enable_auto_glossary": False}
+GLOSSARY_MODE_KEY = "auto_glossary_mode"
+#: The Auto glossary mode a model that is not ``local/`` gets back from an on-device model that set NO GLOSSARY
+#: when no mode was saved before it (an unset key runs as "Off": ``run_env._current_auto_glossary_mode``) or
+#: the saved one was No glossary itself (owner, mobile hotfix 3: "instead of balanced glossary"): Balanced,
+#: the desktop Welcome's default (``welcome_flow.DEFAULT_GLOSSARY_MODE``; a literal: this module loads
+#: before the UI), written through the glossary-mode selector's rules (its enable / append / auto-map flags).
+GLOSSARY_MODE_AFTER_ON_DEVICE = "balanced"
 #: the input token limit (off unless enabled, ``token_limit_disabled``): the model's whole context
 INPUT_LIMIT_KEY = "token_limit"
 DESCRIPTION_REMOVED_KEY = "custom_field_description_removed"
@@ -700,11 +710,12 @@ def _use_on_device_profiles(store: Any, model: Any = None) -> list:
         applied[INPUT_LIMIT_KEY] = int(context)
     if not is_large_on_device_model(model):
         applied.update(ON_DEVICE_GLOSSARY_SETTINGS)
-    if isinstance(record.get("settings"), Mapping):  # already On-device: keep what was remembered then
-        before["settings"] = dict(record["settings"])
-    else:
-        before["settings"] = {}
-        for key in applied:
+    remembered_settings = record.get("settings") if isinstance(record.get("settings"), Mapping) else {}
+    # already On-device (a record no cloud model restored): keep what was remembered then; a key that entry
+    # did not set (the glossary mode when it was the 9B model) still holds the user's own value: remember it
+    before["settings"] = dict(remembered_settings)
+    for key in applied:
+        if key not in remembered_settings:
             present, value = _stored_value(store, key)
             before["settings"][key] = [bool(present), value]
     before["applied"] = applied
@@ -748,7 +759,14 @@ def _restore_profiles_before_on_device(store: Any) -> list:
                                          DESCRIPTION_REMOVED_KEY: bool(previous.get(DESCRIPTION_REMOVED_KEY))})
         else:
             changed += _unset(store, CUSTOM_FIELDS_KEY) + _unset(store, DESCRIPTION_REMOVED_KEY)
+    glossary_mode = _glossary_mode_after_on_device(store, settings, applied)
+    _present, mode_now = _stored_value(store, GLOSSARY_MODE_KEY)
+    # the mode and its enable flag are one setting: Balanced below, or the mode the user picked meanwhile
+    # with the flag its selector wrote
+    keep_glossary = bool(glossary_mode) or (GLOSSARY_MODE_KEY in applied and mode_now != applied[GLOSSARY_MODE_KEY])
     for key, on_device_value in applied.items():
+        if keep_glossary and key in ON_DEVICE_GLOSSARY_SETTINGS:
+            continue
         _present, current = _stored_value(store, key)
         if current != on_device_value:  # changed meanwhile: the user's value stays
             continue
@@ -757,8 +775,28 @@ def _restore_profiles_before_on_device(store: Any) -> list:
             changed += _set_many(store, {key: previous[1]})
         else:  # nothing was saved before: the default again
             changed += _unset(store, key)
+    if glossary_mode:
+        changed += write_setting(store, GLOSSARY_MODE_KEY, glossary_mode)
     changed += _unset(store, ON_DEVICE_BEFORE_KEY)
     return changed
+
+
+def _glossary_mode_after_on_device(store: Any, settings: Mapping, applied: Mapping) -> Optional[str]:
+    """Leaving an on-device model that set NO GLOSSARY while that mode is still selected: Balanced
+    (``GLOSSARY_MODE_AFTER_ON_DEVICE``) when no mode was saved before it or the saved one was No glossary
+    itself; None when the saved mode comes back as it was, when a mode was picked meanwhile (it stays) or
+    when the on-device model never changed the mode (the 9B one)."""
+    on_device_mode = applied.get(GLOSSARY_MODE_KEY)
+    if on_device_mode is None:
+        return None
+    _present, current = _stored_value(store, GLOSSARY_MODE_KEY)
+    if current != on_device_mode:
+        return None
+    previous = settings.get(GLOSSARY_MODE_KEY)
+    saved = previous[1] if isinstance(previous, (list, tuple)) and len(previous) == 2 and previous[0] else None
+    if saved and str(saved) != str(on_device_mode):
+        return None
+    return GLOSSARY_MODE_AFTER_ON_DEVICE
 
 
 def _write_model(store: Any, value: Any) -> list:

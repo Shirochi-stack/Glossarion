@@ -3,10 +3,16 @@
 A target pairs a translation **output folder** with its **raw source** file (either may
 be missing). The rows come from the Library (``LibraryService`` snapshot: the shared
 ``library_core`` scan already resolved every book's output folder and raw source), from
-the Direct Text workspace folder (chat attachments) or from a file picked with Browse
+the Direct Text workspace folder (chat books: ``<chat>/Attachments/<book>``, their raw file
+found by the same shared resolvers, ``LibraryService.raw_source``: the translator's
+``source_epub.txt`` names the attached file) or from a file picked with Browse
 (its output folder found with the QA Scanner's own auto-search,
 ``qa_scan_runtime.automatic_qa_output_candidates``). Nothing here guesses a book's files
 itself: the paths are the shared resolvers' answers.
+
+The Tools pickers list one row per book (``merge_book_rows``: a Library book and a chat book
+with the same output folder or raw file are one row, ``found_in`` says where it was found) and
+the recently translated workspaces of both (``recent_output_targets``).
 
 Pure Python (no Flet); every function that touches the disk is called on the io pool.
 """
@@ -19,6 +25,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 __all__ = [
+    "ATTACHMENTS_DIR",
+    "CHAT_MESSAGES_DIR",
     "HTML_EXTENSIONS",
     "LIBRARY_SORT",
     "SOURCE_EXTENSIONS",
@@ -26,7 +34,10 @@ __all__ = [
     "chat_workspace_targets",
     "folder_has_html",
     "folder_has_scan_files",
+    "found_in",
+    "last_activity",
     "library_targets",
+    "merge_book_rows",
     "order_library_rows",
     "recent_output_targets",
     "target_for_book",
@@ -38,6 +49,11 @@ __all__ = [
 
 SOURCE_EXTENSIONS = (".epub", ".txt", ".pdf", ".md", ".html", ".htm", ".xhtml")
 HTML_EXTENSIONS = (".html", ".xhtml", ".htm")
+#: A chat's folders under ``<Output>/Direct Text/<chat>/`` (``direct_text_store``): the message bodies
+#: (``Chat Messages``: the chat's text replies, never a book) and the attached books' workspaces.
+CHAT_MESSAGES_DIR = "Chat Messages"
+ATTACHMENTS_DIR = "Attachments"
+PROGRESS_FILE = "translation_progress.json"
 #: The in-chat Library picker's order: the Library's Date sort, newest first
 #: (``library_core.sort_books`` SORT_DATE; owner decision 2026-10-08).
 LIBRARY_SORT = "date"
@@ -293,36 +309,151 @@ def order_library_rows(service: Any, rows: Sequence[ToolTarget], query: str = ""
     return out
 
 
-def recent_output_targets(service: Any, limit: int = 50, library_rows: Optional[Sequence[ToolTarget]] = None) -> list:
-    """Translation workspaces (the Library's In progress shelf), newest first.
+def found_in(target: ToolTarget) -> tuple:
+    """Where a row's book was found: ``("library",)``, ``("chat",)`` or both (``merge_book_rows``)."""
+    extra = target.extra if isinstance(target.extra, Mapping) else {}
+    found = tuple(extra.get("found_in") or ())
+    if found:
+        return found
+    return (target.origin,) if target.origin in ("library", "chat") else ()
+
+
+def merge_book_rows(library_rows: Sequence[ToolTarget], chat_rows: Sequence[ToolTarget] = ()) -> list:
+    """One row per book: the Library rows (in their order), then the chat books that are not one of them.
+
+    A chat book is the same book as a row before it when both have the same output folder (a Library
+    row whose workspace is the chat's) or the same raw file (the Library book the chat translated
+    again; the shared resolvers give both the same path). The earlier row stays and records the chat
+    in ``extra["found_in"]`` (``("library", "chat")``) and every workspace of the book in
+    ``extra["workspaces"]`` (``last_activity``); a Library row without a workspace takes the chat's.
+    Pure; the keys stay ``target_key`` (folder first), so Recent outputs and the Books segment name a
+    book alike."""
+    out: list = list(library_rows or ())
+    by_folder: dict = {}
+    by_source: dict = {}
+
+    def index(position: int) -> None:
+        row = out[position]
+        if row.folder:
+            by_folder.setdefault(_norm(row.folder), position)
+        if row.source:
+            by_source.setdefault(_norm(row.source), position)
+
+    for position in range(len(out)):
+        index(position)
+    for chat in chat_rows or ():
+        position = by_folder.get(_norm(chat.folder)) if chat.folder else None
+        if position is None and chat.source:
+            position = by_source.get(_norm(chat.source))
+        if position is None:
+            out.append(chat)
+            index(len(out) - 1)
+            continue
+        row = out[position]
+        found = found_in(row)
+        found = found + tuple(f for f in found_in(chat) if f not in found)
+        workspaces = _workspaces(row)
+        workspaces += tuple(w for w in _workspaces(chat) if _norm(w) not in {_norm(x) for x in workspaces})
+        changes: dict = {"extra": {**dict(row.extra or {}), "found_in": found, "workspaces": workspaces}}
+        if not row.folder and chat.folder:
+            changes.update(folder=chat.folder, kind=chat.kind or row.kind, direct_text=chat.direct_text)
+        if not row.source and chat.source:
+            changes["source"] = chat.source
+        out[position] = replace(row, **changes)
+        index(position)
+    return out
+
+
+def _workspaces(target: ToolTarget) -> tuple:
+    """Every output folder of the row's book (``merge_book_rows``), else its own folder."""
+    extra = target.extra if isinstance(target.extra, Mapping) else {}
+    found = tuple(str(w) for w in extra.get("workspaces") or () if w)
+    return found or ((target.folder,) if target.folder else ())
+
+
+def last_activity(target: ToolTarget) -> float:
+    """When the row's book was last translated into: the newest ``translation_progress.json`` (written on
+    every chapter) of its workspaces (``merge_book_rows``: a Library book the chat translated again),
+    else the folder, else the row's own time."""
+    times: list = []
+    for folder in _workspaces(target):
+        for path in (os.path.join(folder, PROGRESS_FILE), folder):
+            try:
+                times.append(os.path.getmtime(path))
+                break
+            except OSError:
+                continue
+    return max(times) if times else float(target.mtime or 0.0)
+
+
+def _not_started(service: Any, target: ToolTarget) -> bool:
+    """A Library row whose card says "Not started" (the shared ``card_progress_view`` state the scan kept
+    in ``ScanSnapshot.views``): an import with an empty workspace, nothing translated yet."""
+    book = target.extra.get("book") if isinstance(target.extra, Mapping) else None
+    if not isinstance(book, Mapping) or service is None:
+        return False
+    view = None
+    views = getattr(getattr(service, "snapshot", None), "views", None)
+    if isinstance(views, Mapping) and views:
+        from glossarion_mobile.services.library import book_key
+
+        view = views.get(book_key(book))
+    if view is None and callable(getattr(service, "card_view", None)):
+        try:
+            view = service.card_view(book)
+        except Exception:
+            view = None
+    return isinstance(view, Mapping) and view.get("state") == "not_started"
+
+
+def recent_output_targets(service: Any, limit: int = 50, library_rows: Optional[Sequence[ToolTarget]] = None,
+                          chat_rows: Sequence[ToolTarget] = ()) -> list:
+    """The recently translated workspaces, newest first: every Library book with a workspace (In progress
+    and Completed - a book whose translation just finished is on the Completed shelf) and every chat book
+    (``chat_workspace_targets``), one row per book (``merge_book_rows``), ordered by ``last_activity``;
+    Library imports nobody translated yet ("Not started") stay out.
 
     ``library_rows`` (``library_targets(service)``) avoids resolving every book twice.
     """
-    snapshot = getattr(service, "snapshot", None)
-    rows: Sequence = ()
-    if snapshot is not None:
-        rows = tuple(getattr(snapshot, "in_progress", ()) or ())
+    if library_rows is None:
+        library_rows = library_targets(service)
     out: list = []
     seen: set = set()
-    if library_rows is not None:
-        wanted = {_norm(b.get("output_folder")) for b in rows if b.get("output_folder")}
-        for target in library_rows:
-            if target.folder and _norm(target.folder) in wanted and target.key not in seen:
-                seen.add(target.key)
-                out.append(replace(target, origin="recent"))
-    else:
-        for book in rows:
-            target = _book_target(service, book, "recent")
-            if target is None or not target.folder or target.key in seen:
-                continue
-            seen.add(target.key)
-            out.append(target)
+    for target in merge_book_rows(library_rows, chat_rows):
+        if not target.folder or target.key in seen or _not_started(service, target):
+            continue
+        seen.add(target.key)
+        out.append(replace(target, origin="recent", mtime=last_activity(target),
+                           extra={**dict(target.extra or {}), "found_in": found_in(target)}))
     out.sort(key=lambda t: t.mtime, reverse=True)
     return out[:limit]
 
 
-def chat_workspace_targets(chats_root: str, *, depth: int = 3, limit: int = 200) -> list:
-    """Folders under ``<Output>/Direct Text`` that hold a translation workspace."""
+def _workspace_source(service: Any, folder: str) -> str:
+    """The raw file of a chat book's workspace: ``LibraryService.raw_source`` over a workspace row (the
+    shared ``library_core`` resolvers: origins, the raw-inputs registry, Library/Raw, the translator's
+    ``source_epub.txt`` naming the attached file - what ``ChatFeature.open_reader`` asks too); '' when
+    nothing resolves or there is no service."""
+    raw_source = getattr(service, "raw_source", None) if service is not None else None
+    if not callable(raw_source):
+        return ""
+    name = os.path.basename(os.path.normpath(folder))
+    progress = os.path.join(folder, PROGRESS_FILE)
+    row = {"name": name, "folder_name": name, "path": folder, "output_folder": folder, "type": "in_progress",
+           "is_in_progress": True, "in_library": False, "progress_file": progress if os.path.isfile(progress) else ""}
+    try:
+        source = str(raw_source(row) or "")
+    except Exception:
+        return ""
+    return source if source and os.path.isfile(source) else ""
+
+
+def chat_workspace_targets(chats_root: str, *, depth: int = 3, limit: int = 200, service: Any = None) -> list:
+    """The chat books under ``<Output>/Direct Text``: the folders below a chat's own folder that hold a
+    translation workspace (``<chat>/Attachments/<book>``, the desktop's run-style attachment trees),
+    newest first. A chat's own folder (its ``Direct Text N`` replies) and its ``Chat Messages`` are the
+    chat's text messages, never a book. With ``service`` each row gets its raw file
+    (``_workspace_source``)."""
     out: list = []
     if not chats_root or not os.path.isdir(chats_root):
         return out
@@ -331,17 +462,20 @@ def chat_workspace_targets(chats_root: str, *, depth: int = 3, limit: int = 200)
         level = os.path.abspath(current).rstrip("/\\").count(os.sep) - root_depth
         if level >= depth:
             dirs[:] = []
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
-        if "translation_progress.json" in files or any(f.lower().endswith(HTML_EXTENSIONS) for f in files):
-            if os.path.abspath(current) == os.path.abspath(chats_root):
-                continue
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != CHAT_MESSAGES_DIR]
+        if level < 2 or os.path.basename(current) == ATTACHMENTS_DIR:
+            continue  # Direct Text itself, a chat's own folder, its Attachments folder
+        if PROGRESS_FILE in files or any(f.lower().endswith(HTML_EXTENSIONS) for f in files):
             try:
                 mtime = os.path.getmtime(current)
             except OSError:
                 mtime = 0.0
-            rel = os.path.relpath(current, chats_root)
-            out.append(ToolTarget(title=rel.replace(os.sep, " › "), folder=os.path.abspath(current),
-                                  origin="chat", mtime=mtime, kind=workspace_kind(current), direct_text=True))
+            folder = os.path.abspath(current)
+            source = _workspace_source(service, folder)
+            chat = os.path.relpath(current, chats_root).split(os.sep)[0]
+            out.append(ToolTarget(title=os.path.basename(folder), folder=folder, source=source, origin="chat",
+                                  mtime=mtime, kind=workspace_kind(current, source), direct_text=True,
+                                  extra={"found_in": ("chat",), "chat": chat}))
             dirs[:] = []
             if len(out) >= limit:
                 break

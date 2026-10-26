@@ -300,7 +300,10 @@ iOS uses the swipe-from-left-edge back gesture on pushed Views. On the chat root
 - **Request cards:** live per-API-request cards from the classified log stream (shared `direct_text_store` classifier), sorted by spine order.
 - **LogConsole:** filter chips All / Errors / Thinking / API; search; follow toggle; Copy; Share log. Lines are selectable text in the mono family at the log size (§6.2, 8/11).
 - **Outputs** as `FileChip`s.
-- **Buttons:** Open origin, Stop, Resume.
+- **Buttons:** Open origin, Stop, Resume / Retry, Files, Progress, **Library** (hotfix 3 issue 2).
+  - **Library** (`job-library`) opens the Library Book page of the job's book, pushed over the Job page, so Back returns to it. A job started for a Library book (its origin `bid`: Library, Book page, Reader or Tools jobs of one book, a chat's "Save to: Library" run of an attached Library book) opens that book at once.
+  - A chat's own translation of a book attachment (the `direct_text` send, translated in the chat's Attachments folder) shows the button from the start. While it runs it is disabled with the chat card's reason "Added to the Library when the translation finishes" (`job-library-reason`), unless the attached file already is a Library book's raw. Once the run ended a tap looks the book up again (the chat moves it into the Library after the run: `ChatFeature.job_workspace` + `ChatFeature.library_book`); "This book is not in the Library yet" when it did not arrive.
+  - Any other job shows it only when its output folder is a Library book's workspace (a chat's "Save to: Library" run of a new file: its workspace is on the In progress shelf from the start, found while it runs; a Tools job over a Library book); typed-text chats and Tools jobs without a Library book have no Library button. A workspace the shelf lacks that changed after the Library's last scan (inside the Library's folders) makes one quiet rescan first (`ChatFeature.library_book`). Each job state starts one lookup; an answer from an earlier state is ignored and a tap waits for a lookup that is running.
 
 **Empty state.** 🗂 "No jobs yet" / "Translations, glossary extractions, scans and compiles you start appear here."
 
@@ -478,7 +481,6 @@ On iOS the same text goes to local notifications (action category Accept / Revie
    - **Option pills.** Shown only when they differ from the default. Tapping a `Chip` opens the related sheet; its trailing × (`on_delete`) resets it.
      - "Glossary: Manual" / "Glossary: Off" / "Glossary: Main";
      - "Thinking off";
-     - "Multipass on" (shown when "Force Multipass off" is *disabled* for this chat);
      - "→ Japanese" when the chat target differs from the global default;
      - "Model: once" while a one-shot model is armed.
      - At ≥ 160% text scale, the pills collapse into a single "Options (3)" chip that opens Chat settings.
@@ -1015,7 +1017,7 @@ Sections are `ExpansionTile`s. The labels are exact desktop labels.
 
    - "Always accept generated glossaries" (mobile; All chats → Prefs `chat_auto_accept_glossary`, This chat → sidecar `auto_accept_glossary`; never config.json; default off). Help: "Skip the Edit / Yes / No card; translation starts with the generated glossary. Desktop always asks." Not shown on the Series defaults sheet (§2.11).
 3. **Run behaviour:**
-   - "Force Multipass off" (`direct_text_force_multipass_off`, default from legacy `direct_text_force_simple_mode`)
+   - No "Force Multipass off" on mobile (hotfix 3; desktop `direct_text_force_multipass_off`): chat runs follow Settings › Translation defaults › Multipass (off by default); a value imported from desktop or stored by an older build is ignored.
    - "Disable all thinking" (`direct_text_disable_thinking`)
    - "Skip prompt profile" (`direct_text_skip_prompt_profile`)
    - "Attached-text prompt role" `SegmentedButton` User / System / Assistant (`direct_text_attachment_prompt_role`)
@@ -1513,7 +1515,8 @@ The job has origin = book. Progress shows on the Book page summary strip, the Jo
 - **Top bar** (translucent `surface` at 92%):
   - back, then the chapter title over the book title;
   - **`SegmentedButton` Original · Translated · Bilingual** ("Orig · Trans · Both" under 400 dp);
-  - search; ⋯ (Bookmarks, Open Book page, Lightweight reader, Share chapter).
+  - ⓘ **Book Details** (`reader-details`): the book's Book page (the desktop Book Details), pushed over the Reader so Back returns to the same page. The page is the Library row the Reader was opened on, else the row a file opened by path belongs to (its own file or workspace, compiled EPUB, a file in its workspace, its raw; `library.feature.library_book_for_path`), else an EPUB / TXT / workspace's own Book page. A Library never scanned is scanned quietly first. A single HTML / Markdown file keeps ⓘ visible but dimmed; the tap says why. A Book page already under the Reader is the one shown (§1.2). On a tablet the Reader closes first, so the Book page is not left behind it. Hotfix 3 issue 6: before it, the only route was ⋯ › "Open Book page", disabled for every book opened by path;
+  - search; ⋯ (Open Book Details, Bookmarks, Add bookmark here, Lightweight reader, Share chapter).
 - **Bottom bar:**
   - chapter `Slider` with haptic ticks, plus "Ch 12/48 · 43%" and "Page 3/9" in paged mode;
   - icons ◀ prev chapter · ☰ **Chapters** · **Aa** · 🌐 **Translate** · ▶ next chapter.
@@ -1653,7 +1656,11 @@ A `GridView` of 88 dp tool tiles (icon, name, last source), in groups:
 | Images | Manga translator |
 | Files | File browser · Text editor |
 
-Each tool picks its input through the **SourcePicker** sheet, with segments: Recent outputs · Library books · Chat workspaces · Browse.
+Each tool picks its input through the **SourcePicker** sheet, with segments: Recent outputs · Books · Browse (hotfix 2: Library books and chat workspaces are one list).
+
+- **Books:** the Library's books and the chat books (`Direct Text/<chat>/Attachments/<book>`) in one list, one row per book: a chat book with the same output folder or raw file as a Library book is that book's row (the Library's workspace). Each row says where it was found: "📚 Library", "💬 Chat" or "📚 Library · 💬 Chat". A chat book's raw file is the attached EPUB (the shared resolvers, `LibraryService.raw_source`: the translator's `source_epub.txt` names it), so it can be reviewed, batched, etc. like a Library book. A chat's own folder (its "Direct Text N" replies) and its `Chat Messages` folder are text messages, never books.
+- **Recent outputs:** the books translated into last, newest first: every Library workspace (In progress and Completed: a translation that just finished is on the Completed shelf) and every chat book, one row per book like Books (the newest `translation_progress.json` of any of the book's workspaces decides); Library imports nobody translated yet ("Not started") are not listed.
+- A tool that asks for the Library or the chat workspaces opens Books. The Library-only list stays available to the chat's ＋ › From Library (§2.5).
 
 ### 4.3 Progress manager (standalone; `/tools/progress?out=<oid>`)
 
@@ -1835,6 +1842,8 @@ Entry points: Tools, ＋ › Manga, and the "Translate as manga" quick chip when
     - **Models (presets):** editable Prefs data `local_model_presets` (defaults Garbage / Light / Medium / Heavy = unsloth Qwen3.5 0.8B / 2B / 4B / 9B Q4_K_M; the old Ollama presets migrate once with the user's names). ONE button per row: **Download** (one tap: Hugging Face file, resumable download with %, MB/s and ETA, load, use as the model) → progress with Pause and Cancel → **Resume** → **Use** → **In use**; a failure shows **Retry** and the reason. ⋮ Edit / rename, Remove preset, Delete file; Add preset (also the FAB) and Restore defaults.
     - **Add from Hugging Face:** a repo, `repo:quant`, file path or huggingface.co link; Q4_K_M is picked first (then Q4_K_S, Q4_0, IQ4_XS, Q5_K_M, Q8_0), else a file chooser; projectors (mmproj), imatrix files and split GGUFs are not offered. "Save as a preset" is on by default. Files over 1 GB ask first ("Download 5.7 GB from Hugging Face?"); free space is checked before every start or resume.
     - **Other downloads:** downloaded files no preset names (Use, Delete) and paused downloads (Resume, Cancel).
+    - **Use GPU (experimental)** (engine card, also on the Welcome page's "Run on this phone"; shown only where the build has a GPU backend; README "GPU"). With Android's OpenCL backend, switching it on adds the GPU-friendly Q4_0 presets the list lacks (`presets.GPU_PRESETS`) at once, with the note "Added N GPU-friendly presets (Q4_0)" (hotfix 3 issue 5: no extra tap; only on an off → on change, silent when none was missing, never past the 50-preset cap). "Add GPU-friendly presets (Q4_0)" stays as the fallback only while the GPU is on and one is missing (removed later, Restore defaults, switched on by an older build). Switching it off keeps every preset and file. iOS (Metal) runs the default K-quants: no Q4_0 presets.
+    - **On-device profiles:** choosing a `local/` model applies the On-device prompt profiles and Request size and, except for the 9B model, Auto glossary NO GLOSSARY; the values before are remembered (`profiles_before_on_device`). Choosing a model that is not `local/` again puts back what is still the On-device value. The Auto glossary mode (hotfix 3 issue 4): the saved mode comes back as it was; when none was saved before (fresh install, Welcome skipped or its NO GLOSSARY card) or the saved one was No glossary itself, it becomes **Balanced** (the Welcome's default, written like the Settings › Glossary mode selector); a mode picked while on the on-device model stays. Every global model switch (drawer ModelSheet, Chat settings › All chats, Model manager Use, Welcome, Series All chats) goes through `setting_writes.write_setting`.
     - Lifecycle: one model loaded at a time; it unloads after 10 minutes idle, at once when iOS hides the app, after 60 s in the background on Android (never while a job runs). A RAM check runs before every load (Android asks when free RAM is short and refuses above total RAM; iOS refuses above half of the RAM). A `local/` job runs with batch translation off and one extraction worker.
   - The ModelSheet's Local group ends with "Get on-device models…", which opens this tab.
 
@@ -2061,6 +2070,9 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 - **Dialogs and sheets** (`BottomSheet`, `AlertDialog`, `SnackBar`, `Banner`) open with `page.show_dialog(…)` and close with `components.dialogs.close_dialog(page, dialog)`.
   - Never close a known dialog with `page.pop_dialog()`. It closes the most recently opened dialog, which after a handler has shown a snackbar is the snackbar, not the sheet.
   - `BottomSheet(scrollable=True)` only lifts the 9/16 height cap; it never scrolls. A sheet whose content can outgrow a phone builds its body with `components.sheet` (a scrolling column, an optional pinned action row, the bottom system inset).
+  - Every sheet has the "Close Menu ✕" strip (`components.sheet.install_close_buttons`) and slides closed (hotfix 3 issue 1). ✕ closes through `close_dialog`: this sheet by identity, a keyed sheet that was shown again before its dismiss (Flet freezes it), the tablet SidePanel copy; it never raises (an exception in a handler shows Flet's crashed-session screen). Swipe-down: the `components.sheet.bottom_sheet` factory, `ActionSheet` and `InfoSheet` are `draggable`, and any other sheet becomes so when it opens; not full-screen sheets (editors: a stray swipe would discard typed text), sheets with an `InteractiveViewer` (pan / zoom) or a `WebView` (a web page gets only the drags no Flutter recognizer claims: the DeepSeek sign-in page could not scroll and a swipe closed it mid-login) or those that opt out with `sheet.no_drag_dismiss`. These keep ✕ and Back. Every draggable sheet draws the drag pill.
+  - A change of the top View first closes the sheets / dialogs the client may show on the old one and waits for one client frame (`components.dialogs.change_views`; `AppShell._install_views` and `push_overlay` go through it, and `install_close_buttons` installs the guard). Python cannot see whether the client built a dialog (it goes out at once, and the phone draws frames between any two messages; one shown and closed before the next frame was never built and never sends a dismiss), so every open dialog and every closed one whose close no frame ran yet is closed, and the change waits for a frame probe: an empty Column in `page.overlay` (built, like the dialogs, in the last View only) answers `invoke_method` only once a frame built it, and that frame also ran the dialogs' close. Then the new top View goes out in one message with the dialogs shown meanwhile (they open on it); `VIEWS_WAIT` (1.5 s) caps a lost answer. A closed dialog whose dismiss never comes leaves `page._dialogs` `VIEWS_WAIT` after that frame with its on_dismiss. A dialog shown right after a view change applied sends the new top View first. A change that takes the old top View off the page (Back, a pop) applies at once: the client removes the routes above a page with it. Why: Flet 1.0.3 builds the page's dialogs inside the last View only and a sheet keeps its modal route in widget State, so a sheet closed in the same burst as a screen opened (a menu row that navigates), or shown in the same handler pass as one, stayed under the new screen, came back on Back, and neither ✕ nor a swipe reached it, only Android back. Clients that do not report dismissals (host tests) change views at once.
+  - A `ConfirmDialog` whose action fails logs it and stays open with both buttons usable.
 - **Extensions.**
   - `flet_webview.WebView` raises outside Android, iOS and macOS. Every WebView surface therefore has a native fallback for Windows/Linux dev.
   - `flet_video.Video` uses its default controls (there is no `show_controls`) and `aspect_ratio`.
@@ -2166,7 +2178,7 @@ Modules live under `ui/` (Appendix A). Components used by more than one surface 
 | `TextEditor` (`tools/text_editor.py`, `TextEditorScreen`) | FullScreenEditor + find bar (hit i/n) | read-only · editing | as FullScreenEditor |
 | `FileBrowser` (`screens/files.py`, `FileBrowserScreen`) | Breadcrumbs · root chips (Output, Library, Inbox, Chat workspaces) · rows (icon, name, size, date) · ⋯ (Open with · Share · Save to… · Rename · Delete) | loading · list · empty folder · outside the safe roots (blocked) | `View`, a `Row` of breadcrumbs, `ListView`, `ActionSheet`, `TextPromptDialog` |
 | `ExportSheet` (`chat/integration.py` `ChatFeature.export_file`: an `ActionSheet` over `services/files.FileBridge.export_options`) | Share · Save to… · Save to Downloads (Android) / Show in Files (iOS) · Open externally | per platform; unsupported items disabled with a reason | `ActionSheet`; `Share.share_files`, `FilePicker.save_file`, native `save_to_downloads`, `UrlLauncher` |
-| `SourcePicker` (`tools/source_picker.py`) | Segments Recent outputs · Library books · Chat workspaces · Browse; list with checkboxes (multi). Opt-in options (the chat's Library mode, device fix 2026-10-08): `segments` (one segment hides the SegmentedButton), `searchable` + `query`, `book_rows` (Library list rows via `models.card_model_for` + `BookListRow(show_more=False)`, `CoverQueue` covers, rows built once and kept across renders), `header_action` (label, callback), `include_unresolved` (`targets.library_targets`); eligibility is computed once per row on the io pool; Tools pickers keep the defaults | single · multi · empty segment | `BottomSheet`, `SegmentedButton`, `ListView`, `Checkbox`, `FilePicker` |
+| `SourcePicker` (`tools/source_picker.py`) | Segments Recent outputs · Books · Browse (Books: Library and chat books merged one row per book, `targets.merge_book_rows`, labelled 📚 Library / 💬 Chat; Recent outputs: `targets.recent_output_targets`, newest translated first; opt-in segments `library` / `chat` through `segments`, a tool asking for either without them opens Books); list with checkboxes (multi). Opt-in options (the chat's Library mode, device fix 2026-10-08): `segments` (one segment hides the SegmentedButton), `searchable` + `query`, `book_rows` (Library list rows via `models.card_model_for` + `BookListRow(show_more=False)`, `CoverQueue` covers, rows built once and kept across renders), `header_action` (label, callback), `include_unresolved` (`targets.library_targets`); eligibility is computed once per row on the io pool; Tools pickers keep the defaults | single · multi · empty segment | `BottomSheet`, `SegmentedButton`, `ListView`, `Checkbox`, `FilePicker` |
 | `SelectableTextSheet` (`components/dialogs.py`) | The full text, selectable, + Copy all | — | `BottomSheet`, `SelectionArea` around `Text` |
 
 ### 5.6 Lists, selection and Library
@@ -2498,7 +2510,7 @@ A fingerprint contains a file name, so routes use `mid = sha1(fp)[:12]` instead 
   library_attachment:{bid, path},
   tool_jobs:{"<created_at>":{library_job|qa_job, source, bid, folder, summary}},
   overrides:{model, profile, target_language, output_mode, attachment_prompt_role, glossary_override_mode,
-             manual_glossary_path, force_multipass_off, disable_thinking, skip_prompt_profile, disable_auto_scroll, thinking:{…}},
+             manual_glossary_path, disable_thinking, skip_prompt_profile, disable_auto_scroll, thinking:{…}},
   versions:{"<anchor fp>":{members:[fp…], selected:int}},
   pending_plan:{spec…}, add_only:[fp…],
   job_turns:{"run:<run root>": fp | null}}},

@@ -111,7 +111,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 47 | RS Keys button | Settings › Context & memory › KeyPoolTile → Keys (Rolling summary pool) |  |
 | 48 | Temperature + Disable temperature | Settings › Translation defaults; Plan card |  |
 | 49 | Batch Translation + Batch Size | Settings › Translation defaults; Plan card |  |
-| 50 | Multipass mode + refinement mode combo | Settings › Translation defaults › Multipass; Plan card; Mode options › Refine |  |
+| 50 | Multipass mode + refinement mode combo | Settings › Translation defaults › Multipass; Plan card; Mode options › Refine | Chat runs follow it too (no Direct Text "Force Multipass off" on mobile, hotfix 3) |
 | 51 | Refine Prompt dialog | PromptEditor (Profiles › All prompts › Refine prompt; Mode options › Refine) |  |
 | 52 | Glossary Mode dropdown | Settings › Glossary › General; Plan card glossary chip (effective mode); chat policy pill | Shows the effective mode (critic gap) |
 | 53 | 🗑️ Delete glossary files / ↩️ Restore glossary backup | Book › Glossary ⋯; Glossaries file row ⋯; Library selection bar › More › Delete glossary files (N) / Restore glossary backup |  |
@@ -960,7 +960,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 28 | Legacy layout & registry migration | Automatic (no control); Library shows the migrated layout | Automatic |
 | 29 | Scan for Raw (pair missing raws) | Chip "Scan for raw (N)" → `/library/scan-raw` |  |
 | 30 | Library loading spinner / toast / F11 fullscreen | Skeletons, snackbars | F11 n/a |
-| 31 | Book Details hero page | Book › Overview hero |  |
+| 31 | Book Details hero page | Book › Overview hero; Reader top bar ⓘ Book Details and ⋯ › Open Book Details (the Book page of the book or file the Reader shows; hotfix 3) | New: from the Reader |
 | 32 | Start reading / Read raw source | Overview primary / tonal buttons |  |
 | 33 | Edit metadata.json | Overview › Edit → metadata form; ⋯ Edit raw JSON (CodeEditor) (the resolved workspace; an organized book edits its workspace's metadata.json) |  |
 | 34 | Chapter list (Book Details) | Book › Chapters (PM parity; filters persisted via `epub_details_*` incl. rows per page); a book without a workspace lists its EPUB's own chapters (`BookDetailsModel.row_specs`) |  |
@@ -1162,7 +1162,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 0 | Direct Text: chat sessions, sidebar and history persistence | ChatDrawer (Pinned / Series / Recents; Series is U9, optional: `mobile_series.json` + `series_id` in the sidecar), header rename, `direct_text_chats.json` v2 via ChatStore, per-chat drafts, auto-title | Sidecar for extras |
 | 1 | Direct Text: file attachments that run the full pipeline | Composer attach → Plan card → Job card; attached-text prompt role; Vision / Image auto-switch |  |
 | 2 | Direct Text: attachment workspace manager with Migrate | Automatic: a finished chat book moves into the Library by itself (`ChatFeature.auto_migrate`, the desktop Migrate); `/chat/<cid>/attachments` lists workspaces still waiting (⋯ Merge into Library… on a name clash); job card "Open in Library" | Automatic |
-| 3 | Direct Text: per-chat settings panel and glossary override | Chat settings sheet (This chat / All chats) + ManualGlossarySheet |  |
+| 3 | Direct Text: per-chat settings panel and glossary override | Chat settings sheet (This chat / All chats) + ManualGlossarySheet | Adapted: no "Force Multipass off" (hotfix 3): chat runs follow Settings › Translation defaults › Multipass, off by default |
 | 4 | Direct Text: output editing, media playback, bookmarks and zoom | Output editor route; Image / Video / Audio cards (AudioCard volume 75% + Open externally); Jump-to sheet (▲/▼ steppers, Input / Output counters); Chat ⋯ › Text size; token hint |  |
 | 5 | SDLXLIFF reviewer: machine-translation provider choice, credentials, Inject MT and score threshold | Tools › SDLXLIFF › MT sheet + Flag threshold | Argos shown disabled with a ReasonChip (ctranslate2 is native-impossible) |
 | 6 | google-translate-free fallback chain (DeepL/Bing/Yandex/Argos offline) | Automatic (ModelSheet google-translate-free); SDLXLIFF MT sheet providers | The Argos step is skipped on mobile (native-impossible) |

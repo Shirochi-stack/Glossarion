@@ -292,7 +292,8 @@ def test_page_one_lists_the_users_own_on_device_presets(tmp_path):
 
 def test_page_one_offers_the_gpu_switch_where_the_build_has_a_gpu_backend(tmp_path):
     """owner 2026-10-22: "Use GPU (experimental)" on the Welcome page too: the Model manager's switch (same
-    setting), under the on-device cells; the Q4_0 presets button once it is on (Android). No backend: none."""
+    setting), under the on-device cells; switching it on adds the Q4_0 presets (Android; hotfix 3: no extra
+    tap, the button is only the fallback). No backend: none."""
     from glossarion_mobile.services.local_llm import presets as lp
     from glossarion_mobile.services.local_llm import service as svc
 
@@ -313,13 +314,12 @@ def test_page_one_offers_the_gpu_switch_where_the_build_has_a_gpu_backend(tmp_pa
     switch.value = True
     switch.on_change(None)
     assert kwargs["prefs"].get(svc.GPU_KEY) is True and service.use_gpu()
-    assert rows["welcome-gpu-presets"].visible
-    rows["welcome-gpu-presets"].on_click(None)
     names = [p["name"] for p in lp.load_presets(kwargs["prefs"])]
     assert names[-len(lp.GPU_PRESETS):] == [p["name"] for p in lp.GPU_PRESETS]
     # the page re-rendered: the new presets have cells and the switch still shows the saved setting
     rows = by_key(s.page_area.content)
     assert rows["welcome-gpu"].value is True and len(rows["welcome-ondevice"].controls) == len(names)
+    assert not rows["welcome-gpu-presets"].visible  # nothing missing: the fallback button stays hidden
 
 
 def test_page_one_on_device_cells_show_size_ram_hint_and_suggest_light(tmp_path):

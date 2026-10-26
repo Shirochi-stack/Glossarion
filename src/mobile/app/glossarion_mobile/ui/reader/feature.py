@@ -13,7 +13,11 @@ Library feature (whose ``LibraryService.book_for_bid`` resolves route ids):
    cards and the IntentRouter's "Open in Reader": they register the target
    (Prefs file ref → opaque id; the book row or file is passed in-process,
    never in the route) and navigate to ``/reader/<bid>[?ch=&mode=]``;
-4. marks the ``reader`` route implemented (``IMPLEMENTED_ROUTES``).
+4. finds the Book page (the desktop Book Details) of what a Reader shows, for its ⓘ / ⋯ › Open Book
+   Details (``book_details``): the Library row it was opened on, else the row a file opened by path
+   belongs to (``library.feature.library_book_for_path``), else the EPUB / TXT / workspace's own page
+   (``LibraryService.book_for_bid`` synthesises its row);
+5. marks the ``reader`` route implemented (``IMPLEMENTED_ROUTES``).
 
 No desktop logic lives here: the Reader binds to ``reader_doc``,
 ``reader_overlay``, ``workspace_reader``, ``live_stream`` and ``library_core``.
@@ -21,19 +25,27 @@ No desktop logic lives here: the Reader binds to ``reader_doc``,
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Callable, Mapping, Optional
 
 from glossarion_mobile.ui.router import RouteMatch
 
-__all__ = ["IMPLEMENTED_ROUTES", "ReaderFeature", "SCREEN_ROUTES"]
+__all__ = ["DETAILS_NO_LIBRARY", "DETAILS_NOT_A_BOOK", "IMPLEMENTED_ROUTES", "ReaderFeature", "SCREEN_ROUTES"]
 
 log = logging.getLogger("glossarion.reader")
 
 SCREEN_ROUTES = ("reader",)
 MAX_PENDING = 64  # in-process open requests kept (book rows / files by route id)
 IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES)
+#: Files that have a Book page of their own when no Library row holds them (the Library's book types).
+DETAILS_FILE_EXTENSIONS = (".epub", ".txt")
+DETAILS_NO_LIBRARY = "The Library is not available in this session"
+DETAILS_NOT_A_BOOK = ("Book Details are for EPUB and TXT books and translation workspaces; "
+                      "this file is not in the Library")
+DETAILS_GONE = "This book is no longer available"
+SCAN_WAIT_SECONDS = 30.0  # the Book page lookup waits this long for a Library scan that another screen runs
 
 
 class ReaderFeature:
@@ -154,9 +166,101 @@ class ReaderFeature:
                 return {"path": path}
         return None
 
-    def has_book_page(self, bid: str) -> bool:
+    # ---- Book Details (hotfix 3 issue 6) ------------------------------------------------------------
+
+    def book_details_blocking(self, bid: str, target: Optional[Mapping[str, Any]] = None) -> tuple:
+        """``(Book page route id, "")`` for what the Reader at ``bid`` shows, else ``(None, reason)``.
+
+        ``target`` is the Reader's ``{"book": row}`` / ``{"path": file or folder}`` (default: ``resolve(bid)``).
+        A Library row is its own Book page; a file or workspace opened by path is the Library row it belongs
+        to (``library_book_for_path``: its compiled EPUB, a file in its workspace, its raw); otherwise an EPUB,
+        a TXT or a translation workspace gets its own Book page (``LibraryService.book_for_bid`` synthesises
+        the row: the EPUB's details). Blocking (the folder checks)."""
         library = self.library
-        return library is not None and bool(bid) and bid not in {k for k, v in self.pending.items() if v.get("path")}
+        if library is None or not hasattr(library, "bid_for"):
+            return None, DETAILS_NO_LIBRARY
+        target = dict(target or {}) or dict(self.resolve(bid) or {})
+        book = target.get("book")
+        if book and not book.get("synthesised"):
+            return library.bid_for(dict(book)), ""
+        if book:  # a row the Library made up from a file's route id (a deep link): the file's own book
+            from glossarion_mobile.services.library import book_identity
+
+            target = {"path": book_identity(book)}
+        path = os.path.abspath(str(target.get("path") or "")) if target.get("path") else ""
+        if not path or not os.path.exists(path):
+            return None, DETAILS_GONE
+        from glossarion_mobile.ui.library.feature import library_book_for_path
+
+        found = library_book_for_path(library, path)
+        if found is not None:
+            return library.bid_for(found), ""
+        own = os.path.isfile(os.path.join(path, "translation_progress.json")) if os.path.isdir(path) \
+            else path.lower().endswith(DETAILS_FILE_EXTENSIONS)
+        if not own:
+            return None, DETAILS_NOT_A_BOOK
+        synthesise = getattr(type(library), "_synthesise", None)  # as ToolsContext.bid_for_folder
+        row = synthesise(path) if callable(synthesise) else None
+        if row is None:
+            return None, DETAILS_NOT_A_BOOK
+        return (library.remember(row) if hasattr(library, "remember") else library.bid_for(row)), ""
+
+    async def book_details(self, bid: str, target: Optional[Mapping[str, Any]] = None) -> tuple:
+        """:meth:`book_details_blocking` off the UI loop. A file opened by path before the Library was ever
+        scanned (the Reader from the chat, Files or Open with) scans it quietly first, like the chat's
+        attachment lookup, so the file finds its book."""
+        library = self.library
+        snapshot = getattr(library, "snapshot", None)
+        book = (target or {}).get("book")
+        by_path = bool((target or {}).get("path")) if not book else bool(book.get("synthesised"))
+        if by_path and snapshot is not None and not getattr(snapshot, "scanned_at", None) \
+                and hasattr(library, "refresh"):
+            try:
+                scanned = await library.refresh(quiet=True, reason="reader")  # first use: scan quietly
+                if scanned is None and getattr(library, "scanning", False):
+                    await self._next_scan(library)  # another scan runs (Library home, cloud sync): read its result
+            except Exception:
+                log.debug("scanning the Library for the Reader failed", exc_info=True)
+        return await self._run_io(self.book_details_blocking, bid, target)
+
+    @staticmethod
+    async def _next_scan(library: Any) -> None:
+        """Wait (at most ``SCAN_WAIT_SECONDS``) for the scan that is running to publish its snapshot."""
+        subscribe = getattr(library, "subscribe", None)
+        if not callable(subscribe):
+            return
+        loop = asyncio.get_running_loop()
+        published = loop.create_future()
+
+        def on_snapshot(_snapshot: Any) -> None:
+            loop.call_soon_threadsafe(lambda: published.done() or published.set_result(True))
+
+        unsubscribe = subscribe(on_snapshot)
+        try:
+            await asyncio.wait_for(published, SCAN_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            log.debug("the running Library scan did not finish in %ss", SCAN_WAIT_SECONDS)
+        finally:
+            unsubscribe()
+
+    def open_book_details(self, bid: str) -> None:
+        """Show the Book page ``bid`` from the Reader: pushed over it, so Back returns to the Reader where it
+        was (a Book page already under the Reader is the one shown: the shell returns to that depth). On a
+        tablet the Book page is a main-area screen and would open behind the full-screen Reader, so the
+        Reader closes first (its position is saved) - like the glossary's Add to glossary sheet rule."""
+        shell = getattr(self.app, "shell", None)
+        stack = list(getattr(shell, "stack", None) or [])
+        if getattr(shell, "tablet", False) and stack and getattr(stack[-1], "fullscreen", False):
+            self._go_back()
+        navigate = getattr(self.app, "navigate_to", None)
+        if navigate is not None:
+            navigate("library.book", {"bid": bid})
+
+    async def _run_io(self, fn: Callable[..., Any], *args: Any) -> Any:
+        dispatcher = getattr(self.app, "dispatcher", None)
+        if dispatcher is not None and getattr(dispatcher, "bound", False):
+            return await dispatcher.run_in_thread(fn, *args, name="gl-reader-io")
+        return await asyncio.to_thread(fn, *args)
 
     def _register(self, *, book: Optional[Mapping[str, Any]] = None, path: Optional[str] = None) -> Optional[str]:
         library = self.library
@@ -286,7 +390,8 @@ class ReaderFeature:
             width_signal=getattr(state, "width", None),
             ask_in_chat=self._ask_in_chat if chat_view is not None else None,
             add_to_glossary=self._add_to_glossary,
-            has_book_page=self.has_book_page,
+            book_details=self.book_details,
+            open_book_details=self.open_book_details,
             webview_ok=lambda: webview_supported(page) and self.server is not None,
             wakelock=wakelock,
             extras=extras,

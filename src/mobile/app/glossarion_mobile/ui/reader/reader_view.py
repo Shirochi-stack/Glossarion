@@ -25,6 +25,11 @@ while the Reader is on screen. Reading positions are saved to Prefs
 
 "🌐 Translate" runs a ``single_chapter`` job (``force_stream_all``) and opens
 the native ``LivePanel`` fed from the job's log buffer.
+
+ⓘ in the top bar and ⋯ › Open Book Details (hotfix 3 issue 6) open the book's Book page (the desktop Book
+Details) over the Reader, so Back returns to the same page: the Library row the Reader was opened on, the row
+a file opened by path belongs to, else the EPUB / TXT / workspace's own page (``ReaderFeature.book_details``,
+looked up once the first chapter is up).
 """
 
 from __future__ import annotations
@@ -46,7 +51,7 @@ from glossarion_mobile.ui.foreground import poll_sleep
 from glossarion_mobile.ui.reader import bridge
 from glossarion_mobile.ui.reader import model as rm
 from glossarion_mobile.ui.reader.aa_sheet import SCOPE_ALL, SCOPE_BOOK, AaSheet
-from glossarion_mobile.ui.reader.chrome import ReaderChrome, SelectionChipRow
+from glossarion_mobile.ui.reader.chrome import DETAILS_TOOLTIP, ReaderChrome, SelectionChipRow
 from glossarion_mobile.ui.reader.document import EMPTY_CHAPTER_TEXT, DocumentBuilder, blocks_empty, build_native_blocks
 from glossarion_mobile.ui.reader.fallback_view import PAGE_EDGE, FallbackPage
 from glossarion_mobile.ui.reader.live import (
@@ -99,6 +104,9 @@ SPECIAL_FILES_KEY = "epub_details_show_special_files"
 OPEN_LINK_TITLE = "Open link?"
 ALREADY_RUNNING = ("A translation is already running.\n"
                    "Please wait for it to finish (or stop it) first.")
+#: ⋯ › the Book page (the Library card ⋯ "📑 Open Book Details", the desktop context menu's label)
+DETAILS_LABEL = "Open Book Details"
+NOT_A_LIBRARY_BOOK = "Not a Library book"
 
 
 def webview_supported(page: Any) -> bool:
@@ -157,7 +165,10 @@ class ReaderDeps:
     ask_in_chat: Optional[Callable[[str], Any]] = None
     # add_to_glossary(term, book=row): the Glossary Manager's new-entry sheet on the book's glossary (U6)
     add_to_glossary: Optional[Callable[..., Any]] = None
-    has_book_page: Optional[Callable[[str], bool]] = None
+    # book_details(bid, {"book": row} | {"path": file}) -> (Book page route id, "") | (None, reason), sync or
+    # async (ReaderFeature.book_details); open_book_details(page id) shows that Book page over the Reader
+    book_details: Optional[Callable[..., Any]] = None
+    open_book_details: Optional[Callable[[str], Any]] = None
     webview_ok: Optional[Callable[[], bool]] = None
     wakelock: Any = None  # the Reader's holder of the shared wakelock (services.wakelock)
     extras: dict = field(default_factory=dict)
@@ -273,6 +284,10 @@ class ReaderScreen(Screen):
         self._jobs_unsub: Optional[Callable[[], None]] = None
         self._motion_unsub: Optional[Callable[[], None]] = None  # Reduce motion flips the page-turn slide
         self._target_book: dict = {}
+        self._target_path = ""  # the file / workspace the Reader opened when it has no Library row
+        # ⓘ Book Details: (Book page route id, "") or (None, reason) once looked up (``_lookup_details``)
+        self.details: Optional[tuple] = None
+        self._details_task: Any = None
         # Files › Open with › Reader on a chapter file of a translation workspace: the workspace opens
         # at that chapter (``chapter_index_for_file`` after the load).
         self._chapter_file = str(self.args.get("chapter_file") or "")
@@ -395,6 +410,7 @@ class ReaderScreen(Screen):
             on_mode=self._on_mode,
             on_search=lambda e=None: self.open_search(),
             on_more=lambda e=None: self.open_more(),
+            on_details=lambda e=None: self._spawn(self.open_book_details()),
             on_prev=lambda e=None: self._spawn(self.go_chapter(self.index - 1, enter=-1)),
             on_next=lambda e=None: self._spawn(self.go_chapter(self.index + 1, enter=1)),
             on_chapters=lambda e=None: self._spawn(self.open_chapters()),
@@ -542,6 +558,9 @@ class ReaderScreen(Screen):
             return
         self.disposed = True
         self._cancel_poll()
+        details_task, self._details_task = self._details_task, None
+        if details_task is not None and not details_task.done():
+            details_task.cancel()
         unsub, self._jobs_unsub = self._jobs_unsub, None
         if unsub is not None:
             try:
@@ -697,12 +716,13 @@ class ReaderScreen(Screen):
         if book:
             return plan_open(book, raw_only=raw_only, engine=self.engine)
         path = str(target.get("path") or "")
+        self._target_path = os.path.abspath(path) if path else ""
         if path and os.path.isfile(path):
             # A chapter of a translation workspace (response_*.html...): the book, at that chapter
             workspace = workspace_for_chapter_file(path)
             if workspace:
                 self._chapter_file = os.path.abspath(path)
-                path = workspace
+                path = self._target_path = workspace
             elif path.lower().endswith(READER_FILE_EXTENSIONS):
                 # A file from Open-with, the Converter or Files: EPUB, TXT / Markdown, one HTML file
                 return plan_for_file(path)
@@ -805,6 +825,7 @@ class ReaderScreen(Screen):
         if not custom_family:
             self._spawn(self.load_custom_fonts())  # the Aa list, off the first render's path
         self._spawn(self._auto_hide_chrome())
+        self._lookup_details()  # ⓘ Book Details: which Book page this book has (off the first page's path)
         if offer is not None:
             self.offer_resume(offer)
         if session.plan.mode == MODE_OVERLAY:
@@ -1883,8 +1904,8 @@ class ReaderScreen(Screen):
 
     def open_more(self) -> ActionSheet:
         session = self.session
-        has_book = bool(self.bid) and (self.deps.has_book_page(self.bid) if self.deps.has_book_page else True) \
-            and not self.args.get("path")
+        details = self.details  # still looking: the row is available and its tap waits for the lookup
+        details_reason = (details[1] or NOT_A_LIBRARY_BOOK) if details is not None and not details[0] else None
         lightweight_label = "Use the page view" if self.settings.lightweight else "Lightweight reader"
         webview_ok = self.deps.webview_ok() if self.deps.webview_ok else webview_supported(self.page)
         share_path = ""
@@ -1892,10 +1913,10 @@ class ReaderScreen(Screen):
             entry = session.overlay_entry(self.index)
             share_path = str(entry.get("path") or "")
         items = [
+            ActionItem(DETAILS_LABEL, lambda: self._spawn(self.open_book_details()), icon="INFO_OUTLINE",
+                       disabled_reason=details_reason, key="reader-more-details"),
             ActionItem("Bookmarks", lambda: self.open_bookmarks(), icon="BOOKMARKS"),
             ActionItem("Add bookmark here", lambda: self.add_bookmark(), icon="BOOKMARK_ADD"),
-            ActionItem("Open Book page", lambda: self._open_book_page(), icon="MENU_BOOK",
-                       disabled_reason=None if has_book else "Not a Library book"),
             ActionItem(lightweight_label, lambda: self._apply_settings(
                 {"lightweight": not self.settings.lightweight}, SCOPE_ALL), icon="TEXT_SNIPPET",
                 disabled_reason=None if webview_ok else "The page view needs Android, iOS or macOS"),
@@ -1907,10 +1928,77 @@ class ReaderScreen(Screen):
         sheet.show(self.page)
         return sheet
 
-    def _open_book_page(self) -> None:
-        navigate = self.deps.navigate_to
-        if navigate is not None and self.bid:
-            navigate("library.book", {"bid": self.bid}, {"tab": "chapters"})
+    # ---- ⓘ Book Details (hotfix 3 issue 6) -----------------------------------------------------------------
+
+    def _details_target(self) -> Optional[dict]:
+        """What the Reader opened: its Library row, else the file / workspace (None before ``_plan`` ran)."""
+        if self._target_book:
+            return {"book": dict(self._target_book)}
+        if self._target_path:
+            return {"path": self._target_path}
+        return None
+
+    async def _resolve_details(self) -> tuple:
+        """Ask the app which Book page this book has; remembers and shows the answer (ⓘ, ⋯)."""
+        try:
+            target = self._details_target()
+            if target is None:  # the book did not open (error state): the route's own target
+                target = dict(await self._io(self._resolve_target) or {})
+            hook = self.deps.book_details
+            if hook is not None:
+                result = hook(self.bid, target)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                bid, reason = result
+            else:  # no Library lookup in this session: the Reader's own id names a Library row
+                bid, reason = (self.bid, "") if target.get("book") and self.bid else (None, NOT_A_LIBRARY_BOOK)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception("looking up the Book page failed")
+            bid, reason = None, f"Could not find this book's details: {exc}"
+        details = (str(bid), "") if bid else (None, str(reason or NOT_A_LIBRARY_BOOK))
+        if not self.disposed:
+            self.details = details
+            self.chrome.set_details(bool(details[0]), details[1])
+        return details
+
+    def _lookup_details(self, *, fresh: bool = False) -> Any:
+        """Start (once, or again with ``fresh``) the Book page lookup; returns its task (None: no loop)."""
+        task = self._details_task
+        if fresh or task is None or (task.done() and self.details is None):
+            if fresh:
+                self.details = None
+            task = self._details_task = self._spawn(self._resolve_details())
+        return task
+
+    async def open_book_details(self) -> Optional[str]:
+        """ⓘ / ⋯ › Open Book Details: the book's Book page over the Reader (Back returns to this page; the
+        position is saved first). A lookup that found no page is tried again (the Library may have scanned
+        since), then its reason is shown. Returns the Book page's route id."""
+        details = self.details
+        if details is None or not details[0]:
+            task = self._lookup_details(fresh=details is not None)
+            details = await asyncio.shield(task) if task is not None else await self._resolve_details()
+        if self.disposed:
+            return None
+        bid, reason = details
+        if not bid:
+            from glossarion_mobile.ui.components.info_sheet import InfoSheet
+
+            try:
+                InfoSheet(title=DETAILS_TOOLTIP, body=reason).show(self.page)
+            except Exception:
+                self.notify(reason)
+            return None
+        self.selection.hide()
+        self.save_position(flush=True)
+        opener = self.deps.open_book_details
+        if opener is not None:
+            opener(bid)
+        elif self.deps.navigate_to is not None:
+            self.deps.navigate_to("library.book", {"bid": bid})
+        return bid
 
     def _share(self, path: str) -> None:
         share = self.deps.extras.get("share_files")

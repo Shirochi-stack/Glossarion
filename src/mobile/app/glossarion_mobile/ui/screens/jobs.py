@@ -580,6 +580,25 @@ class JobsFeature:
         lookup = getattr(feature, "job_workspace", None)
         return str(lookup(snap) or "") if callable(lookup) else ""
 
+    async def _library_book_of_folder(self, folder: str) -> Optional[str]:
+        """Job detail › Library: the Library id of the book whose workspace is ``folder`` (``ChatFeature.library_book``,
+        which rescans a stale Library first); None without the chat feature."""
+        finder = getattr(getattr(self.app, "chat_feature", None), "library_book", None)
+        if not callable(finder):
+            return None
+        return await finder(folder)
+
+    async def _library_book_of_file(self, path: str) -> Optional[str]:
+        """Job detail › Library: the Library book whose raw file is ``path`` or holds the same bytes
+        (``chat_view.library_book_for_file``, on the io pool); None without the Library."""
+        library = getattr(self.app, "library", None)
+        if library is None:
+            return None
+        from glossarion_mobile.ui.chat.chat_view import library_book_for_file
+
+        target = await self.run_io(library_book_for_file, library, path)
+        return str(getattr(target, "bid", "") or "") or None
+
     async def search_files(self, query: str) -> list:
         """Drawer › Files: names under the safe roots (Output, Library, Inbox), searched on the io pool;
         a hit opens its folder in the file browser."""
@@ -738,7 +757,8 @@ class JobsFeature:
                                      page=self.page, navigate=self._navigate, notify=notify, copy_handler=copy,
                                      file_ref=self.file_ref if self.prefs is not None else None, tablet=tablet,
                                      dark=dark, open_progress=self._open_progress_folder, roots=self.file_roots,
-                                     chat_workspace=self._chat_workspace)
+                                     chat_workspace=self._chat_workspace, library_book=self._library_book_of_folder,
+                                     library_source=self._library_book_of_file, run_io=self.run_io)
         elif match.name in ("tools.files", "tools.files.folder"):
             from glossarion_mobile.ui.screens.files import FileBrowserScreen
 

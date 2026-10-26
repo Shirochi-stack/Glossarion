@@ -46,7 +46,6 @@ DEFAULT_LABELS = (
     ("output_mode", "Default output mode"),
     ("glossary_override_mode", "Glossary"),
     ("attachment_prompt_role", "Attached-text prompt role"),
-    ("force_multipass_off", "Force Multipass off"),
     ("disable_thinking", "Disable all thinking"),
     ("skip_prompt_profile", "Skip prompt profile"),
     ("disable_auto_scroll", "Disable conversation auto-scroll"),

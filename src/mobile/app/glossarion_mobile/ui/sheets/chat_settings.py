@@ -10,8 +10,9 @@ language / default output mode overrides) · Glossary (No Override · No Overrid
 (Attachments Only) · Force No Glossary · Force Manual Glossary; mobile: "Always accept
 generated glossaries", All chats in Prefs ``chat_auto_accept_glossary``, This chat in the
 chat's sidecar meta, never config.json) · Run behaviour
-(Force Multipass off · Disable all thinking · Skip prompt profile · Attached-text
-prompt role · Skip plan for attachments) · Conversation (Disable conversation
+(Disable all thinking · Skip prompt profile · Attached-text prompt role · Skip plan for
+attachments; no desktop "Force Multipass off": chat runs follow Settings › Translation
+defaults › Multipass, off by default - owner, hotfix 3) · Conversation (Disable conversation
 auto-scroll · Rendered conversation cards 4-200 · Text size). Footer: "Reset chat
 overrides". Effective values reach the run as JobSpec overrides; nothing here writes
 config.json in This-chat scope.
@@ -118,7 +119,6 @@ DESCRIPTIONS = {
         "Limit the saved input/output cards mounted in the transcript. The rendered window follows your "
         "scroll position automatically; currently streaming request cards remain visible until they finish."
     ),
-    "force_multipass_off": "Run a single translation pass even when Multipass is enabled in the main window.",
     "none": "Use the main translator's current glossary mode and selected glossary without a Direct Text override.",
     "attachments_only": (
         "Use the main translator's glossary settings for attachments; use No Glossary for Direct Text "
@@ -146,7 +146,6 @@ DESCRIPTIONS = {
 CHAT_SETTING_KEYS = {
     "attachment_prompt_role": "direct_text_attachment_prompt_role",
     "glossary_override_mode": "direct_text_glossary_override_mode",
-    "force_multipass_off": "direct_text_force_multipass_off",
     "disable_thinking": "direct_text_disable_thinking",
     "skip_prompt_profile": "direct_text_skip_prompt_profile",
     "disable_auto_scroll": "direct_text_disable_auto_scroll",
@@ -832,7 +831,6 @@ class ChatSettingsSheet:
                 title="Run behaviour",
                 expanded=self.expanded["run"],
                 controls=[
-                    self._switch("force_multipass_off", "Force Multipass off"),
                     self._switch("disable_thinking", "Disable all thinking"),
                     self._switch("skip_prompt_profile", "Skip prompt profile"),
                     ft.Column(

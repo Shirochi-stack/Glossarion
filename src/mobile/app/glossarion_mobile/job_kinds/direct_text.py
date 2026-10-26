@@ -56,6 +56,12 @@ def build_options(params: Mapping[str, Any], input_path: str) -> Any:
     values = {k: v for k, v in raw.items() if k in names}
     if not values.get("selected_files"):
         values["selected_files"] = [input_path]
+    # hotfix 3: a chat run follows the Multipass setting, also a job an older build queued or stopped with
+    # "Force Multipass off" (resumed from the Jobs page or the launch banner with its stored params)
+    from glossarion_mobile.ui.chat.direct_text_rules import FORCE_MULTIPASS_OFF
+
+    if "force_multipass_off" in names:
+        values["force_multipass_off"] = FORCE_MULTIPASS_OFF
     return DirectTextRunOptions(**values)
 
 

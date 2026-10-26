@@ -59,8 +59,9 @@ DEFAULT_PRESETS: tuple = (
 )
 #: Optional GPU-friendly variants of the four defaults for Android's OpenCL backend (Qualcomm Adreno), whose
 #: fast kernels are for Q4_0 (Q6_K runs unoptimized, the other K-quants may be slow or fall back to the
-#: CPU). Not first-run data: "Add GPU-friendly presets (Q4_0)" (Model manager › On-device, Android with
-#: "Use GPU" on) appends them (``add_gpu_presets``). Unsloth's Q4_0 files keep a few tensors (e.g. the
+#: CPU). Not first-run data: switching "Use GPU" on (Model manager › On-device or the Welcome page,
+#: Android) appends them, and "Add GPU-friendly presets (Q4_0)" while one is missing (``add_gpu_presets``;
+#: switching it off keeps them). Unsloth's Q4_0 files keep a few tensors (e.g. the
 #: output) in higher quants, which run unoptimized. iOS (Metal) and the CPU keep the defaults above.
 #: Verified on Hugging Face 2026-10-20 (size and sha256 = the LFS oid); same repos, so same projectors.
 GPU_PRESETS: tuple = (
@@ -212,9 +213,11 @@ def add_gpu_preset(prefs: Any, gpu_row: dict) -> tuple:
 
 def add_gpu_presets(prefs: Any) -> tuple:
     """Append the missing ``GPU_PRESETS`` to the saved presets (a name already taken gets " 2"):
-    ``(presets, added names)``. The defaults and the user's rows stay as they are."""
+    ``(presets, added names)``. The defaults and the user's rows stay as they are; a list near
+    ``MAX_PRESETS`` gets only what fits (the smaller models first), a full one nothing."""
     rows = load_presets(prefs)
-    added = [_append_gpu_row(rows, row) for row in missing_gpu_presets(rows)]
+    room = max(0, MAX_PRESETS - len(rows))
+    added = [_append_gpu_row(rows, row) for row in missing_gpu_presets(rows)[:room]]
     return (save_presets(prefs, rows) if added else rows), added
 
 

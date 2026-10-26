@@ -396,10 +396,12 @@ GLOSSARY_PROFILE_OVERRIDE_KEYS = {
     "minimal": "glossary_prompt_profile_minimal",
 }
 
-#: Per-chat override keys (Appendix B ``overrides``); None / missing = inherited.
+#: Per-chat override keys (Appendix B ``overrides``); None / missing = inherited. No ``force_multipass_off``
+#: since hotfix 3 (chat runs follow the Multipass setting, ``direct_text_rules.FORCE_MULTIPASS_OFF``): a value an
+#: older build stored is not read (``own_overrides``; Series defaults drop it the same way).
 OVERRIDE_KEYS = (
     "model", "profile", "target_language", "output_mode", "attachment_prompt_role",
-    "glossary_override_mode", "manual_glossary_path", "force_multipass_off", "disable_thinking",
+    "glossary_override_mode", "manual_glossary_path", "disable_thinking",
     "skip_prompt_profile", "disable_auto_scroll", "rendered_card_limit",
     *GLOSSARY_PROFILE_OVERRIDE_KEYS.values(),
 )
@@ -1367,9 +1369,13 @@ class ChatStoreAdapter:
         self._notify()
 
     def own_overrides(self, cid: Any) -> dict:
-        """The chat's own sidecar overrides (no inherited layer)."""
+        """The chat's own sidecar overrides (no inherited layer): ``OVERRIDE_KEYS`` only, so a key an older
+        build stored and that no longer exists (``force_multipass_off``) neither reaches a run nor counts as
+        "custom"."""
         overrides = self.meta(cid).get("overrides")
-        return dict(overrides) if isinstance(overrides, dict) else {}
+        if not isinstance(overrides, dict):
+            return {}
+        return {k: v for k, v in overrides.items() if k in OVERRIDE_KEYS}
 
     def overrides(self, cid: Any) -> dict:
         """The effective per-chat overrides: inherited layers (Series defaults, U9) beneath the

@@ -307,16 +307,18 @@ def test_engine_card_gpu_switch_note_status_and_presets_button(tmp_path):
     assert panel.gpu_switch.label == "Use GPU (experimental)" and "Adreno" in panel.gpu_note.value
     assert "Q4_0" in panel.gpu_note.value and not panel.gpu_presets_button.visible
     panel.gpu_switch.value = True
-    assert panel.save_gpu() is True and prefs.get(svc.GPU_KEY) is True and panel.gpu_presets_button.visible
+    assert panel.save_gpu() is True and prefs.get(svc.GPU_KEY) is True
+    # hotfix 3: switching it on adds the GPU-friendly presets at once; the button is only the fallback
+    assert [p["name"] for p in presets.load_presets(prefs)][-4:] == [p["name"] for p in presets.GPU_PRESETS]
+    assert not panel.gpu_presets_button.visible
     # a GPU failure shows on the card, the device line says CPU
     _chat(service)
     panel.render_engine(service.snapshot(), push=False)
     assert panel.gpu_status.visible and panel.gpu_status.value.startswith("GPU unavailable for fake-echo: no supported GPU")
     assert "Runs on CPU" in panel.engine_detail.value
-    # the GPU-friendly presets: added once, then the button goes
-    added = panel.add_gpu_presets()
-    assert len(added) == 4 and not panel.gpu_presets_button.visible
-    assert [p["name"] for p in presets.load_presets(prefs)][-4:] == [p["name"] for p in presets.GPU_PRESETS]
+    # the GPU-friendly presets are in the list once: the button adds nothing more and stays hidden
+    assert panel.add_gpu_presets() == [] and not panel.gpu_presets_button.visible
+    assert len(presets.load_presets(prefs)) == 8
     # iOS (Metal): the switch, no Q4_0 button (Metal runs the default K-quants)
     prefs = fakes.FakePrefs({svc.GPU_KEY: True})
     service, _engine = make_service(tmp_path / "ios", prefs=prefs, gpu_backend="Metal")

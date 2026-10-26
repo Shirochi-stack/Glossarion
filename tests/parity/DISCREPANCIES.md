@@ -4334,3 +4334,93 @@ No desktop-shared `src/*.py` file changed; config.json gets no key. Every item b
 - **Browser routes in the background (issue 3).** The WebViewBridge parks and reuses hidden WebViews while jobs run
   and builds one at the start of a browser-route job; the desktop CDP path (`browser_driver` / `cdp_browser`) is
   unchanged. iOS suspends web content in the background (documented limit).
+
+## Hotfix 3 (owner device report, 6 issues on the mobile APK; mobile only, no desktop change)
+
+No desktop-shared `src/*.py` file changed for hotfix 3; config.json gets no key. Every item below is a mobile-only
+behaviour.
+
+### Multipass in chats (issue 3; mobile only, desktop unchanged)
+
+- Desktop: the Direct Text dialog keeps its "Force Multipass off" checkbox (`direct_text_force_multipass_off`, default from
+  the legacy `direct_text_force_simple_mode`, so on), and a Direct Text run skips Multipass unless it is unchecked.
+  `multipass_mode` keeps its default (off).
+- Mobile (owner: "We don't need force multipass off in the mobile version, just have it toggled off by default"): no
+  "Force Multipass off" control (Chat settings This chat / All chats / Series defaults, the Series page's Defaults card,
+  the composer's "Multipass on" pill). Every chat run passes `force_multipass_off=False`
+  (`direct_text_rules.FORCE_MULTIPASS_OFF` in `run_request.run_options_dict`; Resume / Retry through
+  `run_request.with_current_glossary`), so it follows Settings › Translation defaults › Multipass and the Plan card's
+  Multipass tile, like the desktop dialog with the checkbox unchecked. Multipass is off by default because
+  `multipass_mode` absent means off (the desktop default; no mobile-only default, config.json gets no key); a saved or
+  imported Multipass ON is respected.
+- What an older build or a desktop import stored is never read: the two config keys (`DirectTextSettings.from_config`
+  does not read them, All chats never writes them), a chat sidecar override (`ChatStoreAdapter.own_overrides` keeps only
+  `OVERRIDE_KEYS`, which no longer list `force_multipass_off`), a Series default (`series._clean_defaults`) and the
+  options of a run sent before the update (`with_current_glossary`; `job_kinds.direct_text.build_options`).
+- Before the fix every chat run exported MULTIPASS_MODE=0 even with Multipass on (`run_env._export_multipass_runtime_env`
+  and `_apply_direct_text_runtime_environment` with `_direct_text_force_multipass_off`), so the Plan card's Multipass tile
+  did nothing in a chat. No shared `src/*.py` changed.
+- Tests: tests_host/test_hotfix3_multipass.py. It includes the real-app flow: on a fresh phone, a chat message and a
+  book in the chat export MULTIPASS_MODE=0 with no refinement pass; after the Settings tap ON the same flow exports 1, and
+  the refinement pass sends both chapters again.
+
+### Auto glossary after an on-device model (issue 4; mobile only, the desktop has no on-device models)
+
+- Mobile (owner 2026-10-19): a small `local/` model sets Auto glossary NO GLOSSARY (`ON_DEVICE_GLOSSARY_SETTINGS`), the
+  9B one keeps the mode; the values before are kept in the mobile On-device record (`profiles_before_on_device`, already
+  there since the On-device profiles; no new key). Choosing a model that is not `local/` again while NO GLOSSARY is still
+  selected restores the saved mode exactly; when no mode was saved before it (fresh install, Welcome skipped or its NO
+  GLOSSARY card) or the saved one was No glossary itself, it writes Balanced (`setting_writes.GLOSSARY_MODE_AFTER_ON_DEVICE`,
+  the Welcome's `welcome_flow.DEFAULT_GLOSSARY_MODE`) through `write_setting` (the shared `settings_rules.apply_change`
+  of the glossary-mode selector: its enable / append / auto-map flags). Before, the keys were unset, and an unset mode
+  runs and shows as "Off" (`run_env._current_auto_glossary_mode`, `settings_schema.effective_default`). A mode the user
+  picked while on the on-device model stays, with its enable flag.
+- Known: a No glossary the user saved on a cloud model before choosing the on-device model also comes back as Balanced
+  (it cannot be told from the on-device default). A phone left with an unset mode by an earlier round trip keeps "Off"
+  until the next round trip or a manual choice (no migration).
+- Tests: tests_host/test_hotfix3_glossary_default.py (every global model writer: drawer ModelSheet, Chat settings › All
+  chats, Model manager Use, Series All chats, the first-run Welcome; repeated switching).
+
+### GPU-friendly presets (issue 5; mobile only, the desktop has no on-device engine)
+
+- Switching "Use GPU (experimental)" on with Android's OpenCL backend appends the missing `presets.GPU_PRESETS` (Q4_0) to
+  the mobile Prefs list `local_model_presets` at once (`OnDeviceFlow.save_gpu` -> `add_gpu_presets(auto=True)`, Model
+  manager and Welcome page); "Add GPU-friendly presets (Q4_0)" is only the fallback while one is missing.
+  `presets.add_gpu_presets` adds only what fits under `MAX_PRESETS` (50), so its count is true. Switching it off keeps
+  every preset and file. iOS (Metal) and builds without a GPU backend add nothing.
+- Tests: tests_host/test_hotfix3_gpu_quants.py.
+
+### Sheets and dialogs close reliably (issue 1; mobile UI only)
+
+- Flet 1.0.3 builds the page's dialogs inside the last View only and a sheet keeps its modal route in widget State, so a
+  sheet closed in the same burst as a new screen opened (e.g. Help › Logs & diagnostics) stayed under the new screen and
+  came back on Back, with "Close Menu ✕" and swipe dead; only Android back closed it. `components.dialogs.change_views`
+  (used by `AppShell._install_views` / `push_overlay`) now closes the dialogs the client may show on the old top View
+  and holds the change for one client frame (a frame probe in `page.overlay` answers `invoke_method` once a frame built
+  it; that frame ran the dialogs' close), then sends the new View with the dialogs shown meanwhile; `VIEWS_WAIT` (1.5 s)
+  caps a lost answer and drops a closed dialog the client never built. A change that removes the old top View applies at
+  once. Navigation started from a sheet therefore waits about one frame.
+- Every sheet slides closed (`draggable`), except full-screen editors, sheets with an `InteractiveViewer` or a `WebView`
+  (the DeepSeek sign-in page) and those that opt out (`sheet.no_drag_dismiss`); "Close Menu ✕" closes through
+  `close_dialog` (frozen keyed sheets, the tablet SidePanel) and never raises; a failing `ConfirmDialog` action is logged
+  and the dialog stays usable. The desktop's Qt dialogs have no counterpart.
+- Tests: tests_host/test_hotfix3_sheets.py (a frame-by-frame model of the v1.0.3 client's dialog handling).
+
+### Job page › Library (issue 2; mobile only, the desktop has no Jobs page)
+
+- The Job page has a Library button: the Library Book page of the job's book (its origin `bid`; a chat book once the chat
+  moved it into the Library after the run, `ChatFeature.job_workspace` + `ChatFeature.library_book`; a Library book whose
+  raw is the attached file, `chat_view.library_book_for_file`; a chat's "Save to: Library" run or a Tools job over a Library
+  book's workspace, with one quiet Library rescan when that workspace changed after the last scan). While a chat's own
+  attachment send (`direct_text`) is still translated in the chat's Attachments folder it is disabled with the chat card's
+  reason; typed-text chats and jobs without a Library book have none.
+- Tests: tests_host/test_hotfix3_job_library.py.
+
+### Reader › Book Details (issue 6; mobile only)
+
+- Desktop: Book Details opens from the Library card's context menu ("📑 Open Book Details"); the EPUB reader has no route
+  to it. Mobile: the Reader's top bar ⓘ Book Details and ⋯ › Open Book Details open the Book page of what the Reader shows
+  (its Library row; for a file opened by path the row it belongs to, `library.feature.library_book_for_path`; else the
+  EPUB / TXT / workspace's own Book page), pushed over the Reader. Before, ⋯ › "Open Book page" was disabled for every
+  book opened by path and went to the Chapters tab.
+- Tests: tests_host/test_hotfix3_reader_details.py.
