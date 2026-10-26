@@ -3,7 +3,7 @@
 Top bar (translucent ``surface`` at 92%): back · chapter title over book title ·
 ``SegmentedButton`` Original · Translated · Bilingual ("Orig · Trans · Both"
 under 400 dp; shown only when the book has a second flavour, like the desktop
-Raw pill) · search · ⋯. Bottom bar: the chapter ``Slider`` with
+Raw pill) · ⓘ Book Details (the book's Book page) · search · ⋯. Bottom bar: the chapter ``Slider`` with
 "Ch 12/48 · 43%" and "Page 3/9" (paged layouts), then ◀ previous chapter ·
 ☰ Chapters · Aa · 🌐 Translate (or "🛰️ Live view" while a live run is open) ·
 ▶ next chapter. A centre tap toggles both bars with a 150 ms fade.
@@ -32,9 +32,11 @@ from glossarion_mobile.ui.reader import model as rm
 from glossarion_mobile.ui.responsive import _text_width
 from glossarion_mobile.ui.theme import HIT_TARGET
 
-__all__ = ["ReaderChrome", "SelectionChipRow", "action_row_width", "compact_actions"]
+__all__ = ["DETAILS_TOOLTIP", "ReaderChrome", "SelectionChipRow", "action_row_width", "compact_actions"]
 
 FADE_MS = tokens.MOTION["state_ms"]  # 150 ms
+DETAILS_TOOLTIP = "Book Details"  # ⓘ: the book's Book page (the desktop Book Details)
+UNAVAILABLE_OPACITY = 0.38  # Material's disabled content opacity (the ⓘ of a file without a Book page)
 
 # The bottom action row (◀ · ☰ · Aa · Translate · ▶). Widths in dp.
 BAR_PADDING = 8  # the bottom bar's left / right padding
@@ -91,6 +93,7 @@ class ReaderChrome:
         on_translate: Callable[..., Any],
         on_slider: Callable[[int], Any],
         narrow: bool = False,
+        on_details: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.on_mode = on_mode
         self.on_slider = on_slider
@@ -112,6 +115,9 @@ class ReaderChrome:
             visible=False,
             key="reader-mode",
         )
+        # ⓘ stays tappable when the book has no Book page: the tap says why (an unavailable row's InfoSheet)
+        self.details_button = _icon_button(ft.Icons.INFO_OUTLINE, DETAILS_TOOLTIP, on_details, "reader-details") \
+            if on_details is not None else None
         self.search_button = _icon_button(ft.Icons.SEARCH, "Search", on_search, "reader-search")
         self.more_button = _icon_button(ft.Icons.MORE_VERT, "More", on_more, "reader-more")
         self.top = ft.Container(
@@ -126,6 +132,7 @@ class ReaderChrome:
                             [
                                 _icon_button(ft.Icons.ARROW_BACK, "Back", on_back, "reader-back"),
                                 ft.Column([self.chapter_title, self.book_title], spacing=0, expand=True, tight=True),
+                                *([self.details_button] if self.details_button is not None else []),
                                 self.search_button,
                                 self.more_button,
                             ],
@@ -210,6 +217,15 @@ class ReaderChrome:
         self.prev_button.disabled = index <= 0 and not (paged and (page or 0) > 0)
         self.next_button.disabled = index >= total - 1
         self._push(self.slider, self.progress_text, self.page_text, self.prev_button, self.next_button)
+
+    def set_details(self, available: bool, reason: str = "") -> None:
+        """ⓘ: dimmed with the reason as its tooltip when the book has no Book page (the tap explains)."""
+        button = self.details_button
+        if button is None:
+            return
+        button.tooltip = DETAILS_TOOLTIP if available else (reason or DETAILS_TOOLTIP)
+        button.icon_color = None if available else ft.Colors.with_opacity(UNAVAILABLE_OPACITY, ft.Colors.ON_SURFACE)
+        self._push(button)
 
     def set_translate(self, *, visible: bool, live: bool, reason: str = "") -> None:
         self.live = bool(live)

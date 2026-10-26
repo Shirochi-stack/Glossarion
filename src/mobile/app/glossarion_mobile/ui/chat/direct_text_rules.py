@@ -41,6 +41,7 @@ __all__ = [
     "AUTO_ACCEPT_GLOSSARY_PREF",
     "DEFAULT_RENDERED_CARD_LIMIT",
     "DirectTextSettings",
+    "FORCE_MULTIPASS_OFF",
     "effective_glossary_label",
     "GLOSSARY_OVERRIDE_LABELS",
     "GLOSSARY_OVERRIDE_MODES",
@@ -391,6 +392,14 @@ AUTO_ACCEPT_GLOSSARY_PREF = "chat_auto_accept_glossary"
 #: accept generated glossaries". Each is a DirectTextSettings field of the same name.
 SIDECAR_META_FIELDS = ("skip_plan", "auto_accept_glossary")
 
+#: ``DirectTextRunOptions.force_multipass_off`` of every mobile chat run (owner, hotfix 3 issue 3: "We don't
+#: need force multipass off in the mobile version, just have it toggled off by default"): chat runs follow the
+#: Multipass setting (Settings › Translation defaults › Multipass, ``multipass_mode``, off by default as on the
+#: desktop). The desktop dialog's "Force Multipass off" (``direct_text_force_multipass_off``, on by default)
+#: has no mobile control; its value imported from desktop or stored by an older build (config key, chat or
+#: series override, a stopped job's options) is ignored.
+FORCE_MULTIPASS_OFF = False
+
 
 def merge_meta_overrides(overrides: Optional[Mapping[str, Any]], meta: Optional[Mapping[str, Any]]) -> dict:
     """A chat's overrides (``ChatStoreAdapter.overrides`` / ``own_overrides``) plus its sidecar-meta settings
@@ -405,11 +414,11 @@ def merge_meta_overrides(overrides: Optional[Mapping[str, Any]], meta: Optional[
 
 @dataclass(frozen=True)
 class DirectTextSettings:
-    """Effective Direct Text settings for one chat (global keys, then chat overrides)."""
+    """Effective Direct Text settings for one chat (global keys, then chat overrides). No "Force Multipass
+    off" on mobile: chat runs follow the Multipass setting (``FORCE_MULTIPASS_OFF``)."""
 
     attachment_prompt_role: str = "user"
     glossary_override_mode: str = "attachments_only"
-    force_multipass_off: bool = True
     disable_thinking: bool = False
     skip_prompt_profile: bool = False
     disable_auto_scroll: bool = False
@@ -430,9 +439,9 @@ class DirectTextSettings:
 
         ``get(key, default)`` returns the raw config.json value (MobileConfigStore.get);
         ``prefs_get(key, default)`` (``Prefs.get``) the mobile-only global values (``AUTO_ACCEPT_GLOSSARY_PREF``;
-        without it they keep their defaults).
+        without it they keep their defaults). The dialog's ``direct_text_force_multipass_off`` (and its legacy
+        ``direct_text_force_simple_mode``) is not read: ``FORCE_MULTIPASS_OFF``.
         """
-        legacy_simple_mode = bool(get('direct_text_force_simple_mode', True))
         skip_profile = get('direct_text_skip_prompt_profile', None)
         if skip_profile is None:
             skip_profile = bool(
@@ -451,7 +460,6 @@ class DirectTextSettings:
         return cls(
             attachment_prompt_role=role if role in _ROLES else 'user',
             glossary_override_mode=normalize_glossary_override_mode(get('direct_text_glossary_override_mode', '')),
-            force_multipass_off=bool(get('direct_text_force_multipass_off', legacy_simple_mode)),
             disable_thinking=bool(get('direct_text_disable_thinking', False)),
             skip_prompt_profile=bool(skip_profile),
             disable_auto_scroll=bool(get('direct_text_disable_auto_scroll', False)),
@@ -463,12 +471,13 @@ class DirectTextSettings:
         )
 
     def with_overrides(self, overrides: Optional[Mapping[str, Any]]) -> "DirectTextSettings":
-        """Apply per-chat overrides (sidecar ``overrides`` + ``merge_meta_overrides``; None/missing = inherit)."""
+        """Apply per-chat overrides (sidecar ``overrides`` + ``merge_meta_overrides``; None/missing = inherit).
+        An older build's ``force_multipass_off`` override is ignored (``FORCE_MULTIPASS_OFF``)."""
         if not overrides:
             return self
         values = dict(self.__dict__)
         for field_name in (
-            "attachment_prompt_role", "glossary_override_mode", "force_multipass_off", "disable_thinking",
+            "attachment_prompt_role", "glossary_override_mode", "disable_thinking",
             "skip_prompt_profile", "disable_auto_scroll", "rendered_card_limit", "output_mode",
         ):
             if overrides.get(field_name) is not None:
@@ -481,16 +490,15 @@ class DirectTextSettings:
         values["attachment_prompt_role"] = role if role in _ROLES else "user"
         values["rendered_card_limit"] = normalize_rendered_card_limit(values["rendered_card_limit"])
         values["output_mode"] = normalize_mode(values["output_mode"])
-        for flag in ("force_multipass_off", "disable_thinking", "skip_prompt_profile", "disable_auto_scroll"):
+        for flag in ("disable_thinking", "skip_prompt_profile", "disable_auto_scroll"):
             values[flag] = bool(values[flag])
         return DirectTextSettings(**values)
 
     def config_updates(self) -> dict:
         """Global keys for these values (the desktop persists one key per control); the mobile-only
-        ``SIDECAR_META_FIELDS`` are not config keys."""
+        ``SIDECAR_META_FIELDS`` are not config keys, nor is the desktop-only ``direct_text_force_multipass_off``."""
         updates = {
             "direct_text_attachment_prompt_role": self.attachment_prompt_role,
-            "direct_text_force_multipass_off": self.force_multipass_off,
             "direct_text_disable_thinking": self.disable_thinking,
             "direct_text_skip_prompt_profile": self.skip_prompt_profile,
             "direct_text_disable_auto_scroll": self.disable_auto_scroll,

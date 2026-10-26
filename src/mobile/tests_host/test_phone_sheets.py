@@ -268,9 +268,9 @@ def test_chat_settings_sections_keep_their_expanded_state_after_a_change():
     assert _tile(sheet, "Run behaviour").expanded is False and _tile(sheet, "Model & prompt").expanded is True
     _tile(sheet, "Run behaviour").expanded = True  # the client reports the tap (ExpansionTile on_change)
     _tile(sheet, "Model & prompt").expanded = False
-    sheet.set_value("force_multipass_off", True)
+    sheet.set_value("disable_thinking", True)
     assert _tile(sheet, "Run behaviour").expanded is True and _tile(sheet, "Model & prompt").expanded is False
-    assert sheet.value_of("force_multipass_off") is True
+    assert sheet.value_of("disable_thinking") is True
 
 
 class _Prefs:

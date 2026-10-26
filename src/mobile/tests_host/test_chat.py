@@ -557,16 +557,18 @@ def test_manual_glossary_source_and_settings_migrations(tmp_path):
         return lambda key, default=None: values.get(key, default)
 
     fresh = DirectTextSettings.from_config(getter({}))
-    assert (fresh.force_multipass_off, fresh.glossary_override_mode, fresh.attachment_prompt_role,
-            fresh.skip_prompt_profile, fresh.rendered_card_limit, fresh.output_mode) == (True, "attachments_only", "user", False, 20, "text")
+    assert (fresh.glossary_override_mode, fresh.attachment_prompt_role,
+            fresh.skip_prompt_profile, fresh.rendered_card_limit, fresh.output_mode) == ("attachments_only", "user", False, 20, "text")
     legacy = DirectTextSettings.from_config(getter({
         "direct_text_force_simple_mode": False, "direct_text_skip_user_prompt_profile": True,
         "direct_text_glossary_override_mode": "bogus", "direct_text_attachment_prompt_role": "ROBOT",
         "direct_text_rendered_card_limit": 999, "output_mode": "refine",
     }))
-    assert (legacy.force_multipass_off, legacy.skip_prompt_profile, legacy.glossary_override_mode,
+    # hotfix 3: no "Force Multipass off" on mobile (direct_text_rules.FORCE_MULTIPASS_OFF, test_hotfix3_multipass.py)
+    assert not hasattr(legacy, "force_multipass_off")
+    assert (legacy.skip_prompt_profile, legacy.glossary_override_mode,
             legacy.attachment_prompt_role, legacy.rendered_card_limit, legacy.output_mode) == (
-        False, True, "attachments_only", "user", 200, "refinement")
+        True, "attachments_only", "user", 200, "refinement")
     chat = fresh.with_overrides({"glossary_override_mode": "manual", "disable_thinking": True, "skip_plan": True,
                                  "attachment_prompt_role": "system", "model": "ignored-here"})
     assert (chat.glossary_override_mode, chat.disable_thinking, chat.skip_plan, chat.attachment_prompt_role) == (

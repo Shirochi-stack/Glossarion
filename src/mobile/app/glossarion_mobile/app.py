@@ -590,6 +590,10 @@ class GlossarionApp:
         self.state.backend.set(dict(result or {}))
         if result and not result.get("ok"):
             log.error("backend warm import failed: %s", list((result.get("failed") or {}).keys()))
+        try:
+            rb.freeze_startup_heap(self.paths)  # hotfix 2: shorter gen-2 GC pauses on devices
+        except Exception:
+            log.exception("freezing the startup heap failed")
 
     async def _after_ready(self) -> None:
         """Native probes that must not delay GLOSSARION_READY."""

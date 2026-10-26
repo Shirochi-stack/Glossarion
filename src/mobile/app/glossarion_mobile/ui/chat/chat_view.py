@@ -3483,13 +3483,14 @@ class ChatView:
         if not self.bound:
             return
         field_name = {"glossary": "glossary_override_mode", "thinking": "disable_thinking",
-                      "multipass": "force_multipass_off", "target": "target_language", "model": "model"}.get(pill_id)
+                      "target": "target_language", "model": "model"}.get(pill_id)
         if field_name:
             self.env.chats.set_override(self.cid, field_name, None)
             self.apply_settings_changed()
 
     def option_pills(self) -> list:
-        """Pills for options that differ from the defaults (UI_SPEC §2.3)."""
+        """Pills for options that differ from the defaults (UI_SPEC §2.3). No "Multipass on" pill: Multipass is
+        not a chat setting on mobile (hotfix 3; chat runs follow Settings › Translation defaults › Multipass)."""
         if not self.bound:
             return []
         settings = self.settings()
@@ -3500,8 +3501,6 @@ class ChatView:
                                        "none": "Glossary: Main"}[settings.glossary_override_mode]))
         if settings.disable_thinking:
             pills.append(("thinking", "Thinking off"))
-        if not settings.force_multipass_off:
-            pills.append(("multipass", "Multipass on"))
         if overrides.get("target_language"):
             pills.append(("target", f"→ {overrides['target_language']}"))
         if overrides.get("model"):

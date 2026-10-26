@@ -1,8 +1,15 @@
 """SourcePicker (UI_SPEC §4.2, §5.5): what a tool runs on.
 
-A ``BottomSheet`` with the segments **Recent outputs** · **Library books** · **Chat
-workspaces** · **Browse**. Rows are ``targets.ToolTarget`` (output folder + raw source),
-loaded on the io pool. Single mode picks on tap; multi mode has checkboxes and a "Use N"
+A ``BottomSheet`` with the segments **Recent outputs** · **Books** · **Browse**. Rows are
+``targets.ToolTarget`` (output folder + raw source), loaded on the io pool. **Books** is one
+list of the Library's books and the chat books (``<chat>/Attachments/<book>``, raw file
+resolved), one row per book (``targets.merge_book_rows``), each labelled where it was found
+(📚 Library · 💬 Chat); a chat's text messages (``Chat Messages``) are not books. **Recent
+outputs** are the workspaces of both translated into last (``targets.recent_output_targets``),
+newest first, with the same row keys. The opt-in segments ``library`` (the Library alone: the
+chat's ＋ › From Library) and ``chat`` (the chat books alone) stay available through
+``segments``; a tool asking for ``segment="library"`` or ``"chat"`` without them opens
+**Books**. Single mode picks on tap; multi mode has checkboxes and a "Use N"
 button (a bulk QA scan, metadata for several EPUBs). Each tool passes ``eligible(target)``:
 rows it cannot use stay visible, disabled, with the reason (QA skips Direct Text
 workspaces, the Converter needs an output folder, metadata needs a raw EPUB...). The
@@ -51,12 +58,19 @@ from glossarion_mobile.ui.components.sheet import sheet_frame
 from glossarion_mobile.ui.theme import HIT_TARGET
 from glossarion_mobile.ui.tools import targets as tg
 
-__all__ = ["LIBRARY_SORT", "SEARCH_HINT", "SEGMENTS", "SourcePicker"]
+__all__ = ["ALL_SEGMENTS", "LIBRARY_SORT", "SEARCH_HINT", "SEGMENTS", "SourcePicker", "found_in_label"]
 
 log = logging.getLogger("glossarion.tools")
 
-SEGMENTS = (("recent", "Recent outputs"), ("library", "Library books"), ("chat", "Chat workspaces"),
-            ("browse", "Browse"))
+#: Every segment, in display order; the Tools pickers show ``SEGMENTS`` (hotfix 2: Library books and
+#: chat workspaces are one "Books" list), ``library`` / ``chat`` alone are opt-in (``segments=``).
+ALL_SEGMENTS = (("recent", "Recent outputs"), ("books", "Books"), ("library", "Library books"),
+                ("chat", "Chat workspaces"), ("browse", "Browse"))
+SEGMENTS = tuple(s for s in ALL_SEGMENTS if s[0] in ("recent", "books", "browse"))
+#: A segment a picker does not offer -> the one that lists its rows.
+SEGMENT_ALIASES = {"library": "books", "chat": "books"}
+#: ``targets.found_in`` -> the row's label.
+FOUND_IN_LABELS = (("library", "📚 Library"), ("chat", "💬 Chat"))
 BROWSE_EXTENSIONS = ("epub", "txt", "pdf")
 #: The Library search field's copy (UI_SPEC §3.1).
 SEARCH_HINT = "Filter title or tag…"
@@ -64,8 +78,17 @@ SEARCH_HINT = "Filter title or tag…"
 LIBRARY_SORT = tg.LIBRARY_SORT
 
 
+def found_in_label(target: tg.ToolTarget) -> str:
+    """Where the row's book was found (``targets.found_in``): 📚 Library, 💬 Chat or both."""
+    found = tg.found_in(target)
+    return " · ".join(label for key, label in FOUND_IN_LABELS if key in found)
+
+
 def _subtitle(target: tg.ToolTarget) -> str:
     parts = []
+    label = found_in_label(target)
+    if label:
+        parts.append(label)
     if target.folder:
         parts.append(f"📁 {target.folder_name}")
     else:
@@ -130,16 +153,17 @@ class SourcePicker:
         self.eligible = eligible or (lambda t: None)
         self.on_done = on_done
         wanted = tuple(segments) if segments is not None else None
-        self.segments = tuple(value for value, _label in SEGMENTS if wanted is None or value in wanted) or tuple(
-            value for value, _label in SEGMENTS)
-        self.segment = segment if segment in self.segments else self.segments[0]
+        defaults = tuple(value for value, _label in SEGMENTS)
+        self.segments = defaults if wanted is None else (
+            tuple(value for value, _label in ALL_SEGMENTS if value in wanted) or defaults)
+        self.segment = self._offered(segment)
         self.searchable = searchable
         self.query = str(query or "")
         self.book_rows = book_rows
         self.header_action = header_action
         self.include_unresolved = include_unresolved
         self.long_press_selects = long_press_selects
-        self.rows: dict = {"recent": [], "library": [], "chat": [], "browse": []}
+        self.rows: dict = {value: [] for value, _label in ALL_SEGMENTS}
         self.shown: list = []  # the rows ``render`` lists (filtered, ordered); ``rendered`` of them are built
         self.rendered = 0
         self.loaded = False
@@ -152,7 +176,7 @@ class SourcePicker:
         self._cover_rows: dict = {}  # book key -> BookListRow waiting for its cover
         self._covers: Any = None  # the Library's CoverQueue (book_rows)
         self.segmented = ft.SegmentedButton(
-            segments=[ft.Segment(value=value, label=ft.Text(label)) for value, label in SEGMENTS
+            segments=[ft.Segment(value=value, label=ft.Text(label)) for value, label in ALL_SEGMENTS
                       if value in self.segments],
             selected=[self.segment], allow_multiple_selection=False, show_selected_icon=False,
             on_change=self._on_segment, key="picker-segments")
@@ -231,19 +255,23 @@ class SourcePicker:
 
         def gather() -> dict:
             library = (tg.library_targets(service, include_unresolved=include_unresolved)
-                       if service is not None and segments & {"recent", "library"} else [])
+                       if service is not None and segments & {"recent", "books", "library"} else [])
+            chat = (tg.chat_workspace_targets(chats_root, service=service)
+                    if segments & {"recent", "books", "chat"} else [])
             rows = {
-                "recent": tg.recent_output_targets(service, library_rows=library)
+                "recent": tg.recent_output_targets(service, library_rows=library, chat_rows=chat)
                 if service is not None and "recent" in segments else [],
+                "books": tg.merge_book_rows(library, chat) if "books" in segments else [],
                 "library": library if "library" in segments else [],
-                "chat": tg.chat_workspace_targets(chats_root) if "chat" in segments else [],
+                "chat": chat if "chat" in segments else [],
             }
             reasons: dict = {}
             for found_rows in rows.values():
                 for target in found_rows:
                     if target.key not in reasons:
                         reasons[target.key] = _reason_of(eligible, target)
-            models = _card_models(service, rows["library"], dark) if book_rows and service is not None else {}
+            models = (_card_models(service, rows["library"] + rows["books"], dark)
+                      if book_rows and service is not None else {})
             return {"rows": rows, "reasons": reasons, "models": models}
 
         try:
@@ -260,6 +288,14 @@ class SourcePicker:
         self.render()
 
     # ---- rendering ----------------------------------------------------------------------------
+
+    def _offered(self, segment: str) -> str:
+        """``segment`` when this picker offers it, else its alias (``library`` / ``chat`` -> Books), else the
+        first segment."""
+        if segment in self.segments:
+            return segment
+        alias = SEGMENT_ALIASES.get(segment)
+        return alias if alias in self.segments else self.segments[0]
 
     def _done_label(self) -> str:
         count = len(self.selected)
@@ -281,7 +317,7 @@ class SourcePicker:
             return rows
         query = self.query.strip()
         service = self.ctx.service
-        if self.segment == "library" and service is not None:
+        if self.segment in ("library", "books") and service is not None:
             return tg.order_library_rows(service, rows, query)
         return [t for t in rows if tg.target_matches(service, t, query)] if query else rows
 
@@ -336,10 +372,12 @@ class SourcePicker:
             query = self.query.strip()
             if query and self.rows.get(self.segment):
                 self.status.value = (f"No Library book matches “{query}”" if self.segment == "library"
+                                     else f"No book matches “{query}”" if self.segment == "books"
                                      else f"Nothing matches “{query}”")
             else:
-                empty = {"recent": "No translation workspaces yet.", "library": "The Library is empty.",
-                         "chat": "No chat attachment workspaces.",
+                empty = {"recent": "No translations yet.",
+                         "books": "No books yet: add one to the Library or attach one in a chat.",
+                         "library": "The Library is empty.", "chat": "No chat books.",
                          "browse": "Pick an EPUB, TXT or PDF file; its output folder is found automatically."}
                 self.status.value = empty.get(self.segment, "")
         else:
@@ -446,7 +484,7 @@ class SourcePicker:
         self.set_segment(selected[0] if selected else self.segments[0])
 
     def set_segment(self, segment: str) -> None:
-        self.segment = segment if segment in self.segments else self.segments[0]
+        self.segment = self._offered(segment)
         self.segmented.selected = [self.segment]
         self.ctx.push(self.segmented)
         self.render()

@@ -60,9 +60,9 @@ class LogConsole(ft.Column):
     list_height: Optional[float] = field(default=320, metadata={"skip": True})
     copy_handler: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
     header_follow: bool = field(default=False, metadata={"skip": True})
-    #: called after each change the console painted (new lines, a filter, follow on/off); the host uses it to
-    #: keep its own page pinned to the end while following (owner 2026-10-21: the job page crept up a few dp
-    #: off its bottom as lines arrived)
+    #: called after each change the console painted (new lines, a filter, follow on/off). Not for pinning the
+    #: host's page to its end: a ``scroll_to`` sent from here runs on the client before the new content is laid
+    #: out (the Job page pins its list with ``auto_scroll`` instead, hotfix 2)
     on_after_change: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
 
     def init(self) -> None:

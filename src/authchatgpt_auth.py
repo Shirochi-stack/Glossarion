@@ -384,6 +384,10 @@ class _DriverPage:
             return None
 
 
+#: Times one request is sent again on a new page after the app rebuilt its page (mobile only).
+MAX_PAGE_RESENDS = 3
+
+
 class _PageLost(AuthChatGPTError):
     """The hooked chatgpt.com document went away while a reply was on its way.
 
@@ -1242,7 +1246,7 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
     prompt = build_prompt(messages, images=images)
     token = _access_token(log_fn)
     refreshed = False
-    resent = False
+    resends = 0
     sent = []
 
     def before_send():
@@ -1268,10 +1272,11 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
                 return result
             except _PageLost:
                 # In the app the hidden page is rebuilt when the screen changes (see _PageLost):
-                # the message goes once more on a new page instead of failing the request.
-                if resent or not getattr(page, "driver", False):
+                # the message goes again on a new page instead of failing the request, up to
+                # MAX_PAGE_RESENDS times (every screen change while it answers rebuilds the page).
+                if resends >= MAX_PAGE_RESENDS or not getattr(page, "driver", False):
                     raise
-                resent = True
+                resends += 1
                 kind = None
             except AuthChatGPTError as exc:
                 if not token or not _login_rejected(exc):
@@ -1279,7 +1284,7 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
                 kind, reason = exc.error_type, str(exc).replace("AuthChatGPT: ", "")
         if kind is None:
             log_fn("🔄 AuthChatGPT: the in-app ChatGPT page was rebuilt while it was answering "
-                   "(a screen change); sending the message again.")
+                   f"(a screen change); sending the message again ({resends}/{MAX_PAGE_RESENDS}).")
             continue
         # The login failed this request: one refresh, then the chat runs logged out.
         replacement = None if refreshed or kind != "auth_error" else _refreshed_token(token)

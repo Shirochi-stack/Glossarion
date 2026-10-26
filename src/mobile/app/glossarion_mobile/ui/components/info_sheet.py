@@ -37,6 +37,7 @@ class InfoSheet:
             content=sheet_frame(self.column, padding=ft.Padding.only(left=16, right=16, bottom=24)),
             show_drag_handle=True,
             scrollable=True,
+            draggable=True,  # slides closed (hotfix 3 issue 1)
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
         )
 

@@ -100,6 +100,50 @@ def _inside(path: Any, root: Any) -> bool:
         return False
 
 
+def _workspace_of(library: Any, folder: str) -> Optional[str]:
+    """The Library id of the book on the current shelf whose workspace is ``folder`` (``ChatFeature.library_book``)."""
+    snap = getattr(library, "snapshot", None)
+    workspace_for = getattr(library, "workspace_for", None)
+    wanted = _norm(folder)
+    for book in (snap.all_books() if snap is not None else ()):
+        workspace = str(book.get("output_folder") or "")
+        if not workspace and callable(workspace_for):
+            try:
+                workspace = str(workspace_for(book) or "")
+            except Exception:
+                workspace = ""
+        if workspace and _norm(workspace) == wanted:
+            return library.bid_for(book)
+    return None
+
+
+#: file-system timestamps vs the scan clock (coarse mtimes on some file systems)
+_SCAN_SLACK = 2.0
+
+
+def _changed_since_scan(library: Any, folder: str) -> bool:
+    """``folder`` is a folder inside the Library's own folders (its output folders, the Library folder) that
+    changed after the shelf was scanned: a rescan may list it. A folder elsewhere, or one the last scan saw as
+    it is, never makes a rescan."""
+    roots: list = []
+    for name in ("output_roots", "library_root"):
+        getter = getattr(library, name, None)
+        try:
+            value = getter() if callable(getter) else None
+        except Exception:
+            value = None
+        roots.extend(value if isinstance(value, (list, tuple)) else [value])
+    roots = [str(root) for root in roots if root]
+    if not roots or not any(_inside(folder, root) and _norm(folder) != _norm(root) for root in roots):
+        return False
+    try:
+        changed = os.path.getmtime(folder)
+    except OSError:
+        return False
+    scanned = getattr(getattr(library, "snapshot", None), "scanned_at", 0) or 0
+    return changed >= float(scanned) - _SCAN_SLACK
+
+
 def _catalog_service() -> Any:
     try:
         from glossarion_mobile.services.model_catalog import default_service
@@ -1516,29 +1560,26 @@ class ChatFeature:
 
     async def library_book(self, folder: str) -> Optional[str]:
         """The Library id of the book whose workspace is ``folder`` (its ``output_folder``, or the one
-        ``LibraryService.workspace_for`` resolves); a quiet rescan first when the Library is stale."""
+        ``LibraryService.workspace_for`` resolves); a quiet rescan first when the Library is stale, and once
+        more when the shelf lacks a folder of the Library's own that changed after its last scan (a workspace a
+        running job just created: a chat's "Save to: Library" run is on the In progress shelf from the start,
+        hotfix 3 issue 2)."""
         library = self.library_service()
         if library is None or not folder or not hasattr(library, "bid_for"):
             return None
         snap = getattr(library, "snapshot", None)
         if getattr(library, "dirty", False) or not getattr(snap, "scanned_at", 0):
-            try:
-                await library.refresh(quiet=True, reason="chat")
-            except Exception:
-                log.debug("refreshing the Library failed", exc_info=True)
-            snap = getattr(library, "snapshot", None)
-        workspace_for = getattr(library, "workspace_for", None)
-        wanted = _norm(folder)
-        for book in (snap.all_books() if snap is not None else ()):
-            workspace = str(book.get("output_folder") or "")
-            if not workspace and callable(workspace_for):
-                try:
-                    workspace = str(workspace_for(book) or "")
-                except Exception:
-                    workspace = ""
-            if workspace and _norm(workspace) == wanted:
-                return library.bid_for(book)
-        return None
+            await self._rescan_library(library)
+        elif _workspace_of(library, folder) is None and _changed_since_scan(library, folder):
+            await self._rescan_library(library)
+        return _workspace_of(library, folder)
+
+    @staticmethod
+    async def _rescan_library(library: Any) -> None:
+        try:
+            await library.refresh(quiet=True, reason="chat")
+        except Exception:
+            log.debug("refreshing the Library failed", exc_info=True)
 
     async def library_translate(self, folder: str, source: str = "", run_config: Optional[dict] = None) -> Any:
         """Resume / Retry failed of a chat book that moved into the Library: the Library translate sheet

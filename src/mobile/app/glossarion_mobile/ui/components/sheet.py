@@ -16,6 +16,12 @@ height at 200 % text and keep a compact, non-scrolling body only when it surely 
 Flutter's modal sheet wraps the content in ``SafeArea(bottom: false)``, so with Android 15
 edge-to-edge and 3-button navigation the last row sat under the navigation bar: ``sheet_frame``
 adds the bottom system inset.
+
+Closing (hotfix 3 issue 1, "the close menu button and slide to close is not working in some edge
+cases, I have to backspace"): every sheet has "Close Menu ✕" (``close_dialog``: by identity, frozen
+or in the tablet SidePanel, never raising) and slides closed (``draggable``) unless it pans / zooms
+itself, is full screen, or opts out (``no_drag_dismiss``); ``install_close_buttons`` also installs
+``dialogs.install_views_guard``, so a new top View never strands a sheet the client still shows.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ __all__ = [
     "bottom_sheet",
     "close_sheet",
     "install_close_buttons",
+    "no_drag_dismiss",
     "with_close_button",
     "fits_compact",
     "page_width",
@@ -89,22 +96,49 @@ CLOSE_LABEL = "Close Menu"
 #: height of the top strip (Flutter's drag-handle area is 48 dp)
 CLOSE_STRIP = 40.0
 _CLOSE_MARK = "_glossarion_close_strip"
+_NO_DRAG = "_glossarion_no_drag"
+_DRAG_DECIDED = "_glossarion_drag_decided"
+#: controls that own vertical drags themselves (a swipe-down would steal their pans / pinches): the image
+#: viewer, and a web page (flet_webview builds ``WebViewWidget`` without gestureRecognizers, so a platform view
+#: only gets the drags no Flutter recognizer claims: the sheet's drag would take every vertical swipe - the
+#: DeepSeek sign-in page could not scroll, and a swipe closed the sheet mid-login)
+_GESTURE_OWNERS = ("InteractiveViewer", "WebView")
+#: the content walk that looks for them stops after this many controls (huge lists are plain rows)
+_GESTURE_SCAN_LIMIT = 400
 
 
-def close_sheet(sheet: ft.BottomSheet) -> None:
-    """Close ``sheet`` as ``page.pop_dialog`` does (its on_dismiss runs as for a swipe)."""
-    sheet.open = False
+def _event_page(sheet: ft.BottomSheet, e: Any) -> Any:
+    """The click's page, else the sheet's (None when neither is mounted: a panel copy, a gone session)."""
+    for source in (e, sheet):
+        if source is None:
+            continue
+        try:
+            page = source.page  # Flet raises when the control is not on a page
+        except Exception:
+            continue
+        if page is not None:
+            return page
+    return None
+
+
+def close_sheet(sheet: ft.BottomSheet, e: Any = None) -> None:
+    """Close ``sheet`` like its own Close / Cancel paths (``dialogs.close_dialog``: this sheet by identity,
+    a frozen one too, the tablet SidePanel copy); its on_dismiss runs as for a swipe. Never raises."""
+    from glossarion_mobile.ui.components.dialogs import close_dialog
+
     try:
-        sheet.update()
-    except Exception:
-        pass
+        close_dialog(_event_page(sheet, e), sheet)
+    except Exception:  # a click handler that raises shows Flet's crashed-session screen
+        import logging
+
+        logging.getLogger("glossarion.ui").exception("closing a sheet failed")
 
 
 def close_strip(sheet: ft.BottomSheet, *, handle: bool) -> ft.Control:
     """The strip on top of a sheet: the drag-handle pill (``handle``) and "Close Menu ✕" at the right."""
     button = ft.TextButton(
         content=ft.Row([ft.Text(CLOSE_LABEL), ft.Icon(ft.Icons.CLOSE, size=18)], spacing=4, tight=True),
-        tooltip=CLOSE_LABEL, on_click=lambda e: close_sheet(sheet), key="sheet-close",
+        tooltip=CLOSE_LABEL, on_click=lambda e: close_sheet(sheet, e), key="sheet-close",
         style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=10, vertical=0)))
     controls: list = [ft.Container(content=button, right=4, top=0, bottom=0, alignment=ft.Alignment.CENTER_RIGHT)]
     if handle:
@@ -118,7 +152,8 @@ def with_close_button(sheet: ft.BottomSheet) -> ft.BottomSheet:
     content = getattr(sheet, "content", None)
     if content is None or getattr(content, _CLOSE_MARK, False):
         return sheet
-    handle = bool(getattr(sheet, "show_drag_handle", False))
+    # the pill where Flutter's handle was, and on every sheet that slides closed (a swapped-in content too)
+    handle = bool(getattr(sheet, "show_drag_handle", False) or getattr(sheet, "draggable", False))
     body = ft.Container(content=content, padding=ft.Padding.only(top=CLOSE_STRIP),
                         expand=getattr(content, "expand", None))
     stack = ft.Stack([body, close_strip(sheet, handle=handle)], expand=getattr(content, "expand", None))
@@ -136,13 +171,65 @@ def sheet_body(sheet: ft.BottomSheet) -> Any:
     return content
 
 
+def no_drag_dismiss(sheet: ft.BottomSheet) -> ft.BottomSheet:
+    """Keep ``sheet`` from sliding closed (it keeps "Close Menu ✕" and Android back): content whose own
+    vertical drags must not close it."""
+    object.__setattr__(sheet, _NO_DRAG, True)
+    sheet.draggable = False
+    return sheet
+
+
+def _holds_gestures(content: Any) -> bool:
+    """True when ``content`` has a control that pans / zooms itself (``_GESTURE_OWNERS``)."""
+    stack, seen = [content], 0
+    while stack and seen < _GESTURE_SCAN_LIMIT:
+        control = stack.pop()
+        if control is None:
+            continue
+        seen += 1
+        if type(control).__name__ in _GESTURE_OWNERS:
+            return True
+        for name in ("content", "title", "subtitle", "leading", "trailing"):
+            child = getattr(control, name, None)
+            if isinstance(child, ft.Control):
+                stack.append(child)
+        for name in ("controls", "actions"):
+            items = getattr(control, name, None)
+            if isinstance(items, list):
+                stack.extend(item for item in items if isinstance(item, ft.Control))
+    return False
+
+
+def drag_dismissable(sheet: ft.BottomSheet) -> bool:
+    """Whether ``sheet`` should slide closed: not full screen (an editor's typed text), not opted out,
+    nothing in it that pans / zooms."""
+    if getattr(sheet, _NO_DRAG, False) or getattr(sheet, "fullscreen", False):
+        return False
+    return not _holds_gestures(getattr(sheet, "content", None))
+
+
+def _enable_drag(sheet: ft.BottomSheet) -> None:
+    """Swipe-down closes the sheet (Flutter reads ``enableDrag`` when the sheet opens); decided once."""
+    if getattr(sheet, _DRAG_DECIDED, False):
+        return
+    object.__setattr__(sheet, _DRAG_DECIDED, True)
+    if not sheet.draggable and drag_dismissable(sheet):
+        sheet.draggable = True  # the strip draws the drag pill for it
+
+
 def install_close_buttons() -> None:
-    """Give every ``ft.BottomSheet`` the "Close Menu ✕" strip (once per process, at app start)."""
+    """Every ``ft.BottomSheet`` gets the "Close Menu ✕" strip and slides closed, and a new top View waits
+    for the sheets on the old one (``dialogs.install_views_guard``); once per process, at app start."""
+    from glossarion_mobile.ui.components.dialogs import install_views_guard
+
+    install_views_guard()
     original = ft.BottomSheet.before_update
     if getattr(original, _CLOSE_MARK, False):
         return
 
     def before_update(self: ft.BottomSheet) -> None:
+        if getattr(self, "open", False):
+            _enable_drag(self)
         with_close_button(self)
         original(self)
 
@@ -150,9 +237,11 @@ def install_close_buttons() -> None:
     ft.BottomSheet.before_update = before_update
 
 
-def bottom_sheet(content: ft.Control, *, key: Optional[str] = None, draggable: bool = False) -> ft.BottomSheet:
-    """The app's sheet chrome: drag handle, no 9/16 height cap, ``content`` as built by the caller."""
-    return ft.BottomSheet(content=content, show_drag_handle=True, scrollable=True, draggable=draggable,
+def bottom_sheet(content: ft.Control, *, key: Optional[str] = None, draggable: bool = True) -> ft.BottomSheet:
+    """The app's sheet chrome: drag handle, slides closed (not when ``content`` pans / zooms itself or holds a
+    web page, ``_GESTURE_OWNERS``), no 9/16 height cap, ``content`` as built by the caller."""
+    return ft.BottomSheet(content=content, show_drag_handle=True, scrollable=True,
+                          draggable=draggable and not _holds_gestures(content),
                           bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH, key=key)
 
 

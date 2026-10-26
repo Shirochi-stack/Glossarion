@@ -48,6 +48,7 @@ from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.chat.chat_view import ChatView
 from glossarion_mobile.ui.chat.header import narrow_header
 from glossarion_mobile.ui.components import surface
+from glossarion_mobile.ui.components.dialogs import change_views
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.responsive import Layout, SizeClass, layout_for
 from glossarion_mobile.ui.router import FULLSCREEN, HANDLED, ROOT, ROUTES_BY_NAME, SHEET, RouteMatch, parse_route
@@ -393,8 +394,14 @@ class AppShell:
         for entry in pushed:
             views.append(self._entry_view(entry))
         views.extend(self.overlays)
-        self.page.views.clear()
-        self.page.views.extend(views)
+
+        def apply() -> None:
+            self.page.views.clear()
+            self.page.views.extend(views)
+
+        # A new top View waits until the client closed the sheets / dialogs it may show on the old one (hotfix 3
+        # issue 1: otherwise their route stays under the new screen and Close Menu cannot reach it).
+        change_views(self.page, apply, top=views[-1], views=views)
         self._place_strip()
 
     def _sync_root_back(self) -> None:
@@ -649,7 +656,7 @@ class AppShell:
             view.route = f"{base}/overlay-{index}"
             log.debug("overlay route %r is taken; using %r", route, view.route)
         self.overlays.append(view)
-        self.page.views.append(view)
+        change_views(self.page, lambda: self.page.views.append(view), top=view)
 
     def _on_tablet_back(self, e: Any = None) -> None:
         entry = self._top_panel_entry()

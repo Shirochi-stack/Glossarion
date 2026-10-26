@@ -10,8 +10,10 @@ The tab body of ``ModelManagerScreen`` (``tab == "local"``), over ``services.loc
   the on-device sampling fields, "Block CJK in translations (adaptive)" (on by default; ``script_ban``).
   Where the build has a GPU backend (iOS Metal, Android arm64 OpenCL), "Use GPU (experimental)" (off by
   default): the card then says what runs the model ("Runs on GPU: … (OpenCL)" / "Runs on CPU (…)") and,
-  after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU"; on Android "Add GPU-friendly
-  presets (Q4_0)" appends ``presets.GPU_PRESETS``.
+  after a GPU failure, "GPU unavailable for <model>: <reason> — using CPU". On Android, switching it on
+  appends the missing ``presets.GPU_PRESETS`` (Q4_0) at once; "Add GPU-friendly presets (Q4_0)" shows only
+  while the GPU is on and one is missing (removed, Restore defaults, switched on by an older build). iOS
+  (Metal) runs the default K-quants: no Q4_0 presets there.
 * **Presets** (data in Prefs, ``presets.PREF_KEY``; Qwen3.5 0.8B/2B/4B/9B defaults): ONE button per
   model. Download (one tap: Hugging Face file and, when the preset or repository has one, its vision
   projector ``mmproj-*.gguf``; download with progress, load, use as the model) / progress with Pause and
@@ -63,6 +65,8 @@ RAM_HINTS = {"ok": ("✓", "fits this phone"), "confirm": ("⚠", "tight on free
              "unknown": ("", "")}
 #: Context slider range and step (tokens); the field takes 512 up to ``presets.MAX_CTX``
 CONTEXT_SLIDER = (2048, 16384, 1024)
+#: Prefs flag (mobile state, not config.json): the GPU-friendly Q4_0 presets were offered once.
+GPU_PRESETS_OFFERED_KEY = "local_gpu_presets_offered"
 
 
 def _push(*controls: Any) -> None:
@@ -633,9 +637,10 @@ class OnDeviceFlow:
 
     def _gpu_section(self, key_prefix: str = "local") -> list:
         """"Use GPU (experimental)" (off by default; only where the build has a GPU backend), its note, the
-        fallback line ("GPU unavailable: … — using CPU") and, on Android, "Add GPU-friendly presets (Q4_0)".
-        Shared by the Model manager's engine card and the Welcome page ("Run on this phone"); *key_prefix*
-        keeps their control keys apart."""
+        fallback line ("GPU unavailable: … — using CPU") and, on Android, "Add GPU-friendly presets (Q4_0)"
+        (the fallback while one is missing: switching the GPU on adds them, ``save_gpu``). Shared by the
+        Model manager's engine card and the Welcome page ("Run on this phone"); *key_prefix* keeps their
+        control keys apart. Building it never changes the presets list."""
         backend = self._gpu_backend()
         use = bool(backend) and bool(getattr(self.service, "use_gpu", lambda: False)())
         self.gpu_switch = ft.Switch(label="Use GPU (experimental)", value=use, key=f"{key_prefix}-gpu", visible=bool(backend),
@@ -668,8 +673,15 @@ class OnDeviceFlow:
                                            and bool(missing))
 
     def save_gpu(self) -> bool:
+        """The switch. Turning it on with Android's OpenCL backend also adds the GPU-friendly Q4_0 presets
+        the list lacks (``add_gpu_presets``; owner 2026-10-26: no extra tap). Off keeps every preset and
+        file; iOS (Metal) runs the default K-quants, so it adds none there."""
+        was_on = bool(getattr(self.service, "use_gpu", lambda: False)())
         value = bool(self.service.save_gpu(self.gpu_switch.value))
         self.gpu_switch.value = value
+        if value and not was_on and self._gpu_backend() == "OpenCL":
+            # re-renders the list; on the Welcome page that rebuilds this section (self.gpu_* are the new ones)
+            self.add_gpu_presets(auto=True)
         self._render_gpu_presets_button()
         self._render_gpu_swap(push=False)
         _push(self.gpu_switch, self.gpu_presets_button, self.gpu_swap_box)
@@ -725,15 +737,33 @@ class OnDeviceFlow:
         self._render_gpu_swap()
         return model
 
-    def add_gpu_presets(self) -> list:
-        """Append the Q4_0 presets (``presets.GPU_PRESETS``) the list does not have yet."""
-        _rows, added = presets.add_gpu_presets(self.prefs)
+    def add_gpu_presets(self, *, auto: bool = False) -> list:
+        """Append the Q4_0 presets (``presets.GPU_PRESETS``) the list does not have yet: the button, and
+        ``save_gpu`` when the GPU goes on (``auto``: silent when none was added)."""
+        rows, added = presets.add_gpu_presets(self.prefs)
+        if self.prefs is not None:
+            self.prefs.set(GPU_PRESETS_OFFERED_KEY, True)  # offered once: a preset removed later stays removed
         self._render_gpu_presets_button()
         _push(self.gpu_presets_button)
-        self.render()
-        self.say(f"Added {len(added)} GPU-friendly preset{'s' if len(added) != 1 else ''} (Q4_0)" if added
-                 else "The GPU-friendly presets are already in the list")
+        # said before the re-render: the Welcome page shows the note under its cells
+        if added:
+            self.say(f"Added {len(added)} GPU-friendly preset{'s' if len(added) != 1 else ''} (Q4_0)")
+        elif not auto:
+            self.say(f"Keep it to {presets.MAX_PRESETS} presets: remove one to add the GPU-friendly presets"
+                     if presets.missing_gpu_presets(rows) else "The GPU-friendly presets are already in the list")
+        if added or not auto:
+            self.render()
         return added
+
+    def offer_gpu_presets_once(self) -> list:
+        """Owner 2026-10-26 (hotfix 2): a GPU switched on before this build, whose Q4_0 presets were never
+        added, gets them once when the Model manager opens (no extra tap). After that (or after any add)
+        the list is the user's: a Q4_0 preset removed later is not added back."""
+        if self.prefs is None or self.prefs.get(GPU_PRESETS_OFFERED_KEY, False):
+            return []
+        if self._gpu_backend() != "OpenCL" or not getattr(self.service, "use_gpu", lambda: False)():
+            return []
+        return self.add_gpu_presets(auto=True)
 
 
 class LocalModelsPanel(OnDeviceFlow):
@@ -815,6 +845,7 @@ class LocalModelsPanel(OnDeviceFlow):
     def did_show(self) -> None:
         self._subscribe()
         self.downloads.scan()
+        self.offer_gpu_presets_once()
         self.render()
         self.render_engine(self.service.snapshot())
 

@@ -33,7 +33,7 @@ from typing import Any, Callable, Optional
 from glossarion_mobile.ui.router import RouteMatch
 from glossarion_mobile.ui.text_scale import effective as effective_text_scale
 
-__all__ = ["IMPLEMENTED_ROUTES", "LibraryFeature", "SCREEN_ROUTES"]
+__all__ = ["IMPLEMENTED_ROUTES", "LibraryFeature", "SCREEN_ROUTES", "library_book_for_path"]
 
 log = logging.getLogger("glossarion.library")
 
@@ -50,6 +50,58 @@ IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES)
 
 _RESUME_STATES = ("resume", "show", "restart")
 _BACKGROUND_STATES = ("pause", "hide", "inactive", "detach")
+
+
+def library_book_for_path(service: Any, path: str) -> Optional[dict]:
+    """The Library row (of the last scan) that the file or folder ``path`` belongs to, else None.
+
+    The Reader's Book Details (hotfix 3 issue 6) for a book it opened by path: the card ⋯ "📖 Open
+    Translated EPUB", Book page › Output, Files › Reader, a chat's raw attachment, Open with. Best match first:
+
+    0. the row's own file or workspace (``path`` / ``output_folder``: a Completed EPUB or TXT, a
+       Library/Translated EPUB, an In-progress workspace);
+    1. its compiled output (``compiled_output_path`` / ``output_epub_path``);
+    2. a file inside its workspace (the row's ``output_folder``, else the folder the scan resolved for a
+       Library/Translated row, ``LibraryService.workspace_for``), the deepest workspace first;
+    3. its raw source (``raw_source_path``).
+
+    A tie goes to a row with a workspace. Reads only the scan (no disk work); the caller rescans first when
+    the Library has never been scanned."""
+    from glossarion_mobile.services.library import _norm, book_key  # the Library ids' path rules
+
+    if service is None or not path:
+        return None
+    wanted = _norm(path)
+    snapshot = getattr(service, "snapshot", None)
+    try:
+        books = list(snapshot.all_books()) if snapshot is not None else []
+    except Exception:
+        return None
+    resolved = dict(getattr(snapshot, "workspaces", None) or {})  # book_key -> workspace (Library/Translated)
+
+    def same(*values: Any) -> bool:
+        return any(value and _norm(value) == wanted for value in values)
+
+    best: Optional[dict] = None
+    best_key: Optional[tuple] = None
+    for book in books:
+        workspace = str(book.get("output_folder") or "")
+        if not workspace:  # ``LibraryService.workspace_for`` without its folder check
+            workspace = str(resolved.get(book_key(book)) or "")
+        if same(book.get("path"), book.get("output_folder")):
+            rank = 0
+        elif same(book.get("compiled_output_path"), book.get("output_epub_path")):
+            rank = 1
+        elif workspace and wanted.startswith(_norm(workspace).rstrip("\\/") + os.sep):
+            rank = 2
+        elif same(book.get("raw_source_path")):
+            rank = 3
+        else:
+            continue
+        key = (rank, 0 if workspace else 1, -len(workspace))
+        if best_key is None or key < best_key:
+            best, best_key = dict(book), key
+    return best
 
 
 class LibraryFeature:

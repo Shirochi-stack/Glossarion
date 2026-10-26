@@ -100,6 +100,7 @@ class ActionSheet:
                 content=sheet_frame(body, padding=ft.Padding.only(bottom=8)),
                 show_drag_handle=True,
                 scrollable=True,
+                draggable=True,  # slides closed (hotfix 3 issue 1); on_cancel answers as for back
                 bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
             )
         if on_cancel is not None:

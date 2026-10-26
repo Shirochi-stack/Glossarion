@@ -114,9 +114,22 @@ def test_a_rebuilt_page_sends_once_more_on_a_new_page(monkeypatch):
     assert any("sending the message again" in line for line in logs)
 
 
-def test_a_second_rebuild_fails_the_request(monkeypatch):
+def test_repeated_rebuilds_resend_up_to_the_limit(monkeypatch):
+    """Hotfix 2: every screen change while it answers rebuilds the page; the request survives
+    MAX_PAGE_RESENDS rebuilds (each on a new page, the pre-call callback still once)."""
+    pages = [FakePage(["gone"]) for _ in range(gpt.MAX_PAGE_RESENDS)] + [FakePage([_done()])]
+    result, opened, logs, sends = _run(monkeypatch, pages)
+    assert result["content"] == "Title"
+    assert len(opened) == gpt.MAX_PAGE_RESENDS + 1 and sends == [1]
+    resent = [line for line in logs if "sending the message again" in line]
+    assert len(resent) == gpt.MAX_PAGE_RESENDS and resent[-1].endswith(
+        f"({gpt.MAX_PAGE_RESENDS}/{gpt.MAX_PAGE_RESENDS}).")
+
+
+def test_a_rebuild_past_the_limit_fails_the_request(monkeypatch):
+    pages = [FakePage(["gone"]) for _ in range(gpt.MAX_PAGE_RESENDS + 1)]
     with pytest.raises(gpt.AuthChatGPTError, match="reloaded during translation") as info:
-        _run(monkeypatch, [FakePage(["gone"]), FakePage(["gone"])])
+        _run(monkeypatch, pages)
     assert info.value.error_type == "browser_error"
 
 

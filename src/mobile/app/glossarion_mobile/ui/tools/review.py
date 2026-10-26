@@ -331,15 +331,20 @@ class ReviewScreen(Screen):
                                          on_click=lambda e: self.open_picker())], wrap=True),
             self.token_text,
         ], icon="MENU_BOOK", key="review-books")
+        # Hotfix 2: compact checkboxes side by side (the card title says "Modes"; the dialog's labels
+        # without the "Mode" suffix), not one full-width switch row each
         for name, (key, default, label) in MODE_KEYS.items():
-            self.switches[name] = ft.Switch(label=label, value=bool(self.ctx.cfg(key, default)),
-                                            on_change=lambda e, n=name: self.set_mode(n, bool(e.control.value)),
-                                            key=f"review-{name}")
+            self.switches[name] = ft.Checkbox(label=label.removesuffix(" Mode"), value=bool(self.ctx.cfg(key, default)),
+                                              visual_density=ft.VisualDensity.COMPACT,
+                                              tooltip=label,
+                                              on_change=lambda e, n=name: self.set_mode(n, bool(e.control.value)),
+                                              key=f"review-{name}")
         self.order_button = ft.TextButton(content="↕ File Order…", on_click=lambda e: self.open_order_sheet(),
                                           key="review-order")
-        modes = card("Modes", [self.switches["spoiler_mode"], self.switches["chunk_mode"],
-                               self.switches["wrap_chunks"], ft.Row([self.switches["volume_mode"], self.order_button],
-                                                                    wrap=True)],
+        modes = card("Modes", [ft.Row([self.switches["spoiler_mode"], self.switches["chunk_mode"],
+                                       self.switches["wrap_chunks"], self.switches["volume_mode"], self.order_button],
+                                      wrap=True, spacing=4, run_spacing=0,
+                                      vertical_alignment=ft.CrossAxisAlignment.CENTER, key="review-modes-row")],
                      icon="TUNE", key="review-modes")
         self.prompts = ReviewPrompts(self.ctx, chunk=lambda: bool(self.switches["chunk_mode"].value))
         prompts = card("Prompts", [
@@ -491,13 +496,14 @@ class ReviewScreen(Screen):
         self.ctx.spawn(self.load_current())
 
     def open_picker(self) -> SourcePicker:
+        """Choose…: the SourcePicker on its Books segment (Library and chat books, one row per book; a
+        chat book's raw file is its attachment); a book without a raw file cannot be reviewed."""
         picker = SourcePicker(self.ctx, title="Review books", multi=True,
                               eligible=lambda t: None if t.source else "No raw source file",
-                              on_done=self.set_targets, selected=self.targets, segment="library")
+                              on_done=self.set_targets, selected=self.targets, segment="books")
         self.picker = picker
         if self.ctx.page is not None:
-            picker.show(self.ctx.page)
-            self.ctx.spawn(picker.load())
+            picker.show(self.ctx.page)  # show() loads the rows (a second load listed and resolved them twice)
         return picker
 
     def set_targets(self, targets: Sequence[tg.ToolTarget]) -> None:

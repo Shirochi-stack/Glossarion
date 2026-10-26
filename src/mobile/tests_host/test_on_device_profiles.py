@@ -565,8 +565,9 @@ def test_small_on_device_model_defaults_to_no_glossary_and_cloud_restores(tmp_pa
     for key in ("auto_glossary_mode", "enable_auto_glossary"):
         if key in config:
             assert store.get(key) == config[key], key
-        else:  # nothing was saved: the desktop default again
-            assert not store.has(key), key
+    if not config:  # nothing was saved: Balanced (mobile hotfix 3; an unset mode ran as "Off")
+        assert store.get("auto_glossary_mode") == sw.GLOSSARY_MODE_AFTER_ON_DEVICE == "balanced"
+        assert store.get("enable_auto_glossary") is True
     # a mode picked while on-device stays
     sw.write_setting(store, "model", LOCAL)
     store.set_many({"auto_glossary_mode": "minimal", "enable_auto_glossary": True})
