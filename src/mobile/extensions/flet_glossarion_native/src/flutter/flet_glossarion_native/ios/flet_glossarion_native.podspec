@@ -8,8 +8,9 @@ Pod::Spec.new do |s|
   s.version          = '0.1.0'
   s.summary          = 'Glossarion native services for Flet.'
   s.description      = <<-DESC
-Open-in file import, local notifications, beginBackgroundTask and iOS 26
-BGContinuedProcessingTask support for the Glossarion Flet app.
+Open-in file import, local notifications, beginBackgroundTask, iOS 26
+BGContinuedProcessingTask support, document destinations and hidden in-app
+browser pages (WKWebView) for the Glossarion Flet app.
                        DESC
   s.homepage         = 'https://github.com/Shirochi-stack/Glossarion'
   s.license          = { :type => 'AGPL-3.0' }
@@ -18,7 +19,7 @@ BGContinuedProcessingTask support for the Glossarion Flet app.
   s.source_files     = 'flet_glossarion_native/Sources/flet_glossarion_native/**/*.swift'
   s.dependency 'Flutter'
   s.platform         = :ios, '13.0'
-  s.frameworks       = 'BackgroundTasks', 'UserNotifications'
+  s.frameworks       = 'BackgroundTasks', 'UserNotifications', 'WebKit'
 
   # Flutter.framework does not contain an i386 slice.
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }

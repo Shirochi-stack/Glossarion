@@ -48,10 +48,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * Android side of GlossarionNative (MethodChannel `glossarion_native/platform`).
  *
  * Dart -> Kotlin: attach, get_platform_info, clear_shared, init_notifications,
- * show_notification, cancel_notification, save_to_downloads, and the document
- * destination methods handled by [DocumentDestinations] (pick_folder, ...).
+ * show_notification, cancel_notification, save_to_downloads, the document
+ * destination methods handled by [DocumentDestinations] (pick_folder, ...) and
+ * the in-app browser page methods handled by [HiddenWebPages] (web_open,
+ * web_load, web_eval, web_title, web_close, web_reset, web_status).
  * Kotlin -> Dart: `share` {items}, `notification` {notification_id, action_id,
- * payload, launched_app}, `document` {type, op_id, ...}.
+ * payload, launched_app}, `document` {type, op_id, ...}, `web` {page_id, type, ...}.
  *
  * Items received before Dart calls `attach` (cold start) are queued and
  * returned by `attach`; later ones are pushed. File copies and Downloads
@@ -73,6 +75,8 @@ class GlossarionNativePlugin :
     private val mainHandler = Handler(Looper.getMainLooper())
     private var io: ExecutorService? = null
     private var documents: DocumentDestinations? = null
+    // Per plugin instance (never static): flutter_foreground_task's headless engine has its own.
+    private var webPages: HiddenWebPages? = null
 
     // Main-thread state.
     private var dartAttached = false
@@ -94,6 +98,11 @@ class GlossarionNativePlugin :
             isDartAttached = { dartAttached && channel != null },
             sendToDart = { event -> channel?.invokeMethod("document", event) },
         )
+        webPages = HiddenWebPages(
+            binding.applicationContext,
+            mainHandler,
+            sendToDart = { event -> channel?.invokeMethod("web", event) },
+        )
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -103,6 +112,9 @@ class GlossarionNativePlugin :
         io = null
         documents?.dispose()
         documents = null
+        // Destroys this instance's pages only.
+        webPages?.dispose()
+        webPages = null
         dartAttached = false
     }
 
@@ -113,6 +125,8 @@ class GlossarionNativePlugin :
         binding.addOnNewIntentListener(this)
         binding.addActivityResultListener(this)
         documents?.activity = binding.activity
+        // Only stored here: the hidden pages attach after the Activity's setContentView.
+        webPages?.activity = binding.activity
         handleIntent(binding.activity.intent, initial = true)
     }
 
@@ -122,6 +136,7 @@ class GlossarionNativePlugin :
         activityBinding = null
         // A picker that is open stays pending: its answer reaches the recreated activity.
         documents?.activity = null
+        webPages?.activity = null
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
@@ -129,6 +144,7 @@ class GlossarionNativePlugin :
         binding.addOnNewIntentListener(this)
         binding.addActivityResultListener(this)
         documents?.activity = binding.activity
+        webPages?.activity = binding.activity
     }
 
     override fun onDetachedFromActivity() {
@@ -136,6 +152,7 @@ class GlossarionNativePlugin :
         activityBinding?.removeActivityResultListener(this)
         activityBinding = null
         documents?.activity = null
+        webPages?.activity = null
     }
 
     override fun onNewIntent(intent: Intent): Boolean = handleIntent(intent, initial = false)
@@ -356,6 +373,11 @@ class GlossarionNativePlugin :
             docs.handle(call, result)
             return
         }
+        val web = webPages
+        if (web != null && web.handles(call.method)) {
+            web.handle(call, result)
+            return
+        }
         try {
             when (call.method) {
                 "attach" -> {
@@ -441,6 +463,8 @@ class GlossarionNativePlugin :
         info["shared_dir"] = sharedRoot(context).absolutePath
         info["cache_dir"] = context.cacheDir.absolutePath
         info["files_dir"] = context.filesDir.absolutePath
+        // In-app browser pages (hotfix 3): left out when the phone has no WebView provider.
+        webPages?.capability()?.let { info["web_pages"] = it }
         return info
     }
 

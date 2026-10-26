@@ -4,6 +4,7 @@ from flet_glossarion_native.documents import (
     DocumentScope,
 )
 from flet_glossarion_native.native import EXTENSION_VERSION, GlossarionNative
+from flet_glossarion_native.web_pages import NATIVE_MAX_PAGES, WEB_PAGES_VERSION, WebPageError
 from flet_glossarion_native.types import (
     CHANNEL_JOBS_ACTION,
     CHANNEL_JOBS_DONE,
@@ -24,6 +25,8 @@ from flet_glossarion_native.types import (
     ShareEvent,
     SharedItem,
     SharedItemKind,
+    WebPageEvent,
+    WebPageEventType,
 )
 
 __version__ = EXTENSION_VERSION
@@ -45,6 +48,7 @@ __all__ = [
     "ForegroundEventType",
     "GlossarionNative",
     "JOB_SERVICE_NOTIFICATION_ID",
+    "NATIVE_MAX_PAGES",
     "NotificationAction",
     "NotificationButton",
     "NotificationChannel",
@@ -53,4 +57,8 @@ __all__ = [
     "ShareEvent",
     "SharedItem",
     "SharedItemKind",
+    "WEB_PAGES_VERSION",
+    "WebPageError",
+    "WebPageEvent",
+    "WebPageEventType",
 ]

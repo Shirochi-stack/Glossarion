@@ -372,7 +372,10 @@ class _DriverPage:
         A None from ``evaluate`` does not say so here: the in-app browser also gives None when
         the page's answer did not arrive in time or the call could not be posted. This asks the
         top page itself (never through the frame, which may be the thing that is gone);
-        None means no answer again, which is not proof either."""
+        None means no answer again, which is not proof either. A page whose renderer stopped
+        (``renderer_gone``, the native in-app pages) lost its document for sure."""
+        if _renderer_gone(self):
+            return True
         script = (f"(() => {{const f = {_FRAME};"
                   f" if (!f) return {'true' if self.framed else '!window.__glossarionGPT'};"
                   " try { return !f.contentWindow.__glossarionGPT; } catch (e) { return true; }})()")
@@ -384,16 +387,65 @@ class _DriverPage:
             return None
 
 
+#: Times one request is sent again on a new page after its in-app page lost its document
+#: (mobile only; see ``_PageLost``).
+MAX_PAGE_RESENDS = 3
+
+
 class _PageLost(AuthChatGPTError):
-    """The hooked chatgpt.com document went away while a reply was on its way.
+    """The hooked chatgpt.com document went away while a reply was on its way (or, for a page
+    whose renderer stopped, while the page was still being set up).
 
-    On Glossarion Mobile this is the app changing screens: Flet 1.0.3 draws ``page.overlay``
-    (where the hidden WebViews live) only in the top View, so pushing or popping a View moves
-    every hidden WebView into another widget tree. Flutter then builds a new WebView, which
-    loads its ``url`` again without the hook. The reply on the old page is lost."""
+    On Glossarion Mobile's flet-webview fallback this is the app changing screens: Flet 1.0.3
+    draws ``page.overlay`` (where those hidden WebViews live) only in the top View, so pushing
+    or popping a View moves every hidden WebView into another widget tree. Flutter then builds
+    a new WebView, which loads its ``url`` again without the hook. The reply on the old page is
+    lost. The native in-app pages (hotfix 3) are owned outside Flutter and survive screen
+    changes; they lose their document only when its renderer stops (``renderer_gone``) or
+    chatgpt.com reloads itself. Either way the message goes again on a new page, up to
+    ``MAX_PAGE_RESENDS`` times.
 
-    def __init__(self):
+    The reply poll (``_complete``) raises it for a new document. A page whose renderer stopped
+    raises it from every wait before the reply too (``_check_page``: loading chatgpt.com, the
+    chat frame, attaching images, sending), which could otherwise only run out their deadlines
+    on a dead page. ``page`` is the page that lost its document."""
+
+    def __init__(self, page=None):
         super().__init__("AuthChatGPT page was reloaded during translation.", "browser_error")
+        self.page = page
+
+
+#: ``services/native_webview.NATIVE_NAME`` (Glossarion Mobile): the driver whose pages the app's
+#: extension owns outside the Flutter widget tree, so screen changes never rebuild them.
+_NATIVE_DRIVER = "native-webview"
+
+
+def _renderer_gone(wrapped):
+    """True once the page's renderer stopped (``browser_driver``'s optional ``renderer_gone``, the
+    native in-app pages): its document is gone for good and every script answers None. Desktop
+    pages and the flet-webview pages have no such attribute."""
+    return getattr(getattr(wrapped, "page", None), "renderer_gone", False) is True
+
+
+def _check_page(wrapped, cancel_check=None):
+    """``_check``, then the page itself: a stopped renderer raises ``_PageLost`` (the request goes
+    again on a new page) instead of letting a wait poll a dead page until its deadline."""
+    _check(cancel_check)
+    if _renderer_gone(wrapped):
+        raise _PageLost(wrapped)
+
+
+def _page_lost_message(wrapped, resends):
+    """The log line of a resend: what took the page's document (see ``_PageLost``)."""
+    again = f"sending the message again ({resends}/{MAX_PAGE_RESENDS})."
+    if _renderer_gone(wrapped):
+        return f"🔄 AuthChatGPT: the in-app ChatGPT page lost its document (its renderer stopped); {again}"
+    driver = getattr(getattr(wrapped, "page", None), "driver", None)
+    if getattr(driver, "name", None) == _NATIVE_DRIVER:
+        # No screen change rebuilds a native page: chatgpt.com replaced its own document.
+        return f"🔄 AuthChatGPT: chatgpt.com reloaded its page while it was answering; {again}"
+    return ("🔄 AuthChatGPT: the in-app ChatGPT page was rebuilt while it was answering "
+            f"(a screen change); {again}")
 
 
 def _frame_script(config):
@@ -432,7 +484,8 @@ def _not_loaded(why):
 
 
 def _driver_wait(wrapped, predicate, cancel_check, why):
-    cdp_browser.wait_until(wrapped, predicate, timeout=_DRIVER_TIMEOUT, check=_check, error=AuthChatGPTError,
+    cdp_browser.wait_until(wrapped, predicate, timeout=_DRIVER_TIMEOUT,
+                           check=lambda cancel: _check_page(wrapped, cancel), error=AuthChatGPTError,
                            cancel_check=cancel_check, message=_not_loaded(f"{why} within {_DRIVER_TIMEOUT:g} s"),
                            tolerate=("browser_error", "timeout"), interval=.3)
 
@@ -455,11 +508,14 @@ def _driver_load(wrapped, url, cancel_check):
     loaded = ("document.readyState !== 'loading' && location.origin === 'https://chatgpt.com' && "
               f"window.__glossarionNav !== '{mark}'")
     for attempt in range(2):
+        _check_page(wrapped, cancel_check)
         try:
             wrapped.page.load(url)
         except browser_driver.BrowserCancelled as exc:
             raise AuthChatGPTError("AuthChatGPT: translation stopped by user", "cancelled") from exc
         except Exception as exc:  # the UI loop did not start the navigation in time
+            if _renderer_gone(wrapped):  # a native page whose renderer stopped refuses every load
+                raise _PageLost(wrapped) from exc
             if attempt:
                 raise AuthChatGPTError(_not_loaded(f"the in-app browser did not open {what}: {str(exc)[:200]}"),
                                        "browser_error") from exc
@@ -468,7 +524,7 @@ def _driver_load(wrapped, url, cancel_check):
             _driver_wait(wrapped, loaded, cancel_check, f"{what} did not load")
             return
         except AuthChatGPTError as exc:
-            if exc.error_type == "cancelled" or attempt:
+            if exc.error_type == "cancelled" or attempt or isinstance(exc, _PageLost):
                 raise
 
 
@@ -503,7 +559,7 @@ def _driver_frame_ready(wrapped, config, cancel_check):
     recovered = False
     deadline = time.monotonic() + _DRIVER_TIMEOUT
     while True:
-        _check(cancel_check)
+        _check_page(wrapped, cancel_check)  # a stopped renderer would answer None past both deadlines
         ready = None
         try:
             ready = wrapped.evaluate(_READY)
@@ -593,7 +649,7 @@ def _driver_tab(config, cancel_check=None):
                 try:
                     _driver_wait(wrapped, composer, cancel_check, "the ChatGPT composer did not appear")
                 except AuthChatGPTError as exc:
-                    if exc.error_type == "cancelled":
+                    if exc.error_type == "cancelled" or isinstance(exc, _PageLost):
                         raise
                     _driver_load(wrapped, BASE_URL + "/", cancel_check)  # one reload before failing
                     _driver_wait(wrapped, composer, cancel_check,
@@ -1085,11 +1141,13 @@ def _attach(page, images, cancel_check):
     """Adds ``images`` to the composer and waits until the page has uploaded them."""
     page.evaluate("(window.__glossarionImages = " + json.dumps(images) + ", true)")
     if page.evaluate(_ATTACH) != "ok":
+        if _renderer_gone(page):  # its None is no answer at all
+            raise _PageLost(page)
         raise AuthChatGPTError("ChatGPT's page has no image upload here; images need a ChatGPT login.",
                                "browser_error")
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
-        _check(cancel_check)
+        _check_page(page, cancel_check)
         if (page.evaluate(_ATTACHED) or 0) >= len(images):
             time.sleep(1.5)  # the thumbnail shows before the upload's last step
             if (page.evaluate(_ATTACHED) or 0) >= len(images):
@@ -1108,7 +1166,7 @@ def _submit(page, cancel_check, before_send_callback):
     deadline = time.monotonic() + 45
     clicked = None
     while time.monotonic() < deadline:
-        _check(cancel_check)
+        _check_page(page, cancel_check)
         state = page.evaluate(_COMPOSER) or {}
         if state.get("requested"):
             return
@@ -1128,7 +1186,7 @@ def _download_image(page, pointer, deadline, cancel_check):
     """The bytes of a generated image (downloaded by the page, signed URL and all)."""
     script = _DOWNLOAD.replace("__POINTER__", json.dumps(pointer))
     while time.monotonic() < deadline:
-        _check(cancel_check)
+        _check_page(page, cancel_check)
         state = page.evaluate(script) or {}
         if state.get("b64"):
             import base64
@@ -1159,7 +1217,7 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
             # None when an answer was late, so there the page is asked whether the hook is gone.
             probe = getattr(page, "hook_lost", None)
             if probe is None or probe() is True:
-                raise _PageLost()
+                raise _PageLost(page)
             time.sleep(.3)
             continue
         resolved = state.get("resolved") or resolved
@@ -1242,7 +1300,7 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
     prompt = build_prompt(messages, images=images)
     token = _access_token(log_fn)
     refreshed = False
-    resent = False
+    resends = 0
     sent = []
 
     def before_send():
@@ -1259,27 +1317,29 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
             raise AuthChatGPTError(IMAGE_OUTPUT_NEEDS_LOGIN, "config_error")
         config = {"token": token, "prompt": prompt, "model": name, "images": len(images),
                   "temporary": bool(token) and not image_output, "imageOutput": bool(image_output)}
-        with _open_tab(config, cancel_check) as page:
-            try:
-                result = _complete(page, float(timeout), cancel_check, on_delta, before_send, on_thinking,
-                                   images=images, image_output=image_output)
-                if token:
-                    _announce_logged_in(token, log_fn)
-                return result
-            except _PageLost:
-                # In the app the hidden page is rebuilt when the screen changes (see _PageLost):
-                # the message goes once more on a new page instead of failing the request.
-                if resent or not getattr(page, "driver", False):
-                    raise
-                resent = True
-                kind = None
-            except AuthChatGPTError as exc:
-                if not token or not _login_rejected(exc):
-                    raise
-                kind, reason = exc.error_type, str(exc).replace("AuthChatGPT: ", "")
-        if kind is None:
-            log_fn("🔄 AuthChatGPT: the in-app ChatGPT page was rebuilt while it was answering "
-                   "(a screen change); sending the message again.")
+        try:
+            with _open_tab(config, cancel_check) as page:
+                try:
+                    result = _complete(page, float(timeout), cancel_check, on_delta, before_send, on_thinking,
+                                       images=images, image_output=image_output)
+                    if token:
+                        _announce_logged_in(token, log_fn)
+                    return result
+                except _PageLost:
+                    raise  # handled below, once the page is closed
+                except AuthChatGPTError as exc:
+                    if not token or not _login_rejected(exc):
+                        raise
+                    kind, reason = exc.error_type, str(exc).replace("AuthChatGPT: ", "")
+        except _PageLost as exc:
+            # The in-app page lost its hooked document while it loaded or answered (see _PageLost);
+            # it is closed now, and the one-tab-loads-at-a-time lock is free again. The message goes
+            # again on a new page instead of failing the request, up to MAX_PAGE_RESENDS times (on
+            # the flet-webview fallback every screen change while it answers rebuilds the page).
+            if resends >= MAX_PAGE_RESENDS or not getattr(exc.page, "driver", False):
+                raise
+            resends += 1
+            log_fn(_page_lost_message(exc.page, resends))
             continue
         # The login failed this request: one refresh, then the chat runs logged out.
         replacement = None if refreshed or kind != "auth_error" else _refreshed_token(token)

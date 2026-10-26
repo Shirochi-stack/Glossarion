@@ -37,12 +37,27 @@ const Set<String> _kDocumentMethods = <String>{
   'query_root',
 };
 
+/// In-app browser pages (hotfix 3): hidden WebViews the platform side creates
+/// and owns outside the Flutter widget tree (HiddenWebPages.kt /
+/// HiddenWebPages.swift). They answer a result map `{ok, error, message, ...}`;
+/// see flet_glossarion_native/web_pages.py. Their arguments and answers carry
+/// scripts and page content: they are never printed.
+const Set<String> _kWebMethods = <String>{
+  'web_open',
+  'web_load',
+  'web_eval',
+  'web_title',
+  'web_close',
+  'web_reset',
+  'web_status',
+};
+
 /// Flet service behind the Python `GlossarionNative` control.
 ///
 /// Python -> Dart: `control.addInvokeMethodListener` (method names below).
 /// Dart -> Python: `control.triggerEvent` with `share`, `foreground`,
-/// `background_task`, `notification` and `document` (payload keys = Python
-/// dataclass fields in flet_glossarion_native/types.py).
+/// `background_task`, `notification`, `document` and `web` (payload keys =
+/// Python dataclass fields in flet_glossarion_native/types.py).
 class GlossarionNativeService extends FletService {
   GlossarionNativeService({required super.control});
 
@@ -184,6 +199,12 @@ class GlossarionNativeService extends FletService {
           control.triggerEvent('document', event);
         }
         return null;
+      case 'web':
+        // In-app browser page events (started, finished, url, error, gone).
+        if (args is Map) {
+          control.triggerEvent('web', _stringMap(args));
+        }
+        return null;
       default:
         throw MissingPluginException(
             'GlossarionNative: unknown platform call ${call.method}');
@@ -305,6 +326,17 @@ class GlossarionNativeService extends FletService {
               List<Map<String, dynamic>>.from(_documentResults);
           _documentResults.clear();
           return taken;
+        case 'web_open':
+        case 'web_load':
+        case 'web_eval':
+        case 'web_title':
+        case 'web_close':
+        case 'web_reset':
+        case 'web_status':
+          // No _waitReady(): the pages need no attach. No debugPrint of args or answers.
+          if (!_isMobile) return _defaultResult(name);
+          final dynamic webAnswer = await _platform(name, args);
+          return webAnswer is Map ? webAnswer : _defaultResult(name);
         default:
           throw Exception('Unknown GlossarionNative method: $name');
       }
@@ -328,6 +360,13 @@ class GlossarionNativeService extends FletService {
         'message': 'Document destinations are not available on this platform',
         'scope': null,
         'retryable': false,
+      };
+    }
+    if (_kWebMethods.contains(name)) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': 'unavailable',
+        'message': 'In-app browser pages are not available on this platform',
       };
     }
     switch (name) {

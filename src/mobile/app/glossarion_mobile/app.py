@@ -414,10 +414,12 @@ class GlossarionApp:
             log.exception("manga feature unavailable; /tools/manga shows a placeholder")
 
     async def _install_webview_bridge(self) -> None:
-        """The in-app browser driver for the keyless browser-backed routes (authnd/ hCaptcha
-        minting, search/gemini AI Mode): a hidden flet-webview registered as the backend's
-        ``browser_driver`` where flet-webview runs (Android, iOS, macOS). Elsewhere those
-        routes report that they need the in-app browser (U9)."""
+        """The in-app browser driver for the browser-backed routes (authnd/ hCaptcha minting,
+        search/gemini AI Mode, authds/, authchatgpt/), registered as the backend's
+        ``browser_driver``: the native in-app browser where the extension offers it (hotfix 3:
+        pages owned outside the Flutter widget tree, ``services.native_webview``), else a hidden
+        flet-webview where flet-webview runs (Android, iOS, macOS; U9). Elsewhere those routes
+        report that they need the in-app browser."""
         try:
             from glossarion_mobile.services.webview_bridge import WebViewBridgeFeature
 
