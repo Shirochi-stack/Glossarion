@@ -1121,6 +1121,9 @@ if [ "${1:-}" = -c ]; then echo "$PY_FULL"; exit 0; fi
 log python "$@"
 """,
     "venv/forge": "#!/usr/bin/env bash\n" + STUB_LOG + 'log forge "$@"\n',
+    # Off forge's PATH like Homebrew's keg-only rustup: the script links them into $HOME/.cargo/bin.
+    "shim/cargo": "#!/usr/bin/env bash\necho 'cargo 0.0.0 (stub)'\n",
+    "shim/rustc": "#!/usr/bin/env bash\necho 'rustc 0.0.0 (stub)'\n",
 }
 
 
@@ -1148,13 +1151,16 @@ def test_build_script_runs_end_to_end_with_stubbed_tools(tmp_path, platform, pac
     clang.mkdir(parents=True)
     (clang / "aarch64-linux-android24-clang").write_bytes(b"")
     tmp.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     forge, cache, calls = tmp / "forge", tmp / "wheelcache", tmp_path / "calls.log"
     env = {k: v for k, v in os.environ.items() if k not in (
         "UV_PYTHON", "VIRTUAL_ENV", "PIP_CONSTRAINT", "NDK_HOME", "GITHUB_ACTIONS", "PYTHONPATH",
         "MOBILE_FORGE_ANDROID_SUPPORT_PATH", "MOBILE_FORGE_IOS_SUPPORT_PATH")}
     env.update({"STUB_CALLS": calls.as_posix(), "STUB_DIR": stubs.as_posix(), "STUB_SHIM": shim.as_posix(),
                 "STUB_REAL_PY": Path(sys.executable).as_posix(), "RUNNER_TEMP": tmp.as_posix(),
-                "FORGE_DIR": forge.as_posix(), "WHEELCACHE": cache.as_posix(), "ANDROID_HOME": sdk.as_posix()})
+                "FORGE_DIR": forge.as_posix(), "WHEELCACHE": cache.as_posix(), "ANDROID_HOME": sdk.as_posix(),
+                "HOME": home.as_posix()})
     # Put the stubs first on bash's own PATH (Git Bash's launcher prepends its git otherwise).
     launcher = ('shim="$STUB_SHIM"; if command -v cygpath > /dev/null; then shim="$(cygpath -u "$shim")"; fi; '
                 'PATH="$shim:$PATH"; export PATH; exec "$BASH" "$0" "$@"')

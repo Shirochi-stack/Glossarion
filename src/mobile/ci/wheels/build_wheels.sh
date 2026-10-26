@@ -31,7 +31,8 @@
 # there, so per-platform compile settings live in recipes/<package>/meta.yaml (OPENSSL_STATIC on
 # Android, IPHONEOS_DEPLOYMENT_TARGET on iOS). Read by forge's own process or inherited by its
 # pip installs, and so effective from here: NDK_HOME, MOBILE_FORGE_*_SUPPORT_PATH (setup.sh),
-# PIP_CONSTRAINT. rustc comes from rustup's default toolchain (`rustup default`, found via HOME).
+# PIP_CONSTRAINT. rustc comes from rustup's default toolchain (`rustup default`, found via HOME);
+# cargo must be on forge's own PATH ("cargo on forge's PATH" below).
 #
 # Link order: forge sets CARGO_TARGET_<triple>_RUSTFLAGS to " -L{prefix}/lib ..." and cargo puts
 # RUSTFLAGS before the -L native=$OPENSSL_DIR/lib of openssl-sys's build script, so its
@@ -78,6 +79,29 @@ recipes=()
 for pkg in "${packages[@]}"; do
   recipes+=("$(host_py "$wheels_py" recipe --platform "$platform" "$pkg")")
 done
+echo "::endgroup::"
+
+echo "::group::cargo on forge's PATH"
+# forge runs the build with a PATH of its own (cross.py cross_kwargs: the venvs, ~/.cargo/bin,
+# /opt/homebrew/bin, /usr/local/bin and the system directories). Without cargo there, maturin's
+# get_requires_for_build_wheel asks for puccinialin (it would download Rust) and forge's
+# `python -m build --no-isolation` fails on "Unmet dependencies". Homebrew's rustup is keg-only
+# (macos-26 images from 2026-10: $(brew --prefix rustup)/bin), so its proxies go into ~/.cargo/bin;
+# a rustup proxy picks the tool by its own name, so links work.
+forge_path="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+echo "cargo: $(command -v cargo || echo none) (PATH), $(PATH="$forge_path" command -v cargo || echo none) (forge's PATH)"
+if ! PATH="$forge_path" command -v cargo > /dev/null; then
+  cargo="$(command -v cargo)" || die "no cargo on PATH (install the Rust toolchain first)"
+  mkdir -p "$HOME/.cargo/bin"
+  for tool in cargo rustc rustdoc rustup; do
+    if [ -e "$(dirname "$cargo")/$tool" ]; then
+      ln -sfn "$(dirname "$cargo")/$tool" "$HOME/.cargo/bin/$tool"
+      echo "$HOME/.cargo/bin/$tool -> $(dirname "$cargo")/$tool"
+    fi
+  done
+fi
+PATH="$forge_path" cargo --version || die "cargo does not run on forge's PATH ($forge_path)"
+PATH="$forge_path" rustc --version || die "rustc does not run on forge's PATH ($forge_path)"
 echo "::endgroup::"
 
 echo "::group::mobile-forge $FORGE_REV (crossenv $CROSSENV_REV)"
