@@ -1295,6 +1295,12 @@ jobs:
           xcrun simctl boot "$udid" 2>/dev/null || true
           xcrun simctl bootstatus "$udid" -b
           xcrun simctl install "$udid" "$SIM_APP"
+          # The first WKWebView (native_webview check) asks tccd for the microphone and camera status.
+          # On a fresh simulator tccd's first answer took ~19 s (run 40301613208) and ran the check past
+          # its 20 s page-open limit; granting both here warms tccd and answers those requests at once.
+          for service in microphone camera; do
+            xcrun simctl privacy "$udid" grant "$service" "$APP_PACKAGE" 2>/dev/null || true
+          done
           xcrun simctl spawn "$udid" log stream --style compact --level debug \
             --predicate "process == \"$executable\"" > "$logs/oslog_stream.txt" 2>&1 &
           # --console-pty captures the process's own stdout/stderr (fd 1/2). SIMCTL_CHILD_* variables
