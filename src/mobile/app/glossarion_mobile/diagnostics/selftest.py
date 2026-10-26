@@ -4,9 +4,10 @@ Run on device by the deep link ``glossarion://app/__selftest__?suite=smoke`` (CI
 emulator smoke) or the "Run self-test" button; on the host by
 ``tests_host/test_bootstrap.py`` or ``python -m glossarion_mobile.diagnostics.selftest``.
 
-Suites: ``smoke`` (packages, env contract, offline assets, the Library / Book page /
-Chapters tab / Reader on a translated workspace of the self-test EPUB, and the Glossary
-Manager's document + a QA quick scan on scratch files; seconds) and ``e2e``
+Suites: ``smoke`` (packages, env contract, offline assets, the native in-app browser pages
+surviving screen changes on devices, the Library / Book page / Chapters tab / Reader on a
+translated workspace of the self-test EPUB, and the Glossary Manager's document + a QA quick
+scan on scratch files; seconds) and ``e2e``
 (``diagnostics.e2e``: real chat / translate / stop / resume jobs against the fake
 OpenAI server on 127.0.0.1; minutes), run on device by
 ``glossarion://app/__selftest__?suite=e2e`` or the "Run end-to-end test" button, on the
@@ -556,6 +557,30 @@ def check_thread_stack(ctx: Context) -> dict[str, Any]:
     return outcome
 
 
+def check_native_webview(ctx: Context) -> dict[str, Any]:
+    """Hotfix 3: the native in-app browser pages survive screen changes (``diagnostics.webview_check``:
+    a loopback page keeps its JavaScript state across a Settings push / pop and a sheet, takes typing and
+    returns a 200 000-character result). Devices only: the host (desktop, host tests, simulated-platform
+    host smoke runs) has no extension; ``GLOSSARION_NATIVE_WEBVIEW=0`` skips it too. On a device in strict
+    mode another (or no) in-app browser fails the check. Browser-route requests holding every page slot
+    skip it (``webview_check.PagesBusy``), like the checks that wait for a running job."""
+    paths = ctx.paths
+    if paths is None or not paths.is_device or os.environ.get("GLOSSARION_SIMULATE_PLATFORM", "").strip():
+        raise CheckSkipped("the native in-app browser runs on Android and iOS devices only")
+    from glossarion_mobile.diagnostics import webview_check
+    from glossarion_mobile.services import native_webview
+
+    driver, why = webview_check.wait_for_native_driver()
+    if driver is None:
+        if ctx.strict and not native_webview.disabled_by_env():
+            raise AssertionError(f"the native in-app browser is not installed: {why}")
+        raise CheckSkipped(f"no native in-app browser here ({why})")
+    try:
+        return webview_check.run(driver)
+    except webview_check.PagesBusy as exc:
+        raise CheckSkipped(str(exc)) from exc
+
+
 def check_library_reader(ctx: Context) -> dict[str, Any]:
     """U5: Library scan, Book page, Chapters tab and Reader page on a translated workspace.
 
@@ -675,6 +700,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
         ("cv2", check_cv2),
         ("onnxruntime", check_onnxruntime),
         ("thread_stack", check_thread_stack),
+        ("native_webview", check_native_webview),
         ("library_reader", check_library_reader),
         ("glossary_qa", check_glossary_qa),
         ("share_link_crypto", check_share_link_crypto),

@@ -38,7 +38,20 @@ from flet_glossarion_native.types import (
     NotificationEvent,
     ShareEvent,
     SharedItem,
+    WebPageEvent,
 )
+from flet_glossarion_native.web_pages import (
+    DEFAULT_EVAL_TIMEOUT,
+    EVAL_SLACK,
+    LOAD_TIMEOUT,
+    OPEN_TIMEOUT,
+    QUERY_TIMEOUT as WEB_QUERY_TIMEOUT,
+    WebPageError,
+    clamp_side,
+    is_http_url,
+)
+from flet_glossarion_native.web_pages import error_result as web_error_result
+from flet_glossarion_native.web_pages import normalize_result as web_normalize_result
 
 __all__ = ["GlossarionNative", "EXTENSION_VERSION"]
 
@@ -121,7 +134,8 @@ async def _file_size(path: Optional[str]) -> int:
 @ft.control("GlossarionNative")
 class GlossarionNative(ft.Service):
     """Android foreground service, notifications, share/open-with intake,
-    MediaStore Downloads export and iOS background tasks.
+    MediaStore Downloads export, iOS background tasks, document destinations
+    and hidden in-app browser pages (``web_*``, see ``web_pages.py``).
 
     Create it once inside the Flet app (``main(page)``) with the event handlers
     set in the constructor so they are registered before the Dart service
@@ -149,6 +163,10 @@ class GlossarionNative(ft.Service):
 
     on_document: Optional[ft.EventHandler[DocumentEvent]] = None
     """Document destinations: write progress and picker answers that arrived late."""
+
+    on_web: Optional[ft.EventHandler[WebPageEvent]] = None
+    """In-app browser pages: navigation started / finished, URL changes, load errors, renderer gone.
+    Dart only sends these when the handler is set at construction (Flet checks ``on_web``)."""
 
     def init(self):
         super().init()
@@ -786,3 +804,127 @@ class GlossarionNative(ft.Service):
         if not isinstance(result, list):
             return []
         return [dict(item) for item in result if isinstance(item, Mapping)]
+
+    # ------------------------------------------------------- in-app browser pages
+    #
+    # Hidden browser pages the extension creates and owns outside the Flutter widget tree (hotfix 3;
+    # Android android.webkit.WebView, iOS WKWebView): they survive screen changes and keep running while
+    # the app is in the background (iOS suspends web content there). See web_pages.py for the contract.
+    # Every method returns a result dict and never raises (asyncio.CancelledError excepted); off-device
+    # the answer is {"ok": False, "error": "unavailable"}. Scripts, results, titles and URLs are never
+    # logged: Flet's exception texts embed the call arguments, so only exception type names are kept.
+
+    async def _web_call(
+        self, method: str, arguments: Optional[dict[str, Any]], *, timeout: float
+    ) -> dict[str, Any]:
+        reason = self._unavailable_reason()
+        if reason is not None:
+            return web_error_result(WebPageError.UNAVAILABLE, reason)
+        try:
+            result = await self._invoke_method(method, arguments, timeout=timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.debug("GlossarionNative.%s timed out", method)
+            return web_error_result(WebPageError.TIMEOUT, f"{method} did not answer in time")
+        except Exception as ex:
+            name = type(ex).__name__
+            lowered = str(ex).lower()
+            if any(marker in lowered for marker in _MISSING_SERVICE_MARKERS):
+                # The client has no GlossarionNative Dart service (flet run, companion app).
+                self._native_unavailable_reason = "no Dart service"
+                logger.info("GlossarionNative unavailable: no Dart service (%s)", name)
+                return web_error_result(WebPageError.UNAVAILABLE, self._native_unavailable_reason)
+            logger.warning("GlossarionNative.%s failed: %s", method, name)
+            return web_error_result(WebPageError.NATIVE_ERROR, name)
+        return web_normalize_result(result)
+
+    async def web_open(
+        self,
+        page_id: str,
+        *,
+        width: int,
+        height: int,
+        prevent_links: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Create the hidden page ``page_id`` (made by the caller, e.g. 16 hex digits), laid out at
+        ``width`` x ``height`` logical pixels (dp / pt, clamped to 1..4096). ``prevent_links``: URL prefixes
+        the page may not navigate to (Android; ``intent:``, ``market:``, ``file:``, ``content:``).
+
+        Answer: ``{"ok": True, "page_id", "attached"}`` (``attached``: the page is in a window right now),
+        else ``bad_args`` / ``exists`` / ``too_many`` / ``unavailable`` / ``native_error`` / ``timeout``.
+        Events of the page arrive through ``on_web`` from now on, also before this call returns."""
+        if not isinstance(page_id, str) or not page_id:
+            return web_error_result(WebPageError.BAD_ARGS, "page_id is required")
+        args = {
+            "page_id": page_id,
+            "width": clamp_side(width, 480),
+            "height": clamp_side(height, 800),
+            "prevent_links": [str(prefix) for prefix in (prevent_links or ()) if prefix],
+        }
+        return await self._web_call("web_open", args, timeout=OPEN_TIMEOUT)
+
+    async def web_load(self, page_id: str, url: str) -> dict[str, Any]:
+        """Start loading ``url`` (http / https only) in the page: ``{"ok": True}`` once the navigation
+        began (``started`` / ``finished`` events follow), else ``no_page`` / ``gone`` / ``bad_args``."""
+        if not is_http_url(url):
+            return web_error_result(WebPageError.BAD_ARGS, "only http(s) pages can be opened")
+        return await self._web_call("web_load", {"page_id": str(page_id), "url": url}, timeout=LOAD_TIMEOUT)
+
+    async def web_eval(
+        self, page_id: str, script: str, *, timeout: float = DEFAULT_EVAL_TIMEOUT
+    ) -> dict[str, Any]:
+        """Run the JavaScript program ``script`` in the page: ``{"ok": True, "result": str | None, "url"}``
+        with the program's completion value when it is a string (wrap expressions so they return
+        ``JSON.stringify(...)``). ``timeout`` is the script's own budget; Python waits ``EVAL_SLACK``
+        seconds longer for the answer. Errors: ``no_page``, ``gone`` (the renderer stopped), ``closed``
+        (the page was closed while it ran), ``timeout``."""
+        if not isinstance(script, str):
+            return web_error_result(WebPageError.BAD_ARGS, "script is required")
+        try:
+            seconds = max(0.0, float(timeout))
+        except (TypeError, ValueError):
+            seconds = DEFAULT_EVAL_TIMEOUT
+        result = await self._web_call(
+            "web_eval", {"page_id": str(page_id), "script": script}, timeout=seconds + EVAL_SLACK
+        )
+        if result.get("ok"):
+            if not isinstance(result.get("result"), str):
+                result["result"] = None
+            if not isinstance(result.get("url"), str):
+                result["url"] = None
+        return result
+
+    async def web_title(self, page_id: str) -> dict[str, Any]:
+        """``{"ok": True, "title": str | None, "url": str | None}`` of the page's current document."""
+        result = await self._web_call("web_title", {"page_id": str(page_id)}, timeout=WEB_QUERY_TIMEOUT)
+        if result.get("ok"):
+            for key in ("title", "url"):
+                if not isinstance(result.get(key), str):
+                    result[key] = None
+        return result
+
+    async def web_close(self, page_id: str) -> dict[str, Any]:
+        """Close and destroy the page: ``{"ok": True, "closed": bool}`` (False: it was not open).
+        Scripts still running in it answer ``closed``."""
+        result = await self._web_call("web_close", {"page_id": str(page_id)}, timeout=WEB_QUERY_TIMEOUT)
+        if result.get("ok"):
+            result["closed"] = result.get("closed") is True
+        return result
+
+    async def web_reset(self) -> dict[str, Any]:
+        """Close every page of this app's plugin instance: ``{"ok": True, "closed": int}``."""
+        result = await self._web_call("web_reset", {}, timeout=WEB_QUERY_TIMEOUT)
+        if result.get("ok"):
+            try:
+                result["closed"] = int(result.get("closed") or 0)
+            except (TypeError, ValueError):
+                result["closed"] = 0
+        return result
+
+    async def web_status(self) -> dict[str, Any]:
+        """Diagnostics: ``{"ok": True, "pages": [{"page_id", "url", "gone", "width", "height", "pending"}],
+        "attached": bool, ...}`` (Android adds ``activity`` and ``density``, iOS ``window``)."""
+        result = await self._web_call("web_status", {}, timeout=WEB_QUERY_TIMEOUT)
+        if result.get("ok"):
+            pages = result.get("pages")
+            result["pages"] = [dict(p) for p in pages if isinstance(p, Mapping)] if isinstance(pages, list) else []
+        return result

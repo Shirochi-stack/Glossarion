@@ -1019,7 +1019,7 @@ class AccountsScreen(Screen):
                 rows.append(ft.ListTile(
                     key=f"experimental-{route}",
                     title=ft.Text(label),
-                    subtitle=reason_subtitle(ReasonChip(reason=EXPERIMENTAL_CHIP, detail=webview_bridge.LIMITATIONS),
+                    subtitle=reason_subtitle(ReasonChip(reason=EXPERIMENTAL_CHIP, detail=webview_bridge.limitations()),
                                              ft.Text(f"{route} · no sign-in · hidden in-app browser",
                                                      theme_style=ft.TextThemeStyle.BODY_SMALL)),
                     on_click=lambda e, title=label, text=about: self.show_experimental(title, text),
@@ -1036,7 +1036,7 @@ class AccountsScreen(Screen):
 
     def show_experimental(self, title: str, about: str) -> InfoSheet:
         """How an Experimental route works and its limitations (InfoSheet)."""
-        sheet = InfoSheet(title=title, body=f"{about}\n\n{webview_bridge.LIMITATIONS}")
+        sheet = InfoSheet(title=title, body=f"{about}\n\n{webview_bridge.limitations()}")
         page = self._page()
         if page is not None:
             sheet.show(page)

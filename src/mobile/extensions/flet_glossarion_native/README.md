@@ -13,6 +13,10 @@ native pieces Flet does not ship:
   in the system picker (Android Storage Access Framework, iOS Files), written to
   later without asking again. This is how finished books reach the user's own
   cloud app; Glossarion makes no network request for it.
+- **Both (hotfix 3)**: hidden in-app browser pages (Android `WebView`, iOS
+  `WKWebView`) the extension creates and owns outside the Flutter widget tree,
+  for the routes that drive a web page (authchatgpt/, authnd/, authds/,
+  search/gemini). Screen changes never rebuild them.
 
 It is installed by `flet build` through `[tool.flet].dev_packages` in
 `src/mobile/pyproject.toml` (`extensions/flet_glossarion_native`, resolved
@@ -40,14 +44,19 @@ src/flutter/flet_glossarion_native/  Dart package / Flutter plugin
     GlossarionNativePlugin.kt        MethodChannel glossarion_native/platform
     ShareReceiverActivity.kt         VIEW/SEND/SEND_MULTIPLE trampoline
     DocumentDestinations.kt          SAF pickers, persisted grants, mode-chain writes (U10)
+    HiddenWebPages.kt                hidden in-app browser pages (hotfix 3)
   ios/flet_glossarion_native/Package.swift   SwiftPM (Flutter 3.44 default)
   ios/flet_glossarion_native.podspec         CocoaPods fallback, same sources
   ios/flet_glossarion_native/Sources/flet_glossarion_native/GlossarionNativePlugin.swift
   ios/flet_glossarion_native/Sources/flet_glossarion_native/DocumentDestinations.swift
+  ios/flet_glossarion_native/Sources/flet_glossarion_native/HiddenWebPages.swift
 src/flet_glossarion_native/documents.py       document-destination contract (refs, results, error codes)
 src/flet_glossarion_native/documents_fake.py  in-memory provider answering like DocumentDestinations.kt (tests)
+src/flet_glossarion_native/web_pages.py       in-app browser page contract (methods, events, error codes)
+src/flet_glossarion_native/web_pages_fake.py  pages answering like HiddenWebPages.kt (host tests)
 tests/test_native_defaults.py        host tests (defaults, marshalling, cross-language contract)
 tests/test_document_destinations.py  U10 API, fake-provider semantics, Dart/Kotlin/Swift static checks
+tests/test_web_pages.py              hotfix 3 page API, fake semantics, Dart/Kotlin/Swift static checks
 ```
 
 ## Python API
@@ -61,6 +70,7 @@ native = GlossarionNative(
     on_background_task=on_background,   # BackgroundTaskEvent(type, task_id, task_name, identifier, reason)
     on_notification=on_notification,   # NotificationEvent(notification_id, action_id, payload, launched_app)
     on_document=on_document,           # DocumentEvent(type, op_id, written, total, kind, status, result)
+    on_web=on_web,                     # WebPageEvent(type, page_id, url, ok, error, code, main_frame, crashed)
 )
 ```
 
@@ -88,6 +98,7 @@ constructor, so they are registered before the Dart service starts.
 | `stat(document)`, `delete(document)`, `query_root(target)` | query / `deleteDocument` / root query + grant check | resource values / `.forDeleting` / reachability | same |
 | `release(target)`, `list_grants()` | `releasePersistableUriPermission`, `persistedUriPermissions` | `True` / `[]` (bookmarks are app data) | `False` / `[]` |
 | `cancel_document_op(op_id)`, `take_document_results()` | stop a write; late picker answers | same | `False` / `[]` |
+| `web_open(page_id, *, width, height, prevent_links=())`, `web_load(page_id, url)`, `web_eval(page_id, script, *, timeout=30)`, `web_title(page_id)`, `web_close(page_id)`, `web_reset()`, `web_status()` | hidden `android.webkit.WebView`s (`HiddenWebPages.kt`) | hidden `WKWebView`s (`HiddenWebPages.swift`) | `{"ok": False, "error": "unavailable"}` |
 
 All methods are coroutines and must run on Flet's event loop. From a worker
 thread (the job thread), use
@@ -151,9 +162,11 @@ library itself does not declare:
 
 ### In-app browser routes in the background (hotfix 1)
 
-authchatgpt/, authnd/, authds/ and search/gemini run in hidden flet-webview
-pages (`services/webview_bridge.py`). Under the foreground service they need
-no native code:
+This section is about the flet-webview fallback (`services/webview_bridge.py`,
+used when the native pages below are missing or switched off with
+`GLOSSARION_NATIVE_WEBVIEW=0`). authchatgpt/, authnd/, authds/ and
+search/gemini then run in hidden flet-webview pages. Under the foreground
+service they need no native code:
 
 - Flutter builds widgets only in frames, and draws none while the app is
   hidden or paused (`SchedulerBinding.scheduleFrame` returns at once). A
@@ -313,6 +326,123 @@ iOS (`DocumentDestinations.swift`):
 The app cannot see whether the cloud app finished uploading (quota full,
 signed out, Wi-Fi only): it can only report that the file was handed over.
 
+## In-app browser pages (hotfix 3)
+
+The routes that drive a web page (authchatgpt/ chatgpt.com web chat, authnd/,
+authds/, search/gemini) used hidden flet-webview controls in `page.overlay`.
+Flet 1.0.3 draws the overlay only in the top View, so every screen push / pop
+moved the WebView into another widget tree, and Flutter built a new native
+WebView that reloaded without the page's hook: an authchatgpt reply in
+progress was lost and sent again. The extension now creates and owns the
+pages itself, outside the Flutter widget tree, and Python drives them through
+the existing service channel. `web_pages.py` holds the contract:
+
+- **Handshake.** `get_platform_info()["web_pages"]` is
+  `{"version": 1, "max_pages": 8, "provider": ...}`;
+  `web_pages.capability(info)` reads it. Android leaves it out when API 26+
+  reports no WebView provider. The app prefers these pages when the key is
+  there; otherwise it falls back to flet-webview unchanged. Desktop uses
+  neither.
+- **Methods.** `web_open` (Python makes the `page_id`; viewport in dp / pt;
+  `prevent_links`), `web_load` (http / https only), `web_eval` (one string
+  back: Python wraps every expression in an IIFE that returns
+  `JSON.stringify({ok, value})`, so there is no console channel and no
+  chunking), `web_title`, `web_close`, `web_reset` (every page of this plugin
+  instance; the app sends it at start-up and at shutdown), `web_status`.
+  Every answer is `{"ok", "error", "message", ...}` with the codes
+  `unavailable`, `bad_args`, `exists`, `too_many`, `no_page`, `gone`,
+  `closed`, `native_error` and Python's own `timeout`. Messages never carry
+  page content; exceptions are reported by type name (Flet's `TimeoutError`
+  text embeds the call arguments).
+- **Events.** `on_web` gets `started`, `finished` (`ok`, `error`), `url`
+  (redirects, commits, pushState), `error` (`code`, `main_frame`; Android
+  forwards at most 8 sub-resource errors per document) and `gone` (the
+  renderer stopped; `crashed`: Android's `didCrash()`, null on iOS, which gives
+  no reason). Flet only sends them when `on_web` has a
+  handler at construction. Console output, scripts, results and page content
+  are never sent or logged.
+- **Threading.** Kotlin and Swift run every page call, WebView callback and
+  `channel.invokeMethod` on the main thread. Each channel result is answered
+  exactly once, and a pending `web_eval` answers `closed` / `gone` when its page
+  is destroyed. The page registry belongs to the plugin instance:
+  flutter_foreground_task's headless engine gets its own instance, which never
+  opens a page, so a job ending never touches the app's pages.
+
+Android (`HiddenWebPages.kt`):
+
+- One 1 x 1 px `FrameLayout` (application context, `clipChildren`, not
+  focusable, `FOCUS_BLOCK_DESCENDANTS`, hidden from accessibility and
+  autofill) sits at index 0 of the Activity's `android.R.id.content`, behind the
+  opaque FlutterView, which takes every touch. Each WebView is laid out at its
+  viewport (dp x density) at (0,0). The 1 px clip keeps it drawn, alpha stays
+  1, and it is never `GONE` / `INVISIBLE`, so Chromium treats the page as
+  visible whenever the app is.
+- FlutterActivity attaches plugins before `setContentView`, and a view added to
+  the content view then would be dropped. So the ActivityAware callbacks only
+  store the Activity; the attach is posted, finds the content view with
+  `peekDecorView()` and runs only while a page exists. ViewRootImpl lays
+  nothing out while the Activity is stopped, so every WebView is measured and
+  laid out by hand after it is added or re-parented: a page opened in the
+  background gets its viewport too.
+- Settings follow webview_flutter_android's defaults plus JavaScript (DOM
+  storage, overview mode, wide viewport, `setSupportMultipleWindows(true)` with
+  no `onCreateWindow`, so `window.open` opens nothing). File and content access
+  are off. The system user agent, mixed content, Safe Browsing and third-party
+  cookies keep their defaults; the process-wide `CookieManager` is shared with
+  flet-webview, so logins carry over. `setRendererPriorityPolicy(IMPORTANT,
+  false)` on API 26+. Never called: `onPause`, `pauseTimers`,
+  `setWebContentsDebuggingEnabled`, `addJavascriptInterface`.
+- Console messages are swallowed, JS dialogs cancelled (`beforeunload`
+  confirmed), permission and geolocation requests denied, and `intent:` /
+  `market:` / `file:` / `content:` navigations refused (`prevent_links`).
+- `onRenderProcessGone` returns `true` (false would kill the app) and loses the
+  page at once: event `gone`, pending evals answer `gone`, the WebView is
+  removed and destroyed and never called again. The id answers `gone` until
+  `web_close`; authchatgpt sends its message again on a new page. Cookies are
+  flushed once when the last page closes (`web_reset` too: once for all its
+  pages, since `CookieManager.flush()` blocks the main thread).
+- In the background the Activity window is invisible, so Chromium marks the
+  pages hidden, exactly as for flet-webview: timers slow to about once a second
+  and `requestAnimationFrame` stops, while scripts, fetch streams and
+  `evaluateJavascript` keep running under the foreground service. New pages can
+  open while the app is hidden (no parking or warm-up is needed any more).
+  Detaching the container while the app is stopped was considered and
+  deferred until there is device data.
+- No manifest, Gradle or dependency change (no androidx.webkit).
+
+iOS (`HiddenWebPages.swift`):
+
+- A 1 x 1 pt clipped `UIView` at index 0 of the key window (behind the
+  FlutterView; no user interaction, hidden from accessibility, alpha 1, not
+  hidden). Every page call attaches it first (`DocumentDestinations.keyWindow()`,
+  shared with the pickers), because WebKit throttles a `WKWebView` outside a
+  window.
+- `WKWebsiteDataStore.default()` and the default process pool, like
+  webview_flutter_wkwebview: cookies and localStorage are shared with the
+  flet-webview pages. No `uiDelegate` (alerts complete silently, `window.open`
+  opens nothing), no user scripts, no `decidePolicyFor` (`prevent_links` is
+  accepted and ignored: WebKit never hands such links to other apps).
+- Failures with `NSURLErrorCancelled` and WebKit's 102 (a navigation replaced
+  by the next one) are ignored; other failures send `error` and `finished`
+  (`ok: false`). `webViewWebContentProcessDidTerminate` sends `gone` with
+  `crashed` null: WebKit does not say whether the process crashed or iOS
+  reclaimed it.
+- **Background.** WebKit still suspends the web content process soon after the
+  app leaves the screen, so requests pause until Glossarion is opened again.
+  Screen changes no longer lose the page. If iOS terminates the web content
+  process in the background, the page reports `gone` when the app returns and
+  authchatgpt sends its message again on a new page.
+- The podspec links `WebKit`; SwiftPM autolinks `import WebKit`. Deployment
+  target, Swift version and `Package.swift` are unchanged. No `@MainActor`, no
+  `async`, no iOS 14+ API.
+
+Debug builds only: Flet's `triggerControlEvent` and `Control.invokeMethod`
+`debugPrint` event payloads (URLs) and call arguments (scripts); Flet's
+`main.dart` silences `debugPrint` in release builds. The on-device smoke check
+`native_webview` proves the pages on the CI emulator and simulator.
+`GLOSSARION_NATIVE_WEBVIEW=0` (a CI / developer switch; phones cannot set it)
+falls back to flet-webview for comparison.
+
 ## Notifications and desugaring
 
 **Decision: notifications are native (NotificationCompat on Android,
@@ -401,10 +531,10 @@ to every plugin.
   and report `continued_processing: False`.
 - **In-app browser routes.** WebKit suspends a backgrounded app's web content
   process. The hidden pages of authchatgpt/, authnd/, authds/ and search/gemini
-  therefore pause in the background even while a background task or continued
-  processing keeps Python running. Public API offers no way around this. A
-  request that needs a new page waits until the app is opened again (Accounts
-  › Experimental says so).
+  (native `WKWebView`s since hotfix 3, see above) therefore pause in the
+  background even while a background task or continued processing keeps Python
+  running. Public API offers no way around this; the requests continue when the
+  app is opened again (Accounts › Experimental says so).
 - **Packaging.** SwiftPM (`ios/flet_glossarion_native/Package.swift`, which
   depends on `../FlutterFramework` like receive_sharing_intent 1.9.0 and
   flutter_foreground_task 11.0.3). `flet_glossarion_native.podspec` is the
@@ -447,6 +577,22 @@ to every plugin.
   `documents_fake.py`. Provider behaviour needs the device checklist in the
   U10 report.
 
+**Hotfix 3 in-app browser pages (2026-10-26):**
+
+- **Kotlin.** `HiddenWebPages.kt` and the wired plugin pass a Kotlin frontend
+  (K1) analysis with no error or new warning against the API 35 `android.jar`,
+  JDK 17 and stubs of the Flutter embedding / androidx.core signatures they
+  call (the session scratchpad's harness on Android lint's bundled Kotlin
+  2.1 compiler). No codegen ran; the Build Mobile CI build is the first
+  compile with kotlinc 2.2.20.
+- **Swift, Dart.** Not compiled here (no Xcode, no Flutter SDK);
+  `tests/test_web_pages.py` checks them statically (balance, method / code /
+  event names, exact WKNavigationDelegate signatures, no `@MainActor` / async /
+  heterogeneous literals passed to `result`, the platform-info ordering).
+- **Python.** `tests/test_web_pages.py` covers the API (defaults, marshalling,
+  privacy of errors) and `web_pages_fake.py`. The on-device proof is the
+  `native_webview` smoke check.
+
 **Only CI or a device can prove:**
 
 - The Gradle build inside the generated Flet app (manifest merge, built-in
@@ -462,3 +608,6 @@ to every plugin.
 - Hotfix 1: an authchatgpt/ book job keeps translating with the app on Home
   and the screen off (Android), one request after another on the reused
   hidden page.
+- Hotfix 3: an authchatgpt/ reply survives opening Settings / Library / Reader
+  while it answers; logins (ChatGPT token, DeepSeek sign-in, Google consent)
+  carry over into the native pages.
