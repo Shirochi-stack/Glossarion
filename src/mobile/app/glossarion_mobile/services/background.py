@@ -57,6 +57,8 @@ where the foreground service holds a CPU wake lock with the screen off).
 Both: while jobs run, the in-app browser routes (authchatgpt/, authnd/, authds/, search/gemini)
 keep their built WebViews for the next request, and a job that uses one gets a WebView built at
 its start (``webview_bridge.jobs_running``): Flutter builds no new WebView while the app is hidden.
+That applies to the flet-webview fallback only; the native in-app browser (hotfix 3,
+``services.native_webview``) opens its pages any time, so the call is a no-op there.
 
 Native calls go through ``NativeBridge`` (stub on desktop); permission and
 wakelock objects are injected (tests use fakes). Event handlers run on the UI
@@ -628,7 +630,8 @@ class BackgroundExecution:
         their used WebViews stay mounted for the next request, and a job that uses one of them gets a
         WebView built at its start, while the app is on screen (``webview_bridge.jobs_running``).
         Flutter builds no new WebView while the app is hidden, so a request that met none in the
-        background stood still until the app came back (hotfix 1, issue 3)."""
+        background stood still until the app came back (hotfix 1, issue 3). The flet-webview
+        fallback only: the native in-app browser (hotfix 3) needs nothing kept or built ahead."""
         try:
             from glossarion_mobile.services import webview_bridge
 

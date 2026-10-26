@@ -37,6 +37,8 @@ __all__ = [
     "ShareEvent",
     "SharedItem",
     "SharedItemKind",
+    "WebPageEvent",
+    "WebPageEventType",
 ]
 
 #: Notification id used by the Android foreground service (flutter_foreground_task
@@ -97,6 +99,22 @@ class DocumentEventType(str, Enum):
     was recreated while the system picker was open) or Glossarion restarted while a picker was open
     (``status == "cancelled"``). ``result`` is the answer the call would have returned; the same
     items are also kept for ``take_document_results()``: de-duplicate by ``op_id``."""
+
+
+class WebPageEventType(str, Enum):
+    """``WebPageEvent.type`` values (in-app browser pages, see ``web_pages.py``)."""
+
+    STARTED = "started"
+    """A main-frame navigation began; ``url`` is the address it loads."""
+    FINISHED = "finished"
+    """The navigation ended: ``ok`` is False after a main-frame network error (``error`` says which)."""
+    URL = "url"
+    """The document URL changed (a redirect, a committed load, history.pushState)."""
+    ERROR = "error"
+    """A load error: ``code``, ``error`` (its description), ``main_frame``."""
+    GONE = "gone"
+    """The page's renderer stopped (``crashed`` False: the system killed it; None: the platform does not
+    say, always so on iOS); the page is lost for good."""
 
 
 class NotificationImportance(str, Enum):
@@ -274,6 +292,26 @@ class DocumentEvent(ft.Event["GlossarionNative"]):
     """``ok``, ``cancelled`` or ``error`` for ``pick_result``."""
     result: Optional[dict[str, Any]] = None
     """The full pick answer (``{"ok": ..., "target"/"document": ...}``) for ``pick_result``."""
+
+
+@dataclass
+class WebPageEvent(ft.Event["GlossarionNative"]):
+    """In-app browser page event (see :class:`WebPageEventType`). Never carries page content."""
+
+    type: str = ""
+    page_id: Optional[str] = None
+    """The ``page_id`` Python passed to ``web_open``."""
+    url: Optional[str] = None
+    ok: Optional[bool] = None
+    """``finished``: False after a main-frame network error since ``started``."""
+    error: Optional[str] = None
+    """``finished`` / ``error``: the failure's description."""
+    code: Optional[int] = None
+    """``error``: the platform error code (Android WebViewClient.ERROR_*, iOS NSError code)."""
+    main_frame: Optional[bool] = None
+    crashed: Optional[bool] = None
+    """``gone``: True for a renderer crash, False when the system killed it to reclaim memory (Android's
+    ``RenderProcessGoneDetail.didCrash``), None when unknown (iOS: WebKit gives no reason)."""
 
 
 @dataclass

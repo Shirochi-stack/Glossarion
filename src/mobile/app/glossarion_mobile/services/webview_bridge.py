@@ -45,6 +45,16 @@ page events go over the Flet connection, not through frames). So:
   its start, while the app is still on screen (:meth:`WebViewBridge.prewarm`);
 * a page that needs a WebView while the app is hidden and finds none parked never builds one:
   it waits (cancellable) until one is parked or the app is visible again.
+
+The native in-app browser (hotfix 3). Flet 1.0.3 draws ``page.overlay`` only in the top View, so
+every screen push / pop moved these hidden WebViews into another widget tree and Flutter built a
+new one, which loaded its URL again without the page's state (an authchatgpt/ reply was lost).
+Where the extension offers it (``get_platform_info()["web_pages"]``), the pages are instead
+``android.webkit.WebView`` / ``WKWebView`` objects the extension creates and owns outside the
+Flutter widget tree (``services/native_webview.py``): screen changes never touch them, and they
+open while the app is hidden too. :class:`HiddenPage` / :class:`PageDriver` are the worker-side
+parts both drivers share. :class:`WebViewBridgeFeature` installs the native driver first and this
+flet-webview bridge (with the parking above, which only it needs) as the fallback.
 """
 
 from __future__ import annotations
@@ -65,8 +75,11 @@ __all__ = [
     "BROWSER_ROUTE_PREFIXES",
     "CHUNK_CHARS",
     "CONSOLE_PREFIX",
+    "HiddenPage",
     "LIMITATIONS",
     "MAX_PAGES",
+    "NATIVE_LIMITATIONS",
+    "PageDriver",
     "UNSUPPORTED_REASON",
     "WebViewBridge",
     "WebViewBridgeFeature",
@@ -77,6 +90,7 @@ __all__ = [
     "current",
     "job_models",
     "jobs_running",
+    "limitations",
     "page_script",
     "platform_supported",
     "uses_browser_route",
@@ -121,7 +135,7 @@ UNSUPPORTED_REASON = (
     "The hidden in-app browser (flet-webview) runs on Android, iOS and macOS only, so AuthND and "
     "Gemini Free cannot run here."
 )
-LIMITATIONS = (
+_LIMITATIONS_HEAD = (
     "Experimental, best effort.\n"
     "• hCaptcha may ask for an interactive challenge, which the hidden browser cannot answer: the "
     "AuthND request then fails after the token timeout (Settings › Response handling › NIM / AuthND "
@@ -130,22 +144,36 @@ LIMITATIONS = (
     "so NVIDIA and Google may serve other pages or extra verification than on desktop.\n"
     "• Google may show a consent or verification page instead of AI Mode; the request then fails "
     "with that message.\n"
-    "• In the background: on Android these requests keep running while a job runs (its "
+)
+_LIMITATIONS_TAIL = (
+    f"• Every request opens its own hidden page; Token concurrency and the Gemini Free sub-chunk "
+    f"concurrency limit how many run at once (never more than {MAX_PAGES})."
+)
+LIMITATIONS = (
+    _LIMITATIONS_HEAD
+    + "• In the background: on Android these requests keep running while a job runs (its "
     "notification is showing): the job opens its in-app page while Glossarion is on screen and "
     "reuses it afterwards. A request that needs a new page while Glossarion is hidden waits until "
     "you open the app again. iOS pauses the in-app browser in the background: keep Glossarion "
     "open while these requests run.\n"
-    f"• Every request opens its own hidden page; Token concurrency and the Gemini Free sub-chunk "
-    f"concurrency limit how many run at once (never more than {MAX_PAGES})."
+    + _LIMITATIONS_TAIL
+)
+#: ``LIMITATIONS`` with the native in-app browser (hotfix 3): only the background bullet differs.
+NATIVE_LIMITATIONS = (
+    _LIMITATIONS_HEAD
+    + "• In the background: on Android these requests keep running while a job runs (its "
+    "notification is showing), and new in-app pages open there too. iOS pauses the in-app browser "
+    "in the background: keep Glossarion open while these requests run.\n"
+    + _LIMITATIONS_TAIL
 )
 
 _status_lock = threading.Lock()
-_current: Optional["WebViewBridge"] = None
+_current: Optional["PageDriver"] = None
 _reason = UNSUPPORTED_REASON
 
 
-def current() -> Optional["WebViewBridge"]:
-    """The installed (registered) bridge, if any."""
+def current() -> Optional["PageDriver"]:
+    """The installed (registered) bridge, if any: the native driver or the flet-webview one."""
     with _status_lock:
         return _current
 
@@ -158,11 +186,22 @@ def availability() -> Tuple[bool, str]:
         return False, _reason
 
 
-def _set_current(bridge: Optional["WebViewBridge"], reason: str = "") -> None:
+def _set_current(bridge: Optional["PageDriver"], reason: str = "") -> None:
     global _current, _reason
     with _status_lock:
         _current = bridge
         _reason = reason or UNSUPPORTED_REASON
+
+
+def limitations() -> str:
+    """What the Experimental rows say about the in-app browser: :data:`NATIVE_LIMITATIONS` while
+    the native driver (hotfix 3) is installed, else :data:`LIMITATIONS`."""
+    from glossarion_mobile.services.native_webview import NATIVE_NAME
+
+    bridge = current()
+    if bridge is not None and getattr(bridge, "name", None) == NATIVE_NAME:
+        return NATIVE_LIMITATIONS
+    return LIMITATIONS
 
 
 def platform_supported(page: Any) -> bool:
@@ -206,9 +245,10 @@ def configured_models(store: Any) -> list:
 
 def jobs_running(running: bool, snap: Any = None) -> None:
     """``BackgroundExecution``: a job started (``running``; ``snap`` is its snapshot) or the queue
-    drained. While jobs run the bridge parks used WebViews for the next page, and a job whose
-    model is a browser route gets one built now, while the app is still on screen. No-op
-    without a registered bridge (desktop, web)."""
+    drained. While jobs run the flet-webview bridge parks used WebViews for the next page, and a
+    job whose model is a browser route gets one built now, while the app is still on screen. No-op
+    without a registered bridge (desktop, web) and with the native driver (its pages open any
+    time, also while the app is hidden: :class:`PageDriver`'s no-ops)."""
     bridge = current()
     if bridge is None:
         return
@@ -294,6 +334,320 @@ def _short_url(url: Any) -> str:
     return text.split("#", 1)[0].split("?", 1)[0][:300]
 
 
+class HiddenPage:
+    """What every hidden page shares (``browser_driver.BrowserPage``): the cancellation rules,
+    the waits in short slices, the calls posted to the UI loop and the ``load_state`` record.
+
+    :class:`WebViewPage` (a flet-webview WebView) and ``native_webview.NativeWebPage`` (a page the
+    extension owns, hotfix 3) add how they reach their WebView. ``driver`` is the
+    :class:`PageDriver` that opened the page. The public methods are the worker-thread API;
+    ``_page_started`` / ``_page_finished`` / ``_url_changed`` / ``_resource_error`` are the
+    load-state transitions (loop thread), the Qt helper's loadStarted / loadFinished record.
+    """
+
+    def __init__(
+        self,
+        driver: Any,
+        page_id: str,
+        owner: str,
+        viewport: Tuple[int, int],
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        from browser_driver import new_load_state
+
+        self.driver = driver
+        self.id = page_id
+        self.owner = owner
+        self.viewport = viewport
+        self.cancel_check = cancel_check
+        self.load_state = new_load_state()
+        self.closed = False
+        self._url = ""
+        self._cancel_reason: Optional[str] = None
+        self._lock = threading.Lock()
+        self._pending: dict[str, concurrent.futures.Future] = {}
+
+    # ---- worker-thread API (browser_driver.BrowserPage) -----------------------------------
+
+    def url(self) -> str:
+        return self._url
+
+    def wait(self, ms: int = 100) -> None:
+        """Let the page run for ``ms`` milliseconds (cancellable)."""
+        deadline = time.monotonic() + max(0, int(ms)) / 1000.0
+        while True:
+            self._raise_if_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(POLL_SECONDS, remaining))
+
+    # ---- cancellation (any thread; never blocks) -------------------------------------------
+
+    def _cancelled(self) -> Optional[str]:
+        reason = self._cancel_reason
+        if reason is None and self.cancel_check is not None:
+            try:
+                if self.cancel_check():
+                    reason = CANCELLED
+            except Exception:
+                reason = None
+        return reason
+
+    def _raise_if_cancelled(self) -> None:
+        from browser_driver import BrowserCancelled
+
+        reason = self._cancelled()
+        if reason is not None:
+            raise BrowserCancelled(reason)
+
+    def _check_usable(self) -> None:
+        self._raise_if_cancelled()
+        if self.closed:
+            raise RuntimeError("the in-app browser page is closed")
+        if self.driver.on_loop_thread():
+            raise RuntimeError("the in-app browser cannot be driven from the UI thread")
+
+    @staticmethod
+    def _fail(futures: list, reason: str) -> None:
+        from browser_driver import BrowserCancelled
+
+        for future in futures:
+            if not future.done():
+                try:
+                    future.set_exception(BrowserCancelled(reason))
+                except concurrent.futures.InvalidStateError:
+                    pass
+
+    def _wait(self, future: concurrent.futures.Future, deadline: Optional[float]) -> Any:
+        """``future``'s result, waiting in slices; None once ``deadline`` passed."""
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            try:
+                return future.result(timeout=POLL_SECONDS if remaining is None
+                                     else max(0.0, min(POLL_SECONDS, remaining)))
+            except concurrent.futures.TimeoutError:
+                pass
+            self._raise_if_cancelled()
+            if remaining is not None and remaining <= 0:
+                return None
+
+    def _call(self, coro_fn: Callable[..., Any], *args: Any, timeout: float, what: str) -> Any:
+        """Run ``coro_fn(*args)`` on the loop and wait for its result; a cancel or the timeout
+        cancels the loop call too."""
+        self._check_usable()
+        future = self.driver.submit(coro_fn, *args)
+        if future is None:
+            raise RuntimeError(f"the in-app browser could not {what}: the app's UI loop is not running")
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return future.result(timeout=max(0.0, min(POLL_SECONDS, deadline - time.monotonic())))
+            except concurrent.futures.TimeoutError:
+                pass
+            try:
+                self._raise_if_cancelled()
+            except Exception:
+                future.cancel()
+                raise
+            if time.monotonic() >= deadline:
+                future.cancel()
+                raise RuntimeError(f"the in-app browser did not {what} within {timeout:g} s")
+
+    def _resolve(self, request_id: str, envelope: Any) -> None:
+        with self._lock:
+            future = self._pending.get(request_id)
+        if future is None or future.done():
+            return
+        try:
+            future.set_result(envelope)
+        except concurrent.futures.InvalidStateError:
+            pass
+
+    # ---- load_state (loop thread): the Qt helper's loadStarted / loadFinished record --------
+
+    def _page_started(self, url: str) -> None:
+        state = self.load_state
+        state["generation"] = int(state.get("generation", 0)) + 1
+        state["finished_generation"] = -1
+        state["finished_at"] = 0.0
+        state["ok"] = False
+        state["error"] = ""
+        if url:
+            self._url = url
+        state["last_event"] = f"page started url={_short_url(url)}"
+
+    def _page_finished(self, url: str, *, error: str = "") -> None:
+        """A navigation finished: ``ok`` is True as with flet-webview's page-ended event; a
+        failure the platform reported (``error``) goes to ``load_state["error"]`` only."""
+        state = self.load_state
+        if url:
+            self._url = url
+        state["ok"] = True
+        if error:
+            state["error"] = str(error)[:300]
+        state["finished_generation"] = int(state.get("generation", 0))
+        state["finished_at"] = time.monotonic()
+        state["last_event"] = f"page ended url={_short_url(url)}"
+
+    def _url_changed(self, url: str) -> None:
+        if url:
+            self._url = url
+
+    def _resource_error(self, text: Any, *, main_frame: bool = False) -> None:
+        # Sub-resources fail too (ads, trackers), so this never marks the document failed; a main
+        # frame failure the platform names (the native pages) is kept as the document's error.
+        detail = str(text or "")[:300]
+        self.load_state["last_event"] = f"resource error: {detail}"
+        if main_frame and detail:
+            self.load_state["error"] = detail
+
+
+class PageDriver:
+    """What both ``browser_driver`` drivers share: the page registry, at most ``max_pages`` open
+    pages (further ``open_page`` calls wait, cancellably), Stop (``cancel_pages``; never blocks),
+    the UI-loop plumbing and the registration as the backend's browser driver.
+
+    :class:`WebViewBridge` (flet-webview) and ``native_webview.NativeWebDriver`` (pages the
+    extension owns, hotfix 3) are the two drivers; ``page_class`` is the page each one opens.
+    ``job_started`` / ``keep_warm`` are no-ops here: only the flet-webview bridge keeps WebViews
+    for jobs.
+    """
+
+    name = ""
+    page_class: Any = HiddenPage
+
+    def __init__(
+        self,
+        dispatcher: Any,
+        *,
+        max_pages: int = MAX_PAGES,
+        viewport: Tuple[int, int] = DEFAULT_VIEWPORT,
+    ) -> None:
+        self.dispatcher = dispatcher
+        self.max_pages = max(1, int(max_pages))
+        self.default_viewport = (int(viewport[0]), int(viewport[1]))
+        self.registered = False
+        self.opened = 0
+        self._slots = threading.BoundedSemaphore(self.max_pages)
+        self._pages: dict[str, Any] = {}
+        self._lock = threading.Lock()
+
+    # ---- browser_driver.BrowserDriver ------------------------------------------------------
+
+    def open_page(
+        self,
+        *,
+        owner: str,
+        user_agent: Optional[str] = None,
+        viewport: Optional[Tuple[int, int]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> Any:
+        """A new hidden page (worker thread). ``user_agent`` is ignored: neither flet-webview nor
+        the native pages set one, so the page keeps the system WebView's."""
+        from browser_driver import BrowserCancelled
+
+        del user_agent
+        if self.on_loop_thread():
+            raise RuntimeError("the in-app browser cannot be driven from the UI thread")
+        while not self._slots.acquire(timeout=0.1):
+            try:
+                cancelled = bool(cancel_check()) if cancel_check is not None else False
+            except Exception:
+                cancelled = False
+            if cancelled:
+                raise BrowserCancelled()
+        size = viewport or self.default_viewport
+        try:
+            page = self._new_page(uuid.uuid4().hex[:16], str(owner or ""),
+                                  (max(1, int(size[0])), max(1, int(size[1]))), cancel_check)
+        except BaseException:
+            self._slots.release()
+            raise
+        with self._lock:
+            self._pages[page.id] = page
+            self.opened += 1
+        return page
+
+    def _new_page(self, page_id: str, owner: str, viewport: Tuple[int, int],
+                  cancel_check: Optional[Callable[[], bool]]) -> Any:
+        return self.page_class(self, page_id, owner, viewport, cancel_check)
+
+    def cancel_pages(self, owner: Optional[str] = None, reason: str = CANCELLED) -> None:
+        """Cancel the open pages of ``owner`` (all when None); never blocks."""
+        with self._lock:
+            pages = [page for page in self._pages.values() if owner is None or page.owner == owner]
+        for page in pages:
+            page.cancel(reason)
+
+    # ---- plumbing ------------------------------------------------------------------------------
+
+    def forget(self, page: Any) -> None:
+        with self._lock:
+            removed = self._pages.pop(page.id, None)
+        if removed is not None:
+            self._slots.release()
+
+    @property
+    def open_pages(self) -> int:
+        with self._lock:
+            return len(self._pages)
+
+    def pages(self, owner: Optional[str] = None) -> list:
+        with self._lock:
+            return [page for page in self._pages.values() if owner is None or page.owner == owner]
+
+    def submit(self, coro_fn: Callable[..., Any], *args: Any) -> Optional[concurrent.futures.Future]:
+        return self.dispatcher.submit(coro_fn, *args)
+
+    def post(self, fn: Callable[..., Any], *args: Any) -> bool:
+        return bool(self.dispatcher.post(fn, *args))
+
+    def on_loop_thread(self) -> bool:
+        guard = getattr(self.dispatcher, "guard", None)
+        return bool(guard is not None and getattr(guard, "bound", False) and guard.on_loop_thread())
+
+    # ---- jobs (``jobs_running``): only the flet-webview bridge keeps WebViews for them --------
+
+    def job_started(self, models: Any = ()) -> None:
+        """A job started (any thread). No-op: a page opens whenever a request needs one."""
+
+    def keep_warm(self, on: bool) -> None:
+        """While jobs run (any thread). No-op: nothing is kept between pages."""
+
+    # ---- registration ---------------------------------------------------------------------------
+
+    def register(self) -> "PageDriver":
+        """Become the backend's browser driver (authnd/ and search/gemini then use it)."""
+        import browser_driver
+
+        browser_driver.register_driver(self)
+        self.registered = True
+        _set_current(self)
+        return self
+
+    def unregister(self, reason: str = "The in-app browser was shut down.") -> None:
+        import browser_driver
+
+        browser_driver.unregister_driver(self)
+        self.registered = False
+        if current() is self:
+            _set_current(None, reason)
+
+    def shutdown(self) -> None:
+        """Unregister and cancel every page; let go of what is kept for jobs (app teardown)."""
+        self.unregister()
+        self.cancel_pages(None, "the app is closing")
+        self.keep_warm(False)
+
+    def status(self) -> dict:
+        with self._lock:
+            owners = sorted({page.owner for page in self._pages.values()})
+            count = len(self._pages)
+        return {"registered": self.registered, "driver": self.name, "open_pages": count, "owners": owners,
+                "opened": self.opened, "max_pages": self.max_pages}
+
+
 class _WebViewSlot:
     """One mounted hidden WebView and the page using it now (None while it is parked).
 
@@ -359,7 +713,7 @@ class _WebViewSlot:
             page.on_console(e)
 
 
-class WebViewPage:
+class WebViewPage(HiddenPage):
     """One hidden page: a ``browser_driver.BrowserPage`` over one off-stage WebView.
 
     The public methods are the worker-thread API; ``on_*`` are the WebView's event handlers
@@ -374,14 +728,8 @@ class WebViewPage:
         viewport: Tuple[int, int],
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> None:
-        from browser_driver import new_load_state
-
+        super().__init__(bridge, page_id, owner, viewport, cancel_check)
         self.bridge = bridge
-        self.id = page_id
-        self.owner = owner
-        self.viewport = viewport
-        self.cancel_check = cancel_check
-        self.load_state = new_load_state()
         self.slot: Optional[_WebViewSlot] = None  # the WebView this page uses (loop thread only)
         self.webview: Any = None  # the slot's WebView (loop thread only)
         self.entry: Any = None  # host overlay entry (loop thread only)
@@ -389,11 +737,6 @@ class WebViewPage:
         self.builds = 0  # WebViews built for this page (each overlay entry gets its own key)
         self.reused = 0  # parked WebViews this page took over
         self.console_lines = 0
-        self.closed = False
-        self._url = ""
-        self._cancel_reason: Optional[str] = None
-        self._lock = threading.Lock()
-        self._pending: dict[str, concurrent.futures.Future] = {}
         self._chunks: dict[str, list] = {}  # loop thread only
 
     # ---- worker-thread API (browser_driver.BrowserPage) -----------------------------------
@@ -412,9 +755,6 @@ class WebViewPage:
             except WebViewUnavailable as exc:  # the app was hidden when the page needed a new WebView
                 if attempt + 1 >= LOAD_ATTEMPTS:
                     raise RuntimeError(f"the in-app browser could not open the page: {exc}") from exc
-
-    def url(self) -> str:
-        return self._url
 
     def title(self) -> str:
         try:
@@ -449,16 +789,6 @@ class WebViewPage:
             return None
         return envelope.get("value")
 
-    def wait(self, ms: int = 100) -> None:
-        """Let the page run for ``ms`` milliseconds (cancellable)."""
-        deadline = time.monotonic() + max(0, int(ms)) / 1000.0
-        while True:
-            self._raise_if_cancelled()
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            time.sleep(min(POLL_SECONDS, remaining))
-
     def close(self) -> None:
         """Release the page (any thread; idempotent): fail its waits, then park its WebView for
         the next page while jobs run (:func:`jobs_running`), else unmount it."""
@@ -483,74 +813,6 @@ class WebViewPage:
             pending = list(self._pending.values())
         self._fail(pending, self._cancel_reason)
         self.bridge.post(self._unmount_on_loop)
-
-    def _cancelled(self) -> Optional[str]:
-        reason = self._cancel_reason
-        if reason is None and self.cancel_check is not None:
-            try:
-                if self.cancel_check():
-                    reason = CANCELLED
-            except Exception:
-                reason = None
-        return reason
-
-    def _raise_if_cancelled(self) -> None:
-        from browser_driver import BrowserCancelled
-
-        reason = self._cancelled()
-        if reason is not None:
-            raise BrowserCancelled(reason)
-
-    def _check_usable(self) -> None:
-        self._raise_if_cancelled()
-        if self.closed:
-            raise RuntimeError("the in-app browser page is closed")
-        if self.bridge.on_loop_thread():
-            raise RuntimeError("the in-app browser cannot be driven from the UI thread")
-
-    @staticmethod
-    def _fail(futures: list, reason: str) -> None:
-        from browser_driver import BrowserCancelled
-
-        for future in futures:
-            if not future.done():
-                try:
-                    future.set_exception(BrowserCancelled(reason))
-                except concurrent.futures.InvalidStateError:
-                    pass
-
-    def _wait(self, future: concurrent.futures.Future, deadline: Optional[float]) -> Any:
-        """``future``'s result, waiting in slices; None once ``deadline`` passed."""
-        while True:
-            remaining = None if deadline is None else deadline - time.monotonic()
-            try:
-                return future.result(timeout=POLL_SECONDS if remaining is None
-                                     else max(0.0, min(POLL_SECONDS, remaining)))
-            except concurrent.futures.TimeoutError:
-                pass
-            self._raise_if_cancelled()
-            if remaining is not None and remaining <= 0:
-                return None
-
-    def _call(self, coro_fn: Callable[..., Any], *args: Any, timeout: float, what: str) -> Any:
-        self._check_usable()
-        future = self.bridge.submit(coro_fn, *args)
-        if future is None:
-            raise RuntimeError(f"the in-app browser could not {what}: the app's UI loop is not running")
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                return future.result(timeout=max(0.0, min(POLL_SECONDS, deadline - time.monotonic())))
-            except concurrent.futures.TimeoutError:
-                pass
-            try:
-                self._raise_if_cancelled()
-            except Exception:
-                future.cancel()
-                raise
-            if time.monotonic() >= deadline:
-                future.cancel()
-                raise RuntimeError(f"the in-app browser did not {what} within {timeout:g} s")
 
     # ---- loop side ---------------------------------------------------------------------------
 
@@ -661,35 +923,16 @@ class WebViewPage:
     # WebView events (loop thread). load_state mirrors the Qt helper's loadStarted/loadFinished.
 
     def on_page_started(self, e: Any) -> None:
-        state = self.load_state
-        state["generation"] = int(state.get("generation", 0)) + 1
-        state["finished_generation"] = -1
-        state["finished_at"] = 0.0
-        state["ok"] = False
-        state["error"] = ""
-        url = str(getattr(e, "data", "") or "")
-        if url:
-            self._url = url
-        state["last_event"] = f"page started url={_short_url(url)}"
+        self._page_started(str(getattr(e, "data", "") or ""))
 
     def on_page_ended(self, e: Any) -> None:
-        state = self.load_state
-        url = str(getattr(e, "data", "") or "")
-        if url:
-            self._url = url
-        state["ok"] = True
-        state["finished_generation"] = int(state.get("generation", 0))
-        state["finished_at"] = time.monotonic()
-        state["last_event"] = f"page ended url={_short_url(url)}"
+        self._page_finished(str(getattr(e, "data", "") or ""))
 
     def on_url_change(self, e: Any) -> None:
-        url = str(getattr(e, "data", "") or "")
-        if url:
-            self._url = url
+        self._url_changed(str(getattr(e, "data", "") or ""))
 
     def on_resource_error(self, e: Any) -> None:
-        # Sub-resources fail too (ads, trackers), so this never marks the document failed.
-        self.load_state["last_event"] = f"resource error: {str(getattr(e, 'data', '') or '')[:300]}"
+        self._resource_error(getattr(e, "data", ""))
 
     def on_console(self, e: Any) -> None:
         payload = parse_console_message(getattr(e, "message", ""), prefix=CONSOLE_PREFIX)
@@ -729,21 +972,13 @@ class WebViewPage:
             envelope = None
         self._resolve(request_id, envelope if isinstance(envelope, dict) else None)
 
-    def _resolve(self, request_id: str, envelope: Optional[dict]) -> None:
-        with self._lock:
-            future = self._pending.get(request_id)
-        if future is None or future.done():
-            return
-        try:
-            future.set_result(envelope)
-        except concurrent.futures.InvalidStateError:
-            pass
 
-
-class WebViewBridge:
-    """The ``browser_driver`` driver of Glossarion Mobile: hidden WebView pages."""
+class WebViewBridge(PageDriver):
+    """The flet-webview ``browser_driver`` driver of Glossarion Mobile: hidden WebView pages in
+    ``page.overlay`` (the fallback where the native in-app browser is not offered)."""
 
     name = "flet-webview"
+    page_class = WebViewPage
 
     def __init__(
         self,
@@ -754,16 +989,9 @@ class WebViewBridge:
         viewport: Tuple[int, int] = DEFAULT_VIEWPORT,
         webview_factory: Optional[Callable[[WebViewPage, str], Any]] = None,
     ) -> None:
-        self.dispatcher = dispatcher
+        super().__init__(dispatcher, max_pages=max_pages, viewport=viewport)
         self.host = host
-        self.max_pages = max(1, int(max_pages))
-        self.default_viewport = (int(viewport[0]), int(viewport[1]))
         self.webview_factory = webview_factory or _flet_webview
-        self.registered = False
-        self.opened = 0
-        self._slots = threading.BoundedSemaphore(self.max_pages)
-        self._pages: dict[str, WebViewPage] = {}
-        self._lock = threading.Lock()
         # Hotfix 1 (issue 3): built WebViews kept for the next page while jobs run.
         self.warm = False  # jobs run: park used WebViews instead of unmounting them
         self.max_spares = self.max_pages
@@ -774,61 +1002,7 @@ class WebViewBridge:
         self._parking: set = set()  # slots on their way to becoming spares (lock)
         self._tasks: set = set()
 
-    # ---- browser_driver.BrowserDriver ------------------------------------------------------
-
-    def open_page(
-        self,
-        *,
-        owner: str,
-        user_agent: Optional[str] = None,
-        viewport: Optional[Tuple[int, int]] = None,
-        cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> WebViewPage:
-        """A new hidden page (worker thread). ``user_agent`` is ignored: flet-webview cannot set
-        one, so the page keeps the system WebView's."""
-        from browser_driver import BrowserCancelled
-
-        del user_agent
-        if self.on_loop_thread():
-            raise RuntimeError("the in-app browser cannot be driven from the UI thread")
-        while not self._slots.acquire(timeout=0.1):
-            try:
-                cancelled = bool(cancel_check()) if cancel_check is not None else False
-            except Exception:
-                cancelled = False
-            if cancelled:
-                raise BrowserCancelled()
-        size = viewport or self.default_viewport
-        page = WebViewPage(self, uuid.uuid4().hex[:16], str(owner or ""),
-                           (max(1, int(size[0])), max(1, int(size[1]))), cancel_check)
-        with self._lock:
-            self._pages[page.id] = page
-            self.opened += 1
-        return page
-
-    def cancel_pages(self, owner: Optional[str] = None, reason: str = CANCELLED) -> None:
-        """Cancel the open pages of ``owner`` (all when None); never blocks."""
-        with self._lock:
-            pages = [page for page in self._pages.values() if owner is None or page.owner == owner]
-        for page in pages:
-            page.cancel(reason)
-
     # ---- plumbing ------------------------------------------------------------------------------
-
-    def forget(self, page: WebViewPage) -> None:
-        with self._lock:
-            removed = self._pages.pop(page.id, None)
-        if removed is not None:
-            self._slots.release()
-
-    @property
-    def open_pages(self) -> int:
-        with self._lock:
-            return len(self._pages)
-
-    def pages(self, owner: Optional[str] = None) -> list:
-        with self._lock:
-            return [page for page in self._pages.values() if owner is None or page.owner == owner]
 
     def make_webview(self, slot: _WebViewSlot, url: str) -> Any:
         return self.webview_factory(slot, url)
@@ -1011,39 +1185,6 @@ class WebViewBridge:
             log.warning("in-app browser: no WebView could be prepared for the job: %s", exc)
             self._unmount_slot(slot)
 
-    def submit(self, coro_fn: Callable[..., Any], *args: Any) -> Optional[concurrent.futures.Future]:
-        return self.dispatcher.submit(coro_fn, *args)
-
-    def post(self, fn: Callable[..., Any], *args: Any) -> bool:
-        return bool(self.dispatcher.post(fn, *args))
-
-    def on_loop_thread(self) -> bool:
-        guard = getattr(self.dispatcher, "guard", None)
-        return bool(guard is not None and getattr(guard, "bound", False) and guard.on_loop_thread())
-
-    def register(self) -> "WebViewBridge":
-        """Become the backend's browser driver (authnd/ and search/gemini then use it)."""
-        import browser_driver
-
-        browser_driver.register_driver(self)
-        self.registered = True
-        _set_current(self)
-        return self
-
-    def unregister(self, reason: str = "The in-app browser was shut down.") -> None:
-        import browser_driver
-
-        browser_driver.unregister_driver(self)
-        self.registered = False
-        if current() is self:
-            _set_current(None, reason)
-
-    def shutdown(self) -> None:
-        """Unregister and cancel every page, unmount the parked WebViews (app teardown)."""
-        self.unregister()
-        self.cancel_pages(None, "the app is closing")
-        self.keep_warm(False)
-
     def status(self) -> dict:
         with self._lock:
             owners = sorted({page.owner for page in self._pages.values()})
@@ -1055,10 +1196,23 @@ class WebViewBridge:
 
 
 class WebViewBridgeFeature:
-    """``app._install_webview_bridge``: register the bridge where flet-webview runs."""
+    """``app._install_webview_bridge``: the native in-app browser where the extension offers it
+    (hotfix 3), else the flet-webview bridge where flet-webview runs."""
 
     @classmethod
-    async def install(cls, app: Any) -> Optional[WebViewBridge]:
+    async def install(cls, app: Any) -> Optional[PageDriver]:
+        try:
+            from glossarion_mobile.services import native_webview
+
+            driver = await native_webview.install(app)  # None: not offered, switched off, not mobile
+        except Exception:
+            log.exception("native in-app browser unavailable; trying flet-webview")
+            driver = None
+        if driver is not None:
+            app.webview_bridge = driver
+            log.info("WebView bridge registered: native in-app browser (authnd/, authds/, authchatgpt/, "
+                     "search/gemini)")
+            return driver
         page = getattr(app, "page", None)
         try:
             supported = platform_supported(page)

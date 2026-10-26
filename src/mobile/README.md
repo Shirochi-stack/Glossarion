@@ -25,7 +25,7 @@ src/mobile/
       diagnostics/          # selftest.py (device + host self-test), fixtures.py
       services/native.py    # GlossarionNative bridge (+ desktop stub)
       app.py                # GlossarionApp: installs each feature (`await XFeature.install(self)`)
-      services/             # jobs, files, intents, OAuth, config store, model catalog, manga, updates, WebViewBridge, …
+      services/             # jobs, files, intents, OAuth, config store, model catalog, manga, updates, in-app browser (native_webview, WebViewBridge fallback), …
       job_kinds/            # one adapter per job kind over the shared backend cores
       state/                # app state, chat store adapter, series, prefs
       ui/router.py          # route whitelist (pure Python)
@@ -268,6 +268,16 @@ Jobs: `prepare` (version, wheel plan, backend bundle, host tests, offline E2E) �
 self-test deep link, then the offline E2E suite; blocking) → `ios` (unsigned IPA) →
 `ios-signed` (only with the Apple secrets) → the optional device suites below. There is no
 release job: the workflow never publishes (see "Releases").
+
+The smoke suite both device jobs block on (the Android emulator and the required iOS simulator
+smoke) includes `native_webview` (hotfix 3, `diagnostics/webview_check.py`): a page of the native
+in-app browser loads a loopback document, keeps its JavaScript state across a Settings push / pop
+and a sheet, takes typing, returns a 200 000-character result and leaves no page behind when
+closed. On a device a missing native driver fails it (strict); on the host and in
+`tools/host_smoke.py --simulate` runs it is skipped, and so it is on a phone whose browser-route
+requests hold every page slot for 30 s (a "Run self-test" during a job). This is the only place the extension's
+Kotlin / Swift pages are compiled and run. `GLOSSARION_NATIVE_WEBVIEW=0` (a CI / developer switch;
+phones cannot set it) skips the check and falls back to the flet-webview bridge.
 
 Artifacts: `X_Glossarion-Android-APK`, `Z_Glossarion-Android-AAB`,
 `X_Glossarion-iOS-Unsigned` (AltStore/SideStore), `X_Glossarion-iOS-Signed`,
@@ -557,6 +567,11 @@ model, OS version and the outcome; the U0 spike checklist above stays valid for 
 8. **Experimental browser routes** (Accounts › Experimental): one `authnd/` request (hCaptcha
    minted in the hidden WebView) and one `search/gemini` request; note when Google shows a
    consent page or the challenge needs a person (expected limitations, shown in the app).
+   Hotfix 3 (native in-app pages): an `authchatgpt/` reply keeps streaming while you open
+   Settings, the Library or the Reader (no "page was rebuilt ... sending the message again" log
+   line); a job on a browser-route model keeps translating with Glossarion in the background
+   (Android); the ChatGPT token, a DeepSeek sign-in and Google's consent carry over to the
+   hidden pages.
 9. **Tablet / accessibility**: a tablet in portrait and landscape (SidePanel for Chat settings /
    Compare / job detail; master-detail Settings, Book page and Manga ≥ 1200 dp), the system text
    size at 200% (the composer's "Options (n)", no clipped headers), reduce motion, TalkBack /

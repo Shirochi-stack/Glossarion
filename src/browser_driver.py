@@ -5,11 +5,14 @@ and ``gemini_free`` drives Google Search AI Mode, in a helper subprocess by defa
 (``AUTHND_TOKEN_MODE`` / ``GEMINI_FREE_MODE`` = ``subprocess``) or inline (``inline``). Desktop
 registers no driver, so none of that changes.
 
-Glossarion Mobile has neither Qt nor helper processes. Its WebViewBridge
+Glossarion Mobile has neither Qt nor helper processes. Its WebViewBridge feature
 (``src/mobile/app/glossarion_mobile/services/webview_bridge.py``) registers a driver whose
 pages are hidden in-app WebViews, and the routes run their own flows on those pages
 (``authnd_auth._mint_captcha_token_flow``, ``gemini_free._submit_ai_mode_prompt``): the same
-scripts, timing and retries as the desktop helper. Only the page operations differ.
+scripts, timing and retries as the desktop helper. Only the page operations differ. Two
+mobile drivers exist: the native in-app browser (``services/native_webview.py``, pages the
+app's Flet extension owns outside the Flutter widget tree, so screen changes never rebuild
+them) and the flet-webview fallback (hidden ``flet_webview`` controls).
 
 Which path a route takes (:func:`use_driver`):
 
@@ -33,7 +36,10 @@ block that thread (never the UI loop):
   allowed) in the page and returns its JSON value, or None when the page gave no value in time
   (``QWebEnginePage.runJavaScript`` callback semantics);
 * ``wait(ms)`` lets the page run for ``ms`` milliseconds (the Qt helper pumps its event loop);
-* ``close()`` releases the page; idempotent.
+* ``close()`` releases the page; idempotent;
+* optional ``renderer_gone`` (bool attribute): True once the page's document is gone for good
+  (its renderer stopped); scripts answer None from then on. A driver without it never loses
+  pages that way.
 
 Blocking page calls raise :class:`BrowserCancelled` (``"stream cancelled"``, the routes' own
 cancel message) once :func:`cancel_pages` cancelled the page or its ``cancel_check`` returns

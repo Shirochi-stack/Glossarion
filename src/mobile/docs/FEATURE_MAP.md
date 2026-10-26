@@ -201,7 +201,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 55 | Async (batch API) processing | Tools › Async batch; Plan card Start ▾ "Run as async batch" |  |
 | 56 | Parallel EPUB Pair (glossary-only) | Glossaries › Parallel EPUB pair |  |
 | 57 | Manga translator launch | Tools › Manga; ＋ sheet › Manga; "Translate as manga" chip |  |
-| 58 | Browser-backed free routes (authnd/, Gemini-free) | Accounts › Experimental (WebViewBridge); ModelSheet route chip | Experimental (U9): a hidden in-app WebView runs the desktop page scripts through `browser_driver`; limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
+| 58 | Browser-backed free routes (authnd/, Gemini-free) | Accounts › Experimental (WebViewBridge); ModelSheet route chip | Experimental (U9): a hidden in-app page runs the desktop page scripts through `browser_driver` (hotfix 3: a native page the extension owns, which screen changes never rebuild; flet-webview fallback); limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
 | 59 | Subscription logins (ChatGPT/Claude/Gemini/Grok) | Accounts |  |
 | 60 | Antigravity / GLM / Arena proxies, OcAgy | Accounts › Unavailable | **Excluded**: antigravity / authza / autharena / ocagy |
 | 61 | Tor proxy routing | Settings › Response handling & retries › "Tor proxy routing" (disabled row + ReasonChip) | **Excluded**: Tor binary; value preserved |
@@ -325,8 +325,8 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 47 | Antigravity (antigravity/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 48 | OcAgy (ocagy/, ocagy0/, ocagyN/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 49 | AuthArena (autharena/, autharena0/, autharenaN/) | Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
-| 50 | AuthND (authnd/, authndN/) NVIDIA Build browser route | Accounts › Experimental (WebViewBridge); Settings › Response handling › NIM/AuthND helpers | Experimental (U9): a hidden in-app WebView runs the desktop page scripts through `browser_driver`; limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
-| 51 | Gemini Free (search/, search/gemini) | Accounts › Experimental (WebViewBridge); Settings › Response handling › Gemini Free chunking | Experimental (U9): a hidden in-app WebView runs the desktop page scripts through `browser_driver`; limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
+| 50 | AuthND (authnd/, authndN/) NVIDIA Build browser route | Accounts › Experimental (WebViewBridge); Settings › Response handling › NIM/AuthND helpers | Experimental (U9): a hidden in-app page runs the desktop page scripts through `browser_driver` (hotfix 3: a native page the extension owns, which screen changes never rebuild; flet-webview fallback); limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
+| 51 | Gemini Free (search/, search/gemini) | Accounts › Experimental (WebViewBridge); Settings › Response handling › Gemini Free chunking | Experimental (U9): a hidden in-app page runs the desktop page scripts through `browser_driver` (hotfix 3: a native page the extension owns, which screen changes never rebuild; flet-webview fallback); limits shown in Accounts › Experimental; disabled row + ReasonChip where flet-webview is unavailable (Windows/Linux dev) |
 | 52 | Opera Aria (search/opera) | ModelSheet search/opera rows + Accounts › Unavailable on mobile (disabled row + ReasonChip) | **Excluded** |
 | 53 | Tor proxy for provider traffic | Settings › Response handling & retries › "Tor proxy" (disabled row + ReasonChip) | **Excluded**; value preserved |
 | 54 | Streaming responses | Settings › Response handling › Streaming (one switch) |  |
@@ -981,7 +981,7 @@ The design decisions behind the surfaces are in `UI_SPEC.md`, with plan §5 as t
 | 49 | Reader: fullscreen & settings persistence | Reader full screen + `epub_reader_*` keys + per-book overrides, `reader_positions` and `reader_bookmarks` in `mobile_state.json` (Prefs) | New: reading positions |
 | 50 | Reader: QtWebEngine prewarm & QTextBrowser fallback | Reader (flet-webview on Android/iOS; native fallback renderer elsewhere) | **Excluded** (Qt-specific); replaced |
 | 51 | Open reader from Progress Manager / Direct Text attachments | Chapters row tap; Job card "Read" / "Open reader" |  |
-| 52 | AuthND browser-token routing (shares the Library's QtWebEngine) | Accounts › Experimental (off-screen WebViewBridge) | Experimental (U9): `browser_driver` pages in the hidden WebView |
+| 52 | AuthND browser-token routing (shares the Library's QtWebEngine) | Accounts › Experimental (off-screen WebViewBridge) | Experimental (U9): `browser_driver` pages in the hidden WebView (native extension-owned pages since hotfix 3, flet-webview fallback) |
 | 53 | Translation context history (HistoryManager) | Automatic (no control); context settings live in Settings › Context & memory | Automatic |
 
 ## 12. multikey-misc (52)

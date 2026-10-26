@@ -33,10 +33,11 @@ from typing import Any, Awaitable, Callable, Optional
 log = logging.getLogger("glossarion.native")
 
 __all__ = ["DOCUMENT_METHODS", "METHOD_TIMEOUTS", "NativeStub", "NativeBridge", "ServiceHolds", "ServiceLease",
-           "create_native", "load_extension", "service_holds", "to_plain"]
+           "WEB_METHODS", "create_native", "load_extension", "service_holds", "to_plain"]
 
 # ``document``: U10 document-destination events (write progress, picker answers that outlived their call).
-EVENTS = ("share", "foreground", "background_task", "notification", "document")
+# ``web``: the native in-app browser pages' navigation events (hotfix 3, ``services.native_webview``).
+EVENTS = ("share", "foreground", "background_task", "notification", "document", "web")
 # Outer guard only; the extension applies its own per-call timeouts (20-30 s).
 DEFAULT_TIMEOUT = 45.0
 #: Calls the extension bounds with its own longer timeout (``save_to_downloads`` copies a whole file: 900 s,
@@ -48,6 +49,10 @@ METHOD_TIMEOUTS = {"save_to_downloads": 960.0, "save_to_downloads_entry": 960.0}
 #: (``cloud_sync.NativeDocs``): the extension bounds each one itself (pickers 1 h, writes by size).
 DOCUMENT_METHODS = ("pick_folder", "pick_save_location", "pick_document", "list_children", "create_file",
                     "create_folder", "write_file", "rename_document", "stat", "delete", "query_root")
+#: The native in-app browser pages (hotfix 3, ``flet_glossarion_native.web_pages``): off-device every one
+#: answers ``{"ok": False, "error": "unavailable"}``. ``services.native_webview`` calls them through
+#: ``NativeBridge.call`` (the extension bounds each one itself; ``web_eval`` by the script's own timeout).
+WEB_METHODS = ("web_open", "web_load", "web_eval", "web_title", "web_close", "web_reset", "web_status")
 
 
 def to_plain(value: Any, _depth: int = 0) -> Any:
@@ -87,6 +92,7 @@ class NativeStub:
         self.on_background_task = handlers.get("on_background_task")
         self.on_notification = handlers.get("on_notification")
         self.on_document = handlers.get("on_document")
+        self.on_web = handlers.get("on_web")
 
     async def get_platform_info(self) -> dict:
         return {"platform": "desktop", "native": False, "stub": True, "unavailable_reason": self.reason}
@@ -192,6 +198,32 @@ class NativeStub:
     async def take_document_results(self) -> list:
         return []
 
+    # ---- native in-app browser pages (hotfix 3): the extension's answers off-device ------------------
+
+    def _no_web_pages(self) -> dict:
+        return {"ok": False, "error": "unavailable", "message": self.reason}
+
+    async def web_open(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_web_pages()
+
+    async def web_load(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_web_pages()
+
+    async def web_eval(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_web_pages()
+
+    async def web_title(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_web_pages()
+
+    async def web_close(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_web_pages()
+
+    async def web_reset(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_web_pages()
+
+    async def web_status(self, *args: Any, **kwargs: Any) -> dict:
+        return self._no_web_pages()
+
     # ---- backups (on-device models): nothing to mark off-device ------------------------------------
 
     async def exclude_from_backup(self, path: str) -> bool:
@@ -231,6 +263,11 @@ def create_native(page: Any, handlers: Optional[dict[str, Any]] = None) -> Any:
     cls = getattr(module, "GlossarionNative", None) if module is not None else None
     if cls is None:
         return NativeStub("flet_glossarion_native not importable", **handlers)
+    if dataclasses.is_dataclass(cls):
+        # An extension without one of the events (an older ``on_web``-less build) still serves the others:
+        # an unknown handler keyword would make the constructor raise and turn every native service off.
+        fields = {f.name for f in dataclasses.fields(cls)}
+        handlers = {key: value for key, value in handlers.items() if key in fields}
     try:
         return cls(**handlers)
     except Exception as exc:
@@ -456,6 +493,14 @@ class NativeBridge:
 
     def add_listener(self, event: str, callback: Callable[[dict], Any]) -> None:
         self._listeners[event].append(callback)
+
+    def remove_listener(self, event: str, callback: Callable[[dict], Any]) -> bool:
+        """Stop sending ``event`` to ``callback`` (a driver that unregisters); True when it was listening."""
+        try:
+            self._listeners.get(event, []).remove(callback)
+        except ValueError:
+            return False
+        return True
 
     def _make_handler(self, name: str) -> Callable[[Any], Awaitable[None]]:
         async def handler(e: Any = None) -> None:

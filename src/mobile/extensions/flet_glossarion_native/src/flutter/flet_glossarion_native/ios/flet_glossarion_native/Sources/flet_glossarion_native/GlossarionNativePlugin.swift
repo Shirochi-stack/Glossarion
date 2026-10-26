@@ -8,10 +8,12 @@ import UserNotifications
 /// Dart -> Swift: attach, get_platform_info, clear_shared, init_notifications,
 /// show_notification, cancel_notification, begin_background_task,
 /// end_background_task, background_time_remaining, start_continued_processing,
-/// update_continued_processing, finish_continued_processing, and the document
-/// destination methods handled by DocumentDestinations (pick_folder, ...).
+/// update_continued_processing, finish_continued_processing, the document
+/// destination methods handled by DocumentDestinations (pick_folder, ...) and the
+/// in-app browser page methods handled by HiddenWebPages (web_open, web_load,
+/// web_eval, web_title, web_close, web_reset, web_status).
 /// Swift -> Dart: "share" {items}, "notification" {...}, "background_task" {...},
-/// "document" {type, op_id, ...}.
+/// "document" {type, op_id, ...}, "web" {page_id, type, ...}.
 ///
 /// "Open in" / "Copy to Glossarion" file URLs are copied (security-scoped,
 /// coordinated) into tmp/shared/<batch>/ and returned as shared items. The
@@ -70,6 +72,13 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
     }
   )
 
+  /// In-app browser pages (hotfix 3): hidden WKWebViews owned by this plugin instance.
+  private lazy var webPages = HiddenWebPages(
+    send: { [weak self] event in
+      self?.channel?.invokeMethod("web", arguments: event)
+    }
+  )
+
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = GlossarionNativePlugin()
     let channel = FlutterMethodChannel(name: channelName, binaryMessenger: registrar.messenger())
@@ -89,6 +98,10 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
     let args = call.arguments as? [String: Any] ?? [:]
     if DocumentDestinations.methods.contains(call.method) {
       documents.handle(call.method, args, result: result)
+      return
+    }
+    if HiddenWebPages.methods.contains(call.method) {
+      webPages.handle(call.method, args, result: result)
       return
     }
     switch call.method {
@@ -161,6 +174,11 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
     }
   }
 
+  /// FlutterPlugin (optional): the engine is going away; destroy this instance's in-app pages.
+  public func detachFromEngine(for registrar: FlutterPluginRegistrar) {
+    webPages.reset()
+  }
+
   /// Sets NSURLIsExcludedFromBackupKey on `path` (a file or folder; its contents follow).
   static func excludeFromBackup(_ path: String?) -> Bool {
     guard let path = path, !path.isEmpty else { return false }
@@ -195,6 +213,8 @@ public class GlossarionNativePlugin: NSObject, FlutterPlugin, FlutterSceneLifeCy
     if let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String {
       info["version_code"] = build
     }
+    // In-app browser pages (hotfix 3); set before `base` is copied for the async answer below.
+    info["web_pages"] = webPages.capability()
     let base = info
     UNUserNotificationCenter.current().getNotificationSettings { settings in
       let status = settings.authorizationStatus

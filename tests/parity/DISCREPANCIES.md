@@ -4335,9 +4335,9 @@ No desktop-shared `src/*.py` file changed; config.json gets no key. Every item b
   and builds one at the start of a browser-route job; the desktop CDP path (`browser_driver` / `cdp_browser`) is
   unchanged. iOS suspends web content in the background (documented limit).
 
-## Hotfix 3 (owner device report, 6 issues on the mobile APK; mobile only, no desktop change)
+## Hotfix 2, part 2 (owner device report, 6 issues on the mobile APK; mobile only, no desktop change)
 
-No desktop-shared `src/*.py` file changed for hotfix 3; config.json gets no key. Every item below is a mobile-only
+No desktop-shared `src/*.py` file changed for these six items (the AuthChatGPT resend cap in `src/authchatgpt_auth.py` only runs on the in-app browser); config.json gets no key. Every item below is a mobile-only
 behaviour.
 
 ### Multipass in chats (issue 3; mobile only, desktop unchanged)
@@ -4424,3 +4424,24 @@ behaviour.
   EPUB / TXT / workspace's own Book page), pushed over the Reader. Before, ⋯ › "Open Book page" was disabled for every
   book opened by path and went to the Chapters tab.
 - Tests: tests_host/test_hotfix3_reader_details.py.
+
+## Hotfix 3: native in-app browser pages (mobile only; the desktop CDP path is unchanged)
+
+Pinned by `src/mobile/tests_host/test_hotfix3_native_browser.py`, `test_hotfix3_native_contract.py` and
+`src/mobile/extensions/flet_glossarion_native/tests/test_web_pages.py`; on the CI emulator and simulator by the
+smoke check `native_webview`.
+
+- **Where the pages live.** The browser routes (authchatgpt/, authnd/, authds/, search/gemini) run on hidden pages
+  the app's Flet extension creates and owns outside the Flutter widget tree (Android `WebView`, iOS `WKWebView`;
+  `services/native_webview.py` over the `web_*` methods of `GlossarionNative`) wherever the extension reports
+  `web_pages`. Screen changes no longer rebuild them and they open while the app is hidden, so the hotfix 1
+  parking / warm-up / hidden wait applies to the flet-webview fallback only. Desktop registers no driver and keeps
+  its CDP / Qt pages.
+- **authchatgpt/ resend.** `_DriverPage.hook_lost()` answers True without a script when the page reports
+  `renderer_gone` (the native pages' renderer stopped); the request is then sent again on a new page, now up to
+  `MAX_PAGE_RESENDS = 3` times (was once), with a log line that names the cause ("its renderer stopped" or "a
+  screen change") and the count. Desktop CDP pages have neither `renderer_gone` nor the driver flag, so a
+  `_PageLost` there is raised as before.
+- `browser_driver`: docstring only (the optional page attribute `renderer_gone`, the two mobile drivers).
+- Accounts › Experimental shows `NATIVE_LIMITATIONS` while the native driver is installed (only its background
+  bullet differs from `LIMITATIONS`).

@@ -1153,14 +1153,24 @@ final class DocumentDestinations: NSObject, UIDocumentPickerDelegate {
     return types.isEmpty ? ["public.item"] : Array(Set(types))
   }
 
-  static func topViewController() -> UIViewController? {
-    var root: UIViewController?
+  /// The key window of the foreground-active scene (or its first window), else the app delegate's
+  /// window. Shared by the pickers (topViewController) and the hidden in-app browser pages.
+  static func keyWindow() -> UIWindow? {
     if #available(iOS 13.0, *) {
       let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
       let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-      let window = scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first
-      root = window?.rootViewController
+      if let window = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first {
+        return window
+      }
     }
+    if let delegateWindow = UIApplication.shared.delegate?.window, let window = delegateWindow {
+      return window
+    }
+    return nil
+  }
+
+  static func topViewController() -> UIViewController? {
+    var root = keyWindow()?.rootViewController
     if root == nil {
       root = UIApplication.shared.delegate?.window??.rootViewController
     }
