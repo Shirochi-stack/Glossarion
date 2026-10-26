@@ -21,6 +21,10 @@ simulator compile the extension's Kotlin / Swift side, so this check proves it t
 ``GLOSSARION_SIMULATE_PLATFORM`` host smoke runs) and when ``GLOSSARION_NATIVE_WEBVIEW`` switches
 the native browser off; on a device in strict mode a missing native driver fails the check.
 Blocking: runs on the self-test worker thread, never on the Flet loop.
+
+Suite ``background`` (hotfix 4, :func:`run_background`, ``check_native_webview_background``): the
+pages keep running while Glossarion is in the background (Android, CI emulator only: the smoke script
+presses HOME when the check asks for it).
 """
 
 from __future__ import annotations
@@ -32,13 +36,19 @@ import uuid
 from typing import Any, Callable, Optional, Tuple
 
 __all__ = [
+    "BG_SECONDS",
     "BIG_SIZE",
+    "MARKER_BG",
+    "MARKER_BG_READY",
     "OWNER",
     "SELFTEST_HTML",
     "TITLE",
     "PagesBusy",
+    "background_result",
+    "check_background_result",
     "churn_route",
     "run",
+    "run_background",
     "screen_churn",
     "wait_for_native_driver",
 ]
@@ -266,5 +276,199 @@ def run(driver: Any, *, server_factory: Optional[Callable[[], Any]] = None, time
         if page is not None:
             page.close()
         server.stop()
+    detail["secs"] = round(time.monotonic() - started, 2)
+    return detail
+
+
+# ============================================================================ suite ``background``
+# Hotfix 4: the bug it guards. Chromium hid the native pages while the app was in the background (the
+# Activity window is not visible), and Blink freezes a hidden page a minute or five later: its timers
+# and fetch streams stop, and an authchatgpt/ reply in progress waited until the app was opened again
+# (a job stood still for hours). HiddenWebPages.kt now reports each page's window as visible. The CI
+# emulator proves it (``ci/android_smoke.sh``): the suite holds the foreground service like a job,
+# loads a loopback page that beats every second and fetches its own URL every two seconds, prints
+# :data:`MARKER_BG_READY`, the script presses HOME, and the check watches the page for
+# :data:`BG_SECONDS` while Glossarion is hidden: ``document.visibilityState`` stays ``visible`` and
+# neither the beats nor the fetches stop. The measurements go out on one :data:`MARKER_BG` line.
+
+BG_TITLE = "Glossarion in-app browser background self-test"
+BG_HTML = (
+    "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    f"<title>{BG_TITLE}</title></head>\n"
+    "<body><p>Checking that hidden pages keep running in the background.</p></body></html>\n"
+)
+#: The page's own heartbeat (route-style expressions): a beat per second, a same-origin fetch every 2 s.
+BG_START_SCRIPT = (
+    "(() => {if (window.__glossarionBg) return true;"
+    " const s = window.__glossarionBg = {beats: [], fetches: [], failures: 0, hidden: 0};"
+    " setInterval(() => {s.beats.push(Date.now()); if (document.visibilityState !== 'visible') s.hidden += 1;"
+    " if (s.beats.length > 900) s.beats.shift();}, 1000);"
+    " setInterval(() => {fetch(location.href, {cache: 'no-store'}).then(r => r.text())"
+    ".then(() => {s.fetches.push(Date.now()); if (s.fetches.length > 450) s.fetches.shift();},"
+    " () => {s.failures += 1;});}, 2000);"
+    " return true;})()"
+)
+BG_STATE_SCRIPT = (
+    "(() => {const s = window.__glossarionBg; return s ? {now: Date.now(), visibility: document.visibilityState,"
+    " beats: s.beats.slice(-900), fetches: s.fetches.slice(-450), failures: s.failures, hidden: s.hidden} : null;})()"
+)
+#: Seconds the page is watched while Glossarion is hidden: past Chromium's one-minute freeze of hidden
+#: pages (2025+ WebView; older ones wait five minutes, where ``visibilityState`` proves it instead).
+BG_SECONDS = 75.0
+#: Seconds the check waits for Glossarion to leave the screen after :data:`MARKER_BG_READY`.
+BG_HIDE_WAIT_SECONDS = 120.0
+#: Seconds between looks at the page while it is hidden.
+BG_POLL_SECONDS = 5.0
+#: Longest gap (ms) between two beats while hidden (1 s timers; a busy emulator may be a few seconds late).
+BG_MAX_GAP_MS = 10000
+MARKER_BG_READY = "GLOSSARION_BGWEB_READY"
+MARKER_BG = "GLOSSARION_BGWEB"
+SERVICE_HOLD = "selftest-background"
+
+
+def _service_lease(driver: Any, timeout: float) -> Tuple[Any, bool]:
+    """Hold the app's foreground service like a job (Android freezes a cached app's process)."""
+    from glossarion_mobile.services.native import ServiceLease
+
+    lease = ServiceLease(getattr(driver, "native", None), SERVICE_HOLD)
+    future = driver.dispatcher.submit(lease.acquire, "Glossarion", "Checking the in-app browser in the background")
+    if future is None:
+        raise AssertionError("the app's UI loop is not running")
+    return lease, bool(future.result(timeout=timeout))
+
+
+def _in_window(values: Any, start: float, end: float) -> list:
+    return sorted(v for v in (values or []) if isinstance(v, (int, float)) and start < v <= end)
+
+
+def background_result(start: Any, end: Any, visibilities: list, *, seconds: float, came_back: bool) -> dict:
+    """What the page did while Glossarion was hidden: ``start`` / ``end`` are :data:`BG_STATE_SCRIPT`
+    answers at the start and the end of the window, ``visibilities`` its ``visibilityState`` at every look."""
+    t0 = float((start or {}).get("now") or 0)
+    t1 = float((end or {}).get("now") or 0)
+    beats = _in_window((end or {}).get("beats"), t0, t1)
+    fetches = _in_window((end or {}).get("fetches"), t0, t1)
+    edges = [t0] + beats + [t1]
+    gap = max((b - a for a, b in zip(edges, edges[1:])), default=0.0)
+    return {
+        "seconds": round(seconds, 1),
+        "page_ms": round(t1 - t0),
+        "beats": len(beats),
+        "fetches": len(fetches),
+        "max_gap_ms": round(gap),
+        "fetch_failures": int((end or {}).get("failures") or 0) - int((start or {}).get("failures") or 0),
+        "visibility": sorted({str(v) for v in visibilities}),
+        "came_back": bool(came_back),
+    }
+
+
+def check_background_result(result: dict) -> None:
+    """Raises AssertionError with the reason unless the page kept running while Glossarion was hidden."""
+    if result.get("came_back"):
+        raise AssertionError("Glossarion came back on screen during the background check")
+    if result.get("visibility") != ["visible"]:
+        raise AssertionError(f"Chromium treated the hidden page as {', '.join(result.get('visibility') or ['?'])} "
+                             "(document.visibilityState) while Glossarion was in the background: Android freezes "
+                             "such a page")
+    if result.get("max_gap_ms", 0) > BG_MAX_GAP_MS:
+        raise AssertionError(f"the page's timers stopped for {result['max_gap_ms'] / 1000:.0f} s while Glossarion "
+                             "was in the background")
+    wanted = max(1, int(float(result.get("seconds") or 0) / 4))  # a fetch every 2 s: at least half of them
+    if result.get("fetches", 0) < wanted:
+        raise AssertionError(f"the page's fetches stopped while Glossarion was in the background "
+                             f"({result.get('fetches', 0)} in {result.get('seconds')} s, {result.get('fetch_failures', 0)} "
+                             "failed)")
+
+
+def run_background(
+    driver: Any,
+    *,
+    emit: Callable[[str, Any], Any],
+    server_factory: Optional[Callable[[], Any]] = None,
+    seconds: Optional[float] = None,
+    hide_wait: Optional[float] = None,
+    poll: Optional[float] = None,
+    sleep: Callable[[float], Any] = time.sleep,
+    timeout: float = 30.0,
+) -> dict:
+    """Suite ``background`` against ``driver`` (a registered ``NativeWebDriver``, worker thread): raises
+    AssertionError with the reason, returns the detail. Starts with Glossarion on screen (the foreground
+    service can only start then); ``emit(MARKER_BG_READY, ...)`` asks for HOME."""
+    import browser_driver
+
+    if server_factory is None:
+        from glossarion_mobile.services.reader_server import ReaderServer as server_factory
+    on_screen = getattr(driver, "app_on_screen", None)
+    if on_screen is None:
+        raise AssertionError("the native in-app browser has no app-visibility hook (native_webview.install sets it)")
+    if not on_screen():
+        raise AssertionError("start the background check with Glossarion on screen")
+    window = BG_SECONDS if seconds is None else max(0.0, float(seconds))
+    hide_limit = BG_HIDE_WAIT_SECONDS if hide_wait is None else max(0.0, float(hide_wait))
+    step = BG_POLL_SECONDS if poll is None else max(0.0, float(poll))
+    started = time.monotonic()
+    detail: dict = {"driver": getattr(driver, "name", None)}
+    lease, held = _service_lease(driver, timeout)
+    server = server_factory()
+    page = None
+    try:
+        if not held:
+            raise AssertionError("the foreground service did not start (a job's notification), so Android would "
+                                 "freeze the app in the background")
+        server.start()
+        url = server.publish(BG_HTML, name="webview-background.html")
+        page = _open_check_page(driver)
+        page.load(url)
+        if not browser_driver.wait_until_loaded(page, 30):
+            state = page.load_state
+            raise AssertionError("the background self-test page did not load: "
+                                 f"{str(state.get('error') or state.get('last_event') or 'no page event')[:120]}")
+        if page.run_js(BG_START_SCRIPT, 10000) is not True:
+            raise AssertionError("the background self-test page ran no script")
+        deadline = time.monotonic() + 15.0
+        while len((page.run_js(BG_STATE_SCRIPT, 10000) or {}).get("beats") or []) < 2:
+            if time.monotonic() >= deadline:
+                raise AssertionError("the self-test page's timers did not run with Glossarion on screen")
+            sleep(0.25)
+        emit(MARKER_BG_READY, {"seconds": window})
+        deadline = time.monotonic() + hide_limit
+        while on_screen():
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"Glossarion did not leave the screen within {hide_limit:g} s (the CI smoke "
+                                     f"script presses HOME after {MARKER_BG_READY})")
+            sleep(0.25)
+        start = page.run_js(BG_STATE_SCRIPT, 10000)
+        if not isinstance(start, dict):
+            raise AssertionError("the self-test page gave no answer once Glossarion was hidden")
+        visibilities = [start.get("visibility")]
+        came_back = False
+        hidden_at = time.monotonic()
+        while True:
+            left = window - (time.monotonic() - hidden_at)
+            if left <= 0:
+                break
+            sleep(min(step, left))
+            came_back = came_back or bool(on_screen())
+            look = page.run_js(BG_STATE_SCRIPT, 10000)
+            visibilities.append(look.get("visibility") if isinstance(look, dict) else None)
+        end = page.run_js(BG_STATE_SCRIPT, 10000)
+        if not isinstance(end, dict):
+            raise AssertionError("the self-test page gave no answer at the end of the background check")
+        result = background_result(start, end, visibilities, seconds=time.monotonic() - hidden_at,
+                                   came_back=came_back or bool(on_screen()))
+        detail.update(result)
+        emit(MARKER_BG, result)
+        check_background_result(result)
+    finally:
+        if page is not None:
+            page.close()
+        server.stop()
+        future = driver.dispatcher.submit(lease.release)
+        if future is not None:
+            try:
+                future.result(timeout=timeout)
+            except Exception:  # the result is what counts; the service ends with the app anyway
+                pass
     detail["secs"] = round(time.monotonic() - started, 2)
     return detail

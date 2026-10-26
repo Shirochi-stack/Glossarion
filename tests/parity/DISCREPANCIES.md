@@ -4445,3 +4445,53 @@ smoke check `native_webview`.
 - `browser_driver`: docstring only (the optional page attribute `renderer_gone`, the two mobile drivers).
 - Accounts › Experimental shows `NATIVE_LIMITATIONS` while the native driver is installed (only its background
   bullet differs from `LIMITATIONS`).
+
+## Hotfix 4: the in-app browser routes keep running in the background (mobile behaviour; desktop unchanged)
+
+Owner report on hotfix 3: an authchatgpt/ job froze in the background ("has not moved from 7/107 in the jobs menu
+for several hours"). Pinned by `src/mobile/tests_host/test_hotfix4_native_background.py`; on the CI emulator by
+the self-test suite `background` (`ci/android_smoke.sh` presses HOME while it watches a loopback page).
+
+- **Cause.** Android's Chromium hides a WebView whose window is not visible (the Activity window in the
+  background) and Blink freezes a hidden page a minute or five later: timers and fetch streams stop while
+  `evaluateJavascript` still answers. The reply poll took "stream open, nothing new" (or no answer) as "keep
+  waiting" until the request timeout: 10 h with Retry Timeout off, silently.
+- **Android (`HiddenWebPages.kt`).** Every native page is a `PageWebView` that reports its window as visible, so
+  Chromium never hides it and Blink never freezes it. iOS is unchanged (WebKit suspends web content in the
+  background by design); the bound below does not count that time there (review round), so a suspended reply
+  waits until the app is opened again, as in hotfix 3.
+- **Shared `src/` files, desktop behaviour unchanged:**
+  - `browser_driver.py`: new `ReplyWatch` (+ its constants). Enabled only for driver pages (the mobile in-app
+    browser); desktop pages pass `enabled=False`, which makes every method a no-op.
+  - `authchatgpt_auth.py`: `_POLL` also schedules a 0 ms probe timer and reports `paused` (desktop ignores it);
+    `_complete` runs the watch (driver pages only: no answer for 90 s, or the page's timers stopped for 90 s ->
+    `browser_error`; an open stream silent for 600 s -> `timeout`; one "⏳" log line while it waits) and takes a
+    `log_fn` keyword; the 60 s "did not start a reply" verdict waits while the page is paused (a frozen page is
+    no usage limit); a generated image download on an in-app page is capped at 300 s; a Stop while
+    `driver.open_page` waits for a free page raises the route's "cancelled" `AuthChatGPTError` instead of a bare
+    `BrowserCancelled` (mobile only: desktop never calls `open_page`).
+  - `authds_auth.py`: the reply poll moves into `_POLL` with the same probe timer, and driver pages get the same
+    watch. Desktop CDP pages have no `driver` flag: unchanged.
+- A stalled page now fails its request (with the reason) instead of being resent: the job's own retry handling
+  sends it again on a new page. `MAX_PAGE_RESENDS` still covers a lost document (renderer gone, page reloaded).
+- `webview_bridge.PageDriver.open_page` logs once when a request waits 30 s for a free page.
+- **Review round (findings R1-R4; `test_hotfix4_native_background.py`, `test_hotfix4_back_keeps_jobs.py`).**
+  - R1 iOS: `ReplyWatch` takes an optional `hidden` callable (the page's optional `content_suspended()`, a new
+    optional `BrowserPage` method; `browser_driver.content_suspended(page)` asks it). While it is True every poll
+    starts the clocks again and one "⏸" line is logged, and `running_since(started)` (the 60 s "did not start a
+    reply" verdict) counts from the last restart. The mobile drivers answer it from `PageDriver.pages_suspended`:
+    `suspends_hidden_pages` (set by both installers on iOS, `webview_bridge.suspends_hidden_pages()`) and the app
+    off screen. The 300 s in-app image download cap does not count that time either. Android keeps the bound.
+    Desktop pages have no such method and their watch is off: unchanged.
+  - R2 authds/: `_complete` takes a keyword-only `log_fn` for its watch ("⏳" notice); `send_chat_completion`
+    passes it on driver pages only (the desktop call is the same as before). An unanswered poll on a driver page
+    asks `_DriverPage.hook_lost()` (`!window.__glossarionDS`, or `renderer_gone`) and reports "reloaded" only when
+    the state is gone; otherwise `watch.unanswered` bounds it. Desktop pages have no `hook_lost`: unchanged.
+  - R3 authchatgpt/ handed-off answers and generated images: the hook's `poll(limitMs)` aborts a read after
+    `limitMs` and counts failed reads (`pollFailures` / `pollFailure` / `pollStatus`, reported by `_POLL`);
+    driver pages read with `_POLL_ANSWER_TIMED` (60 s) and fail the request after 6 failed reads in a row
+    (`_check_reads`, an HTTP status keeps `_kind(status)`). Desktop pages still call `poll()` without a limit and
+    never check the count: unchanged.
+  - R4 (mobile only): Android back on the chat while a job runs or waits calls the extension's new
+    `move_task_to_back` (`Activity.moveTaskToBack(true)`) instead of finishing the Activity (`AppShell`: the root
+    View's `can_pop` follows the Jobs badge; the drawer the menu button opened closes first). Not shared code.

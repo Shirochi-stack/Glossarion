@@ -386,6 +386,11 @@ class _DriverPage:
         except Exception:
             return None
 
+    def content_suspended(self):
+        """True while the system suspends the page by design (iOS, Glossarion off screen): the reply
+        poll's ``browser_driver.ReplyWatch`` does not count that time."""
+        return browser_driver.content_suspended(self.page)
+
 
 #: Times one request is sent again on a new page after its in-app page lost its document
 #: (mobile only; see ``_PageLost``).
@@ -632,7 +637,10 @@ def _driver_tab(config, cancel_check=None):
     def cancelled():
         return _cancel.is_set() or bool(cancel_check and cancel_check())
 
-    page = driver.open_page(owner=BROWSER_OWNER, cancel_check=cancelled)
+    try:  # waits while every page slot is in use (other requests); a Stop ends the wait
+        page = driver.open_page(owner=BROWSER_OWNER, cancel_check=cancelled)
+    except browser_driver.BrowserCancelled as exc:
+        raise AuthChatGPTError("AuthChatGPT: translation stopped by user", "cancelled") from exc
     try:
         wrapped = _DriverPage(page)
         with _driver_loading(cancel_check):
@@ -694,18 +702,27 @@ _HOOK_SCRIPT = r"""((window) => {
  const norm = s => String(s || '').toLowerCase().trim().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
  let catalogPromise = null;
  // A handed-off answer (Pro runs as a background task) is read from the conversation itself,
- // as chatgpt.com's own poller does, when no stream delivers it.
- state.poll = () => {
-  if (state.polling || !state.conversationId) return false;
+ // as chatgpt.com's own poller does, when no stream delivers it. ``limitMs`` (the in-app pages):
+ // a read that takes longer is aborted. A read that fails (or finds no conversation to read) adds
+ // one to ``pollFailures`` (``pollFailure`` says how); a good read sets it back to 0.
+ state.poll = limitMs => {
+  if (state.polling) return false;
+  const failed = how => { state.pollFailures = (state.pollFailures || 0) + 1; state.pollFailure = how; };
+  if (!state.conversationId) { failed('no conversation'); return false; }
   state.polling = true;
+  const controller = limitMs ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), limitMs) : 0;
   (async () => {
    try {
     const base = cfg.token ? '/backend-api' : '/backend-anon';
-    const response = await nativeFetch.call(window, base + '/conversation/' + state.conversationId, {credentials:'include',
-     headers: cfg.token ? {authorization:'Bearer ' + cfg.token} : {}});
+    const init = {credentials:'include', headers: cfg.token ? {authorization:'Bearer ' + cfg.token} : {}};
+    if (controller) init.signal = controller.signal;
+    const response = await nativeFetch.call(window, base + '/conversation/' + state.conversationId, init);
     state.pollStatus = response.status;
-    if (!response.ok) return;
+    if (!response.ok) { failed('HTTP ' + response.status); return; }
     const data = await response.json();
+    state.pollFailures = 0;
+    state.pollFailure = null;
     let best = null;
     for (const node of Object.values(data.mapping || {})) {
      const m = node && node.message, c = (m && m.content) || {};
@@ -725,8 +742,12 @@ _HOOK_SCRIPT = r"""((window) => {
       images.push({pointer:part.asset_pointer, index:(m.metadata || {}).generation_index || 0});
     }
     if (images.length) state.finalImages = images.sort((a, b) => a.index - b.index);
-   } catch (e) { state.pollError = String(e && e.message || e); }
-   finally { state.polling = false; }
+   } catch (e) {
+    state.pollError = String(e && e.message || e);
+    failed(controller && controller.signal.aborted ? 'no answer in time'
+     : e && e.name === 'SyntaxError' ? 'unreadable answer' : 'network error');
+   }
+   finally { if (timer) clearTimeout(timer); state.polling = false; }
   })();
   return true;
  };
@@ -882,9 +903,15 @@ _HOOK_SCRIPT = r"""((window) => {
  state.watch();
 })(__TARGET__)"""
 
-_POLL = """(() => {const s = window.__glossarionGPT; return s ? {chunks:s.chunks.splice(0), streams:s.streams,
- open:s.open, idle:s.closedAt ? Date.now() - s.closedAt : 0, status:s.status, error:s.error, kind:s.kind,
- sentinel:s.sentinel, resolved:s.resolved, final:s.final || null, finalImages:s.finalImages || null} : null;})()"""
+# ``paused``: milliseconds a 0 ms probe timer has been waiting to run (0 once it ran). A page whose
+# timers stopped (Android froze it as a hidden page) keeps answering scripts but never runs it.
+# ``pollFailures`` / ``pollFailure`` / ``pollStatus``: the reads of a handed-off answer (``state.poll``).
+_POLL = """(() => {const s = window.__glossarionGPT; if (!s) return null; const now = Date.now();
+ if (!s.probeAt) { s.probeAt = now; setTimeout(() => { s.probeAt = 0; }, 0); }
+ return {chunks:s.chunks.splice(0), streams:s.streams, open:s.open, idle:s.closedAt ? now - s.closedAt : 0,
+ paused:s.probeAt ? now - s.probeAt : 0, status:s.status, error:s.error, kind:s.kind, sentinel:s.sentinel,
+ resolved:s.resolved, final:s.final || null, finalImages:s.finalImages || null,
+ pollFailures:s.pollFailures || 0, pollFailure:s.pollFailure || null, pollStatus:s.pollStatus || 0};})()"""
 _POLL_ANSWER = "(() => window.__glossarionGPT.poll())()"
 #: the download state of one generated image (``__POINTER__``): {b64, mime} / {error} / {pending}
 _DOWNLOAD = "(() => {const s = window.__glossarionGPT; s.download(__POINTER__); return s.downloads[__POINTER__] || null;})()"
@@ -893,6 +920,19 @@ IMAGE_OUTPUT_NEEDS_LOGIN = ("AuthChatGPT needs a ChatGPT login to create images 
                             "Click ChatGPT Login.")
 #: seconds between reads of a handed-off answer (chatgpt.com's own poll_interval_ms is 10 s)
 _HANDOFF_POLL_SECONDS = 10
+#: In-app pages: a read of a handed-off answer (Pro) or of a generated image's conversation that
+#: takes longer than this (ms) is aborted, so a hung read cannot stop the next ones ...
+_HANDOFF_READ_MS = 60000
+#: ... and this many failed reads in a row (an HTTP error, a network error, no answer in time, no
+#: conversation to read) fail the request with the reason instead of waiting out its timeout (10 h
+#: with Retry Timeout off). Desktop pages keep reading until the request's deadline, as before.
+_HANDOFF_READ_FAILURES = 6
+_POLL_ANSWER_TIMED = "(() => window.__glossarionGPT.poll(%d))()" % _HANDOFF_READ_MS
+#: How a read failed (``pollFailure``), as the hook writes it (anything else is not shown).
+_READ_FAILURES = ("no answer in time", "unreadable answer", "network error", "no conversation")
+#: In-app pages: seconds a generated image may take to download (the page itself retries for a
+#: minute; desktop keeps the request's deadline).
+_DRIVER_IMAGE_SECONDS = 300
 _COMPOSER = ("(() => {const c = document.querySelector('#prompt-textarea'), b = document.querySelector('[data-testid=\"send-button\"]');"
              " return {text: c ? c.innerText.trim() : null, send: !!b && !b.disabled,"
              " requested: !!(window.__glossarionGPT && (window.__glossarionGPT.requested || window.__glossarionGPT.sentinel))};})()")
@@ -1185,8 +1225,14 @@ def _submit(page, cancel_check, before_send_callback):
 def _download_image(page, pointer, deadline, cancel_check):
     """The bytes of a generated image (downloaded by the page, signed URL and all)."""
     script = _DOWNLOAD.replace("__POINTER__", json.dumps(pointer))
-    while time.monotonic() < deadline:
+    # An in-app page that stopped never ends the wait itself: it gets _DRIVER_IMAGE_SECONDS, not
+    # counting time the system suspends it by design (iOS in the background).
+    driver = getattr(page, "driver", False) is True
+    cap = time.monotonic() + _DRIVER_IMAGE_SECONDS
+    while time.monotonic() < deadline and (not driver or time.monotonic() < cap):
         _check_page(page, cancel_check)
+        if driver and browser_driver.content_suspended(page):
+            cap = time.monotonic() + _DRIVER_IMAGE_SECONDS
         state = page.evaluate(script) or {}
         if state.get("b64"):
             import base64
@@ -1197,8 +1243,39 @@ def _download_image(page, pointer, deadline, cancel_check):
     raise AuthChatGPTError("AuthChatGPT timed out downloading the generated image.", "timeout")
 
 
+def _answered(watch, asked, state):
+    """``state`` (a ``_POLL`` answer) for the reply's ``browser_driver.ReplyWatch``."""
+    watch.answered(asked, paused=state.get("paused"), data=bool(state.get("chunks")),
+                   streaming=bool(state.get("open")))
+
+
+def _read_answer(page, watch):
+    """Start one read of a handed-off answer from the conversation (an in-app page's read is aborted
+    after ``_HANDOFF_READ_MS``; a desktop page's read runs as before)."""
+    page.evaluate(_POLL_ANSWER_TIMED if watch.on else _POLL_ANSWER)
+
+
+def _check_reads(watch, state):
+    """In-app pages: ``_HANDOFF_READ_FAILURES`` failed reads of the conversation in a row fail the
+    request with the reason (an HTTP status keeps its error kind). Desktop pages: nothing."""
+    failures = state.get("pollFailures")
+    if (not watch.on or isinstance(failures, bool) or not isinstance(failures, int)
+            or failures < _HANDOFF_READ_FAILURES):
+        return
+    how = str(state.get("pollFailure") or "")
+    status = state.get("pollStatus")
+    if re.fullmatch(r"HTTP \d{3}", how) and isinstance(status, int) and not isinstance(status, bool):
+        kind = _kind(status)
+    elif how in _READ_FAILURES:
+        kind = "timeout" if how == "no answer in time" else "browser_error"
+    else:
+        how, kind = "read failed", "browser_error"
+    raise AuthChatGPTError(f"AuthChatGPT: ChatGPT's answer could not be read ({how}, {failures} times in a row).",
+                           kind)
+
+
 def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_thinking=None, images=None,
-              image_output=False):
+              image_output=False, log_fn=None):
     if images:
         _attach(page, images, cancel_check)
     with _COOKIES.sending_message(cancel_check):
@@ -1209,8 +1286,16 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
     deadline = started + timeout
     resolved = None
     polled = 0.0
+    # Glossarion Mobile's in-app pages: a page that stopped answering or running fails the request
+    # (``browser_driver.ReplyWatch``), except while the system suspends it by design (iOS in the
+    # background: the reply continues when the app is opened); desktop CDP pages have no ``driver``
+    # flag and poll as before.
+    watch = browser_driver.ReplyWatch(getattr(page, "driver", False) is True, route="AuthChatGPT", site="ChatGPT",
+                                      host="chatgpt.com", error=AuthChatGPTError, log_fn=log_fn,
+                                      hidden=getattr(page, "content_suspended", None))
     while time.monotonic() < deadline:
         _check(cancel_check)
+        asked = watch.poll_started()
         state = page.evaluate(_POLL)
         if not state:
             # Desktop: no hook state means a new document. The in-app browser also answers
@@ -1218,6 +1303,7 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
             probe = getattr(page, "hook_lost", None)
             if probe is None or probe() is True:
                 raise _PageLost(page)
+            watch.unanswered(asked)  # an in-app page that never answers fails the request
             time.sleep(.3)
             continue
         resolved = state.get("resolved") or resolved
@@ -1242,11 +1328,13 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
                         "reasoning_content": parser.reasoning, "finish_reason": "stop", "usage": None,
                         "model": parser.model or final.get("model"), "images": [image],
                         "thinking_effort": (resolved or {}).get("effort")}
+            _answered(watch, asked, state)
+            _check_reads(watch, state)  # an in-app page whose reads keep failing fails the request
             if time.monotonic() - polled >= _HANDOFF_POLL_SECONDS:
                 if not polled and on_thinking:
                     on_thinking("ChatGPT is creating the image; waiting for it…\n")
                 polled = time.monotonic()
-                page.evaluate(_POLL_ANSWER)
+                _read_answer(page, watch)
             time.sleep(.3)
             continue
         if parser.finished and not state.get("open"):
@@ -1263,16 +1351,21 @@ def _complete(page, timeout, cancel_check, on_delta, before_send_callback, on_th
             return {"content": content, "reasoning_content": parser.reasoning, "finish_reason": "stop",
                     "usage": None, "model": final.get("model") or parser.model,
                     "thinking_effort": (resolved or {}).get("effort")}
+        _answered(watch, asked, state)  # an in-app page that stopped running fails the request
+        if parser.handoff and not state.get("open"):
+            _check_reads(watch, state)  # an in-app page whose reads keep failing fails the request
         if parser.handoff and not state.get("open") and time.monotonic() - polled >= _HANDOFF_POLL_SECONDS:
             if not polled and on_thinking:
                 on_thinking("ChatGPT is working on this in the background (Pro); waiting for its answer…\n")
             polled = time.monotonic()
-            page.evaluate(_POLL_ANSWER)
+            _read_answer(page, watch)
         sentinel = state.get("sentinel") or 0
         if sentinel and not state.get("streams"):
             raise AuthChatGPTError(f"AuthChatGPT: ChatGPT refused the request check (HTTP {sentinel}).",
                                    _kind(sentinel))
-        if not state.get("streams") and time.monotonic() - started > 60:
+        # (An in-app page that stopped running starts no reply either: that is no usage limit, and
+        # the watch fails it as paused. Time the app or the page was paused does not count.)
+        if not state.get("streams") and watch.running_since(started) > 60 and not watch.paused():
             raise AuthChatGPTError("AuthChatGPT: ChatGPT did not start a reply. It may be showing a "
                                    "usage limit; try again later or click ChatGPT Login.", "rate_limit")
         # A reply that moved to another stream (/resume) is picked up there.
@@ -1321,7 +1414,7 @@ def send_chat_completion(*, messages, model=DEFAULT_MODEL, timeout=300, log_fn=p
             with _open_tab(config, cancel_check) as page:
                 try:
                     result = _complete(page, float(timeout), cancel_check, on_delta, before_send, on_thinking,
-                                       images=images, image_output=image_output)
+                                       images=images, image_output=image_output, log_fn=log_fn)
                     if token:
                         _announce_logged_in(token, log_fn)
                     return result

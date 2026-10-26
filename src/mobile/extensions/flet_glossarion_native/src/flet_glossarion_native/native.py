@@ -411,6 +411,13 @@ class GlossarionNative(ft.Service):
     async def is_job_service_running(self) -> bool:
         return _as_bool(await self._call("is_job_service_running", default=False))
 
+    async def move_task_to_back(self) -> bool:
+        """Android: send the app's task to the background like Home (``Activity.moveTaskToBack``), so
+        the Activity, the Flutter engine and the Python session stay; True when it moved. The app calls
+        it for system back on the chat while a job runs (hotfix 4: back used to finish the Activity,
+        which stopped the in-app browser the job needed). False off Android or on failure."""
+        return (await self._call("move_task_to_back", default=False)) is True
+
     # ------------------------------------------------ iOS background execution
 
     async def begin_background_task(

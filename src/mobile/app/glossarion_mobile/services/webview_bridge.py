@@ -93,6 +93,7 @@ __all__ = [
     "limitations",
     "page_script",
     "platform_supported",
+    "suspends_hidden_pages",
     "uses_browser_route",
 ]
 
@@ -109,6 +110,8 @@ DEFAULT_VIEWPORT = (480, 800)
 LOAD_TIMEOUT = 20.0  # seconds for the loop to mount the WebView / start a navigation
 TITLE_TIMEOUT = 5.0
 POLL_SECONDS = 0.05
+#: Seconds a request waits for a free page (every one in use) before the wait is logged.
+SLOT_NOTICE_SECONDS = 30.0
 #: The hidden pages never leave the web: app / store / local links are refused.
 PREVENT_LINKS = ("intent:", "market:", "file:", "content:")
 CANCELLED = "stream cancelled"  # browser_driver.CANCELLED (the routes' cancel message)
@@ -209,6 +212,17 @@ def platform_supported(page: Any) -> bool:
     from glossarion_mobile.ui.reader.reader_view import webview_supported
 
     return webview_supported(page)
+
+
+def suspends_hidden_pages() -> bool:
+    """``PageDriver.suspends_hidden_pages`` here (hotfix 4): True on iOS, where WebKit suspends web
+    content by design while the app is off screen; False on Android and elsewhere."""
+    try:
+        from glossarion_mobile.runtime_bootstrap import detect_platform
+
+        return detect_platform() == "ios"
+    except Exception:
+        return False
 
 
 def uses_browser_route(model: Any) -> bool:
@@ -382,6 +396,14 @@ class HiddenPage:
                 return
             time.sleep(min(POLL_SECONDS, remaining))
 
+    def content_suspended(self) -> bool:
+        """``browser_driver.BrowserPage``'s optional ``content_suspended``: the system suspends this
+        page by design right now (iOS while Glossarion is off screen; :meth:`PageDriver.pages_suspended`)."""
+        try:
+            return self.driver.pages_suspended() is True
+        except Exception:
+            return False
+
     # ---- cancellation (any thread; never blocks) -------------------------------------------
 
     def _cancelled(self) -> Optional[str]:
@@ -512,6 +534,12 @@ class PageDriver:
     extension owns, hotfix 3) are the two drivers; ``page_class`` is the page each one opens.
     ``job_started`` / ``keep_warm`` are no-ops here: only the flet-webview bridge keeps WebViews
     for jobs.
+
+    ``suspends_hidden_pages`` (hotfix 4, set by the installers on iOS): WebKit suspends web content
+    by design while Glossarion is off screen, even while a background task or continued processing
+    keeps Python running. :meth:`pages_suspended` (each page's ``content_suspended``) is then True
+    and the routes' reply watch (``browser_driver.ReplyWatch``) waits for the app instead of failing
+    the request. Android never: a page that stops there is a fault the watch bounds.
     """
 
     name = ""
@@ -529,9 +557,24 @@ class PageDriver:
         self.default_viewport = (int(viewport[0]), int(viewport[1]))
         self.registered = False
         self.opened = 0
+        self.suspends_hidden_pages = False
         self._slots = threading.BoundedSemaphore(self.max_pages)
         self._pages: dict[str, Any] = {}
         self._lock = threading.Lock()
+
+    def app_shown(self) -> bool:
+        """Glossarion is on screen (the drivers answer from Flet's ``page.app_visible``); True here."""
+        return True
+
+    def pages_suspended(self) -> bool:
+        """The system suspends this driver's pages by design right now: iOS (``suspends_hidden_pages``)
+        while Glossarion is off screen. Any thread; never raises."""
+        if not self.suspends_hidden_pages:
+            return False
+        try:
+            return not self.app_shown()
+        except Exception:
+            return False
 
     # ---- browser_driver.BrowserDriver ------------------------------------------------------
 
@@ -550,6 +593,10 @@ class PageDriver:
         del user_agent
         if self.on_loop_thread():
             raise RuntimeError("the in-app browser cannot be driven from the UI thread")
+        # Bounded by the pages in use: every route bounds its own page waits and replies (hotfix 4:
+        # browser_driver.ReplyWatch fails a reply whose page stopped). A long wait is logged once.
+        waiting_since = time.monotonic()
+        told = False
         while not self._slots.acquire(timeout=0.1):
             try:
                 cancelled = bool(cancel_check()) if cancel_check is not None else False
@@ -557,6 +604,10 @@ class PageDriver:
                 cancelled = False
             if cancelled:
                 raise BrowserCancelled()
+            if not told and time.monotonic() - waiting_since >= SLOT_NOTICE_SECONDS:
+                told = True
+                log.info("in-app browser: a %s request waits for a free page (%d of %d in use)",
+                         str(owner or "browser")[:40], self.open_pages, self.max_pages)
         size = viewport or self.default_viewport
         try:
             page = self._new_page(uuid.uuid4().hex[:16], str(owner or ""),
@@ -1015,6 +1066,9 @@ class WebViewBridge(PageDriver):
         except Exception:
             return True
 
+    def app_shown(self) -> bool:
+        return self.app_visible()
+
     # ---- built WebViews kept for the next page (hotfix 1, issue 3) ---------------------------
 
     def job_started(self, models: Any = ()) -> None:
@@ -1226,7 +1280,9 @@ class WebViewBridgeFeature:
             return None
         from glossarion_mobile.ui.components.hidden_webview import HiddenWebViewHost
 
-        bridge = WebViewBridge(app.dispatcher, HiddenWebViewHost(page)).register()
+        bridge = WebViewBridge(app.dispatcher, HiddenWebViewHost(page))
+        bridge.suspends_hidden_pages = suspends_hidden_pages()
+        bridge.register()
         store = getattr(app, "config_store", None)
         if store is not None:
             bridge.config_models = lambda: configured_models(store)  # a job warms a WebView for these

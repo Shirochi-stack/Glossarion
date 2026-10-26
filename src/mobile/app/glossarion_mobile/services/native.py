@@ -127,6 +127,9 @@ class NativeStub:
     async def is_job_service_running(self) -> bool:
         return False
 
+    async def move_task_to_back(self) -> bool:
+        return False
+
     async def begin_background_task(self, *args: Any, **kwargs: Any) -> int:
         return -1
 
@@ -578,6 +581,12 @@ class NativeBridge:
 
     async def is_job_service_running(self) -> bool:
         return bool(await self.call("is_job_service_running", default=False))
+
+    async def move_task_to_back(self) -> bool:
+        """Android: send Glossarion to the background like Home, keeping the Activity, the Flutter
+        engine and this session (system back on the chat while a job runs, hotfix 4); True when it
+        moved. False elsewhere, on a timeout or without the extension."""
+        return (await self.call("move_task_to_back", default=False)) is True
 
     async def begin_background_task(self, name: str) -> int:
         result = await self.call("begin_background_task", name, default=-1)

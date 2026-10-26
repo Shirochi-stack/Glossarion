@@ -11,7 +11,9 @@ scan on scratch files; seconds) and ``e2e``
 (``diagnostics.e2e``: real chat / translate / stop / resume jobs against the fake
 OpenAI server on 127.0.0.1; minutes), run on device by
 ``glossarion://app/__selftest__?suite=e2e`` or the "Run end-to-end test" button, on the
-host by ``python -m glossarion_mobile.diagnostics.e2e``.
+host by ``python -m glossarion_mobile.diagnostics.e2e``. Suite ``background`` (hotfix 4, the CI
+emulator only: ``ci/android_smoke.sh`` presses HOME when it asks): the native in-app browser keeps
+running while Glossarion is in the background.
 
 ``run_selftest()`` is blocking (call it from a worker thread, never from the
 Flet loop), returns a JSON-serialisable dict, writes ``<logs>/selftest-last.json``
@@ -581,6 +583,31 @@ def check_native_webview(ctx: Context) -> dict[str, Any]:
         raise CheckSkipped(str(exc)) from exc
 
 
+def check_native_webview_background(ctx: Context) -> dict[str, Any]:
+    """Hotfix 4 (suite ``background``, the CI emulator: ``ci/android_smoke.sh`` presses HOME when the
+    check prints ``GLOSSARION_BGWEB_READY``): a native in-app page keeps running its timers and fetches,
+    and Chromium keeps it ``visible``, while Glossarion is in the background under the foreground service
+    (``diagnostics.webview_check.run_background``). Android devices only: iOS suspends web content in the
+    background by design; the host has no extension."""
+    paths = ctx.paths
+    if paths is None or not paths.is_device or os.environ.get("GLOSSARION_SIMULATE_PLATFORM", "").strip():
+        raise CheckSkipped("the native in-app browser runs on Android and iOS devices only")
+    if paths.platform == "ios":
+        raise CheckSkipped("iOS suspends the in-app browser in the background by design")
+    from glossarion_mobile.diagnostics import webview_check
+    from glossarion_mobile.services import native_webview
+
+    driver, why = webview_check.wait_for_native_driver()
+    if driver is None:
+        if ctx.strict and not native_webview.disabled_by_env():
+            raise AssertionError(f"the native in-app browser is not installed: {why}")
+        raise CheckSkipped(f"no native in-app browser here ({why})")
+    try:
+        return webview_check.run_background(driver, emit=rb.emit_marker)
+    except webview_check.PagesBusy as exc:
+        raise CheckSkipped(str(exc)) from exc
+
+
 def check_library_reader(ctx: Context) -> dict[str, Any]:
     """U5: Library scan, Book page, Chapters tab and Reader page on a translated workspace.
 
@@ -708,6 +735,7 @@ SUITES: dict[str, tuple[tuple[str, Callable[[Context], dict[str, Any]]], ...]] =
     ),
     "e2e": _e2e_checks(),
     "llama": (("llama_download_generate", check_llama_suite), ("llama_vision_describe", check_llama_vision)),
+    "background": (("native_webview_background", check_native_webview_background),),
 }
 
 

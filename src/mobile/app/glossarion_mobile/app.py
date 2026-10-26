@@ -236,6 +236,10 @@ class GlossarionApp:
         )
         self.shell.global_strip.on_open = lambda: self.navigate_to("jobs")
         self.shell.global_strip.on_stop = lambda: self.notify("No job is running")
+        if self.is_mobile and getattr(getattr(page, "platform", None), "value", None) == "android":
+            # Hotfix 4: back on the chat while a job runs sends the app to the background like Home
+            # (leaving finished the Activity, which stopped the job's in-app browser).
+            self.shell.move_to_background = self.native.move_task_to_back
         self.state.width.set(float(getattr(page, "width", 0) or 0))
         self.state.size_class.set(self.shell.size_class)
         self.shell.mount()

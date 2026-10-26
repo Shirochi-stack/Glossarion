@@ -10,7 +10,9 @@ the pages itself, outside the Flutter widget tree:
 * Android (``HiddenWebPages.kt``): ``android.webkit.WebView``s in one 1 x 1 px clipped ``FrameLayout``
   added at index 0 of the Activity's ``android.R.id.content`` (behind the opaque FlutterView), each laid
   out at the page viewport (dp). Never ``GONE`` / ``INVISIBLE``, alpha 1, never ``onPause()`` /
-  ``pauseTimers()``, so Chromium keeps the pages running. Process-wide ``CookieManager`` and the
+  ``pauseTimers()``, and every page reports its window as visible (hotfix 4: Chromium hides a page whose
+  window is not, as in the background, and Blink freezes a hidden page a minute or five later), so
+  Chromium keeps the pages running in the background too. Process-wide ``CookieManager`` and the
   default profile: logins made in flet-webview pages carry over.
 * iOS (``HiddenWebPages.swift``): ``WKWebView``s in a 1 x 1 pt clipped ``UIView`` at index 0 of the key
   window, ``WKWebsiteDataStore.default()`` (cookies and localStorage shared with flet-webview).

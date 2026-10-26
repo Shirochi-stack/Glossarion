@@ -11,7 +11,9 @@ flet bridge parks WebViews for jobs (hotfix 1).
 Here the pages are ``android.webkit.WebView`` / ``WKWebView`` objects that the extension's
 Kotlin / Swift code (``HiddenWebPages``) creates and owns outside the Flutter widget tree: one
 1 x 1 clipped container behind the Flutter view, laid out at each page's viewport, never hidden
-(so Chromium / WebKit do not treat it as invisible), sharing the default cookie store and
+(so Chromium / WebKit do not treat it as invisible; on Android every page also reports its window
+as visible, hotfix 4: Chromium hid the pages while the app was in the background and Blink froze
+them a minute or five later, so a reply waited until the app was opened again), sharing the default cookie store and
 profile with the flet-webview pages (sign-ins carry over). Screen changes never touch them, and
 a page opens and loads while the app is hidden too (no parking, prewarm or claim). Python drives
 them through the extension's ``GlossarionNative`` service (``flet_glossarion_native.web_pages``
@@ -26,7 +28,9 @@ only awaits the service call and resolves the page's future. Script results come
 text of :func:`eval_script`'s JSON envelope and are decoded on the worker, never on the loop.
 A page is lost only when its renderer stops (Android ``onRenderProcessGone``, iOS
 ``webViewWebContentProcessDidTerminate``): ``renderer_gone`` turns True, pending scripts answer
-None and ``authchatgpt_auth`` sends the message again on a new page.
+None and ``authchatgpt_auth`` sends the message again on a new page. A page that stops answering
+or running its timers (frozen by the system) fails its reply after 90 s with the reason
+(``browser_driver.ReplyWatch``) instead of waiting out the request timeout.
 
 Selection (:func:`install`, from ``WebViewBridgeFeature.install``): this driver where the
 extension reports the ``web_pages`` capability and ``GLOSSARION_NATIVE_WEBVIEW`` is not
@@ -60,6 +64,7 @@ from glossarion_mobile.services.webview_bridge import (
     HiddenPage,
     PageDriver,
     _clean_expression,
+    suspends_hidden_pages,
 )
 
 __all__ = [
@@ -512,7 +517,15 @@ class NativeWebDriver(PageDriver):
         #: ``async () -> dict``: push and pop a screen and open a sheet (the self-test, set by
         #: :func:`install`; ``diagnostics.webview_check.screen_churn``).
         self.screen_churn: Optional[Callable[[], Awaitable[dict]]] = None
+        #: ``() -> bool``: Glossarion is on screen (Flet's ``page.app_visible``; set by :func:`install`).
+        #: The pages open, load and run whatever the app shows; the background self-test
+        #: (``diagnostics.webview_check.run_background``) and, on iOS only, :meth:`pages_suspended` read it.
+        self.app_on_screen: Optional[Callable[[], bool]] = None
         self._listening = False
+
+    def app_shown(self) -> bool:
+        probe = self.app_on_screen
+        return True if probe is None else bool(probe())
 
     # ---- events (loop thread) ----------------------------------------------------------------
 
@@ -600,6 +613,13 @@ class NativeWebDriver(PageDriver):
         return status
 
 
+def _app_on_screen(app: Any) -> bool:
+    """``NativeWebDriver.app_on_screen``: False only while Flet says the app is hidden or paused."""
+    from glossarion_mobile.ui.foreground import app_visible
+
+    return app_visible(getattr(app, "page", None))
+
+
 async def install(app: Any) -> Optional[NativeWebDriver]:
     """Register the native in-app browser for ``app`` (loop thread), or None: switched off by
     :data:`ENV_SWITCH`, no native extension (desktop, host tests, ``flet run``), no answer to the
@@ -634,6 +654,9 @@ async def install(app: Any) -> Optional[NativeWebDriver]:
         native_cap = MAX_PAGES
     driver = NativeWebDriver(dispatcher, native, capability=found, max_pages=max(1, min(MAX_PAGES, native_cap)))
     driver.screen_churn = functools.partial(webview_check.screen_churn, app)
+    driver.app_on_screen = functools.partial(_app_on_screen, app)
+    # iOS: WebKit suspends the pages while Glossarion is off screen; replies wait for the app (hotfix 4).
+    driver.suspends_hidden_pages = suspends_hidden_pages()
     # Pages an earlier Python session left in this engine go first, before a route can open one
     # (posted, not awaited: start-up does not wait for it; the loop runs it ahead of any page call).
     driver.post(driver.reset)
