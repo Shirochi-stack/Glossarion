@@ -56,6 +56,9 @@ __all__ = [
 TITLE = "Glossarion in-app browser self-test"
 OWNER = "selftest"
 VIEWPORT = (360, 640)
+#: Seconds a check page may take to load: the in-app routes' own budget (authchatgpt_auth._DRIVER_TIMEOUT);
+#: a cold CI simulator starts WebKit's helper processes slowly (run 40397986852: GPU process after 13 s).
+LOAD_WAIT_SECONDS = 90.0
 SELFTEST_HTML = (
     "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -226,7 +229,7 @@ def run(driver: Any, *, server_factory: Optional[Callable[[], Any]] = None, time
         url = server.publish(SELFTEST_HTML, name="webview-selftest.html")
         page = _open_check_page(driver)
         page.load(url)
-        if not browser_driver.wait_until_loaded(page, 30):
+        if not browser_driver.wait_until_loaded(page, LOAD_WAIT_SECONDS):
             state = page.load_state
             raise AssertionError("the self-test page did not load: "
                                  f"{str(state.get('error') or state.get('last_event') or 'no page event')[:120]}")
@@ -420,7 +423,7 @@ def run_background(
         url = server.publish(BG_HTML, name="webview-background.html")
         page = _open_check_page(driver)
         page.load(url)
-        if not browser_driver.wait_until_loaded(page, 30):
+        if not browser_driver.wait_until_loaded(page, LOAD_WAIT_SECONDS):
             state = page.load_state
             raise AssertionError("the background self-test page did not load: "
                                  f"{str(state.get('error') or state.get('last_event') or 'no page event')[:120]}")
