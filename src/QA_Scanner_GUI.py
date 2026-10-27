@@ -3777,9 +3777,10 @@ class QAScannerMixin:
             check_glossary_names_layout.addStretch()
             detection_layout.addWidget(check_glossary_names_row)
 
-            # Other Settings' entry types dropdown, Auto-fix strength and Chapters checked at once (one setting
-            # each: a change in either dialog shows in both)
-            from other_settings import glossary_entry_types_row, glossary_name_autofix_row, glossary_name_workers_row
+            # Other Settings' entry types dropdown, Auto-fix strength, Chapters checked at once and Names keep
+            # their numbers (one setting each: a change in either dialog shows in both)
+            from other_settings import (glossary_entry_types_row, glossary_name_autofix_row, glossary_name_numbers_row,
+                                        glossary_name_workers_row)
             glossary_names_types_row = glossary_entry_types_row(self, lambda: dialog)
             detection_layout.addWidget(glossary_names_types_row)
             glossary_names_types_row.setVisible(check_glossary_names_checkbox.isChecked())
@@ -3792,6 +3793,10 @@ class QAScannerMixin:
             detection_layout.addWidget(glossary_names_workers_row)
             glossary_names_workers_row.setVisible(check_glossary_names_checkbox.isChecked())
             check_glossary_names_checkbox.toggled.connect(glossary_names_workers_row.setVisible)
+            glossary_names_numbers_row = glossary_name_numbers_row(self)
+            detection_layout.addWidget(glossary_names_numbers_row)
+            glossary_names_numbers_row.setVisible(check_glossary_names_checkbox.isChecked())
+            check_glossary_names_checkbox.toggled.connect(glossary_names_numbers_row.setVisible)
 
             glossary_names_fix_row = QWidget()
             glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)

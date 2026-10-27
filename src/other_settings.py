@@ -578,6 +578,48 @@ def glossary_name_autofix_row(self):
     return name_check_autofix_level_row
 
 
+def glossary_name_numbers_row(self):
+    """The glossary name check's "Names keep their numbers" toggle (``glossary_name_check_match_numbers_var``,
+    default on). Other Settings and the QA Scanner settings each build one; a change in one moves every
+    other open row (saved by either dialog's save_config)."""
+    from PySide6.QtWidgets import QHBoxLayout, QWidget
+
+    # "Names keep their numbers": a candidate with another number (or none) is never a respelling, and a
+    # name glued to a number's left ("the72 Demon Kings") counts as present (owner 2026-10-27, default on)
+    if not hasattr(self, 'glossary_name_check_match_numbers_var'):
+        self.glossary_name_check_match_numbers_var = bool(self.config.get('glossary_name_check_match_numbers', True))
+    name_check_numbers_row = QWidget()
+    name_check_numbers_layout = QHBoxLayout(name_check_numbers_row)
+    name_check_numbers_layout.setContentsMargins(20, 0, 0, 0)
+    name_check_numbers_cb = self._create_styled_checkbox("Names keep their numbers")
+    name_check_numbers_cb.setChecked(bool(self.glossary_name_check_match_numbers_var))
+    name_check_numbers_cb.setToolTip(
+        "A spelling with another number, or none, is never taken for a glossary name\n"
+        "('Demon Kings' is not '72 Demon Kings'), and a name whose number is glued to the\n"
+        "word before it ('the72 Demon Kings', a missing space) counts as found.\n"
+        "Off: numbers are ignored when names are compared.")
+
+    open_rows = getattr(self, '_glossary_name_numbers_rows', None)
+    if open_rows is None:
+        open_rows = self._glossary_name_numbers_rows = []
+    open_rows.append(name_check_numbers_cb)
+
+    def _on_name_check_numbers_toggle(checked):
+        self.glossary_name_check_match_numbers_var = bool(checked)
+        for checkbox in list(open_rows):
+            try:
+                # not with signals blocked: the styled checkbox draws its ✓ from its own toggled signal (the
+                # other copy's handler then finds every row already set)
+                if checkbox.isChecked() != bool(checked):
+                    checkbox.setChecked(bool(checked))
+            except RuntimeError:  # its dialog was closed and deleted
+                open_rows.remove(checkbox)
+    name_check_numbers_cb.toggled.connect(_on_name_check_numbers_toggle)
+    name_check_numbers_layout.addWidget(name_check_numbers_cb)
+    name_check_numbers_layout.addStretch()
+    return name_check_numbers_row
+
+
 def _glossary_name_workers_text(value):
     """The slider's value: "Auto (N)" (what Auto checks at once here) or "N chapters"."""
     if value:
@@ -9360,26 +9402,8 @@ def _create_processing_options_section(self, parent):
     name_check_autofix_level_row = glossary_name_autofix_row(self)
     name_check_workers_row = glossary_name_workers_row(self)
 
-    # "Names keep their numbers": a candidate with another number (or none) is never a respelling, and a
-    # name glued to a number's left ("the72 Demon Kings") counts as present (owner 2026-10-27, default on)
-    if not hasattr(self, 'glossary_name_check_match_numbers_var'):
-        self.glossary_name_check_match_numbers_var = bool(self.config.get('glossary_name_check_match_numbers', True))
-    name_check_numbers_row = QWidget()
-    name_check_numbers_layout = QHBoxLayout(name_check_numbers_row)
-    name_check_numbers_layout.setContentsMargins(20, 0, 0, 0)
-    name_check_numbers_cb = self._create_styled_checkbox("Names keep their numbers")
-    name_check_numbers_cb.setChecked(bool(self.glossary_name_check_match_numbers_var))
-    name_check_numbers_cb.setToolTip(
-        "A spelling with another number, or none, is never taken for a glossary name\n"
-        "('Demon Kings' is not '72 Demon Kings'), and a name whose number is glued to the\n"
-        "word before it ('the72 Demon Kings', a missing space) counts as found.\n"
-        "Off: numbers are ignored when names are compared.")
-
-    def _on_name_check_numbers_toggle(checked):
-        self.glossary_name_check_match_numbers_var = bool(checked)
-    name_check_numbers_cb.toggled.connect(_on_name_check_numbers_toggle)
-    name_check_numbers_layout.addWidget(name_check_numbers_cb)
-    name_check_numbers_layout.addStretch()
+    # "Names keep their numbers" (shared with the QA Scanner settings' name check)
+    name_check_numbers_row = glossary_name_numbers_row(self)
 
     # NER: an English named-entity model finds the names in the translation (ONNX Runtime builds:
     # Heavy / NoCuda / mobile); without it the capitalization heuristic does.

@@ -740,6 +740,16 @@ out["workers_auto"] = [s.value() for s in sliders] + [v.text().split(" (")[0] fo
 out["workers_auto"] += [owner.glossary_name_check_workers_var]
 sliders[1].setValue(1)
 out["workers_one"] = [s.value() for s in sliders] + [v.text() for v in values]
+from PySide6.QtWidgets import QCheckBox
+owner._create_styled_checkbox = lambda text: QCheckBox(text)
+rows = [other_settings.glossary_name_numbers_row(owner) for _ in range(2)]  # Other Settings, QA Scanner
+boxes = [r.findChild(QCheckBox) for r in rows]
+out["numbers_start"] = [b.isChecked() for b in boxes] + [b.text() for b in boxes]
+boxes[1].setChecked(False)
+out["numbers_off"] = [b.isChecked() for b in boxes] + [owner.glossary_name_check_match_numbers_var]
+shiboken6.delete(rows[1])
+boxes[0].setChecked(True)
+out["numbers_after_close"] = [boxes[0].isChecked(), owner.glossary_name_check_match_numbers_var]
 print("SYNC=" + json.dumps(out))
 '''
 
@@ -766,6 +776,9 @@ def test_entry_types_dropdown_is_one_setting_in_other_settings_and_the_qa_scanne
     assert out["workers_start"] == [2, 2, "2 chapters", "2 chapters"]
     assert out["workers_auto"] == [0, 0, "Auto", "Auto", 0]  # "Auto (N)": N is what Auto checks here
     assert out["workers_one"] == [1, 1, "1 chapter", "1 chapter"]
+    assert out["numbers_start"] == [True, True, "Names keep their numbers", "Names keep their numbers"]
+    assert out["numbers_off"] == [False, False, False]
+    assert out["numbers_after_close"] == [True, True]
     # both dialogs build it from the one helper; the QA row sits right below the name check toggle
     with open(os.path.join(SRC, "other_settings.py"), encoding="utf-8") as f:
         other = f.read()
@@ -774,10 +787,11 @@ def test_entry_types_dropdown_is_one_setting_in_other_settings_and_the_qa_scanne
     section = other[other.index("def _create_processing_options_section"):]
     body = section[:section.index("\ndef ")]
     assert "glossary_entry_types_row(\n        self, " in body and "glossary_name_autofix_row(self)" in body
-    assert "glossary_name_workers_row(self)" in body
+    assert "glossary_name_workers_row(self)" in body and "glossary_name_numbers_row(self)" in body
     # the toggle (with its ✓ when NER is installed), then the entry types and Auto-fix strength, then the button
     assert (qa.index("detection_layout.addWidget(check_glossary_names_row)")
             < qa.index("glossary_entry_types_row(self, lambda: dialog)")
             < qa.index("glossary_name_autofix_row(self)")
             < qa.index("glossary_name_workers_row(self)")
+            < qa.index("glossary_name_numbers_row(self)")
             < qa.index("detection_layout.addWidget(glossary_names_fix_row)"))

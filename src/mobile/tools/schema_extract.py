@@ -177,6 +177,7 @@ HELPER_ROW_KEYS = {
     "glossary_entry_types_row": ("emergency_glossary_compliance_mode",),
     "glossary_name_autofix_row": ("glossary_name_check_autofix_level",),
     "glossary_name_workers_row": ("glossary_name_check_workers",),
+    "glossary_name_numbers_row": ("glossary_name_check_match_numbers",),
 }
 # U9 P5b: the desktop builds its three settings tables from the schema
 # (``settings_map = desktop_settings_map(self)`` in settings_persistence, ``bool_vars =
