@@ -31,6 +31,9 @@ class ChatEnv(SettingsContext):
     # U9: async () -> the picked folder's app-owned copy (FileBridge.pick_folder); raises
     # FolderPickUnavailable where the platform cannot hand over a folder (Android SAF trees)
     pick_folder: Optional[Callable[[], Any]] = None
+    # hotfix 5: async () -> {"path", "error", "message"}, a photo from the phone's camera app (＋ › Camera);
+    # None off the phone app
+    take_photo: Optional[Callable[[], Any]] = None
     # U9: (route name, source path) -> a tool screen with this file as its source (Plan "Run as async batch")
     open_tool_with_source: Optional[Callable[[str, str], Any]] = None
     # U9: () -> the Tools ToolsContext (＋ › From Library: the SourcePicker of Library books)

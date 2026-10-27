@@ -1,7 +1,9 @@
 import 'package:flet/flet.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
+import 'draggable_sheet.dart';
 import 'native_service.dart';
 
 class Extension extends FletExtension {
@@ -13,6 +15,16 @@ class Extension extends FletExtension {
     // main() before runApp()).
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       FlutterForegroundTask.initCommunicationPort();
+    }
+  }
+
+  @override
+  Widget? createWidget(Key? key, Control control) {
+    switch (control.type) {
+      case "GlossarionDraggableSheet":
+        return GlossarionDraggableSheetControl(key: key, control: control);
+      default:
+        return null;
     }
   }
 

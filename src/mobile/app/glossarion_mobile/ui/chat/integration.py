@@ -388,6 +388,7 @@ class ChatFeature:
             open_reader=self.open_reader,
             pick_files=self.pick_files,
             pick_folder=self.pick_folder,
+            take_photo=self.take_photo if self.camera_available() else None,
             open_tool_with_source=self.open_tool_with_source,
             tools_context=self.tools_context,
             import_file=self.import_file,
@@ -892,6 +893,15 @@ class ChatFeature:
         if callable(navigate):
             navigate(route_name)
         return route_name
+
+    def camera_available(self) -> bool:
+        """＋ › Camera works: the phone app's extension is there (not the desktop stub)."""
+        native = getattr(self.app, "native", None)
+        return native is not None and not getattr(native, "is_stub", True)
+
+    async def take_photo(self) -> dict:
+        """＋ › Camera (hotfix 5): a photo from the phone's camera app (``NativeBridge.take_photo``)."""
+        return await self.app.native.take_photo()
 
     def import_file(self, path: str) -> str:
         """Blocking: an app-owned copy of a picked file (FileBridge Inbox) when the bridge exists."""

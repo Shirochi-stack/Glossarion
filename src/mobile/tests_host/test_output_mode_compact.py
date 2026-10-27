@@ -114,7 +114,9 @@ def test_phone_composer_puts_the_mode_chip_in_the_action_row():
     assert text_row.controls == [composer.text_field, composer.expand_button]
     plus, mode, pills, hint, send = composer.action_row.controls
     assert (plus, mode, hint, send) == (composer.plus_button, row, composer.token_hint, composer.send_button)
-    assert pills.content is composer.pills_row and pills.expand
+    # hotfix 5: the model chip and ⚙ share what the row leaves (the chip ellipsizes)
+    assert pills.content is composer.middle_row and pills.expand
+    assert composer.middle_row.controls == [composer.model_chip, composer.pills_row]
     assert composer.action_row.height == 40 and not composer.action_row.wrap
     # the chip: active emoji + ▾ in a 48 dp target, tooltip + button semantics
     assert row.inline and row.effective_style == "chip" and row.tight and row.scroll is None

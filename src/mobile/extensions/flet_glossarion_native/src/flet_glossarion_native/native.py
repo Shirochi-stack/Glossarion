@@ -418,6 +418,25 @@ class GlossarionNative(ft.Service):
         which stopped the in-app browser the job needed). False off Android or on failure."""
         return (await self._call("move_task_to_back", default=False)) is True
 
+    async def unfocus(self) -> bool:
+        """Drop the focus of the text field that held it at the last touch, and with it the keyboard
+        (Flutter's ``FocusNode.unfocus``); the app calls it from every field's ``on_tap_outside``
+        (hotfix 5: a tap outside a field closes the keyboard). True when a field lost the focus; False
+        when the same tap had focused another field, the request came late, or without the extension."""
+        return (await self._call("unfocus", default=False)) is True
+
+    async def take_photo(self) -> dict[str, Any]:
+        """＋ › Camera (hotfix 5): the phone's own camera app takes one photo (image_picker).
+        ``{"path": str | None, "error": None}`` (the JPEG in the app's cache; None when the user backed out),
+        or ``{"path": None, "error": code, "message": text}``: no camera, camera access off, or no extension."""
+        result = await self._call("take_photo", default=None, timeout=_LONG_TIMEOUT)  # the user takes their time
+        if not isinstance(result, dict):
+            return {"path": None, "error": "unavailable",
+                    "message": "The camera is only available in the phone app"}
+        path = result.get("path")
+        return {"path": str(path) if path else None, "error": result.get("error") or None,
+                "message": str(result.get("message") or "")}
+
     # ------------------------------------------------ iOS background execution
 
     async def begin_background_task(

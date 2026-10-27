@@ -43,7 +43,8 @@ DEFAULT_TIMEOUT = 45.0
 #: Calls the extension bounds with its own longer timeout (``save_to_downloads`` copies a whole file: 900 s,
 #: ``flet_glossarion_native._LONG_TIMEOUT``): the outer guard waits longer, or Python would report a failure
 #: while the native copy still runs (the copy-once mirror, Save to Downloads, the transfer.it handoff).
-METHOD_TIMEOUTS = {"save_to_downloads": 960.0, "save_to_downloads_entry": 960.0}
+METHOD_TIMEOUTS = {"save_to_downloads": 960.0, "save_to_downloads_entry": 960.0,
+                   "take_photo": 960.0}  # ＋ › Camera: the user takes their time in the camera app
 #: Document destinations (U10, ``flet_glossarion_native`` documents API): off-device every one answers
 #: ``{"ok": False, "error": "unavailable"}``. The cloud sync calls them on the extension directly
 #: (``cloud_sync.NativeDocs``): the extension bounds each one itself (pickers 1 h, writes by size).
@@ -129,6 +130,12 @@ class NativeStub:
 
     async def move_task_to_back(self) -> bool:
         return False
+
+    async def unfocus(self) -> bool:
+        return False
+
+    async def take_photo(self) -> dict:
+        return {"path": None, "error": "unavailable", "message": "The camera is only available in the phone app"}
 
     async def begin_background_task(self, *args: Any, **kwargs: Any) -> int:
         return -1
@@ -587,6 +594,21 @@ class NativeBridge:
         engine and this session (system back on the chat while a job runs, hotfix 4); True when it
         moved. False elsewhere, on a timeout or without the extension."""
         return (await self.call("move_task_to_back", default=False)) is True
+
+    async def unfocus(self) -> bool:
+        """The focused text field lets go of the focus and its keyboard (a tap outside it, hotfix 5);
+        True when a field lost the focus. False elsewhere, on a timeout or without the extension."""
+        return (await self.call("unfocus", default=False)) is True
+
+    async def take_photo(self) -> dict:
+        """＋ › Camera (hotfix 5): a photo from the phone's camera app: ``{"path": str | None, "error": None}``
+        (None: the user backed out) or ``{"path": None, "error": code, "message": text}``."""
+        result = await self.call("take_photo", default=None)
+        if not isinstance(result, dict):
+            return {"path": None, "error": "unavailable", "message": "The camera is only available in the phone app"}
+        path = result.get("path")
+        return {"path": str(path) if path else None, "error": result.get("error") or None,
+                "message": str(result.get("message") or "")}
 
     async def begin_background_task(self, name: str) -> int:
         result = await self.call("begin_background_task", name, default=-1)

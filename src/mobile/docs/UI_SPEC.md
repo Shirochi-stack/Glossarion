@@ -451,6 +451,7 @@ On iOS the same text goes to local notifications (action category Accept / Revie
    - Hint (desktop strings):
      - "Message to translate…" when there is no attachment;
      - "Add optional instructions for the attached file…" when there is one.
+   - A tap outside the field (blank space, the chat, another control, the start of a scroll) closes the keyboard (hotfix 5, `components/keyboard_dismiss`: every text field in the app, through the extension's `unfocus`), except while the slash-command list is open.
    - An **expand icon** (`open_in_full`, 20 dp visual, 48 dp target) appears at the top-right from 3 lines up. It opens `/chat/<cid>/compose`: a full-screen editor with a token count and "Done".
    - **Draft autosave** per chat, debounced 450 ms, written to the v2 `draft` field.
    - **Paste-to-chip.** When one `on_change` adds more than 10,000 characters:
@@ -478,6 +479,7 @@ On iOS the same text goes to local notifications (action category Accept / Revie
      - The choice is persisted as described in §2.6. The chip, the toggles and the ＋ sheet's row (§2.5) share one `OutputModeState` Signal, so they always agree.
      - After an automatic switch to Vision, the chip (or the active toggle) carries a small dot. Its tooltip reads "Output mode: Vision · auto" and it is spoken as "Output mode: Vision, automatic".
      - A mode that cannot fully run in this build stays visible. For example, video playback without flet-video: the options sheet shows the limitation with a `ReasonChip`. Nothing is hidden.
+   - **Model chip** (hotfix 5, `Composer.model_chip`): the chat's model without its route prefix ("gpt-6-luna ▾", the full id as tooltip), a tonal pill that takes what the row leaves and ellipsizes. Tap opens the **mini model picker** (`sheets/mini_model_sheet.MiniModelSheet`, a `ModelSheet` subclass): the chat model's provider only (polled first, the chat's model ticked), and pinned at the bottom the model's **Effort** (`services/thinking_effort`: one list from Off up to what the model supports, writing the same global keys as the full sheet's "Thinking & effort"; for an unknown route the OpenAI-compatible effort plus the "Pass thinking to unknown routes" switch, `pass_thinking_all_openai`) and **All models** (the full ModelSheet). On the phone app it is the extension's `DraggableSheet`: it opens at about half the screen, a swipe up grows it to full height before the rows scroll, a swipe down closes it.
    - **Option pills.** Shown only when they differ from the default. Tapping a `Chip` opens the related sheet; its trailing × (`on_delete`) resets it.
      - "Glossary: Manual" / "Glossary: Off" / "Glossary: Main";
      - "Thinking off";
@@ -557,16 +559,15 @@ The button never reads `os.environ`. It only observes JobService signals.
 
 Every tap triggers `HapticFeedback.light_impact`.
 
-1. **Attach tiles.** A `Row` of 72 dp tiles, radius 14, tonal. Each tile is a `Container` with `on_click` and `on_long_press`. Order: Files · From Library · Photos · Camera · Clipboard (From Library second, so it needs no scrolling on a phone; device fix 2026-10-08).
+On the phone app the content is the extension's `DraggableSheet` (Flutter's DraggableScrollableSheet, hotfix 5): the sheet opens on the attach tiles alone (like Claude's "Add context" sheet), a swipe up grows it to show items 2-4, a swipe down closes it. Without the extension (desktop `flet run`) the sheet scrolls through all four.
+
+1. **Attach tiles.** One `Row` of equal outlined tiles (84 dp, radius 16, icon over label). Each tile is a `Container` with `on_click` and `on_long_press`. Order: Files · Library · Photos · Camera (Library second; device fix 2026-10-08). Hotfix 5 removed the Clipboard tile (the keyboard pastes).
    - **Files:** `FilePicker.pick_files(allow_multiple=True, allowed_extensions=…)`.
      - Long-press offers "Pick folder…" (`FilePicker.get_directory_path`).
      - On Android, a SAF failure falls back to "Pick a .zip instead".
    - **Photos:** images. CBZ comes in through Files.
-   - **Camera:** `flet-camera`, when the package resolves for both platforms (Appendix C).
-     - A multi-capture "Scan pages" mode produces a set of images. When there is more than one, they can be zipped into a CBZ.
-     - If the package is not in the build, the tile is disabled with a `ReasonChip`, and Photos remains available.
+   - **Camera:** the phone's own camera app takes one photo (hotfix 5: the extension's `take_photo`, Flutter's `image_picker`; no CAMERA permission on Android, `NSCameraUsageDescription` on iOS), attached like Photos. Backing out attaches nothing; no camera or camera access off is said in plain words. Off the phone app the tile is disabled with a `ReasonChip`.
    - **From Library:** opens the in-chat Library picker (the SourcePicker's Library mode: one list, no segments; the Library's "Filter title or tag…" search over titles, raw titles and tags, filtering on every keystroke; newest first, the Library's Date sort; each row is the Library's own list row with its 48 × 72 cover, type badge, size, progress pill and warning chips, no ⋯; "Open Library" in its header closes the picker and opens the Library). A Completed book with neither a workspace nor a raw file on this device is listed but disabled with the ReasonChip "No raw file on this device". One tap attaches the book's raw file to this chat (snackbar "Attached <name> from the Library" · Remove) and remembers it (sidecar meta `library_attachment` {bid, path}); Send then defaults to "Save to: Library" (§2.12.1). The empty-chat chip "From Library" (§2.13) and `/library [title]` (§2.7) open the same picker: attaching a Library book never leaves the chat. A long-press on a row starts a multi-selection (as on the Library shelves): further taps add or remove books and "Use N" puts them in one batch plan (§2.12; Start runs one translate job, each book in its own Library workspace). Rows are built a page at a time (the Library's page size; the next page when the list nears its end).
-   - **Clipboard:** pastes clipboard text (`Clipboard.get()`) as a chip or into the field.
 
    Files are imported through FileBridge. It copies them into `Inbox/`, or into `Library/Raw/` when "Add to Library" is chosen in the chip menu.
 2. **Output mode.** An `OutputModeRow` on a line of its own, sharing the composer's Signal (§2.3). It shows the label "Output: Text" (labelMedium; "Output: Vision · auto" after an automatic switch) and the six toggles. Where the composer shows the mode chip, the row shows the six icon toggles only. When the composer shows labelled toggles, the row shows the label plus labelled toggles. Below it, inline, the active mode's options (the `ModeOptionsSheet` content, §2.6), animated with `AnimatedSwitcher`.

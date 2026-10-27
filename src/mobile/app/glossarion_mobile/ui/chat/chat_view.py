@@ -153,7 +153,7 @@ from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.foreground import park_while_hidden
 from glossarion_mobile.ui.responsive import Layout, layout_for
-from glossarion_mobile.ui.sheets.plus_sheet import PlusSheet
+from glossarion_mobile.ui.sheets.plus_sheet import CAMERA_OFF_REASON, PlusSheet, camera_error_text
 from glossarion_mobile.ui.shell.job_strip import JobStrip
 from glossarion_mobile.ui.theme import build_text_theme
 
@@ -566,7 +566,9 @@ class ChatView:
             on_pill=self._on_pill,
             on_pill_reset=self._on_pill_reset,
             on_slash=self.run_slash,
+            on_open_model=self.open_mini_model_sheet,
         )
+        self.composer.set_model(getattr(state.chat_context.value, "model", "") or "")
         self.column = ft.Column(
             [self.transcript_stack, self.job_strip, self.quick_chips.control, self.caption,
              self.composer.slash.control, self.composer],
@@ -666,8 +668,10 @@ class ChatView:
 
     def _on_context(self, context: Any) -> None:
         self.header.set_context(context)
+        self.composer.set_model(getattr(context, "model", "") or "")  # the composer's model chip (hotfix 5)
         self.refresh_send()
         self._push(self.header.wrapper)
+        self._push(self.composer.model_chip)
 
     def _on_current_chat(self, cid: str) -> None:
         if self.bound and str(cid) != self.cid:
@@ -4022,6 +4026,7 @@ class ChatView:
             on_open_mode_options=self.open_mode_options,
             on_dismiss=lambda e: self.composer.set_plus_open(False),
             mode_content=lambda mode: self.mode_options_content(mode, inline=True).column,
+            camera_reason=None if getattr(self.env, "take_photo", None) is not None else CAMERA_OFF_REASON,
         )
         self._haptic("light_impact")
         self.composer.set_plus_open(True)
@@ -4034,10 +4039,36 @@ class ChatView:
             self.open_library_picker()
         elif tile_id in ("files", "photos"):
             self._spawn(self.pick_and_attach(images=tile_id == "photos"))
+        elif tile_id == "camera":
+            self._spawn(self.capture_and_attach())
         elif tile_id == "clipboard":
             self._spawn(self._paste_clipboard())
         else:
             self.notify("This source is not available in this build")
+
+    async def capture_and_attach(self) -> Optional[str]:
+        """＋ › Camera (hotfix 5): the phone's own camera app takes a photo, attached like ＋ › Photos (an
+        app-owned copy, then ``attach_file``). Backing out of the camera attaches nothing."""
+        take = getattr(self.env, "take_photo", None) if self.env is not None else None
+        if take is None:
+            self.notify(CAMERA_OFF_REASON)
+            return None
+        try:
+            result = await take()
+        except Exception as exc:
+            log.warning("camera failed: %s", exc)
+            result = {"path": None, "error": "failed", "message": str(exc)}
+        result = result if isinstance(result, dict) else {}
+        path = result.get("path")
+        if not path:
+            if result.get("error"):
+                self.notify(camera_error_text(result.get("error"), result.get("message")))
+            return None
+        if self.env.import_file is not None:
+            path = await self.env.run_io(self.env.import_file, path)
+        if path and self.attach_file(path):
+            return path
+        return None
 
     def open_library_picker(self, query: str = "") -> Any:
         """＋ › From Library, the empty-chat "From Library" chip and ``/library`` (UI_SPEC §2.5 item 1):
@@ -4403,6 +4434,46 @@ class ChatView:
             on_accounts=lambda: self.navigate("settings.accounts"),
         )
         self.model_sheet = sheet
+        sheet.show(self.page)
+
+        async def load() -> None:
+            try:
+                models = await self.env.run_io(load_model_catalog, self.env.config_get)
+            except Exception as exc:
+                log.info("model catalog unavailable: %s", exc)
+                return
+            sheet.set_models(models)
+
+        self._spawn(load())
+        return sheet
+
+    def open_mini_model_sheet(self) -> Any:
+        """The composer's model chip (hotfix 5): the chat model's provider in a sheet that grows with a swipe
+        up, with the model's Effort; "All models" opens the full ModelSheet. A pick is this chat's model, as
+        in the full sheet."""
+        if self.env is None:
+            return self.open_model_sheet("model")
+        from glossarion_mobile.services.oauth import sign_in_satisfied
+        from glossarion_mobile.ui.sheets.mini_model_sheet import MiniModelSheet
+        from glossarion_mobile.ui.sheets.model_sheet_min import load_model_catalog
+
+        context = self.state.chat_context.value
+        signed = self.state.signed_in.value
+        sheet = MiniModelSheet(
+            current_model=context.model,
+            current_profile=context.profile,
+            current_language=context.target_language,
+            profiles=self._profiles(),
+            languages=self.env.languages,
+            signed_in=lambda model: sign_in_satisfied(model, signed),
+            on_select=self._on_model_sheet_select,
+            on_sign_in=self.open_login_sheet,
+            on_accounts=lambda: self.navigate("settings.accounts"),
+            on_all_models=lambda: self.open_model_sheet("model"),
+        )
+        self.model_sheet = sheet
+        # the keyboard stays down while it is open and after it closes (a closing sheet gives the focus back)
+        self._hold_keyboard(sheet.prepare(self.page))
         sheet.show(self.page)
 
         async def load() -> None:

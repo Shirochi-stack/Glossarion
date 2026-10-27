@@ -2,8 +2,11 @@ import 'dart:async';
 
 import 'package:flet/flet.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:image_picker/image_picker.dart' as picker;
 
 import 'task_handler.dart';
 
@@ -73,6 +76,11 @@ class GlossarionNativeService extends FletService {
   bool _taskCallbackAdded = false;
   String? _lastError;
   int _sequence = 0;
+  /// The primary focus at the last touch and when it came (hotfix 5
+  /// `unfocus`): a tap outside a text field drops the focus of the field that
+  /// held it then, never that of a field the same tap focused.
+  FocusNode? _focusAtDown;
+  DateTime? _downAt;
 
   bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -86,6 +94,7 @@ class GlossarionNativeService extends FletService {
     super.init();
     debugPrint("GlossarionNativeService(${control.id}).init");
     control.addInvokeMethodListener(_invokeMethod);
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_onPointer);
 
     if (!_isMobile) {
       _ready.complete();
@@ -110,6 +119,8 @@ class GlossarionNativeService extends FletService {
   void dispose() {
     debugPrint("GlossarionNativeService(${control.id}).dispose()");
     control.removeInvokeMethodListener(_invokeMethod);
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_onPointer);
+    _focusAtDown = null;
     if (_taskCallbackAdded) {
       FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
       _taskCallbackAdded = false;
@@ -279,6 +290,12 @@ class GlossarionNativeService extends FletService {
           return _isAndroid
               ? (await _platform('move_task_to_back', args)) == true
               : false;
+        case 'unfocus':
+          // A tap outside a text field closes the keyboard (hotfix 5); pure
+          // Flutter, so every platform answers.
+          return _unfocus();
+        case 'take_photo':
+          return await _takePhoto();
         case 'begin_background_task':
           if (!_isIOS) return -1;
           final dynamic taskId = await _platform('begin_background_task', args);
@@ -358,6 +375,61 @@ class GlossarionNativeService extends FletService {
     }
   }
 
+  // --------------------------------------------------- camera (hotfix 5)
+
+  /// ＋ › Camera: the phone's own camera app takes one photo (image_picker:
+  /// ACTION_IMAGE_CAPTURE on Android, UIImagePickerController on iOS).
+  /// `{path}` is the JPEG in the app's cache (null when the user backed out);
+  /// `{error, message}` when there is no camera or access is off.
+  Future<Map<String, dynamic>> _takePhoto() async {
+    if (!_isMobile) {
+      return <String, dynamic>{
+        'path': null,
+        'error': 'unavailable',
+        'message': 'The camera is only available in the phone app',
+      };
+    }
+    try {
+      final picker.XFile? photo = await picker.ImagePicker()
+          .pickImage(source: picker.ImageSource.camera);
+      return <String, dynamic>{'path': photo?.path, 'error': null};
+    } on PlatformException catch (e) {
+      return <String, dynamic>{
+        'path': null,
+        'error': e.code,
+        'message': e.message ?? e.code,
+      };
+    }
+  }
+
+  // ------------------------------------------------- keyboard (hotfix 5)
+
+  void _onPointer(PointerEvent event) {
+    if (event is PointerDownEvent) {
+      _focusAtDown = FocusManager.instance.primaryFocus;
+      _downAt = DateTime.now();
+    }
+  }
+
+  /// Python's answer to a text field's `tap_outside` (Flutter unfocuses on a
+  /// tap outside only for a mouse): the field focused at that touch loses the
+  /// focus, and with it the keyboard. Nothing changes when the same tap moved
+  /// the focus on (another field), or when the request comes late (a busy
+  /// Python must not close a keyboard the user has opened again since).
+  bool _unfocus() {
+    final FocusNode? node = _focusAtDown;
+    final DateTime? at = _downAt;
+    _focusAtDown = null;
+    if (node == null || at == null || !node.hasPrimaryFocus) {
+      return false;
+    }
+    if (DateTime.now().difference(at) > const Duration(seconds: 2)) {
+      return false;
+    }
+    node.unfocus();
+    return true;
+  }
+
   dynamic _defaultResult(String name) {
     if (_kDocumentMethods.contains(name)) {
       return <String, dynamic>{
@@ -394,6 +466,7 @@ class GlossarionNativeService extends FletService {
       case 'start_continued_processing':
       case 'update_continued_processing':
       case 'move_task_to_back':
+      case 'unfocus':
         return false;
       default:
         return null;
