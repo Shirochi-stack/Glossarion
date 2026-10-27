@@ -929,6 +929,8 @@ LABEL_OVERRIDES = {
     "active_profile": "Prompt profile",
     "auto_glossary_mode": "Glossary mode",
     "glossary_name_check_mode": "Glossary name check mode",
+    # the QA scanner's toggle text says whether NER is installed (picked at runtime, 2026-10-27)
+    "check_glossary_names": "Check glossary names with NER (Experimental)",
     "output_language": "Target language",
     "contextual": "Contextual translation",
     "token_limit": "Input token limit",

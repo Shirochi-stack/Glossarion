@@ -34,7 +34,8 @@ log = logging.getLogger("glossarion.tools.qa")
 CHECK_KEY = ("qa_scanner_settings", "check_glossary_names")
 NER_KEY = "glossary_name_check_use_ner"
 SCOPE_KEYS = ("emergency_glossary_compliance_mode", "emergency_glossary_compliance_custom_types",
-              "glossary_name_check_min_chars", "glossary_name_check_autofix_level")
+              "glossary_name_check_min_chars", "glossary_name_check_autofix_level",
+              "glossary_name_check_match_numbers")
 TITLE = "Check Glossary Names"
 INTRO = ("Checked rows are replaced with the glossary name. Rows are pre-checked when one close spelling of a "
          "character name was found; review the others before checking them. Each changed file is backed up to "

@@ -83,6 +83,25 @@ def test_glued_and_cut_names_are_not_variants():
     assert [f.kind for f in g.check_chapter("사쿠라 미하일 싱리안 종", output, ents).findings] == ["missing"] * 3
 
 
+def test_numbers_must_match_and_a_number_glued_to_a_word_is_present():
+    """2026-10-27 (owner): "slain one of the72 Demon Kings" (a missing space) was reported as "Demon Kings → 72
+    Demon Kings", whose fix would have written "the7272 Demon Kings"."""
+    rows = [{"type": "term", "raw_name": "72마왕", "translated_name": "72 Demon Kings"}]
+    ents = g.build_entries(rows, mode="all")
+    source = "아카데미 시절부터 72마왕 중 하나의 목을 베고"
+    assert g.check_chapter(source, "<p>slain one of the72 Demon Kings while still at the academy</p>", ents).findings == []
+    # a candidate with another number, or none, is never a respelling (_norm drops digits)
+    for output in ("<p>He slew one of the Demon Kings.</p>", "<p>He slew one of the 73 Demon Kings.</p>"):
+        assert [f.kind for f in g.check_chapter(source, output, ents).findings] == ["missing"], output
+    # "Names keep their numbers" off (glossary_name_check_match_numbers): the comparison ignores numbers
+    loose = g.build_entries(rows, mode="all", match_numbers=False)
+    [finding] = g.check_chapter(source, "<p>slain one of the72 Demon Kings</p>", loose).findings
+    assert finding.variants == ("Demon Kings",)
+    # the same number with other spacing still is one
+    assert g._is_variant("72 Demon Kings", "demonkings", "72 Demon-Kings", "demonkings")
+    assert not g._is_variant("72 Demon Kings", "demonkings", "Demon Kings", "demonkings")
+
+
 def test_missing_names_are_not_reportable():
     result = g.check_chapter("발터 아르겐트", "<p>He nodded.</p>", entries())
     assert [f.kind for f in result.findings] == ["missing"]
@@ -148,12 +167,14 @@ def test_settings_from_env_and_config():
            "EMERGENCY_GLOSSARY_COMPLIANCE_MIN_CHARS": "5",
            "GLOSSARY_NAME_CHECK_MIN_CHARS": "2"}
     assert g.settings_from_env(env) == {"mode": "custom", "custom_types": ("term",), "min_chars": 2,
-                                        "autofix_level": 1}
+                                        "autofix_level": 1, "match_numbers": True}
     assert g.settings_from_config({"emergency_glossary_compliance_mode": "all",
                                    "emergency_glossary_compliance_min_chars": 5,
                                    "glossary_name_check_min_chars": 4,
                                    "glossary_name_check_autofix_level": 3}, env) == {
-        "mode": "all", "custom_types": (), "min_chars": 4, "autofix_level": 3}
+        "mode": "all", "custom_types": (), "min_chars": 4, "autofix_level": 3, "match_numbers": True}
+    assert g.settings_from_env({"GLOSSARY_NAME_CHECK_MATCH_NUMBERS": "0"})["match_numbers"] is False
+    assert g.settings_from_config({"glossary_name_check_match_numbers": False}, {})["match_numbers"] is False
     assert g.settings_from_env({"GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL": "9"})["autofix_level"] == 3
 
 
@@ -188,6 +209,29 @@ def test_translation_hook_is_off_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("GLOSSARY_NAME_CHECK", raising=False)
     t._run_glossary_name_check(str(book), "response_chapter0001.html", {"body": "발터 아르겐트"})
     assert "Walter" in (book / "response_chapter0001.html").read_text(encoding="utf-8")
+
+
+def test_qa_scan_logs_what_finds_the_names_and_its_progress(tmp_path):
+    """2026-10-27 (owner): the QA scan's name check logged one line, then its result."""
+    import scan_html_folder as s
+    book = _book(tmp_path, "<p>Walter Argent smiled.</p>")
+    lines = []
+    s.run_glossary_name_check(str(book), [{"filename": "response_chapter0001.html", "issues": []}],
+                              {"_glossary_name_scope": {"mode": "characters", "custom_types": (), "min_chars": 3}},
+                              log=lines.append)
+    assert "   🔎 Names found with the capitalization heuristic" in lines
+    assert "   📖 Glossary name check: 1/1 chapters (100%)" in lines
+    assert lines.index("   📖 Glossary name check: 1/1 chapters (100%)") < len(lines) - 1  # before the result
+
+
+def test_ner_status_names_what_finds_the_names(monkeypatch):
+    monkeypatch.setattr(ner_names, "runtime_available", lambda: True)
+    monkeypatch.setattr(ner_names, "model_installed", lambda: True)
+    assert g.ner_status(True) == "installed" and g.ner_status(False) == "off"
+    monkeypatch.setattr(ner_names, "model_installed", lambda: False)
+    assert g.ner_status(True) == "missing"
+    monkeypatch.setattr(ner_names, "runtime_available", lambda: False)
+    assert g.ner_status(True) == "unsupported"
 
 
 def test_qa_scanner_adds_issues(tmp_path):
@@ -663,6 +707,17 @@ out["configure"] = [b.isVisible() for b in buttons]
 shiboken6.delete(dialogs[1])  # the QA Scanner settings closed
 combos[0].setCurrentIndex(0)
 out["after_close"] = [combos[0].currentText(), owner.emergency_glossary_compliance_mode_var, buttons[0].isVisible()]
+from PySide6.QtWidgets import QLabel, QSlider
+owner.glossary_name_check_autofix_level_var = 2
+rows = [other_settings.glossary_name_autofix_row(owner) for _ in range(2)]  # Other Settings, QA Scanner
+sliders = [r.findChild(QSlider) for r in rows]
+values = [r.findChildren(QLabel)[-1] for r in rows]
+out["autofix_start"] = [s.value() for s in sliders] + [v.text() for v in values]
+sliders[1].setValue(3)
+out["autofix_moved"] = [s.value() for s in sliders] + [v.text() for v in values] + [owner.glossary_name_check_autofix_level_var]
+shiboken6.delete(rows[0])
+sliders[1].setValue(1)
+out["autofix_after_close"] = [sliders[1].value(), values[1].text(), owner.glossary_name_check_autofix_level_var]
 print("SYNC=" + json.dumps(out))
 '''
 
@@ -683,13 +738,19 @@ def test_entry_types_dropdown_is_one_setting_in_other_settings_and_the_qa_scanne
     assert out["start"] == ["All", "All"] and out["configure_start"] == [False, False]
     assert out["custom"] == ["Custom", "Custom", "custom"] and out["configure"] == [True, True]
     assert out["after_close"] == ["Characters", "characters", False]
+    assert out["autofix_start"] == [2, 2, "2 Balanced", "2 Balanced"]
+    assert out["autofix_moved"] == [3, 3, "3 Aggressive", "3 Aggressive", 3]
+    assert out["autofix_after_close"] == [1, "1 Conservative", 1]
     # both dialogs build it from the one helper; the QA row sits right below the name check toggle
     with open(os.path.join(SRC, "other_settings.py"), encoding="utf-8") as f:
         other = f.read()
     with open(os.path.join(SRC, "QA_Scanner_GUI.py"), encoding="utf-8") as f:
         qa = f.read()
     section = other[other.index("def _create_processing_options_section"):]
-    assert "glossary_entry_types_row(\n        self, " in section[:section.index("\ndef ")]
-    assert (qa.index("detection_layout.addWidget(check_glossary_names_checkbox)")
+    body = section[:section.index("\ndef ")]
+    assert "glossary_entry_types_row(\n        self, " in body and "glossary_name_autofix_row(self)" in body
+    # the toggle (with its ✓ when NER is installed), then the entry types and Auto-fix strength, then the button
+    assert (qa.index("detection_layout.addWidget(check_glossary_names_row)")
             < qa.index("glossary_entry_types_row(self, lambda: dialog)")
+            < qa.index("glossary_name_autofix_row(self)")
             < qa.index("detection_layout.addWidget(glossary_names_fix_row)"))

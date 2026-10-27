@@ -459,7 +459,8 @@ class QAScannerMixin:
         import glossary_name_check as name_check
         config = dict(self.config or {})
         for key in ('emergency_glossary_compliance_mode', 'emergency_glossary_compliance_custom_types',
-                    'glossary_name_check_min_chars', 'glossary_name_check_autofix_level'):
+                    'glossary_name_check_min_chars', 'glossary_name_check_autofix_level',
+                    'glossary_name_check_match_numbers'):
             if hasattr(self, key + '_var'):
                 config[key] = getattr(self, key + '_var')
         return name_check.settings_from_config(config)
@@ -3740,8 +3741,16 @@ class QAScannerMixin:
             check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
             detection_layout.addWidget(check_glossary_checkbox)
 
-            check_glossary_names_checkbox = self._create_styled_checkbox(
-                "Check glossary names with NER (Experimental)")
+            # the label says whether NER does the check (owner 2026-10-27: ✓ when its model is installed)
+            import glossary_name_check as name_check
+            ner_state = name_check.ner_status(bool(getattr(self, 'glossary_name_check_use_ner_var',
+                                                           self.config.get('glossary_name_check_use_ner', True))))
+            check_glossary_names_checkbox = self._create_styled_checkbox({
+                "installed": "Check glossary names with NER (Experimental)",
+                "missing": "Check glossary names (Experimental) — NER not installed (downloads on first use)",
+                "unsupported": "Check glossary names (Experimental) — NER not supported in this build",
+                "off": "Check glossary names (Experimental) — NER off in Other Settings",
+            }[ner_state])
             check_glossary_names_checkbox.setChecked(qa_settings.get('check_glossary_names', False))
             check_glossary_names_checkbox.setToolTip(
                 "Flags chapters where a glossary name from the source chapter was translated with a\n"
@@ -3752,14 +3761,29 @@ class QAScannerMixin:
                 "Checks the entry types below (the same setting as Other Settings › Emergency Glossary\n"
                 "Compliance and the name check) and the name check's minimum length (Other Settings).\n"
                 "Flagged chapters count as QA failures like other issues.")
-            detection_layout.addWidget(check_glossary_names_checkbox)
+            check_glossary_names_row = QWidget()
+            check_glossary_names_layout = QHBoxLayout(check_glossary_names_row)
+            check_glossary_names_layout.setContentsMargins(0, 0, 0, 0)
+            check_glossary_names_layout.addWidget(check_glossary_names_checkbox)
+            if ner_state == "installed":
+                ner_installed_icon = QLabel("✓")
+                ner_installed_icon.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 12pt;")
+                ner_installed_icon.setToolTip("The named-entity model (NER) is installed")
+                check_glossary_names_layout.addWidget(ner_installed_icon)
+            check_glossary_names_layout.addStretch()
+            detection_layout.addWidget(check_glossary_names_row)
 
-            # The entry types dropdown of Other Settings (one setting: a change in either dialog shows in both)
-            from other_settings import glossary_entry_types_row
+            # Other Settings' entry types dropdown and Auto-fix strength (one setting each: a change in either
+            # dialog shows in both)
+            from other_settings import glossary_entry_types_row, glossary_name_autofix_row
             glossary_names_types_row = glossary_entry_types_row(self, lambda: dialog)
             detection_layout.addWidget(glossary_names_types_row)
             glossary_names_types_row.setVisible(check_glossary_names_checkbox.isChecked())
             check_glossary_names_checkbox.toggled.connect(glossary_names_types_row.setVisible)
+            glossary_names_autofix_row = glossary_name_autofix_row(self)
+            detection_layout.addWidget(glossary_names_autofix_row)
+            glossary_names_autofix_row.setVisible(check_glossary_names_checkbox.isChecked())
+            check_glossary_names_checkbox.toggled.connect(glossary_names_autofix_row.setVisible)
 
             glossary_names_fix_row = QWidget()
             glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)

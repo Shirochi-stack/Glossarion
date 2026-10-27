@@ -185,8 +185,12 @@ def _fold(text):
     return str(text or "").casefold().replace("’", "'").replace("‘", "'")
 
 
-def _expected_present(expected, text):
-    pattern = r"(?<![\w])" + re.escape(_fold(expected)) + r"(?:s|es)?(?![\w])"
+def _expected_present(expected, text, match_numbers=True):
+    folded = _fold(expected)
+    # a name that starts with a number glued to the word before it ("the72 Demon Kings") is there: the
+    # translation lacks a space, it did not respell the name (``match_numbers``, "Names keep their numbers")
+    before = r"(?<!\d)" if match_numbers and folded[:1].isdigit() else r"(?<![\w])"
+    pattern = before + re.escape(folded) + r"(?:s|es)?(?![\w])"
     return re.search(pattern, _fold(text)) is not None
 
 
@@ -225,7 +229,9 @@ def _title_candidates(text):
     return found
 
 
-def _is_variant(expected, expected_key, candidate, candidate_key):
+def _is_variant(expected, expected_key, candidate, candidate_key, match_numbers=True):
+    if match_numbers and re.sub(r"\D", "", expected) != re.sub(r"\D", "", candidate):
+        return False  # ``_norm`` drops digits: "Demon Kings" is not a respelling of "72 Demon Kings"
     if expected_key == candidate_key:
         # spacing / hyphenation drift ("Yoo So-jeong" vs "Yoo Sojeong"), not a case change
         return _fold(expected) != _fold(candidate)
@@ -251,17 +257,18 @@ def _is_variant(expected, expected_key, candidate, candidate_key):
 class GlossaryNameEntries:
     """Entries to check plus every translated name in the glossary (never a variant)."""
 
-    def __init__(self, entries, known_names, autofix_level=AUTOFIX_CONSERVATIVE):
+    def __init__(self, entries, known_names, autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True):
         self.entries = tuple(entries)
         self.known = frozenset(known_names)
         self.autofix_level = autofix_level
+        self.match_numbers = match_numbers
 
     def __bool__(self):
         return bool(self.entries)
 
 
 def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_chars=0,
-                  autofix_level=AUTOFIX_CONSERVATIVE):
+                  autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True):
     """Pick the entries to check from ``glossary_usage.parse_glossary_file`` rows."""
     known = set()
     picked = {}
@@ -283,7 +290,7 @@ def build_entries(glossary_entries, *, mode="characters", custom_types=(), min_c
             continue  # untranslated names and non-Latin targets have nothing to check
         picked.setdefault(raw, NameEntry(raw, translated, entry_type, str(row.get("_origin") or "")))
     entries = sorted(picked.values(), key=lambda e: -len(e.raw))
-    return GlossaryNameEntries(entries, known, autofix_level)
+    return GlossaryNameEntries(entries, known, autofix_level, match_numbers)
 
 
 _load_lock = threading.Lock()
@@ -340,7 +347,7 @@ def _layer_rows(layers):
 
 
 def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars=0, settings=None,
-                 autofix_level=AUTOFIX_CONSERVATIVE):
+                 autofix_level=AUTOFIX_CONSERVATIVE, match_numbers=True):
     """The names to check from the book's glossary and the enabled extension / unified glossary
     (``glossary_layers``), parsed once per (file versions, options)."""
     if not glossary_path or not os.path.isfile(glossary_path):
@@ -351,13 +358,13 @@ def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars
         info = os.stat(path)
         stamps.append((os.path.normcase(os.path.abspath(path)), origin, info.st_size, info.st_mtime_ns))
     key = (tuple(stamps), str(mode or "characters").lower(), tuple(custom_types or ()), int(min_chars or 0),
-           int(autofix_level))
+           int(autofix_level), bool(match_numbers))
     with _load_lock:
         cached = _load_cache.get(key)
         if cached is not None:
             return cached
     entries = build_entries(_layer_rows(layers), mode=mode, custom_types=custom_types, min_chars=min_chars,
-                            autofix_level=autofix_level)
+                            autofix_level=autofix_level, match_numbers=match_numbers)
     with _load_lock:
         _load_cache.clear()
         _load_cache[key] = entries
@@ -400,6 +407,7 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
         return result
     output_text = html_to_text(output_markup)
     level = getattr(entries, "autofix_level", AUTOFIX_CONSERVATIVE)
+    numbers = getattr(entries, "match_numbers", True)
     candidates = None
     parts = frozenset()  # candidates that only count as a spacing / hyphen respelling (_ner_candidates)
     matched_raws = []
@@ -417,7 +425,7 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
         matched_raws.append(entry.raw)
         if count <= covered:
             continue
-        if _expected_present(entry.translated, output_text):
+        if _expected_present(entry.translated, output_text, numbers):
             # A close spelling next to the right one is more often a second
             # character (Adele / Adela) than drift, so only absences are searched.
             continue
@@ -436,7 +444,7 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
         # ("Yoo So-jeong" for "Yoo Sojeong") normalizes to the same key.
         variants = [core for key, core in candidates.items()
                     if (key == expected_key or (key not in entries.known and key not in parts))
-                    and _is_variant(entry.translated, expected_key, core, key)]
+                    and _is_variant(entry.translated, expected_key, core, key, numbers)]
         if variants:
             kind = KIND_VARIANT if len(variants) == 1 else KIND_AMBIGUOUS
             occurrences = sum(len(_occurrences(v, output_markup)) for v in variants)
@@ -554,7 +562,8 @@ def settings_from_env(env=None):
         min_chars = 2
     return {"mode": mode, "custom_types": tuple(custom_types if mode == "custom" else ()),
             "min_chars": min_chars,
-            "autofix_level": _autofix_level(env.get("GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL"))}
+            "autofix_level": _autofix_level(env.get("GLOSSARY_NAME_CHECK_AUTOFIX_LEVEL")),
+            "match_numbers": _truthy(env.get("GLOSSARY_NAME_CHECK_MATCH_NUMBERS"), True)}
 
 
 def _autofix_level(value, default=AUTOFIX_CONSERVATIVE):
@@ -582,6 +591,8 @@ def settings_from_config(config, env=None):
             pass
     if "glossary_name_check_autofix_level" in config:
         scope["autofix_level"] = _autofix_level(config["glossary_name_check_autofix_level"], scope["autofix_level"])
+    if "glossary_name_check_match_numbers" in config:
+        scope["match_numbers"] = _truthy(config["glossary_name_check_match_numbers"], True)
     return scope
 
 
@@ -604,6 +615,24 @@ def use_ner_from_config(config, env=None):
     if "glossary_name_check_use_ner" in config:
         return _truthy(config["glossary_name_check_use_ner"], True)
     return use_ner_from_env(env)
+
+
+def ner_status(use_ner=True):
+    """What finds the names here: "installed" (the NER model is downloaded and this build runs it),
+    "missing" (it downloads on first use), "unsupported" (no ONNX Runtime in this build) or "off" (the
+    setting; the capitalization heuristic finds them)."""
+    if not use_ner:
+        return "off"
+    try:
+        import ner_names
+    except ImportError:
+        return "unsupported"
+    if not ner_names.runtime_available():
+        return "unsupported"
+    try:
+        return "installed" if ner_names.model_installed() else "missing"
+    except Exception:
+        return "missing"
 
 
 _ner_notes = set()
