@@ -4,8 +4,9 @@ For every glossary entry whose raw name occurs in a source chapter, the
 translated chapter should contain the entry's translated name. When it does
 not, the output is searched for a close spelling the model used instead
 (``Walter Argent`` for glossary ``Valter Argent``, ``Gang Si-hyeon`` for
-``Kang Si-hyeon``). Name-like text is found with a capitalization heuristic,
-so no NER model or extra dependency is needed.
+``Kang Si-hyeon``). The names in the output come from the NER model
+(``ner_names``, "Use Named Entity Recognition model (NER)") when this build can
+run it; otherwise, or with the setting off, from a capitalization heuristic.
 
 Measured on the local validation corpus (63 books, 11k chapters), the rules
 below keep plurals, honorific suffixes, possessives and sentence words glued
@@ -363,29 +364,44 @@ def load_entries(glossary_path, *, mode="characters", custom_types=(), min_chars
     return entries
 
 
-def _ner_candidates(text, tagger):
+def _ner_candidates(text, tagger, title=False):
     """Names the NER model finds in the output (person / place / organization / misc), keyed by
     ``_norm`` like ``_name_candidates``; NER also sees names at a sentence start and names that are
-    ordinary words elsewhere ("Rose"), which the capitalization heuristic has to skip."""
-    found = {}
+    ordinary words elsewhere ("Rose"), which the capitalization heuristic has to skip.
+
+    Returns ``(candidates, parts)``. Every run of up to four words inside a name is a candidate too
+    (``_title_candidates``): a glossary entry is often a given name alone ("Minho" in "Lee Min-ho").
+    In prose those runs are ``parts``, only a respelling of a glossary name with other spacing /
+    hyphens ("Min-ho" for "Minho"): a close spelling of a short name inside a longer one is another
+    name (corpus, unified glossaries: "Mikiyo" for "Miki", "Hanako" for "Hana"). ``title``: Title Case
+    draws neighbouring words into the model's names ("Sad Mirena", "Serin & Elisha"), so there every
+    run is a full candidate."""
+    found, parts = {}, set()
     for entity in tagger.entities(text):
         core = _clean_candidate(entity.text)
         key = _norm(core)
         if core and len(key) >= 2:
             found.setdefault(key, core)
-    return found
+            parts.discard(key)  # a whole name elsewhere in the text
+        for part_key, part in _title_candidates(entity.text).items():
+            if part_key not in found:
+                found[part_key] = part
+                if not title:
+                    parts.add(part_key)
+    return found, parts
 
 
 def check_chapter(source_text, output_markup, entries, output_file="", *, ner=None, title=False):
     """Compare one translated chapter with its source chapter. ``ner``: a ``ner_names.NerTagger``
-    finds the candidate spellings (else the capitalization heuristic). ``title``: the text is a title in
-    Title Case (``_title_candidates``)."""
+    finds the candidate spellings, alone (else the capitalization heuristic). ``title``: the text is a
+    title in Title Case (``_title_candidates``)."""
     result = ChapterResult(output_file=output_file)
     if not entries or not source_text or not output_markup:
         return result
     output_text = html_to_text(output_markup)
     level = getattr(entries, "autofix_level", AUTOFIX_CONSERVATIVE)
     candidates = None
+    parts = frozenset()  # candidates that only count as a spacing / hyphen respelling (_ner_candidates)
     matched_raws = []
     # a large (unified) glossary: skip entries whose first two characters never occur in the chapter
     bigrams = {source_text[i:i + 2] for i in range(len(source_text) - 1)}
@@ -406,20 +422,20 @@ def check_chapter(source_text, output_markup, entries, output_file="", *, ner=No
             # character (Adele / Adela) than drift, so only absences are searched.
             continue
         if candidates is None:
-            # NER adds the names the heuristic cannot see (sentence starts, ordinary words); the
-            # heuristic keeps the invented / lowercase-hyphen spellings the model does not tag (corpus)
-            candidates = _name_candidates(output_text)
-            if title:
-                for key, core in _title_candidates(output_text).items():
-                    candidates.setdefault(key, core)
+            # with NER on, its names are the only candidates (owner, 2026-10-27); the capitalization
+            # heuristic is the fallback where NER cannot run
             if ner is not None:
-                for key, core in _ner_candidates(output_text, ner).items():
-                    candidates.setdefault(key, core)
+                candidates, parts = _ner_candidates(output_text, ner, title)
+            else:
+                candidates = _name_candidates(output_text)
+                if title:
+                    for key, core in _title_candidates(output_text).items():
+                        candidates.setdefault(key, core)
         expected_key = _norm(entry.translated)
         # Another glossary name is never drift; a respelling of this one
         # ("Yoo So-jeong" for "Yoo Sojeong") normalizes to the same key.
         variants = [core for key, core in candidates.items()
-                    if (key == expected_key or key not in entries.known)
+                    if (key == expected_key or (key not in entries.known and key not in parts))
                     and _is_variant(entry.translated, expected_key, core, key)]
         if variants:
             kind = KIND_VARIANT if len(variants) == 1 else KIND_AMBIGUOUS

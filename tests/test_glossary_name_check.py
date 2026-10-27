@@ -275,6 +275,79 @@ def test_ner_candidates_find_sentence_initial_names(tmp_path):
     assert (finding.kind, finding.variants) == ("variant", ("Walther",))
 
 
+def test_with_ner_its_names_are_the_only_candidates(tmp_path):
+    """2026-10-27 (owner): with NER on, the check uses the model alone, never the capitalization heuristic."""
+    output = "<p>Walter Argent smiled.</p>"
+    assert [f.kind for f in findings("발터 아르겐트", output)] == ["variant"]  # the heuristic finds it
+    text = g.html_to_text(output)
+    untagged = _fake_tagger(tmp_path, text, {})
+    assert [f.kind for f in g.check_chapter("발터 아르겐트", output, entries(), ner=untagged).findings] == ["missing"]
+    tagged = _fake_tagger(tmp_path, text, {"Walter": 3, "Argent": 4})
+    [finding] = g.check_chapter("발터 아르겐트", output, entries(), ner=tagged).findings
+    assert (finding.kind, finding.variants) == ("variant", ("Walter Argent",))
+
+
+def test_a_word_inside_an_ner_name_is_only_a_respelling(tmp_path):
+    """A glossary entry is often a given name alone: "Min-ho" in "Lee Min-ho" is drift of "Minho", but a
+    close spelling inside a longer name is another name ("Mikiyo" in "Sawayanagi Mikiyo" for "Miki")."""
+    rows = [{"type": "character", "raw_name": "민호", "translated_name": "Minho"},
+            {"type": "character", "raw_name": "미키", "translated_name": "Miki"}]
+    ents = g.build_entries(rows, min_chars=0)
+    output = "<p>Lee Min-ho met Sawayanagi Mikiyo.</p>"
+    text = g.html_to_text(output)
+    tagger = _fake_tagger(tmp_path, text, {"Lee": 3, "Min": 4, "ho": 4, "Sawayanagi": 3, "Mikiyo": 4})
+    found = {f.expected: f for f in g.check_chapter("이민호 사와야나기 미키요", output, ents, ner=tagger).findings}
+    assert (found["Minho"].kind, found["Minho"].variants) == ("variant", ("Min-ho",))
+    assert found["Miki"].kind == "missing"
+    # in a title every run of words is a full candidate (Title Case pulls words into the name)
+    title = "Chapter 3: Sad Mikiyo"
+    title_tagger = _fake_tagger(tmp_path, title, {"Sad": 3, "Mikiyo": 4})
+    [finding] = g.check_chapter("미키", f"<p>{title}</p>", g.build_entries(rows[1:], min_chars=0),
+                                ner=title_tagger, title=True).findings
+    assert (finding.kind, finding.variants) == ("variant", ("Mikiyo",))
+
+
+def test_tagger_keeps_the_part_after_a_hyphen_or_apostrophe(tmp_path):
+    # the real model labels the joined part "O" or another type: "Yoo So", "Ju", "Tu Zhi", "Yuki"
+    text = "Yoo So-jeong met Ju-in, Tu Zhi'an's son and the Yuki-onna at Walter's inn"
+    tagger = _fake_tagger(tmp_path, text, {"Yoo": 3, "So": 4, "Ju": 3, "Tu": 3, "Zhi": 4, "Yuki": 1, "onna": 7,
+                                           "Walter": 3})
+    assert [(e.label, e.text) for e in tagger.entities(text)] == [
+        ("PER", "Yoo So-jeong"), ("PER", "Ju-in"), ("PER", "Tu Zhi'an"), ("MISC", "Yuki-onna"), ("PER", "Walter")]
+
+
+class _ProbSession(_FakeSession):
+    """Per-word label probabilities ({label id: p}, the rest of the mass on "O") instead of sure labels."""
+
+    def run(self, _outputs, feed):
+        import numpy as np
+        ids = feed["input_ids"][0]
+        probs = np.full((1, len(ids), 9), 1e-6, dtype=np.float64)
+        for position in range(len(ids)):
+            word = self.tags[position - 1] if 0 < position <= len(self.tags) else {}
+            for label, p in word.items():
+                probs[0, position, label] = p
+            probs[0, position, 0] = max(1e-6, 1.0 - sum(word.values()))
+        return [np.log(probs).astype(np.float32)]
+
+
+def test_tagger_scores_a_word_by_how_sure_it_is_a_name(tmp_path):
+    """Corpus titles (2026-10-27): the model is often unsure of the type only ("Mirena Falls": place 0.58),
+    keeps a name across a type switch ("World Tree El" misc + "Lamina" I-LOC), and a capitalized word it
+    starts another entity with stays out of the name before it ("Lee Da-yun-Style")."""
+    text = "Tasty Mirena met Lee Da-yun-Style near Mirena Falls by the World Tree El Lamina"
+    probs = {"Tasty": {3: 0.79}, "Mirena": {4: 0.35, 3: 0.25},  # "Mirena": O 0.40 is the single best label
+             "Lee": {3: 1.0}, "Da": {4: 1.0}, "yun": {4: 0.94}, "Style": {1: 0.88},
+             "Falls": {8: 0.35, 2: 0.3, 4: 0.23}, "World": {1: 0.7}, "Tree": {2: 0.98},
+             "El": {2: 0.64, 8: 0.2}, "Lamina": {8: 0.47, 2: 0.4}}
+    tagger = _fake_tagger(tmp_path, text, {})
+    words = [text[a:b] for a, b in ner_names.basic_words(text)]
+    tagger.session = _ProbSession([probs.get(w, {}) for w in words])
+    assert [(e.label, e.text) for e in tagger.entities(text)] == [
+        ("PER", "Tasty Mirena"), ("PER", "Lee Da-yun"), ("MISC", "Style"), ("PER", "Mirena Falls"),
+        ("MISC", "World Tree El Lamina")]
+
+
 def test_resolve_ner_falls_back_when_unsupported(monkeypatch):
     monkeypatch.setattr(ner_names, "runtime_available", lambda: False)
     monkeypatch.setattr(g, "_ner_notes", set())
@@ -558,3 +631,65 @@ def test_no_record_no_report(tmp_path):
     g.check_and_fix_file(str(book / "response_chapter0001.html"), "발터 아르겐트가 웃었다.",
                          g.load_entries(str(book / "glossary.csv")), auto_fix=True, record=True)
     assert not (book / "glossary_name_check").exists() and g.summary_line(str(book)) is None
+
+
+# ------------------------------------------------------------------- entry types (Other Settings + QA)
+_ENTRY_TYPES_SYNC = r'''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import shiboken6
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QPushButton, QVBoxLayout, QWidget
+app = QApplication.instance() or QApplication([])
+import other_settings
+
+class Owner(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.config = {"emergency_glossary_compliance_mode": "all"}
+
+owner = Owner()
+dialogs = []
+for _ in range(2):  # Other Settings and the QA Scanner settings
+    dlg = QDialog()
+    QVBoxLayout(dlg).addWidget(other_settings.glossary_entry_types_row(owner, lambda d=dlg: d))
+    dlg.show()
+    dialogs.append(dlg)
+combos = [d.findChild(QComboBox) for d in dialogs]
+buttons = [next(b for b in d.findChildren(QPushButton) if b.text() == "Configure…") for d in dialogs]
+out = {"start": [c.currentText() for c in combos], "configure_start": [b.isVisible() for b in buttons]}
+combos[1].setCurrentIndex(2)  # Custom in the QA Scanner settings
+out["custom"] = [c.currentText() for c in combos] + [owner.emergency_glossary_compliance_mode_var]
+out["configure"] = [b.isVisible() for b in buttons]
+shiboken6.delete(dialogs[1])  # the QA Scanner settings closed
+combos[0].setCurrentIndex(0)
+out["after_close"] = [combos[0].currentText(), owner.emergency_glossary_compliance_mode_var, buttons[0].isVisible()]
+print("SYNC=" + json.dumps(out))
+'''
+
+
+def test_entry_types_dropdown_is_one_setting_in_other_settings_and_the_qa_scanner(tmp_path):
+    """2026-10-27 (owner): the QA Scanner settings show Other Settings' entry types dropdown below their
+    glossary name check toggle, and the two stay in sync."""
+    pytest.importorskip("PySide6")
+    import subprocess
+    script = tmp_path / "entry_types_sync.py"
+    script.write_text(_ENTRY_TYPES_SYNC, encoding="utf-8")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", GLOSSARION_HTTP_LOG="0", PYTHONIOENCODING="utf-8")
+    result = subprocess.run([sys.executable, str(script), SRC], cwd=str(tmp_path), env=env, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", timeout=300)
+    line = next((ln for ln in result.stdout.splitlines() if ln.startswith("SYNC=")), None)
+    assert line is not None, (result.returncode, result.stdout[-2000:], result.stderr[-2000:])
+    out = json.loads(line[len("SYNC="):])
+    assert out["start"] == ["All", "All"] and out["configure_start"] == [False, False]
+    assert out["custom"] == ["Custom", "Custom", "custom"] and out["configure"] == [True, True]
+    assert out["after_close"] == ["Characters", "characters", False]
+    # both dialogs build it from the one helper; the QA row sits right below the name check toggle
+    with open(os.path.join(SRC, "other_settings.py"), encoding="utf-8") as f:
+        other = f.read()
+    with open(os.path.join(SRC, "QA_Scanner_GUI.py"), encoding="utf-8") as f:
+        qa = f.read()
+    section = other[other.index("def _create_processing_options_section"):]
+    assert "glossary_entry_types_row(\n        self, " in section[:section.index("\ndef ")]
+    assert (qa.index("detection_layout.addWidget(check_glossary_names_checkbox)")
+            < qa.index("glossary_entry_types_row(self, lambda: dialog)")
+            < qa.index("detection_layout.addWidget(glossary_names_fix_row)"))

@@ -170,6 +170,12 @@ SCAN_EXCLUDE = {
 WIDGET_KEY_PINS = {
     ("translator_gui.py", "show_assistant_prompt_dialog", "profile_combo"): ("active_assistant_prompt_profile",),
 }
+# Shared widget-row builders a dialog calls (``row = glossary_entry_types_row(self, ...)``): the keys
+# the row edits. Group and tab come from the call site, as they did when the widgets were built there
+# (2026-10-27: Other Settings' entry types dropdown, also shown by the QA Scanner settings).
+HELPER_ROW_KEYS = {
+    "glossary_entry_types_row": ("emergency_glossary_compliance_mode",),
+}
 # U9 P5b: the desktop builds its three settings tables from the schema
 # (``settings_map = desktop_settings_map(self)`` in settings_persistence, ``bool_vars =
 # desktop_bool_vars(self)`` / ``str_vars = desktop_str_vars(self)`` in owner_state). The literals
@@ -2262,6 +2268,11 @@ def widget_labels(mod: Module, fn: Func, ctx: RefContext, widget_key: dict):
                 text = joined_text(call.args[0])
                 if text and text.strip():
                     last_label = (text.strip(), idx)
+                continue
+            if isinstance(func, ast.Name) and func.id in HELPER_ROW_KEYS:
+                keys = HELPER_ROW_KEYS[func.id]
+                for key in keys:
+                    helper_labels.append((key, 0, len(keys), None, None, group, current_tab))
                 continue
             if isinstance(func, ast.Name) and func.id in local_defs or is_self_attr(func):
                 # helper rows: _create_slider_row(layout, "Top-P:", self, 'top_p_var', ...)

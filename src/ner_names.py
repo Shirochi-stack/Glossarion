@@ -27,6 +27,10 @@ __all__ = ["Entity", "NerTagger", "UNSUPPORTED_REASON", "get_tagger", "model_ins
 UNSUPPORTED_REASON = "Not supported in this build"
 MAX_TOKENS = 510  # 512 positions minus [CLS] / [SEP]
 _LABEL_TYPES = ("PER", "LOC", "ORG", "MISC")
+# the letters joined to a name by a hyphen / apostrophe ("So-jeong", "Zhi'an"), but not an English
+# contraction ("Walter's", "Yoo'll")
+_JOINED_PART = re.compile(r"[-'’]([^\W\d_]+)")
+_CONTRACTIONS = frozenset(("s", "t", "d", "m", "ll", "re", "ve"))
 
 
 @dataclass(frozen=True)
@@ -197,11 +201,25 @@ class NerTagger:
         logits = self.session.run(None, feed)[0][0]
         shifted = logits - logits.max(axis=-1, keepdims=True)
         probs = np.exp(shifted) / np.exp(shifted).sum(axis=-1, keepdims=True)
-        # one label per word: its first sub-token's (HF aggregation "first")
-        return [(int(probs[i].argmax()), float(probs[i].max())) for i in first_piece]
+        # one label per word: its first sub-token's (HF aggregation "first"). The score is how sure the model
+        # is that the word is part of a name at all (1 - P(O)), as it is often unsure of the type only (a
+        # title's "Mirena Falls": person / place / misc, 0.58 at best, but 0.99 a name); a word whose name
+        # labels together outweigh "O" takes the best of them ("Tasty Mirena": O 0.40, the rest 0.60)
+        outside = self.labels.index("O")
+        labels = []
+        for i in first_piece:
+            name = 1.0 - float(probs[i][outside])
+            if name < 0.5:
+                labels.append((outside, name))
+                continue
+            others = probs[i].copy()
+            others[outside] = -1.0
+            labels.append((int(others.argmax()), name))
+        return labels
 
     def entities(self, text: str, min_score: float = 0.5) -> list:
-        """Named entities in ``text`` (character spans), adjacent B-/I- words of one type merged."""
+        """Named entities in ``text`` (character spans), adjacent B-/I- words of one name merged; ``score``
+        is the mean probability that its words are part of a name."""
         key = hash(text)
         cached = self._cache.get(key)
         if cached is not None and cached[0] == text:
@@ -218,15 +236,16 @@ class NerTagger:
                     continue
                 prefix, kind = label.split("-", 1)
                 gap = text[current["end"]:start] if current else ""
-                # I- continues the open entity of its type across spaces / joining marks ("Si-hyeon", "O'Neil")
-                if current and kind == current["label"] and (prefix == "I" or gap in ("-", "'", "’")) \
+                # I- continues the open entity across spaces / joining marks ("Si-hyeon", "O'Neil"), whatever type
+                # the model gave it ("World Tree El" MISC + "Lamina" I-LOC); B- of its type only across a mark
+                if current and (prefix == "I" or (kind == current["label"] and gap in ("-", "'", "’"))) \
                         and gap.strip(" -'’") == "" and "\n" not in gap:
                     current["end"] = end
                     current["scores"].append(score)
                     continue
                 if current:
                     found.append(current)
-                current = {"label": kind, "start": start, "end": end, "scores": [score]}
+                current = {"label": kind, "start": start, "end": end, "scores": [score], "begins": prefix == "B"}
             if current:
                 found.append(current)
         # the hyphen / apostrophe inside a name is its own "O" word ("So-jeong", "Al'shel"): rejoin
@@ -238,7 +257,23 @@ class NerTagger:
                 prev["scores"].extend(item["scores"])
             else:
                 merged.append(item)
-        found = merged
+        # ...and a part after the joining mark the model labelled "O" or another type ("Yoo So-jeong" came
+        # back as "Yoo So", "Ju-in" as "Ju", "Tu Zhi'an" as "Tu Zhi", "Yuki-onna" as "Yuki") is the name's too,
+        # unless it is a capitalized word the model starts another entity with ("Lee Da-yun-Style Coping Method")
+        starts = {item["start"]: item for item in merged}
+        found = []
+        for item in merged:
+            if found and item["start"] < found[-1]["end"]:
+                continue  # the joined part of the name before it
+            while True:
+                part = _JOINED_PART.match(text, item["end"])
+                if part is None or (part.group(0)[0] != "-" and part.group(1).casefold() in _CONTRACTIONS):
+                    break
+                other = starts.get(part.start(1))
+                if other is not None and other["begins"] and part.group(1)[0].isupper():
+                    break
+                item["end"] = part.end()
+            found.append(item)
         out = []
         for item in found:
             score = sum(item["scores"]) / len(item["scores"])
