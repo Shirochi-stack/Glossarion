@@ -738,10 +738,11 @@ class JobDetailScreen(Screen):
 
     def _apply_library(self, snap: JobSnapshot) -> None:
         """The Library button: shown once the job's book is known (its origin book, or what the lookup found);
-        a chat book shows it from the start - disabled with the chat card's reason ("Added to the Library when
-        the translation finishes") while it is translated, enabled once the run ended (a tap looks again: the
-        chat moves the book only after the run). Hidden for every other job (a typed-text chat, a Tools job
-        without a Library book). A new job state starts a new lookup (``resolve_library``)."""
+        a chat book shows it from the start, enabled also while it is translated or not compiled yet (hotfix 5,
+        owner: "should still jump to the library overview of the attachment regardless of the attachment being
+        compiled or not, since it exists for in progress attachments"): a tap looks the book up again (its raw
+        file is on the Library's shelf from the run's start). Hidden for every other job (a typed-text chat, a
+        Tools job without a Library book). A new job state starts a new lookup (``resolve_library``)."""
         key = self._library_state_key(snap)
         if key != self._library_key:
             self._library_key = key
@@ -749,10 +750,9 @@ class JobDetailScreen(Screen):
             if self._library_found is None:
                 self._spawn(self.resolve_library(snap, key))
         chat_book = self.chat_book(snap)
-        waiting = self._library_found is None and chat_book and not snap.is_terminal
         self.library_button.visible = self.navigate is not None and (self._library_found is not None or chat_book)
-        self.library_button.disabled = waiting
-        self.library_reason.visible = self.library_button.visible and waiting
+        self.library_button.disabled = False
+        self.library_reason.visible = False
 
     async def resolve_library(self, snap: Optional[JobSnapshot] = None, key: Any = None) -> Optional[str]:
         """Look the job's Library book up (``find_library_book``) and show the answer, unless the job moved on
@@ -776,16 +776,17 @@ class JobDetailScreen(Screen):
         return bid
 
     async def _on_library(self, e: Any = None) -> Optional[str]:
-        """Library: the Book page of the job's book, pushed over this page (Back returns here). A finished chat
-        book that was not found before is looked up again now (the chat moves it into the Library after its
-        run ended). One lookup at a time (``ChatFeature.library_book`` does not wait for a Library scan that
-        is already running, it answers from the stale shelf): the tap first waits for the running lookup (the
-        job state's own, or a first tap's) and looks again only when that found nothing."""
+        """Library: the Book page of the job's book, pushed over this page (Back returns here). A book that was
+        not found before is looked up again now, while it is translated too (hotfix 5; a finished chat book
+        moves into the Library after its run ended). One lookup at a time (``ChatFeature.library_book`` does not
+        wait for a Library scan that is already running, it answers from the stale shelf): the tap first waits
+        for the running lookup (the job state's own, or a first tap's) and looks again only when that found
+        nothing."""
         snap = self.snap
         if snap is None or self.navigate is None:
             return None
         bid = self._library_found
-        if bid is None and snap.is_terminal:
+        if bid is None:
             task = self._library_task
             if task is not None and not task.done():
                 await asyncio.wait({task})

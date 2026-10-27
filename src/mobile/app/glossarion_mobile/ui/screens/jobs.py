@@ -590,13 +590,21 @@ class JobsFeature:
 
     async def _library_book_of_file(self, path: str) -> Optional[str]:
         """Job detail › Library: the Library book whose raw file is ``path`` or holds the same bytes
-        (``chat_view.library_book_for_file``, on the io pool); None without the Library."""
+        (``chat_view.library_book_for_file``, on the io pool); None without the Library. Not found on the
+        shelf: a quiet rescan and one more look (hotfix 5: a chat book being translated is on the Library's
+        shelf from its run's start, which records its raw file, but a Library scanned before missed it)."""
         library = getattr(self.app, "library", None)
         if library is None:
             return None
         from glossarion_mobile.ui.chat.chat_view import library_book_for_file
 
         target = await self.run_io(library_book_for_file, library, path)
+        if target is None and callable(getattr(library, "refresh", None)):
+            try:
+                await library.refresh(quiet=True, reason="jobs")
+            except Exception:
+                log.debug("refreshing the Library failed", exc_info=True)
+            target = await self.run_io(library_book_for_file, library, path)
         return str(getattr(target, "bid", "") or "") or None
 
     async def search_files(self, query: str) -> list:

@@ -388,6 +388,7 @@ class ChatFeature:
             open_reader=self.open_reader,
             pick_files=self.pick_files,
             pick_folder=self.pick_folder,
+            take_photo=self.take_photo if self.camera_available() else None,
             open_tool_with_source=self.open_tool_with_source,
             tools_context=self.tools_context,
             import_file=self.import_file,
@@ -893,6 +894,15 @@ class ChatFeature:
             navigate(route_name)
         return route_name
 
+    def camera_available(self) -> bool:
+        """＋ › Camera works: the phone app's extension is there (not the desktop stub)."""
+        native = getattr(self.app, "native", None)
+        return native is not None and not getattr(native, "is_stub", True)
+
+    async def take_photo(self) -> dict:
+        """＋ › Camera (hotfix 5): a photo from the phone's camera app (``NativeBridge.take_photo``)."""
+        return await self.app.native.take_photo()
+
     def import_file(self, path: str) -> str:
         """Blocking: an app-owned copy of a picked file (FileBridge Inbox) when the bridge exists."""
         files_service = getattr(self.app, "files", None)
@@ -1176,9 +1186,16 @@ class ChatFeature:
             self._post(self._announce, outcome)
 
     def _on_job_transition(self, snap: Any, previous: Any = None) -> Any:
-        """A job ended: once nothing runs, sweep (moves that waited for the jobs, and workspaces a job
-        was writing). Returns the sweep task (None when there is nothing to do yet)."""
-        if state_name(snap) not in TERMINAL_STATES or self._active_job() is not None:
+        """A job ended: the Result cards re-read their compiled files (hotfix 5: after Compile ▾ the card kept
+        "Compile an EPUB or PDF first" on Share file via link until it was rendered again); once nothing runs,
+        sweep (moves that waited for the jobs, and workspaces a job was writing). Returns the sweep task (None
+        when there is nothing to do yet)."""
+        if state_name(snap) not in TERMINAL_STATES:
+            return None
+        if self._u10_cards:
+            self._u10_full = True
+            self._post(self._u10_schedule)
+        if self._active_job() is not None:
             return None
         return self._spawn(self.sweep("idle"))
 
@@ -1626,7 +1643,13 @@ class ChatFeature:
         except (TypeError, ValueError):
             user_index = -1
         span = turn_span(messages, user_index) if 0 <= user_index < len(messages) else []
-        folder = turn_workspace(messages, span[1:]) or moved_workspace(messages, span[1:])
+        roots: list = []
+        try:  # where this chat's moves go: a card the move did not follow still finds its book (hotfix 5)
+            root = chats.binding_for(cid).migration_output_root(chats.session(cid))
+            roots = [root] if root else []
+        except Exception:
+            log.debug("the chat's migration root is unknown", exc_info=True)
+        folder = turn_workspace(messages, span[1:]) or moved_workspace(messages, span[1:], roots)
         if folder:
             return folder
         if span:

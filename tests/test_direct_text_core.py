@@ -1451,6 +1451,35 @@ RUN_ENV_KNOB_EDITS = (
      "            (os.environ if self._RUN_ENVIRONMENT is None else self._RUN_ENVIRONMENT).get('MANUAL_GLOSSARY', ''),\n"),
 )
 
+#: hotfix 5 (emulator repro of the owner's "translated, but no EPUB"): a link that spells the moved folder another
+#: way (Android /data/user/0/<pkg>, a link to /data/data/<pkg>; the migrate resolves its source) moves too
+RELOCATE_REALPATH_EDITS = (
+    ('        """Keep response links valid after an attachment workspace is moved."""\n'
+     "        source_folder = os.path.abspath(source_folder)\n"
+     "        target_folder = os.path.abspath(target_folder)\n",
+     '        """Keep response links valid after an attachment workspace is moved.\n'
+     "\n"
+     "        A stored link may spell the moved folder another way than ``source_folder`` (Android keeps\n"
+     "        app files under ``/data/user/0/<pkg>``, a link to ``/data/data/<pkg>``; the caller resolves\n"
+     "        the source with ``realpath``): links that only match once both are resolved move too.\n"
+     '        """\n'
+     "        source_folder = os.path.abspath(source_folder)\n"
+     "        target_folder = os.path.abspath(target_folder)\n"
+     "        source_real = os.path.realpath(source_folder)\n"),
+    ("            absolute = os.path.abspath(value)\n"
+     "            if not self._path_is_same_or_descendant(absolute, source_folder):\n"
+     '                return ""\n'
+     "            relative = os.path.relpath(absolute, source_folder)\n",
+     "            absolute = os.path.abspath(value)\n"
+     "            base = source_folder\n"
+     "            if not self._path_is_same_or_descendant(absolute, source_folder):\n"
+     "                absolute = os.path.realpath(absolute)\n"
+     "                base = source_real\n"
+     "                if not self._path_is_same_or_descendant(absolute, base):\n"
+     '                    return ""\n'
+     "            relative = os.path.relpath(absolute, base)\n"),
+)
+
 QMESSAGEBOX_EDITS = (
     ("            QMessageBox.information(\n                message_parent,\n",
      "            self._direct_text_notice(\n                \"information\",\n                message_parent,\n"),
@@ -1612,6 +1641,10 @@ def _expected_move(name, legacy_text):
         text = text.replace("_InputOutputDialog.", "ChatStoreMixin.")
     if name == "_effective_run_glossary_path":
         for old, new in RUN_ENV_KNOB_EDITS:
+            assert text.count(_dedent4(old)) == 1, old
+            text = text.replace(_dedent4(old), _dedent4(new))
+    if name == "_relocate_session_attachment_paths":
+        for old, new in RELOCATE_REALPATH_EDITS:
             assert text.count(_dedent4(old)) == 1, old
             text = text.replace(_dedent4(old), _dedent4(new))
     if name == "_migrate_conversation_attachment":

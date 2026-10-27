@@ -782,7 +782,9 @@ def test_build_files_are_unchanged():
     assert "s.version          = '0.1.0'" in podspec
     pubspec = _source(PUBSPEC)
     deps = re.search(r"^dependencies:\n(.*?)^flutter:", pubspec, re.S | re.M).group(1)
-    assert set(re.findall(r"^  ([a-z_]+):", deps, re.M)) == {"flutter", "flet", "flutter_foreground_task"}
+    # image_picker: hotfix 5's ＋ › Camera (the phone's camera app); the in-app browser itself adds nothing
+    assert set(re.findall(r"^  ([a-z_]+):", deps, re.M)) == {"flutter", "flet", "flutter_foreground_task",
+                                                             "image_picker"}
     assert re.search(r"^version: 0\.1\.0$", pubspec, re.M)
     root = ET.parse(MANIFEST).getroot()
     permissions = {p.get(ANDROID_NS + "name") for p in root.findall("uses-permission")}

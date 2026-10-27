@@ -16,5 +16,9 @@ def _restore_sheet_hook():
         yield
         return
     original = ft.BottomSheet.before_update
+    # hotfix 5: on the phone app the start also hooks every text field (``keyboard_dismiss``: a tap outside
+    # closes the keyboard)
+    original_field = ft.TextField.before_update
     yield
     ft.BottomSheet.before_update = original
+    ft.TextField.before_update = original_field

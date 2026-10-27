@@ -220,6 +220,12 @@ class JobNotifications:
                                 snap.title, channel=CHANNEL_ACTION, route=job_route(snap.id),
                                 actions=[{"id": ACTION_RESUME, "title": "Resume"}])
 
+    async def finishing(self, snap: Any) -> bool:
+        """Android's background limit ended the service while a job only finishes (hotfix 5): it goes on, at the
+        latest once Glossarion is open again."""
+        return await self._show(action_notification_id(snap.id), "Finishing: open Glossarion if it stays here",
+                                snap.title, channel=CHANNEL_ACTION, route=job_route(snap.id))
+
     async def sign_in_required(self, account_label: str = "ChatGPT", route: str = "/settings/accounts") -> bool:
         return await self._show(_notification_id(_ACTION_BASE, "sign-in:" + account_label),
                                 f"Sign-in required for {account_label}", "Tap to sign in", channel=CHANNEL_ACTION,

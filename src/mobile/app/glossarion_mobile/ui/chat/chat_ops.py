@@ -37,6 +37,8 @@ __all__ = [
     "moved_workspace",
     "turn_workspace",
     "workspace_outputs",
+    "export_outputs",
+    "COMPILED_EXPORT_KINDS",
     "jump_entries",
     "safe_file_stem",
     "search_matches",
@@ -94,15 +96,24 @@ def turn_workspace(messages: Sequence[Any], indices: Iterable[Any]) -> str:
     return ""
 
 
-def moved_workspace(messages: Sequence[Any], indices: Iterable[Any]) -> str:
+def moved_workspace(messages: Sequence[Any], indices: Iterable[Any], roots: Sequence[str] = ()) -> str:
     """Blocking: a turn's workspace after it moved out of ``Attachments/`` into the Library (the move
     rewrites the cards' output folders, ``_relocate_session_attachment_paths``): the nearest folder at
-    or above a response's output folder that holds ``translation_progress.json``; '' when none does."""
+    or above a response's output folder that holds ``translation_progress.json``; '' when none does.
+
+    ``roots`` (hotfix 5): where the chat's moves go (``migration_output_root``). Cards an earlier build
+    moved without following still name the gone ``Attachments/<stem>`` (it compared the Android
+    ``/data/user/0`` and ``/data/data`` spellings of one folder as text): ``<root>/<stem>`` with its
+    ``translation_progress.json`` is that book."""
+    indices = [index for index in indices if index is not None and 0 <= int(index) < len(messages)]
+    stems: list = []
     for index in indices:
-        if index is None or not (0 <= int(index) < len(messages)):
-            continue
         message = messages[int(index)]
         folder = str(message[4] or "") if isinstance(message, (list, tuple)) and len(message) > 4 else ""
+        if folder and not os.path.isdir(folder):
+            stem = _attachment_stem(folder)
+            if stem and stem not in stems:
+                stems.append(stem)
         for _level in range(3):
             if not folder or not os.path.isdir(folder):
                 break
@@ -112,6 +123,24 @@ def moved_workspace(messages: Sequence[Any], indices: Iterable[Any]) -> str:
             if parent == folder:
                 break
             folder = parent
+    for root in roots or ():
+        for stem in stems:
+            candidate = os.path.join(str(root), stem)
+            if root and os.path.isfile(os.path.join(candidate, "translation_progress.json")):
+                return candidate
+    return ""
+
+
+def _attachment_stem(folder: str) -> str:
+    """The ``<stem>`` of a path at or below ``…/Attachments/<stem>`` ('' when it is not inside one)."""
+    current = os.path.normpath(str(folder or ""))
+    while current:
+        parent = os.path.dirname(current)
+        if os.path.basename(parent).lower() == "attachments":
+            return os.path.basename(current)
+        if parent == current:
+            return ""
+        current = parent
     return ""
 
 
@@ -171,6 +200,30 @@ def workspace_outputs(folder: str) -> list:
     for name in ("glossary.csv", "glossary.json"):
         add(os.path.join(folder, name), "glossary")
     return out
+
+
+#: what Share / Export offers of a book's workspace: its compiled outputs only
+COMPILED_EXPORT_KINDS = ("epub", "pdf", "txt", "html")
+
+
+def export_outputs(folder: str, source: str = "") -> list:
+    """Blocking: ``[(path, kind)]`` Share / Export offers for a workspace (hotfix 5, owner: "The share/export button
+    should only include the compiled output. Not unrelated .sdlxliff files"): the compiled outputs (EPUB / PDF /
+    TXT / HTML) - never a book run's per-chapter SDLXLIFF or its glossary. A workspace without one offers the run's
+    own translated files only when its ``source`` is not a book: a subtitle input's subtitles, an SDLXLIFF / XLIFF
+    input's SDLXLIFF; a book not compiled yet offers nothing (Compile ▾ first)."""
+    outputs = workspace_outputs(folder)
+    compiled = [(path, kind) for path, kind in outputs if kind in COMPILED_EXPORT_KINDS]
+    if compiled:
+        return compiled
+    extension = os.path.splitext(str(source or ""))[1].lower()
+    if extension in (".sdlxliff", ".xliff", ".xlf"):
+        wanted = "sdlxliff"
+    elif extension and extension.endswith(_SUBTITLE_EXTENSIONS):
+        wanted = "subtitle"
+    else:
+        return []
+    return [(path, kind) for path, kind in outputs if kind == wanted]
 
 
 # ---------------------------------------------------------------------------

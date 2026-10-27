@@ -250,6 +250,9 @@ UIFileSharingEnabled = true
 LSSupportsOpeningDocumentsInPlace = true
 ITSAppUsesNonExemptEncryption = false
 NSLocalNetworkUsageDescription = "Glossarion connects to model servers on your local network (Ollama, LM Studio) and receives sign-in callbacks on this device."
+# ＋ › Camera (hotfix 5, the extension's image_picker); iOS ends an app that opens the camera without it
+NSCameraUsageDescription = "Glossarion uses the camera to photograph pages you want to translate."
+NSPhotoLibraryUsageDescription = "Glossarion opens the photos you choose to translate them."
 UIBackgroundModes = ["processing"]
 BGTaskSchedulerPermittedIdentifiers = ["com.glossarion.app.job.*"]
 CFBundleDocumentTypes = [

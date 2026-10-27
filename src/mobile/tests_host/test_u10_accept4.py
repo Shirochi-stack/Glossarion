@@ -620,15 +620,24 @@ def test_share_links_end_to_end_on_a_phone(app_env, tmp_path, monkeypatch, caplo
             assert await _until(lambda: _card_share_reason(_result_card(app)) is None, 15), \
                 f"Result card share action: {_card_share_reason(_result_card(app))!r}"
             screen = await open_book_output()
-            assert screen.output.share_reason() == u10.SHARE_OFF_REASON
+            # hotfix 5 (owner: "being lazy ... It should redirect to the service and default to ... gofile"): the
+            # Book page's button is tappable with every service off too, and goes to Gofile's consent sheet
+            assert screen.output.share_reason() is None
             texts = _texts_under(screen.output.cloud_column)
-            assert u10.SHARE_LABEL in texts and u10.SHARE_OFF_REASON in texts, texts
-            share_button = _visible(tester, r"^out-share-link-\d+$")[0][1]
-            assert type(share_button).__name__ == "Row" and share_button.controls[0].disabled, \
-                "Share file via link is tappable while every service is off"
-            # the output row's ⋮ sheet keeps the action, disabled with its reason
+            assert u10.SHARE_LABEL in texts and u10.SHARE_OFF_REASON not in texts, texts
+            share_key, share_button = _visible(tester, r"^out-share-link-\d+$")[0]
+            assert type(share_button).__name__ != "Row" and not share_button.disabled
+            await d.tap(key=share_key)
+            await d.wait(key="share-file-0", timeout=30)  # the EPUB and the big TXT: which file first
+            await d.tap(key="share-file-0")
+            await d.wait(key="share-consent", timeout=30)
+            assert "Gofile" in " ".join(_texts_under(_dialog(tester, "share-consent")))
+            await d.tap(key="consent-cancel")  # nothing leaves the phone without "Upload"
+            await d.wait(key="share-consent", gone=True, timeout=30)
+            assert not shares.provider_state("gofile").enabled
+            # the output row's ⋮ sheet keeps the action, enabled
             sheet = screen.output.open_sheet(epub, "epub")
-            assert sheet.item(u10.SHARE_LABEL).disabled_reason == u10.SHARE_OFF_REASON
+            assert sheet.item(u10.SHARE_LABEL).disabled_reason is None
             sheet.close()
             await asyncio.sleep(0.2)
             assert gofile.requests == [] and pixeldrain.requests == [] and send.uploads == []

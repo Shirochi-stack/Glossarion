@@ -1272,6 +1272,10 @@ def test_job_page_sheets_with_the_floating_job_bar(app_env, monkeypatch, tmp_pat
                 assert await client.until(lambda: isinstance(app.shell.top_screen, JobDetailScreen)
                                           and client.top_route() == app.shell.current_route), client.describe()
                 detail = app.shell.top_screen
+                # hotfix 5: the Library button no longer waits with its reason chip while the book is translated;
+                # the chip (a ReasonChip's InfoSheet) is still the Job page's sheet these checks open and close
+                detail.library_reason.visible = True
+                detail.library_reason.update()
                 assert await client.until(lambda: detail.library_reason.visible
                                           and client.find(lambda n: client.key_of(n) == "job-library-reason")), \
                     "the Job page shows no Library reason chip"

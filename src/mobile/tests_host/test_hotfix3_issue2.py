@@ -20,8 +20,8 @@ tree).
 
 1. ``test_chat_epub_job_library_button_running_and_finished`` (the owner's screenshot): New chat, ＋ › Files (an
    EPUB), Send, Start. Mid-book (the model holds) the chat's running Job card › Log opens the Job page: Stop,
-   Progress and the floating job bar are there, and so is **Library**, disabled with the reason "Added to the
-   Library when the translation finishes" (the book is still in the chat's Attachments folder); a tap does nothing.
+   Progress and the floating job bar are there, and so is **Library**, enabled (hotfix 5): the run recorded the
+   attached raw file, so a tap opens its Library page already and Back returns to the Job page.
    The model answers and the job ends Done while the chat's move into the Library is held at a gate: Library is
    enabled and a tap says "This book is not in the Library yet" (no navigation). The chat moves the book: a tap
    opens that book's Book page (the moved workspace, pushed over the Job page) and Back returns to the Job page.
@@ -538,16 +538,18 @@ def test_chat_epub_job_library_button_running_and_finished(iso, offline):
                                 and str(strip.title_text.value or "").startswith("Translating"), 30), \
             f"the floating job bar is not on the Job page: {strip.visible} {strip.title_text.value!r}"
         _trace("job bar on the Job page:", strip.title_text.value, "|", strip.subtitle_text.value)
-        # what the owner saw, plus the Library button: disabled while the book is translated in the chat
-        ui = await _wait_state(tester, mirror, detail, "waiting")
+        # what the owner saw, plus the Library button: enabled while the book is translated in the chat too
+        # (hotfix 5: "regardless of the attachment being compiled or not")
+        ui = await _wait_state(tester, mirror, detail, "enabled")
         _trace("running chat book:", ui)
         assert await I12._until(lambda: _lookup_done(detail), 30)
         ui = _library_ui(tester, mirror, detail)
-        assert _expect(ui, "waiting"), f"the running chat book's lookup changed the button: {ui}"
-        # a tap on the disabled button does nothing
-        stack = _stack(app)
+        assert _expect(ui, "enabled"), f"the running chat book's lookup changed the button: {ui}"
+        # a tap opens the book's Library page while it is still translated: the run recorded its raw file at the
+        # start, so it is on the Library's shelf already (the owner: "it exists for in progress attachments")
         await driver.tap(key="job-library", timeout=10)
-        assert _detail(app, jid) is detail and _stack(app) == stack, (stack, _stack(app))
+        assert await I12._until(lambda: _stack(app)[-1:] == ["library.book"], 30), _stack(app)
+        await _back_to_job(app, driver, jid, detail)
         assert I12._settled(server) and service.snapshot(jid).state is JobState.RUNNING  # still held mid-book
 
         # ---- the model answers: Done; the chat's move into the Library is held at a gate -----------------------

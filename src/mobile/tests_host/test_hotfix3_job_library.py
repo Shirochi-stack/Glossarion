@@ -354,12 +354,17 @@ def test_a_chat_book_waits_while_it_runs_and_opens_the_moved_book_after_the_run(
                      origin={"type": "chat", "cid": "4", "label": "Chat · Novel"})
         service = FakeJobService(snap)
         h = Harness(service, snap.id, lookups)
-        assert h.state() == "waiting"
+        # hotfix 5: enabled while it runs too (the owner: "regardless of the attachment being compiled or not")
+        assert h.state() == "enabled" and not h.chip.visible
         assert h.chip.reason == _wait_reason() == "Added to the Library when the translation finishes"
         await h.settle()
-        assert h.state() == "waiting"
+        assert h.state() == "enabled"
         assert [_key(p) for p in lookups.source_calls] == [_key(raw)]  # the attached file, never the run input
         assert lookups.folder_calls == []  # still in Attachments: no Library rescan for it
+        # a tap while it runs looks again; not on the shelf yet: it says why
+        assert await h.detail._on_library() is None
+        assert h.navigated == [] and h.notes == [_wait_reason()] and lookups.folder_calls == []
+        h.notes.clear()
         # the job ends; the chat has not moved the book yet
         service.set(dataclasses.replace(snap, state=JobState.DONE))
         await h.settle()
@@ -400,7 +405,7 @@ def test_a_chat_attachment_that_is_a_library_book_opens_it_while_running(tmp_pat
         snap = _snap("direct_text", inputs=(tmp_path / "run.epub",), params={JOB_TARGET_PARAM: [str(raw)]},
                      origin={"type": "chat", "cid": "4", "label": "Chat · Novel"})
         h = Harness(FakeJobService(snap), snap.id, lookups)
-        assert h.state() == "waiting"
+        assert h.state() == "enabled"  # hotfix 5: never waiting
         await h.settle()
         assert h.state() == "enabled" and not h.chip.visible
         assert await h.detail._on_library() == "abcdefabcdef"
@@ -686,9 +691,9 @@ def test_owner_flow_chat_epub_job_library_button_opens_the_book_and_back_returns
             detail = app.shell.top_screen
             assert detail.job_id == jid and detail.library_book is not None and detail.library_source is not None
             assert await _until(lambda: detail.snap.state is JobState.RUNNING and detail.stop_button.visible)
-            assert await _until(lambda: detail.library_button.visible and detail.library_button.disabled
-                                and detail.library_reason.visible)
-            assert detail.library_reason.reason == "Added to the Library when the translation finishes"
+            # hotfix 5: the button is enabled while the book is translated (no waiting reason chip)
+            assert await _until(lambda: detail.library_button.visible and not detail.library_button.disabled
+                                and not detail.library_reason.visible)
 
             # --- the run ends; the chat has not moved the book yet: enabled, the tap looks again ---
             release.set()

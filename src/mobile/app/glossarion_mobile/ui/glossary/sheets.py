@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 import flet as ft
 
+from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components._handlers import call_handler
 from glossarion_mobile.ui.components.sheet import fits_compact
 from glossarion_mobile.ui.glossary.common import SheetHost, sheet
@@ -268,6 +269,7 @@ class ModeSheet:
             ft.Text("Append Glossary, Auto-Mapping and Fuzzy Auto-Mapping follow the mode (🔒 in Settings › Glossary "
                     "› General).", theme_style=ft.TextThemeStyle.BODY_SMALL, color=ft.Colors.ON_SURFACE_VARIANT),
         ], actions=[ft.TextButton(content="Done", on_click=lambda e: self.host.close())], key="mode-sheet")
+        self.body = self.dialog.content.content.content  # SafeArea > Container > the sheet's Column
 
     def choose(self, mode: Optional[str]) -> dict:
         if not mode:
@@ -276,7 +278,16 @@ class ModeSheet:
         call_handler(self.on_changed, mode)
         return changed
 
+    def estimated_height(self) -> float:
+        """Estimate (dp) with room for larger text: title, 52 dp per mode, the 2-line note, Done, padding."""
+        modes = len(getattr(self.group.content, "controls", None) or ())
+        return 56.0 + 52.0 * modes + 52.0 + 48.0 + 36.0 + 30.0
+
     def show(self, page: Any = None) -> "ModeSheet":
+        page = page if page is not None else getattr(self.ctx, "page", None)
+        # hotfix 5 (owner: "the glossary modes should not cover the entire screen"): a scrolling body takes the
+        # whole screen height, and the eight modes fit a phone, so it scrolls only when they would not
+        self.body.scroll = None if fits_compact(page, self.estimated_height()) else ft.ScrollMode.AUTO
         self.host.open(self.dialog)
         return self
 
@@ -309,10 +320,16 @@ class PlanGlossarySheet:
         self.glossary_card: Any = None  # GlossaryPromptCard (None: no profile dropdown)
         service = ctx.service
         loaded = str(service.cfg("manual_glossary_path", "") or "")
-        self.mode_tile = ft.ListTile(leading=ft.Icon(ft.Icons.RULE), title=ft.Text(f"Glossary mode: {service.mode_label()}"),
-                                     subtitle=ft.Text(effective) if effective else None,
-                                     trailing=ft.Icon(ft.Icons.ARROW_DROP_DOWN), key="pg-mode",
-                                     on_click=lambda e: self._run(on_mode))
+        # hotfix 5 (owner: "the glossary mode should stand out a little more"): a tonal card, the mode in bold
+        self.mode_tile = ft.ListTile(leading=ft.Icon(ft.Icons.RULE, color=ft.Colors.ON_SECONDARY_CONTAINER),
+                                     title=ft.Text(f"Glossary mode: {service.mode_label()}", weight=ft.FontWeight.W_600,
+                                                   color=ft.Colors.ON_SECONDARY_CONTAINER),
+                                     subtitle=ft.Text(effective, color=ft.Colors.ON_SECONDARY_CONTAINER)
+                                     if effective else None,
+                                     trailing=ft.Icon(ft.Icons.ARROW_DROP_DOWN, color=ft.Colors.ON_SECONDARY_CONTAINER),
+                                     bgcolor=ft.Colors.SECONDARY_CONTAINER,
+                                     shape=ft.RoundedRectangleBorder(radius=tokens.RADII["card"]),
+                                     key="pg-mode", on_click=lambda e: self._run(on_mode))
         self.loaded_text = ft.Text(f"Loaded: {os.path.basename(loaded)}" if loaded else "No glossary loaded (auto-mapping "
                                    "picks the book glossary)", theme_style=ft.TextThemeStyle.BODY_SMALL, key="pg-loaded")
         self.profile_row = self._profile_row(prompt_bucket, chat_profile)

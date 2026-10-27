@@ -5,8 +5,15 @@ arrive from a ``LogBuffer`` through ``UiDispatcher.subscribe_log`` (the pump
 hands over at most 400 new lines per 120 ms tick, on the loop thread) and are
 coalesced into 40-line selectable ``Text`` blocks in the mono family at the log
 size (``theme.log_text``, §6.2), at most 100 mounted
-(§7.3). Following scrolls with ``scroll_to(offset=-1)``; ``auto_scroll`` stays
-off. Search and Share arrive with the job detail view (U3).
+(§7.3). Search and Share arrive with the job detail view (U3).
+
+Following (hotfix 5, owner: "why are the logs not scrolled to the bottom by default. There should be a
+button to jump to bottom"): the list follows with Flet's ``auto_scroll`` (the client jumps to the end after
+it laid the new lines out; a ``scroll_to(offset=-1)`` sent from here ran before that layout, against the
+previous end, so a log opened on its backlog stayed near its top). Every console opens on its newest lines,
+also while auto-scroll is paused for the session. Scrolling up pauses following and shows a ↓ button
+(``jump_button``, key ``log-jump-end``) over the list's corner; ↓, the auto-scroll button or scrolling back
+to the end follows again.
 
 Owner 2026-10-18: the follow toggle is an "auto-scroll" button (pause / resume icons, a tooltip naming
 the state, key ``log-autoscroll``) whose choice lasts for the app session (``SESSION``); with
@@ -40,6 +47,11 @@ CHIP_PADDING = ft.Padding.symmetric(horizontal=2)
 CHIP_LABEL_PADDING = ft.Padding.symmetric(horizontal=4)
 #: Copy / follow in the filter row: 40 dp wide, still 48 dp tall
 COMPACT_BUTTON = ft.BoxConstraints(min_width=40, min_height=tokens.SIZES["hit_target"])
+#: how close to the list's end (dp) still counts as "at the end" (Flet's auto_scroll re-pins within 40 px)
+END_SLACK = 40.0
+#: a console opened while auto-scroll is paused stops following this long after its backlog arrived (the
+#: client pins the last backlog batch after laying it out)
+OPEN_SETTLE_SECONDS = 0.6
 
 # (filter id, chip label, LogLine.kind values shown)
 FILTERS = (
@@ -71,6 +83,9 @@ class LogConsole(ft.Column):
         self.following = bool(SESSION["following"])
         self.lines: deque[LogLine] = deque(maxlen=self.block_lines * self.max_blocks)
         self.gap_total = 0
+        self.at_end = True  # the list shows its newest lines (on_scroll keeps it current)
+        self._opening_seq: Optional[int] = None  # the backlog's last line while the console opens on its end
+        self._scroll_paused = False  # a scroll up paused following (back at the end follows again)
         self._unsubscribe: Optional[Callable[[], None]] = None
         self._block_counts: list[int] = []
         self.filter_chips = {
@@ -109,8 +124,23 @@ class LogConsole(ft.Column):
             padding=ft.Padding.all(8),
             height=self.list_height,
             expand=self.list_height is None,
-            auto_scroll=False,
+            # following: the client pins the end after layout (instant, no 1 s animation); ``attach`` turns it
+            # on for the backlog whatever the session's choice
+            auto_scroll=self.following,
+            auto_scroll_animation=ft.Animation(0, ft.AnimationCurve.LINEAR),
+            on_scroll=self._on_scroll,
+            scroll_interval=100,
         )
+        self.jump_button = ft.IconButton(
+            icon=ft.Icons.ARROW_DOWNWARD,
+            tooltip="Jump to the newest lines",
+            size_constraints=HIT_TARGET,
+            on_click=self.jump_to_end,
+            style=ft.ButtonStyle(bgcolor=ft.Colors.SECONDARY_CONTAINER, color=ft.Colors.ON_SECONDARY_CONTAINER,
+                                 elevation=2),
+            key="log-jump-end",
+        )
+        self.jump_holder = ft.Container(content=self.jump_button, right=8, bottom=8, visible=False)
         self.filter_row = ft.Row(list(self.filter_chips.values()), scroll=ft.ScrollMode.AUTO, spacing=4, expand=True,
                                  key="log-filters")
         self.toolbar = ft.Row(
@@ -121,7 +151,9 @@ class LogConsole(ft.Column):
         self.controls = [
             self.toolbar,
             ft.Container(
-                content=self.list_view,
+                content=ft.Stack([self.list_view, self.jump_holder],
+                                 fit=ft.StackFit.EXPAND if self.list_height is None else ft.StackFit.LOOSE,
+                                 expand=self.list_height is None, key="log-list-stack"),
                 bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
                 border_radius=tokens.RADII["field"],
                 expand=self.list_height is None,
@@ -141,6 +173,10 @@ class LogConsole(ft.Column):
 
     def attach(self) -> None:
         if self._unsubscribe is None and self.buffer is not None and self.dispatcher is not None:
+            # the console opens on its newest lines, also while auto-scroll is paused for the session
+            last = int(getattr(self.buffer, "last_seq", 0) or 0)
+            self._opening_seq = last if last > 0 else None
+            self.list_view.auto_scroll = True
             self._unsubscribe = self.dispatcher.subscribe_log(self.buffer, self.on_lines, backlog=self.backlog)
 
     def detach(self) -> None:
@@ -169,7 +205,24 @@ class LogConsole(ft.Column):
             self.lines.append(line)
             if self._visible(line):
                 self._append_text(line.text)
+        opening = self._opening_seq
+        if opening is not None and lines and lines[-1].seq >= opening:
+            self._opening_seq = None  # the backlog is in: the session's auto-scroll choice applies again
+            if not self.following:
+                self._settle_paused()
         self._after_change()
+
+    def _settle_paused(self) -> None:
+        """A console opened while auto-scroll is paused: stop following once the client pinned the backlog."""
+        def settle() -> None:
+            if not self.following and self._opening_seq is None:
+                self.list_view.auto_scroll = False
+                self._push(self.list_view)
+
+        try:
+            asyncio.get_running_loop().call_later(OPEN_SETTLE_SECONDS, settle)
+        except RuntimeError:  # no loop (host tests drive it directly)
+            settle()
 
     def _append_text(self, text: str, force_new_block: bool = False) -> None:
         # identity, not ``in``: Flet controls are dataclasses whose ``==`` compares every field, and
@@ -213,11 +266,6 @@ class LogConsole(ft.Column):
             self.dispatcher.mark_dirty(self)
         else:
             self.update()
-        if self.following:
-            try:
-                asyncio.ensure_future(self.list_view.scroll_to(offset=-1, duration=0))
-            except Exception:
-                pass
         if self.on_after_change is not None:
             try:
                 self.on_after_change()
@@ -244,14 +292,77 @@ class LogConsole(ft.Column):
             button.icon = ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN
             button.tooltip = "Auto-scroll is paused: tap to follow new lines"
 
-    def set_following(self, following: bool) -> None:
-        """Auto-scroll on (jumps to the end now) or off; remembered for the app session."""
+    def set_following(self, following: bool, *, remember: bool = True) -> None:
+        """Auto-scroll on (jumps to the end now) or off; ``remember``: the choice lasts for the app session
+        (a scroll up pauses this console only)."""
         self.following = bool(following)
-        SESSION["following"] = self.following
+        if remember:
+            SESSION["following"] = self.following
         self._paint_follow()
+        if self.following:
+            self.list_view.auto_scroll = True
+            self._jump()
+        elif self._opening_seq is None:
+            self.list_view.auto_scroll = False
         self._after_change()
 
+    def _jump(self) -> None:
+        """To the end now: the lines are laid out already, so a ``scroll_to`` lands on the real end (the
+        client's own pin waits for new lines after a scroll up)."""
+        self._set_at_end(True)
+        if self._page_or_none() is None:
+            return
+        try:
+            asyncio.ensure_future(self.list_view.scroll_to(offset=-1, duration=200))
+        except Exception:
+            pass
+
+    def jump_to_end(self, e: Any = None) -> None:
+        """↓: the newest lines, and this console follows again (the session's auto-scroll choice stays)."""
+        self._scroll_paused = False
+        self.set_following(True, remember=False)
+
+    def _set_at_end(self, at_end: bool) -> None:
+        self.at_end = bool(at_end)
+        visible = not self.at_end and bool(self.lines)
+        if self.jump_holder.visible != visible:
+            self.jump_holder.visible = visible
+            self._push(self.jump_holder)
+
+    def _on_scroll(self, e: Any) -> None:
+        """Scrolling up pauses following (this console only) and shows ↓; back at the end it follows again
+        when a scroll paused it."""
+        pixels, maximum = getattr(e, "pixels", None), getattr(e, "max_scroll_extent", None)
+        if pixels is None or maximum is None:
+            return
+        try:
+            at_end = float(pixels) >= float(maximum) - END_SLACK
+        except (TypeError, ValueError):
+            return
+        was = self.at_end
+        self._set_at_end(at_end)
+        if was and not at_end and self.following and self._opening_seq is None:
+            # auto_scroll stays on: the client unpinned itself on the scroll up and re-pins back at the end
+            self._scroll_paused = True
+            self.following = False
+            self._paint_follow()
+            self._push(self.follow_button)
+        elif at_end and not was and self._scroll_paused:
+            self._scroll_paused = False
+            self.following = True
+            self._paint_follow()
+            self._push(self.follow_button)
+
+    def _push(self, control: Any) -> None:
+        if self._page_or_none() is None:
+            return
+        try:
+            control.update()
+        except Exception:
+            pass
+
     def _toggle_follow(self, e: Any = None) -> None:
+        self._scroll_paused = False
         self.set_following(not self.following)
 
     def visible_text(self) -> str:

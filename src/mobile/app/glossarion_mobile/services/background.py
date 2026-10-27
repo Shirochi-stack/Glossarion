@@ -23,7 +23,8 @@ Android
   * the notification swiped away (Android 14+ allows it for foreground services)
     -> posted again while the job runs, at most once per second (like a VPN's);
   * ``on_foreground(type=timeout)`` (Android 15 dataSync 6h/24h budget) ->
-    graceful stop (never escalates) + "Paused (system limit): tap to resume";
+    graceful stop (never escalates) + "Paused (system limit): tap to resume" - unless the job only
+    finishes (a compile, or all chapters translated: the EPUB build), which goes on (hotfix 5);
   * job end: ``stop_job_service`` (the ``jobs.done`` notification follows).
 
 ``notification_status()`` reads the real permission state on every call
@@ -195,6 +196,25 @@ class _PermissionRequester:
         except ImportError:
             return False
         return bool(await asyncio.wait_for(handler.open_app_settings(), 10))
+
+
+#: jobs that only build files from what is translated: Android's background limit lets them finish (hotfix 5)
+FINISHING_KINDS = frozenset({"compile_epub", "compile_pdf"})
+
+
+def job_finishing(snap: Any) -> bool:
+    """The job only finishes: a compile, or a translation whose chapters are all done (its EPUB build)."""
+    spec = getattr(snap, "spec", None)
+    kind = str(getattr(spec, "kind", "") or getattr(snap, "kind", "") or "")
+    if kind in FINISHING_KINDS:
+        return True
+    progress = getattr(snap, "progress", None)
+    try:
+        total = int(getattr(progress, "total", 0) or 0)
+        done = int(getattr(progress, "completed", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return total > 0 and done >= total
 
 
 class BackgroundExecution:
@@ -772,6 +792,13 @@ class BackgroundExecution:
             self.service_running = False
             self._sync_ticker()
             if snap is not None and self.jobs is not None:
+                if job_finishing(snap):
+                    # hotfix 5: all chapters are in, only the EPUB build is left - a graceful stop would end it
+                    # "Stopped" without the EPUB; it goes on (at the latest once the app is open again)
+                    log.info("background time limit while job %s finishes: it keeps going", getattr(snap, "id", "?"))
+                    if self.notifications is not None:
+                        await self.notifications.finishing(snap)
+                    return
                 self.jobs.request_stop(escalate=False, reason="Android ended the background service (time limit)")
                 if self.notifications is not None:
                     await self.notifications.paused(snap, "system limit")

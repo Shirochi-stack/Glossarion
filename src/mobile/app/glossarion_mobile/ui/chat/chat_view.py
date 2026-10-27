@@ -78,6 +78,7 @@ from glossarion_mobile.ui.chat.chat_ops import (
     transcript_markdown,
     turn_workspace,
     version_view,
+    export_outputs,
     workspace_outputs,
 )
 from glossarion_mobile.ui.chat.chat_ops import moved_workspace as _moved_workspace
@@ -153,7 +154,7 @@ from glossarion_mobile.ui.components.dialogs import ConfirmDialog, close_dialog
 from glossarion_mobile.ui.components.info_sheet import InfoSheet
 from glossarion_mobile.ui.foreground import park_while_hidden
 from glossarion_mobile.ui.responsive import Layout, layout_for
-from glossarion_mobile.ui.sheets.plus_sheet import PlusSheet
+from glossarion_mobile.ui.sheets.plus_sheet import CAMERA_OFF_REASON, PlusSheet, camera_error_text
 from glossarion_mobile.ui.shell.job_strip import JobStrip
 from glossarion_mobile.ui.theme import build_text_theme
 
@@ -566,7 +567,9 @@ class ChatView:
             on_pill=self._on_pill,
             on_pill_reset=self._on_pill_reset,
             on_slash=self.run_slash,
+            on_open_model=self.open_mini_model_sheet,
         )
+        self.composer.set_model(getattr(state.chat_context.value, "model", "") or "")
         self.column = ft.Column(
             [self.transcript_stack, self.job_strip, self.quick_chips.control, self.caption,
              self.composer.slash.control, self.composer],
@@ -666,8 +669,10 @@ class ChatView:
 
     def _on_context(self, context: Any) -> None:
         self.header.set_context(context)
+        self.composer.set_model(getattr(context, "model", "") or "")  # the composer's model chip (hotfix 5)
         self.refresh_send()
         self._push(self.header.wrapper)
+        self._push(self.composer.model_chip)
 
     def _on_current_chat(self, cid: str) -> None:
         if self.bound and str(cid) != self.cid:
@@ -2145,10 +2150,11 @@ class ChatView:
         settings = self.settings()
         chips = [
             ft.Chip(label=ft.Text(context.model), on_click=lambda e: self.open_model_sheet("model"), key=f"{key}-model"),
-            ft.Chip(label=ft.Text(context.profile), on_click=lambda e: self.open_model_sheet("profile"),
+            # hotfix 5: a short preview of the profiles / languages, custom options at its end (not the full sheet)
+            ft.Chip(label=ft.Text(context.profile), on_click=lambda e: self.open_mini_model_sheet("profile"),
                     key=f"{key}-profile"),
-            ft.Chip(label=ft.Text(f"→ {context.target_language}"), on_click=lambda e: self.open_model_sheet("language"),
-                    key=f"{key}-language"),
+            ft.Chip(label=ft.Text(f"→ {context.target_language}"),
+                    on_click=lambda e: self.open_mini_model_sheet("language"), key=f"{key}-language"),
             ft.Chip(label=ft.Text(self._glossary_chip_text()), leading=ft.Icon(ft.Icons.MENU_BOOK, size=16),
                     on_click=lambda e: self.open_plan_glossary([path]), key=f"{key}-glossary"),
         ]
@@ -2191,7 +2197,7 @@ class ChatView:
         chips = self._setting_chips(path, "plan")
         chips += [
             ft.Chip(label=ft.Text(f"{_output_mode(mode).emoji} {_output_mode(mode).label}"),
-                    on_click=lambda e: self.open_mode_options(mode), key="plan-output"),
+                    on_click=lambda e: self.open_plan_mode(plan), key="plan-output"),
             range_chip,
             ft.Chip(label=ft.Text(destination_label(destination)),
                     leading=ft.Icon(ft.Icons.LOCAL_LIBRARY if destination == "library" else ft.Icons.CHAT, size=16),
@@ -2975,18 +2981,20 @@ class ChatView:
         return self.env.chats.output_folder(self.cid)
 
     async def _export_outputs(self, item: Any = None) -> None:
-        """Share / Export the job card's output files (its own ``Attachments/<stem>`` workspace,
-        ``chat_ops.workspace_outputs``: compiled EPUB / PDF first, then ``*_translated.txt``,
-        subtitles, SDLXLIFF and the glossary); a choice when there are several. Without a turn
-        workspace: the chat's newest output folder (the desktop attachment rule, newest EPUB / PDF)."""
+        """Share / Export the job card's compiled outputs (its own ``Attachments/<stem>`` workspace,
+        ``chat_ops.export_outputs``: EPUB / PDF / TXT / HTML; a subtitle or SDLXLIFF input's own translated
+        files when it has none; hotfix 5: never a book run's per-chapter SDLXLIFF); a choice when there are
+        several (a short sheet). Without a turn workspace: the chat's newest output folder (the desktop
+        attachment rule, newest EPUB / PDF)."""
         folder = await self.env.run_io(self._job_workspace, item) if item is not None else ""
         if not folder:
             folder = self._last_output_folder()
         documents: list = []
         if folder and os.path.isdir(folder):
-            documents = [path for path, _kind in await self.env.run_io(workspace_outputs, folder)]
+            source = self._turn_source(item) if self.bound else ""
+            documents = [path for path, _kind in await self.env.run_io(export_outputs, folder, source)]
         if not documents:
-            self.notify("No output files in this turn's workspace yet")
+            self.notify("No compiled EPUB or PDF yet: use Compile ▾ first")
             return
         if len(documents) > 1 and self.page is not None:
             items = [ActionItem(f"{os.path.splitext(path)[1][1:].upper()} · {os.path.basename(path)}",
@@ -4022,6 +4030,7 @@ class ChatView:
             on_open_mode_options=self.open_mode_options,
             on_dismiss=lambda e: self.composer.set_plus_open(False),
             mode_content=lambda mode: self.mode_options_content(mode, inline=True).column,
+            camera_reason=None if getattr(self.env, "take_photo", None) is not None else CAMERA_OFF_REASON,
         )
         self._haptic("light_impact")
         self.composer.set_plus_open(True)
@@ -4034,10 +4043,36 @@ class ChatView:
             self.open_library_picker()
         elif tile_id in ("files", "photos"):
             self._spawn(self.pick_and_attach(images=tile_id == "photos"))
+        elif tile_id == "camera":
+            self._spawn(self.capture_and_attach())
         elif tile_id == "clipboard":
             self._spawn(self._paste_clipboard())
         else:
             self.notify("This source is not available in this build")
+
+    async def capture_and_attach(self) -> Optional[str]:
+        """＋ › Camera (hotfix 5): the phone's own camera app takes a photo, attached like ＋ › Photos (an
+        app-owned copy, then ``attach_file``). Backing out of the camera attaches nothing."""
+        take = getattr(self.env, "take_photo", None) if self.env is not None else None
+        if take is None:
+            self.notify(CAMERA_OFF_REASON)
+            return None
+        try:
+            result = await take()
+        except Exception as exc:
+            log.warning("camera failed: %s", exc)
+            result = {"path": None, "error": "failed", "message": str(exc)}
+        result = result if isinstance(result, dict) else {}
+        path = result.get("path")
+        if not path:
+            if result.get("error"):
+                self.notify(camera_error_text(result.get("error"), result.get("message")))
+            return None
+        if self.env.import_file is not None:
+            path = await self.env.run_io(self.env.import_file, path)
+        if path and self.attach_file(path):
+            return path
+        return None
 
     def open_library_picker(self, query: str = "") -> Any:
         """＋ › From Library, the empty-chat "From Library" chip and ``/library`` (UI_SPEC §2.5 item 1):
@@ -4280,14 +4315,25 @@ class ChatView:
             self.plus_sheet.close()
         self.composer.set_plus_open(False)
 
-    def open_mode_options(self, mode_id: str) -> ModeOptionsSheet:
+    def open_mode_options(self, mode_id: str, on_switch: Optional[Callable[[str], Any]] = None) -> ModeOptionsSheet:
         from glossarion_mobile.ui.sheets.model_sheet import sheet_env
 
         self.mode_sheet = ModeOptionsSheet(mode_id, ctx=sheet_env().ctx,  # ctx: the settings tiles (U4)
-                                           **self._mode_options_kwargs())
+                                           on_switch=on_switch, **self._mode_options_kwargs())
         self._hold_keyboard(getattr(self.mode_sheet, "dialog", None))
         self.mode_sheet.show(self.page)
         return self.mode_sheet
+
+    def open_plan_mode(self, plan: dict) -> ModeOptionsSheet:
+        """The Plan card's output chip (hotfix 5): the mode's options with the six mode toggles above them;
+        another mode becomes this send's mode (the plan's ``output_mode``) and the chip follows."""
+        cid, created = self.cid, plan.get("created")
+
+        def switched(mode: str) -> None:
+            self._update_plan(cid, created, output_mode=mode)
+            self.render_transcript()
+
+        return self.open_mode_options(str(plan.get("output_mode") or "text"), on_switch=switched)
 
     def set_mode_scope(self, this_chat: bool) -> None:
         """Mode options "This chat only": the mode lives in the chat override, else in the global
@@ -4416,6 +4462,48 @@ class ChatView:
         self._spawn(load())
         return sheet
 
+    def open_mini_model_sheet(self, tab: str = "model") -> Any:
+        """The composer's model chip (hotfix 5): the chat model's provider in a sheet that grows with a swipe
+        up, with the model's Effort; "All models" opens the full ModelSheet. A pick is this chat's model, as
+        in the full sheet. ``tab`` "profile" / "language" (a card's profile / language chip): the configured
+        profiles / languages the same way, custom options at the end of the list."""
+        if self.env is None:
+            return self.open_model_sheet(tab)
+        from glossarion_mobile.services.oauth import sign_in_satisfied
+        from glossarion_mobile.ui.sheets.mini_model_sheet import MiniModelSheet
+        from glossarion_mobile.ui.sheets.model_sheet_min import load_model_catalog
+
+        context = self.state.chat_context.value
+        signed = self.state.signed_in.value
+        sheet = MiniModelSheet(
+            tab=tab,
+            current_model=context.model,
+            current_profile=context.profile,
+            current_language=context.target_language,
+            profiles=self._profiles(),
+            languages=self.env.languages,
+            signed_in=lambda model: sign_in_satisfied(model, signed),
+            on_select=self._on_model_sheet_select,
+            on_sign_in=self.open_login_sheet,
+            on_accounts=lambda: self.navigate("settings.accounts"),
+            on_all_models=lambda: self.open_model_sheet("model"),
+        )
+        self.model_sheet = sheet
+        # the keyboard stays down while it is open and after it closes (a closing sheet gives the focus back)
+        self._hold_keyboard(sheet.prepare(self.page))
+        sheet.show(self.page)
+
+        async def load() -> None:
+            try:
+                models = await self.env.run_io(load_model_catalog, self.env.config_get)
+            except Exception as exc:
+                log.info("model catalog unavailable: %s", exc)
+                return
+            sheet.set_models(models)
+
+        self._spawn(load())
+        return sheet
+
     def _on_model_once_select(self, field_name: str, value: str, this_chat_only: bool = False) -> None:
         """One-shot choice: send now with ``{override key: value}`` for this run only."""
         key = _SHEET_OVERRIDE_KEYS.get(field_name)
@@ -4428,6 +4516,10 @@ class ChatView:
         override_key = {"model": "model", "profile": "profile", "language": "target_language"}[field_name]
         if field_name == "model" and self.bound and not global_scope:
             this_chat_only = True  # owner (U13): every chat keeps its own model; Settings sets the default
+            self.env.chats.set_override(self.cid, override_key, value)
+            remember_pick(self.env, field_name, value, global_scope=False)
+        elif this_chat_only and self.bound and not global_scope:
+            # "Apply to this chat only" (a profile / language): the chat's own value, as Chat settings › This chat
             self.env.chats.set_override(self.cid, override_key, value)
             remember_pick(self.env, field_name, value, global_scope=False)
         else:
@@ -4908,7 +5000,7 @@ class ChatView:
         folder = turn_workspace(messages, indices)
         if folder:
             return folder, True
-        moved = _moved_workspace(messages, indices)
+        moved = _moved_workspace(messages, indices, self._migration_roots())
         if moved:
             return moved, _in_attachments(moved)
         stem = os.path.splitext(os.path.basename(self._turn_source(item)))[0].lower()
@@ -4937,17 +5029,29 @@ class ChatView:
             return "Only books (EPUB, TXT, PDF, HTML) are added to the Library"
         return LIBRARY_WAIT_REASON
 
+    def _migration_roots(self) -> list:
+        """Blocking-safe: where this chat's moves into the Library go (``migration_output_root``), for the cards
+        an earlier build moved without following them (``chat_ops.moved_workspace``, hotfix 5)."""
+        if not self.bound:
+            return []
+        try:
+            root = self.env.chats.binding_for(self.cid).migration_output_root(self.env.chats.session(self.cid))
+        except Exception:
+            return []
+        return [root] if root else []
+
     def _latest_workspace(self) -> tuple:
         """Blocking: (the chat's most recently written book workspace - an ``Attachments/<stem>`` folder or
         one that moved into the Library -, its attachment path)."""
         messages = self._messages()
+        roots = self._migration_roots()
         candidates: dict = {}
         for folder in self.env.chats.attachment_folders(self.cid) if self.bound else []:
             candidates.setdefault(os.path.normcase(os.path.abspath(folder)), (folder, ""))
         for item in build_items(messages, 0, len(messages)):
             if item.kind != "job" or item.index < 0:
                 continue
-            moved = _moved_workspace(messages, list(item.requests) + [item.report, item.actions])
+            moved = _moved_workspace(messages, list(item.requests) + [item.report, item.actions], roots)
             if moved and not _in_attachments(moved):
                 message = messages[item.index]
                 source = str(message[2] or "") if len(message) > 2 and str(message[0]) == "user_file" else ""

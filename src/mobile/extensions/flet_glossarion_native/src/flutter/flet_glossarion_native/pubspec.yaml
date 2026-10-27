@@ -18,6 +18,11 @@ dependencies:
 
   flutter_foreground_task: ^11.0.3
 
+  # ＋ › Camera (hotfix 5): the phone's own camera app takes the photo
+  # (ACTION_IMAGE_CAPTURE / UIImagePickerController); no CAMERA permission on
+  # Android, NSCameraUsageDescription on iOS (src/mobile/pyproject.toml).
+  image_picker: ^1.1.2
+
   # receive_sharing_intent is intentionally NOT a dependency: on Android its
   # plugin read every SEND intent that reached MainActivity on the UI thread
   # and crashed the app on an unreadable URI (SecurityException from

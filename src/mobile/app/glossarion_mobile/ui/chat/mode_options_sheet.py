@@ -267,27 +267,38 @@ class ModeOptionsContent:
 
 
 class ModeOptionsSheet:
+    """``on_switch(mode)`` (hotfix 5, the Plan card's output chip; owner: "not showing options to switch other
+    output modes like vision and image"): the six mode toggles above the options; a tap on another mode shows
+    that mode's options here and reports it (the Plan card saves it as the send's mode)."""
+
     def __init__(self, mode: str, *, on_dismiss: Optional[Callable[..., Any]] = None, ctx: Any = None,
-                 **content_kwargs: Any) -> None:
+                 on_switch: Optional[Callable[[str], Any]] = None, **content_kwargs: Any) -> None:
         self._page: Any = None
         on_generate = content_kwargs.pop("on_generate", None)
         on_open_keys = content_kwargs.pop("on_open_keys", None)
         on_open_endpoints = content_kwargs.pop("on_open_endpoints", None)
-        self.content = ModeOptionsContent(
-            mode, ctx=ctx,
+        self._content_kwargs = dict(
+            ctx=ctx,
             on_generate=(lambda m: self._close_then(on_generate, m)) if on_generate else None,
             on_open_keys=(lambda s: self._close_then(on_open_keys, s)) if on_open_keys else None,
             on_open_endpoints=(lambda: self._close_then(on_open_endpoints)) if on_open_endpoints else None,
             **content_kwargs,
         )
-        self.mode = self.content.mode
         self.ctx = ctx
-        self.tiles = self.content.tiles
-        self.this_chat_switch = self.content.this_chat_switch
-        self.generate_button = self.content.generate_button
+        self.on_switch = on_switch
+        self._use_content(ModeOptionsContent(mode, **self._content_kwargs))
+        self.mode_row: Any = None
+        if on_switch is not None:
+            from glossarion_mobile.state.store import Signal
+            from glossarion_mobile.ui.chat.output_mode_row import OutputModeRow
+            from glossarion_mobile.ui.chat.output_modes import OutputModeState
+
+            self.mode_row = OutputModeRow(mode_signal=Signal(OutputModeState(self.mode), name="plan_output_mode"),
+                                          style_name="icons", on_mode_changed=self.switch, key="mode-options-switch")
+        self.body_slot = ft.Container(content=self.content.column, key="mode-options-body")
         # Scrolls at the sheet level (Vision's eight tiles are taller than a phone); the ＋ sheet
         # inlines the same column inside its own scroll, so the column itself does not scroll.
-        self.scroll_body = scroll_column([self.content.column])
+        self.scroll_body = scroll_column([c for c in (self.mode_row, self.body_slot) if c is not None])
         self.dialog = ft.BottomSheet(
             content=sheet_frame(self.scroll_body, padding=ft.Padding.only(left=16, right=16, bottom=24)),
             show_drag_handle=True,
@@ -295,6 +306,30 @@ class ModeOptionsSheet:
             on_dismiss=on_dismiss,
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
         )
+
+    def _use_content(self, content: "ModeOptionsContent") -> None:
+        self.content = content
+        self.mode = content.mode
+        self.tiles = content.tiles
+        self.this_chat_switch = content.this_chat_switch
+        self.generate_button = content.generate_button
+
+    def switch(self, mode: str) -> str:
+        """Another mode from the toggles: its options here, then ``on_switch(mode)``."""
+        mode = normalize_mode(mode)
+        if mode != self.mode:
+            self._use_content(ModeOptionsContent(mode, **self._content_kwargs))
+            self.body_slot.content = self.content.column
+            if self._page is not None:
+                self.scroll_body.scroll = None if fits_compact(self._page, self.estimated_height()) \
+                    else ft.ScrollMode.AUTO
+                try:
+                    self.dialog.update()
+                except Exception:
+                    pass
+        if self.on_switch is not None:
+            self.on_switch(mode)
+        return mode
 
     def _close_then(self, handler: Callable[..., Any], *args: Any) -> Any:
         self.close()
@@ -307,7 +342,8 @@ class ModeOptionsSheet:
         """Upper estimate (dp): title + "This chat only" + description, ~96 dp per settings tile, the Generate
         button."""
         generate = 56.0 if getattr(self.generate_button, "visible", False) else 0.0
-        return 150.0 + 96.0 * len(self.tiles or ()) + generate
+        toggles = 56.0 if getattr(self, "mode_row", None) is not None else 0.0
+        return 150.0 + 96.0 * len(self.tiles or ()) + generate + toggles
 
     def show(self, page: Any) -> None:
         self._page = page

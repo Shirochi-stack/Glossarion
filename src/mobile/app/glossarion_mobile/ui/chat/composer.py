@@ -40,7 +40,8 @@ from glossarion_mobile.ui.chat.output_mode_row import OutputModeRow
 from glossarion_mobile.ui.chat.send_button import SendStopButton
 from glossarion_mobile.ui.chat.slash import SlashCommand, SlashPopover, completion, parse_command
 from glossarion_mobile.ui.chat.send_state import BlockReason, SendAction, SendInputs, SendState
-from glossarion_mobile.ui.responsive import ACTION_ROW_GAP
+from glossarion_mobile.ui.components.keyboard_dismiss import keeps_keyboard
+from glossarion_mobile.ui.responsive import ACTION_ROW_GAP, CHIP_ARROW
 from glossarion_mobile.ui.theme import HIT_TARGET, icon_data
 
 __all__ = [
@@ -51,12 +52,23 @@ __all__ = [
     "StatusCaption",
     "HINT_EMPTY",
     "HINT_ATTACHMENT",
+    "model_chip_label",
 ]
 
 PASTE_CHIP_THRESHOLD = 10_000
 EXPAND_ICON_LINES = 3
 HINT_EMPTY = "Message to translate…"  # desktop placeholder without the drop hint
 HINT_ATTACHMENT = "Add optional instructions for the attached file…"  # desktop string
+
+
+def model_chip_label(model: str) -> str:
+    """The model chip's text: the model id without its route prefix (``authgpt/gpt-6-luna`` ->
+    ``gpt-6-luna``); the chip's tooltip keeps the full id."""
+    text = str(model or "").strip()
+    head, sep, rest = text.partition("/")
+    if sep and rest and head and head.replace("-", "").replace("_", "").isalnum():
+        return rest
+    return text
 
 
 @ft.control
@@ -204,6 +216,7 @@ class Composer(ft.Container):
     on_pill: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
     on_pill_reset: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
     on_slash: Optional[Callable[[str], Any]] = field(default=None, metadata={"skip": True})
+    on_open_model: Optional[Callable[[], Any]] = field(default=None, metadata={"skip": True})
 
     def init(self) -> None:
         super().init()
@@ -234,6 +247,9 @@ class Composer(ft.Container):
             text_style=ft.TextStyle(size=tokens.TYPE_SCALE["body_large"].size),
         )
         self.field_focused = False
+        # a tap outside closes the keyboard (hotfix 5), except on the open slash-command list: a tap on a
+        # command that takes an argument fills the field and keeps typing
+        keeps_keyboard(self.text_field, lambda: bool(self.slash.visible))
         self.expand_button = ft.IconButton(
             icon=ft.Icons.OPEN_IN_FULL,
             icon_size=20,
@@ -258,16 +274,42 @@ class Composer(ft.Container):
             rotate=ft.Rotate(angle=0),
             animate_rotation=motion.rotation_animation(tokens.MOTION["sheet_ms"]),
         )
-        self.pills_row = ft.Row([], spacing=6, scroll=ft.ScrollMode.AUTO, visible=True)
+        # the ⚙ (Chat settings) button; it follows the model chip, so it never scrolls (a scrolling Row
+        # cannot sit in a Row without a width)
+        self.pills_row = ft.Row([], spacing=6, visible=True)
+        # hotfix 5: the mini model picker next to the output mode: the model's short name + ▾ (tap: the
+        # current provider's models, ``MiniModelSheet``); it takes what the row leaves and ellipsizes
+        self.model = ""
+        self.model_text = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_LARGE, no_wrap=True, max_lines=1,
+                                  overflow=ft.TextOverflow.ELLIPSIS, expand=True, expand_loose=True)
+        self.model_chip = ft.Container(
+            content=ft.Row([self.model_text, ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=CHIP_ARROW)], spacing=0,
+                           tight=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            height=36,
+            border_radius=18,
+            # a 320 dp phone with the token hint leaves it almost no room: clip, never paint over ⚙
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            bgcolor=ft.Colors.SECONDARY_CONTAINER,
+            padding=ft.Padding.only(left=12, right=4),
+            ink=True,
+            on_click=self._on_open_model,
+            tooltip="Model",
+            expand=True,
+            expand_loose=True,
+            visible=False,
+            key="composer-model",
+        )
         self.token_hint = ft.Text("", theme_style=ft.TextThemeStyle.LABEL_SMALL, visible=False, no_wrap=True)
         self.send_button = SendStopButton(on_action=self._on_send_action)
-        # ＋ · output mode · option pills (take the rest, scroll) · token hint · Send; one line, never
-        # wrapping (responsive.action_row_width estimates it).
+        # ＋ · output mode · [model chip · ⚙] (take the rest) · token hint · Send; one line, never wrapping
+        # (responsive.action_row_width estimates it; the model chip shrinks to fit).
+        self.middle_row = ft.Row([self.model_chip, self.pills_row], spacing=ACTION_ROW_GAP,
+                                 vertical_alignment=ft.CrossAxisAlignment.CENTER)
         self.action_row = ft.Row(
             [
                 self.plus_button,
                 self.output_row,
-                ft.Container(content=self.pills_row, expand=True),
+                ft.Container(content=self.middle_row, expand=True),
                 self.token_hint,
                 self.send_button,
             ],
@@ -408,6 +450,17 @@ class Composer(ft.Container):
             )
         ]
         self.pills_row.visible = True
+
+    def set_model(self, model: str) -> None:
+        """The model chip shows the open chat's model (its name without the route; the full id as tooltip)."""
+        self.model = str(model or "").strip()
+        self.model_text.value = model_chip_label(self.model)
+        self.model_chip.tooltip = f"Model: {self.model}" if self.model else "Model"
+        self.model_chip.visible = bool(self.model)
+
+    def _on_open_model(self, e: Any = None) -> None:
+        if self.on_open_model is not None:
+            self.on_open_model()
 
     def set_token_hint(self, text: str) -> None:
         """"≈1.2k tok"; hidden at >= 160% text scale (§7.5), where it would crowd the action row."""

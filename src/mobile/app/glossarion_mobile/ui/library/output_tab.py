@@ -430,7 +430,7 @@ class OutputTab:
                                     icon="DRIVE_FILE_MOVE", key="output-cloud-pick"))
         items.append(ActionItem(u10.SEND_NOW_LABEL, lambda: self.ctx.spawn(self.send_now()), icon="CLOUD_UPLOAD",
                                 disabled_reason=self.cloud_reason(), key="output-cloud"))
-        items.append(ActionItem(u10.SHARE_LABEL, lambda: self.ctx.spawn(self.actions.provider_sheet(path, self.identity)),
+        items.append(ActionItem(u10.SHARE_LABEL, lambda: self.ctx.spawn(self.actions.share_file(path, self.identity)),
                                 icon="LINK", disabled_reason=self.share_reason(), key="output-share-link"))
         items.append(ActionItem("Delete", lambda: self.confirm_delete(path), icon="DELETE_OUTLINE", destructive=True,
                                 key="output-delete"))

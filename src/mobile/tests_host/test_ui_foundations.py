@@ -1229,7 +1229,7 @@ def test_composer_header_transcript_and_plus_sheet():
 
     plus = PlusSheet()
     assert plus.dialog.show_drag_handle and plus.dialog.draggable and plus.dialog.scrollable
-    assert list(plus.tiles) == ["files", "library", "photos", "camera", "clipboard"]
+    assert list(plus.tiles) == ["files", "library", "photos", "camera"]  # hotfix 5: no Clipboard tile
     camera = plus.tiles["camera"]
     assert camera.on_click is None and any(isinstance(c, ReasonChip) for c in camera.content.controls)
     assert len(plus.tool_tiles) == len(TOOLS) == 10
