@@ -9439,12 +9439,15 @@ SETTINGS = {
                 "different spelling (e.g. 'Walter Argent' for glossary 'Valter Argent').\n"
                 'Names are found with a named-entity recognition model (NER, 104 MB, downloaded '
                 'on\n'
-                'first use) plus a capitalization heuristic; Other Settings › "Use Named Entity\n'
-                'Recognition model (NER)" turns NER off (builds without ONNX Runtime use the '
+                'first use); Other Settings › "Use Named Entity Recognition model (NER)" turns it '
+                'off\n'
+                'for a capitalization heuristic (builds without ONNX Runtime always use the '
                 'heuristic).\n'
-                "Uses the entry types of Emergency Glossary Compliance and the name check's "
-                'minimum\n'
-                'length (Other Settings). Flagged chapters count as QA failures like other issues.',
+                'Checks the entry types below (the same setting as Other Settings › Emergency '
+                'Glossary\n'
+                "Compliance and the name check) and the name check's minimum length (Other "
+                'Settings).\n'
+                'Flagged chapters count as QA failures like other issues.',
      'type': 'bool',
      'ui_group': 'Detection Options',
      'ui_sites': ('qa',)},

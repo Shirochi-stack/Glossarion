@@ -442,6 +442,75 @@ def open_glossary_entry_types_dialog(self, parent, title, prompt, current_types)
         return None
 
 
+GLOSSARY_ENTRY_TYPE_MODES = ('characters', 'all', 'custom')
+
+
+def glossary_entry_types_row(self, dialog_parent):
+    """The entry types row (Characters / All / Custom, with Configure… for Custom) that Emergency Glossary
+    Compliance and the glossary name check share.
+
+    Other Settings and the QA Scanner settings each build one. Both edit
+    ``emergency_glossary_compliance_mode_var`` / ``emergency_glossary_compliance_custom_types_var``
+    (saved by either dialog's save_config), and a change in one moves every other open row.
+    ``dialog_parent()`` gives the parent of the Configure… dialog.
+    """
+    from PySide6.QtWidgets import QComboBox, QHBoxLayout, QPushButton, QWidget
+
+    if not hasattr(self, 'emergency_glossary_compliance_mode_var'):
+        self.emergency_glossary_compliance_mode_var = self.config.get('emergency_glossary_compliance_mode', 'characters')
+    if not hasattr(self, 'emergency_glossary_compliance_custom_types_var'):
+        self.emergency_glossary_compliance_custom_types_var = self.config.get('emergency_glossary_compliance_custom_types', [])
+
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(20, 0, 0, 0)
+    layout.setSpacing(8)
+    combo = QComboBox()
+    combo.addItems(["Characters", "All", "Custom"])
+    combo.setFixedWidth(140)
+    mode = str(self.emergency_glossary_compliance_mode_var).lower()
+    combo.setCurrentIndex(GLOSSARY_ENTRY_TYPE_MODES.index(mode) if mode in GLOSSARY_ENTRY_TYPE_MODES else 0)
+    _disable_combobox_mousewheel(self, combo)
+    layout.addWidget(combo)
+    configure_btn = QPushButton("Configure…")
+    configure_btn.setFixedWidth(100)
+    configure_btn.setStyleSheet("background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;")
+    layout.addWidget(configure_btn)
+    configure_btn.setVisible(combo.currentIndex() == 2)
+    layout.addStretch()
+
+    open_rows = getattr(self, '_glossary_entry_type_rows', None)
+    if open_rows is None:
+        open_rows = self._glossary_entry_type_rows = []
+    open_rows.append((combo, configure_btn))
+
+    def _on_mode_change(index):
+        self.emergency_glossary_compliance_mode_var = GLOSSARY_ENTRY_TYPE_MODES[index]
+        for other_combo, other_btn in list(open_rows):
+            try:
+                if other_combo is not combo:
+                    other_combo.blockSignals(True)
+                    other_combo.setCurrentIndex(index)
+                    other_combo.blockSignals(False)
+                other_btn.setVisible(index == 2)
+            except RuntimeError:  # its dialog was closed and deleted
+                open_rows.remove((other_combo, other_btn))
+    combo.currentIndexChanged.connect(_on_mode_change)
+
+    def _open_custom_types_dialog():
+        selected = open_glossary_entry_types_dialog(
+            self,
+            dialog_parent(),
+            "Custom Glossary Compliance Types",
+            "Select which entry types to pre-edit:",
+            self.emergency_glossary_compliance_custom_types_var,
+        )
+        if selected is not None:
+            self.emergency_glossary_compliance_custom_types_var = selected
+    configure_btn.clicked.connect(_open_custom_types_dialog)
+    return row
+
+
 def _disable_combobox_mousewheel(self, combobox):
     """Disable mousewheel scrolling on a combobox (PySide6)"""
     combobox.wheelEvent = lambda event: None
@@ -9016,31 +9085,9 @@ def _create_processing_options_section(self, parent):
     except Exception:
         pass
     
-    # Row for dropdown + configure button
-    glossary_compliance_row = QWidget()
-    glossary_compliance_row_layout = QHBoxLayout(glossary_compliance_row)
-    glossary_compliance_row_layout.setContentsMargins(20, 0, 0, 0)
-    glossary_compliance_row_layout.setSpacing(8)
-    
-    glossary_compliance_mode_combo = QComboBox()
-    glossary_compliance_mode_combo.addItems(["Characters", "All", "Custom"])
-    glossary_compliance_mode_combo.setFixedWidth(140)
-    try:
-        if not hasattr(self, 'emergency_glossary_compliance_mode_var'):
-            self.emergency_glossary_compliance_mode_var = self.config.get('emergency_glossary_compliance_mode', 'characters')
-        mode_map = {'characters': 0, 'all': 1, 'custom': 2}
-        glossary_compliance_mode_combo.setCurrentIndex(mode_map.get(str(self.emergency_glossary_compliance_mode_var).lower(), 0))
-    except Exception:
-        pass
-    self._disable_combobox_mousewheel(glossary_compliance_mode_combo)
-    glossary_compliance_row_layout.addWidget(glossary_compliance_mode_combo)
-    
-    glossary_compliance_configure_btn = QPushButton("Configure…")
-    glossary_compliance_configure_btn.setFixedWidth(100)
-    glossary_compliance_configure_btn.setStyleSheet("background-color: #3a5f8a; color: white; padding: 4px 8px; border-radius: 3px;")
-    glossary_compliance_configure_btn.setVisible(glossary_compliance_mode_combo.currentIndex() == 2)
-    glossary_compliance_row_layout.addWidget(glossary_compliance_configure_btn)
-    glossary_compliance_row_layout.addStretch()
+    # Entry types dropdown + Configure… (shared with the QA Scanner settings' glossary name check)
+    glossary_compliance_row = glossary_entry_types_row(
+        self, lambda: self._other_settings_dialog if hasattr(self, '_other_settings_dialog') else self)
 
     # A length floor avoids forcing short glossary keys into unrelated words.
     glossary_min_chars_row = QWidget()
@@ -9084,11 +9131,7 @@ def _create_processing_options_section(self, parent):
     glossary_compliance_desc.setStyleSheet("color: gray; font-size: 10pt;")
     glossary_compliance_desc.setContentsMargins(20, 0, 0, 5)
     glossary_compliance_desc.setTextFormat(Qt.RichText)
-    
-    # Initialize custom types list
-    if not hasattr(self, 'emergency_glossary_compliance_custom_types_var'):
-        self.emergency_glossary_compliance_custom_types_var = self.config.get('emergency_glossary_compliance_custom_types', [])
-    
+
     def _on_glossary_compliance_toggle(checked):
         try:
             self.emergency_glossary_compliance_var = bool(checked)
@@ -9097,30 +9140,7 @@ def _create_processing_options_section(self, parent):
         except Exception:
             pass
     glossary_compliance_cb.toggled.connect(_on_glossary_compliance_toggle)
-    
-    def _on_glossary_compliance_mode_change(index):
-        try:
-            mode_list = ['characters', 'all', 'custom']
-            self.emergency_glossary_compliance_mode_var = mode_list[index]
-            glossary_compliance_configure_btn.setVisible(index == 2)
-        except Exception:
-            pass
-    glossary_compliance_mode_combo.currentIndexChanged.connect(_on_glossary_compliance_mode_change)
-    
-    def _open_glossary_compliance_custom_dialog():
-        """Open dialog to select custom entry types for glossary compliance"""
-        selected = open_glossary_entry_types_dialog(
-            self,
-            self._other_settings_dialog if hasattr(self, '_other_settings_dialog') else self,
-            "Custom Glossary Compliance Types",
-            "Select which entry types to pre-edit:",
-            self.emergency_glossary_compliance_custom_types_var,
-        )
-        if selected is not None:
-            self.emergency_glossary_compliance_custom_types_var = selected
 
-    glossary_compliance_configure_btn.clicked.connect(_open_glossary_compliance_custom_dialog)
-    
     # Glossary Name Check (experimental): after each chapter, look for glossary names the model
     # spelled differently. Shares the entry types row (shown below both toggles); own minimum length.
     if not hasattr(self, 'glossary_name_check_var'):

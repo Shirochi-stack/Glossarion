@@ -3747,11 +3747,19 @@ class QAScannerMixin:
                 "Flags chapters where a glossary name from the source chapter was translated with a\n"
                 "different spelling (e.g. 'Walter Argent' for glossary 'Valter Argent').\n"
                 "Names are found with a named-entity recognition model (NER, 104 MB, downloaded on\n"
-                "first use) plus a capitalization heuristic; Other Settings › \"Use Named Entity\n"
-                "Recognition model (NER)\" turns NER off (builds without ONNX Runtime use the heuristic).\n"
-                "Uses the entry types of Emergency Glossary Compliance and the name check's minimum\n"
-                "length (Other Settings). Flagged chapters count as QA failures like other issues.")
+                "first use); Other Settings › \"Use Named Entity Recognition model (NER)\" turns it off\n"
+                "for a capitalization heuristic (builds without ONNX Runtime always use the heuristic).\n"
+                "Checks the entry types below (the same setting as Other Settings › Emergency Glossary\n"
+                "Compliance and the name check) and the name check's minimum length (Other Settings).\n"
+                "Flagged chapters count as QA failures like other issues.")
             detection_layout.addWidget(check_glossary_names_checkbox)
+
+            # The entry types dropdown of Other Settings (one setting: a change in either dialog shows in both)
+            from other_settings import glossary_entry_types_row
+            glossary_names_types_row = glossary_entry_types_row(self, lambda: dialog)
+            detection_layout.addWidget(glossary_names_types_row)
+            glossary_names_types_row.setVisible(check_glossary_names_checkbox.isChecked())
+            check_glossary_names_checkbox.toggled.connect(glossary_names_types_row.setVisible)
 
             glossary_names_fix_row = QWidget()
             glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)
