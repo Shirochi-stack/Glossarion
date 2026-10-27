@@ -1252,18 +1252,28 @@ class ChatStoreMixin:
     def _relocate_session_attachment_paths(
         self, session, source_folder, target_folder
     ):
-        """Keep response links valid after an attachment workspace is moved."""
+        """Keep response links valid after an attachment workspace is moved.
+
+        A stored link may spell the moved folder another way than ``source_folder`` (Android keeps
+        app files under ``/data/user/0/<pkg>``, a link to ``/data/data/<pkg>``; the caller resolves
+        the source with ``realpath``): links that only match once both are resolved move too.
+        """
         source_folder = os.path.abspath(source_folder)
         target_folder = os.path.abspath(target_folder)
+        source_real = os.path.realpath(source_folder)
 
         def relocated(path):
             value = str(path or "").strip()
             if not value:
                 return ""
             absolute = os.path.abspath(value)
+            base = source_folder
             if not self._path_is_same_or_descendant(absolute, source_folder):
-                return ""
-            relative = os.path.relpath(absolute, source_folder)
+                absolute = os.path.realpath(absolute)
+                base = source_real
+                if not self._path_is_same_or_descendant(absolute, base):
+                    return ""
+            relative = os.path.relpath(absolute, base)
             return os.path.normpath(os.path.join(target_folder, relative))
 
         updated_messages = []

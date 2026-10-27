@@ -824,6 +824,86 @@ def test_the_plan_card_profile_and_language_chips_open_the_preview():
     assert 'self.open_mini_model_sheet("profile")' in source and 'self.open_mini_model_sheet("language")' in source
 
 
+# ---- 7. the compiled EPUB the cards could not find; the background time limit --------------------------------
+
+
+def test_a_moved_book_takes_its_cards_along_whatever_spelling_their_paths_use(tmp_path, monkeypatch):
+    """The emulator repro: Android keeps app files under /data/user/0/<pkg>, a link to /data/data/<pkg>. The move
+    resolved its source (realpath) and compared the cards' /data/user/0 paths as text: no card followed the book, so
+    it showed no EPUB, "Compile an EPUB or PDF first" and "not in the Library yet"."""
+    import os
+
+    import direct_text_store
+
+    real_root = tmp_path / "data" / "data" / "pkg"
+    alias_root = tmp_path / "data" / "user" / "0" / "pkg"
+    source = real_root / "Direct Text" / "Chat" / "Attachments" / "novel"
+    source.mkdir(parents=True)
+    target = tmp_path / "Output" / "novel"
+    original = os.path.realpath
+
+    def realpath(path, *args, **kwargs):  # the /data/user/0 -> /data/data link
+        text = os.path.abspath(str(path))
+        if text.startswith(str(alias_root)):
+            text = str(real_root) + text[len(str(alias_root)):]
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, "realpath", realpath)
+    store = direct_text_store.ChatStore(tmp_path / "history.json", output_root=tmp_path / "Output")
+    aliased = alias_root / "Direct Text" / "Chat" / "Attachments" / "novel"
+    session = {"messages": [("assistant", "Done", "", "", str(aliased), "", {}),
+                            ("assistant", "Other", "", "", str(tmp_path / "elsewhere"), "", {}),
+                            ("assistant", "Same spelling", "", "", str(source / "part"), "", {})]}
+    store._relocate_session_attachment_paths(session, str(source), str(target))
+    folders = [message[4] for message in session["messages"]]
+    assert folders == [str(target), str(tmp_path / "elsewhere"), str(target / "part")]
+
+
+def test_cards_an_earlier_build_did_not_move_still_find_their_book(tmp_path):
+    from glossarion_mobile.ui.chat.chat_ops import moved_workspace
+
+    gone = tmp_path / "Direct Text" / "Chat" / "Attachments" / "novel"
+    book = tmp_path / "Output" / "novel"
+    book.mkdir(parents=True)
+    (book / "translation_progress.json").write_text("{}", encoding="utf-8")
+    messages = [("user_file", "novel.epub", "x", 0, "", "user"), ("assistant", "Done", "", "", str(gone), "", {})]
+    assert moved_workspace(messages, [1]) == ""
+    assert moved_workspace(messages, [1], [str(tmp_path / "Output")]) == str(book)
+    assert moved_workspace(messages, [1], [str(tmp_path / "Elsewhere")]) == ""
+
+
+def _jobs_helpers():
+    spec = importlib.util.spec_from_file_location("_glossarion_jobs_helpers_hotfix5",
+                                                  Path(__file__).with_name("test_jobs.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_background_time_limit_lets_a_finishing_epub_build_go_on():
+    from glossarion_mobile.services.background import job_finishing
+    from glossarion_mobile.services.jobs import JobSpec, JobState, Progress
+
+    tj = _jobs_helpers()
+    background, native, _clock, jobs = tj._background("android")
+
+    async def scenario():
+        jobs.snap = tj._snap(state=JobState.RUNNING, progress=Progress(total=107, completed=107))  # the EPUB build
+        await background.on_foreground_event({"type": "timeout", "is_timeout": True})
+        assert jobs.stops == [], "the EPUB build was stopped"
+        note = [c for c in native.calls if c[0] == "show_notification"][-1]
+        assert note[1][1].startswith("Finishing")
+        jobs.snap = tj._snap(state=JobState.RUNNING, progress=Progress(total=107, completed=40))  # still translating
+        await background.on_foreground_event({"type": "timeout", "is_timeout": True})
+        assert len(jobs.stops) == 1 and jobs.stops[0]["escalate"] is False
+        assert [c for c in native.calls if c[0] == "show_notification"][-1][1][1] == "Paused (system limit): tap to resume"
+
+    asyncio.run(scenario())
+    compile_job = types.SimpleNamespace(spec=JobSpec("compile_epub", "Book", ("a",)), progress=Progress())
+    assert job_finishing(compile_job)
+    assert not job_finishing(types.SimpleNamespace(spec=JobSpec("translate", "Book", ("a",)), progress=Progress()))
+
+
 # ---- the layers agree (sources) -------------------------------------------------------------------------
 
 

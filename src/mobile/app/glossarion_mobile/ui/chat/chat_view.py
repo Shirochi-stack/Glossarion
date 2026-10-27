@@ -5000,7 +5000,7 @@ class ChatView:
         folder = turn_workspace(messages, indices)
         if folder:
             return folder, True
-        moved = _moved_workspace(messages, indices)
+        moved = _moved_workspace(messages, indices, self._migration_roots())
         if moved:
             return moved, _in_attachments(moved)
         stem = os.path.splitext(os.path.basename(self._turn_source(item)))[0].lower()
@@ -5029,17 +5029,29 @@ class ChatView:
             return "Only books (EPUB, TXT, PDF, HTML) are added to the Library"
         return LIBRARY_WAIT_REASON
 
+    def _migration_roots(self) -> list:
+        """Blocking-safe: where this chat's moves into the Library go (``migration_output_root``), for the cards
+        an earlier build moved without following them (``chat_ops.moved_workspace``, hotfix 5)."""
+        if not self.bound:
+            return []
+        try:
+            root = self.env.chats.binding_for(self.cid).migration_output_root(self.env.chats.session(self.cid))
+        except Exception:
+            return []
+        return [root] if root else []
+
     def _latest_workspace(self) -> tuple:
         """Blocking: (the chat's most recently written book workspace - an ``Attachments/<stem>`` folder or
         one that moved into the Library -, its attachment path)."""
         messages = self._messages()
+        roots = self._migration_roots()
         candidates: dict = {}
         for folder in self.env.chats.attachment_folders(self.cid) if self.bound else []:
             candidates.setdefault(os.path.normcase(os.path.abspath(folder)), (folder, ""))
         for item in build_items(messages, 0, len(messages)):
             if item.kind != "job" or item.index < 0:
                 continue
-            moved = _moved_workspace(messages, list(item.requests) + [item.report, item.actions])
+            moved = _moved_workspace(messages, list(item.requests) + [item.report, item.actions], roots)
             if moved and not _in_attachments(moved):
                 message = messages[item.index]
                 source = str(message[2] or "") if len(message) > 2 and str(message[0]) == "user_file" else ""

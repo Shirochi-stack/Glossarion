@@ -1643,7 +1643,13 @@ class ChatFeature:
         except (TypeError, ValueError):
             user_index = -1
         span = turn_span(messages, user_index) if 0 <= user_index < len(messages) else []
-        folder = turn_workspace(messages, span[1:]) or moved_workspace(messages, span[1:])
+        roots: list = []
+        try:  # where this chat's moves go: a card the move did not follow still finds its book (hotfix 5)
+            root = chats.binding_for(cid).migration_output_root(chats.session(cid))
+            roots = [root] if root else []
+        except Exception:
+            log.debug("the chat's migration root is unknown", exc_info=True)
+        folder = turn_workspace(messages, span[1:]) or moved_workspace(messages, span[1:], roots)
         if folder:
             return folder
         if span:
