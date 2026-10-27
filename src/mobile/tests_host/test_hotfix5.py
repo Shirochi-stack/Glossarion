@@ -512,6 +512,92 @@ def test_camera_errors_are_said_and_backing_out_attaches_nothing():
     assert asyncio.run(ChatView.capture_and_attach(off)) is None and said[-1].startswith("The camera is only")
 
 
+# ---- 4. logs open on their newest lines, ↓ jumps back ----------------------------------------------------
+
+
+class _LogDispatcher:
+    """Hands the backlog over at once (the pump's job) and runs on the 'loop thread'."""
+
+    def __init__(self):
+        self.dirty: list = []
+
+    def subscribe_log(self, buffer, callback, *, backlog=0):
+        lines = buffer.since(max(0, buffer.last_seq - backlog))[0] if hasattr(buffer, "since") else []
+        callback(list(lines), 0)
+        return lambda: None
+
+    def on_loop_thread(self):
+        return True
+
+    def mark_dirty(self, control):
+        self.dirty.append(control)
+
+
+def _log_buffer(count):
+    from glossarion_mobile.services.dispatcher import LogBuffer
+
+    buffer = LogBuffer(5000, name="hotfix5")
+    buffer.extend([f"line {i}" for i in range(count)])
+    return buffer
+
+
+def _scroll(console, pixels, maximum):
+    console._on_scroll(types.SimpleNamespace(pixels=pixels, max_scroll_extent=maximum))
+
+
+def test_a_log_opens_on_its_newest_lines_even_while_auto_scroll_is_paused(monkeypatch):
+    from glossarion_mobile.ui.components import log_console as lc
+
+    monkeypatch.setitem(lc.SESSION, "following", False)  # paused earlier in this app session
+    console = lc.LogConsole(buffer=_log_buffer(30), dispatcher=_LogDispatcher(), backlog=500)
+    assert not console.following and not console.list_view.auto_scroll
+    console.attach()  # the backlog arrives: the client pins it after layout, whatever the session's choice
+    assert console.visible_text().endswith("line 29")
+    assert console.list_view.auto_scroll is False  # no loop here: the paused choice applies at once afterwards
+    lc.SESSION["following"] = True
+    following = lc.LogConsole(buffer=_log_buffer(5), dispatcher=_LogDispatcher())
+    following.attach()
+    assert following.following and following.list_view.auto_scroll
+    assert following.list_view.auto_scroll_animation.duration == 0  # a jump, never the 1 s default animation
+
+
+def test_scrolling_up_shows_the_jump_button_and_it_follows_again(monkeypatch):
+    from glossarion_mobile.ui.components import log_console as lc
+
+    monkeypatch.setitem(lc.SESSION, "following", True)
+    console = lc.LogConsole(buffer=_log_buffer(80), dispatcher=_LogDispatcher(), header_follow=True)
+    console.attach()
+    jumps: list = []
+
+    async def scroll_to(**kw):
+        jumps.append(kw)
+
+    monkeypatch.setattr(console, "_page_or_none", lambda: object())
+    monkeypatch.setattr(lc.asyncio, "ensure_future", lambda coro: asyncio.new_event_loop().run_until_complete(coro))
+    object.__setattr__(console.list_view, "scroll_to", scroll_to)
+    for control in (console.jump_holder, console.follow_button, console.list_view):
+        object.__setattr__(control, "update", lambda: None)
+    assert console.jump_button.key == "log-jump-end" and not console.jump_holder.visible
+    _scroll(console, 1000, 1000)
+    assert console.at_end and not console.jump_holder.visible
+    _scroll(console, 300, 1000)  # the reader scrolls up: this console stops following, ↓ shows
+    assert not console.at_end and console.jump_holder.visible and not console.following
+    assert lc.SESSION["following"] is True and console.list_view.auto_scroll  # not a session pause
+    console.jump_button.on_click(None)  # ↓: the newest lines, following again
+    assert jumps and jumps[-1]["offset"] == -1 and console.following and not console.jump_holder.visible
+    # back at the end by hand after a scroll up: following again too
+    _scroll(console, 300, 1000)
+    assert not console.following
+    _scroll(console, 990, 1000)
+    assert console.following and not console.jump_holder.visible
+    # a pause with the auto-scroll button stays a pause at the end
+    console.follow_button.on_click(None)
+    assert not console.following and lc.SESSION["following"] is False and not console.list_view.auto_scroll
+    _scroll(console, 500, 1000)
+    _scroll(console, 1000, 1000)
+    assert not console.following
+
+
 # ---- the layers agree (sources) -------------------------------------------------------------------------
 
 

@@ -157,10 +157,11 @@ def test_the_host_hears_every_painted_change_to_keep_its_page_at_the_end(monkeyp
     console = LogConsole(dispatcher=_Dispatcher(), on_after_change=lambda: heard.append(console.following))
     scrolls = _live(console, monkeypatch)
     console.on_lines([line("one")], 0)
-    assert heard == [True] and len(scrolls) == 1
+    # hotfix 5: following is the list's auto_scroll (the client pins after layout), never a scroll_to per batch
+    assert heard == [True] and scrolls == [] and console.list_view.auto_scroll
     console.set_following(False)
     console.on_lines([line("two")], 0)
-    assert heard == [True, False, False] and len(scrolls) == 1     # paused: no inner scroll, the host still hears
+    assert heard == [True, False, False] and scrolls == [] and not console.list_view.auto_scroll  # the host hears
 
 
 def test_autoscroll_toggle_pauses_and_resumes_following(monkeypatch):
@@ -173,19 +174,18 @@ def test_autoscroll_toggle_pauses_and_resumes_following(monkeypatch):
     scrolls = _live(console, monkeypatch)
 
     console.on_lines([line("first")], 0)
-    assert len(scrolls) == 1 and scrolls[-1]["offset"] == -1
+    assert scrolls == [] and console.list_view.auto_scroll  # following: the client pins the end after layout
 
     button.on_click(None)  # off: lines are still appended, the view stays put
-    assert not console.following and not button.selected
+    assert not console.following and not button.selected and not console.list_view.auto_scroll
     assert button.icon != on_icon and button.tooltip != on_tip and "paused" in button.tooltip.lower()
-    count = len(scrolls)
     console.on_lines([line("second"), line("third")], 0)
-    assert len(scrolls) == count
+    assert scrolls == []
     assert console.visible_text() == "first\nsecond\nthird"
 
-    button.on_click(None)  # on again: jumps to the end now
+    button.on_click(None)  # on again: jumps to the end now (the lines are laid out already)
     assert console.following and button.selected and button.icon == on_icon and button.tooltip == on_tip
-    assert len(scrolls) == count + 1 and scrolls[-1]["offset"] == -1
+    assert console.list_view.auto_scroll and len(scrolls) == 1 and scrolls[-1]["offset"] == -1
 
 
 def test_autoscroll_choice_lasts_for_the_session():
