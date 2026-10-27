@@ -6689,7 +6689,10 @@ def run_glossary_name_check(folder_path, results, qa_settings, log=print, *, epu
     log(f"\n📖 Glossary name check (experimental): {len(entries.entries)} entries from {sources}")
     use_ner = qa_settings.get("_glossary_name_use_ner")
     ner = name_check.resolve_ner(name_check.use_ner_from_env() if use_ner is None else use_ner, log)
-    log(f"   🔎 Names found with {'the named-entity model (NER)' if ner is not None else 'the capitalization heuristic'}")
+    workers = name_check.chapter_workers(ner, chosen=qa_settings.get("_glossary_name_workers") or 0)
+    log(f"   🔎 Names found with "
+        + (f"the named-entity model (NER), {workers} chapter(s) at once" if ner is not None
+           else "the capitalization heuristic"))
     # progress: a line every tenth of the chapters (at most every 15 s apart) and the last one
     shown = {"done": 0, "at": time.monotonic()}
     shown_lock = threading.Lock()
@@ -6705,7 +6708,8 @@ def run_glossary_name_check(folder_path, results, qa_settings, log=print, *, epu
         log(f"   📖 Glossary name check: {done}/{total} chapters ({done * 100 // max(1, total)}%)")
 
     chapters = name_check.scan_folder(folder_path, entries, progress_path=progress_path,
-                                      selected_files=list(by_file), stop=should_stop, ner=ner, progress=on_progress)
+                                      selected_files=list(by_file), stop=should_stop, ner=ner, progress=on_progress,
+                                      workers=workers)
     flagged = 0
     for chapter in chapters:
         result_obj = by_file.get(chapter.output_file)

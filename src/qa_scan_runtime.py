@@ -623,9 +623,11 @@ def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=N
     if settings.get("check_glossary_names"):
         # Glossary name check: Emergency Glossary Compliance's entry types, its own minimum length / NER
         try:
-            from glossary_name_check import layer_settings_from_config, settings_from_config, use_ner_from_config
+            from glossary_name_check import (layer_settings_from_config, settings_from_config, use_ner_from_config,
+                                             workers_from_config)
             settings["_glossary_name_scope"] = settings_from_config(live_config)
             settings["_glossary_name_use_ner"] = use_ner_from_config(live_config)
+            settings["_glossary_name_workers"] = workers_from_config(live_config)  # 0 = Auto
             # the glossaries a request adds (Add Additional Glossary / Enable Unified Glossary)
             settings["_glossary_name_layers"] = layer_settings_from_config(live_config)
         except Exception:

@@ -433,6 +433,9 @@ class QAScannerMixin:
                              maximum=total)
 
             ner = name_check.resolve_ner(use_ner, logs.append, progress=on_download, cancel=cancelled, retry=True)
+            workers = name_check.chapter_workers(ner, chosen=name_check.workers_from_config(
+                {"glossary_name_check_workers": getattr(self, 'glossary_name_check_workers_var',
+                                                        self.config.get('glossary_name_check_workers', 0))}))
             reviews = []
             for index, folder in enumerate(folders):
                 if cancelled():
@@ -441,7 +444,8 @@ class QAScannerMixin:
                     where["text"] = f"{os.path.basename(folder)} ({index + 1} of {len(folders)})\n"
                 state.update(text=f"{where['text']}Checking glossary names...", value=0, maximum=0)
                 reviews.append(name_check.review_folder(folder, scope, stop=cancelled, ner=ner,
-                                                        progress=on_chapter, settings=layer_settings))
+                                                        progress=on_chapter, workers=workers,
+                                                        settings=layer_settings))
             return reviews
 
         def flush_logs():
@@ -3773,9 +3777,9 @@ class QAScannerMixin:
             check_glossary_names_layout.addStretch()
             detection_layout.addWidget(check_glossary_names_row)
 
-            # Other Settings' entry types dropdown and Auto-fix strength (one setting each: a change in either
-            # dialog shows in both)
-            from other_settings import glossary_entry_types_row, glossary_name_autofix_row
+            # Other Settings' entry types dropdown, Auto-fix strength and Chapters checked at once (one setting
+            # each: a change in either dialog shows in both)
+            from other_settings import glossary_entry_types_row, glossary_name_autofix_row, glossary_name_workers_row
             glossary_names_types_row = glossary_entry_types_row(self, lambda: dialog)
             detection_layout.addWidget(glossary_names_types_row)
             glossary_names_types_row.setVisible(check_glossary_names_checkbox.isChecked())
@@ -3784,6 +3788,10 @@ class QAScannerMixin:
             detection_layout.addWidget(glossary_names_autofix_row)
             glossary_names_autofix_row.setVisible(check_glossary_names_checkbox.isChecked())
             check_glossary_names_checkbox.toggled.connect(glossary_names_autofix_row.setVisible)
+            glossary_names_workers_row = glossary_name_workers_row(self)
+            detection_layout.addWidget(glossary_names_workers_row)
+            glossary_names_workers_row.setVisible(check_glossary_names_checkbox.isChecked())
+            check_glossary_names_checkbox.toggled.connect(glossary_names_workers_row.setVisible)
 
             glossary_names_fix_row = QWidget()
             glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)

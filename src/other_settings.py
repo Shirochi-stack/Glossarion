@@ -578,6 +578,83 @@ def glossary_name_autofix_row(self):
     return name_check_autofix_level_row
 
 
+def _glossary_name_workers_text(value):
+    """The slider's value: "Auto (N)" (what Auto checks at once here) or "N chapters"."""
+    if value:
+        return f"{value} chapter" + ("" if value == 1 else "s")
+    try:
+        import glossary_name_check as name_check
+        return f"Auto ({name_check.chapter_workers(True)})"
+    except Exception:
+        return "Auto"
+
+
+def glossary_name_workers_row(self):
+    """The glossary name check's "Chapters checked at once" slider (``glossary_name_check_workers_var``,
+    0 = Auto). Other Settings and the QA Scanner settings each build one; a change in one moves every
+    other open row (saved by either dialog's save_config)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QSlider, QWidget
+
+    import glossary_name_check as name_check
+
+    # Chapters checked at once: one loaded NER model checks several chapters at the same time
+    name_check_workers_row = QWidget()
+    name_check_workers_layout = QHBoxLayout(name_check_workers_row)
+    name_check_workers_layout.setContentsMargins(20, 0, 0, 0)
+    name_check_workers_layout.setSpacing(8)
+    name_check_workers_layout.addWidget(QLabel("Chapters checked at once:"))
+    name_check_workers_slider = QSlider(Qt.Horizontal)
+    name_check_workers_slider.setRange(0, name_check.MAX_CHAPTER_WORKERS)
+    name_check_workers_slider.setSingleStep(1)
+    name_check_workers_slider.setPageStep(1)
+    name_check_workers_slider.setTickPosition(QSlider.TicksBelow)
+    name_check_workers_slider.setTickInterval(1)
+    name_check_workers_slider.setFixedWidth(180)
+    name_check_workers_slider.wheelEvent = lambda event: event.ignore()
+    name_check_workers_slider.setToolTip(
+        "<b>Chapters checked at once</b> (with the named-entity model, NER)<br>"
+        "How many chapters the glossary name check checks at the same time in the QA scan and in "
+        "<i>Check glossary names in existing output…</i>. One loaded model checks them all; each "
+        "check uses up to 4 CPU cores.<br>"
+        "<b>Auto</b> (default): the QA Scanner's <i>Maximum parallel workers</i> ÷ 4 (2 with 8 "
+        "workers, 4 with 16 or All cores).<br>"
+        "More is faster until the CPU is busy. The capitalization heuristic checks one chapter at a "
+        "time, and the check after each translated chapter is not affected.")
+    try:
+        current_name_check_workers = max(0, min(name_check.MAX_CHAPTER_WORKERS, int(
+            getattr(self, 'glossary_name_check_workers_var', self.config.get('glossary_name_check_workers', 0)))))
+    except (TypeError, ValueError):
+        current_name_check_workers = 0
+    self.glossary_name_check_workers_var = current_name_check_workers
+    name_check_workers_slider.setValue(current_name_check_workers)
+    name_check_workers_layout.addWidget(name_check_workers_slider)
+    name_check_workers_value = QLabel(_glossary_name_workers_text(current_name_check_workers))
+    name_check_workers_value.setMinimumWidth(110)
+    name_check_workers_layout.addWidget(name_check_workers_value)
+    name_check_workers_layout.addStretch()
+
+    open_rows = getattr(self, '_glossary_name_workers_rows', None)
+    if open_rows is None:
+        open_rows = self._glossary_name_workers_rows = []
+    open_rows.append((name_check_workers_slider, name_check_workers_value))
+
+    def _on_name_check_workers_change(value):
+        self.glossary_name_check_workers_var = value
+        for slider, value_label in list(open_rows):
+            try:
+                if slider is not name_check_workers_slider and slider.value() != value:
+                    slider.blockSignals(True)
+                    slider.setValue(value)
+                    slider.blockSignals(False)
+                value_label.setText(_glossary_name_workers_text(value))
+            except RuntimeError:  # its dialog was closed and deleted
+                open_rows.remove((slider, value_label))
+
+    name_check_workers_slider.valueChanged.connect(_on_name_check_workers_change)
+    return name_check_workers_row
+
+
 def _disable_combobox_mousewheel(self, combobox):
     """Disable mousewheel scrolling on a combobox (PySide6)"""
     combobox.wheelEvent = lambda event: None
@@ -9279,8 +9356,9 @@ def _create_processing_options_section(self, parent):
     name_check_min_chars_slider.valueChanged.connect(_on_name_check_min_chars_change)
     _on_name_check_min_chars_change(current_name_check_min_chars)
 
-    # Auto-fix strength (shared with the QA Scanner settings' glossary name check)
+    # Auto-fix strength and Chapters checked at once (shared with the QA Scanner settings' name check)
     name_check_autofix_level_row = glossary_name_autofix_row(self)
+    name_check_workers_row = glossary_name_workers_row(self)
 
     # "Names keep their numbers": a candidate with another number (or none) is never a respelling, and a
     # name glued to a number's left ("the72 Demon Kings") counts as present (owner 2026-10-27, default on)
@@ -9353,6 +9431,7 @@ def _create_processing_options_section(self, parent):
             name_check_row.setVisible(checked)
             name_check_min_chars_row.setVisible(checked)
             name_check_autofix_level_row.setVisible(checked)
+            name_check_workers_row.setVisible(checked)
             name_check_numbers_row.setVisible(checked)
             name_check_ner_row.setVisible(checked)
             name_check_desc.setVisible(checked)
@@ -9387,6 +9466,7 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(name_check_row)
     left_v.addWidget(name_check_min_chars_row)
     left_v.addWidget(name_check_autofix_level_row)
+    left_v.addWidget(name_check_workers_row)
     left_v.addWidget(name_check_numbers_row)
     left_v.addWidget(name_check_ner_row)
     left_v.addWidget(name_check_desc)
@@ -9401,6 +9481,7 @@ def _create_processing_options_section(self, parent):
     name_check_row.setVisible(name_check_cb.isChecked())
     name_check_min_chars_row.setVisible(name_check_cb.isChecked())
     name_check_autofix_level_row.setVisible(name_check_cb.isChecked())
+    name_check_workers_row.setVisible(name_check_cb.isChecked())
     name_check_numbers_row.setVisible(name_check_cb.isChecked())
     name_check_ner_row.setVisible(name_check_cb.isChecked())
     name_check_desc.setVisible(name_check_cb.isChecked())

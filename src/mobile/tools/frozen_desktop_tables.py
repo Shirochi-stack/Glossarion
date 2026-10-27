@@ -105,6 +105,7 @@ class FrozenDesktopTables:
             ('payload_summary_decode_images', ['payload_summary_decode_images_var'], False, bool),
             ('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),
             ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),
+            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(8, safe_int(v, 0)))),
             ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
             ('token_limit_disabled', ['token_limit_disabled'], False, bool),
             ('enable_thoughts', ['enable_thoughts_var'], True, bool),

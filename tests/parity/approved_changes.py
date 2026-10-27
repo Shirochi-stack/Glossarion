@@ -829,8 +829,10 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   'value=done,\n'
   '                             maximum=total)\n'
   '\n'
-  '            ner = name_check.resolve_ner(use_ner, logs.append, progress=on_download, cancel=cancelled, '
-  'retry=True)\n'
+  '            ner = name_check.resolve_ner(use_ner, logs.append, progress=on_download, cancel=cancelled, retry=True)\n'
+  '            workers = name_check.chapter_workers(ner, chosen=name_check.workers_from_config(\n'
+  '                {"glossary_name_check_workers": getattr(self, \'glossary_name_check_workers_var\',\n'
+  "                                                        self.config.get('glossary_name_check_workers', 0))}))\n"
   '            reviews = []\n'
   '            for index, folder in enumerate(folders):\n'
   '                if cancelled():\n'
@@ -839,7 +841,8 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '                    where["text"] = f"{os.path.basename(folder)} ({index + 1} of {len(folders)})\\n"\n'
   '                state.update(text=f"{where[\'text\']}Checking glossary names...", value=0, maximum=0)\n'
   '                reviews.append(name_check.review_folder(folder, scope, stop=cancelled, ner=ner,\n'
-  '                                                        progress=on_chapter, settings=layer_settings))\n'
+  '                                                        progress=on_chapter, workers=workers,\n'
+  '                                                        settings=layer_settings))\n'
   '            return reviews\n'
   '\n'
   '        def flush_logs():\n'
@@ -1399,9 +1402,9 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '            check_glossary_names_layout.addStretch()\n'
   '            detection_layout.addWidget(check_glossary_names_row)\n'
   '\n'
-  "            # Other Settings' entry types dropdown and Auto-fix strength (one setting each: a change in either\n"
-  '            # dialog shows in both)\n'
-  '            from other_settings import glossary_entry_types_row, glossary_name_autofix_row\n'
+  "            # Other Settings' entry types dropdown, Auto-fix strength and Chapters checked at once (one setting\n"
+  '            # each: a change in either dialog shows in both)\n'
+  '            from other_settings import glossary_entry_types_row, glossary_name_autofix_row, glossary_name_workers_row\n'
   '            glossary_names_types_row = glossary_entry_types_row(self, lambda: dialog)\n'
   '            detection_layout.addWidget(glossary_names_types_row)\n'
   '            glossary_names_types_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
@@ -1410,6 +1413,10 @@ _NAME_CHECK_QA_GUI = [('\n    def prewarm_qa_scanner_gui(self):\n',
   '            detection_layout.addWidget(glossary_names_autofix_row)\n'
   '            glossary_names_autofix_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
   '            check_glossary_names_checkbox.toggled.connect(glossary_names_autofix_row.setVisible)\n'
+  '            glossary_names_workers_row = glossary_name_workers_row(self)\n'
+  '            detection_layout.addWidget(glossary_names_workers_row)\n'
+  '            glossary_names_workers_row.setVisible(check_glossary_names_checkbox.isChecked())\n'
+  '            check_glossary_names_checkbox.toggled.connect(glossary_names_workers_row.setVisible)\n'
   '\n'
   '            glossary_names_fix_row = QWidget()\n'
   '            glossary_names_fix_layout = QHBoxLayout(glossary_names_fix_row)\n'
@@ -1480,10 +1487,11 @@ _NAME_CHECK_QA_RUNTIME = [('        "check_glossary_leakage": True,\n        "ch
   '    if settings.get("check_glossary_names"):\n'
   "        # Glossary name check: Emergency Glossary Compliance's entry types, its own minimum length / NER\n"
   '        try:\n'
-  '            from glossary_name_check import layer_settings_from_config, settings_from_config, '
-  'use_ner_from_config\n'
+  '            from glossary_name_check import (layer_settings_from_config, settings_from_config, use_ner_from_config,\n'
+  '                                             workers_from_config)\n'
   '            settings["_glossary_name_scope"] = settings_from_config(live_config)\n'
   '            settings["_glossary_name_use_ner"] = use_ner_from_config(live_config)\n'
+  '            settings["_glossary_name_workers"] = workers_from_config(live_config)  # 0 = Auto\n'
   '            # the glossaries a request adds (Add Additional Glossary / Enable Unified Glossary)\n'
   '            settings["_glossary_name_layers"] = layer_settings_from_config(live_config)\n'
   '        except Exception:\n'
@@ -1513,7 +1521,10 @@ _NAME_CHECK_SCANNER = [('\ndef check_potential_truncation(raw_text):\n',
   '    log(f"\\n📖 Glossary name check (experimental): {len(entries.entries)} entries from {sources}")\n'
   '    use_ner = qa_settings.get("_glossary_name_use_ner")\n'
   '    ner = name_check.resolve_ner(name_check.use_ner_from_env() if use_ner is None else use_ner, log)\n'
-  '    log(f"   🔎 Names found with {\'the named-entity model (NER)\' if ner is not None else \'the capitalization heuristic\'}")\n'
+  '    workers = name_check.chapter_workers(ner, chosen=qa_settings.get("_glossary_name_workers") or 0)\n'
+  '    log(f"   🔎 Names found with "\n'
+  '        + (f"the named-entity model (NER), {workers} chapter(s) at once" if ner is not None\n'
+  '           else "the capitalization heuristic"))\n'
   '    # progress: a line every tenth of the chapters (at most every 15 s apart) and the last one\n'
   '    shown = {"done": 0, "at": time.monotonic()}\n'
   '    shown_lock = threading.Lock()\n'
@@ -1529,7 +1540,8 @@ _NAME_CHECK_SCANNER = [('\ndef check_potential_truncation(raw_text):\n',
   '        log(f"   📖 Glossary name check: {done}/{total} chapters ({done * 100 // max(1, total)}%)")\n'
   '\n'
   '    chapters = name_check.scan_folder(folder_path, entries, progress_path=progress_path,\n'
-  '                                      selected_files=list(by_file), stop=should_stop, ner=ner, progress=on_progress)\n'
+  '                                      selected_files=list(by_file), stop=should_stop, ner=ner, progress=on_progress,\n'
+  '                                      workers=workers)\n'
   '    flagged = 0\n'
   '    for chapter in chapters:\n'
   '        result_obj = by_file.get(chapter.output_file)\n'
@@ -1648,6 +1660,11 @@ _INPAINT_NO_POOL_SYNC = [('\ndef _run_clean_background(self, image_path: str, re
 # on): the settings / bool rows and the env line in the pinned sources, and the schema hunks
 _MATCH_NUMBERS_LEGACY = {'src/translator_gui.py': [("                ('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "                ('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),\n                ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),\n            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', True),\n            ('payload_summary_auto_update_var', 'payload_summary_auto_update', False),\n", "            ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', True),\n            ('glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', True),\n            ('payload_summary_auto_update_var', 'payload_summary_auto_update', False),\n"), ('            \'GLOSSARY_NAME_CHECK_USE_NER\': "1" if getattr(self, \'glossary_name_check_use_ner_var\', True) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n', '            \'GLOSSARY_NAME_CHECK_USE_NER\': "1" if getattr(self, \'glossary_name_check_use_ner_var\', True) else "0",\n            \'GLOSSARY_NAME_CHECK_MATCH_NUMBERS\': "1" if getattr(self, \'glossary_name_check_match_numbers_var\', True) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n')], 'src/owner_state.py': [("            ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', True),\n            ('payload_summary_auto_update_var', 'payload_summary_auto_update', False),\n", "            ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', True),\n            ('glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', True),\n            ('payload_summary_auto_update_var', 'payload_summary_auto_update', False),\n")], 'src/settings_persistence.py': [("            ('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_use_ner', ['glossary_name_check_use_ner_var'], True, bool),\n            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n")], 'src/run_env.py': [('            \'GLOSSARY_NAME_CHECK_USE_NER\': "1" if getattr(self, \'glossary_name_check_use_ner_var\', True) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n', '            \'GLOSSARY_NAME_CHECK_USE_NER\': "1" if getattr(self, \'glossary_name_check_use_ner_var\', True) else "0",\n            \'GLOSSARY_NAME_CHECK_MATCH_NUMBERS\': "1" if getattr(self, \'glossary_name_check_match_numbers_var\', True) else "0",\n            \'COMPRESS_GLOSSARY_PROMPT\': \'1\' if self.config.get(\'compress_glossary_prompt\') else \'0\',\n')]}
 _MATCH_NUMBERS_SCHEMA = {'src/settings_schema_data.py': [(" 'glossary_name_check_use_ner',\n 'retry_duplicate_bodies',\n", " 'glossary_name_check_use_ner',\n 'glossary_name_check_match_numbers',\n 'retry_duplicate_bodies',\n"), (" ('glossary_name_check_use_ner', ('glossary_name_check_use_ner_var',), ('value', True), ('bool',)),\n ('retry_duplicate_bodies', ('retry_duplicate_var',), ('value', False), ('bool',)),\n", " ('glossary_name_check_use_ner', ('glossary_name_check_use_ner_var',), ('value', True), ('bool',)),\n ('glossary_name_check_match_numbers',\n  ('glossary_name_check_match_numbers_var',),\n  ('value', True),\n  ('bool',)),\n ('retry_duplicate_bodies', ('retry_duplicate_var',), ('value', False), ('bool',)),\n"), (" ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', ('value', True)),\n ('payload_summary_auto_update_var', 'payload_summary_auto_update', ('value', False)),\n", " ('glossary_name_check_use_ner_var', 'glossary_name_check_use_ner', ('value', True)),\n ('glossary_name_check_match_numbers_var', 'glossary_name_check_match_numbers', ('value', True)),\n ('payload_summary_auto_update_var', 'payload_summary_auto_update', ('value', False)),\n"), ("     'var_names': ('glossary_name_check_autofix_level_var',)},\n    'glossary_name_check_min_chars': {'converter': ('safe_int', 2, 0, 10, 'max_min'),\n", '     \'var_names\': (\'glossary_name_check_autofix_level_var\',)},\n    \'glossary_name_check_match_numbers\': {\'converter\': (\'bool\',),\n     \'default\': True,\n     \'default_source\': \'init\',\n     \'dialog_default\': True,\n     \'env\': ((\'GLOSSARY_NAME_CHECK_MATCH_NUMBERS\', \'translation\', True),),\n     \'init_default\': True,\n     \'label\': \'Names keep their numbers\',\n     \'origins\': (\'settings_map\', \'init\', \'dialog\', \'env\'),\n     \'save_default\': True,\n     \'tooltip\': \'A spelling with another number, or none, is never taken for a glossary name\\n\'\n                "(\'Demon Kings\' is not \'72 Demon Kings\'), and a name whose number is glued to the\\n"\n                "word before it (\'the72 Demon Kings\', a missing space) counts as found.\\n"\n                \'Off: numbers are ignored when names are compared.\',\n     \'type\': \'bool\',\n     \'ui_group\': \'Processing Options\',\n     \'ui_sites\': (\'other.processing\',),\n     \'var_names\': (\'glossary_name_check_match_numbers_var\',)},\n    \'glossary_name_check_min_chars\': {\'converter\': (\'safe_int\', 2, 0, 10, \'max_min\'),\n'), ("             ('QA_CHECK_GLOSSARY_NAMES', 'qa', False)),\n     'label': 'Check glossary names with NER (Experimental)',\n     'nested_default': False,\n", "             ('QA_CHECK_GLOSSARY_NAMES', 'qa', False)),\n     'nested_default': False,\n")], 'src/settings_schema.py': [('    "glossary_name_check_mode": "Glossary name check mode",\n    "output_language": "Target language",\n', '    "glossary_name_check_mode": "Glossary name check mode",\n    # the QA scanner\'s toggle text says whether NER is installed (picked at runtime, 2026-10-27)\n    "check_glossary_names": "Check glossary names with NER (Experimental)",\n    "output_language": "Target language",\n')]}
+
+
+# 2026-10-27 "Chapters checked at once" (glossary_name_check_workers, 0 = Auto): the settings row in the
+# pinned sources (after the match-numbers row)
+_NAME_CHECK_WORKERS_LEGACY = {'src/translator_gui.py': [("                ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "                ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n                ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(8, safe_int(v, 0)))),\n                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n"), ("            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(8, safe_int(v, 0)))),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n")], 'src/settings_persistence.py': [("            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n", "            ('glossary_name_check_match_numbers', ['glossary_name_check_match_numbers_var'], True, bool),\n            ('glossary_name_check_workers', ['glossary_name_check_workers_var'], 0, lambda v: max(0, min(8, safe_int(v, 0)))),\n            ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),\n")]}
 
 
 APPROVED = (
@@ -1999,6 +2016,13 @@ APPROVED = (
             **{rel: [pair for pair in pairs] for rel, pairs in _MATCH_NUMBERS_LEGACY.items()},
             **_MATCH_NUMBERS_SCHEMA,
         },
+        "values": {},
+    },
+    {
+        "date": "2026-10-27",
+        "what": "New glossary name check setting 'Chapters checked at once' (glossary_name_check_workers, "
+                "0 = Auto: the count Maximum parallel workers gave before)",
+        "source": _NAME_CHECK_WORKERS_LEGACY,
         "values": {},
     },
 )

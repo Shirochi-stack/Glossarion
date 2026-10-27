@@ -558,6 +558,18 @@ def test_chapter_workers_follow_the_qa_performance_setting(monkeypatch, cpus, se
     assert ner_names.ner_threads() == min(4, cpus)
     assert g.chapter_workers(object(), setting) == expected
     assert g.chapter_workers(None, setting) == 1  # the heuristic alone is pure Python
+    # "Chapters checked at once" (glossary_name_check_workers): 0 = Auto (the rule above), else that count
+    assert g.chapter_workers(object(), setting, chosen=0) == expected
+    assert g.chapter_workers(object(), setting, chosen=3) == 3
+    assert g.chapter_workers(None, setting, chosen=3) == 1
+
+
+def test_chapters_at_once_setting_reads_and_clamps():
+    assert g.workers_from_config({}) == 0 and g.workers_from_config(None) == 0
+    assert g.workers_from_config({"glossary_name_check_workers": 3}) == 3
+    assert g.workers_from_config({"glossary_name_check_workers": 99}) == g.MAX_CHAPTER_WORKERS
+    assert g.workers_from_config({"glossary_name_check_workers": "x"}) == 0
+    assert g.chapter_workers(object(), chosen=99) == g.MAX_CHAPTER_WORKERS
 
 
 def test_parallel_scan_keeps_file_order_and_results(tmp_path):
@@ -718,6 +730,16 @@ out["autofix_moved"] = [s.value() for s in sliders] + [v.text() for v in values]
 shiboken6.delete(rows[0])
 sliders[1].setValue(1)
 out["autofix_after_close"] = [sliders[1].value(), values[1].text(), owner.glossary_name_check_autofix_level_var]
+owner.config["glossary_name_check_workers"] = 2  # saved: the rows start from it
+rows = [other_settings.glossary_name_workers_row(owner) for _ in range(2)]  # Other Settings, QA Scanner
+sliders = [r.findChild(QSlider) for r in rows]
+values = [r.findChildren(QLabel)[-1] for r in rows]
+out["workers_start"] = [s.value() for s in sliders] + [v.text() for v in values]
+sliders[0].setValue(0)
+out["workers_auto"] = [s.value() for s in sliders] + [v.text().split(" (")[0] for v in values]
+out["workers_auto"] += [owner.glossary_name_check_workers_var]
+sliders[1].setValue(1)
+out["workers_one"] = [s.value() for s in sliders] + [v.text() for v in values]
 print("SYNC=" + json.dumps(out))
 '''
 
@@ -741,6 +763,9 @@ def test_entry_types_dropdown_is_one_setting_in_other_settings_and_the_qa_scanne
     assert out["autofix_start"] == [2, 2, "2 Balanced", "2 Balanced"]
     assert out["autofix_moved"] == [3, 3, "3 Aggressive", "3 Aggressive", 3]
     assert out["autofix_after_close"] == [1, "1 Conservative", 1]
+    assert out["workers_start"] == [2, 2, "2 chapters", "2 chapters"]
+    assert out["workers_auto"] == [0, 0, "Auto", "Auto", 0]  # "Auto (N)": N is what Auto checks here
+    assert out["workers_one"] == [1, 1, "1 chapter", "1 chapter"]
     # both dialogs build it from the one helper; the QA row sits right below the name check toggle
     with open(os.path.join(SRC, "other_settings.py"), encoding="utf-8") as f:
         other = f.read()
@@ -749,8 +774,10 @@ def test_entry_types_dropdown_is_one_setting_in_other_settings_and_the_qa_scanne
     section = other[other.index("def _create_processing_options_section"):]
     body = section[:section.index("\ndef ")]
     assert "glossary_entry_types_row(\n        self, " in body and "glossary_name_autofix_row(self)" in body
+    assert "glossary_name_workers_row(self)" in body
     # the toggle (with its ✓ when NER is installed), then the entry types and Auto-fix strength, then the button
     assert (qa.index("detection_layout.addWidget(check_glossary_names_row)")
             < qa.index("glossary_entry_types_row(self, lambda: dialog)")
             < qa.index("glossary_name_autofix_row(self)")
+            < qa.index("glossary_name_workers_row(self)")
             < qa.index("detection_layout.addWidget(glossary_names_fix_row)"))

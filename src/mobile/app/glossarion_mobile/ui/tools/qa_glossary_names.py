@@ -27,7 +27,8 @@ from glossarion_mobile.ui.components.dialogs import close_dialog
 from glossarion_mobile.ui.components.sheet import bottom_sheet, scroll_column, sheet_frame
 from glossarion_mobile.ui.tools.common import ask, hint_text, section_header
 
-__all__ = ["CHECK_KEY", "GlossaryNameFixSheet", "NER_KEY", "check_enabled", "name_check_scope", "use_ner"]
+__all__ = ["CHECK_KEY", "GlossaryNameFixSheet", "NER_KEY", "chapters_at_once", "check_enabled", "name_check_scope",
+           "use_ner"]
 
 log = logging.getLogger("glossarion.tools.qa")
 
@@ -65,6 +66,13 @@ def use_ner(ctx: Any) -> bool:
     return name_check.use_ner_from_config({"glossary_name_check_use_ner": ctx.cfg(NER_KEY, True)})
 
 
+def chapters_at_once(ctx: Any) -> int:
+    """Settings › "Chapters checked at once" (glossary_name_check_workers; 0 = Auto)."""
+    import glossary_name_check as name_check
+
+    return name_check.workers_from_config({"glossary_name_check_workers": ctx.cfg("glossary_name_check_workers", 0)})
+
+
 def glossary_layer_settings(ctx: Any) -> dict:
     """Settings › Glossary's Add Additional Glossary / Enable Unified Glossary (and the unified file's
     language keys): the name check uses only the glossaries a translation request would."""
@@ -84,9 +92,10 @@ def ner_needs_download() -> bool:
 
 
 def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
-                state: Optional[dict] = None, layer_settings: Optional[dict] = None) -> list:
+                state: Optional[dict] = None, layer_settings: Optional[dict] = None, chosen: int = 0) -> list:
     """Review every folder on a worker thread; ``state`` gets the progress text and fraction
-    (``text`` / ``value``, None = indeterminate) that ``GlossaryNameFixSheet.scan`` shows."""
+    (``text`` / ``value``, None = indeterminate) that ``GlossaryNameFixSheet.scan`` shows. ``chosen``:
+    Settings › "Chapters checked at once" (``chapters_at_once``; 0 = Auto)."""
     import glossary_name_check as name_check
 
     state = {} if state is None else state
@@ -97,6 +106,7 @@ def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
                           f"{report.total / mb:.1f} MB", value=report.fraction)
 
     ner = name_check.resolve_ner(with_ner, log.info, progress=on_download, retry=True)
+    workers = name_check.chapter_workers(ner, chosen=chosen)
     reviews = []
     for index, folder in enumerate(folders):
         def on_chapter(done: int, total: int, index: int = index) -> None:
@@ -105,7 +115,7 @@ def _review_all(folders: Sequence[str], scope: dict, with_ner: bool = False,
                          value=done / total if total else None)
 
         state.update(text="Scanning…", value=None)
-        reviews.append(name_check.review_folder(folder, scope, ner=ner, progress=on_chapter,
+        reviews.append(name_check.review_folder(folder, scope, ner=ner, progress=on_chapter, workers=workers,
                                                 settings=layer_settings))
     return reviews
 
@@ -159,7 +169,7 @@ class GlossaryNameFixSheet:
         try:
             task = asyncio.ensure_future(
                 self.ctx.io(_review_all, self.folders, name_check_scope(self.ctx), with_ner, state,
-                            glossary_layer_settings(self.ctx)))
+                            glossary_layer_settings(self.ctx), chapters_at_once(self.ctx)))
             shown = None
             while not task.done():
                 current = (state.get("text"), state.get("value"))

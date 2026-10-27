@@ -740,12 +740,28 @@ def max_workers_setting():
         return 1
 
 
-def chapter_workers(ner, max_workers=None):
-    """Chapters checked at once. Only NER calls run in parallel (the heuristic is pure Python), each
-    using ``ner_names.ner_threads()`` cores, within the "Maximum parallel workers" budget: 16 cores and
-    "All cores" check 4 chapters at once, 2 cores or "Single thread" one."""
+#: the top of "Chapters checked at once" (glossary_name_check_workers; 0 = Auto)
+MAX_CHAPTER_WORKERS = 8
+
+
+def workers_from_config(config):
+    """"Chapters checked at once" (glossary_name_check_workers): 0 = Auto (``chapter_workers``' own count)."""
+    try:
+        return max(0, min(MAX_CHAPTER_WORKERS, int((config or {}).get("glossary_name_check_workers", 0))))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def chapter_workers(ner, max_workers=None, chosen=0):
+    """Chapters checked at once. Only NER calls run in parallel (the heuristic is pure Python): one
+    loaded model checks several chapters at the same time. ``chosen`` ("Chapters checked at once",
+    1-8) sets the count; 0 = Auto: each call uses ``ner_names.ner_threads()`` cores within the
+    "Maximum parallel workers" budget: 16 cores and "All cores" check 4 chapters at once, 2 cores or
+    "Single thread" one."""
     if ner is None:
         return 1
+    if chosen:
+        return max(1, min(MAX_CHAPTER_WORKERS, int(chosen)))
     cpus = os.cpu_count() or 1
     budget = max_workers_setting() if max_workers is None else max_workers
     budget = cpus if not budget or budget <= 0 else min(int(budget), cpus)

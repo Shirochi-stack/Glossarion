@@ -854,6 +854,10 @@ TOOLTIP_OVERRIDES = {
     "payload_cleanup_limit_mb": (
         "The Payloads and http_requests debug folders are trimmed to this size, oldest files first, at "
         "startup and exit. 0 = never clean up."),
+    "glossary_name_check_workers": (
+        "How many chapters the named-entity model (NER) checks at the same time in the QA scan and the glossary "
+        "name review. 0 = Auto: the QA Scanner's Maximum parallel workers ÷ 4 (each check uses up to 4 CPU "
+        "cores). The capitalization heuristic checks one chapter at a time."),
     "glossary_name_check_autofix_level": (
         "Which findings Auto-fix replaces (and the review pre-checks). 1 Conservative: one close spelling of "
         "a character name. 2 Balanced: also the other entry types in scope. 3 Aggressive: every close "
